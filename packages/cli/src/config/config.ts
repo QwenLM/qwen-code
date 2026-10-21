@@ -2816,6 +2816,8 @@ export async function loadCliConfig(
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,
+    workflowKeywordTriggerEnabled:
+      settings.ui?.disableWorkflowKeywordTrigger !== true,
     workflowSizeGuideline: settings.tools?.workflowSizeGuideline,
     workflowNameOnly: settings.tools?.workflowNameOnly,
     modelProposedGoals: normalizeModelProposedGoals(

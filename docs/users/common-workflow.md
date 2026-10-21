@@ -620,3 +620,7 @@ See [Where to create QWEN.md](./features/memory.md#where-to-create-qwenmd) for w
 > - Keep the rules specific and actionable: "back every claim with a query result" works better than "be careful".
 > - Keep the policy short — QWEN.md is followed more reliably when it is concise (see [Memory](./features/memory.md)).
 > - Adapt the rules to your stack: name the actual query tools, dashboards, or log commands your team treats as authoritative sources.
+
+## Suggest a workflow for one human turn
+
+Use `ultracode` or the existing `workflow` keyword in a supported human submission to suggest the Workflow tool for that turn. See [workflow intent](workflow-intent.md) ([简体中文](workflow-intent.zh-CN.md)) for entry points, SDK opt-in, and settings.

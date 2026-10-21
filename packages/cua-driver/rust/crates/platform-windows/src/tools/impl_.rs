@@ -50,7 +50,7 @@ fn pin_overlay_above(key: &str, hwnd: u64) {
 /// window. MSAA-walked elements are skipped (no ScrollItemPattern) and keep the
 /// existing failure.
 fn resolve_onscreen_point_with_scroll(
-    element_cache: &crate::uia::cache::ElementCache,
+    element_cache: &crate::uia::cache::BoundElementCache,
     pid: u32,
     hwnd: u64,
     idx: usize,
@@ -447,6 +447,18 @@ impl Tool for ExactPidWindowTargetGuard {
                 if let Err(result) = exact_window_ownership_result(pid, window_id, owner_pid) {
                     return result;
                 }
+                if matches!(
+                    self.inner.def().name.as_str(),
+                    "click" | "double_click" | "right_click"
+                ) && crate::input::delivery::DeliveryMode::from_args(&args)
+                    == crate::input::delivery::DeliveryMode::Background
+                    && crate::input::delivery::is_tk_target_window(window_id)
+                {
+                    return crate::input::delivery::background_unavailable_error(
+                        window_id,
+                        crate::input::delivery::EventKind::MouseClick,
+                    );
+                }
             }
         }
         self.inner.invoke(args).await
@@ -548,7 +560,7 @@ pub fn load_driver_config() -> DriverConfig {
 }
 
 pub struct ResizeRegistry {
-    ratios: std::sync::Mutex<std::collections::HashMap<u32, f64>>,
+    ratios: std::sync::Mutex<std::collections::HashMap<(u32, u64), f64>>,
 }
 
 impl ResizeRegistry {
@@ -557,14 +569,14 @@ impl ResizeRegistry {
             ratios: std::sync::Mutex::new(Default::default()),
         }
     }
-    pub fn set_ratio(&self, pid: u32, ratio: f64) {
-        self.ratios.lock().unwrap().insert(pid, ratio);
+    pub fn set_ratio(&self, pid: u32, window: u64, ratio: f64) {
+        self.ratios.lock().unwrap().insert((pid, window), ratio);
     }
-    pub fn clear_ratio(&self, pid: u32) {
-        self.ratios.lock().unwrap().remove(&pid);
+    pub fn clear_ratio(&self, pid: u32, window: u64) {
+        self.ratios.lock().unwrap().remove(&(pid, window));
     }
-    pub fn ratio(&self, pid: u32) -> Option<f64> {
-        self.ratios.lock().unwrap().get(&pid).copied()
+    pub fn ratio(&self, pid: u32, window: u64) -> Option<f64> {
+        self.ratios.lock().unwrap().get(&(pid, window)).copied()
     }
 }
 
@@ -1119,6 +1131,33 @@ mod list_windows_z_index_tests {
 
 // ── get_window_state ─────────────────────────────────────────────────────────
 
+struct PendingUiaTree(crate::uia::UiaTreeResult);
+
+impl std::ops::Deref for PendingUiaTree {
+    type Target = crate::uia::UiaTreeResult;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for PendingUiaTree {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl PendingUiaTree {
+    fn settle(&mut self, transferred: bool) {
+        crate::uia::settle_node_bindings(&mut self.0.nodes, self.0.backend, transferred);
+    }
+}
+
+impl Drop for PendingUiaTree {
+    fn drop(&mut self) {
+        self.settle(false);
+    }
+}
+
 pub struct GetWindowStateTool {
     state: Arc<ToolState>,
 }
@@ -1186,6 +1225,7 @@ impl Tool for GetWindowStateTool {
                 "window_id":{"type":"integer","description":"HWND of the target window. Must belong to `pid`. Enumerate via `list_windows` or read from `launch_app`'s `windows` array."},
                 "app_context":{"type":"boolean","description":"Use the compact app observation projection."},
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
+                "include_accessibility":{"type":"boolean","default":true,"description":"Set false for a screenshot without a UIA walk."},
                 "include_screenshot":{"type":"boolean","description":"Default true — returns a grounding screenshot alongside the tree. Set false to skip the grab and return tree only (the cheap path for re-indexing before an element ax action)."},
                 "screenshot_out_file":{"type":"string","description":"When set, write the PNG to this file path instead of embedding base64 in the response. The structured output will contain `screenshot_file_path` instead."},
                 "query":{"type":"string","description":"Optional case-insensitive substring. Projects both tree_markdown and structured elements to matches plus ancestors while preserving original indices. Compare total_element_count with returned_element_count."},
@@ -1406,8 +1446,12 @@ impl Tool for GetWindowStateTool {
 
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
         let collect_runtime_ids = revision_request_for_capture.is_some();
+        let include_accessibility = args["include_accessibility"] != false;
         let mut tree_task = tokio::task::spawn_blocking(move || {
-            crate::uia::walk_tree_bounded_with_progress(
+            if !include_accessibility {
+                return None;
+            }
+            Some(PendingUiaTree(crate::uia::walk_tree_bounded_with_progress(
                 hwnd,
                 tree_query.as_deref(),
                 max_elements,
@@ -1416,13 +1460,13 @@ impl Tool for GetWindowStateTool {
                 &mut |node, line| {
                     let _ = progress_tx.send((node.depth, node, line));
                 },
-            )
+            )))
         });
         let tree_deadline = tokio::time::sleep(std::time::Duration::from_secs(4));
         tokio::pin!(tree_deadline);
         let mut partial_nodes = Vec::new();
         let mut partial_lines = Vec::new();
-        let (mut tree_result, uia_worker_restart_required) = loop {
+        let (tree_result, uia_worker_restart_required) = loop {
             tokio::select! {
                 joined = &mut tree_task => {
                     let tree = joined.map_err(|error| anyhow::anyhow!("UIA worker task failed: {error}"));
@@ -1442,7 +1486,7 @@ impl Tool for GetWindowStateTool {
                         query.as_deref(),
                         "uia_provider_timeout",
                     );
-                    break (Ok(partial), true);
+                    break (Ok(Some(PendingUiaTree(partial))), true);
                 }
             }
         };
@@ -1455,7 +1499,7 @@ impl Tool for GetWindowStateTool {
         let observation_revision = match (
             revision_request_for_capture.as_ref(),
             observation_session,
-            tree_result.as_ref().ok(),
+            tree_result.as_ref().ok().and_then(Option::as_ref),
         ) {
             (Some(request), Some(session), Some(tree)) => match observation_revisions.observe(
                 session,
@@ -1468,9 +1512,6 @@ impl Tool for GetWindowStateTool {
             ) {
                 Ok(revision) => Some(revision),
                 Err(error) => {
-                    if let Ok(tree) = tree_result.as_mut() {
-                        crate::uia::settle_node_bindings(&mut tree.nodes, tree.backend, false);
-                    }
                     return ToolResult::error(error);
                 }
             },
@@ -1478,7 +1519,7 @@ impl Tool for GetWindowStateTool {
         };
         let result = tree_result.map(|tree| {
             (
-                Some(tree),
+                tree,
                 screenshot_opt,
                 screenshot_err,
                 observation_revision,
@@ -1548,34 +1589,25 @@ impl Tool for GetWindowStateTool {
                     // IAccessible and click must dispatch through MSAA.
                     let bindings_transferred =
                         !observation_only && (tr.complete || (!is_msaa && tr.read_complete()));
-                    if bindings_transferred {
-                        if is_msaa {
-                            state.element_cache.update_msaa(pid, hwnd, &tr.nodes);
+                    let snapshot_id = bindings_transferred.then(|| {
+                        let kind = if is_msaa {
+                            crate::uia::cache::SnapshotKind::Msaa
                         } else {
-                            state.element_cache.update(pid, hwnd, &tr.nodes);
-                        }
-                    }
-                    crate::uia::settle_node_bindings(
-                        &mut tr.nodes,
-                        tr.backend,
-                        bindings_transferred,
-                    );
+                            crate::uia::cache::SnapshotKind::Uia
+                        };
+                        state.element_cache.update_for_session(
+                            pid,
+                            hwnd,
+                            &tr.nodes,
+                            kind,
+                            args.get("_session_id").and_then(Value::as_str),
+                        )
+                    });
+                    tr.settle(bindings_transferred);
                     structured["element_count"] = json!(count);
                     structured["elements_complete"] = json!(tr.complete);
                     structured["element_bindings_retained"] = json!(bindings_transferred);
 
-                    // Surface 6: register a snapshot in the global token
-                    // registry. Windows uses u64 HWND but the registry
-                    // stores u32 — truncate (HWND fits in 32-bit on
-                    // every supported edition; the upper 32 bits are
-                    // zero in user-space).
-                    let snapshot_id = bindings_transferred.then(|| {
-                        cua_driver_core::element_token::global().register_snapshot(
-                            pid as i32,
-                            hwnd as u32,
-                            count,
-                        )
-                    });
                     if observation_revision.is_some() && !observation_only {
                         state.watch_target(pid, hwnd);
                     }
@@ -1793,10 +1825,12 @@ impl Tool for GetWindowStateTool {
                     if !observation_only {
                         if let Some(ow) = orig_w {
                             if w > 0 {
-                                state.resize_registry.set_ratio(pid, ow as f64 / w as f64);
+                                state
+                                    .resize_registry
+                                    .set_ratio(pid, hwnd, ow as f64 / w as f64);
                             }
                         } else {
-                            state.resize_registry.clear_ratio(pid);
+                            state.resize_registry.clear_ratio(pid, hwnd);
                         }
                     }
                     // base64 is embedded only when no out_file was given (vision
@@ -2623,6 +2657,10 @@ impl Tool for LaunchAppTool {
             // Legacy ShellExecuteExW path — unchanged behavior for plain
             // Win32 apps and for callers passing an explicit `path` /
             // `launch_path`.
+            let launch_token = match crate::standard_user_launch::app_launch_token() {
+                Ok(token) => token,
+                Err(message) => return ToolResult::error(message),
+            };
             let urls_clone = urls.clone();
             let target_for_shell = target_file_opt.clone();
             let extra_for_shell = extra_joined.clone();
@@ -2666,39 +2704,64 @@ impl Tool for LaunchAppTool {
                 });
                 let args_w = to_wide(&extra_for_shell);
 
+                use crate::standard_user_launch::AppLaunchToken;
                 let pid = if direct_minimized_exe {
                     let target = target_for_shell
                         .as_deref()
                         .expect("checked executable path");
-                    let mut command_line = to_wide(&if extra_for_shell.is_empty() {
+                    let command_line_text = if extra_for_shell.is_empty() {
                         format!(r#""{target}""#)
                     } else {
                         format!(r#""{target}" {extra_for_shell}"#)
-                    });
-                    let startup = STARTUPINFOW {
-                        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
-                        dwFlags: STARTF_USESHOWWINDOW,
-                        wShowWindow: n_show_for_shell as u16,
-                        ..Default::default()
                     };
-                    let mut process = PROCESS_INFORMATION::default();
-                    unsafe {
-                        CreateProcessW(
-                            PCWSTR(file_w.as_ptr()),
-                            PWSTR(command_line.as_mut_ptr()),
-                            None,
-                            None,
-                            false,
-                            PROCESS_CREATION_FLAGS(0),
-                            None,
-                            PCWSTR::null(),
-                            &startup,
-                            &mut process,
-                        )?;
-                        let _ = CloseHandle(process.hThread);
-                        let _ = CloseHandle(process.hProcess);
+                    if let AppLaunchToken::StandardUser(token) = &launch_token {
+                        crate::standard_user_launch::create_process(
+                            token,
+                            target,
+                            &command_line_text,
+                            n_show_for_shell,
+                        )
+                        .map_err(anyhow::Error::msg)?
+                    } else {
+                        let mut command_line = to_wide(&command_line_text);
+                        let startup = STARTUPINFOW {
+                            cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+                            dwFlags: STARTF_USESHOWWINDOW,
+                            wShowWindow: n_show_for_shell as u16,
+                            ..Default::default()
+                        };
+                        let mut process = PROCESS_INFORMATION::default();
+                        unsafe {
+                            CreateProcessW(
+                                PCWSTR(file_w.as_ptr()),
+                                PWSTR(command_line.as_mut_ptr()),
+                                None,
+                                None,
+                                false,
+                                PROCESS_CREATION_FLAGS(0),
+                                None,
+                                PCWSTR::null(),
+                                &startup,
+                                &mut process,
+                            )?;
+                            let _ = CloseHandle(process.hThread);
+                            let _ = CloseHandle(process.hProcess);
+                        }
+                        process.dwProcessId
                     }
-                    process.dwProcessId
+                } else if let AppLaunchToken::StandardUser(token) = &launch_token {
+                    let file = target_for_shell
+                        .as_deref()
+                        .or_else(|| urls_clone.first().map(String::as_str))
+                        .unwrap_or("");
+                    crate::standard_user_launch::shell_execute(
+                        token,
+                        file,
+                        &extra_for_shell,
+                        n_show_for_shell,
+                        std::time::Duration::from_secs(10),
+                    )
+                    .map_err(anyhow::Error::msg)?
                 } else {
                     let mut info = SHELLEXECUTEINFOW {
                         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -2735,6 +2798,16 @@ impl Tool for LaunchAppTool {
                 // `lpFile`, so only their remaining URLs belong here.
                 let first_unopened_url = first_unopened_shell_url_index(target_for_shell.is_some());
                 for url in &urls_clone[first_unopened_url.min(urls_clone.len())..] {
+                    if let AppLaunchToken::StandardUser(token) = &launch_token {
+                        let _ = crate::standard_user_launch::shell_execute(
+                            token,
+                            url,
+                            "",
+                            n_show_for_shell,
+                            std::time::Duration::from_secs(10),
+                        );
+                        continue;
+                    }
                     let file = to_wide(url);
                     let mut url_info = SHELLEXECUTEINFOW {
                         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -3400,6 +3473,7 @@ impl Tool for ClickTool {
             Ok(r) => r,
             Err(e) => return e,
         };
+        let element_cache = crate::uia::cache::BoundElementCache::from_resolved(&resolved);
         let elem_idx = match &resolved {
             cua_driver_core::element_token::ResolvedElement::Element { element_index, .. } => {
                 Some(*element_index)
@@ -3443,6 +3517,7 @@ impl Tool for ClickTool {
             )
             .with_structured(json!({
                 "code": "background_unavailable",
+                "sent": false,
                 "effect": "refused",
                 "escalation": {
                     "recommended": "foreground",
@@ -3506,10 +3581,8 @@ impl Tool for ClickTool {
             //     `accDoDefaultAction` here because LO's MSAA impl applies
             //     the change asynchronously and returns S_OK either way,
             //     so the visible behavior is the same as a center click.
-            if let Some((SnapshotKind::Msaa, role)) = self
-                .state
-                .element_cache
-                .get_element_kind_and_role(pid, hwnd, idx)
+            if let Some((SnapshotKind::Msaa, role)) =
+                element_cache.get_element_kind_and_role(pid, hwnd, idx)
             {
                 const ROLE_BUTTONDROPDOWN: i32 = 0x38;
                 const ROLE_BUTTONMENU: i32 = 0x39;
@@ -3526,7 +3599,7 @@ impl Tool for ClickTool {
                     )
                 );
                 let (tx, ty) = if want_expand && is_dropdown_role {
-                    match self.state.element_cache.get_element_rect(pid, hwnd, idx) {
+                    match element_cache.get_element_rect(pid, hwnd, idx) {
                         Some((_l, t, r, b)) => {
                             // Right-edge of the SplitButton — the dropdown
                             // arrow half. -4 puts the click safely inside
@@ -3549,7 +3622,7 @@ impl Tool for ClickTool {
                          Use action:\"invoke\" or omit the action arg."
                     ));
                 } else {
-                    match self.state.element_cache.get_element_center(pid, hwnd, idx) {
+                    match element_cache.get_element_center(pid, hwnd, idx) {
                         Some(v) => v,
                         None => {
                             return ToolResult::error(format!(
@@ -3569,10 +3642,6 @@ impl Tool for ClickTool {
                     },
                 );
                 let btn_fg = button.clone();
-                let foreground_target = crate::win32::capture_foreground_target(hwnd);
-                let prev_fg_addr = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
-                };
                 let mods_owned = modifiers.clone();
                 let activate = delivery == DeliveryMode::Foreground;
                 let send_result = tokio::task::spawn_blocking(move || {
@@ -3588,9 +3657,6 @@ impl Tool for ClickTool {
                     }
                 })
                 .await;
-                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
-                    return ToolResult::error(error);
-                }
                 let half = if want_expand { "dropdown" } else { "press" };
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
@@ -3605,7 +3671,7 @@ impl Tool for ClickTool {
             }
 
             // UIA path: get cached center (no COM call needed — captured at walk time).
-            let (cx, cy) = match self.state.element_cache.get_element_center(pid, hwnd, idx) {
+            let (cx, cy) = match element_cache.get_element_center(pid, hwnd, idx) {
                 Some(v) => v,
                 None => {
                     return ToolResult::error(format!(
@@ -3638,7 +3704,6 @@ impl Tool for ClickTool {
             // WPF/WinUI menus and tree nodes whose visual click target is
             // transient or scroll-adjusted.
             if action_req.as_deref() == Some("expand") {
-                let state = self.state.clone();
                 let expand = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                     use windows::core::Interface;
                     use windows::Win32::UI::Accessibility::{
@@ -3646,8 +3711,7 @@ impl Tool for ClickTool {
                         UIA_ExpandCollapsePatternId,
                     };
 
-                    let retained = state
-                        .element_cache
+                    let retained = element_cache
                         .get_element_retained(pid, hwnd, idx)
                         .ok_or_else(|| {
                             anyhow::anyhow!("element [{idx}] is not in the UIA cache")
@@ -3697,8 +3761,7 @@ impl Tool for ClickTool {
                 // stale rectangle is still inside the outer HWND. Ask the item
                 // to scroll itself into view before trusting that rectangle.
                 let (cx, cy) = if !modifiers.is_empty() {
-                    self.state
-                        .element_cache
+                    element_cache
                         .get_element_retained(pid, hwnd, idx)
                         .and_then(|retained| {
                             retained.is_uia().then(|| unsafe {
@@ -3714,7 +3777,7 @@ impl Tool for ClickTool {
                     (cx, cy)
                 };
                 let (cx, cy) = match resolve_onscreen_point_with_scroll(
-                    &self.state.element_cache,
+                    &element_cache,
                     pid,
                     hwnd,
                     idx,
@@ -3727,10 +3790,6 @@ impl Tool for ClickTool {
                 };
                 let btn_fg = btn.clone();
                 let mods_owned = modifiers.clone();
-                let foreground_target = crate::win32::capture_foreground_target(hwnd);
-                let prev_fg_addr = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
-                };
                 let send_result = tokio::task::spawn_blocking(move || {
                     let mod_refs: Vec<&str> = mods_owned.iter().map(String::as_str).collect();
                     crate::input::send_click_synthesized_active_mods(
@@ -3738,9 +3797,6 @@ impl Tool for ClickTool {
                     )
                 })
                 .await;
-                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
-                    return ToolResult::error(error);
-                }
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Performed SendInput click on [{idx}] at screen ({cx},{cy}) (delivery_mode:foreground)."
@@ -3764,7 +3820,8 @@ impl Tool for ClickTool {
                 && (count > 1 || btn == "right" || btn == "middle")
             {
                 if let Some(r) =
-                    winui3_background_gesture(&self.state, pid, hwnd, Some(idx), count, &btn).await
+                    winui3_background_gesture(&element_cache, pid, hwnd, Some(idx), count, &btn)
+                        .await
                 {
                     return r;
                 }
@@ -3807,7 +3864,6 @@ impl Tool for ClickTool {
             //     different patterns; keep PostMessage for now)
             //   - count > 1 (double-click semantics aren't an Invoke
             //     concept — PostMessage produces the actual WM_LBUTTONDBLCLK)
-            let state_clone = self.state.clone();
             let use_uia_invoke = (btn == "left" || btn == "middle") && count == 1;
             let result = tokio::task::spawn_blocking(move || -> Result<String, ClickDispatchError> {
                 // Direct Chromium UIA Invoke can return S_OK without firing a
@@ -3818,7 +3874,7 @@ impl Tool for ClickTool {
                     && crate::input::is_chromium_target_window(hwnd)
                 {
                     let (cx, cy) = resolve_onscreen_point_with_scroll(
-                        &state_clone.element_cache, pid, hwnd, idx, cx, cy, "clicking",
+                        &element_cache, pid, hwnd, idx, cx, cy, "clicking",
                     )
                     .map_err(ClickDispatchError::Refusal)?;
                     return crate::input::inject_click_screen(hwnd, cx, cy, count, &btn)
@@ -3838,7 +3894,7 @@ impl Tool for ClickTool {
                     // is mid-flight (use-after-free → daemon crash). The guard
                     // lives to the end of this `if let` block, past every UIA
                     // pattern dispatch below; its Release fires when it drops.
-                    if let Some(element_guard) = state_clone.element_cache.get_element_retained(pid, hwnd, idx) {
+                    if let Some(element_guard) = element_cache.get_element_retained(pid, hwnd, idx) {
                         let ptr = element_guard.as_ptr();
                         use windows::Win32::UI::Accessibility::{
                             IUIAutomationElement, IUIAutomationInvokePattern,
@@ -3929,7 +3985,7 @@ impl Tool for ClickTool {
                     )
                 {
                     let (cx, cy) = resolve_onscreen_point_with_scroll(
-                        &state_clone.element_cache,
+                        &element_cache,
                         pid,
                         hwnd,
                         idx,
@@ -3999,7 +4055,7 @@ impl Tool for ClickTool {
                         ))
                     }
                 }
-            } else if let Some(ratio) = self.state.resize_registry.ratio(pid) {
+            } else if let Some(ratio) = self.state.resize_registry.ratio(pid, hwnd) {
                 px *= ratio;
                 py *= ratio;
             }
@@ -4049,10 +4105,6 @@ impl Tool for ClickTool {
             // background-safe and would deliver the click without the
             // foreground swap the caller asked for).
             if delivery == DeliveryMode::Foreground {
-                let foreground_target = crate::win32::capture_foreground_target(hwnd);
-                let prev_fg_addr = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
-                };
                 let mods_owned = modifiers.clone();
                 let send_result = tokio::task::spawn_blocking(move || {
                     let mod_refs: Vec<&str> = mods_owned.iter().map(String::as_str).collect();
@@ -4061,9 +4113,6 @@ impl Tool for ClickTool {
                     )
                 })
                 .await;
-                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
-                    return ToolResult::error(error);
-                }
                 return match send_result {
                     Ok(Ok(())) => {
                         let click_word = match count {
@@ -4089,7 +4138,7 @@ impl Tool for ClickTool {
                 && (count > 1 || btn == "right" || btn == "middle")
             {
                 if let Some(r) =
-                    winui3_background_gesture(&self.state, pid, hwnd, None, count, &btn).await
+                    winui3_background_gesture(&element_cache, pid, hwnd, None, count, &btn).await
                 {
                     return r;
                 }
@@ -4154,14 +4203,22 @@ impl Tool for ClickTool {
                     )
                 })
                 .await
-                .unwrap_or(false);
-                if invoked {
+                .unwrap_or(crate::uia::windows_enum::PointInvokeOutcome::Timeout);
+                if invoked == crate::uia::windows_enum::PointInvokeOutcome::Invoked {
                     return ToolResult::text(format!(
                         "✅ Performed UIA Invoke at ({sx},{sy}) for pid {pid}."
                     ))
                     .with_structured(
                         json!({ "path": "ax", "verified": false, "effect": "unverifiable" }),
                     );
+                }
+                if !matches!(
+                    invoked,
+                    crate::uia::windows_enum::PointInvokeOutcome::Miss
+                        | crate::uia::windows_enum::PointInvokeOutcome::Unavailable
+                ) {
+                    return ToolResult::error("UIA point action is busy or its effect is unconfirmed; no second click was sent; observe before retrying")
+                        .with_structured(json!({"code":"uia_input_unconfirmed","sent":true}));
                 }
             }
 
@@ -4313,7 +4370,7 @@ pub struct TypeTextTool {
 }
 
 fn wait_for_cached_element_keyboard_focus(
-    state: &ToolState,
+    element_cache: &crate::uia::cache::BoundElementCache,
     pid: u32,
     hwnd: u64,
     element_index: usize,
@@ -4321,11 +4378,7 @@ fn wait_for_cached_element_keyboard_focus(
 ) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        if state
-            .element_cache
-            .element_has_keyboard_focus(pid, hwnd, element_index)
-            == Some(true)
-        {
+        if element_cache.element_has_keyboard_focus(pid, hwnd, element_index) == Some(true) {
             return true;
         }
         if std::time::Instant::now() >= deadline {
@@ -4341,7 +4394,7 @@ fn wait_for_cached_element_keyboard_focus(
 /// bounded fallback. Both routes require `CurrentHasKeyboardFocus` read-back
 /// before any keyboard input is allowed to leave the driver.
 fn focus_cached_element_for_foreground(
-    state: &ToolState,
+    element_cache: &crate::uia::cache::BoundElementCache,
     pid: u32,
     hwnd: u64,
     element_index: usize,
@@ -4353,10 +4406,10 @@ fn focus_cached_element_for_foreground(
     // which would make the enclosing verify-before-SendInput transaction
     // fail closed. The foreground route has already activated the exact HWND,
     // so focus the cached element directly and verify it below.
-    let set_focus = state.element_cache.focus_element(pid, hwnd, element_index);
+    let set_focus = element_cache.focus_element(pid, hwnd, element_index);
     if set_focus.is_ok()
         && wait_for_cached_element_keyboard_focus(
-            state,
+            &element_cache,
             pid,
             hwnd,
             element_index,
@@ -4369,7 +4422,7 @@ fn focus_cached_element_for_foreground(
     if let Some((x, y)) = click_point {
         crate::input::send_click_synthesized_active_mods(hwnd, x, y, 1, "left", &[])?;
         if wait_for_cached_element_keyboard_focus(
-            state,
+            &element_cache,
             pid,
             hwnd,
             element_index,
@@ -4510,6 +4563,7 @@ impl Tool for TypeTextTool {
             Ok(r) => r,
             Err(e) => return e,
         };
+        let element_cache = crate::uia::cache::BoundElementCache::from_resolved(&resolved);
         let elem_idx: Option<u64> = match &resolved {
             cua_driver_core::element_token::ResolvedElement::Element { element_index, .. } => {
                 Some(*element_index as u64)
@@ -4600,11 +4654,7 @@ impl Tool for TypeTextTool {
             }
         };
         if let Some(idx) = elem_idx {
-            if let Some((cx, cy)) =
-                self.state
-                    .element_cache
-                    .get_element_center(pid, hwnd, idx as usize)
-            {
+            if let Some((cx, cy)) = element_cache.get_element_center(pid, hwnd, idx as usize) {
                 pin_overlay_above(&cursor_key, hwnd);
                 overlay_glide_to(&cursor_key, cx as f64, cy as f64).await;
                 self.state
@@ -4655,21 +4705,16 @@ impl Tool for TypeTextTool {
             // activation/focus/input transaction. The focus itself happens
             // only after exact top-level foreground is confirmed.
             let focus_target = if let Some(idx) = elem_idx {
-                let (cx, cy) =
-                    match self
-                        .state
-                        .element_cache
-                        .get_element_center(pid, hwnd, idx as usize)
-                    {
-                        Some(center) => center,
-                        None => {
-                            return ToolResult::error(format!(
+                let (cx, cy) = match element_cache.get_element_center(pid, hwnd, idx as usize) {
+                    Some(center) => center,
+                    None => {
+                        return ToolResult::error(format!(
                         "Element {idx} not in cache for hwnd={hwnd}. Call get_window_state first."
                     ))
-                        }
-                    };
+                    }
+                };
                 let (cx, cy) = match resolve_onscreen_point_with_scroll(
-                    &self.state.element_cache,
+                    &element_cache,
                     pid,
                     hwnd,
                     idx as usize,
@@ -4685,11 +4730,16 @@ impl Tool for TypeTextTool {
                 None
             };
             let text_fg = text.clone();
-            let state = self.state.clone();
             let r = tokio::task::spawn_blocking(move || {
                 crate::input::send_text_synthesized_after_focus(hwnd, &text_fg, || {
                     if let Some((idx, point)) = focus_target {
-                        focus_cached_element_for_foreground(&state, pid, hwnd, idx, Some(point))?;
+                        focus_cached_element_for_foreground(
+                            &element_cache,
+                            pid,
+                            hwnd,
+                            idx,
+                            Some(point),
+                        )?;
                     }
                     Ok(())
                 })
@@ -4722,11 +4772,7 @@ impl Tool for TypeTextTool {
         // Only when an element_index is supplied (we have its cached center);
         // the focused-element path has no resolvable position to point at.
         if let Some(idx) = elem_idx {
-            if let Some((cx, cy)) =
-                self.state
-                    .element_cache
-                    .get_element_center(pid, hwnd, idx as usize)
-            {
+            if let Some((cx, cy)) = element_cache.get_element_center(pid, hwnd, idx as usize) {
                 overlay_glide_to(&cursor_key, cx as f64, cy as f64).await;
                 crate::overlay::send_command(
                     cursor_key.clone(),
@@ -4754,14 +4800,14 @@ impl Tool for TypeTextTool {
         //    (most legacy Win32 EDITs consume WM_CHAR fine without focus steal).
         if let Some(idx) = elem_idx {
             let idx = idx as usize;
-            let state = self.state.clone();
             let text_for_uia = text.clone();
+            let cache_for_write = element_cache.clone();
             let set_result = tokio::task::spawn_blocking(move || {
-                // Retain the element under the cache lock so a concurrent
+                // Retain the element from its bound snapshot so a concurrent
                 // get_window_state snapshot-replace on the same (pid, hwnd)
                 // can't Release it to zero while this SetValue is in flight.
                 // The guard is held for the whole closure.
-                let element_guard = state.element_cache.get_element_retained(pid, hwnd, idx)?;
+                let element_guard = cache_for_write.get_element_retained(pid, hwnd, idx)?;
                 let ptr = element_guard.as_ptr();
                 use windows::core::{Interface, BSTR};
                 use windows::Win32::UI::Accessibility::{
@@ -4803,9 +4849,8 @@ impl Tool for TypeTextTool {
                 // (works regardless of which window is foreground), proving the
                 // a11y write actually took rather than trusting SetValue's
                 // return alone.
-                let state_rb = self.state.clone();
                 let verify = tokio::task::spawn_blocking(move || {
-                    let value = read_cached_element_value(&state_rb, pid, hwnd, idx);
+                    let value = read_cached_element_value(&element_cache, pid, hwnd, idx);
                     classify_value_write_readback(value.as_deref(), &before, &expected)
                 })
                 .await
@@ -4899,14 +4944,13 @@ impl Tool for TypeTextTool {
         let text_for_post = text.clone();
         let verify_pid = pid;
         let verify_idx = elem_idx.map(|i| i as usize);
-        let state_rb = self.state.clone();
         let result = tokio::task::spawn_blocking(move || {
             // Prefer a focus-independent read of the *specific* cached element
             // when we have its index; only fall back to the (flaky, focus-
             // dependent) system focused element when typing into "whatever is
             // focused" with no element_index.
             let read = |idx: Option<usize>| match idx {
-                Some(i) => read_cached_element_value(&state_rb, verify_pid, hwnd, i),
+                Some(i) => read_cached_element_value(&element_cache, verify_pid, hwnd, i),
                 None => read_focused_value_uia(verify_pid),
             };
             let before = read(verify_idx);
@@ -5093,13 +5137,18 @@ fn classify_value_write_readback(
 /// `None` if the index isn't cached or the element exposes no readable text
 /// pattern. Mirrors the cache-retain + `mem::forget` discipline of the
 /// ValuePattern.SetValue path so the cached COM ref isn't released.
-fn read_cached_element_value(state: &ToolState, pid: u32, hwnd: u64, idx: usize) -> Option<String> {
+fn read_cached_element_value(
+    element_cache: &crate::uia::cache::BoundElementCache,
+    pid: u32,
+    hwnd: u64,
+    idx: usize,
+) -> Option<String> {
     use windows::core::Interface;
     use windows::Win32::UI::Accessibility::{
         IUIAutomationElement, IUIAutomationTextPattern, IUIAutomationValuePattern,
         UIA_TextPatternId, UIA_ValuePatternId,
     };
-    let guard = state.element_cache.get_element_retained(pid, hwnd, idx)?;
+    let guard = element_cache.get_element_retained(pid, hwnd, idx)?;
     let ptr = guard.as_ptr();
     let elem: IUIAutomationElement = unsafe { IUIAutomationElement::from_raw(ptr as *mut _) };
     let val = unsafe {
@@ -5269,6 +5318,7 @@ impl Tool for PressKeyTool {
             Ok(r) => r,
             Err(e) => return e,
         };
+        let element_cache = crate::uia::cache::BoundElementCache::from_resolved(&resolved);
         let elem_idx: Option<u64> = match &resolved {
             cua_driver_core::element_token::ResolvedElement::Element { element_index, .. } => {
                 Some(*element_index as u64)
@@ -5379,17 +5429,13 @@ impl Tool for PressKeyTool {
             None
         };
         if let Some(idx) = elem_idx.filter(|_| background_webview_focus) {
-            let Some((cx, cy)) =
-                self.state
-                    .element_cache
-                    .get_element_center(pid, hwnd, idx as usize)
-            else {
+            let Some((cx, cy)) = element_cache.get_element_center(pid, hwnd, idx as usize) else {
                 return ToolResult::error(format!(
                     "Element {idx} not in cache for hwnd={hwnd}. Call get_window_state first."
                 ));
             };
             let (cx, cy) = match resolve_onscreen_point_with_scroll(
-                &self.state.element_cache,
+                &element_cache,
                 pid,
                 hwnd,
                 idx as usize,
@@ -5401,7 +5447,7 @@ impl Tool for PressKeyTool {
                 Err(result) => return result,
             };
             let (mut px, mut py) = screen_to_bitmap(hwnd, cx, cy);
-            if let Some(ratio) = self.state.resize_registry.ratio(pid) {
+            if let Some(ratio) = self.state.resize_registry.ratio(pid, hwnd) {
                 px = (px as f64 / ratio).round() as i32;
                 py = (py as f64 / ratio).round() as i32;
             }
@@ -5426,10 +5472,10 @@ impl Tool for PressKeyTool {
                 return error;
             }
         } else if let Some(idx) = elem_idx.filter(|_| delivery != DeliveryMode::Foreground) {
-            let state = self.state.clone();
+            let cache_for_focus = element_cache.clone();
             let focused = tokio::task::spawn_blocking(move || {
                 crate::uia::fg_bypass::run_with_uwp_bypass(hwnd as isize, || {
-                    state.element_cache.focus_element(pid, hwnd, idx as usize)
+                    cache_for_focus.focus_element(pid, hwnd, idx as usize)
                 })
             })
             .await;
@@ -5452,18 +5498,14 @@ impl Tool for PressKeyTool {
         // goes via the plain background post path below.
         if !px_focus && delivery == DeliveryMode::Foreground {
             let focus_target = elem_idx.map(|idx| {
-                let point = self
-                    .state
-                    .element_cache
-                    .get_element_center(pid, hwnd, idx as usize);
+                let point = element_cache.get_element_center(pid, hwnd, idx as usize);
                 (idx as usize, point)
             });
-            let state = self.state.clone();
             let send_result = tokio::task::spawn_blocking(move || {
                 let m: Vec<&str> = mods.iter().map(String::as_str).collect();
                 crate::input::send_key_synthesized_after_focus(hwnd, &key, &m, || {
                     if let Some((idx, point)) = focus_target {
-                        focus_cached_element_for_foreground(&state, pid, hwnd, idx, point)?;
+                        focus_cached_element_for_foreground(&element_cache, pid, hwnd, idx, point)?;
                     }
                     Ok(())
                 })
@@ -5683,6 +5725,7 @@ impl Tool for HotkeyTool {
             Ok(resolved) => resolved,
             Err(error) => return error,
         };
+        let element_cache = crate::uia::cache::BoundElementCache::from_resolved(&resolved);
         let elem_idx = match &resolved {
             cua_driver_core::element_token::ResolvedElement::Element { element_index, .. } => {
                 Some(*element_index)
@@ -5789,10 +5832,10 @@ impl Tool for HotkeyTool {
             None
         };
         if let Some(idx) = elem_idx.filter(|_| delivery == DeliveryMode::Background) {
-            let state = self.state.clone();
+            let cache_for_focus = element_cache.clone();
             let focused = tokio::task::spawn_blocking(move || {
                 crate::uia::fg_bypass::run_with_uwp_bypass(hwnd as isize, || {
-                    state.element_cache.focus_element(pid, hwnd, idx)
+                    cache_for_focus.focus_element(pid, hwnd, idx)
                 })
             })
             .await;
@@ -5887,16 +5930,15 @@ impl Tool for HotkeyTool {
         // chord even though the renderer control is focused.
         let use_send_input = delivery == DeliveryMode::Foreground;
         let focus_target = elem_idx.map(|idx| {
-            let point = self.state.element_cache.get_element_center(pid, hwnd, idx);
+            let point = element_cache.get_element_center(pid, hwnd, idx);
             (idx, point)
         });
-        let state = self.state.clone();
         let result = tokio::task::spawn_blocking(move || {
             let m: Vec<&str> = mods.iter().map(String::as_str).collect();
             if use_send_input {
                 crate::input::send_key_synthesized_after_focus(hwnd, &key, &m, || {
                     if let Some((idx, point)) = focus_target {
-                        focus_cached_element_for_foreground(&state, pid, hwnd, idx, point)?;
+                        focus_cached_element_for_foreground(&element_cache, pid, hwnd, idx, point)?;
                     }
                     Ok(())
                 })
@@ -5924,7 +5966,7 @@ impl Tool for HotkeyTool {
 // ── perform_secondary_action ─────────────────────────────────────────────────
 
 pub struct PerformSecondaryActionTool {
-    state: Arc<ToolState>,
+    _state: Arc<ToolState>,
 }
 
 static PERFORM_SECONDARY_ACTION_DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
@@ -5980,6 +6022,7 @@ impl Tool for PerformSecondaryActionTool {
             Ok(resolved) => resolved,
             Err(error) => return error,
         };
+        let element_cache = crate::uia::cache::BoundElementCache::from_resolved(&resolved);
         let cua_driver_core::element_token::ResolvedElement::Element {
             window_id: Some(window_id),
             element_index,
@@ -5990,20 +6033,15 @@ impl Tool for PerformSecondaryActionTool {
                 .with_structured(json!({ "code": "invalid_element_target" }));
         };
         let hwnd = window_id as u64;
-        let advertised =
-            match self
-                .state
-                .element_cache
-                .get_element_actions(pid, hwnd, element_index)
-            {
-                Some(actions) => actions,
-                None => {
-                    return ToolResult::error(
-                        "element_token no longer resolves in the current UIA snapshot",
-                    )
-                    .with_structured(json!({ "code": "stale_element_token" }))
-                }
-            };
+        let advertised = match element_cache.get_element_actions(pid, hwnd, element_index) {
+            Some(actions) => actions,
+            None => {
+                return ToolResult::error(
+                    "element_token no longer resolves in the current UIA snapshot",
+                )
+                .with_structured(json!({ "code": "stale_element_token" }))
+            }
+        };
         let mut matches = advertised
             .iter()
             .filter(|action| action.as_str() == requested);
@@ -6028,18 +6066,13 @@ impl Tool for PerformSecondaryActionTool {
         }
 
         use crate::uia::cache::SnapshotKind;
-        let (kind, _) =
-            match self
-                .state
-                .element_cache
-                .get_element_kind_and_role(pid, hwnd, element_index)
-            {
-                Some(kind) => kind,
-                None => {
-                    return ToolResult::error("element is stale")
-                        .with_structured(json!({ "code": "stale_element_token" }))
-                }
-            };
+        let (kind, _) = match element_cache.get_element_kind_and_role(pid, hwnd, element_index) {
+            Some(kind) => kind,
+            None => {
+                return ToolResult::error("element is stale")
+                    .with_structured(json!({ "code": "stale_element_token" }))
+            }
+        };
         if kind == SnapshotKind::Msaa && action != "invoke" {
             return ToolResult::error(format!(
                 "MSAA supports only its native default invoke action; '{action}' has no stable semantic dispatch"
@@ -6070,7 +6103,6 @@ impl Tool for PerformSecondaryActionTool {
             .collect::<std::collections::HashSet<_>>();
         let _no_activate =
             crate::input::NoActivateGuard::arm(windows::Win32::Foundation::HWND(hwnd as *mut _));
-        let state = self.state.clone();
         let action_for_dispatch = action.clone();
         let mut dispatch = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
             use windows::core::{Interface, VARIANT};
@@ -6081,8 +6113,7 @@ impl Tool for PerformSecondaryActionTool {
                 UIA_SelectionItemPatternId, UIA_TogglePatternId,
             };
 
-            let retained = state
-                .element_cache
+            let retained = element_cache
                 .get_element_retained(pid, hwnd, element_index)
                 .ok_or_else(|| anyhow::anyhow!("element is stale"))?;
             match kind {
@@ -6222,7 +6253,7 @@ mod perform_secondary_action_schema_tests {
     #[test]
     fn runtime_schema_stays_platform_owned() {
         let tool = PerformSecondaryActionTool {
-            state: ToolState::new(),
+            _state: ToolState::new(),
         };
         let def = tool.def();
         assert_eq!(def.name, "perform_secondary_action");
@@ -6239,7 +6270,7 @@ mod perform_secondary_action_schema_tests {
 // ── set_value ─────────────────────────────────────────────────────────────────
 
 pub struct SetValueTool {
-    state: Arc<ToolState>,
+    _state: Arc<ToolState>,
 }
 
 static SET_VALUE_DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
@@ -6308,6 +6339,7 @@ impl Tool for SetValueTool {
             Ok(r) => r,
             Err(e) => return e,
         };
+        let element_cache = crate::uia::cache::BoundElementCache::from_resolved(&resolved);
         let (hwnd, idx) = match resolved {
             cua_driver_core::element_token::ResolvedElement::Element {
                 window_id: Some(wid),
@@ -6348,7 +6380,7 @@ impl Tool for SetValueTool {
         // value, so a value write gets the same visual feedback as a click —
         // the viewer can see *where* the agent is acting. No-op when the
         // overlay is disabled or the element has no cached center.
-        if let Some((cx, cy)) = self.state.element_cache.get_element_center(pid, hwnd, idx) {
+        if let Some((cx, cy)) = element_cache.get_element_center(pid, hwnd, idx) {
             pin_overlay_above(&cursor_key, hwnd);
             overlay_glide_to(&cursor_key, cx as f64, cy as f64).await;
             crate::overlay::send_command(
@@ -6360,14 +6392,12 @@ impl Tool for SetValueTool {
             );
         }
 
-        let state = self.state.clone();
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-            // Retain the element under the cache lock so a concurrent
+            // Retain the element from its bound snapshot so a concurrent
             // get_window_state snapshot-replace on the same (pid, hwnd) can't
             // Release it to zero while this Value/RangeValue SetValue is in
             // flight. The guard is held for the whole closure.
-            let element_guard = state
-                .element_cache
+            let element_guard = element_cache
                 .get_element_retained(pid, hwnd, idx)
                 .ok_or_else(|| anyhow::anyhow!("Element {idx} not in cache."))?;
             let ptr = element_guard.as_ptr();
@@ -6377,6 +6407,20 @@ impl Tool for SetValueTool {
             };
             let elem: IUIAutomationElement =
                 unsafe { IUIAutomationElement::from_raw(ptr as *mut _) };
+            let combo = unsafe { elem.CurrentNativeWindowHandle() }
+                .ok()
+                .and_then(|native| crate::win32::combo::combo_for_window(native.0 as isize));
+            if let Some(combo) = combo {
+                let result = crate::win32::combo::set_value(combo, &value).and_then(|write| {
+                    if crate::win32::combo::write_verified(&write, &value) {
+                        Ok("Win32Combo".to_owned())
+                    } else {
+                        anyhow::bail!("write_not_applied: combo selection readback did not match")
+                    }
+                });
+                std::mem::forget(elem);
+                return result;
+            }
             // Try ValuePattern first (text inputs, editable combos, etc).
             // The SetValue is shielded by the EnableWindow bypass: a
             // Chromium/Electron (or XAML) SetValue handler self-foregrounds via
@@ -6439,7 +6483,7 @@ impl Tool for SetValueTool {
 // ── scroll ────────────────────────────────────────────────────────────────────
 
 pub struct ScrollTool {
-    state: Arc<ToolState>,
+    _state: Arc<ToolState>,
 }
 static SCROLL_DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
 
@@ -6568,6 +6612,7 @@ impl Tool for ScrollTool {
             Ok(r) => r,
             Err(e) => return e,
         };
+        let element_cache = crate::uia::cache::BoundElementCache::from_resolved(&resolved);
         let elem_idx: Option<u64> = match &resolved {
             cua_driver_core::element_token::ResolvedElement::Element { element_index, .. } => {
                 Some(*element_index as u64)
@@ -6632,11 +6677,9 @@ impl Tool for ScrollTool {
             } else {
                 None
             };
-            let state = self.state.clone();
             let direction_for_uia = direction.clone();
             let uia_result = tokio::task::spawn_blocking(move || {
-                let retained = state
-                    .element_cache
+                let retained = element_cache
                     .get_element_retained(pid, hwnd, idx as usize)
                     .ok_or_else(|| anyhow::anyhow!("element [{idx}] is not in the UIA cache"))?;
                 if !retained.is_uia() {
@@ -6771,7 +6814,7 @@ impl Tool for ScrollTool {
                     windows::Win32::Foundation::HWND(hwnd as *mut _),
                     "scroll delivery",
                     || Ok(()),
-                    || crate::input::send_wheel_synthesized(cx, cy, ticks, horizontal),
+                    |_, _| crate::input::send_wheel_synthesized(cx, cy, ticks, horizontal),
                 )
             })
             .await;
@@ -6918,13 +6961,13 @@ async fn chromium_click_short_circuit(
 /// `spawn_blocking`. Returns `Some(Ok)` on success, `Some(Err)` if Invoke
 /// failed, `None` if the element isn't cached or has no InvokePattern.
 fn winui3_uia_multi_invoke(
-    state: &Arc<ToolState>,
+    element_cache: &crate::uia::cache::BoundElementCache,
     pid: u32,
     hwnd: u64,
     idx: usize,
     count: usize,
 ) -> Option<anyhow::Result<()>> {
-    let guard = state.element_cache.get_element_retained(pid, hwnd, idx)?;
+    let guard = element_cache.get_element_retained(pid, hwnd, idx)?;
     let ptr = guard.as_ptr();
     use windows::core::Interface;
     use windows::Win32::UI::Accessibility::{
@@ -6979,7 +7022,7 @@ fn winui3_uia_multi_invoke(
 /// Returns `None` for non-WinUI3 targets (caller falls through to its normal
 /// routing).
 async fn winui3_background_gesture(
-    state: &Arc<ToolState>,
+    element_cache: &crate::uia::cache::BoundElementCache,
     pid: u32,
     hwnd: u64,
     idx: Option<usize>,
@@ -6995,9 +7038,9 @@ async fn winui3_background_gesture(
     }
     if count >= 2 && button == "left" {
         if let Some(idx) = idx {
-            let st = state.clone();
+            let element_cache = element_cache.clone();
             let uia = tokio::task::spawn_blocking(move || {
-                winui3_uia_multi_invoke(&st, pid, hwnd, idx, count)
+                winui3_uia_multi_invoke(&element_cache, pid, hwnd, idx, count)
             })
             .await
             .ok()
@@ -7089,6 +7132,7 @@ impl Tool for DoubleClickTool {
             Ok(r) => r,
             Err(e) => return e,
         };
+        let element_cache = crate::uia::cache::BoundElementCache::from_resolved(&resolved);
         let elem_idx = match &resolved {
             cua_driver_core::element_token::ResolvedElement::Element { element_index, .. } => {
                 Some(*element_index)
@@ -7147,7 +7191,7 @@ impl Tool for DoubleClickTool {
         };
 
         if let Some(idx) = elem_idx {
-            let (cx, cy) = match self.state.element_cache.get_element_center(pid, hwnd, idx) {
+            let (cx, cy) = match element_cache.get_element_center(pid, hwnd, idx) {
                 Some(v) => v,
                 None => {
                     return ToolResult::error(format!(
@@ -7156,7 +7200,7 @@ impl Tool for DoubleClickTool {
                 }
             };
             let (cx, cy) = match resolve_onscreen_point_with_scroll(
-                &self.state.element_cache,
+                &element_cache,
                 pid,
                 hwnd,
                 idx,
@@ -7186,7 +7230,7 @@ impl Tool for DoubleClickTool {
             // click isn't expressible → structured error.
             if delivery == DeliveryMode::Background {
                 if let Some(r) =
-                    winui3_background_gesture(&self.state, pid, hwnd, Some(idx), 2, "left").await
+                    winui3_background_gesture(&element_cache, pid, hwnd, Some(idx), 2, "left").await
                 {
                     return r;
                 }
@@ -7217,17 +7261,10 @@ impl Tool for DoubleClickTool {
             }
             // delivery_mode:"foreground" — route through SendInput at the cached coords.
             if delivery == DeliveryMode::Foreground {
-                let foreground_target = crate::win32::capture_foreground_target(hwnd);
-                let prev_fg_addr = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
-                };
                 let send_result = tokio::task::spawn_blocking(move || {
                     crate::input::send_click_synthesized_active_mods(hwnd, cx, cy, 2, "left", &[])
                 })
                 .await;
-                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
-                    return ToolResult::error(error);
-                }
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Sent double-click via SendInput on [{idx}] at screen ({cx},{cy}) (delivery_mode:foreground)."
@@ -7274,7 +7311,7 @@ impl Tool for DoubleClickTool {
                         ))
                     }
                 }
-            } else if let Some(ratio) = self.state.resize_registry.ratio(pid) {
+            } else if let Some(ratio) = self.state.resize_registry.ratio(pid, hwnd) {
                 px *= ratio;
                 py *= ratio;
             }
@@ -7294,7 +7331,7 @@ impl Tool for DoubleClickTool {
             // error (caller retries with delivery_mode:foreground or uses element_index).
             if delivery == DeliveryMode::Background {
                 if let Some(r) =
-                    winui3_background_gesture(&self.state, pid, hwnd, None, 2, "left").await
+                    winui3_background_gesture(&element_cache, pid, hwnd, None, 2, "left").await
                 {
                     return r;
                 }
@@ -7322,10 +7359,6 @@ impl Tool for DoubleClickTool {
             }
             // delivery_mode:"foreground" — SendInput at screen coords with FG swap.
             if delivery == DeliveryMode::Foreground {
-                let foreground_target = crate::win32::capture_foreground_target(hwnd);
-                let prev_fg_addr = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
-                };
                 let send_result = tokio::task::spawn_blocking(move || {
                     crate::input::send_click_synthesized_active_mods(
                         hwnd,
@@ -7337,9 +7370,6 @@ impl Tool for DoubleClickTool {
                     )
                 })
                 .await;
-                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
-                    return ToolResult::error(error);
-                }
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Sent double-click via SendInput to pid {pid} at screen ({sx_i},{sy_i}) (delivery_mode:foreground)."
@@ -7447,6 +7477,7 @@ impl Tool for RightClickTool {
             Ok(r) => r,
             Err(e) => return e,
         };
+        let element_cache = crate::uia::cache::BoundElementCache::from_resolved(&resolved);
         let elem_idx = match &resolved {
             cua_driver_core::element_token::ResolvedElement::Element { element_index, .. } => {
                 Some(*element_index)
@@ -7505,7 +7536,7 @@ impl Tool for RightClickTool {
         };
 
         if let Some(idx) = elem_idx {
-            let (cx, cy) = match self.state.element_cache.get_element_center(pid, hwnd, idx) {
+            let (cx, cy) = match element_cache.get_element_center(pid, hwnd, idx) {
                 Some(v) => v,
                 None => {
                     return ToolResult::error(format!(
@@ -7514,7 +7545,7 @@ impl Tool for RightClickTool {
                 }
             };
             let (cx, cy) = match resolve_onscreen_point_with_scroll(
-                &self.state.element_cache,
+                &element_cache,
                 pid,
                 hwnd,
                 idx,
@@ -7541,7 +7572,8 @@ impl Tool for RightClickTool {
             // Return the structured error (retry with delivery_mode:foreground).
             if delivery == DeliveryMode::Background {
                 if let Some(r) =
-                    winui3_background_gesture(&self.state, pid, hwnd, Some(idx), 1, "right").await
+                    winui3_background_gesture(&element_cache, pid, hwnd, Some(idx), 1, "right")
+                        .await
                 {
                     return r;
                 }
@@ -7569,17 +7601,10 @@ impl Tool for RightClickTool {
                 };
             }
             if delivery == DeliveryMode::Foreground {
-                let foreground_target = crate::win32::capture_foreground_target(hwnd);
-                let prev_fg_addr = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
-                };
                 let send_result = tokio::task::spawn_blocking(move || {
                     crate::input::send_click_synthesized_active_mods(hwnd, cx, cy, 1, "right", &[])
                 })
                 .await;
-                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
-                    return ToolResult::error(error);
-                }
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Sent right-click via SendInput on [{idx}] at screen ({cx},{cy}) (delivery_mode:foreground)."
@@ -7625,7 +7650,7 @@ impl Tool for RightClickTool {
                         ))
                     }
                 }
-            } else if let Some(ratio) = self.state.resize_registry.ratio(pid) {
+            } else if let Some(ratio) = self.state.resize_registry.ratio(pid, hwnd) {
                 px *= ratio;
                 py *= ratio;
             }
@@ -7644,7 +7669,7 @@ impl Tool for RightClickTool {
             // ignored, pen-barrel injector steals foreground) → structured error.
             if delivery == DeliveryMode::Background {
                 if let Some(r) =
-                    winui3_background_gesture(&self.state, pid, hwnd, None, 1, "right").await
+                    winui3_background_gesture(&element_cache, pid, hwnd, None, 1, "right").await
                 {
                     return r;
                 }
@@ -7671,10 +7696,6 @@ impl Tool for RightClickTool {
                 };
             }
             if delivery == DeliveryMode::Foreground {
-                let foreground_target = crate::win32::capture_foreground_target(hwnd);
-                let prev_fg_addr = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
-                };
                 let send_result = tokio::task::spawn_blocking(move || {
                     crate::input::send_click_synthesized_active_mods(
                         hwnd,
@@ -7686,9 +7707,6 @@ impl Tool for RightClickTool {
                     )
                 })
                 .await;
-                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
-                    return ToolResult::error(error);
-                }
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Sent right-click via SendInput to pid {pid} at screen ({sx_i},{sy_i}) (delivery_mode:foreground)."
@@ -7850,6 +7868,24 @@ impl Tool for DragTool {
             };
 
         let hwnd_opt = args.opt_u64("window_id");
+        let hwnd = match hwnd_opt {
+            Some(h) => h,
+            None => {
+                let windows =
+                    tokio::task::spawn_blocking(move || crate::win32::list_windows(Some(pid)))
+                        .await
+                        .unwrap_or_default();
+                match windows.first() {
+                    Some(w) => w.hwnd,
+                    None => {
+                        return ToolResult::error(format!(
+                            "No windows found for pid {pid}. Provide window_id."
+                        ))
+                    }
+                }
+            }
+        };
+
         let duration_ms = args.u64_or("duration_ms", 500);
         let steps = args.u64_or("steps", 20) as usize;
         let button = args.str_or("button", "left");
@@ -7871,30 +7907,12 @@ impl Tool for DragTool {
                     ))
                 }
             }
-        } else if let Some(ratio) = self.state.resize_registry.ratio(pid) {
+        } else if let Some(ratio) = self.state.resize_registry.ratio(pid, hwnd) {
             from_x *= ratio;
             from_y *= ratio;
             to_x *= ratio;
             to_y *= ratio;
         }
-
-        let hwnd = match hwnd_opt {
-            Some(h) => h,
-            None => {
-                let windows =
-                    tokio::task::spawn_blocking(move || crate::win32::list_windows(Some(pid)))
-                        .await
-                        .unwrap_or_default();
-                match windows.first() {
-                    Some(w) => w.hwnd,
-                    None => {
-                        return ToolResult::error(format!(
-                            "No windows found for pid {pid}. Provide window_id."
-                        ))
-                    }
-                }
-            }
-        };
 
         // Compute screen-coord endpoints. Same correction as the click
         // tools — bitmap pixels are anchored to the DWM-frame top-left,
@@ -7911,8 +7929,17 @@ impl Tool for DragTool {
         // (a WinUI3 Slider can also be set with the set_value tool, which uses
         // UIA RangeValuePattern and holds the contract).
         if delivery == DeliveryMode::Background {
-            if let Some(r) =
-                winui3_background_gesture(&self.state, pid, hwnd, None, 1, &button).await
+            if let Some(r) = winui3_background_gesture(
+                &crate::uia::cache::BoundElementCache::from_resolved(
+                    &cua_driver_core::element_token::ResolvedElement::None,
+                ),
+                pid,
+                hwnd,
+                None,
+                1,
+                &button,
+            )
+            .await
             {
                 return r;
             }
@@ -7980,10 +8007,6 @@ impl Tool for DragTool {
         if delivery == DeliveryMode::Foreground {
             let btn_fg = button.clone();
             pin_overlay_above(&cursor_key, hwnd);
-            let foreground_target = crate::win32::capture_foreground_target(hwnd);
-            let prev_fg_addr = unsafe {
-                windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
-            };
             let send_result = tokio::task::spawn_blocking(move || {
                 crate::input::mouse::send_drag_synthesized(
                     hwnd,
@@ -8004,9 +8027,6 @@ impl Tool for DragTool {
                 steps,
             );
             let (send_result, ()) = tokio::join!(send_result, visual_drag);
-            if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
-                return ToolResult::error(error);
-            }
             let button_suffix = if button == "left" {
                 String::new()
             } else {
@@ -8859,11 +8879,7 @@ impl Tool for SetConfigTool {
             // legacy per-field shape; documented as intentional.
             description: "Write a setting into the persistent driver config. Values take \
                 effect immediately.\n\n\
-                Two input shapes:\n\
-                - **Swift-compatible** (preferred): `{\"key\": \"max_image_dimension\", \"value\": 1568}` \
-                  — single dotted-path leaf write.\n\
-                - **Legacy per-field** (Rust-only): `{\"max_image_dimension\": 0}` \
-                  — bulk write of named fields.\n\n\
+                Pass named configuration fields, for example max_image_dimension.\n\n\
                 Known keys:\n\
                 - `capture_mode` (string: `vision` | `ax` | `som`) — DEPRECATED and ignored; \
                   `get_window_state` always returns both the UIA tree and a screenshot. Still \
@@ -8876,9 +8892,9 @@ impl Tool for SetConfigTool {
                 "key":{"type":"string","description":"Dotted snake_case path to a leaf config field (Swift-compatible shape). Pair with `value`."},
                 "value":{"description":"New value for `key`. JSON type depends on the key."},
                 "capture_mode":{"type":"string","enum":["ax","vision"],"description":"DEPRECATED and ignored — get_window_state always returns both the UIA tree and a screenshot. Still accepted/persisted for back-compat but has no effect. (\"som\"/\"screenshot\" still decode as deprecated aliases.)"},
-                "max_image_dimension":{"type":"integer","description":"Legacy per-field shape."},
-                "experimental_pip":{"type":"boolean","description":"Legacy per-field shape. Enables PiP preview (applies next restart)."},
-                "experimental_pip_geometry":{"type":"string","description":"Legacy per-field shape. PiP window size + optional position."}
+                "max_image_dimension":{"type":"integer","description":"Configuration field."},
+                "experimental_pip":{"type":"boolean","description":"Configuration field. Enables PiP preview (applies next restart)."},
+                "experimental_pip_geometry":{"type":"string","description":"Configuration field. PiP window size + optional position."}
             },"additionalProperties":false}),
             read_only: false, destructive: false, idempotent: true, open_world: false,
         })
@@ -8951,7 +8967,7 @@ impl Tool for SetConfigTool {
                 )),
             }
         }
-        // Legacy per-field shape.
+        // Configuration field.
         if let Some(mode) = args.get("capture_mode").and_then(|v| v.as_str()) {
             cfg.capture_mode = mode.to_owned();
             if let Err(e) =
@@ -9174,7 +9190,7 @@ impl Tool for ZoomTool {
         let ratio = self
             .state
             .resize_registry
-            .ratio(raw_pid as u32)
+            .ratio(raw_pid as u32, hwnd)
             .unwrap_or(1.0);
         let (nx1, ny1, nx2, ny2) = (x1 * ratio, y1 * ratio, x2 * ratio, y2 * ratio);
 
@@ -10299,10 +10315,6 @@ pub fn build_registry_with_provider(
             },
         ))
     };
-    // Share the element cache with the recording-hook layer so it can
-    // resolve element_index → window-local screenshot coords for click.png.
-    crate::recording_hooks::set_element_cache(state.element_cache.clone());
-
     // Drop a session's owned cursor on `session_end` (explicit end_session, the
     // CLI `session end` verb, or the daemon idle-TTL sweep). The session id IS
     // the cursor key (caller-declared `session`), so this prunes the metadata
@@ -10346,6 +10358,10 @@ pub fn build_registry_with_provider(
             cua_driver_core::observation_revision::revision_tokens().clear_runtime(&runtime_scope);
         });
     }
+    cua_driver_core::desktop_keyboard::register(
+        &mut r,
+        Arc::new(crate::input::keyboard::DesktopKeyboard),
+    );
     r.register(Box::new(ListAppsTool));
     r.register(Box::new(ListWindowsTool));
     r.register(Box::new(GetWindowStateTool {
@@ -10412,19 +10428,19 @@ pub fn build_registry_with_provider(
     ));
     r.register(pid_window_guarded(
         SetValueTool {
-            state: state.clone(),
+            _state: state.clone(),
         },
         &pid_window_candidates,
     ));
     r.register(pid_window_guarded(
         PerformSecondaryActionTool {
-            state: state.clone(),
+            _state: state.clone(),
         },
         &pid_window_candidates,
     ));
     r.register(pid_window_guarded(
         ScrollTool {
-            state: state.clone(),
+            _state: state.clone(),
         },
         &pid_window_candidates,
     ));
