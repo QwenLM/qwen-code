@@ -56,8 +56,9 @@ R3 整合 [#14134 的 c807de17](https://github.com/QwenLM/qwen-code/pull/14134)
 [#14187 的 d14b2ad1](https://github.com/QwenLM/qwen-code/pull/14187) 中对应回归覆盖。
 沙箱诊断、Mem0 spawn/身份、cgroup launcher、bwrap/landlock relay/protected root
 成对接入现有 helper。cgroup 保留 hook 与 managed-child-run 两类消费者及
-`reapOnParentExit`。这些源码变更和保留的测试尚未在整合候选上验证；Linux 原生
-cgroup/bwrap/landlock 仍为 NOT_RUN。
+`reapOnParentExit`。保留的定向测试已在整合候选 `e8192c18` 上通过；其独立验收
+41 个实际产品场景与另列的三个合成协议场景，范围见下方分发设计。
+随后合入 main 的新树为 NOT_RUN；Linux 原生 cgroup/bwrap/landlock 仍未验证。
 
 明确不接收 #14134 提议的三处替换。review Vitest 保留调用它的宿主解释器，容器分支
 继续使用镜像的 `node`。PEM oracle 和 TLS 信任探针保留 `process.execPath`，与

@@ -25,8 +25,8 @@ function makeManager(): NodeReplKernelManager {
   return manager;
 }
 
-afterEach(() => {
-  while (managers.length > 0) managers.pop()?.dispose();
+afterEach(async () => {
+  await Promise.all(managers.splice(0).map((manager) => manager.dispose()));
 });
 
 function textOf(events: Array<{ type: string; text?: string }>): string {
@@ -436,7 +436,7 @@ describe('binding semantics through the real kernel', () => {
       // The kernel child's cwd is `work`; on Windows a directory that is any
       // process's cwd cannot be removed (EBUSY). Dispose first, then retry
       // the removal across the child's asynchronous teardown.
-      manager.dispose();
+      await manager.dispose();
       fs.rmSync(store, {
         recursive: true,
         force: true,

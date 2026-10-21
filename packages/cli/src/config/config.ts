@@ -77,6 +77,7 @@ import { loadSettings, SettingScope } from './settings.js';
 import { getSettingsSchema } from './settingsSchema.js';
 import { resolveHookSettingsForConfig } from './hook-settings.js';
 import { createBundledMem0Server } from './mem0-settings.js';
+import { prepareBundledGeneratedUi } from './generated-ui-settings.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -2625,6 +2626,17 @@ export async function loadCliConfig(
     mcpToolIdleTimeoutMs: settings.mcp?.toolIdleTimeoutMs,
     mcpServers,
     topTierMcpServers,
+    bundledGeneratedUi: prepareBundledGeneratedUi(
+      settings.experimental?.generatedUi,
+      !bareMode &&
+        !safeMode &&
+        !sshWorkspace &&
+        !agentHostReadOnly &&
+        !provisionalWorkspace &&
+        !sandboxEnabled &&
+        !sandboxConfig &&
+        hostPolicy?.executionEngine !== 'managed',
+    ),
     pendingMcpServers,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)

@@ -4,20 +4,21 @@
 
 ## 状态与问题
 
-原 npm 交付实现于 2026-10-21，基于 R1
-`d41362f40f3e5dbbce192dc5f610a28dad088fb4`。macOS arm64 构建、typecheck、
-五种真实 npm 安装布局及 20 项产品场景通过。独立验收通过五项生命周期和
-两项 managed-update 场景，实际观察到原 Node 执行 smoke。更新夹具使用自有克隆，
-其版本人为设为 0.0.0，目标为未修改的候选 0.25.3 tarball；这不代表两个正式
-发布版本之间的升级验收。
+整合候选 `e8192c18b1643e20ea9c9a8fa2a2d023eb004c46` 纳入 R1
+`65c20e3fcd4360222655b6e7af0e2dbbe67e86cb` 与下述解释器工作，其 macOS arm64
+构建、typecheck 和定向门禁已通过。独立验收通过五种真实 npm 安装布局及 41 个不同的
+实际产品场景，包含生命周期、运行模式、资源、managed 与手动更新。另有三个合成协议
+场景通过；其 CLI/update producer 是合成的，不能计入实际产品覆盖。此前三次实际场景
+失败与首次合成准备失败仍保留，未改写为通过。更新夹具使用自有 0.0.0 克隆与未修改的
+候选 0.25.3 tarball，不代表两个正式发布版本之间的升级。
 
-当前整合纳入修复后的 R1
-`356890b743e142f4226cb86de3bd8c9b29a92baf` 与下述解释器工作。新候选的构建、
-定向测试和受影响产物均为 NOT_RUN；上面的原验收结果不代表新源码或 Linux 沙箱
-机制已经通过。
+当前正常 merge 纳入 main `65051590d90c3b043b94e65a56e3187f9e4d9f1b`，包含已合并
+R1、Generated UI 资产与发布执行权限保护。新整合源码、安装、构建和产物均为
+NOT_RUN；e819 的结果不代表它们已经通过。新产物必须重新实测 160 MiB 解包体积门禁。
 
-剩余模式/protocol、IPC/exit-44、只读安装、missing-grammar 与平台验收门禁仍需
-明确完成。这是显式选择 OpenTUI 的兼容交付，不能视为所有 TUI 会话迁移到 Bun 已完成。
+已观察到的 serve 关闭失败与 strict 交互 `--json-file` 输出缺口仍未关闭。
+Linux 原生 cgroup/bwrap/landlock、其他平台及正式发布版本升级仍未验证。
+这是显式选择 OpenTUI 的兼容交付，不能视为所有 TUI 会话迁移到 Bun 已完成。
 
 当前 npm 发布清单排除了 `opentui-assets`，也没有私有 Bun 运行时。Node 低于
 26.4 时，显式 OpenTUI 请求回退到 Ink；较新 Node 的 bundle 安装仍缺少启动

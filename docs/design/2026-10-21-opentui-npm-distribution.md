@@ -4,22 +4,27 @@
 
 ## Status and problem
 
-The original npm delivery was implemented on 2026-10-21, based on R1
-`d41362f40f3e5dbbce192dc5f610a28dad088fb4`. macOS arm64 build, typecheck,
-five real npm installation layouts, and 20 product cases pass. Independent
-verification passes five lifecycle cases and two managed-update cases, including
-observed original-Node smoke execution. The update fixture uses an owned clone
-with synthetic version 0.0.0 and the unchanged candidate 0.25.3 tarball; it does
-not establish an upgrade between two published releases.
+The consolidated candidate `e8192c18b1643e20ea9c9a8fa2a2d023eb004c46`
+incorporates R1 `65c20e3fcd4360222655b6e7af0e2dbbe67e86cb` and the interpreter
+work below. Its macOS arm64 build, typecheck and focused gates passed.
+Independent acceptance passed five real npm installation layouts and 41 distinct
+actual product cases, including lifecycle, runtime modes, resources and managed
+and manual updates. Three synthetic protocol cases passed separately; their
+CLI/update producers were synthetic, so they do not add actual-product coverage.
+The three earlier actual-case failures and first synthetic preparation failure
+remain recorded rather than relabeled as passes. Update fixtures use owned
+0.0.0 clones and the unchanged candidate 0.25.3 tarball, not two published releases.
 
-The current consolidation incorporates repaired R1
-`356890b743e142f4226cb86de3bd8c9b29a92baf` and the interpreter work described
-below. Its build, focused tests and affected artifacts are NOT_RUN; the original
-results above do not validate this new source or Linux sandbox mechanisms.
+The current normal merge incorporates main
+`65051590d90c3b043b94e65a56e3187f9e4d9f1b`, including merged R1, Generated UI
+assets and the release executable-bit protection. This integrated source,
+installation, build and artifact are NOT_RUN; e819 results do not validate them.
+The 160 MiB unpacked-size gate must be measured again on the new artifact.
 
-The remaining mode/protocol, IPC/exit-44, read-only installation, missing-grammar
-and platform acceptance gates remain explicit. This is an opt-in compatibility
-delivery, not completion of the migration of all TUI sessions to Bun.
+The observed serve shutdown failure and strict interactive `--json-file` output
+gap remain open. Native Linux cgroup/bwrap/landlock, other platforms and official
+release upgrades also remain unverified. This is an opt-in compatibility delivery,
+not completion of the migration of all TUI sessions to Bun.
 
 The published npm manifest excludes `opentui-assets` and has no private Bun
 runtime. On Node below 26.4, an explicit OpenTUI request falls back to Ink; on

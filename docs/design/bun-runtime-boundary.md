@@ -71,8 +71,10 @@ and its regression coverage from
 It migrates the sandbox diagnostic, Mem0 spawn/identity, cgroup launcher, and
 bwrap/landlock relay/protected-root pairs through the existing helper. cgroup
 retains both hook and managed-child-run consumers and `reapOnParentExit`.
-These source changes and their retained tests have not yet been validated on
-the consolidated candidate; native Linux cgroup/bwrap/landlock remain NOT_RUN.
+The retained focused tests passed at consolidated `e8192c18`; its independent
+41 actual product cases and three separate synthetic protocol cases are scoped
+in the distribution design below. The subsequent main integration is NOT_RUN;
+native Linux cgroup/bwrap/landlock remain unverified.
 
 Three proposed swaps are deliberately not taken from #14134. Review Vitest
 keeps its invoking host interpreter; its container branch still uses the
