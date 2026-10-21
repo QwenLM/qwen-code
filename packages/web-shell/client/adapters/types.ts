@@ -83,8 +83,11 @@ export interface TurnCollapseHead {
 }
 
 export interface ContentBlock {
-  type: 'text' | 'image';
+  type: 'text' | 'image' | 'diff';
   text?: string;
+  path?: string;
+  oldText?: string;
+  newText?: string;
   source?: { type: string; media_type: string; data: string };
 }
 

@@ -1,0 +1,1201 @@
+// @vitest-environment jsdom
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { act } from 'react';
+import { TrajectoryLiveContext } from './trajectory-live-context';
+import {
+  createTrajectoryLiveStore,
+  type TrajectoryLiveStore,
+} from './trajectory-live-store';
+import { createTrajectoryPageLoader } from './transcriptPageLoader';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DaemonHttpError, type DaemonEvent } from '@qwen-code/sdk/daemon';
+import {
+  useTrajectoryWindow,
+  type TrajectoryPageLoader,
+  type TrajectoryPageResult,
+  type TrajectoryWindow,
+} from './useTrajectoryWindow';
+
+Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function userText(text: string, recordId: string): DaemonEvent {
+  return {
+    v: 1,
+    type: 'session_update',
+    data: {
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text },
+      _meta: {
+        qwenTranscript: {
+          sourceRecordIds: [recordId],
+          segmentId: `${recordId}:0`,
+        },
+        'qwen.session.recordId': recordId,
+      },
+    },
+  } as unknown as DaemonEvent;
+}
+
+function requestFrame(recordId: string, durationMs: number): DaemonEvent {
+  return {
+    v: 1,
+    type: 'session_update',
+    data: {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        timing: { kind: 'request', durationMs, status: 'ok' },
+        'qwen.session.recordId': recordId,
+      },
+    },
+  } as unknown as DaemonEvent;
+}
+
+function page(
+  events: readonly DaemonEvent[],
+  extra: Partial<TrajectoryPageResult> = {},
+): TrajectoryPageResult {
+  return { events, hasMore: false, ...extra };
+}
+
+let container: HTMLDivElement | null = null;
+let root: Root | null = null;
+
+function render(
+  loadPage: TrajectoryPageLoader | undefined,
+  options?: {
+    pageSize?: number;
+    maxPages?: number;
+    bookmarkLimit?: number;
+    cursorBudget?: number;
+    liveStore?: TrajectoryLiveStore;
+  },
+): {
+  latest: () => TrajectoryWindow;
+  rerender: (next: TrajectoryPageLoader | undefined) => void;
+} {
+  let latest: TrajectoryWindow | undefined;
+  function Probe({ loader }: { loader: TrajectoryPageLoader | undefined }) {
+    latest = useTrajectoryWindow(loader, options);
+    return null;
+  }
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  act(() => {
+    root!.render(
+      options?.liveStore ? (
+        <TrajectoryLiveContext.Provider value={options.liveStore}>
+          <Probe loader={loadPage} />
+        </TrajectoryLiveContext.Provider>
+      ) : (
+        <Probe loader={loadPage} />
+      ),
+    );
+  });
+  return {
+    latest: () => latest!,
+    rerender: (next) => {
+      act(() => {
+        root!.render(<Probe loader={next} />);
+      });
+    },
+  };
+}
+
+beforeEach(() => {
+  vi.restoreAllMocks();
+});
+
+afterEach(() => {
+  if (root) {
+    const current = root;
+    act(() => current.unmount());
+  }
+  container?.remove();
+  root = null;
+  container = null;
+});
+
+describe('useTrajectoryWindow', () => {
+  it('does not project previous-loader pages during the render before its reset effect', async () => {
+    const first = vi.fn(async () => page([userText('first', 'first')]));
+    const pending = deferred<TrajectoryPageResult>();
+    const second = vi.fn(() => pending.promise);
+    const frames: Array<{
+      loader: TrajectoryPageLoader;
+      trajectory: TrajectoryWindow['trajectory'];
+      status: TrajectoryWindow['status'];
+      loadedPages: number;
+    }> = [];
+    function Probe({ loader }: { loader: TrajectoryPageLoader }) {
+      const state = useTrajectoryWindow(loader);
+      frames.push({
+        loader,
+        trajectory: state.trajectory,
+        status: state.status,
+        loadedPages: state.loadedPages,
+      });
+      return null;
+    }
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => root!.render(<Probe loader={first} />));
+    expect(frames.some((frame) => frame.trajectory !== undefined)).toBe(true);
+    act(() => root!.render(<Probe loader={second} />));
+    expect(
+      frames
+        .filter((frame) => frame.loader === second)
+        .every(
+          (frame) =>
+            frame.trajectory === undefined &&
+            frame.status !== 'ready' &&
+            frame.loadedPages === 0,
+        ),
+    ).toBe(true);
+  });
+
+  it('keeps the history window and navigation stable across live events and recovery', async () => {
+    const store = createTrajectoryLiveStore();
+    const owner = {};
+    store.begin(owner, {
+      sessionId: 's',
+      scope: 'scope',
+      epoch: 'epoch',
+      events: [],
+      incomplete: false,
+    });
+    const read = vi.fn(async (_id: string, opts: { cursor?: string }) =>
+      opts.cursor
+        ? page([userText('old', 'old')])
+        : page([userText('new', 'new')], { hasMore: true, nextCursor: 'old' }),
+    );
+    const loader = createTrajectoryPageLoader(
+      { getSessionTranscriptPage: read },
+      's',
+      'scope',
+    );
+    const view = render(loader, { maxPages: 1, liveStore: store });
+    await act(async () => {});
+    act(() => view.latest().older());
+    await act(async () => {});
+    const previous = view.latest();
+    act(() =>
+      store.ingest(owner, { v: 1, type: 'replay_complete', data: {} }, 'epoch'),
+    );
+    act(() => store.invalidate(owner, 'gap'));
+    expect(view.latest().trajectory).toBe(previous.trajectory);
+    expect(view.latest().navigationVersion).toBe(previous.navigationVersion);
+    expect(view.latest().mode).toBe('history');
+    expect(view.latest().lifecycle.status).toBe('stale');
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks for nothing without a loader', async () => {
+    const view = render(undefined);
+    await act(async () => {});
+
+    expect(view.latest().status).toBe('idle');
+    expect(view.latest().trajectory).toBeUndefined();
+  });
+
+  it('folds the newest page on mount', async () => {
+    const loadPage = vi.fn(async () =>
+      page([userText('go', 'rec-1'), requestFrame('rec-2', 1200)]),
+    );
+    const view = render(loadPage);
+    await act(async () => {});
+
+    expect(loadPage).toHaveBeenCalledTimes(1);
+    expect(loadPage.mock.calls[0]![0]).toEqual({ limit: 250 });
+    expect(view.latest().status).toBe('ready');
+    expect(view.latest().truncated).toBe(false);
+    expect(view.latest().trajectory?.rows.map((row) => row.kind)).toEqual([
+      'user',
+      'request',
+    ]);
+  });
+
+  it('keeps a readable page but blocks navigation when more history has no cursor', async () => {
+    const loadPage = vi.fn(async () =>
+      page([userText('newest', 'rec-1')], { hasMore: true }),
+    );
+    const view = render(loadPage);
+    await act(async () => {});
+
+    expect(view.latest().truncated).toBe(true);
+    expect(view.latest().status).toBe('ready');
+    expect(view.latest().navigationError ?? view.latest().olderFailure).toEqual(
+      {
+        kind: 'protocol',
+      },
+    );
+    expect(view.latest().canOlder).toBe(false);
+    expect(view.latest().trajectory?.rows).toHaveLength(1);
+    expect(loadPage).toHaveBeenCalledTimes(1);
+  });
+
+  describe('walking back', () => {
+    /** Pages keyed by the cursor that asks for them; `''` is the newest. */
+    function chain(
+      pages: Record<string, TrajectoryPageResult | Error>,
+    ): TrajectoryPageLoader & ReturnType<typeof vi.fn> {
+      return vi.fn(async ({ cursor }: { limit: number; cursor?: string }) => {
+        const entry = pages[cursor ?? ''];
+        if (entry === undefined) throw new Error(`no page at ${cursor}`);
+        if (entry instanceof Error) throw entry;
+        return entry;
+      });
+    }
+
+    function promptTexts(window: TrajectoryWindow): string[] {
+      return window
+        .trajectory!.rows.filter((row) => row.kind === 'user')
+        .map((row) => (row.kind === 'user' ? row.block.text : ''));
+    }
+
+    it('follows each cursor and folds the pages oldest first', async () => {
+      const loadPage = chain({
+        '': page([userText('newest', 'rec-3')], {
+          hasMore: true,
+          nextCursor: 'c1',
+        }),
+        c1: page([userText('middle', 'rec-2')], {
+          hasMore: true,
+          nextCursor: 'c2',
+        }),
+        c2: page([userText('oldest', 'rec-1')]),
+      });
+      const statuses: string[] = [];
+      let latest: TrajectoryWindow | undefined;
+      function Probe() {
+        latest = useTrajectoryWindow(loadPage);
+        statuses.push(`${latest.status}:${latest.trajectory ? 'drawn' : '-'}`);
+        return null;
+      }
+      container = document.createElement('div');
+      document.body.appendChild(container);
+      root = createRoot(container);
+      await act(async () => {
+        root!.render(<Probe />);
+      });
+      await act(async () => {});
+
+      expect(loadPage.mock.calls.map((call) => call[0])).toEqual([
+        { limit: 250 },
+        { limit: 250, cursor: 'c1' },
+        { limit: 250, cursor: 'c2' },
+      ]);
+      expect(promptTexts(latest!)).toEqual(['oldest', 'middle', 'newest']);
+      expect(latest!.truncated).toBe(false);
+      expect(latest!.loadedPages).toBe(3);
+      // Drawn once, whole: no render shows a window that later grows above
+      // the rows already on screen.
+      const firstDrawn = statuses.findIndex((entry) => entry.endsWith('drawn'));
+      expect(statuses[firstDrawn]).toBe('ready:drawn');
+      expect(statuses.slice(0, firstDrawn).every((e) => e.endsWith(':-'))).toBe(
+        true,
+      );
+      expect(statuses.filter((e) => e.startsWith('ready')).length).toBe(
+        statuses.length - firstDrawn,
+      );
+    });
+
+    it('draws nothing until the walk ends, counting pages as it goes', async () => {
+      const oldest = deferred<TrajectoryPageResult>();
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        if (cursor === 'c2') return oldest.promise;
+        if (cursor === 'c1') {
+          return page([userText('middle', 'rec-2')], {
+            hasMore: true,
+            nextCursor: 'c2',
+          });
+        }
+        return page([userText('newest', 'rec-3')], {
+          hasMore: true,
+          nextCursor: 'c1',
+        });
+      });
+      const view = render(loadPage);
+      await act(async () => {});
+
+      // Two pages are in and a third is on its way: showing the two now would
+      // mean putting the third above rows the reader can already see.
+      expect(loadPage).toHaveBeenCalledTimes(3);
+      expect(view.latest().status).toBe('loading');
+      expect(view.latest().loadedPages).toBe(2);
+      expect(view.latest().trajectory).toBeUndefined();
+
+      await act(async () => {
+        oldest.resolve(page([userText('oldest', 'rec-1')]));
+      });
+      expect(view.latest().status).toBe('ready');
+      expect(view.latest().loadedPages).toBe(3);
+      expect(promptTexts(view.latest())).toEqual([
+        'oldest',
+        'middle',
+        'newest',
+      ]);
+    });
+
+    it('stops at the page cap and says history is left', async () => {
+      const pages: Record<string, TrajectoryPageResult> = {};
+      for (let i = 0; i < 6; i += 1) {
+        pages[i === 0 ? '' : `c${i}`] = page(
+          [userText(`page ${i}`, `rec-${i}`)],
+          { hasMore: true, nextCursor: `c${i + 1}` },
+        );
+      }
+      const loadPage = chain(pages);
+      const view = render(loadPage, { maxPages: 3 });
+      await act(async () => {});
+
+      expect(loadPage).toHaveBeenCalledTimes(3);
+      expect(view.latest().loadedPages).toBe(3);
+      expect(view.latest().truncated).toBe(true);
+      expect(promptTexts(view.latest())).toEqual([
+        'page 2',
+        'page 1',
+        'page 0',
+      ]);
+    });
+
+    it('stops at the default cap of four pages', async () => {
+      const pages: Record<string, TrajectoryPageResult> = {};
+      for (let i = 0; i < 6; i += 1) {
+        pages[i === 0 ? '' : `c${i}`] = page(
+          [userText(`page ${i}`, `rec-${i}`)],
+          { hasMore: true, nextCursor: `c${i + 1}` },
+        );
+      }
+      const loadPage = chain(pages);
+      render(loadPage);
+      await act(async () => {});
+
+      expect(loadPage).toHaveBeenCalledTimes(4);
+    });
+
+    it('keeps the newer pages when an older one cannot be read', async () => {
+      const loadPage = chain({
+        '': page([userText('newest', 'rec-3')], {
+          hasMore: true,
+          nextCursor: 'c1',
+        }),
+        c1: page([userText('middle', 'rec-2')], {
+          hasMore: true,
+          nextCursor: 'c2',
+        }),
+        c2: new Error('socket hang up'),
+      });
+      const view = render(loadPage);
+      await act(async () => {});
+
+      expect(view.latest().status).toBe('ready');
+      expect(view.latest().error).toBeUndefined();
+      expect(view.latest().olderFailure).toEqual({
+        kind: 'unreadable',
+        message: 'socket hang up',
+      });
+      expect(view.latest().truncated).toBe(true);
+      expect(promptTexts(view.latest())).toEqual(['middle', 'newest']);
+      expect(loadPage).toHaveBeenCalledTimes(3);
+    });
+
+    it('leaves a partial older page out rather than folding its hole', async () => {
+      const loadPage = chain({
+        '': page([userText('newest', 'rec-2')], {
+          hasMore: true,
+          nextCursor: 'c1',
+        }),
+        c1: page([userText('half of it', 'rec-1')], {
+          partial: true as const,
+          hasMore: true,
+          nextCursor: 'c2',
+        }),
+      });
+      const view = render(loadPage);
+      await act(async () => {});
+
+      expect(view.latest().olderFailure).toEqual({ kind: 'partial' });
+      expect(promptTexts(view.latest())).toEqual(['newest']);
+      expect(loadPage).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not walk back from a newest page it could not read', async () => {
+      const loadPage = chain({
+        '': page([], {
+          replayError: 'Replay conversion failed for this page',
+          hasMore: true,
+          nextCursor: 'c1',
+        }),
+        c1: page([userText('older', 'rec-1')]),
+      });
+      const view = render(loadPage);
+      await act(async () => {});
+
+      expect(view.latest().status).toBe('error');
+      expect(loadPage).toHaveBeenCalledTimes(1);
+    });
+
+    it('rebuilds the whole window on retry after an older page failed', async () => {
+      let olderFails = true;
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        if (!cursor) {
+          return page([userText('newest', 'rec-2')], {
+            hasMore: true,
+            nextCursor: 'c1',
+          });
+        }
+        if (olderFails) throw new Error('down');
+        return page([userText('oldest', 'rec-1')]);
+      });
+      const view = render(loadPage);
+      await act(async () => {});
+      expect(view.latest().olderFailure).toBeDefined();
+
+      olderFails = false;
+      await act(async () => {
+        view.latest().refresh();
+      });
+
+      expect(view.latest().olderFailure).toBeUndefined();
+      expect(view.latest().truncated).toBe(false);
+      expect(promptTexts(view.latest())).toEqual(['oldest', 'newest']);
+    });
+
+    it('abandons a walk that a refresh superseded', async () => {
+      const staleOlder = deferred<TrajectoryPageResult>();
+      let round = 0;
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        if (!cursor) {
+          round += 1;
+          return page([userText(`newest ${round}`, `rec-n${round}`)], {
+            hasMore: true,
+            nextCursor: `c-${round}`,
+          });
+        }
+        if (cursor === 'c-1') return staleOlder.promise;
+        return page([userText('fresh older', 'rec-o2')]);
+      });
+      const view = render(loadPage);
+      await act(async () => {});
+      expect(loadPage).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        view.latest().refresh();
+      });
+      expect(loadPage).toHaveBeenCalledTimes(4);
+      const settled = view.latest();
+
+      await act(async () => {
+        staleOlder.resolve(
+          page([userText('stale older', 'rec-o1')], {
+            hasMore: true,
+            nextCursor: 'c-stale',
+          }),
+        );
+      });
+
+      // The old walk neither writes nor asks for the page after its reply.
+      expect(loadPage).toHaveBeenCalledTimes(4);
+      expect(view.latest().loadedPages).toBe(settled.loadedPages);
+      expect(promptTexts(view.latest())).toEqual(['fresh older', 'newest 2']);
+    });
+
+    it('abandons a walk when the component unmounts', async () => {
+      const older = deferred<TrajectoryPageResult>();
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) =>
+        cursor
+          ? older.promise
+          : page([userText('newest', 'rec-2')], {
+              hasMore: true,
+              nextCursor: 'c1',
+            }),
+      );
+      render(loadPage);
+      await act(async () => {});
+
+      const current = root!;
+      act(() => current.unmount());
+      root = null;
+
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await act(async () => {
+        older.resolve(
+          page([userText('older', 'rec-1')], {
+            hasMore: true,
+            nextCursor: 'c2',
+          }),
+        );
+      });
+      expect(errors).not.toHaveBeenCalled();
+      expect(loadPage).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the whole window when a refresh of the newest page fails', async () => {
+      let newestFails = false;
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        if (!cursor) {
+          if (newestFails) throw new Error('down');
+          return page([userText('newest', 'rec-2')], {
+            hasMore: true,
+            nextCursor: 'c1',
+          });
+        }
+        return page([userText('oldest', 'rec-1')]);
+      });
+      const view = render(loadPage);
+      await act(async () => {});
+
+      newestFails = true;
+      await act(async () => {
+        view.latest().refresh();
+      });
+
+      expect(view.latest().status).toBe('error');
+      expect(promptTexts(view.latest())).toEqual(['oldest', 'newest']);
+      expect(view.latest().loadedPages).toBe(2);
+    });
+  });
+
+  it('replaces the page on refresh rather than adding to it', async () => {
+    let body = 'first';
+    const loadPage = vi.fn(async () => page([userText(body, 'rec-1')]));
+    const view = render(loadPage);
+    await act(async () => {});
+    expect(view.latest().trajectory!.rows).toHaveLength(1);
+
+    body = 'second';
+    await act(async () => {
+      view.latest().refresh();
+    });
+
+    // Page boundaries are picked per request, so a fresh page and the held one
+    // overlap by an unknown amount and cannot be joined without dropping or
+    // repeating records.
+    const rows = view.latest().trajectory!.rows;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.kind === 'user' && rows[0]!.block.text).toBe('second');
+  });
+
+  it('drops a reply that a refresh has already superseded', async () => {
+    const stale = deferred<TrajectoryPageResult>();
+    let first = true;
+    const loadPage = vi.fn(async () => {
+      if (first) {
+        first = false;
+        return stale.promise;
+      }
+      return page([userText('fresh', 'rec-2')]);
+    });
+    const view = render(loadPage);
+    await act(async () => {});
+
+    await act(async () => {
+      view.latest().refresh();
+    });
+    await act(async () => {
+      stale.resolve(page([userText('stale', 'rec-1')]));
+    });
+
+    const rows = view.latest().trajectory!.rows;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.kind === 'user' && rows[0]!.block.text).toBe('fresh');
+  });
+
+  it('drops a failure that a refresh has already superseded', async () => {
+    const stale = deferred<TrajectoryPageResult>();
+    let first = true;
+    const loadPage = vi.fn(async () => {
+      if (first) {
+        first = false;
+        return stale.promise;
+      }
+      return page([userText('fresh', 'rec-2')]);
+    });
+    const view = render(loadPage);
+    await act(async () => {});
+
+    await act(async () => {
+      view.latest().refresh();
+    });
+    await act(async () => {
+      stale.reject(new Error('socket hang up'));
+    });
+
+    // The read that failed is not the one on screen, so its error is not
+    // this window's to report.
+    expect(view.latest().status).toBe('ready');
+    expect(view.latest().error).toBeUndefined();
+  });
+
+  it('drops a reply that arrives after the loader changed', async () => {
+    const stale = deferred<TrajectoryPageResult>();
+    const first: TrajectoryPageLoader = vi.fn(async () => stale.promise);
+    const second: TrajectoryPageLoader = vi.fn(async () =>
+      page([userText('second session', 'rec-9')]),
+    );
+    const view = render(first);
+    await act(async () => {});
+
+    view.rerender(second);
+    await act(async () => {});
+    await act(async () => {
+      stale.resolve(page([userText('first session', 'rec-1')]));
+    });
+
+    const rows = view.latest().trajectory!.rows;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.kind === 'user' && rows[0]!.block.text).toBe(
+      'second session',
+    );
+  });
+
+  it("drops the previous loader's page when the loader changes", async () => {
+    const first: TrajectoryPageLoader = vi.fn(async () =>
+      page([userText('first session', 'rec-1')]),
+    );
+    const failing = deferred<TrajectoryPageResult>();
+    const second: TrajectoryPageLoader = vi.fn(async () => failing.promise);
+    const view = render(first);
+    await act(async () => {});
+    expect(view.latest().trajectory!.rows).toHaveLength(1);
+
+    view.rerender(second);
+    await act(async () => {
+      failing.reject(new Error('second session is unreadable'));
+    });
+
+    // A different loader is a different session. Holding the old rows is what
+    // `refresh` does, and doing it here would leave one session's trajectory
+    // on screen underneath another session's error.
+    expect(view.latest().trajectory).toBeUndefined();
+    expect(view.latest().error).toEqual({
+      kind: 'unreadable',
+      message: 'second session is unreadable',
+    });
+  });
+
+  it('reads again after a failure', async () => {
+    let calls = 0;
+    const loadPage: TrajectoryPageLoader = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('down');
+      return page([userText('recovered', 'rec-1')]);
+    });
+    const view = render(loadPage);
+    await act(async () => {});
+    expect(view.latest().error).toEqual({
+      kind: 'unreadable',
+      message: 'down',
+    });
+
+    await act(async () => view.latest().refresh());
+
+    expect(view.latest().trajectory!.rows).toHaveLength(1);
+    expect(view.latest().error).toBeUndefined();
+  });
+
+  it('keeps the held window when a page cannot be read', async () => {
+    let fail = false;
+    const loadPage = vi.fn(async () =>
+      fail
+        ? page([], { replayError: 'Replay conversion failed for this page' })
+        : page([userText('kept', 'rec-1')]),
+    );
+    const view = render(loadPage);
+    await act(async () => {});
+
+    fail = true;
+    await act(async () => {
+      view.latest().refresh();
+    });
+
+    expect(view.latest().status).toBe('error');
+    expect(view.latest().error).toEqual({
+      kind: 'unreadable',
+      message: 'Replay conversion failed for this page',
+    });
+    expect(view.latest().trajectory!.rows).toHaveLength(1);
+  });
+
+  it('names a partial page as a kind rather than a word', async () => {
+    const loadPage = vi.fn(async () =>
+      page([userText('half', 'rec-1')], { partial: true as const }),
+    );
+    const view = render(loadPage);
+    await act(async () => {});
+
+    // `partial` is a flag on the page, not a sentence; carrying it as a kind
+    // keeps the literal out of the message the reader is shown.
+    expect(view.latest().error).toEqual({ kind: 'partial' });
+  });
+
+  it('reports a partial page as an error rather than folding a prefix', async () => {
+    const loadPage = vi.fn(async () =>
+      page([userText('half', 'rec-1')], { partial: true as const }),
+    );
+    const view = render(loadPage);
+    await act(async () => {});
+
+    expect(view.latest().status).toBe('error');
+    expect(view.latest().trajectory).toBeUndefined();
+  });
+
+  it('surfaces a rejected fetch', async () => {
+    const loadPage = vi.fn(async () => {
+      throw new Error('daemon unreachable');
+    });
+    const view = render(loadPage);
+    await act(async () => {});
+
+    expect(view.latest().status).toBe('error');
+    expect(view.latest().error).toEqual({
+      kind: 'unreadable',
+      message: 'daemon unreachable',
+    });
+  });
+
+  it('does not write state after unmount', async () => {
+    const pending = deferred<TrajectoryPageResult>();
+    const loadPage = vi.fn(async () => pending.promise);
+    render(loadPage);
+    await act(async () => {});
+
+    const current = root!;
+    act(() => current.unmount());
+    root = null;
+
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await act(async () => {
+      pending.resolve(page([userText('late', 'rec-1')]));
+    });
+    expect(errors).not.toHaveBeenCalled();
+  });
+
+  describe('bounded historical windows', () => {
+    function texts(window: TrajectoryWindow): string[] {
+      return window.trajectory!.rows.flatMap((row) =>
+        row.kind === 'user' ? [row.block.text] : [],
+      );
+    }
+
+    function history(count = 8) {
+      return vi.fn(async ({ cursor }: { limit: number; cursor?: string }) => {
+        const index = cursor === undefined ? 0 : Number(cursor.slice(1));
+        if (!Number.isInteger(index) || index < 0 || index >= count)
+          throw new Error(`Unexpected cursor ${cursor}`);
+        return page([userText(`page ${index}`, `rec-${index}`)], {
+          hasMore: index + 1 < count,
+          ...(index + 1 < count ? { nextCursor: `c${index + 1}` } : {}),
+        });
+      });
+    }
+
+    it('loads whole consecutive segments and returns only to cursor-addressed history', async () => {
+      const loadPage = history(6);
+      const view = render(loadPage, { maxPages: 2 });
+      await act(async () => {});
+      const initialVersion = view.latest().navigationVersion;
+      expect(texts(view.latest())).toEqual(['page 1', 'page 0']);
+      expect(view.latest().mode).toBe('latest');
+      expect(view.latest().canNewer).toBe(false);
+
+      await act(async () => view.latest().older());
+      expect(texts(view.latest())).toEqual(['page 3', 'page 2']);
+      expect(view.latest().mode).toBe('history');
+      expect(view.latest().bookmarks).toBe(1);
+      expect(view.latest().canNewer).toBe(false);
+      expect(view.latest().navigationVersion).toBe(initialVersion + 1);
+      const calls = loadPage.mock.calls.length;
+      await act(async () => view.latest().newer());
+      expect(loadPage).toHaveBeenCalledTimes(calls);
+
+      await act(async () => view.latest().older());
+      expect(texts(view.latest())).toEqual(['page 5', 'page 4']);
+      expect(view.latest().canOlder).toBe(false);
+      expect(view.latest().canNewer).toBe(true);
+      expect(view.latest().bookmarks).toBe(2);
+
+      await act(async () => view.latest().newer());
+      expect(texts(view.latest())).toEqual(['page 3', 'page 2']);
+      await act(async () => view.latest().older());
+      expect(texts(view.latest())).toEqual(['page 5', 'page 4']);
+      expect(view.latest().bookmarks).toBe(2);
+      expect(loadPage.mock.calls.map(([opts]) => opts.cursor)).toEqual([
+        undefined,
+        'c1',
+        'c2',
+        'c3',
+        'c4',
+        'c5',
+        'c2',
+        'c3',
+        'c4',
+        'c5',
+      ]);
+    });
+
+    it('keeps the old window until every candidate page succeeds and retries only the failure', async () => {
+      let partial = true;
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        const index = cursor === undefined ? 0 : Number(cursor.slice(1));
+        return page([userText(`page ${index}`, `rec-${index}`)], {
+          ...(cursor === 'c3' && partial ? { partial: true as const } : {}),
+          hasMore: index < 3,
+          ...(index < 3 ? { nextCursor: `c${index + 1}` } : {}),
+        });
+      });
+      const view = render(loadPage, { maxPages: 2 });
+      await act(async () => {});
+      const original = view.latest().trajectory;
+      const version = view.latest().navigationVersion;
+      await act(async () => view.latest().older());
+      expect(view.latest().trajectory).toBe(original);
+      expect(view.latest().navigationVersion).toBe(version);
+      expect(view.latest().bookmarks).toBe(0);
+      expect(view.latest().navigationError).toEqual({ kind: 'partial' });
+      expect(view.latest().mode).toBe('latest');
+
+      await act(async () => view.latest().retry());
+      expect(view.latest().trajectory).toBe(original);
+      partial = false;
+      await act(async () => view.latest().retry());
+      expect(texts(view.latest())).toEqual(['page 3', 'page 2']);
+      expect(view.latest().navigationError).toBeUndefined();
+      expect(view.latest().bookmarks).toBe(1);
+      expect(loadPage.mock.calls.map(([opts]) => opts.cursor)).toEqual([
+        undefined,
+        'c1',
+        'c2',
+        'c3',
+        'c3',
+        'c3',
+      ]);
+    });
+
+    it('repairs the first window at its failed older page without skipping the gap', async () => {
+      let fail = true;
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        if (cursor === 'c1' && fail) throw new Error('offline');
+        const index = cursor === undefined ? 0 : Number(cursor.slice(1));
+        return page([userText(`page ${index}`, `rec-${index}`)], {
+          hasMore: index < 3,
+          ...(index < 3 ? { nextCursor: `c${index + 1}` } : {}),
+        });
+      });
+      const view = render(loadPage, { maxPages: 3 });
+      await act(async () => {});
+      const version = view.latest().navigationVersion;
+      expect(texts(view.latest())).toEqual(['page 0']);
+      expect(view.latest().canOlder).toBe(false);
+      await act(async () => view.latest().older());
+      expect(loadPage).toHaveBeenCalledTimes(2);
+      fail = false;
+      await act(async () => view.latest().retry());
+      expect(texts(view.latest())).toEqual(['page 2', 'page 1', 'page 0']);
+      expect(view.latest().olderFailure).toBeUndefined();
+      expect(view.latest().navigationVersion).toBe(version);
+      expect(view.latest().canOlder).toBe(true);
+      expect(loadPage.mock.calls.map(([opts]) => opts.cursor)).toEqual([
+        undefined,
+        'c1',
+        'c1',
+        'c2',
+      ]);
+    });
+
+    it('keeps historical bookmarks on failed latest refresh and clears them on success', async () => {
+      let latestText = 'original';
+      let latestFails = false;
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        if (cursor === undefined) {
+          if (latestFails) throw new Error('offline');
+          return page([userText(latestText, 'latest')], {
+            hasMore: true,
+            nextCursor: 'c1',
+          });
+        }
+        return page([userText(cursor, cursor)], {
+          hasMore: true,
+          nextCursor: cursor === 'c1' ? 'c2' : 'c3',
+        });
+      });
+      const view = render(loadPage, { maxPages: 1 });
+      await act(async () => {});
+      await act(async () => view.latest().older());
+      await act(async () => view.latest().older());
+      const held = view.latest().trajectory;
+      const version = view.latest().navigationVersion;
+      latestFails = true;
+      await act(async () => view.latest().refresh());
+      expect(view.latest().trajectory).toBe(held);
+      expect(view.latest().bookmarks).toBe(2);
+      expect(view.latest().mode).toBe('history');
+      expect(view.latest().navigationVersion).toBe(version);
+      latestFails = false;
+      latestText = 'appended';
+      await act(async () => view.latest().refresh());
+      expect(texts(view.latest())).toEqual(['appended']);
+      expect(view.latest().mode).toBe('latest');
+      expect(view.latest().bookmarks).toBe(0);
+      expect(view.latest().canNewer).toBe(false);
+      expect(view.latest().navigationVersion).toBe(version + 1);
+    });
+
+    it('ignores duplicate navigation and superseded historical replies', async () => {
+      const pending = deferred<TrajectoryPageResult>();
+      let latest = 0;
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        if (cursor) return pending.promise;
+        latest += 1;
+        return page([userText(`latest ${latest}`, `latest-${latest}`)], {
+          hasMore: true,
+          nextCursor: 'c1',
+        });
+      });
+      const view = render(loadPage, { maxPages: 1 });
+      await act(async () => {});
+      const held = view.latest().trajectory;
+      act(() => {
+        view.latest().older();
+        view.latest().older();
+      });
+      await act(async () => {});
+      expect(view.latest().trajectory).toBe(held);
+      expect(loadPage).toHaveBeenCalledTimes(2);
+      await act(async () => view.latest().refresh());
+      const refreshed = view.latest().trajectory;
+      await act(async () => {
+        pending.resolve(
+          page([userText('obsolete', 'old')], {
+            hasMore: true,
+            nextCursor: 'c2',
+          }),
+        );
+      });
+      expect(view.latest().trajectory).toBe(refreshed);
+      expect(texts(view.latest())).toEqual(['latest 2']);
+      expect(view.latest().bookmarks).toBe(0);
+      expect(loadPage).toHaveBeenCalledTimes(3);
+    });
+
+    it('abandons a historical candidate and its continuation when the loader changes', async () => {
+      const pending = deferred<TrajectoryPageResult>();
+      const first = vi.fn(async ({ cursor }: { cursor?: string }) =>
+        cursor
+          ? pending.promise
+          : page([userText('first', 'first')], {
+              hasMore: true,
+              nextCursor: 'c1',
+            }),
+      );
+      const second = vi.fn(async () => page([userText('second', 'second')]));
+      const view = render(first, { maxPages: 1 });
+      await act(async () => {});
+      act(() => view.latest().older());
+      await act(async () => {});
+      view.rerender(second);
+      await act(async () => {});
+      await act(async () =>
+        pending.resolve(
+          page([userText('late', 'late')], {
+            hasMore: true,
+            nextCursor: 'c2',
+          }),
+        ),
+      );
+      expect(texts(view.latest())).toEqual(['second']);
+      expect(view.latest().bookmarks).toBe(0);
+      expect(view.latest().canOlder).toBe(false);
+      expect(first).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      ['missing', undefined],
+      ['repeated', 'c1'],
+    ])(
+      'blocks a %s cursor without committing the candidate',
+      async (_name, nextCursor) => {
+        const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) =>
+          cursor === undefined
+            ? page([userText('latest', 'latest')], {
+                hasMore: true,
+                nextCursor: 'c1',
+              })
+            : page([userText('candidate', 'candidate')], {
+                hasMore: true,
+                nextCursor,
+              }),
+        );
+        const view = render(loadPage, { maxPages: 1 });
+        await act(async () => {});
+        const held = view.latest().trajectory;
+        await act(async () => view.latest().older());
+        expect(view.latest().trajectory).toBe(held);
+        expect(view.latest().navigationError).toEqual({ kind: 'protocol' });
+        expect(view.latest().canOlder).toBe(false);
+        expect(view.latest().bookmarks).toBe(0);
+        const calls = loadPage.mock.calls.length;
+        await act(async () => view.latest().retry());
+        expect(loadPage).toHaveBeenCalledTimes(calls);
+      },
+    );
+
+    it('rejects a two-cursor loop inside a candidate', async () => {
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        if (cursor === undefined)
+          return page([userText('latest', 'latest')], {
+            hasMore: true,
+            nextCursor: 'c1',
+          });
+        return page([userText(cursor, cursor)], {
+          hasMore: true,
+          nextCursor: cursor === 'c1' ? 'c2' : 'c1',
+        });
+      });
+      const view = render(loadPage, { maxPages: 1 });
+      await act(async () => {});
+      await act(async () => view.latest().older());
+      const held = view.latest().trajectory;
+      await act(async () => view.latest().older());
+      expect(view.latest().trajectory).toBe(held);
+      expect(view.latest().navigationError).toEqual({ kind: 'protocol' });
+      expect(loadPage.mock.calls.map(([opts]) => opts.cursor)).toEqual([
+        undefined,
+        'c1',
+        'c2',
+      ]);
+    });
+
+    it('counts empty event pages and follows their advancing cursor', async () => {
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        if (cursor === undefined)
+          return page([userText('latest', 'latest')], {
+            hasMore: true,
+            nextCursor: 'c1',
+          });
+        if (cursor === 'c1')
+          return page([], { hasMore: true, nextCursor: 'c2' });
+        return page([userText('oldest', 'oldest')]);
+      });
+      const view = render(loadPage, { maxPages: 1 });
+      await act(async () => {});
+      await act(async () => view.latest().older());
+      expect(view.latest().loadedPages).toBe(1);
+      expect(view.latest().trajectory?.rows).toHaveLength(0);
+      expect(view.latest().canOlder).toBe(true);
+      await act(async () => view.latest().older());
+      expect(texts(view.latest())).toEqual(['oldest']);
+      expect(view.latest().canOlder).toBe(false);
+    });
+
+    it('keeps a continuous newer chain when the bookmark count is capped', async () => {
+      const loadPage = history(7);
+      const view = render(loadPage, { maxPages: 1, bookmarkLimit: 2 });
+      await act(async () => {});
+      for (let index = 0; index < 4; index += 1)
+        await act(async () => view.latest().older());
+      expect(texts(view.latest())).toEqual(['page 4']);
+      expect(view.latest().bookmarks).toBe(2);
+      expect(view.latest().historyReleased).toBe(true);
+      await act(async () => view.latest().newer());
+      expect(texts(view.latest())).toEqual(['page 3']);
+      expect(view.latest().canNewer).toBe(false);
+      const count = loadPage.mock.calls.length;
+      await act(async () => view.latest().newer());
+      expect(loadPage).toHaveBeenCalledTimes(count);
+      await act(async () => view.latest().older());
+      expect(texts(view.latest())).toEqual(['page 4']);
+      expect(view.latest().bookmarks).toBe(2);
+      await act(async () => view.latest().refresh());
+      expect(texts(view.latest())).toEqual(['page 0']);
+      expect(view.latest().historyReleased).toBe(false);
+    });
+
+    it('bounds bookmark cursor text by evicting only the newest end', async () => {
+      const loadPage = history(7);
+      const view = render(loadPage, { maxPages: 1, cursorBudget: 4 });
+      await act(async () => {});
+      for (let index = 0; index < 3; index += 1)
+        await act(async () => view.latest().older());
+      expect(texts(view.latest())).toEqual(['page 3']);
+      expect(view.latest().bookmarks).toBe(2);
+      expect(view.latest().historyReleased).toBe(true);
+      await act(async () => view.latest().newer());
+      expect(texts(view.latest())).toEqual(['page 2']);
+      expect(view.latest().canNewer).toBe(false);
+    });
+
+    it('rejects one cursor larger than the budget without truncating or requesting it', async () => {
+      const cursor = 'unacceptably-long-opaque-cursor';
+      const loadPage = vi.fn(async () =>
+        page([userText('latest', 'latest')], {
+          hasMore: true,
+          nextCursor: cursor,
+        }),
+      );
+      const view = render(loadPage, { maxPages: 1, cursorBudget: 4 });
+      await act(async () => {});
+      const held = view.latest().trajectory;
+      await act(async () => view.latest().older());
+      expect(view.latest().trajectory).toBe(held);
+      expect(view.latest().navigationError).toEqual({ kind: 'budget' });
+      expect(view.latest().canOlder).toBe(false);
+      expect(loadPage).toHaveBeenCalledTimes(1);
+    });
+
+    it('uses the structured snapshot error and requires a fresh latest read', async () => {
+      let expired = true;
+      const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+        if (cursor !== undefined && expired)
+          throw new DaemonHttpError(
+            409,
+            { code: 'transcript_snapshot_unavailable' },
+            'localized detail',
+          );
+        return page([userText(cursor ?? 'latest', cursor ?? 'latest')], {
+          hasMore: true,
+          nextCursor: cursor === undefined ? 'c1' : 'c2',
+        });
+      });
+      const view = render(loadPage, { maxPages: 1 });
+      await act(async () => {});
+      const held = view.latest().trajectory;
+      await act(async () => view.latest().older());
+      expect(view.latest().trajectory).toBe(held);
+      expect(view.latest().navigationError).toEqual({ kind: 'expired' });
+      expect(view.latest().canOlder).toBe(false);
+      const count = loadPage.mock.calls.length;
+      await act(async () => view.latest().retry());
+      expect(loadPage).toHaveBeenCalledTimes(count);
+      expired = false;
+      await act(async () => view.latest().refresh());
+      expect(view.latest().navigationError).toBeUndefined();
+      expect(view.latest().canOlder).toBe(true);
+    });
+  });
+});

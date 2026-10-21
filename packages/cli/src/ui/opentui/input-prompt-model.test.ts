@@ -17,6 +17,7 @@ import {
   LARGE_PASTE_CHAR_THRESHOLD,
   LARGE_PASTE_LINE_THRESHOLD,
   applyCompletion,
+  atCategoryTabs,
   codePointIndexToDisplayCol,
   codePointIndexToDisplayOffset,
   commandCompletionItemsToSuggestions,
@@ -25,11 +26,13 @@ import {
   displayColToCodePointIndex,
   displayOffsetToCodePointIndex,
   expandPendingPastePlaceholders,
+  filterByCategory,
   freePastePlaceholderId,
   isLargePaste,
   isPerfectMatchForTarget,
   isPerfectSlashMatch,
   largePastePlaceholder,
+  nextCategory,
   nextLargePastePlaceholder,
   normalizePastedText,
   parsePastePlaceholder,
@@ -93,6 +96,43 @@ const GATING_COMMANDS: readonly SlashCommand[] = [
   cmd({ name: 'skill-a', kind: CommandKind.SKILL }),
   cmd({ name: 'review' }),
 ];
+
+describe('detectCompletionTarget AT queries', () => {
+  it.each([
+    ['hello @README.md', 'README.md'],
+    ['中文 @文件.ts', '文件.ts'],
+    ['😀 @README.md', 'README.md'],
+    ['@😀file.ts', '😀file.ts'],
+    ['😀😀 @src/𠮷file.ts', 'src/𠮷file.ts'],
+    ['😀 @src/😀file.ts', 'src/😀file.ts'],
+  ])('uses the complete file query from %s', (text, query) => {
+    const cursor = Array.from(text).length;
+    expect(detectCompletionTarget([text], 0, cursor, text, cursor)).toEqual({
+      mode: CompletionMode.AT,
+      query,
+      start: Array.from(text).indexOf('@') + 1,
+      end: cursor,
+    });
+  });
+
+  it('keeps code-point replacement bounds with the cursor inside a Unicode path', () => {
+    const text = '😀 @src/😀file.ts tail';
+    const target = detectCompletionTarget([text], 0, 7, text, 7);
+    expect(target).toEqual({
+      mode: CompletionMode.AT,
+      query: 'src/😀file.ts',
+      start: 3,
+      end: 15,
+    });
+    const applied = applyCompletion(
+      text,
+      target!,
+      { label: '😀done.ts', value: '😀done.ts' },
+      false,
+    );
+    expect(applied.line).toBe('😀 @😀done.ts tail');
+  });
+});
 
 describe('detectCompletionTarget mid-input gating (useCommandCompletion port, R1-86)', () => {
   const detect = (text: string, cursorOffset: number) => {
@@ -785,5 +825,57 @@ describe('display-width ↔ code-point cursor conversion (R2-1)', () => {
       expect(displayOffsetToCodePointIndex(text, i)).toBe(i);
       expect(codePointIndexToDisplayOffset(text, i)).toBe(i);
     }
+  });
+});
+
+describe('@ completion category rules (#143)', () => {
+  const row = (value: string, category?: Suggestion['category']): Suggestion =>
+    ({ value, label: value, category }) as Suggestion;
+
+  it('derives tabs in ink CATEGORY_ORDER, not in arrival order', () => {
+    const tabs = atCategoryTabs([
+      row('session:a', 'session'),
+      row('ext', 'extension'),
+      row('file.txt'),
+      row('@server:uri', 'mcp'),
+    ]);
+    expect(tabs).toEqual(['all', 'file', 'session', 'mcp', 'extension']);
+  });
+
+  it('yields no tabs for a single category, which is what hides the bar', () => {
+    expect(atCategoryTabs([row('a.txt'), row('b.txt')])).toEqual(['all']);
+    expect(atCategoryTabs([])).toEqual(['all']);
+  });
+
+  it('counts a category-less row as a file', () => {
+    expect(atCategoryTabs([row('a.txt'), row('session:a', 'session')])).toEqual(
+      ['all', 'file', 'session'],
+    );
+    expect(
+      filterByCategory([row('a.txt'), row('s', 'session')], 'file'),
+    ).toEqual([row('a.txt')]);
+  });
+
+  it('filters to the active tab and passes everything through on all', () => {
+    const rows = [row('a.txt'), row('session:a', 'session')];
+    expect(filterByCategory(rows, 'all')).toEqual(rows);
+    expect(filterByCategory(rows, 'session')).toEqual([
+      row('session:a', 'session'),
+    ]);
+    expect(filterByCategory(rows, 'mcp')).toEqual([]);
+  });
+
+  it('steps tabs with wrap in both directions', () => {
+    const tabs = ['all', 'file', 'session'] as const;
+    expect(nextCategory(tabs, 'all', 1)).toBe('file');
+    expect(nextCategory(tabs, 'session', 1)).toBe('all');
+    expect(nextCategory(tabs, 'all', -1)).toBe('session');
+    expect(nextCategory(tabs, 'file', -1)).toBe('all');
+  });
+
+  it('falls back to all when the active tab left the result set', () => {
+    const tabs = ['all', 'file'] as const;
+    expect(nextCategory(tabs, 'session', 1)).toBe('all');
+    expect(nextCategory(tabs, 'session', -1)).toBe('all');
   });
 });

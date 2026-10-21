@@ -104,6 +104,10 @@ describe('stable release notes workflow', () => {
     expect(validate).toContain('exit 1');
     expect(checkout).toContain('persist-credentials: false');
     expect(install).toContain(
+      'corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only',
+    );
+    expect(install).toContain('if [ -f pnpm-lock.yaml ]');
+    expect(install).toContain(
       'npm ci --ignore-scripts --no-audit --progress=false',
     );
     expect(install).toContain('npm run postinstall');

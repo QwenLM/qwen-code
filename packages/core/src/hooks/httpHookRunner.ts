@@ -11,6 +11,7 @@ import { combineAbortSignals } from '../utils/abortController.js';
 import { isBlockedAddress, isMetadataAddress } from './ssrfGuard.js';
 import { lookup as dnsLookup } from 'dns';
 import { HookAbortError, HookTimeoutError } from './hook-errors.js';
+import { DEFAULT_HTTP_HOOK_TIMEOUT_SECONDS } from './hook-timeout.js';
 import { isBlockingHookOutput } from './types.js';
 import type {
   HttpHookConfig,
@@ -21,11 +22,6 @@ import type {
 } from './types.js';
 
 const debugLogger = createDebugLogger('HTTP_HOOK_RUNNER');
-
-/**
- * Default timeout for HTTP hook execution
- */
-const DEFAULT_HTTP_TIMEOUT = 10 * 60 * 1000;
 
 /**
  * Maximum output length (10,000 characters as per Qwen Code spec)
@@ -124,6 +120,37 @@ export class HttpHookRunner {
     eventName: HookEventName,
     input: HookInput,
     signal?: AbortSignal,
+    trackRequest = false,
+    requestSignal?: AbortSignal,
+  ): Promise<HookExecutionResult> {
+    let requestState: NonNullable<HookExecutionResult['httpRequestState']> =
+      'not_started';
+    const result = await this.executeRequest(
+      hookConfig,
+      eventName,
+      input,
+      signal,
+      trackRequest
+        ? (state) => {
+            requestState = state;
+          }
+        : undefined,
+      requestSignal,
+    );
+    return trackRequest
+      ? { ...result, httpRequestState: requestState }
+      : result;
+  }
+
+  private async executeRequest(
+    hookConfig: HttpHookConfig,
+    eventName: HookEventName,
+    input: HookInput,
+    signal?: AbortSignal,
+    onRequestState?: (
+      state: NonNullable<HookExecutionResult['httpRequestState']>,
+    ) => void,
+    requestSignal?: AbortSignal,
   ): Promise<HookExecutionResult> {
     const startTime = Date.now();
     const hookId = hookConfig.name || hookConfig.url;
@@ -211,18 +238,21 @@ export class HttpHookRunner {
         hook_event_name: eventName,
       });
 
-      // Set up combined abort signal (external signal + timeout)
+      // Managed requests keep their response channel until timeout or shutdown.
       const timeout = hookConfig.timeout
         ? hookConfig.timeout * 1000
-        : DEFAULT_HTTP_TIMEOUT;
+        : DEFAULT_HTTP_HOOK_TIMEOUT_SECONDS * 1000;
       const { signal: combinedSignal, cleanup } = combineAbortSignals(
-        [signal],
+        [requestSignal ?? signal],
         { timeoutMs: timeout },
       );
 
       try {
         debugLogger.debug(`Executing HTTP hook: ${hookId} -> ${url}`);
 
+        signal?.throwIfAborted();
+        combinedSignal.throwIfAborted();
+        onRequestState?.('outcome_unknown');
         const response = await fetch(url, {
           method: 'POST',
           headers: {
@@ -237,14 +267,10 @@ export class HttpHookRunner {
           // non-2xx branch below (non-blocking error).
           redirect: 'manual',
         });
-
-        cleanup();
-
-        const duration = Date.now() - startTime;
-
         // Per Qwen Code spec: Non-2xx status is a non-blocking error
         // Execution continues, but we log a warning
         if (!response.ok) {
+          onRequestState?.('response_received');
           debugLogger.warn(
             `HTTP hook ${hookId} returned non-2xx status ${response.status} (non-blocking)`,
           );
@@ -257,12 +283,17 @@ export class HttpHookRunner {
             outcome: 'non_blocking_error',
             error: new Error(`HTTP hook returned ${response.status}`),
             output: { continue: true },
-            duration,
+            duration: Date.now() - startTime,
           };
         }
 
         // Parse response
-        const output = await this.parseResponse(response, eventName);
+        const output = await this.parseResponse(
+          response,
+          eventName,
+          onRequestState && (() => onRequestState('response_received')),
+        );
+        const duration = Date.now() - startTime;
 
         debugLogger.debug(
           `HTTP hook ${hookId} completed successfully in ${duration}ms`,
@@ -281,8 +312,6 @@ export class HttpHookRunner {
           duration,
         };
       } catch (fetchError) {
-        cleanup();
-
         const duration = Date.now() - startTime;
 
         if (
@@ -290,9 +319,9 @@ export class HttpHookRunner {
           (fetchError.name === 'AbortError' || combinedSignal.aborted)
         ) {
           // Timeout or abort is a non-blocking error per Qwen Code spec.
-          // The combined signal fires for both, so the caller's own signal
-          // tells them apart.
-          const cancelled = signal?.aborted === true;
+          const cancelled =
+            (requestSignal ?? signal)?.aborted === true ||
+            (signal?.aborted === true && !combinedSignal.aborted);
           debugLogger.warn(
             `HTTP hook ${hookId} ${cancelled ? 'was aborted' : `timed out after ${timeout}ms`} (non-blocking)`,
           );
@@ -325,6 +354,8 @@ export class HttpHookRunner {
           output: { continue: true },
           duration,
         };
+      } finally {
+        cleanup();
       }
     } catch (error) {
       const duration = Date.now() - startTime;
@@ -350,13 +381,19 @@ export class HttpHookRunner {
   private async parseResponse(
     response: Response,
     eventName: HookEventName,
+    onBodyReceived?: () => void,
   ): Promise<HookOutput> {
     const contentType = response.headers.get('content-type') || '';
+    // Managed receipts require the body, not just headers. Keep transport
+    // failures outside the native malformed-JSON fallback.
+    const body = onBodyReceived ? await response.text() : undefined;
+    onBodyReceived?.();
 
     // Try to parse as JSON
     if (contentType.includes('application/json')) {
       try {
-        const json = await response.json();
+        const json =
+          body === undefined ? await response.json() : JSON.parse(body);
         return this.normalizeOutput(json, eventName);
       } catch {
         debugLogger.warn('Failed to parse JSON response, using empty output');
@@ -365,7 +402,7 @@ export class HttpHookRunner {
     }
 
     // For plain text responses, add as context (truncated if needed)
-    const text = await response.text();
+    const text = body ?? (await response.text());
     if (text.trim()) {
       return {
         continue: true,

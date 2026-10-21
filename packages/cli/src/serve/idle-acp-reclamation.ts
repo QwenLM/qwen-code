@@ -34,7 +34,7 @@ export function createIdleAcpReclaimer(options: {
     if (
       signal?.aborted ||
       (requester?.state === 'active' && !requester.current?.runtime.trusted) ||
-      policy.mode !== 'admit' ||
+      (policy.mode !== 'admit' && policy.mode !== 'enforce') ||
       options.processes.committedProcessCount < policy.maxConcurrentChildren!
     ) {
       return;

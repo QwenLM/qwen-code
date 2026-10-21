@@ -221,7 +221,11 @@ type AnthropicThinkingParam =
       budget_tokens: number;
       display?: AnthropicThinkingDisplay;
     }
-  | { type: 'adaptive'; display?: AnthropicThinkingDisplay };
+  | {
+      type: 'adaptive';
+      display?: AnthropicThinkingDisplay;
+      block_binding?: { prefix_mismatch_behavior: 'drop_block' };
+    };
 
 type MessageCreateParamsWithThinking = MessageCreateParamsNonStreaming & {
   thinking?: AnthropicThinkingParam;
@@ -240,6 +244,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
   private effortClampWarned = false;
   private budgetDropWarned = false;
   private temperatureDropWarned = false;
+  private blockBindingUnsupported = false;
   // Stream watchdog tuning, resolved once (config field > env > default) so
   // the env read + any invalid-value warning happen per generator, not per
   // streaming request. Same guards the OpenAI pipeline applies — the two
@@ -319,6 +324,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
   ): Promise<GenerateContentResponse> {
     let response: Message;
+    let anthropicRequest: MessageCreateParamsWithThinking | undefined;
     // Wrap the caller's signal in a per-request child for the same reason as
     // generateContentStream: the Anthropic SDK leaks an abort listener onto
     // whatever signal it is handed, so keep that on a short-lived signal rather
@@ -328,7 +334,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       ? createChildAbortController(parentSignal)
       : undefined;
     try {
-      const anthropicRequest = await this.buildRequest(request);
+      anthropicRequest = await this.buildRequest(request);
       runtimeDiagnostics.recordAnthropicWireRequest(anthropicRequest);
       const telemetryAttempt = reportAnthropicRequest(anthropicRequest);
       const headers = this.buildPerRequestHeaders(anthropicRequest);
@@ -338,6 +344,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
       })) as Message;
       reportAnthropicResponse(telemetryAttempt, response);
     } catch (error) {
+      if (
+        anthropicRequest &&
+        this.disableUnsupportedBlockBinding(error, anthropicRequest)
+      ) {
+        return this.generateContent(request);
+      }
       throw redactProxyError(error);
     } finally {
       perRequestAc?.abort();
@@ -380,6 +392,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
       )) as AsyncIterable<RawMessageStreamEvent>;
     } catch (error) {
       perRequestAc.abort();
+      if (this.disableUnsupportedBlockBinding(error, anthropicRequest)) {
+        return this.generateContentStream(request);
+      }
       throw redactProxyError(error);
     }
 
@@ -419,9 +434,23 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // Abort the child once the stream is fully drained or abandoned; this
     // releases the SDK request and detaches the child's listener from the
     // caller's signal.
+    const disableUnsupportedBlockBinding = (error: unknown) =>
+      this.disableUnsupportedBlockBinding(error, anthropicRequest);
+    const retryWithoutBlockBinding = () => this.generateContentStream(request);
     async function* drainThenCleanup(): AsyncGenerator<GenerateContentResponse> {
+      let yielded = false;
       try {
-        yield* inner;
+        for await (const chunk of inner) {
+          yielded = true;
+          yield chunk;
+        }
+      } catch (error) {
+        if (!yielded && disableUnsupportedBlockBinding(error)) {
+          perRequestAc.abort();
+          yield* await retryWithoutBlockBinding();
+        } else {
+          throw error;
+        }
       } finally {
         perRequestAc.abort();
       }
@@ -494,6 +523,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
     if (anthropicRequest.thinking) {
       betas.push('interleaved-thinking-2025-05-14');
+      if (
+        anthropicRequest.thinking.type === 'adaptive' &&
+        anthropicRequest.thinking.block_binding
+      ) {
+        betas.push('thinking-binding-controls-2026-08-01');
+      }
     }
     if (anthropicRequest.output_config) {
       betas.push('effort-2025-11-24');
@@ -532,6 +567,38 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (betas.length === 0) return undefined;
     const unique = Array.from(new Set(betas));
     return { 'anthropic-beta': unique.join(',') };
+  }
+
+  private disableUnsupportedBlockBinding(
+    error: unknown,
+    request: MessageCreateParamsWithThinking,
+  ): boolean {
+    if (
+      !request.thinking ||
+      request.thinking.type !== 'adaptive' ||
+      !request.thinking.block_binding ||
+      isAnthropicNativeBaseUrl(this.contentGeneratorConfig)
+    ) {
+      return false;
+    }
+    const status = getErrorStatus(error);
+    if (status !== undefined && status !== 400) return false;
+    const message = error instanceof Error ? error.message : '';
+    if (
+      !/block_binding/i.test(message) ||
+      !/(extra inputs are not permitted|unknown field|unrecognized field|unsupported field)/i.test(
+        message,
+      )
+    ) {
+      return false;
+    }
+    if (!this.blockBindingUnsupported) {
+      this.blockBindingUnsupported = true;
+      debugLogger.warn(
+        'Anthropic-compatible endpoint rejected thinking.block_binding; retrying without it.',
+      );
+    }
+    return true;
   }
 
   /**
@@ -706,11 +773,33 @@ export class AnthropicContentGenerator implements ContentGenerator {
     //                    ArenaManager / forkedAgent).
     const deepseekThinkingOn = isDeepSeek && !!thinking;
     const stripAssistantThinking = isDeepSeek && !thinking;
+    // Proxy-hosted Claude: a non-DeepSeek backend on a non-native base URL.
+    // Its wire shape is Anthropic's, while its history may carry thinking
+    // blocks recorded by another provider without a signature.
+    const isProxyHostedClaude =
+      !isDeepSeek && !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
     const dropUnsignedAssistantThinking =
-      !isDeepSeek &&
+      isProxyHostedClaude &&
       !!thinking &&
-      this.modelSupportsAdaptiveThinking(true) &&
-      !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
+      this.modelSupportsAdaptiveThinking(true);
+    // Strict Anthropic-compatible proxies (verified against SGLang v0.5.19,
+    // #11772; llama.cpp/vLLM expected to behave the same but untested)
+    // reject a `thinking` block with no `signature` field at all (HTTP 400,
+    // e.g. SGLang `thinking.signature`) while accepting an empty signature.
+    // The repaired blocks come from HISTORY, not the outgoing request, so
+    // this is deliberately not gated on `thinking`: the #11772 consumers
+    // (auto-memory extraction, prompt suggestions, skill review) fork with
+    // `includeThoughts: false` and still replay unsigned blocks. 4.6+
+    // adaptive models are excluded — that quadrant is owned by
+    // `dropUnsignedAssistantThinking` (an empty string cannot stand in for
+    // the native API's opaque signature), and the two passes must stay
+    // disjoint so the 4.6+ wire shape never changes. Unknown or unversioned
+    // model ids parse as non-adaptive and keep the fill — that is exactly
+    // what a custom SGLang model id needs. The native API's history is left
+    // untouched.
+    // https://github.com/QwenLM/qwen-code/issues/11772
+    const fillUnsignedThinkingSignature =
+      isProxyHostedClaude && !this.modelSupportsAdaptiveThinking(true);
     // Opus/Sonnet 4.6+ and every 5.x family reject a request whose final
     // message has role 'assistant' ("assistant message prefill") with a
     // hard 400 — per Anthropic's own migration guidance this is a
@@ -747,11 +836,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
       request,
       {
         // DeepSeek normalization and injection run together. Proxy-hosted
-        // Claude uses the separate unsigned-thinking cleanup below because an
-        // empty string cannot replace Claude's opaque signature.
+        // Claude is split two ways: non-4.6 models fill `signature: ''`
+        // (strict serde only requires the key to be present), while 4.6+
+        // adaptive models drop unsigned blocks, since an empty string
+        // cannot stand in for the native API's opaque signature. The two
+        // quadrants are disjoint by construction.
         normalizeAssistantThinkingSignature: deepseekThinkingOn,
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
         dropUnsignedAssistantThinking,
+        fillUnsignedThinkingSignature,
         stripAssistantThinking,
         stripTrailingAssistantPrefill,
         // Manual (non-adaptive) extended thinking requires an assistant
@@ -790,6 +883,23 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // 4.6+) compound this by consuming output budget on server-driven
     // thinking before any tool_use, making forced tool_choice essential.
     const toolChoice = this.resolveToolChoice(request, tools);
+
+    const modelVersion = parseClaudeModelVersion(
+      this.contentGeneratorConfig.model,
+    );
+    if (
+      !this.blockBindingUnsupported &&
+      thinking?.type === 'adaptive' &&
+      modelVersion?.major === 5 &&
+      ((modelVersion.family === 'opus' && modelVersion.minor >= 5) ||
+        (modelVersion.family === 'fable' && modelVersion.minor >= 1))
+    ) {
+      // https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
+      thinking = {
+        ...thinking,
+        block_binding: { prefix_mismatch_behavior: 'drop_block' },
+      };
+    }
 
     return {
       model: this.contentGeneratorConfig.model,

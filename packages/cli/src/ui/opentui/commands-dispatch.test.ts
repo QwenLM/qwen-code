@@ -12,9 +12,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import {
   SlashCommandStatus,
   ToolConfirmationOutcome,
+  makeFakeConfig,
 } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
@@ -23,9 +27,11 @@ import {
   type SlashCommandActionReturn,
 } from '../commands/types.js';
 import { quitCommand } from '../commands/quitCommand.js';
+import { cdCommand } from '../commands/cdCommand.js';
 import type { HistoryItem } from '../types.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { resetTrustedFoldersForTesting } from '../../config/trustedFolders.js';
 import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import {
   OpenTuiSlashDispatcher,
@@ -33,6 +39,10 @@ import {
   type OpenTuiDispatchOutcome,
 } from './commands-dispatch.js';
 import type { OpenTuiCommandHost } from './commands-context.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
+import { helpCommand } from '../commands/helpCommand.js';
+import { clearCommand } from '../commands/clearCommand.js';
+import { OpenTuiSlashGateway } from './slash-gateway.js';
 
 const { logSlashCommandSpy, loadInteractiveCommandsMock } = vi.hoisted(() => ({
   logSlashCommandSpy: vi.fn(),
@@ -140,6 +150,7 @@ function createFakeHost(): FakeHost {
       sessionNames.push(name);
     },
     isIdle: () => true,
+    isStreaming: () => false,
     extensionsUpdateState: new Map(),
     dispatchExtensionStateUpdate: () => push('dispatchExtensionStateUpdate'),
     addConfirmUpdateExtensionRequest: () =>
@@ -223,6 +234,132 @@ async function dispatch(
 }
 
 describe('guards (ink handleSlashCommand parity)', () => {
+  it.each([
+    ['startup', 'Error'],
+    ['startup', 'string'],
+    ['command', 'Error'],
+    ['command', 'string'],
+  ])(
+    'sanitizes Mod %s errors thrown as %s before display and recording',
+    async (phase, errorType) => {
+      const message =
+        '\u001b[31mMod failed\u001b[0m\u0007\u0008\u007f\u009f\u202e\n\t检查配置 \u001b]8;;https://example.invalid\u0007details\u001b]8;;\u0007\u2066\u2069';
+      const error = errorType === 'Error' ? new Error(message) : message;
+      const recordSlashCommand = vi.fn();
+      const config = {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        getChatRecordingService: () => ({ recordSlashCommand }),
+      } as unknown as Config;
+      const initialize = vi.fn().mockImplementation(async () => {
+        if (phase === 'startup') throw error;
+      });
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          initialize,
+        } as unknown as interactiveMods.InteractiveModSession);
+      const action = vi.fn().mockRejectedValue(error);
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [stub({ name: 'test', kind: CommandKind.FILE, action })],
+      );
+      try {
+        expect(await dispatcher.handle('/test')).toEqual({ kind: 'handled' });
+        expect(initialize).toHaveBeenCalledOnce();
+        expect(action).toHaveBeenCalledTimes(phase === 'startup' ? 0 : 1);
+        const expected = {
+          type: 'error',
+          text: 'Mod failed\n\t检查配置 details',
+        };
+        expect(host.items).toContainEqual(expect.objectContaining(expected));
+        expect(recordSlashCommand).toHaveBeenCalledWith({
+          phase: 'result',
+          rawCommand: '/test',
+          outputHistoryItems: [expected],
+        });
+        expect(error instanceof Error ? error.message : error).toBe(message);
+      } finally {
+        dispatcher.dispose();
+        owner.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    ['/compress', 'compress', CommandKind.BUILT_IN, false],
+    ['/summarize', 'compress', CommandKind.BUILT_IN, false],
+    ['/help', 'help', CommandKind.FILE, false],
+    ['/exit', 'quit', CommandKind.FILE, false],
+    ['/alpha /beta work', 'alpha', CommandKind.SKILL, false],
+    ['/help', 'help', CommandKind.BUILT_IN, true],
+    ['/exit', 'quit', CommandKind.BUILT_IN, true],
+  ])(
+    'allows only actual recovery commands after startup failure: %s (%s, %s)',
+    async (input, name, kind, recovery) => {
+      const error = new Error('Config startup failed');
+      const config = {
+        initialize: vi.fn().mockRejectedValue(error),
+        getGeminiClient: () => undefined,
+        getSessionId: () => 'mod-startup-failed',
+      } as unknown as Config;
+      const failStartup = vi.fn();
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          ready: new Promise(() => {}),
+          failStartup,
+        } as unknown as interactiveMods.InteractiveModSession);
+      const action = vi
+        .fn()
+        .mockResolvedValue({ type: 'submit_prompt', content: 'must not run' });
+      const command = recovery
+        ? name === 'help'
+          ? helpCommand
+          : quitCommand
+        : stub({
+            name,
+            kind,
+            altNames:
+              name === 'compress'
+                ? ['summarize']
+                : name === 'quit'
+                  ? ['exit']
+                  : undefined,
+            action,
+          });
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [command, stub({ name: 'beta', kind: CommandKind.SKILL, action })],
+      );
+      try {
+        const outcome = await dispatcher.handle(input);
+        expect(action).not.toHaveBeenCalled();
+        expect(failStartup).toHaveBeenCalledTimes(recovery ? 0 : 1);
+        if (recovery) {
+          expect(outcome).toMatchObject({
+            kind: name === 'help' ? 'open_dialog' : 'quit',
+          });
+          expect(config.initialize).not.toHaveBeenCalled();
+        } else {
+          expect(outcome).toEqual({ kind: 'handled' });
+          expect(host.items).toContainEqual(
+            expect.objectContaining({
+              type: 'error',
+              text: 'Config startup failed',
+            }),
+          );
+        }
+      } finally {
+        dispatcher.dispose();
+        owner.mockRestore();
+      }
+    },
+  );
+
   it('returns false for non-slash input and path-like input', async () => {
     const { outcome: plain } = await dispatch('hello world', []);
     expect(plain).toBe(false);
@@ -1129,6 +1266,128 @@ describe('cancellation, telemetry and recording', () => {
     logSlashCommandSpy.mockClear();
   });
 
+  it.each(['/clear', '/reset', '/new'])(
+    '%s retains input ownership through Mod shutdown and chat reset',
+    async (input) => {
+      let finishEnd = () => {};
+      const ending = new Promise<void>((resolve) => {
+        finishEnd = resolve;
+      });
+      let finishReset = () => {};
+      const resetting = new Promise<void>((resolve) => {
+        finishReset = resolve;
+      });
+      const syncSession = vi.fn(() => ending);
+      const resetChat = vi.fn(() => resetting);
+      const config = makeFakeConfig();
+      vi.spyOn(config, 'initialize').mockResolvedValue();
+      vi.spyOn(config, 'startNewSession').mockReturnValue('new-session');
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(undefined!);
+      vi.spyOn(config, 'getLlmClient').mockReturnValue({
+        resetChat,
+      } as unknown as ReturnType<Config['getLlmClient']>);
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          initialize: vi.fn().mockResolvedValue(undefined),
+          syncSession,
+          invalidateTools: vi.fn(),
+          restoreTools: vi.fn().mockResolvedValue(undefined),
+        } as unknown as interactiveMods.InteractiveModSession);
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [clearCommand],
+      );
+      const gateway = new OpenTuiSlashGateway();
+      gateway.attach(dispatcher);
+      const pending = gateway.dispatch(input);
+      try {
+        await vi.waitFor(() =>
+          expect(syncSession).toHaveBeenCalledWith('clear'),
+        );
+        gateway.cancel();
+        await Promise.resolve();
+        expect(gateway.isBusy()).toBe(true);
+        expect(host.processingFlags.at(-1)).toBe(true);
+        expect(
+          host.items.some((item) => item.text === 'Command cancelled.'),
+        ).toBe(false);
+        expect(await gateway.dispatch('next prompt')).toMatchObject({
+          kind: 'rejected',
+        });
+        expect(host.calls).not.toContain('clearItems');
+
+        finishEnd();
+        await vi.waitFor(() => expect(resetChat).toHaveBeenCalledOnce());
+        gateway.cancel();
+        await Promise.resolve();
+        expect(gateway.isBusy()).toBe(true);
+        expect(host.processingFlags.at(-1)).toBe(true);
+        finishReset();
+        await pending;
+        expect(gateway.isBusy()).toBe(false);
+        expect(host.processingFlags.at(-1)).toBe(false);
+        expect(await gateway.dispatch('next prompt')).toEqual({
+          kind: 'dispatched',
+          outcome: false,
+        });
+      } finally {
+        finishEnd();
+        finishReset();
+        await pending;
+        owner.mockRestore();
+      }
+    },
+  );
+
+  it('keeps a file command named clear cancellable', async () => {
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(host, services, [
+      stub({
+        name: 'clear',
+        kind: CommandKind.FILE,
+        action: () => new Promise(() => {}),
+      }),
+    ]);
+    const pending = dispatcher.handle('/clear');
+    dispatcher.cancel();
+    await expect(pending).resolves.toEqual({ kind: 'handled' });
+    expect(host.processingFlags.at(-1)).toBe(false);
+    expect(host.items.some((item) => item.text === 'Command cancelled.')).toBe(
+      true,
+    );
+  });
+
+  it('releases a failed clear and lets the next command cancel normally', async () => {
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(host, services, [
+      {
+        ...clearCommand,
+        action: async () => {
+          throw new Error('reset failed');
+        },
+      },
+      stub({ name: 'compress', action: () => new Promise(() => {}) }),
+    ]);
+    const gateway = new OpenTuiSlashGateway();
+    gateway.attach(dispatcher);
+    await gateway.dispatch('/clear');
+    expect(gateway.isBusy()).toBe(false);
+    expect(host.items.at(-1)).toMatchObject({
+      type: 'error',
+      text: 'reset failed',
+    });
+    const pending = gateway.dispatch('/compress');
+    await Promise.resolve();
+    gateway.cancel();
+    await pending;
+    expect(gateway.isBusy()).toBe(false);
+    expect(host.processingFlags.at(-1)).toBe(false);
+    expect(host.items.at(-1)).toMatchObject({ text: 'Command cancelled.' });
+  });
+
   it('cancel() aborts the action and reports like ink', async () => {
     const host = createFakeHost();
     const dispatcher = new OpenTuiSlashDispatcher(host, services, [
@@ -1378,5 +1637,287 @@ describe('extension refresh subscription (ink processor parity)', () => {
       [],
     ).dispose();
     expect(count(second)).toBe(0);
+  });
+});
+
+describe('isIdleRef parity (command actions see pre-dispatch idle state)', () => {
+  // Mirrors the REAL OpenTuiCommandHost (opentui-host.ts): `isIdle()` is
+  // computed from the same `processing`/`streaming` flags the setters change,
+  // unlike `createFakeHost()`, whose `isIdle` is a constant.
+  function createProcessingLinkedHost(initiallyIdle: boolean) {
+    let processing = !initiallyIdle;
+    let streaming = false;
+    return {
+      isIdle: () => !processing && !streaming,
+      isStreaming: () => streaming,
+      setIsProcessing: (flag: boolean) => {
+        processing = flag;
+      },
+      setStreaming: (flag: boolean) => {
+        streaming = flag;
+      },
+    };
+  }
+
+  // Services for the REAL cdCommand.ts action, so the guard's own error
+  // message is verified too.
+  function realCdServices(
+    relocateWorkingDirectory: ReturnType<typeof vi.fn>,
+    merged: object = {},
+  ) {
+    return {
+      config: {
+        getTargetDir: () => os.tmpdir(),
+        isRestrictiveSandbox: () => false,
+        relocateWorkingDirectory,
+        getLlmClient: () => ({
+          addWorkingDirectoryChangedContext: vi
+            .fn()
+            .mockResolvedValue(undefined),
+        }),
+      } as unknown as Config,
+      settings: { merged } as unknown as LoadedSettings,
+      logger: null,
+    };
+  }
+
+  it('real /cd relocates the working directory when the host was idle before dispatch', async () => {
+    const targetDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-cd-dispatch-'),
+    );
+    try {
+      const relocateWorkingDirectory = vi.fn().mockResolvedValue({});
+      const host = createFakeHost();
+      Object.assign(host, createProcessingLinkedHost(true));
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        realCdServices(relocateWorkingDirectory),
+        [cdCommand],
+      );
+
+      const outcome = await dispatcher.handle(`/cd ${targetDir}`);
+
+      expect(outcome).toEqual({ kind: 'handled' });
+      expect(relocateWorkingDirectory).toHaveBeenCalled();
+    } finally {
+      fs.rmSync(targetDir, { recursive: true, force: true });
+    }
+  });
+
+  it('real /cd is refused and nothing relocates when the host was busy before dispatch', async () => {
+    const targetDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-cd-dispatch-'),
+    );
+    try {
+      const relocateWorkingDirectory = vi.fn().mockResolvedValue({});
+      const host = createFakeHost();
+      Object.assign(host, createProcessingLinkedHost(false));
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        realCdServices(relocateWorkingDirectory),
+        [cdCommand],
+      );
+
+      const outcome = await dispatcher.handle(`/cd ${targetDir}`);
+
+      expect(outcome).toEqual({ kind: 'handled' });
+      expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+      expect(host.items.at(-1)).toMatchObject({
+        type: 'error',
+        text: 'Cannot change directory while a response or tool call is in progress.',
+      });
+    } finally {
+      fs.rmSync(targetDir, { recursive: true, force: true });
+    }
+  });
+
+  // Folder trust on, backed by a throwaway trust file, so the real /cd asks
+  // before moving into the untrusted target.
+  const folderTrustOn = { security: { folderTrust: { enabled: true } } };
+  async function withUntrustedDir(
+    run: (targetDir: string) => Promise<void>,
+  ): Promise<void> {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-cd-dispatch-'));
+    const prev = process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    try {
+      const targetDir = path.join(tmpDir, 'untrusted');
+      fs.mkdirSync(targetDir);
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = path.join(
+        tmpDir,
+        'trustedFolders.json',
+      );
+      resetTrustedFoldersForTesting();
+      await run(targetDir);
+    } finally {
+      if (prev === undefined) {
+        delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+      } else {
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = prev;
+      }
+      resetTrustedFoldersForTesting();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+
+  it('real /cd into an untrusted folder relocates once the user accepts the trust prompt', () =>
+    withUntrustedDir(async (targetDir) => {
+      const relocateWorkingDirectory = vi.fn().mockResolvedValue({});
+      const host = createFakeHost();
+      Object.assign(host, createProcessingLinkedHost(true));
+      setActionConfirmation(host, true);
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        realCdServices(relocateWorkingDirectory, folderTrustOn),
+        [cdCommand],
+      );
+
+      await dispatcher.handle(`/cd ${targetDir}`);
+
+      const realTargetDir = await fs.promises.realpath(targetDir);
+      expect(host.actionConfirmations).toBe(1);
+      expect(host.items.at(-1)).toMatchObject({
+        type: 'info',
+        text: `Moved to ${realTargetDir}.`,
+      });
+      expect(relocateWorkingDirectory).toHaveBeenCalledWith(
+        realTargetDir,
+        realTargetDir,
+      );
+    }));
+
+  it('real /cd is refused when a stream starts while the trust prompt is open', () =>
+    withUntrustedDir(async (targetDir) => {
+      const relocateWorkingDirectory = vi.fn().mockResolvedValue({});
+      const host = createFakeHost();
+      const linkedHost = createProcessingLinkedHost(true);
+      Object.assign(host, linkedHost);
+      let prompts = 0;
+      host.presentActionConfirmation = async () => {
+        prompts += 1;
+        linkedHost.setStreaming(true);
+        return true;
+      };
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        realCdServices(relocateWorkingDirectory, folderTrustOn),
+        [cdCommand],
+      );
+
+      await dispatcher.handle(`/cd ${targetDir}`);
+
+      expect(prompts).toBe(1);
+      expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+      expect(host.items.at(-1)).toMatchObject({
+        type: 'error',
+        text: 'Cannot change directory while a response or tool call is in progress.',
+      });
+    }));
+
+  // Asks for confirmation on the first pass, then reports what the
+  // confirmed re-run sees.
+  const confirmingProbe = (
+    confirmation: 'confirm_action' | 'confirm_shell_commands',
+  ) => {
+    let firstRun = true;
+    return stub({
+      name: 'probe',
+      action: (context): SlashCommandActionReturn => {
+        if (firstRun) {
+          firstRun = false;
+          return confirmation === 'confirm_action'
+            ? {
+                type: 'confirm_action',
+                prompt: 'Proceed?',
+                originalInvocation: { raw: '/probe' },
+              }
+            : {
+                type: 'confirm_shell_commands',
+                commandsToConfirm: ['ls'],
+                originalInvocation: { raw: '/probe' },
+              };
+        }
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: `isIdle=${context.ui.isIdleRef.current}`,
+        };
+      },
+    });
+  };
+
+  it.each([
+    ['confirm_action', true],
+    ['confirm_action', false],
+    ['confirm_shell_commands', true],
+    ['confirm_shell_commands', false],
+  ] as const)(
+    'the re-run after an accepted %s sees the pre-dispatch idle state (%s)',
+    async (confirmation, initiallyIdle) => {
+      const host = createFakeHost();
+      Object.assign(host, createProcessingLinkedHost(initiallyIdle));
+      setActionConfirmation(host, true);
+      setShellResolution(host, {
+        outcome: ToolConfirmationOutcome.ProceedOnce,
+        approvedCommands: ['ls'],
+      });
+      const dispatcher = new OpenTuiSlashDispatcher(host, services, [
+        confirmingProbe(confirmation),
+      ]);
+
+      await dispatcher.handle('/probe');
+
+      expect(host.items.at(-1)).toMatchObject({
+        type: 'info',
+        text: `isIdle=${initiallyIdle}`,
+      });
+    },
+  );
+
+  it('renders a goal mutation card when the host was idle before dispatch', async () => {
+    const snapshot = { v: 2, goal: { objective: 'x' }, activity: 'idle' };
+    const pauseCommand = stub({
+      name: 'goal',
+      action: () =>
+        ({
+          type: 'goal_control',
+          operation: { kind: 'pause' },
+          response: { snapshot },
+          cause: 'pause',
+        }) as never,
+    });
+
+    const { host } = await dispatch(
+      '/goal pause',
+      [pauseCommand],
+      createProcessingLinkedHost(true),
+    );
+
+    expect(host.items.at(-1)).toMatchObject({
+      type: 'goal_state',
+      snapshot,
+      cause: 'pause',
+    });
+  });
+
+  it('defers the goal mutation card when a turn starts streaming during the action', async () => {
+    const snapshot = { v: 2, goal: { objective: 'x' }, activity: 'idle' };
+    const linkedHost = createProcessingLinkedHost(true);
+    const pauseCommand = stub({
+      name: 'goal',
+      action: () => {
+        linkedHost.setStreaming(true);
+        return {
+          type: 'goal_control',
+          operation: { kind: 'pause' },
+          response: { snapshot },
+          cause: 'pause',
+        } as never;
+      },
+    });
+
+    const { host } = await dispatch('/goal pause', [pauseCommand], linkedHost);
+
+    expect(linkedHost.isStreaming()).toBe(true);
+    expect(host.items.some((item) => item.type === 'goal_state')).toBe(false);
   });
 });

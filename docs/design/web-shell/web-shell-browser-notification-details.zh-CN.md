@@ -2,7 +2,9 @@
 
 [English](web-shell-browser-notification-details.md) | [简体中文](web-shell-browser-notification-details.zh-CN.md)
 
-基础版合入 #11398 后，本次增强让用户直接辨认通知对应的会话、查看本轮回复摘录，并点击返回对应会话。权限、后台触发和去重规则沿用基础版，内置入口现按品牌设计默认开启偏好。不增加 daemon 路由或协议字段；新增的公共 Web Shell 品牌选项见[品牌设计](web-shell-browser-notification-branding.zh-CN.md)。
+状态：截至 2026-10-12，回合结束通知的内容限制、图标及会话导航仍为当前设计。[操作提醒设计](../browser-action-notifications.zh-CN.md)扩展触发条件并更新任务名称；授权遵循已修订的[品牌接入行为](web-shell-browser-notification-branding.zh-CN.md#配置与接入)。
+
+基础版合入 #11398 后，本次增强让用户直接辨认通知对应的会话、查看本轮回复摘录，并点击返回对应会话。回合结束通知的后台触发和去重规则沿用基础版，内置入口现按品牌设计默认开启偏好。不增加 daemon 路由或协议字段；新增的公共 Web Shell 品牌选项见[品牌设计](web-shell-browser-notification-branding.zh-CN.md)。
 
 ## 内容与图标
 
@@ -14,7 +16,7 @@
 
 标题中的会话部分最多保留 60 个 Unicode 码点（应用名称前缀另计），提问摘录最多 80 个，回复摘录最多 120 个，超长时以省略号结尾。摘录清理最多读取前 4096 个 UTF-16 代码单元，移除常见 Markdown 格式、简单内联链接地址、控制字符和双向格式字符，并合并空白。尖括号内容（含 HTML 和 JSX）按字面保留，纯文本通知不猜测它是代码还是标记；代码围栏保留内容。截断不拆开 Unicode 码点，按字素簇截断不在范围内。不增加配置或模型调用。浏览器或系统布局可能进一步截短整体正文。
 
-通知携带项目现有 `packages/desktop-shell/src-tauri/icons/128x128.png` 标志的本包副本，由 Vite 解析图片 URL。发布的库将 PNG 内联为 data URL，无需另行发布图片资源。标题与正文不额外拼接 IP、端口或跳转地址；Chrome 自带的站点来源和 macOS 上的 Chrome 标志由浏览器及系统控制，业务图标不能替换它们。通知内容可能显示在通知中心或锁屏上，设置说明告知会展示标题、提问和回复摘录。共享存储仍仅记录去重哈希，不保存正文、标题或导航目标。
+通知携带项目现有 `packages/desktop/src-tauri/icons/128x128.png` 标志的本包副本，由 Vite 解析图片 URL。发布的库将 PNG 内联为 data URL，无需另行发布图片资源。标题与正文不额外拼接 IP、端口或跳转地址；Chrome 自带的站点来源和 macOS 上的 Chrome 标志由浏览器及系统控制，业务图标不能替换它们。通知内容可能显示在通知中心或锁屏上，设置说明告知会展示标题、提问和回复摘录。共享存储仍仅记录去重哈希，不保存正文、标题或导航目标。
 
 ## 点击打开会话
 

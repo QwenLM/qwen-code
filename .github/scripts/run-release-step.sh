@@ -11,8 +11,6 @@ step="${1:?usage: run-release-step.sh <step>}"
 
 publish_package() {
   local directory="$1"
-  local published_marker="${2:-}"
-  local marker_value="${3:-}"
   (
     cd "${directory}"
     local package_name
@@ -25,10 +23,12 @@ publish_package() {
       echo "::notice::${package_name}@${RELEASE_VERSION} already published; skipping"
       exit 0
     fi
+    # npm, not pnpm: pnpm's packer writes 0644 for every entry outside `bin`, so
+    # the generated CLI's `vendor/ripgrep/*/rg` lost the exec bit that
+    # copy_bundle_assets.js restores on purpose — a fresh install then could not
+    # spawn the bundled ripgrep at all (#12668). npm keeps the working-tree mode.
+    # Only this generated package needs it; the workspace loop stays on pnpm.
     npm publish --provenance "${publish_args[@]}"
-    if [[ -n "${published_marker}" ]]; then
-      echo "${marker_value}" >> "${published_marker}"
-    fi
   )
 }
 
@@ -123,7 +123,7 @@ case "${step}" in
 
   push-release-branch)
     release_branch_name="${BRANCH_NAME:?}"
-    git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json
+    git add package.json pnpm-lock.yaml packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json
     if git diff --staged --quiet; then
       echo "No version changes to commit"
     else
@@ -170,6 +170,11 @@ case "${step}" in
       exit 1
     }
     npm run prepare:package
+    # Last check before the publish step: the tarball the registry will serve
+    # must carry the exec bit on every vendored ripgrep (#12668). The gate rides
+    # the workflow-pinned checkout, not the selected release ref, which may
+    # predate it; `dist` still resolves against the release ref's package.
+    node .release-workflow/scripts/check-release-tarball-exec-bits.mjs dist
     ;;
 
   build-archives)
@@ -181,25 +186,17 @@ case "${step}" in
     ;;
 
   publish-packages)
-    if [[ "${PUBLISH_EXTERNAL_CONTEXT_MEM0}" == "true" ]]; then
-      publish_package 'integrations/external-context-mem0'
+    package_names="$(node "$(dirname "$0")/../../scripts/release-packages.mjs")"
+    publish_args=(--access public "--tag=${NPM_TAG}" --no-git-checks --provenance)
+    while IFS= read -r name; do
+      publish_args+=("--filter=${name}")
+    done <<< "${package_names}"
+    if [[ "${IS_DRY_RUN}" == "true" ]]; then
+      # Exercise packing and lifecycle checks even for an existing version.
+      publish_args+=(--dry-run --force)
     fi
-    if [[ "${PUBLISH_AUDIO_CAPTURE}" == "true" ]]; then
-      publish_package 'packages/audio-capture'
-    fi
+    corepack pnpm -r publish "${publish_args[@]}"
     publish_package 'dist'
-    publish_package 'packages/channels/base'
-
-    publish_marker="$(mktemp)"
-    # Explicit allowlist: new channel packages require release approval.
-    for channel in dingtalk dws feishu github qqbot telegram wecom weixin; do
-      echo "::group::Publishing @qwen-code/channel-${channel}"
-      publish_package "packages/channels/${channel}" "${publish_marker}" "${channel}"
-      echo "::endgroup::"
-    done
-    if [[ "${IS_DRY_RUN}" != "true" ]] && [[ ! -s "${publish_marker}" ]]; then
-      echo "::warning::Every channel package was already published; nothing shipped"
-    fi
     ;;
 
   verify-archives)

@@ -24,6 +24,7 @@ import type {
   ExternalToolGuardPrepareRequest,
   ExternalToolGuardPrepareResult,
 } from '@qwen-code/acp-bridge/bridgeOptions';
+import { readSshWorkspace } from './ssh-workspace-store.js';
 
 // Git subcommands allowed even when relocated outside the session working
 // directory. Limited to subcommands verified to neither write files nor
@@ -3261,6 +3262,9 @@ async function evaluateBuiltInGuard(
   if (!SHELL_EXECUTING_TOOLS.has(request.toolName)) return { allowed: true };
   const command = request.arguments['command'];
   if (typeof command !== 'string') return { allowed: true };
+  // SSH tools execute against a different filesystem. The trusted anchor
+  // identifies that runtime; the local worktree boundary cannot validate it.
+  if (readSshWorkspace(request.effectiveCwd)) return { allowed: true };
 
   const sessionCwd = await realpathNearestExistingAsync(request.effectiveCwd);
 
@@ -3315,6 +3319,19 @@ async function evaluateBuiltInGuard(
       }
       canonicalEffectiveCwd = canonicalReported;
     }
+  }
+
+  // Normal tool permission already admitted this call, so the session's own
+  // directory needs no second containment check: whoever admitted it saw the
+  // command. Keep the fallback check for speculative calls that never run
+  // that flow, and for a sub-agent pinned to its own worktree — the boundary
+  // established above is what keeps it out of its siblings and the parent
+  // checkout, and nothing in the permission flow re-establishes it.
+  if (
+    request.permissionChecked === true &&
+    canonicalEffectiveCwd === sessionCwd
+  ) {
+    return { allowed: true };
   }
 
   // A model-supplied `directory` becomes the containment basis, so it must

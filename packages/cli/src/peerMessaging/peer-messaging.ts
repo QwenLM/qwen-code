@@ -154,15 +154,20 @@ export interface PeerReceipt {
 }
 
 export interface PeerMessagingOptions {
-  getApprovalMode: () => ApprovalMode | null;
-  getPolicySetting: () => InboundPolicy | undefined;
+  /**
+   * The four settings readers take the session a message is addressed to
+   * (its `toSessionId`). A process holding one session ignores it; one
+   * hosting several reads the settings of that session. See the gate.
+   */
+  getApprovalMode: (sessionId?: string) => ApprovalMode | null;
+  getPolicySetting: (sessionId?: string) => InboundPolicy | undefined;
   /**
    * How long a held message waits, in milliseconds, or null for "until
    * the session ends". Omitted in tests, which take the default.
    */
-  getHeldExpiryMs?: () => number | null;
+  getHeldExpiryMs?: (sessionId?: string) => number | null;
   /** Which scope set the policy, for wording a hold cause. See the gate. */
-  getPolicyScope?: () => PolicyScope | undefined;
+  getPolicyScope?: (sessionId?: string) => PolicyScope | undefined;
   updateSessionRegistryIpcPath: (
     ipcPath: string | undefined,
     ipcToken?: string,
@@ -489,11 +494,13 @@ export class PeerMessaging {
   }
 
   /**
-   * How long a held message has to live, in milliseconds, or null when
-   * holds do not expire. Used by `/peers` to show what is left.
+   * How long a held message addressed to `sessionId` has to live, in
+   * milliseconds, or null when holds do not expire for it. Used by
+   * `/peers` to show what is left, and asked per message: a process
+   * holding several sessions gives each its own lifetime.
    */
-  getHeldExpiryMs(): number | null {
-    return this.gate?.getHeldExpiryMs() ?? null;
+  getHeldExpiryMs(sessionId?: string): number | null {
+    return this.gate?.getHeldExpiryMs(sessionId) ?? null;
   }
 
   /**

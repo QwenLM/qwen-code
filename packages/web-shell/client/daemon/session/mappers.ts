@@ -726,8 +726,6 @@ function getGoalState(
   ) {
     return undefined;
   }
-  const checkpointStalls = getNumber(source, 'checkpointStalls');
-  const lastCheckpointFailure = getString(source, 'lastCheckpointFailure');
   const lastReason = getString(source, 'lastReason');
   const limitKindRaw = getString(source, 'limitKind');
   const limitKind =
@@ -755,10 +753,6 @@ function getGoalState(
       ...(activeTimeBudgetMs !== undefined ? { activeTimeBudgetMs } : {}),
       createdAt,
       updatedAt,
-      ...(checkpointStalls !== undefined && checkpointStalls > 0
-        ? { checkpointStalls }
-        : {}),
-      ...(lastCheckpointFailure ? { lastCheckpointFailure } : {}),
       ...(lastReason ? { lastReason } : {}),
       ...(limitKind ? { limitKind } : {}),
     },

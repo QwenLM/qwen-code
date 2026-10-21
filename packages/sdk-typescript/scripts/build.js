@@ -39,7 +39,7 @@ const MAX_TRANSCRIPT_BROWSER_BUNDLE_BYTES = 192 * 1024;
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });
 
-execSync('tsc --project tsconfig.build.json', {
+execSync('tsc --build tsconfig.reference.json', {
   stdio: 'inherit',
   cwd: rootDir,
 });

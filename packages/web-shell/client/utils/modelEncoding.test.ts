@@ -3,6 +3,7 @@ import {
   encodeVisionModelForSetting,
   extractBareModelId,
   decodeVisionModelForPicker,
+  resolveFastModelForPicker,
 } from './modelEncoding';
 
 describe('encodeVisionModelForSetting', () => {
@@ -56,6 +57,46 @@ describe('encodeVisionModelForSetting', () => {
 
   it('passes through empty string unchanged', () => {
     expect(encodeVisionModelForSetting('')).toBe('');
+  });
+});
+
+describe('resolveFastModelForPicker', () => {
+  it('matches an endpoint pin uniquely and leaves missing or ambiguous pins unresolved', () => {
+    const models = [
+      {
+        id: 'qwen-route:v1:a',
+        baseModelId: 'shared',
+        authType: 'openai',
+        baseUrl: 'https://first.example/v1',
+      },
+      {
+        id: 'qwen-route:v1:b',
+        baseModelId: 'shared',
+        authType: 'openai',
+        baseUrl: 'https://second.example/v1?token=value#fragment',
+      },
+      { id: 'unique(openai)', baseModelId: 'unique', authType: 'openai' },
+    ];
+    expect(
+      resolveFastModelForPicker(
+        'openai:shared\0https://SECOND.example/v1',
+        models,
+      ),
+    ).toBe('qwen-route:v1:b');
+    const missing = 'openai:shared\0https://removed.example/v1';
+    expect(resolveFastModelForPicker(missing, models)).toBe(missing);
+    expect(resolveFastModelForPicker('openai:shared', models)).toBe(
+      'openai:shared',
+    );
+    expect(resolveFastModelForPicker('unique', models)).toBe('unique(openai)');
+    const samePublicEndpoint = models.map((model) => ({
+      ...model,
+      baseUrl: 'https://second.example/v1',
+    }));
+    const ambiguous = 'openai:shared\0https://second.example/v1';
+    expect(resolveFastModelForPicker(ambiguous, samePublicEndpoint)).toBe(
+      ambiguous,
+    );
   });
 });
 

@@ -14,6 +14,7 @@ import type {
 import { DAEMON_ERROR_KINDS, parseDaemonBackgroundTurn } from '../types.js';
 import { isSettingsChangedData } from '../events.js';
 import type {
+  DaemonLoopStop,
   DaemonUiEvent,
   DaemonUiPermissionOption,
   DaemonUiToolProvenance,
@@ -29,6 +30,7 @@ import {
   getString,
   getTextContent,
   extractContentPart,
+  getFiniteNumber,
   isRecord,
   redactSensitiveFields,
   stringifyJson,
@@ -67,6 +69,14 @@ const SESSION_RECORDING_DEGRADED_MESSAGE =
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording.';
 
 const ATTACHMENT_UNAVAILABLE_TEXT = '[Attachment is no longer available]';
+
+// Wire close-reason tokens are internal identifiers; render known ones as
+// copy and never echo an unknown token into the transcript.
+const SESSION_CLOSED_REASON_COPY: Record<string, string> = {
+  client_close: 'Session closed',
+  last_client_detached: 'Session closed after the last client detached',
+  idle_timeout: 'Session closed after idle timeout',
+};
 
 export function normalizeDaemonEvent(
   event: DaemonEvent,
@@ -133,11 +143,29 @@ export function normalizeDaemonEvent(
       ];
     }
     case 'session_closed':
+      if (
+        isRecord(event.data) &&
+        event.data['persistenceUnconfirmed'] === true
+      ) {
+        return [
+          {
+            ...base,
+            type: 'error',
+            recoverable: false,
+            text: 'Workspace runtime stopped; session persistence is unconfirmed.',
+          },
+        ];
+      }
       return [
         {
           ...base,
           type: 'status',
-          text: `Session closed: ${getString(event.data, 'reason') ?? 'closed'}`,
+          text:
+            getString(event.data, 'cause') === 'workspace_runtime_stop'
+              ? 'Workspace runtime stopped.'
+              : (SESSION_CLOSED_REASON_COPY[
+                  getString(event.data, 'reason') ?? ''
+                ] ?? 'Session closed'),
         },
       ];
     case 'session_recording_degraded': {
@@ -220,6 +248,10 @@ export function normalizeDaemonEvent(
       const code = getString(event.data, 'code');
       const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       const promptId = getString(event.data, 'promptId');
+      const loop =
+        errorKind === 'loop_detected'
+          ? parseDaemonLoopStop(event.data)
+          : undefined;
       return [
         {
           ...base,
@@ -229,6 +261,7 @@ export function normalizeDaemonEvent(
           ...(code ? { code } : {}),
           ...(errorKind ? { errorKind } : {}),
           ...(promptId ? { promptId } : {}),
+          ...(loop ? { loop } : {}),
           text:
             getString(event.data, 'message') ??
             'Prompt failed (no details available)',
@@ -240,6 +273,9 @@ export function normalizeDaemonEvent(
 
     case 'history_truncated':
       return normalizeHistoryTruncated(event, base);
+
+    case 'session_messages_deleted':
+      return [];
 
     case 'session_rewound':
       return normalizeSessionRewound(event, base);
@@ -1025,6 +1061,15 @@ function normalizeSessionUpdate(
       // the web UI has its own activity indicator, so drop the frame.
       const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
       if (
+        meta &&
+        Object.hasOwn(meta, 'toolLifecycle') &&
+        update['status'] === undefined &&
+        update['content'] === undefined &&
+        update['title'] === undefined &&
+        update['kind'] === undefined
+      )
+        return [];
+      if (
         getString(update, 'status') === 'in_progress' &&
         getString(update, 'kind') === undefined &&
         (meta?.['shellProgress'] !== undefined ||
@@ -1240,10 +1285,14 @@ function normalizeToolUpdate(
   const subagentType =
     getString(update, 'subagentType') ??
     (metadata ? getString(metadata, 'subagentType') : undefined);
+  const startedAt = numberField(metadata, 'startedAt');
+  const durationMs = numberField(metadata, 'durationMs');
   return {
     ...base,
     type: 'tool.update',
     toolCallId,
+    ...(startedAt !== undefined && startedAt >= 0 ? { startedAt } : {}),
+    ...(durationMs !== undefined && durationMs >= 0 ? { durationMs } : {}),
     ...(status ? { status } : {}),
     ...(title ? { title } : {}),
     ...(toolName ? { toolName } : {}),
@@ -1370,6 +1419,21 @@ function extractToolProvenance(
     }
   }
   return {};
+}
+
+function parseDaemonLoopStop(data: unknown): DaemonLoopStop | undefined {
+  if (!isRecord(data)) return undefined;
+  const loopType = getString(data, 'loopType');
+  const loopReason = getString(data, 'loopReason');
+  const toolCallCount = getFiniteNumber(data, 'toolCallCount');
+  const toolCallLimit = getFiniteNumber(data, 'toolCallLimit');
+  if (!loopType && !loopReason) return undefined;
+  return {
+    ...(loopType ? { loopType } : {}),
+    ...(loopReason ? { loopReason } : {}),
+    ...(toolCallCount !== undefined ? { toolCallCount } : {}),
+    ...(toolCallLimit !== undefined ? { toolCallLimit } : {}),
+  };
 }
 
 function asDaemonErrorKind(

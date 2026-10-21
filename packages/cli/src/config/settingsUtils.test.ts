@@ -29,7 +29,6 @@ import {
   setNestedPropertyForce,
   validateSettingValue,
 } from './settingsUtils.js';
-import { GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP } from '@qwen-code/qwen-code-core';
 import {
   getSettingsSchema,
   type SettingDefinition,
@@ -261,9 +260,9 @@ describe('SettingsUtils', () => {
 
       it('refuses out-of-range model.goalCheckpointTimeoutSeconds values', async () => {
         // This file mocks getSettingsSchema, so read the production
-        // definition straight from the module: removing the declared bounds
-        // must turn this red, closing the /config write path that persists a
-        // value the next CLI start rejects.
+        // definition straight from the module. The setting is deprecated and
+        // ignored, but its declared bounds stay so the /config write path
+        // keeps refusing a value that was never valid.
         const { getSettingsSchema: getRealSettingsSchema } =
           await vi.importActual<typeof import('./settingsSchema.js')>(
             './settingsSchema.js',
@@ -272,16 +271,11 @@ describe('SettingsUtils', () => {
           getRealSettingsSchema().model.properties.goalCheckpointTimeoutSeconds;
 
         expect(validateSettingValue(definition, 0)).toBe('Value must be >= 1');
-        expect(
-          validateSettingValue(
-            definition,
-            GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
-          ),
-        ).toBe(`Value must be <= ${GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP}`);
+        expect(validateSettingValue(definition, 901)).toBe(
+          'Value must be <= 900',
+        );
         expect(validateSettingValue(definition, 1)).toBeUndefined();
-        expect(
-          validateSettingValue(definition, GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP),
-        ).toBeUndefined();
+        expect(validateSettingValue(definition, 900)).toBeUndefined();
       });
 
       it('refuses zero for Goal cadence settings while accepting -1', async () => {

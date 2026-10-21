@@ -124,7 +124,11 @@ export function getModelConfigurationKey(
 
 export function isConversationModelConfiguration(model: ProviderModelConfig) {
   return (
-    !model.imageOnly && !model.voiceOnly && !model.fastOnly && !model.visionOnly
+    !model.imageOnly &&
+    !model.voiceOnly &&
+    !model.fastOnly &&
+    !model.visionOnly &&
+    !model.realtimeOnly
   );
 }
 
@@ -133,6 +137,7 @@ export function isImageModelConfiguration(model: ProviderModelConfig) {
     !isImageGenerationCapable(model) ||
     model.fastOnly ||
     model.voiceOnly ||
+    model.realtimeOnly ||
     !model.baseUrl ||
     typeof model.envKey !== 'string' ||
     !model.envKey.trim()
@@ -211,7 +216,9 @@ export function listModelConfigurations(loaded: LoadedSettings) {
             ? ('image' as const)
             : model.voiceOnly === true
               ? ('voice' as const)
-              : ('chat' as const),
+              : model.realtimeOnly === true
+                ? ('realtime' as const)
+                : ('chat' as const),
         ...(imageModel ? { imageModel } : {}),
         ...(advisorModel ? { advisorModel } : {}),
       };

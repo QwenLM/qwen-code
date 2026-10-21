@@ -23,7 +23,10 @@ import { describe, expect, it } from 'vitest';
 import { parse, stringify } from 'yaml';
 
 import { hooks as pnpmHooks, workspacePackageNames } from '../../.pnpmfile.mjs';
+import { checkReleaseTarballExecBits } from '../check-release-tarball-exec-bits.mjs';
 import { getPinnedPnpmPackage } from '../pnpm-package.js';
+import { INDEPENDENT_PACKAGES } from '../release-packages.mjs';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
@@ -44,9 +47,134 @@ function readWorkflow(relativePath) {
   return readFileSync(path.join(root, relativePath), 'utf8');
 }
 
+const heapCap = (value) => value?.match(/--max-old-space-size=(\d+)/)?.[1];
+
+/**
+ * Writes a throwaway package shaped like the generated CLI for the
+ * vendored-ripgrep packing cases: `vendor/ripgrep/<platform>/rg` (or `rg.exe`
+ * for a `-win32` platform) at the given mode, and the manifest entry that makes
+ * a packer pick the tree up.
+ */
+function writeVendoredRipgrepFixture(directory, platforms) {
+  writeFileSync(
+    path.join(directory, 'package.json'),
+    JSON.stringify({
+      name: 'vendored-ripgrep-fixture',
+      version: '1.0.0',
+      files: ['vendor'],
+    }),
+  );
+  for (const [platform, mode] of Object.entries(platforms)) {
+    const binary = path.join(
+      directory,
+      'vendor',
+      'ripgrep',
+      platform,
+      platform.endsWith('-win32') ? 'rg.exe' : 'rg',
+    );
+    mkdirSync(path.dirname(binary), { recursive: true });
+    writeFileSync(binary, '#!/bin/sh\n');
+    chmodSync(binary, mode);
+  }
+  return directory;
+}
+
 const releaseStepScript = readWorkflow('.github/scripts/run-release-step.sh');
 
 describe('package scripts', () => {
+  it('keeps documented CI variable defaults in sync with workflows', () => {
+    const guide = readWorkflow('docs/developers/development/ci-variables.md');
+    const docRows = new Map(
+      [
+        ...guide.matchAll(
+          /^\|\s*`(QWEN_\w+)`\s*\|\s*`([^`]+)`\s*\|\s*([^|]+)\s*\|/gm,
+        ),
+      ].map(([, name, value, usedIn]) => [
+        name,
+        {
+          defaultVal: value,
+          files: [...usedIn.matchAll(/`([^`]+\.yml)`/g)].map(([, f]) => f),
+        },
+      ]),
+    );
+
+    // These variables are documented below the test-execution table.
+    const excludedNonTestVariables = new Set([
+      'QWEN_RELEASE_STATIC_TIMEOUT_MINUTES',
+      'QWEN_RELEASE_BUILD_TIMEOUT_MINUTES',
+    ]);
+    const relatedRows = new Map(
+      [...guide.matchAll(/`(QWEN_RELEASE_\w+)` \(default `([^`]+)`/g)].map(
+        ([, name, value]) => [name, value],
+      ),
+    );
+
+    const workflowFiles = ['ci.yml', 'release.yml'];
+    const workflowVars = new Map();
+
+    for (const file of workflowFiles) {
+      const workflow = readWorkflow(`.github/workflows/${file}`);
+      for (const [, name] of workflow.matchAll(/vars\.(QWEN_\w+)/g)) {
+        if (!workflowVars.has(name)) {
+          workflowVars.set(name, { fallbacks: new Set(), files: new Set() });
+        }
+        const entry = workflowVars.get(name);
+        entry.files.add(file);
+      }
+      for (const [, name, fallback] of workflow.matchAll(
+        /vars\.(QWEN_\w+)\s*\|\|\s*'([^']+)'/g,
+      )) {
+        workflowVars.get(name).fallbacks.add(fallback);
+      }
+    }
+
+    // Every workflow variable must have a known fallback and a matching doc.
+    for (const [name, info] of workflowVars.entries()) {
+      expect(info.fallbacks.size, `No fallback found for ${name}`).toBe(1);
+      const [fallback] = info.fallbacks;
+      if (excludedNonTestVariables.has(name)) {
+        expect(info.files, `Unexpected workflow for ${name}`).toEqual(
+          new Set(['release.yml']),
+        );
+        expect(relatedRows.get(name), `Related variable ${name} drifted`).toBe(
+          fallback,
+        );
+        expect(docRows.has(name), `${name} is outside the test table`).toBe(
+          false,
+        );
+        continue;
+      }
+      const docEntry = docRows.get(name);
+      expect(
+        docEntry,
+        `Workflow variable ${name} missing from docs`,
+      ).toBeDefined();
+      expect(docEntry.defaultVal, `Default mismatch for ${name}`).toBe(
+        fallback,
+      );
+      expect(new Set(docEntry.files), `Used-in mismatch for ${name}`).toEqual(
+        info.files,
+      );
+    }
+
+    // A deleted workflow variable must not linger in the documentation.
+    for (const [name, docEntry] of docRows.entries()) {
+      expect(
+        workflowVars.has(name),
+        `Documented variable ${name} not found in test workflows`,
+      ).toBe(true);
+      expect(
+        docEntry.files.length,
+        `No workflow listed for ${name}`,
+      ).toBeGreaterThan(0);
+    }
+    for (const name of excludedNonTestVariables) {
+      expect(workflowVars.has(name), `Missing related variable ${name}`).toBe(
+        true,
+      );
+    }
+  });
+
   it('accepts only an exact pnpm package-manager version', () => {
     expect(getPinnedPnpmPackage({ packageManager: 'pnpm@11.24.0' })).toBe(
       'pnpm@11.24.0',
@@ -154,7 +282,18 @@ describe('package scripts', () => {
     });
   });
 
-  it('checks both lockfiles for integrity and agreement', () => {
+  it('preserves the registry retry policy under pnpm', () => {
+    const workspace = parse(readWorkflow('pnpm-workspace.yaml'));
+
+    expect(workspace).toMatchObject({
+      fetchRetries: 5,
+      fetchRetryMintimeout: 20000,
+      fetchRetryMaxtimeout: 120000,
+      fetchTimeout: 300000,
+    });
+  });
+
+  it('checks the pnpm lockfile for integrity and Playwright parity', () => {
     const result = spawnSync(
       process.execPath,
       [path.join(root, 'scripts/check-lockfile.js')],
@@ -162,12 +301,7 @@ describe('package scripts', () => {
     );
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain('Lockfile check passed.');
     expect(result.stdout).toContain('pnpm lockfile check passed.');
-    expect(result.stdout).toContain('pnpm lockfile matches package-lock.json.');
-    expect(result.stdout).toContain(
-      'pnpm build approvals cover every install script.',
-    );
     // Pins the Playwright parity block's existence and happy path: deleting it,
     // or returning before it, goes red here. Its drift arms live in
     // check-lockfile.test.js, which runs the script against perturbed fixtures.
@@ -186,7 +320,6 @@ describe('package scripts', () => {
         // them the run dies on a missing package.json before reaching the
         // branch under test.
         for (const file of [
-          'package-lock.json',
           'pnpm-lock.yaml',
           'pnpm-workspace.yaml',
           'package.json',
@@ -210,115 +343,12 @@ describe('package scripts', () => {
       }
     }
 
-    function mutatePackageLock(fixtureRoot, mutate) {
-      const file = path.join(fixtureRoot, 'package-lock.json');
-      const lock = JSON.parse(readFileSync(file, 'utf8'));
-      mutate(lock);
-      writeFileSync(file, JSON.stringify(lock));
-    }
-
     function mutatePnpmLock(fixtureRoot, mutate) {
       const file = path.join(fixtureRoot, 'pnpm-lock.yaml');
       const lock = parse(readFileSync(file, 'utf8'));
       mutate(lock);
       writeFileSync(file, stringify(lock));
     }
-
-    function mutatePnpmWorkspace(fixtureRoot, mutate) {
-      const file = path.join(fixtureRoot, 'pnpm-workspace.yaml');
-      const workspace = parse(readFileSync(file, 'utf8'));
-      mutate(workspace);
-      writeFileSync(file, stringify(workspace));
-    }
-
-    it('fails when pnpm resolves a version npm has not locked', () => {
-      const result = runCheckLockfile((fixtureRoot) =>
-        mutatePnpmLock(fixtureRoot, (lock) => {
-          lock.packages['bogus-package@9.9.9'] = {
-            resolution: { integrity: 'sha512-bogus' },
-          };
-        }),
-      );
-
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain(
-        'versions that package-lock.json does not lock',
-      );
-      expect(result.stderr).toContain('- bogus-package@9.9.9');
-    });
-
-    it('fails when a knownNpmLockGaps entry no longer describes a gap', () => {
-      // mime-db@1.52.0 is the committed exception; npm locking it makes the
-      // exception stale.
-      const result = runCheckLockfile((fixtureRoot) =>
-        mutatePackageLock(fixtureRoot, (lock) => {
-          lock.packages['node_modules/mime-types/node_modules/mime-db'] = {
-            version: '1.52.0',
-            resolved: 'https://registry.npmjs.org/mime-db/-/mime-db-1.52.0.tgz',
-            integrity: 'sha512-bogus',
-          };
-        }),
-      );
-
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain(
-        'remove these entries from knownNpmLockGaps',
-      );
-      expect(result.stderr).toContain('- mime-db@1.52.0');
-    });
-
-    it('fails when a knownNpmLockGaps entry leaves the pnpm graph', () => {
-      // Deleting the pnpm key exercises the `!pnpmVersions.includes(key)`
-      // arm: the allowlist entry survives with nothing to describe, and the
-      // gate must say so instead of passing the version agreement.
-      const result = runCheckLockfile((fixtureRoot) =>
-        mutatePnpmLock(fixtureRoot, (lock) => {
-          delete lock.packages['mime-db@1.52.0'];
-        }),
-      );
-
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain(
-        'remove these entries from knownNpmLockGaps',
-      );
-      expect(result.stderr).toContain('- mime-db@1.52.0');
-    });
-
-    it('fails when an install script has no allowBuilds decision', () => {
-      const result = runCheckLockfile((fixtureRoot) =>
-        mutatePnpmWorkspace(fixtureRoot, (workspace) => {
-          delete workspace.allowBuilds.esbuild;
-        }),
-      );
-
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain('no allowBuilds entry');
-      expect(result.stderr).toContain('- esbuild');
-    });
-
-    it('reports an aliased install script under its real package name', () => {
-      // npmPackageName returns `details.name` for an aliased install
-      // (`"build-tool-cjs": "npm:build-tool@…"`). The build-approval loop
-      // must compare the real name, not the alias, so an allowBuilds entry
-      // under the alias cannot silence the gate.
-      const result = runCheckLockfile((fixtureRoot) =>
-        mutatePackageLock(fixtureRoot, (lock) => {
-          lock.packages['node_modules/build-tool-cjs'] = {
-            name: 'build-tool',
-            version: '1.0.0',
-            resolved:
-              'https://registry.npmjs.org/build-tool/-/build-tool-1.0.0.tgz',
-            integrity: 'sha512-bogus',
-            hasInstallScript: true,
-          };
-        }),
-      );
-
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain('no allowBuilds entry');
-      expect(result.stderr).toContain('- build-tool');
-      expect(result.stderr).not.toContain('- build-tool-cjs');
-    });
 
     it('fails closed when pnpm-lock.yaml has no packages section', () => {
       const result = runCheckLockfile((fixtureRoot) => {
@@ -334,98 +364,28 @@ describe('package scripts', () => {
 
     it('accepts a git dependency pnpm keys by source instead of version', () => {
       const resolved = 'git+https://github.com/example/git-dep.git#7ae66ab2';
-      const result = runCheckLockfile((fixtureRoot) => {
-        mutatePackageLock(fixtureRoot, (lock) => {
-          lock.packages['node_modules/git-dep'] = {
-            version: '1.2.3',
-            resolved,
-          };
-        });
+      const result = runCheckLockfile((fixtureRoot) =>
         mutatePnpmLock(fixtureRoot, (lock) => {
           lock.packages[`git-dep@${resolved}`] = {
             resolution: { type: 'git' },
           };
-        });
-      });
-
-      expect(result.status).toBe(0);
-      expect(result.stdout).toContain(
-        'pnpm lockfile matches package-lock.json.',
-      );
-    });
-
-    it('accepts an allowBuilds key scoped to the version npm locks', () => {
-      const result = runCheckLockfile((fixtureRoot) =>
-        mutatePnpmWorkspace(fixtureRoot, (workspace) => {
-          delete workspace.allowBuilds.keytar;
-          workspace.allowBuilds['keytar@7.9.0'] = true;
         }),
       );
 
       expect(result.status).toBe(0);
-      expect(result.stdout).toContain(
-        'pnpm build approvals cover every install script.',
-      );
+      expect(result.stdout).toContain('pnpm lockfile check passed.');
     });
 
-    it('rejects an allowBuilds key scoped to another version', () => {
-      // pnpm matches a version-scoped key exactly, so an approval written for
-      // one version says nothing about the one npm actually locks.
+    it('fails when a registry package loses its integrity hash', () => {
       const result = runCheckLockfile((fixtureRoot) =>
-        mutatePnpmWorkspace(fixtureRoot, (workspace) => {
-          delete workspace.allowBuilds.keytar;
-          workspace.allowBuilds['keytar@7.0.0'] = true;
+        mutatePnpmLock(fixtureRoot, (lock) => {
+          lock.packages['left-pad@1.3.0'] = { resolution: {} };
         }),
       );
 
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain('no allowBuilds entry');
-      expect(result.stderr).toContain('- keytar@7.9.0');
-    });
-
-    it('accepts a union of exact versions', () => {
-      // pnpm writes this shape itself when it merges version-scoped rules:
-      // the name once, then bare exact versions joined by `||`.
-      const result = runCheckLockfile((fixtureRoot) =>
-        mutatePnpmWorkspace(fixtureRoot, (workspace) => {
-          delete workspace.allowBuilds.keytar;
-          workspace.allowBuilds['keytar@7.0.0 || 7.9.0'] = true;
-        }),
-      );
-
-      expect(result.status).toBe(0);
-      expect(result.stdout).toContain(
-        'pnpm build approvals cover every install script.',
-      );
-    });
-
-    it('ignores a range-scoped allowBuilds key, which decides nothing', () => {
-      // A range is not a version scope: pnpm's parseVersionPolicyRule throws
-      // INVALID_VERSION_UNION ('Use exact versions only') on `esbuild@^0.25.0`,
-      // so this key decides nothing and the gate stays red for that tree.
-      const result = runCheckLockfile((fixtureRoot) =>
-        mutatePnpmWorkspace(fixtureRoot, (workspace) => {
-          delete workspace.allowBuilds.esbuild;
-          workspace.allowBuilds['esbuild@^0.25.0'] = true;
-        }),
-      );
-
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain('no allowBuilds entry');
-      expect(result.stderr).toContain('- esbuild@');
-    });
-
-    it('ignores an allowBuilds placeholder that decides nothing', () => {
-      const result = runCheckLockfile((fixtureRoot) =>
-        mutatePnpmWorkspace(fixtureRoot, (workspace) => {
-          // pnpm writes this string for an install whose build it skipped.
-          workspace.allowBuilds.esbuild = 'set this to true or false';
-        }),
-      );
-
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain('no allowBuilds entry');
-      expect(result.stderr).toContain('- esbuild');
+      expect(result.stderr).toContain('missing "resolution.integrity"');
+      expect(result.stderr).toContain('- left-pad@1.3.0');
     });
   });
 
@@ -1010,14 +970,8 @@ describe('package scripts', () => {
       'utf8',
     );
 
-    expect(versionScript).toContain(
-      'const workspacesToExclude = [\n' +
-        "  '@qwen-code/sdk',\n" +
-        "  '@qwen-code/mobile-mcp',\n" +
-        "  '@qwen-code/node-repl-mcp',\n" +
-        "  '@qwen-code/qwen-live',\n" +
-        '];',
-    );
+    expect(versionScript).toContain('INDEPENDENT_PACKAGES.map((name)');
+    expect(INDEPENDENT_PACKAGES).toContain('@qwen-code/node-repl-mcp');
   });
 
   it('smoke-tests the real worktree bootstrap on every supported host', () => {
@@ -1088,18 +1042,17 @@ describe('package scripts', () => {
     const workflow = parse(
       readWorkflow('.github/workflows/pnpm-worktree-smoke.yml'),
     );
-    // package-lock.json is deliberately absent: no step in this job reads
-    // it (the install validates pnpm-lock.yaml against the workspace
-    // manifests), and npm/pnpm version agreement is gated by the 'Check
-    // lockfile' step in ci.yml.
+    // The install validates pnpm-lock.yaml against the workspace manifests,
+    // so these are the inputs that can change its result.
     const expectedPaths = [
       '.github/workflows/pnpm-worktree-smoke.yml',
       '.npmrc',
       '.pnpmfile.mjs',
       'package.json',
       'packages/*/package.json',
-      '!packages/desktop-shell/package.json',
+      '!packages/desktop/package.json',
       '!packages/live-host/package.json',
+      '!packages/mobile-shell/package.json',
       'packages/channels/*/package.json',
       'integrations/*/package.json',
       'patches/**',
@@ -1118,22 +1071,98 @@ describe('package scripts', () => {
     expect(workflow.on.push.paths).toEqual(expectedPaths);
   });
 
-  it('builds the standalone qwen-live daemon in the root build order', () => {
+  it('includes the standalone qwen-live daemon in recursive root builds', () => {
     const buildScript = readFileSync(
       path.join(root, 'scripts/build.js'),
       'utf8',
     );
 
-    // The qwen-live e2e harness spawns packages/qwen-live/dist/index.js and
-    // the workspace unit tests run from src, so this pin is what catches the
-    // root build silently dropping the package.
-    const startIndex = buildScript.indexOf('const buildOrder = [');
-    expect(startIndex).toBeGreaterThan(-1);
-    const buildOrder = buildScript.slice(
-      startIndex,
-      buildScript.indexOf('];', startIndex),
+    expect(buildScript).toContain('corepack pnpm -r');
+    expect(buildScript).not.toContain('!@qwen-code/qwen-live');
+    expect(readPackageJson().workspaces).toContain('packages/*');
+  });
+
+  it('detects an unapplied ink patch by a file the patch creates', () => {
+    const buildScript = readFileSync(
+      path.join(root, 'scripts/build.js'),
+      'utf8',
     );
-    expect(buildOrder).toContain("'packages/qwen-live',");
+    const sentinel = buildScript.match(
+      /'node_modules\/ink\/build\/([^']+)'/,
+    )?.[1];
+    expect(sentinel).toBeDefined();
+    expect(buildScript).toContain('npm run postinstall');
+
+    const inkPatch = readdirSync(path.join(root, 'patches')).find((name) =>
+      name.startsWith('ink+'),
+    );
+    expect(inkPatch).toBeDefined();
+    const created = readFileSync(path.join(root, 'patches', inkPatch), 'utf8')
+      .split(/^diff --git /m)
+      .find((file) =>
+        file.startsWith(`a/node_modules/ink/build/${sentinel} b/node_modules/`),
+      );
+    // The sentinel only proves the patch is missing if no published ink ships
+    // it, i.e. the patch must create the file rather than edit an existing one.
+    expect(created).toContain('new file mode');
+  });
+
+  it('keeps the root build above the heap ceiling that broke the CLI compile', () => {
+    const { build } = readPackageJson().scripts;
+    const cap = heapCap(build);
+    expect(cap).toBeDefined();
+    // The CLI's TypeScript compile crossed the previous 4 GiB ceiling on the
+    // shared pool and failed the Java daemon E2E leg before any test ran
+    // (#14835). Keep the build-time cap at or above the 6144 MB that fixed it.
+    expect(Number(cap)).toBeGreaterThanOrEqual(6144);
+  });
+
+  it('keeps the pnpm prepare build above the heap ceiling and the root build cap', () => {
+    const { nodeOptions } = parse(readWorkflow('pnpm-workspace.yaml'));
+    const pnpmCap = heapCap(nodeOptions);
+    const buildCap = heapCap(readPackageJson().scripts.build);
+    expect(pnpmCap).toBeDefined();
+    expect(buildCap).toBeDefined();
+    // The pnpm prepare path compiles the same CLI project that crossed the
+    // 4 GiB ceiling in #14823; #14827 raised this cap, so pin it beside the
+    // root build script instead of leaving one half of the fix unguarded.
+    expect(Number(pnpmCap)).toBeGreaterThanOrEqual(6144);
+    // pnpm replaces NODE_OPTIONS for every package script, so this cap — not
+    // the root build script's — governs `tsc --build` on both the explicit
+    // and install-time paths. A raise on the root entry point intended for
+    // that compile must be mirrored here.
+    expect(Number(pnpmCap)).toBeGreaterThanOrEqual(Number(buildCap));
+  });
+
+  it('selects the CLI dependency closure without selecting the same-named root', () => {
+    const buildScript = readFileSync(
+      path.join(root, 'scripts/build.js'),
+      'utf8',
+    );
+    const selector = buildScript.match(/\? '--filter "([^"]+)"/)?.[1];
+    expect(selector).toBeDefined();
+    const result = spawnSync(
+      'corepack',
+      ['pnpm', '--filter', selector, 'list', '--depth', '-1', '--json'],
+      { cwd: root, encoding: 'utf8', shell: process.platform === 'win32' },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const paths = JSON.parse(result.stdout).map((pkg) =>
+      path.relative(root, pkg.path).replaceAll('\\', '/'),
+    );
+    expect(paths).toEqual(
+      expect.arrayContaining([
+        'packages/cli',
+        'packages/core',
+        'packages/browser-use',
+        'packages/sdk-typescript',
+        'packages/web-shell',
+        'packages/web-templates',
+      ]),
+    );
+    expect(paths).not.toContain('');
+    expect(paths).not.toContain('packages/mobile-mcp');
+    expect(paths).not.toContain('packages/vscode-ide-companion');
   });
 
   it('keeps the Mem0 Extension manifest aligned with release versions', () => {
@@ -1187,6 +1216,81 @@ describe('package scripts', () => {
     expect(step).toContain('retry_arg=(--retry="${VITEST_RETRY}")');
     expect(step).toContain('npm run test:ci:workspaces -- "${retry_arg[@]}"');
     expect(step).toContain('npm run test:scripts -- "${retry_arg[@]}"');
+  });
+
+  it('drops DAC capabilities for root unit tests on both CI commands', () => {
+    // The permission-bit probes in the workspaces and scripts/tests ask the
+    // kernel, so on a root lane that keeps these capabilities every case
+    // they gate skips, without failing.
+    const step = getWorkflowStep(
+      getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
+      'Run tests and generate reports',
+    );
+    // The step's code, one command per entry: indentation, blank lines and
+    // comments do not change what runs, a commented-out line does.
+    const code = step
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#'));
+    const setpriv =
+      "test_runner=(setpriv '--bounding-set=-dac_override,-dac_read_search' '--inh-caps=-dac_override,-dac_read_search')";
+    const branch = code.indexOf('if [ "$(id -u)" -eq 0 ]; then');
+    expect(branch).toBeGreaterThan(0);
+    expect(code.slice(branch - 1, branch + 5)).toEqual([
+      'test_runner=()',
+      'if [ "$(id -u)" -eq 0 ]; then',
+      'chown -R 0 "$GITHUB_WORKSPACE" "$HOME"',
+      "echo 'Dropping DAC override capabilities for root unit tests'",
+      setpriv,
+      'fi',
+    ]);
+    // Nothing else touches it (no unset, read or reset), and both test
+    // commands run under it, with no unwrapped copy beside them.
+    expect(code.filter((line) => /\btest_runner\b/.test(line))).toEqual([
+      'test_runner=()',
+      setpriv,
+      '"${test_runner[@]}" npm run test:ci:workspaces -- "${retry_arg[@]}"',
+      '"${test_runner[@]}" npm run test:scripts -- "${retry_arg[@]}"',
+    ]);
+    expect(
+      code.filter((line) =>
+        /\bnpm run test:(?:ci:workspaces|scripts)\b/.test(line),
+      ),
+    ).toHaveLength(2);
+  });
+
+  it('keeps every copy of the permission-bit probe identical', () => {
+    // The probe is copied, not shared: each package that uses it keeps its
+    // own copy, and cli, core and browser-use also keep its tests (wecom
+    // inlines a smaller probe for its one case). A fix to one copy has to
+    // reach the others, or the packages measure differently.
+    const copies = {
+      'permission-bits.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+        'packages/sdk-typescript/test/test-utils',
+        'integrations/test-failure-explorer/src/test-utils',
+      ],
+      'permission-bits.test.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+      ],
+      'permission-bits.mocked-fs.test.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+      ],
+    };
+    for (const [file, dirs] of Object.entries(copies)) {
+      const [reference, ...others] = dirs.map((dir) =>
+        readFileSync(path.join(root, dir, file), 'utf8'),
+      );
+      others.forEach((text, i) => {
+        expect(text, `${file}: ${dirs[i + 1]} vs ${dirs[0]}`).toBe(reference);
+      });
+    }
   });
 
   it('bounds the CI unit step so a hang fails instead of stalling', () => {
@@ -1638,12 +1742,14 @@ describe('package scripts', () => {
     // The validation jobs reuse the anchored install step; only the anchor
     // definition plus prepare and publish appear as full textual copies.
     expect(installSteps.length).toBe(3);
+    for (const installStep of installSteps.slice(0, 2)) {
+      expect(installStep).toContain('npm run generate');
+    }
     for (const installStep of installSteps) {
       expect(installStep).toContain(
-        'npm ci --ignore-scripts --no-audit --progress=false',
+        'corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only',
       );
       expect(installStep).toContain('npm run postinstall');
-      expect(installStep).toContain('npm run generate');
       expect(installStep).not.toContain('QWEN_SKIP_PREPARE');
       expect(installStep).not.toContain('CI_BOT_PAT');
     }
@@ -1655,6 +1761,9 @@ describe('package scripts', () => {
     }
 
     const publishJob = getWorkflowJob(workflow, 'publish');
+    expect(getWorkflowStep(publishJob, 'Install Dependencies')).not.toContain(
+      'npm run generate',
+    );
     expect(publishJob.slice(0, publishJob.indexOf('steps:'))).not.toContain(
       'CI_BOT_PAT',
     );
@@ -1714,9 +1823,89 @@ describe('package scripts', () => {
       'npm publish --provenance "${publish_args[@]}"',
     );
     expect(releaseStepScript).toContain(
-      'Every channel package was already published; nothing shipped',
+      'corepack pnpm -r publish "${publish_args[@]}"',
     );
   });
+
+  it('publishes the generated CLI with a packer that keeps the ripgrep exec bit', () => {
+    // #12668: pnpm's packer writes 0644 for every entry outside `bin`, so a CLI
+    // published with it ships a vendored ripgrep that nobody can spawn. The
+    // generated CLI is the only package carrying vendored binaries and the only
+    // one `publish_package` is called for, so it alone goes back to npm.
+    expect(releaseStepScript).toContain("publish_package 'dist'");
+    expect(releaseStepScript).not.toContain('corepack pnpm publish');
+    expect(releaseStepScript).toContain(
+      'npm publish --provenance "${publish_args[@]}"',
+    );
+
+    // The gate runs in the arm that produces `dist`, before the publish step
+    // consumes it, so no release can publish a tarball it never checked. It
+    // runs from the workflow-pinned scripts: a release ref that predates it
+    // would have no `scripts/check-release-tarball-exec-bits.mjs` of its own.
+    const buildPackageArm = releaseStepScript.slice(
+      releaseStepScript.indexOf('build-package)'),
+      releaseStepScript.indexOf('build-archives)'),
+    );
+    expect(buildPackageArm).toContain(
+      'node .release-workflow/scripts/check-release-tarball-exec-bits.mjs dist',
+    );
+  });
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'npm pack keeps the exec bit on every vendored ripgrep in the CLI tarball',
+    () => {
+      // The archive is where the bit is lost (#12668), so assert on its
+      // recorded modes rather than on the staged tree. A `-win32` directory
+      // ships a 0644 `rg.exe` by design and the gate excludes it structurally.
+      const fixture = mkdtempSync(path.join(tmpdir(), 'cli-rg-exec-bit-'));
+      try {
+        writeVendoredRipgrepFixture(fixture, {
+          'x64-linux': 0o755,
+          'arm64-darwin': 0o755,
+          'x64-win32': 0o644,
+        });
+        const { entries } = checkReleaseTarballExecBits(fixture);
+        expect(entries.map(([name]) => name)).toEqual([
+          'package/vendor/ripgrep/arm64-darwin/rg',
+          'package/vendor/ripgrep/x64-linux/rg',
+        ]);
+        for (const [name, mode] of entries) {
+          expect(mode & 0o111, name).toBe(0o111);
+        }
+      } finally {
+        rmSync(fixture, { force: true, recursive: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'release tarball gate rejects a vendored ripgrep without an exec bit',
+    () => {
+      const fixture = mkdtempSync(path.join(tmpdir(), 'cli-rg-gate-'));
+      try {
+        writeVendoredRipgrepFixture(fixture, { 'x64-linux': 0o644 });
+        expect(() => checkReleaseTarballExecBits(fixture)).toThrow(
+          /package\/vendor\/ripgrep\/x64-linux\/rg: 0644 lacks an exec bit/,
+        );
+
+        // A package whose vendor/ripgrep holds no unix platform must not pass
+        // vacuously: the gate refuses before it ever packs.
+        const empty = mkdtempSync(path.join(tmpdir(), 'cli-rg-none-'));
+        try {
+          mkdirSync(path.join(empty, 'vendor', 'ripgrep'), {
+            recursive: true,
+          });
+          expect(() => checkReleaseTarballExecBits(empty)).toThrow(
+            /no unix vendored ripgrep under/,
+          );
+        } finally {
+          rmSync(empty, { force: true, recursive: true });
+        }
+      } finally {
+        rmSync(fixture, { force: true, recursive: true });
+      }
+    },
+  );
 
   it('meets npm trusted publishing requirements', () => {
     for (const [workflowPath, jobName, publishStepName] of [
@@ -1771,6 +1960,7 @@ describe('package scripts', () => {
       'packages/mobile-mcp',
       'packages/node-repl',
       'packages/sdk-typescript',
+      'packages/web-shell',
     ]) {
       const packageJson = JSON.parse(
         readFileSync(path.join(root, packageDirectory, 'package.json'), 'utf8'),
@@ -1824,7 +2014,7 @@ describe('package scripts', () => {
 
       expect(installStep).toContain("QWEN_SKIP_PREPARE: '1'");
       expect(installStep).toContain(
-        'npm ci --prefer-offline --no-audit --progress=false',
+        'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only',
       );
       if (armsHooks) {
         expect(installStep).toContain('git config core.hooksPath .husky');

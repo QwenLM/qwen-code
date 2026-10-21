@@ -66,17 +66,20 @@ export function resolveActionSessionContext(
   );
 }
 
+/**
+ * The Live workspace is the daemon's own, and it announces it by tagging that
+ * entry `kind: 'live'` — a tag no daemon old enough to lack Live session
+ * routing has ever sent. That tag is therefore the whole precondition.
+ *
+ * It deliberately does not ask for `multi_workspace_sessions`. That feature
+ * counts *user* workspaces (`listEntries()` drops the Live entry as internal),
+ * so a daemon serving a single project withholds it while still advertising
+ * the Live workspace in the very same payload — and a Live session could not
+ * be opened at all. The checks below are what actually keep this safe.
+ */
 export function resolveLiveSessionWorkspaceCwd(
   capabilities: DaemonCapabilities,
 ): string {
-  if (
-    !Array.isArray(capabilities.features) ||
-    !capabilities.features.includes('multi_workspace_sessions')
-  ) {
-    throw new Error(
-      'Daemon does not advertise multi-workspace session routing',
-    );
-  }
   const workspaces = Array.isArray(capabilities.workspaces)
     ? capabilities.workspaces
     : [];

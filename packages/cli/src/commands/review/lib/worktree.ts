@@ -1431,6 +1431,90 @@ export function localFilterCommands(worktree: string): string[] {
  * path the screen exists to cover. Only the target's existence is asked here;
  * origin-resolution of what a hit came from is #10441.
  */
+/**
+ * The unflattened filter screen for a tree, or null when its repository
+ * could not be resolved.
+ *
+ * `checkoutFilterCommands` and `localFilterCommands` flatten this into one
+ * list for callers that refuse on any hit. A caller that measures instead —
+ * `worktreeResidue`, and base-tree's reuse and post-build checks — needs the
+ * halves apart: the `filters` it can BLANK on its own git invocation
+ * (`filterBlankEnv`), and the `unread`/`dangling` config it could not see to
+ * the bottom and therefore must refuse on.
+ */
+export function filterScreenForTree(worktree: string): FilterScreen | null {
+  return screenForTree(worktree);
+}
+
+/**
+ * Whether git's FULLY resolved config for this tree — system and global
+ * scopes included, which the repo-local screen above deliberately never
+ * reads — would transform any tracked file's bytes between disk and blob: a
+ * content filter (`filter.<name>.smudge|clean|process`) from ANY scope, or
+ * line-ending conversion (`core.autocrlf` / `core.eol`).
+ *
+ * The one caller is base-tree's `settleCheckoutIndex`, whose blanked
+ * measurement spawns read no user config at all (global and system are cut
+ * at the source, so a driver the tree's own `.gitattributes` selects cannot
+ * run). A filter that lives only in the reviewer's `~/.gitconfig` — git-lfs
+ * installed the default way is the common one — still smudged the checkout,
+ * so without a settle the blanked measurement compares smudged bytes against
+ * the cleaned blob and refuses every such tree. Git itself answers the
+ * question, with its own scope and include resolution, so the trigger sees
+ * exactly what a checkout would run. Reading config executes nothing.
+ *
+ * False on any failure: a config git cannot read to the bottom is one the
+ * measurement's own screen refuses on (repo-local) or never reads (global
+ * and system, cut at the source), and an unsettled tree over one simply
+ * keeps its fail-closed answer.
+ */
+export function resolvedContentTransformForTree(worktree: string): boolean {
+  const r = spawnSync(
+    'git',
+    [
+      'config',
+      '--get-regexp',
+      '^filter\\..*\\.(smudge|clean|process)$|^core\\.(autocrlf|eol)$',
+    ],
+    {
+      cwd: worktree,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+    },
+  );
+  // Exit 1 is "no key matched"; a hit is exit 0. Anything else — spawn
+  // failure, git's own error — answers false, per the docblock.
+  if (r.status !== 0 || typeof r.stdout !== 'string') return false;
+  // A defined filter transforms whatever its attributes select, so its key
+  // alone is a hit; the line-ending keys are hits only at a transforming
+  // VALUE — an explicit `autocrlf = false` is the cross-platform default
+  // spelled out, and settling over it would cost every such repository the
+  // second-long wait for nothing.
+  for (const line of r.stdout.split('\n')) {
+    const space = line.indexOf(' ');
+    const key = (space === -1 ? line : line.slice(0, space)).toLowerCase();
+    // A key spelled with no `=` is git's boolean true.
+    const value =
+      space === -1
+        ? 'true'
+        : line
+            .slice(space + 1)
+            .trim()
+            .toLowerCase();
+    if (key.startsWith('filter.')) return true;
+    if (key === 'core.autocrlf' && (value === 'true' || value === 'input')) {
+      return true;
+    }
+    if (
+      key === 'core.eol' &&
+      (value === 'crlf' || (value === 'native' && process.platform === 'win32'))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function checkoutFilterCommands(worktree: string): string[] {
   const screen = screenForTree(worktree);
   if (screen === null) return [UNRESOLVED_REPO];

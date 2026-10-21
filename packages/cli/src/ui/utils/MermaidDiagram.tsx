@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ConfigContext } from '../contexts/ConfigContext.js';
 import React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
@@ -42,6 +43,8 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
   availableTerminalHeight,
 }) => {
   const writeRaw = useTerminalOutput();
+  const config = React.useContext(ConfigContext);
+  const sandboxed = Boolean(config?.getShellExecutionSandbox?.());
   const preparedTerminalImageSequence = React.useRef<string | null>(null);
   const [imageState, setImageState] = React.useState<MermaidImageState | null>(
     null,
@@ -51,14 +54,16 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
     availableTerminalHeight ?? 'auto'
   }`;
   const image =
-    imageState?.key === imageKey && !isPending ? imageState.result : null;
+    imageState?.key === imageKey && !isPending && !sandboxed
+      ? imageState.result
+      : null;
   const visual = React.useMemo(
     () => renderMermaidVisual(source, innerWidth),
     [source, innerWidth],
   );
 
   React.useEffect(() => {
-    if (isPending) {
+    if (isPending || sandboxed) {
       setImageState(null);
       return;
     }
@@ -93,7 +98,14 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
       cancelled = true;
       abortController.abort();
     };
-  }, [availableTerminalHeight, imageKey, innerWidth, isPending, source]);
+  }, [
+    availableTerminalHeight,
+    imageKey,
+    innerWidth,
+    isPending,
+    source,
+    sandboxed,
+  ]);
 
   const kittySequence =
     image?.kind === 'terminal-image' &&

@@ -15,6 +15,9 @@
  *  - the callbacks the mount hands a dialog do the real thing — persist through
  *    the data helpers, reach the composer owner, or report a seam this shell
  *    does not wire rather than closing over a no-op;
+ *  - a dialog outcome ink writes to the transcript reaches both the transcript
+ *    and the chat recording, while one ink keeps transient stays on the shell's
+ *    notice slot;
  *  - the help request routes to HelpOverlay and drives tab/scroll keys through
  *    the mount's own useKeyboard handler;
  *  - an unknown dialog kind hits the never-default and throws.
@@ -29,6 +32,8 @@ import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
 import {
   addWorkspaceDirectory,
   applyModelSelection,
+  applyMcpServerAction,
+  applyThemeSelection,
   removeWorkspaceDirectory,
 } from './dialog-data.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
@@ -42,8 +47,6 @@ const mocks = vi.hoisted(() => {
     dialogProps: {} as Record<string, Record<string, unknown>>,
     /** Line count the stubbed help-content builders report, to pin the scroll bound. */
     helpLineCount: 0,
-    /** Terminal height the mocked renderer reports, to pin the help body budget. */
-    terminalHeight: 40,
   };
   // Renders the dialog-name marker but keeps the props the mount passed, so
   // wiring (callbacks, data builders) stays observable from these tests.
@@ -87,10 +90,7 @@ vi.mock('@opentui/react', () => ({
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.keyboardHandlers.push(handler);
   },
-  useTerminalDimensions: () => ({
-    width: 120,
-    height: mocks.state.terminalHeight,
-  }),
+  useTerminalDimensions: () => ({ width: 120, height: 40 }),
   useRenderer: () => ({
     addInputHandler: () => {},
     removeInputHandler: () => {},
@@ -142,7 +142,7 @@ vi.mock('./dialog-data.js', () => ({
   removeWorkspaceDirectory: vi.fn(),
   buildMcpServers: () => [],
   enrichMcpOAuthState: async () => [],
-  applyMcpServerAction: async () => ({ message: null, changed: false }),
+  applyMcpServerAction: vi.fn(async () => ({ message: null, changed: false })),
   getMcpServerTools: () => [],
   getMcpServerResources: () => [],
   buildExtensionRows: () => [],
@@ -155,7 +155,7 @@ vi.mock('./dialog-data.js', () => ({
   buildModelEntries: () => [],
   computeModelDialogInitialKey: () => undefined,
   applyModelSelection: vi.fn(async () => ({ ok: true as const })),
-  applyThemeSelection: () => ({ applied: undefined, error: undefined }),
+  applyThemeSelection: vi.fn(() => ({ applied: undefined, error: undefined })),
 }));
 
 vi.mock('./help-overlay.js', () => ({ HelpOverlay: mocks.stub('help') }));
@@ -229,6 +229,8 @@ function mount(
     onClose?: () => void;
     fillInput?: (text: string) => void;
     onSelectSetting?: (name: string, scope: unknown) => void;
+    onRestartRequest?: () => void;
+    availableTerminalHeight?: number;
   } = {},
 ) {
   return render(
@@ -242,6 +244,8 @@ function mount(
       notify={overrides.notify ?? (() => {})}
       fillInput={overrides.fillInput}
       onSelectSetting={overrides.onSelectSetting}
+      onRestartRequest={overrides.onRestartRequest}
+      availableTerminalHeight={overrides.availableTerminalHeight ?? 35}
     />,
   );
 }
@@ -303,7 +307,6 @@ describe('OpenTuiDialogMount routing', () => {
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.dialogProps = {};
     mocks.state.helpLineCount = 0;
-    mocks.state.terminalHeight = 40;
     vi.clearAllMocks();
     mockGetHookSystem.mockReset();
   });
@@ -313,6 +316,58 @@ describe('OpenTuiDialogMount routing', () => {
     for (const [expected, request] of REQUESTS) {
       const { unmount } = mount(request);
       expect(screen.getByText(expected)).toBeTruthy();
+      unmount();
+    }
+  });
+
+  it('hands the region height to the approval-mode dialog, as it does for theme/settings/model', () => {
+    // The approval-mode dialog windows its list from this budget; without the
+    // forwarding its five rows never window and overflow the region.
+    mount(
+      { dialog: 'approval-mode' },
+      { notify: () => {}, availableTerminalHeight: 20 },
+    );
+    expect(
+      mocks.state.dialogProps['approval-mode']?.['availableTerminalHeight'],
+    ).toBe(20);
+  });
+
+  it('hands the region height to the settings dialog, which windows its list from it', () => {
+    // The settings list windows to the region it is handed; without the
+    // forwarding it silently reverts to the flat eight-row window and
+    // overpaints the frame on a short terminal.
+    mount({ dialog: 'settings' }, { availableTerminalHeight: 20 });
+    expect(
+      mocks.state.dialogProps['settings']?.['availableTerminalHeight'],
+    ).toBe(20);
+  });
+
+  it('forwards settings restart requests to the shell owner', () => {
+    const onRestartRequest = vi.fn();
+    mount({ dialog: 'settings' }, { onRestartRequest });
+
+    dialogProp('settings', 'onRestartRequest')();
+
+    expect(onRestartRequest).toHaveBeenCalledOnce();
+  });
+
+  it('hands the region height to every region-mounted dialog leg', () => {
+    // The budget is a property of the region, not of the legs that window:
+    // the legs that window a list size themselves from it (the permission
+    // rule and directory lists, the delete/resume session picker, the diff
+    // and subagents scrollboxes, the hooks and extension lists, the MCP tool
+    // and resource lists, the arena pickers, the theme/effort/output-style
+    // lists) and the rest ignore it. A leg left unforwarded renders
+    // content-height inside the fixed, clipped region, where the clip takes
+    // rows the keys still commit.
+    for (const [dialog, request] of REQUESTS) {
+      // The help overlay's budget arrives as its derived bodyRows.
+      if (dialog === 'help') continue;
+      const { unmount } = mount(request, { availableTerminalHeight: 23 });
+      expect(
+        mocks.state.dialogProps[dialog]?.['availableTerminalHeight'],
+        `mount did not forward the region budget to ${dialog}`,
+      ).toBe(23);
       unmount();
     }
   });
@@ -395,7 +450,7 @@ describe('OpenTuiDialogMount routing', () => {
   it('drives help tab cycling and scrolling through its own keyboard handler', () => {
     // 23 lines over the 18-row window leave five offsets that actually move it.
     mocks.state.helpLineCount = 23;
-    mount({ dialog: 'help' });
+    mount({ dialog: 'help' }, { availableTerminalHeight: 31 });
     expect(mocks.state.keyboardHandlers.length).toBeGreaterThan(0);
     const send = (name: string, shift = false) => {
       act(() => {
@@ -408,7 +463,7 @@ describe('OpenTuiDialogMount routing', () => {
     // The overlay gets the popup area, not the raw terminal: the 120 columns
     // this renderer reports cap at 100, the width ink hands its Help dialog.
     expect(overlay().width).toBe(100);
-    expect(overlay().bodyRows).toBe(34);
+    expect(overlay().bodyRows).toBe(25);
     expect(overlay().tab).toBe('general');
     // The general tab has no scrollable window, so the arrow keys are inert.
     send('down');
@@ -433,12 +488,11 @@ describe('OpenTuiDialogMount routing', () => {
   });
 
   it('pages the help command list by the window a short terminal leaves', () => {
-    // The same 23 lines, but a 24-row terminal budgets 18 body rows and the tab
+    // The same 23 lines, but a 24-row region budgets 18 body rows and the tab
     // chrome claims four of them: the window narrows to 14, so a page covers 14
     // lines and stops at nine rather than the five offsets a roomy terminal has.
     mocks.state.helpLineCount = 23;
-    mocks.state.terminalHeight = 24;
-    mount({ dialog: 'help' });
+    mount({ dialog: 'help' }, { availableTerminalHeight: 24 });
     const send = (name: string) => {
       act(() => {
         for (const handler of mocks.state.keyboardHandlers)
@@ -455,6 +509,17 @@ describe('OpenTuiDialogMount routing', () => {
     expect(helpOverlay().scroll).toBe(0);
   });
 
+  it('budgets the help overlay from the region, not the raw terminal height', () => {
+    // The overlay renders inside the popup region, whose budget already accounts
+    // for the banner, the status bar and the composer — none of them occupied
+    // while it is open. Deriving the body from the raw terminal height instead
+    // leaves those rows unused inside the region and windows the command list
+    // short of ink's fixed 18.
+    mocks.state.helpLineCount = 23;
+    mount({ dialog: 'help' }, { availableTerminalHeight: 19 });
+    expect(helpOverlay().bodyRows).toBe(13);
+  });
+
   it('closes the help overlay on escape', () => {
     const onClose = vi.fn();
     render(
@@ -466,6 +531,7 @@ describe('OpenTuiDialogMount routing', () => {
         commands={[]}
         onClose={onClose}
         notify={() => {}}
+        availableTerminalHeight={19}
       />,
     );
     act(() => {
@@ -565,6 +631,124 @@ describe('OpenTuiDialogMount routing', () => {
     expect(addItem).not.toHaveBeenCalled();
     expect(recordSlashCommand).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  // ink's split, ported: the outcomes it writes to the transcript must survive
+  // the dialog closing, and the commands it records must replay on resume.
+  const persistedOutcomes: Array<{
+    request: OpenTuiDialogRequest;
+    args: string[];
+    rawCommand: string | null;
+    type: string;
+  }> = [
+    {
+      request: { dialog: 'editor' },
+      args: ['Editor set to vim.'],
+      rawCommand: '/editor',
+      type: 'info',
+    },
+    {
+      request: { dialog: 'effort' },
+      args: ['Reasoning effort: high (requested; clamped per model).'],
+      rawCommand: '/effort',
+      type: 'info',
+    },
+    {
+      request: { dialog: 'output-style' },
+      args: ['Failed to set "general.outputStyle": disk full', 'error'],
+      rawCommand: '/output-style',
+      type: 'error',
+    },
+    {
+      // /delete is in SLASH_COMMANDS_SKIP_RECORDING: added, not recorded.
+      request: { dialog: 'delete' },
+      args: ['Failed to delete session.', 'error'],
+      rawCommand: null,
+      type: 'error',
+    },
+    {
+      request: { dialog: 'auth', openedViaCommand: true },
+      args: ['Authenticated with Qwen OAuth.'],
+      rawCommand: '/auth',
+      type: 'info',
+    },
+    {
+      // The boot auth-error open is not a command, so ink records nothing.
+      request: { dialog: 'auth', initialError: 'Token expired.' },
+      args: ['Authenticated with Qwen OAuth.'],
+      rawCommand: null,
+      type: 'info',
+    },
+    {
+      request: { dialog: 'arena', mode: 'select' },
+      args: ['Arena session started.'],
+      rawCommand: '/arena select',
+      type: 'info',
+    },
+    {
+      request: { dialog: 'arena', mode: 'stop' },
+      args: ['No arena session is running.', 'error'],
+      rawCommand: '/arena stop',
+      type: 'error',
+    },
+  ];
+
+  it.each(persistedOutcomes)(
+    '%# writes the outcome ink persists for $request.dialog',
+    ({ request, args, rawCommand, type }) => {
+      mount(request);
+      dialogProp(request.dialog, 'notify')(...args);
+
+      const text = args[0]!;
+      expect(addItem).toHaveBeenCalledTimes(1);
+      expect(addItem.mock.calls[0]![0]).toEqual({ type, text });
+      if (rawCommand) {
+        expect(recordSlashCommand).toHaveBeenCalledWith({
+          phase: 'result',
+          rawCommand,
+          outputHistoryItems: [{ type, text }],
+        });
+      } else {
+        expect(recordSlashCommand).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('keeps the theme, mcp and arena-start outcomes off the transcript', async () => {
+    const notices: string[] = [];
+    const notify = (text: string) => notices.push(text);
+
+    // ink reports these inside the dialog or through addItem-free paths, so a
+    // transcript row here would outlive state the user can still change.
+    vi.mocked(applyThemeSelection).mockReturnValueOnce({
+      applied: 'Ayu',
+      error: undefined,
+    });
+    const theme = mount({ dialog: 'theme' }, { notify });
+    dialogProp('theme', 'onSelect')('Ayu', 'user');
+    theme.unmount();
+
+    vi.mocked(applyMcpServerAction).mockResolvedValueOnce({
+      message: 'Auth started.',
+      changed: false,
+    });
+    const mcp = mount({ dialog: 'mcp' }, { notify });
+    await act(async () => {
+      dialogProp('mcp', 'onServerAction')({ name: 'srv' }, 'auth');
+    });
+    mcp.unmount();
+
+    const arena = mount({ dialog: 'arena', mode: 'start' }, { notify });
+    dialogProp('arena', 'notify')('The arena session is already running.');
+    arena.unmount();
+
+    expect(notices).toEqual([
+      'Theme set to Ayu.',
+      'Auth started.',
+      'The arena session is already running.',
+    ]);
+    expect(addItem).not.toHaveBeenCalled();
+    expect(recordSlashCommand).not.toHaveBeenCalled();
   });
 
   it('throws for an unhandled dialog kind', () => {

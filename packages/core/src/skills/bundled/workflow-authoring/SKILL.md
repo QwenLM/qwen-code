@@ -38,7 +38,10 @@ The source is wrapped as an async IIFE, so top-level `await` and a top-level
 `return` are both legal — and a trailing expression is _not_ a return value.
 End every successful path with an explicit `return`.
 
-It is plain JavaScript, not TypeScript, and it cannot `import` anything.
+It is plain JavaScript, not TypeScript, and it cannot `import` anything. A
+script with a dynamic `import()` anywhere in it — even in a branch that never
+runs — is refused before it starts, so none of its agents runs first; do file,
+network, and package work inside an agent instead.
 
 The script may start with a literal `export const meta = {...}` declaration
 with `name`, `description`, and optionally `whenToUse` and
@@ -75,6 +78,22 @@ non-function element rejects the whole batch, and by then every `agent()` in it
 has already been admitted, counted against the caps, and spent — with its
 result discarded.
 
+Each list a single call takes — the thunks of `parallel()`, and the items and
+the stages of `pipeline()` — holds at most 4096 entries. A longer list rejects
+the whole call before any of its thunks or stages runs; it is never truncated.
+Like any invalid argument, that rejection can be caught, and inside an outer
+`parallel()`/`pipeline()` it becomes that slot's `null`. The limit is per call,
+not per run: split a larger input into batches of thunks and await each in
+turn. Batching does not lift the agent cap or the token budget.
+
+```js
+const thunks = files.map((file) => () => agent(`Summarize ${file}`));
+let summaries = [];
+for (let i = 0; i < thunks.length; i += 4096) {
+  summaries = summaries.concat(await parallel(thunks.slice(i, i + 4096)));
+}
+```
+
 A script must be deterministic so a resume replays the same call sequence.
 `Math.random()` throws, and so does all of `Date` — `Date()`, `new Date()`,
 `Date.now()`, `Date.parse()` and `Date.UTC()` alike. Pass timestamps in via
@@ -98,10 +117,12 @@ say explicitly what each one should read and whether it may edit files.
   `phase()` between groups rather than per dispatch.
 - `schema` (JSON Schema object) — the subagent must deliver its result by
   calling `structured_output` with arguments matching the schema; agent()
-  resolves to the validated object. After two in-conversation nudges without a
-  valid result, it resolves to null and the failure is recorded as "subagent
-  completed without calling StructuredOutput (after 2 in-conversation nudges)";
-  check for null.
+  resolves to the validated object. A schema that does not compile, or that
+  requires a property its own object forbids, makes agent() resolve to null
+  without starting the agent. Each failed submission hands its error back to
+  the agent, and the third failed submission stops it. With no valid result
+  agent() resolves to null and the failure states how many submissions failed
+  and the last error; check for null.
 - `agentType` (string) — resolves against the declarative-agents registry
   (`.qwen/agents/<name>.md`, project then user then built-in). Unresolved names
   make the admitted agent() resolve to null and record "agent({agentType}):
@@ -223,6 +244,8 @@ at its index.
   (clamped to 64).
 - 1000 `agent()` calls per run, override via `QWEN_CODE_MAX_WORKFLOW_AGENTS`
   (clamped to 10000). The call past the cap throws.
+- 4096 entries in each list of one `parallel()` or `pipeline()` call, with no
+  override.
 - 30-minute wall-clock cap per run, override via
   `QWEN_CODE_MAX_WORKFLOW_SECONDS` (applied as given). A fan-out near the agent
   cap will not fit inside the default cap.
@@ -299,10 +322,9 @@ a nested `workflow()` call throws.
 
 It takes one of two forms. `workflow('<name>')` resolves a name against
 `<projectRoot>/.qwen/workflows` (project scope, also surfaced as `/<name>`
-slash commands) and `~/.qwen/workflows` (user scope, lower precedence when both
-define the same name); an active extension's workflow is always named
+slash commands) and `~/.qwen/workflows` (user scope). Local hosts may also enable trusted ancestor `.qwen/workflows` directories up to the nearest Git root, as project scope. Lookup prefers the current target, nearest trusted ancestors, then user scope; project saves remain in the current session target. An active extension's workflow is always named
 `'<extension>:<name>'`. `workflow({ scriptPath: '<absolute path>' })` loads a
-script file directly from either of those directories, an active extension's
+script file directly from either base directory, a direct legal `<name>.js` file in an admitted ancestor directory, an active extension's
 workflow file, or the generated-scripts root
 (`$QWEN_CODE_PROJECT_DIR/workflows/generated` — the per-project runtime dir,
 not the project tree); any other path is refused. A bare string is always a name: a path passed as a string is rejected
@@ -327,10 +349,16 @@ its prompt and opts chained in call order, so calls whose rolling prefix-hash
 still matches are served from cache for the longest unchanged prefix, and the
 first changed or missing call onward runs live. Post-processing after the last
 agent can therefore change freely without losing the cache. Pass the same
-`args` — they seed the chain, so different args re-run everything.
+`args` — they seed the chain, so different args re-run everything. A run whose
+journal is no longer on disk has nothing to resume: the call is refused before
+any agent runs, so start it again without `resumeFromRunId`. A run id that is
+still running, paused, or not yet exited is refused too, since a second start
+would run two copies of its agents against one journal. A run whose process
+exited mid-run is later listed as failed with an `interrupted` error, and
+resumes like any other.
 
-The journal is one JSON line per event: a `started` line when an agent is
-dispatched, then a `result` line when it returns a value or a `failed` line
+The journal is one JSON line per event: a `launched` line when the run starts
+(never on a resume), a `started` line when an agent is dispatched, then a `result` line when it returns a value or a `failed` line
 when it settles without one. Only `result` lines feed the resume cache. A
 `started` line with neither after it means the run was interrupted with that
 agent in flight — not that the agent is broken. Read the journal before
@@ -342,6 +370,13 @@ Runs appear in the background-tasks view and the `/workflows` dialog (live
 phase tree, token usage, cooperative pause/resume, cancel);
 `run_in_background: true` returns a run handle immediately in the interactive
 TUI and delivers completion through the conversation.
+
+Saved `/<name>` commands typed in the interactive TUI's ink renderer stay in the foreground:
+watch the live tool card; `/workflows <runId>` shows the run after it settles.
+Completion displays the result and delivers it to the model through a
+notification, without another user prompt.
+The OpenTUI renderer does not yet run client-scheduled tools; there, ask the
+model to call `Workflow({ name: '<name>' })` instead.
 
 ## Worked example
 

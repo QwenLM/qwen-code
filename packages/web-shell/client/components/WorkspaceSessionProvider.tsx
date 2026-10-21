@@ -15,6 +15,11 @@ import {
 } from '@qwen-code/sdk/daemon';
 import { App, type WebShellProps } from '../App';
 import {
+  WebShellNavigationBoundary,
+  useWebShellNavigation,
+  type WebShellUrlNavigationOptions,
+} from '../navigation';
+import {
   WEB_SHELL_HISTORY_PAGE_SIZE,
   WEB_SHELL_MAX_TRANSCRIPT_BLOCKS,
 } from '../constants/sessions';
@@ -50,6 +55,7 @@ function withChrome(
 }
 
 interface WorkspaceSessionProviderProps {
+  urlNavigation?: WebShellUrlNavigationOptions;
   sessionId?: string;
   workspaceId?: string;
   workspaceCwd?: string;
@@ -64,6 +70,36 @@ interface WorkspaceSessionProviderProps {
 }
 
 export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
+  if (!props.urlNavigation)
+    return <ResolvedWorkspaceSessionProvider {...props} />;
+  return (
+    <WebShellNavigationBoundary
+      options={props.urlNavigation}
+      externalTarget={{
+        sessionId: props.sessionId,
+        workspaceId: props.workspaceId,
+        workspaceCwd: props.workspaceCwd,
+        sessionContext: props.sessionContext,
+      }}
+      onSessionIdChange={props.webShellProps.onSessionIdChange}
+    >
+      {(target, onSessionIdChange) => (
+        <ResolvedWorkspaceSessionProvider
+          {...props}
+          sessionId={target.sessionId}
+          workspaceId={target.workspaceId}
+          workspaceCwd={target.workspaceCwd}
+          sessionContext={target.sessionContext}
+          webShellProps={{ ...props.webShellProps, onSessionIdChange }}
+        />
+      )}
+    </WebShellNavigationBoundary>
+  );
+}
+
+function ResolvedWorkspaceSessionProvider(
+  props: WorkspaceSessionProviderProps,
+) {
   const {
     sessionId,
     workspaceId,
@@ -162,6 +198,7 @@ function WorkspaceSessionProviderWorkspace({
   chromeLanguage,
   webShellProps: appProps,
 }: WorkspaceSessionProviderProps) {
+  const navigation = useWebShellNavigation();
   const webShellProps = withChrome(appProps, chromeTheme, chromeLanguage);
   const workspace = useWorkspace();
   const workspaceActions = useWorkspaceActions();
@@ -356,6 +393,7 @@ function WorkspaceSessionProviderWorkspace({
         actionLabel={t('session.new')}
         theme={surfaceTheme(webShellProps.theme)}
         onAction={() => {
+          navigation?.beginSessionNavigation();
           setUsePrimaryNewSession(true);
           webShellProps.onSessionIdChange?.(undefined, undefined);
         }}
@@ -427,6 +465,7 @@ function StandaloneSessionGate({
 }: WorkspaceSessionProviderProps & {
   attachedSessionId?: string;
 }) {
+  const navigation = useWebShellNavigation();
   const webShellProps = withChrome(appProps, chromeTheme, chromeLanguage);
   const workspace = useWorkspace();
   const [attempt, setAttempt] = useState(0);
@@ -600,6 +639,7 @@ function StandaloneSessionGate({
         onAction={
           webShellProps.onSessionIdChange
             ? () => {
+                navigation?.beginSessionNavigation();
                 webShellProps.onSessionIdChange?.(
                   undefined,
                   undefined,

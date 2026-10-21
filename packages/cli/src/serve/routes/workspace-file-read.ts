@@ -508,7 +508,7 @@ async function handleGetGlob(
       includeIgnored,
       maxResults: cap + 1,
     });
-    const truncated = probe.length > cap;
+    const truncated = probe.truncated === true || probe.length > cap;
     const trimmed = truncated ? probe.slice(0, cap) : probe;
     // Use the shared `workspaceRelative` helper so a root match
     // (e.g. `pattern=.` resolving to the workspace itself) renders

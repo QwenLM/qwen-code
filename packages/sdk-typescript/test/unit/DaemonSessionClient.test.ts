@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { DaemonAttachmentUploadError } from '../../src/daemon/DaemonAttachmentUploadError.js';
 import {
   DaemonClient,
   DaemonPendingPromptLimitError,
@@ -217,7 +218,11 @@ describe('DaemonSessionClient', () => {
       },
     });
 
-    await expect(session.continueSession()).resolves.toEqual({
+    await expect(
+      session.continueSession(undefined, {
+        confirmCancellation: 'legacy-daemon',
+      }),
+    ).resolves.toEqual({
       accepted: false,
       interruption: 'none',
     });
@@ -227,6 +232,10 @@ describe('DaemonSessionClient', () => {
       '/session/s-1/continue',
     ]);
     expect(calls[2]?.headers['x-qwen-client-id']).toBe('fresh-client');
+    expect([calls[0]?.body, calls[2]?.body]).toEqual([
+      JSON.stringify({ confirmCancellation: 'legacy-daemon' }),
+      JSON.stringify({ confirmCancellation: 'legacy-daemon' }),
+    ]);
   });
 
   it('does not retry an unknown continuation admission outcome', async () => {
@@ -876,6 +885,19 @@ describe('DaemonSessionClient', () => {
           lastEventId: 7,
           compactedReplay: [{ id: 1, v: 1, type: 'session_update', data: {} }],
           liveJournal: [{ id: 7, v: 1, type: 'session_update', data: {} }],
+          lifecycleReplay: [
+            {
+              id: 6,
+              v: 1,
+              type: 'session_update',
+              data: {
+                _meta: {
+                  executionLifecycle: { executionId: 'only-lifecycle' },
+                },
+              },
+            },
+          ],
+          lifecycleReplayIncomplete: true,
         });
       }
       return jsonResponse(500, { error: `unexpected ${req.url}` });
@@ -886,7 +908,12 @@ describe('DaemonSessionClient', () => {
     expect(session.replaySnapshot.compactedReplay).toHaveLength(1);
     expect(session.replaySnapshot.liveJournal).toHaveLength(1);
 
+    expect(session.replaySnapshot.lifecycleReplay).toHaveLength(1);
+    expect(session.replaySnapshot.lifecycleReplayIncomplete).toBe(true);
+    expect(JSON.stringify(session.session)).not.toContain('only-lifecycle');
     const consumed = session.consumeReplaySnapshot();
+    expect(consumed.lifecycleReplay).toHaveLength(1);
+    expect(session.replaySnapshot.lifecycleReplay).toBeUndefined();
     expect(consumed.compactedReplay).toHaveLength(1);
     expect(consumed.liveJournal).toHaveLength(1);
     expect(session.replaySnapshot.compactedReplay).toHaveLength(0);
@@ -1300,6 +1327,83 @@ describe('DaemonSessionClient', () => {
       calls.filter((call) => call.url.endsWith('/attachments/media-1')),
     ).toHaveLength(2);
   });
+
+  it.each(['create', 'chunk'] as const)(
+    'repairs identity only before chunk upload allocation (%s)',
+    async (failureAt) => {
+      let rejected = false;
+      const size = 524289;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/capabilities'))
+          return jsonResponse(200, {
+            features: ['session_attachment_chunk_upload'],
+          });
+        if (req.url.endsWith('/resume'))
+          return jsonResponse(200, {
+            sessionId: 's-1',
+            workspaceCwd: '/work/a',
+            attached: true,
+            clientId: 'client-2',
+            state: {},
+          });
+        if (
+          !rejected &&
+          ((failureAt === 'create' &&
+            req.url.endsWith('/attachment-uploads')) ||
+            (failureAt === 'chunk' && req.url.includes('/chunks?')))
+        ) {
+          rejected = true;
+          return jsonResponse(400, { code: 'invalid_client_id' });
+        }
+        if (req.url.endsWith('/attachment-uploads'))
+          return jsonResponse(201, {
+            uploadId: '12345678-1234-4234-8234-123456789abc',
+          });
+        if (req.url.includes('/chunks?'))
+          return jsonResponse(200, {
+            offset: Math.min(
+              Number(new URL(req.url).searchParams.get('offset')) + 524288,
+              size,
+            ),
+          });
+        if (req.method === 'DELETE') return new Response(null, { status: 204 });
+        return jsonResponse(200, {
+          type: 'resource',
+          attachmentId: 'test.bin',
+          mimeType: 'application/octet-stream',
+          size,
+        });
+      });
+      const session = new DaemonSessionClient({
+        client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+        session: {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+        },
+      });
+      const upload = session.uploadAttachment(
+        new Blob([new Uint8Array(size)]),
+        'test.bin',
+        'application/octet-stream',
+      );
+      if (failureAt === 'create') {
+        await expect(upload).resolves.toMatchObject({ size });
+        expect(
+          calls.filter((call) => call.url.endsWith('/resume')),
+        ).toHaveLength(1);
+        expect(session.clientId).toBe('client-2');
+      } else {
+        await expect(upload).rejects.toBeInstanceOf(
+          DaemonAttachmentUploadError,
+        );
+        expect(
+          calls.filter((call) => call.url.endsWith('/resume')),
+        ).toHaveLength(0);
+      }
+    },
+  );
 
   it('uploads session attachment through the authenticated session route', async () => {
     const reference = {
@@ -2084,6 +2188,31 @@ describe('DaemonSessionClient', () => {
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
   });
 
+  it('forwards send-now for queued mid-turn messages with clientId', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { requested: false }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'session with/slash',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.sendMidTurnMessagesNow()).resolves.toEqual({
+      requested: false,
+    });
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/session%20with%2Fslash/mid-turn-messages/send-now',
+    );
+    expect(calls[0]?.method).toBe('POST');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
   it('maps pending prompt HTTP failures through DaemonClient errors', async () => {
     const { fetch } = recordingFetch(() =>
       jsonResponse(404, { error: 'not found' }),
@@ -2407,7 +2536,7 @@ describe('DaemonSessionClient', () => {
     }
   });
 
-  it('coalesces a prompt abort with an explicit session cancel', async () => {
+  it('keeps a mechanical prompt abort separate from a later explicit cancel', async () => {
     let eventsController:
       | ReadableStreamDefaultController<Uint8Array>
       | undefined;
@@ -2468,16 +2597,68 @@ describe('DaemonSessionClient', () => {
     const explicitCancel = session.cancel();
     await vi.waitFor(() => {
       expect(calls.filter((call) => call.url.endsWith('/cancel'))).toHaveLength(
-        1,
+        2,
       );
     });
 
+    expect(
+      calls
+        .filter((call) => call.url.endsWith('/cancel'))
+        .map((call) => JSON.parse(call.body!)),
+    ).toEqual([{ _meta: { 'qwen.cancelReason': 'interrupted' } }, {}]);
     resolveCancel(new Response(null, { status: 204 }));
     await explicitCancel;
     await prompt;
     eventsController?.close();
     eventsAbort.abort();
     await eventPump;
+  });
+
+  it('sends lifecycle interruption independently of a later user cancellation', async () => {
+    let release!: () => void;
+    const { fetch, calls } = recordingFetch((request) => {
+      const body = JSON.parse(request.body ?? '{}');
+      if (body._meta?.['qwen.cancelReason'] === 'interrupted') {
+        return new Promise<Response>((resolve) => {
+          release = () => resolve(new Response(null, { status: 204 }));
+        });
+      }
+      return new Response(null, { status: 204 });
+    });
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: { sessionId: 's-1', workspaceCwd: '/work/a', attached: true },
+    });
+    const interruption = session.interrupt();
+    await session.cancel();
+    expect(calls.map((request) => JSON.parse(request.body ?? '{}'))).toEqual([
+      { _meta: { 'qwen.cancelReason': 'interrupted' } },
+      {},
+    ]);
+    release();
+    await interruption;
+  });
+
+  it('coalesces duplicate public cancellations with the existing request shape', async () => {
+    const { fetch } = recordingFetch(() => new Response(null, { status: 204 }));
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    let release!: () => void;
+    const cancel = vi.spyOn(client, 'cancel').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const session = new DaemonSessionClient({
+      client,
+      session: { sessionId: 's-1', workspaceCwd: '/work/a', attached: true },
+    });
+    const first = session.cancel();
+    const duplicate = session.cancel();
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenCalledWith('s-1', undefined);
+    release();
+    await Promise.all([first, duplicate]);
   });
 
   it('releases a subscription prompt slot after a non-202 result', async () => {
@@ -3499,6 +3680,92 @@ describe('DaemonSessionClient clientId self-heal', () => {
       },
     });
   }
+
+  it('checks the caller before the first admission request', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(202, { promptId: 'p-1', lastEventId: 0 }),
+    );
+    const session = newSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+    const beforeDispatch = vi.fn(() => {
+      throw new DOMException('Caller expired', 'AbortError');
+    });
+
+    await expect(
+      session.submitPrompt(
+        { prompt: [{ type: 'text', text: 'hi' }] },
+        undefined,
+        beforeDispatch,
+      ),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(beforeDispatch).toHaveBeenCalledWith('client-1');
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each(['cancel', 'owner', 'client', 'unchanged', 'no-guard'] as const)(
+    'revalidates admission after client recovery: %s',
+    async (change) => {
+      let releaseResume!: (response: Response) => void;
+      const resume = new Promise<Response>((resolve) => {
+        releaseResume = resolve;
+      });
+      let promptCalls = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/resume')) return resume;
+        if (req.url.endsWith('/prompt')) {
+          promptCalls++;
+          return promptCalls === 1
+            ? invalidClientIdResponse()
+            : jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const session = newSession(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      );
+      const caller = new AbortController();
+      let ownerCurrent = true;
+      const beforeDispatch = vi.fn((clientId: string | undefined) => {
+        caller.signal.throwIfAborted();
+        if (!ownerCurrent || (change === 'client' && clientId !== 'client-1')) {
+          throw new DOMException('Caller expired', 'AbortError');
+        }
+      });
+      const pending = session.submitPrompt(
+        { prompt: [{ type: 'text', text: 'hi' }] },
+        undefined,
+        change === 'no-guard' ? undefined : beforeDispatch,
+      );
+      const result = pending.catch((error: unknown) => error);
+      await vi.waitFor(() =>
+        expect(calls.some((call) => call.url.endsWith('/resume'))).toBe(true),
+      );
+      if (change === 'cancel') caller.abort();
+      if (change === 'owner') ownerCurrent = false;
+      releaseResume(
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-2',
+          state: {},
+        }),
+      );
+
+      if (change === 'unchanged' || change === 'no-guard') {
+        expect(await result).toEqual({ promptId: 'p-1', lastEventId: 0 });
+        expect(promptCalls).toBe(2);
+        expect(calls.at(-1)?.headers['x-qwen-client-id']).toBe('client-2');
+      } else {
+        expect(await result).toMatchObject({ name: 'AbortError' });
+        expect(promptCalls).toBe(1);
+      }
+      if (change !== 'no-guard') {
+        expect(beforeDispatch.mock.calls).toEqual([['client-1'], ['client-2']]);
+      }
+    },
+  );
 
   it('retries a worktree prompt only after matching durable reattachment', async () => {
     let promptCalls = 0;

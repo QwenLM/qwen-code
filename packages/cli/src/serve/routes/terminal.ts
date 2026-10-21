@@ -19,6 +19,7 @@ const TERMINAL_HEARTBEAT_MS = 15_000;
 export interface WebTerminalWorkspaceContext {
   workspaceCwd: string;
   env: Readonly<NodeJS.ProcessEnv>;
+  command?: { file: string; args: string[] };
 }
 
 type TerminalControl =
@@ -202,6 +203,7 @@ export function createTerminalWsHandler(
             terminalId,
             workspaceCwd: workspace.workspaceCwd,
             env: workspace.env,
+            command: workspace.command,
           });
         } catch {
           result = { error: 'Failed to create terminal' } as const;

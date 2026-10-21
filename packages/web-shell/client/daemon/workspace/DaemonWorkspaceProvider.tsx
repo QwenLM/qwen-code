@@ -74,8 +74,11 @@ function recordProviderCopy(id: string, provided: boolean): void {
 }
 
 // Module-level sentinel for deferred-disposal StrictMode guard.
-// See the useEffect cleanup in DaemonWorkspaceProvider for details.
-let pendingDisposeClient: DaemonClient | undefined;
+// See the useEffect cleanup in DaemonWorkspaceProvider for details. A pool,
+// not a single slot: sequential provider remounts (multi-daemon focused-host
+// switches, #13727) clean up A then B inside one microtask window, and a
+// single slot would leak A.
+const pendingDisposeClients = new Set<DaemonClient>();
 
 /**
  * Delay before the one bounded retry after a retryable brand-fetch failure.
@@ -228,9 +231,7 @@ export function DaemonWorkspaceProvider({
     // Cancel any pending deferred disposal from a previous cleanup (handles
     // React StrictMode double-invocation: the first cleanup schedules a
     // disposal microtask, but the synchronous second mount cancels it).
-    if (pendingDisposeClient === client) {
-      pendingDisposeClient = undefined;
-    }
+    pendingDisposeClients.delete(client);
 
     let disposed = false;
     const initialPromise = getCapabilities();
@@ -266,10 +267,9 @@ export function DaemonWorkspaceProvider({
       // re-mount cancels disposal before the microtask fires, preserving
       // the memoized client. On real unmount or client replacement no
       // cancellation occurs and disposal proceeds.
-      pendingDisposeClient = client;
+      pendingDisposeClients.add(client);
       queueMicrotask(() => {
-        if (pendingDisposeClient === client) {
-          pendingDisposeClient = undefined;
+        if (pendingDisposeClients.delete(client)) {
           client.dispose();
         }
       });

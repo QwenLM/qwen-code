@@ -106,6 +106,20 @@ export function isSupportedArchivePath(source: string): boolean {
   return getSupportedArchiveExtensionFromPathname(source) !== undefined;
 }
 
+/**
+ * Archive-shaped URL regardless of scheme.
+ *
+ * Single source of truth for "does this URL's pathname end in a supported
+ * archive extension" — callers that need the scheme policy (HTTPS-only
+ * downloads, insecure-scheme rejections) layer it on top of this instead of
+ * re-deriving the pathname themselves, so a future change to how a URL's
+ * pathname is derived (matrix parameters, percent-decoding, …) keeps every
+ * consumer in sync automatically.
+ */
+export function isArchiveShapedUrl(source: string): boolean {
+  return getSupportedArchiveExtension(source) !== undefined;
+}
+
 export function isSupportedArchiveUrl(source: string): boolean {
   let parsedUrl: URL;
   try {

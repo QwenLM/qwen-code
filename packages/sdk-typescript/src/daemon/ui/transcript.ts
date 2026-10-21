@@ -1043,6 +1043,12 @@ function upsertToolBlock(
   const bytesBefore = retainedBefore ? estimateBlockBytes(retainedBefore) : 0;
   const existing = getWritableBlockById(state, existingId);
   if (existing?.kind === 'tool') {
+    const promptId = event.backgroundTurn?.turnId ?? event.promptId;
+    if (existing.promptId === undefined && promptId !== undefined) {
+      existing.promptId = promptId;
+    }
+    if (event.startedAt !== undefined) existing.startedAt = event.startedAt;
+    if (event.durationMs !== undefined) existing.durationMs = event.durationMs;
     if (event.subagentSessionReady !== undefined) {
       existing.subagentSessionReady =
         existing.subagentSessionReady === true || event.subagentSessionReady;
@@ -1180,6 +1186,8 @@ function upsertToolBlock(
     id: allocateBlockId(state, 'tool'),
     kind: 'tool',
     toolCallId: event.toolCallId,
+    ...(event.startedAt !== undefined ? { startedAt: event.startedAt } : {}),
+    ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
     title: event.title ?? event.toolName ?? event.toolKind ?? 'Tool',
     status: event.status ?? 'pending',
     preview: createDaemonToolPreview(event.rawInput, {
@@ -1196,6 +1204,7 @@ function upsertToolBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.promptId ? { promptId: event.promptId } : {}),
     ...(event.backgroundTurn
       ? {
           backgroundTurn: event.backgroundTurn,
@@ -1684,7 +1693,10 @@ function appendStatusBlock(
   event?: DaemonUiEvent,
   opts: { clearActiveText?: boolean } = {},
 ): void {
-  const blockId = allocateBlockId(state, kind);
+  const allocated = allocateBlockId(state, kind);
+  const blockId = event?.promptId?.startsWith('local-command:')
+    ? `${event.promptId}:${allocated}`
+    : allocated;
   const block: DaemonStatusTranscriptBlock = {
     id: blockId,
     kind,
@@ -1704,12 +1716,11 @@ function appendStatusBlock(
       : {}),
     ...(event?.segmentId ? { segmentId: event.segmentId } : {}),
     ...(event?.type === 'error' && event.code ? { code: event.code } : {}),
-    ...(event?.type === 'error' && event.promptId
-      ? { promptId: event.promptId }
-      : {}),
+    ...(event?.promptId ? { promptId: event.promptId } : {}),
     ...(event?.type === 'error' && event.errorKind
       ? { errorKind: event.errorKind }
       : {}),
+    ...(event?.type === 'error' && event.loop ? { loop: event.loop } : {}),
     ...(event?.type === 'error' && event.source
       ? { source: event.source }
       : {}),
@@ -1807,7 +1818,14 @@ function createTextBlock(
   promptId?: string,
   segmentId?: string,
 ): DaemonTextTranscriptBlock {
-  const blockId = allocateBlockId(state, kind);
+  const allocated = allocateBlockId(state, kind);
+  const localCommandId =
+    typeof meta?.['localCommandId'] === 'string'
+      ? meta['localCommandId']
+      : promptId?.startsWith('local-command:')
+        ? promptId
+        : undefined;
+  const blockId = localCommandId ? `${localCommandId}:${allocated}` : allocated;
   return {
     id: blockId,
     kind,

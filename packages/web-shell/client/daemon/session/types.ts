@@ -7,6 +7,7 @@
 import type { ReactNode } from 'react';
 import type {
   CreateSessionRequest,
+  DaemonBranchSessionRequest,
   DaemonCapabilities,
   DaemonBackgroundTurn,
   DaemonEvent,
@@ -22,6 +23,7 @@ import type {
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
+  DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
@@ -33,12 +35,15 @@ import type {
   DaemonSession,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionStatsStatus,
   DaemonSessionArtifactsEnvelope,
+  DaemonSessionArtifactInput,
+  DaemonSessionArtifactMutationResult,
   SessionSourceInput,
   SessionSourcesResult,
   SessionSourceUpsertResult,
@@ -92,6 +97,14 @@ export interface DaemonStandaloneConnectionState {
 
 export interface DaemonConnectionState {
   status: DaemonConnectionStatus;
+  runtimeStopped?: boolean;
+  runtimeStopPersistenceUnconfirmed?: boolean;
+  capacityRecovery?: {
+    error: unknown;
+    sessionId: string;
+    sessionContext?: DaemonProductSessionContext;
+    mode: 'load' | 'resume';
+  };
   sessionId?: string;
   /**
    * Daemon-confirmed client identity bound to this session (the value sent as
@@ -256,6 +269,37 @@ export interface DaemonSessionProviderProps {
 
 export type DaemonPromptStatus = 'idle' | 'waiting' | 'streaming';
 
+export type DaemonPromptSettlementOutcome =
+  | 'completed'
+  | 'cancelled'
+  | 'failed';
+
+export interface DaemonPromptSettledEvent {
+  sessionId: string;
+  promptId: string;
+  outcome: DaemonPromptSettlementOutcome;
+  /**
+   * The client that submitted the prompt, from the terminal frame's
+   * envelope. Lets a submitter recognise its own turn when the admission
+   * response never reached it.
+   */
+  originatorClientId?: string;
+  /** Daemon terminal reason. Present for completed and cancelled turns. */
+  stopReason?: string;
+  error?: {
+    message: string;
+    code?: string;
+  };
+}
+
+export type DaemonPromptSettledListener = (
+  event: DaemonPromptSettledEvent,
+) => void;
+
+export type DaemonPromptSettlementSubscribe = (
+  listener: DaemonPromptSettledListener,
+) => () => void;
+
 export type DaemonNoticeSeverity = 'info' | 'warning' | 'error';
 
 export type DaemonNoticeCategory =
@@ -365,6 +409,7 @@ export interface DaemonCommandInfo {
 export interface SendPromptOptions {
   /** Original text declared at the user submission boundary, before host preparation. */
   submittedPrompt?: string;
+  source?: 'mcp-app';
   optimisticUserMessage?: boolean;
   images?: DaemonPromptImage[];
   files?: DaemonPromptFile[];
@@ -377,17 +422,21 @@ export interface SendPromptOptions {
   retry?: boolean;
   /** Fired after local validation, immediately before dispatch to the daemon. */
   onAdmissionStarted?: () => void;
+  /** Revalidates the caller before every HTTP attempt, including client recovery. */
+  beforeDispatch?: (clientId: string | undefined) => void;
   /**
    * Fired once the daemon has ACCEPTED the prompt (admission), before the turn
    * runs to completion. Lets a caller act on "the prompt reached the session"
    * without waiting for the whole turn — e.g. the scheduled-tasks "run now",
    * which records the run at admission so a long/stalled turn or a closed tab
-   * can't lose the record.
+   * can't lose the record. Carries the daemon's id for the prompt, the key
+   * its terminal `turn_complete` / `turn_error` settles under.
    */
-  onAdmitted?: () => void;
+  onAdmitted?: (admission: { promptId: string }) => void;
 }
 
-export interface SubmitPromptOptions extends SendPromptOptions {
+export interface SubmitPromptOptions
+  extends Omit<SendPromptOptions, 'beforeDispatch' | 'source'> {
   sessionId?: string;
   signal?: AbortSignal;
 }
@@ -470,7 +519,7 @@ export interface DaemonSessionActions {
     requestStartedAt?: number,
   ): void;
   sendPrompt(text: string, options?: SendPromptOptions): Promise<PromptResult>;
-  continueSession(): Promise<void>;
+  continueSession(options?: { confirmCancellation?: string }): Promise<void>;
   /**
    * Non-blocking prompt submission. POSTs to the daemon and returns
    * immediately with the `promptId`. The daemon queues the prompt in its
@@ -483,6 +532,13 @@ export interface DaemonSessionActions {
   ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
+  refreshModels(
+    beforeRefresh?: (target: {
+      workspaceCwd: string;
+      sessionId?: string;
+    }) => void | Promise<void>,
+  ): Promise<void>;
+
   setReasoningEffort(
     value: ReasoningSelection,
     opts?: { persist?: boolean },
@@ -546,6 +602,7 @@ export interface DaemonSessionActions {
    */
   createSession(options?: {
     workspaceCwd?: string;
+    getCurrentWorkspaceCwd?: () => string | undefined;
     sessionContext?: DaemonProductSessionContext;
     modelServiceId?: string;
     approvalMode?: DaemonApprovalMode;
@@ -554,7 +611,7 @@ export interface DaemonSessionActions {
     branch?: { name: string };
   }): Promise<DaemonSession>;
   attachSession(): Promise<void>;
-  clearSession(): Promise<void>;
+  clearSession(options?: { dropSessionContext?: boolean }): Promise<void>;
   newSession(): Promise<void>;
   releaseSession(sessionId: string): Promise<void>;
   closeSession(): Promise<void>;
@@ -574,10 +631,19 @@ export interface DaemonSessionActions {
     prompt: string,
     opts?: { signal?: AbortSignal },
   ): AsyncGenerator<DaemonSessionGenerationEvent>;
-  getRewindSnapshots(): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }>;
+  getRewindSnapshots(opts?: {
+    /** Rethrow failures raw instead of recording a notice; for best-effort
+     * callers that fall back on their own. */
+    silent?: boolean;
+  }): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }>;
   rewindSession(
     promptId: string,
-    opts?: { rewindFiles?: boolean },
+    opts?: {
+      rewindFiles?: boolean;
+      /** Rethrow failures raw instead of recording a notice; for best-effort
+       * callers that fall back on their own. */
+      silent?: boolean;
+    },
   ): Promise<DaemonRewindResult>;
   btwSession(
     question: string,
@@ -615,6 +681,16 @@ export interface DaemonSessionActions {
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonRemoveMidTurnMessageResult>;
   /**
+   * Ask the daemon to deliver the queued mid-turn messages now, cutting short
+   * a model response that a foreground turn is streaming, unless it has
+   * started a tool call.
+   * Pre-flight the daemon's `session_mid_turn_send_now` capability: older
+   * daemons lack the route.
+   */
+  sendMidTurnMessagesNow(
+    opts?: PendingPromptActionOptions,
+  ): Promise<DaemonSendMidTurnMessagesNowResult>;
+  /**
    * Best-effort reconciliation snapshot (queue + delivery-state rings) from the
    * daemon. Resolves `undefined` (never throws/raises a notice) when there
    * is no session or the query fails — callers preserve current state.
@@ -634,6 +710,7 @@ export interface DaemonSessionActions {
   ): Promise<DaemonRemovePendingPromptResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(opts?: GetTasksActionOptions): Promise<DaemonSessionTasksStatus>;
+  getTaskRuntime(taskId: string): Promise<DaemonSessionTaskRuntimeStatus>;
   getWorkflowTasks(
     opts?: GetTasksActionOptions,
   ): Promise<DaemonSessionWorkflowTasksStatus>;
@@ -673,13 +750,18 @@ export interface DaemonSessionActions {
   clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
+  /**
+   * Register an artifact this client knows about — a file a slash command
+   * reported it wrote, for example. The store owns identity, so re-registering
+   * the same workspace path updates the existing entry instead of duplicating.
+   */
+  addArtifact(
+    artifact: DaemonSessionArtifactInput,
+  ): Promise<DaemonSessionArtifactMutationResult>;
   listSources(): Promise<SessionSourcesResult>;
   upsertSource(source: SessionSourceInput): Promise<SessionSourceUpsertResult>;
   removeSource(sourceId: string): Promise<SessionSourceRemoveResult>;
-  branchSession(
-    name?: string,
-    atRecordId?: string,
-  ): Promise<{
+  branchSession(options?: DaemonBranchSessionRequest): Promise<{
     sessionId: string;
     displayName: string;
     switchStarted: boolean;

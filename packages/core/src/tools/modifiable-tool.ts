@@ -25,7 +25,10 @@ const debugLogger = createDebugLogger('MODIFIABLE_TOOL');
  */
 export interface ModifiableDeclarativeTool<TParams extends object>
   extends DeclarativeTool<TParams, ToolResult> {
-  getModifyContext(abortSignal: AbortSignal): ModifyContext<TParams>;
+  getModifyContext(
+    abortSignal: AbortSignal,
+    callId?: string,
+  ): ModifyContext<TParams>;
 }
 
 export interface ModifyContext<ToolParams> {

@@ -24,7 +24,10 @@ import {
   WORKFLOW_SUBAGENT_DISALLOWED_TOOLS,
   WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
 } from '../../../agents/runtime/workflow-orchestrator.js';
-import { WORKFLOW_SYNC_EVALUATION_TIMEOUT_MS } from '../../../agents/runtime/workflow-sandbox.js';
+import {
+  WORKFLOW_BATCH_LIMIT,
+  WORKFLOW_SYNC_EVALUATION_TIMEOUT_MS,
+} from '../../../agents/runtime/workflow-sandbox.js';
 import { ToolDisplayNames, ToolNames } from '../../../tools/tool-names.js';
 import {
   DEFAULT_STALL_MS,
@@ -39,7 +42,10 @@ import {
   WORKFLOW_SIZE_GUIDELINE_AGENTS,
   WORKFLOW_SIZE_GUIDELINE_SETTING_LABEL,
 } from '../../../agents/runtime/workflow-size.js';
-import type { WorkflowAgentDispatch } from '../../../agents/runtime/workflow-orchestrator.js';
+import {
+  WorkflowOrchestrator,
+  type WorkflowAgentDispatch,
+} from '../../../agents/runtime/workflow-orchestrator.js';
 import {
   buildWorkflowToolDescription,
   WorkflowTool,
@@ -107,7 +113,8 @@ describe('bundled workflow-authoring skill', () => {
     ['is not an agent dispatch'],
     ['nests one level only'],
     ['read `budget.total`'],
-    ['subagent completed without calling StructuredOutput'],
+    ['the third failed submission stops it'],
+    ['makes agent() resolve to null without starting the agent'],
     ['Unresolved names make the admitted agent() resolve to null'],
   ])('moved out of the tool description: %s', (anchor) => {
     it('is in the skill', () => {
@@ -160,6 +167,10 @@ describe('bundled workflow-authoring skill', () => {
       `${WORKFLOW_SYNC_EVALUATION_TIMEOUT_MS / 1000} seconds for the script's synchronous code before its first \`await\`, with no override`,
     ],
     ['max(2, min(16, availableParallelism()-2))'],
+    [
+      `${WORKFLOW_BATCH_LIMIT} entries in each list of one \`parallel()\` or \`pipeline()\` call, with no override`,
+    ],
+    [`holds at most ${WORKFLOW_BATCH_LIMIT} entries`],
   ])('states the runtime limit: %s', (anchor) => {
     expect(skillProse()).toContain(anchor);
   });
@@ -250,7 +261,13 @@ describe('bundled workflow-authoring skill', () => {
     // Labels: the failures list carries nothing else.
     ['Make it unique per dispatch'],
     // The journal: every line type, and what a bare `started` means.
+    ['a `launched` line when the run starts'],
     ['a `started` line when an agent is dispatched'],
+    // Resume: what is refused, and what to do instead.
+    ['journal is no longer on disk has nothing to resume'],
+    ['start it again without `resumeFromRunId`'],
+    ['would run two copies of its agents against one journal'],
+    ['listed as failed with an `interrupted` error'],
     ['Only `result` lines feed the resume cache'],
     ['means the run was interrupted'],
     // budget: where total comes from, what spent() counts, what the gate
@@ -263,6 +280,9 @@ describe('bundled workflow-authoring skill', () => {
     ['Math.floor(budget.total / 100_000)'],
     // Saving is a different skill.
     ['`workflow-creator` skill'],
+    ["interactive TUI's ink renderer"],
+    ['OpenTUI renderer does not yet run client-scheduled tools'],
+    ["Workflow({ name: '<name>' })"],
   ])('states the script contract: %s', (anchor) => {
     expect(skillProse()).toContain(anchor);
   });
@@ -307,8 +327,9 @@ describe('bundled workflow-authoring skill', () => {
 describe('the worked example', () => {
   function extractExample(): string {
     const body = loadSkill().body;
-    const match = body.match(/```js\n([\s\S]*?)```/);
-    if (!match) throw new Error('SKILL.md has no ```js example');
+    const section = body.slice(body.indexOf('## Worked example'));
+    const match = section.match(/```js\n([\s\S]*?)```/);
+    if (!match) throw new Error('SKILL.md has no ```js worked example');
     return match[1];
   }
 
@@ -466,6 +487,52 @@ describe('bundled workflow-authoring skill — workflow size', () => {
     expect(skillProse()).toContain(
       'arrives as a reminder that replaces the guideline in the description',
     );
+  });
+
+  it('says a dynamic import() is refused before the script starts', () => {
+    expect(skillProse()).toContain(
+      'even in a branch that never runs — is refused before it starts, so none of its agents runs first',
+    );
+  });
+
+  it('says an oversized list rejects the whole call as an ordinary rejection', () => {
+    expect(skillProse()).toContain(
+      'A longer list rejects the whole call before any of its thunks or stages runs; it is never truncated.',
+    );
+    expect(skillProse()).toContain(
+      "inside an outer `parallel()`/`pipeline()` it becomes that slot's `null`",
+    );
+    expect(skillProse()).toContain(
+      'Batching does not lift the agent cap or the token budget.',
+    );
+  });
+
+  // The batching snippet is copied for inputs past the limit, so it is run.
+  // Its map must build thunks, not calls: an eager agent() there would start
+  // every agent before the first batch is even formed.
+  it('batches past the limit from thunks and keeps every result in order', async () => {
+    const body = loadSkill().body;
+    const snippet = body.match(/```js\n([\s\S]*?)```/)?.[1] ?? '';
+    expect(snippet).toContain('files.map((file) => () => agent(');
+    expect(snippet).toContain(`i += ${WORKFLOW_BATCH_LIMIT}`);
+    const files = WORKFLOW_BATCH_LIMIT + 3;
+    const prev = process.env[MAX_WORKFLOW_AGENTS_ENV];
+    process.env[MAX_WORKFLOW_AGENTS_ENV] = String(files);
+    try {
+      const outcome = await new WorkflowOrchestrator(
+        async (prompt) => prompt,
+      ).run({
+        script: `const files = Array.from({ length: ${files} }, (_, i) => 'f' + i);\n${snippet}\nreturn summaries;`,
+        args: undefined,
+      });
+      const summaries = outcome.result as string[];
+      expect(summaries).toHaveLength(files);
+      expect(summaries[0]).toBe('Summarize f0');
+      expect(summaries[files - 1]).toBe(`Summarize f${files - 1}`);
+    } finally {
+      if (prev === undefined) delete process.env[MAX_WORKFLOW_AGENTS_ENV];
+      else process.env[MAX_WORKFLOW_AGENTS_ENV] = prev;
+    }
   });
 
   it('says a non-deterministic script is refused before it starts', () => {

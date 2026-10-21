@@ -1,3 +1,4 @@
+import { useWebShellCustomization } from '../../customization';
 import type {
   DaemonBackgroundTurn,
   DaemonSessionArtifact,
@@ -5,16 +6,18 @@ import type {
 import type { ACPToolCall } from '../../adapters/types';
 import { DownloadIcon, SquareArrowOutUpRightIcon } from 'lucide-react';
 import { memo, useEffect, useRef, useState } from 'react';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
+import { isExternalOpenUrl } from '../../utils/externalOpen';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
 import {
+  artifactDisplayName,
   formatArtifactSize,
   downloadWorkspaceFile,
   getArtifactTypeLabel,
   getImageMimeTypeFromPath,
   isSamePath,
-  normalizePath,
   stripWorkspacePath,
 } from './artifactUtils';
 import { LineStats, sumLineStats } from './LineStats';
@@ -144,7 +147,13 @@ export type TurnOutputOpenRequest = (
   sourceSessionId?: string;
 };
 
+export type ArtifactFilter = (
+  artifact: DaemonSessionArtifact,
+  context: { turnId: string; sourceSessionId?: string },
+) => boolean;
+
 interface TurnOutputsProps {
+  sourceSessionId?: string;
   turnId: string;
   changes: readonly TurnOutputFileChange[];
   artifacts: readonly DaemonSessionArtifact[];
@@ -163,7 +172,8 @@ interface TurnOutputsProps {
 function TurnOutputsComponent({
   turnId,
   changes,
-  artifacts,
+  artifacts: allArtifacts,
+  sourceSessionId,
   scheduledTasks,
   workspaceCwd,
   onOpenRequest,
@@ -173,6 +183,12 @@ function TurnOutputsComponent({
   onError,
 }: TurnOutputsProps) {
   const { t } = useI18n();
+  const { filterArtifact } = useWebShellCustomization();
+  const artifacts = filterArtifact
+    ? allArtifacts.filter((artifact) =>
+        filterArtifact(artifact, { turnId, sourceSessionId }),
+      )
+    : allArtifacts;
   const workspaceTarget = useArtifactWorkspaceTarget(workspaceCwd);
   const workspaceActions = workspaceTarget?.actions;
   const [showAllChanges, setShowAllChanges] = useState(false);
@@ -217,7 +233,7 @@ function TurnOutputsComponent({
       onOpenRequest({
         id: `artifact:${artifact.id}`,
         kind: 'artifact',
-        title: artifact.title ?? 'Artifact',
+        title: artifactDisplayName(artifact),
         turnId,
         artifactId: artifact.id,
         ...(artifact.managedId ? { managedId: artifact.managedId } : {}),
@@ -367,29 +383,33 @@ function TurnOutputsComponent({
         </div>
       )}
 
-      {visibleArtifacts.map((artifact) => (
-        <ArtifactCard
-          key={artifact.id}
-          artifact={artifact}
-          onOpen={
-            canOpenWorkspaceArtifact(artifact)
-              ? () => openArtifact(artifact)
-              : undefined
-          }
-          onError={onError}
-          onDownload={
-            canDownloadArtifact(artifact) && workspaceActions
-              ? (isCancelled) =>
-                  downloadWorkspaceFile(
-                    workspaceActions,
-                    artifact.workspacePath,
-                    artifact.mimeType,
-                    isCancelled,
-                  )
-              : undefined
-          }
-        />
-      ))}
+      {visibleArtifacts.map((artifact) => {
+        const externalUrl = getArtifactExternalUrl(artifact);
+        return (
+          <ArtifactCard
+            key={artifact.id}
+            artifact={artifact}
+            externalUrl={externalUrl}
+            onOpen={
+              externalUrl || !canOpenWorkspaceArtifact(artifact)
+                ? undefined
+                : () => openArtifact(artifact)
+            }
+            onError={onError}
+            onDownload={
+              canDownloadArtifact(artifact) && workspaceActions
+                ? (isCancelled) =>
+                    downloadWorkspaceFile(
+                      workspaceActions,
+                      artifact.workspacePath,
+                      artifact.mimeType,
+                      isCancelled,
+                    )
+                : undefined
+            }
+          />
+        );
+      })}
       {remainingArtifacts > 0 && (
         <button
           type="button"
@@ -421,16 +441,19 @@ function TurnOutputsComponent({
 
 function ArtifactCard({
   artifact,
+  externalUrl,
   onOpen,
   onDownload,
   onError,
 }: {
   artifact: DaemonSessionArtifact;
+  externalUrl?: string;
   onOpen?: () => void;
   onDownload?: (isCancelled: () => boolean) => Promise<void>;
   onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const [downloading, setDownloading] = useState(false);
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -443,10 +466,7 @@ function ArtifactCard({
   }, []);
   const size = formatArtifactSize(artifact.sizeBytes);
   const blockedReason = getWorkspaceArtifactOpenBlockReason(artifact, t);
-  const downloadName =
-    (artifact.workspacePath &&
-      normalizePath(artifact.workspacePath).split('/').at(-1)) ||
-    artifact.title;
+  const displayName = artifactDisplayName(artifact);
   const handleDownload = async () => {
     if (!onDownload || downloading) return;
     setDownloading(true);
@@ -463,6 +483,9 @@ function ArtifactCard({
       setDownloading(false);
     }
   };
+  const openIcon = (
+    <SquareArrowOutUpRightIcon size={16} strokeWidth={1.8} aria-hidden="true" />
+  );
   return (
     <div className={styles.card}>
       <div className={styles.summary}>
@@ -470,13 +493,16 @@ function ArtifactCard({
           <ArtifactIcon artifact={artifact} className={styles.iconSvg} />
         </span>
         <div className={styles.artifactInfo}>
-          <div className={styles.title}>{artifact.title}</div>
+          <div className={`${styles.title} ${styles.artifactTitle}`}>
+            {displayName}
+          </div>
           <div className={styles.artifactMeta}>
             {[
               artifact.metadata?.['artifactType'] === 'web_preview_snapshot'
                 ? t('webPreview.saved')
                 : getArtifactTypeLabel(artifact),
               size,
+              artifact.status === 'changed' && t('turnOutputs.artifactChanged'),
             ]
               .filter(Boolean)
               .join(' · ')}
@@ -488,7 +514,7 @@ function ArtifactCard({
               type="button"
               className={styles.reviewButton}
               onClick={() => void handleDownload()}
-              title={`${t('common.download')} ${downloadName}`}
+              title={`${t('common.download')} ${displayName}`}
               disabled={downloading}
             >
               <DownloadIcon size={16} strokeWidth={1.8} aria-hidden="true" />
@@ -497,21 +523,30 @@ function ArtifactCard({
           )}
           <span
             className={styles.openButtonWrapper}
-            title={blockedReason ?? artifact.title}
+            title={blockedReason ?? displayName}
           >
-            <button
-              type="button"
-              className={styles.reviewButton}
-              onClick={onOpen}
-              disabled={!onOpen}
-            >
-              <SquareArrowOutUpRightIcon
-                size={16}
-                strokeWidth={1.8}
-                aria-hidden="true"
-              />
-              {t('common.open')}
-            </button>
+            {externalUrl ? (
+              <a
+                className={styles.reviewButton}
+                href={externalUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(event) => openExternalLink(event, externalUrl)}
+              >
+                {openIcon}
+                {t('common.open')}
+              </a>
+            ) : (
+              <button
+                type="button"
+                className={styles.reviewButton}
+                onClick={onOpen}
+                disabled={!onOpen}
+              >
+                {openIcon}
+                {t('common.open')}
+              </button>
+            )}
           </span>
         </div>
       </div>
@@ -670,7 +705,7 @@ function canDownloadArtifact(
 ): artifact is DaemonSessionArtifact & { workspacePath: string } {
   return (
     artifact.storage === 'workspace' &&
-    artifact.status === 'available' &&
+    (artifact.status === 'available' || artifact.status === 'changed') &&
     Boolean(artifact.workspacePath)
   );
 }
@@ -682,6 +717,22 @@ export function canOpenWorkspaceArtifact(
     return true;
   }
   return artifact.status === 'available' || artifact.status === 'changed';
+}
+
+/**
+ * Link artifacts are entries to a resource, so their card opens the address in
+ * a new page instead of the side panel. Only a URL the shell may hand to the
+ * external opener qualifies, and published deliveries stay with the panel's
+ * live preview (`handleTurnOutputOpen`).
+ */
+export function getArtifactExternalUrl(
+  artifact: DaemonSessionArtifact,
+): string | undefined {
+  if (artifact.kind !== 'link' || artifact.storage === 'published') {
+    return undefined;
+  }
+  const url = artifact.url?.trim();
+  return isExternalOpenUrl(url) ? url : undefined;
 }
 
 export function getWorkspaceArtifactOpenBlockReason(

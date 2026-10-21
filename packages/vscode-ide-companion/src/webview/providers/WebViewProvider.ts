@@ -44,6 +44,7 @@ import {
   type QwenDaemonListenerHandle,
 } from '../../services/qwenDaemonProcess.js';
 import { isLoopbackHostname } from '../../services/daemonIdeConnection.js';
+import { probePreAuthHostGateRejection } from './preAuthHostGateProbe.js';
 
 /** Threshold (ms) before a completed task triggers a notification. */
 const LONG_TASK_THRESHOLD_MS = 20_000;
@@ -1734,11 +1735,17 @@ export class WebViewProvider {
       vscode.Uri.parse(baseUrl),
     );
     const externalUrl = externalUri.toString();
+    const hostname = new URL(externalUrl).hostname;
+    if (hostname.startsWith('[')) {
+      throw new Error(
+        `Qwen Code cannot reach its daemon from this window: VS Code resolved it to "${externalUrl}", but the webview cannot connect to an IPv6 literal under its content security policy.`,
+      );
+    }
     // This URL shares its payload with the daemon's bearer token. A
     // browser-based remote resolves to a relay origin rather than a forwarded
     // loopback one, and the webview CSP would then be the only thing keeping
     // that token away from a third-party host — so refuse here instead.
-    if (!isLoopbackHostname(new URL(externalUrl).hostname)) {
+    if (!isLoopbackHostname(hostname)) {
       throw new Error(
         `Qwen Code cannot reach its daemon from this window: VS Code resolved it to "${externalUrl}", which is not a forwarded loopback address.`,
       );
@@ -1895,6 +1902,27 @@ export class WebViewProvider {
         const webviewBaseUrl = await this.resolveWebviewDaemonBaseUrl(
           runtime.baseUrl,
         );
+        // A remote window whose client-side forwarded port differs from the
+        // daemon's bound port gets a pre-auth 403 from the Host gate on every
+        // daemon call — bootstrapping would hand the shell a baseUrl whose
+        // every request fails opaquely. That is deterministic config
+        // breakage, so fail fast with guidance instead. The gate sits ahead
+        // of the CORS middleware (DNS-rebinding defense), so the webview's
+        // browser can never read the 403; the extension host can, and the
+        // probe never rejects.
+        if (
+          vscode.env.remoteName &&
+          (await probePreAuthHostGateRejection(
+            runtime.baseUrl,
+            new URL(webviewBaseUrl).host,
+          ))
+        ) {
+          await webview.postMessage({
+            type: 'webShellBootstrapError',
+            data: { reason: 'daemonPreAuthHostGate' },
+          });
+          return true;
+        }
         await webview.postMessage({
           type: 'webShellBootstrap',
           data: {

@@ -61,6 +61,7 @@ export type {
 } from './conformance.js';
 export {
   extractContentPart,
+  extractTranscriptTiming,
   getOutputText,
   isSensitiveKey as isDaemonUiSensitiveKey,
   redactSensitiveFields as redactDaemonUiSensitiveFields,
@@ -76,7 +77,9 @@ export {
 } from './types.js';
 export type { DaemonUiContentPart } from './utils.js';
 export type {
+  DaemonLoopStop,
   DaemonShellTranscriptBlock,
+  DaemonTranscriptTimingMeta,
   DaemonUserShellTranscriptBlock,
   DaemonPermissionTranscriptBlock,
   DaemonStatusTranscriptBlock,
@@ -101,6 +104,7 @@ export type {
   DaemonTranscriptState,
   DaemonTranscriptStore,
   DaemonTranscriptTruncationDetail,
+  DaemonTurnUsage,
   DaemonUnrecognizedDiagnostic,
   DaemonUnrecognizedDiagnosticReason,
   // Chat-stream events
@@ -153,3 +157,25 @@ export type {
   DaemonUiAuthDeviceFlowCancelledEvent,
   NormalizeDaemonEventOptions,
 } from './types.js';
+
+export {
+  createExecutionLifecycleState,
+  extractExecutionLifecycle,
+  reduceExecutionLifecycle,
+} from './execution-lifecycle.js';
+export type {
+  DaemonExecutionLifecycle,
+  ExecutionLifecycleEntry,
+  ExecutionLifecycleState,
+} from './execution-lifecycle.js';
+
+export {
+  createToolLifecycleState,
+  extractToolLifecycle,
+  reduceToolLifecycle,
+} from './tool-lifecycle.js';
+export type {
+  DaemonToolLifecycle,
+  ToolLifecycleEntry,
+  ToolLifecycleState,
+} from './tool-lifecycle.js';

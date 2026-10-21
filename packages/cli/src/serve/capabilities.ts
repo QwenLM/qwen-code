@@ -21,6 +21,13 @@ export interface ServeProtocolVersions {
 export interface ServeCapabilityDescriptor {
   since: ServeProtocolVersion;
   /**
+   * Marks this tag as part of the hosted persona's curated wire set
+   * (`hostedPersonaServeFeatures`). Declared only here, in the registry:
+   * the persona adds a tag by setting this field, never by editing a list
+   * at the route.
+   */
+  hostedPersona?: boolean;
+  /**
    * Sub-mode names supported by this capability, when the feature has
    * more than one operating mode and clients benefit from feature-
    * detecting the active set. Optional — baseline tags (always-on,
@@ -32,8 +39,15 @@ export interface ServeCapabilityDescriptor {
 export const SERVE_CAPABILITY_REGISTRY = {
   health: { since: 'v1' },
   daemon_status: { since: 'v1' },
+  daemon_update: { since: 'v1' },
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
+  hosted_harness_private_v1: { since: 'v1', hostedPersona: true },
+  // The Hosted Harness can open journals containing message.delta records;
+  // a control plane refuses older Harness builds at negotiation instead of
+  // failing every Session open (G3).
+  managed_session_journal_delta_v1: { since: 'v1', hostedPersona: true },
+  session_startup_config: { since: 'v1' },
   session_id_override: { since: 'v1' },
   session_scope_override: { since: 'v1' },
   session_load: { since: 'v1' },
@@ -42,6 +56,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // the underlying ACP method from unstable_resumeSession to resumeSession.
   unstable_session_resume: { since: 'v1' },
   session_list: { since: 'v1' },
+  session_catalog_batch: { since: 'v1' },
   // Aggregate persisted session counts via
   // `GET /workspace/:id/session-info` (and the plural
   // `/workspaces/:workspace/session-info` twin). Performs a disk scan of
@@ -56,6 +71,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Prompts and mid-turn messages reference session-scoped image and file
   // attachments by their stored filename.
   session_attachments: { since: 'v1' },
+  session_attachment_chunk_upload: { since: 'v1' },
   session_attachment_list: { since: 'v1' },
   session_mid_turn_message_mutation: { since: 'v1' },
   // Daemon-owned reconciliation surface for mid-turn messages:
@@ -65,6 +81,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // older daemon without it leaves them on the legacy client-fallback
   // behavior. Client-generated message ids make retries idempotent.
   session_mid_turn_message_query: { since: 'v1' },
+  // `POST /session/:id/mid-turn-messages/send-now` asks the agent to deliver
+  // the queued mid-turn messages now, cutting a streaming model response
+  // short instead of waiting for its next tool boundary, unless that response
+  // has started a tool call.
+  session_mid_turn_send_now: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
@@ -119,6 +140,15 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // definitions. Built-in / extension agents stay read-only.
   workspace_agents: { since: 'v1' },
   workspace_agent_generate: { since: 'v1' },
+  // Persistent workspace Agents answering @-mentions in chat sessions
+  // (`/workspaces/:workspace/agent/*`). Conditional on the
+  // `experimental.agentCollaboration` opt-in. Whether the routes exist at all
+  // is settled at daemon startup, but the tag is recomputed per response, so a
+  // workspace opting in or out afterwards is seen on the next request. A client
+  // that sees it absent must not render the collaboration surface rather than
+  // render it and let the calls 404. Distinct from `workspace_agents` above,
+  // which is unconditional subagent-definition CRUD.
+  agent_collaboration_v1: { since: 'v1' },
   workspace_env: { since: 'v1' },
   workspace_preflight: { since: 'v1' },
   session_context: { since: 'v1' },
@@ -135,6 +165,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_status: { since: 'v1' },
   session_close: { since: 'v1' },
   session_archive: { since: 'v1' },
+  session_archive_idle_guard: { since: 'v1' },
   session_storage_conflict_repair: { since: 'v1' },
   session_metadata: { since: 'v1' },
   session_organization: { since: 'v1' },
@@ -193,6 +224,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `workspace_file_read`). The advertised upload byte cap is surfaced via
   // `limits.maxWorkspaceFileUploadBytes`.
   workspace_file_upload: { since: 'v1' },
+  // Qualified-only deletion of regular files in trusted local workspaces.
+  workspace_file_delete: { since: 'v1' },
+  workspace_directory_create: { since: 'v1' },
+  workspace_directory_delete: { since: 'v1' },
   // Daemon hosts the session-level approval-mode
   // control route `POST /session/:id/approval-mode` (gated by the
   // mutation gate, strict). The route accepts `{mode, persist?}` —
@@ -210,6 +245,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_tool_toggle: { since: 'v1' },
   workspace_skill_settings_toggle: { since: 'v1' },
   workspace_skill_settings_batch_toggle: { since: 'v1' },
+  workspace_session_refresh: { since: 'v1' },
   extension_batch_activation_v2: { since: 'v1' },
   // Extension activation commits do not refresh active sessions. Clients that
   // need immediate runtime application must submit the independent refresh
@@ -231,8 +267,16 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_voice: { since: 'v1' },
   workspace_voice_transcription: { since: 'v1', modes: ['batch'] },
   // Inspect bound workspace trust and request local operator action.
-  // Remote clients cannot directly write trustedFolders.json.
+  // Recording the decision itself is the separate grant tag below.
   workspace_trust: { since: 'v1' },
+  // Record the bound workspace as trusted in the local trusted-folders file.
+  // This is the recovery path for Web Shell / Desktop clients, which cannot
+  // render the terminal-only folder-trust prompt (#13130). The route sits
+  // behind the strict mutation gate, so a caller already holds operator
+  // authority over this daemon, and it has no revoke counterpart.
+  // Advertised only where trust hot-reload applies the decision to the running
+  // runtime without a daemon restart.
+  workspace_trust_grant: { since: 'v1' },
   // Workspace trust policy changes rebuild the affected runtime generation
   // without restarting the daemon. V2 trust status exposes convergence.
   workspace_trust_hot_reload: { since: 'v1' },
@@ -254,6 +298,39 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // and its auth is reported per-request through the
   // `github_cli_unavailable` / `github_prs_failed` error codes.
   workspace_github_prs: { since: 'v1' },
+  // `GET /workspaces/:workspace/git/worktrees` lists every worktree of the
+  // workspace's repository, `GET .../git/worktrees/status?path=` reads one
+  // listed worktree's working-tree counters, and
+  // `POST .../git/worktrees/remove` removes one linked worktree by path,
+  // leaving the repository's other registrations alone except where git
+  // refuses per-path removal of a registration it has marked stale — usually
+  // a directory that outlived its gitfile — which falls back to
+  // `git worktree prune`. Removal refuses the main
+  // worktree and any registered workspace outright, and a dirty or
+  // session-hosting worktree unless the body carries `force: true` (409
+  // `worktree_dirty` / `worktree_in_use` / `worktree_locked` /
+  // `worktree_operation_in_progress` / `worktree_unmerged_commits` /
+  // `worktree_status_unknown` / `worktree_nested_repository`, the last for a
+  // submodule whose own repository the removal would delete — which git
+  // itself only refuses while the checkout is still there, and which carries
+  // `submodulesUnknown` instead when whether there is one could not be
+  // checked). The
+  // `worktree_is_workspace` refusal names the blocking workspace in
+  // `workspaceCwd`, since it may be rooted below the worktree. Any
+  // other refusal git makes on a non-forced removal that changed nothing,
+  // for a checkout git can still reach, comes back as 409
+  // `worktree_remove_refused` with git's own sentence in `detail`, so a
+  // refusal `--force --force` would clear is not a dead end. A forced
+  // removal's failure, and one git cannot validate, surface as git's error. Whichever
+  // refusal answers, it carries everything else the same `force` would take. The session count spans every
+  // registered workspace's current runtime, draining ones included, so a
+  // worktree holding another workspace's session is refused too. A success
+  // carries `directoryRemains` when the registration went and the directory
+  // did not — an unfinished deletion, or the prune fallback, which deletes
+  // no file in the working tree, though it does delete the registration's
+  // admin directory and with it that worktree's HEAD, reflog and any
+  // submodule repository.
+  workspace_git_worktrees: { since: 'v1' },
   // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)
   // through the ACP child's `McpClientManager`. Pre-checks the live
@@ -351,13 +428,16 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // settings, so daemons without settings persistence omit the tag and
   // return 404.
   user_language_sync: { since: 'v1' },
+  session_message_deletion: { since: 'v1' },
   session_rewind: { since: 'v1' },
   workspace_hooks: { since: 'v1' },
   session_hooks: { since: 'v1' },
   workspace_extensions: { since: 'v1' },
   session_branch: { since: 'v1' },
+  session_branch_worktree: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
+  workspace_model_reload: { since: 'v1' },
   // Immediate best-effort channel delivery for prompt/scheduled finals and
   // direct workspace notifications. Presence describes the route/event
   // contract; current worker availability is reported per delivery.
@@ -374,6 +454,13 @@ export const SERVE_CAPABILITY_REGISTRY = {
   channel_control: { since: 'v1' },
   // Sanitized workspace Channel configuration, lifecycle, and pairing.
   channel_management: { since: 'v1' },
+  // `DELETE /workspaces/:workspace/channels/:name` converges a Channel whose
+  // configuration is gone from the merged settings view the Worker resolves
+  // (system + user + workspace scopes): the runtime must be silent about the
+  // Channel or confirm exactly one committed Worker owner in that workspace,
+  // which is stopped before the persisted startup selection held in that
+  // scope is removed, instead of reporting `channel_instance_not_found`.
+  channel_delete_config_loss_convergence: { since: 'v1' },
   // Read-only workspace graph of recently observed channel contacts.
   workspace_channel_observed_contacts: { since: 'v1' },
   // Multi-workspace session routing. Advertised only when one daemon hosts
@@ -397,6 +484,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   native_directory_picker: { since: 'v1' },
   // Workspace-owned runtime lifecycle status and explicit on-demand startup.
   workspace_runtime: { since: 'v1' },
+  workspace_runtime_stop: { since: 'v1' },
   // The daemon host can open a workspace directory in the host's OS file
   // manager (Finder via `open` on macOS, Explorer via `explorer.exe` on
   // Windows, xdg-open on a Linux host with a display). Headless hosts omit
@@ -410,7 +498,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // surfacing a guaranteed launch failure.
   workspace_local_terminal: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
-  // Covers core file read/write/upload, status/permissions/trust/lifecycle/MCP/tool,
+  // Covers core file read/write/upload/delete, status/permissions/trust/lifecycle/MCP/tool,
   // memory, workspace agent CRUD, and persisted session organization surfaces.
   // Workspace-qualified settings also require the existing
   // `workspace_settings` tag because that surface depends on settings
@@ -432,6 +520,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // projections. This is additive to the legacy primary-workspace
   // `workspace_extensions` contract.
   extension_management_v2: { since: 'v1' },
+  extension_list_details: { since: 'v1' },
   extension_state: { since: 'v1' },
   extension_git_credentials: { since: 'v1' },
   extension_local_path_install: { since: 'v1' },
@@ -509,6 +598,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // gate. `/live/status` remains the dynamic readiness surface for the Host,
   // permissions, self-checks, and provider reachability.
   realtime_voice: { since: 'v1' },
+  // The Web Shell page may itself be the Live Voice audio endpoint over WS
+  // `/live/web`, on any platform. Separate from `realtime_voice` so clients
+  // that only know the native Host never offer its macOS install flow here.
+  realtime_voice_web: { since: 'v1' },
   web_terminal: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
@@ -520,7 +613,18 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
  * advertised.
  */
 export interface AdvertiseFeatureToggles {
+  hostedHarness?: boolean;
   requireAuth?: boolean;
+  /**
+   * Whether the daemon is serving the workspace-agent collaboration routes
+   * (`agent_collaboration_v1`) for this response. Resolved from
+   * `experimental.agentCollaboration` at call time rather than snapshotted at
+   * boot: which routes exist at all is settled at startup, but a workspace
+   * opting in or out afterwards is seen on the next request. Left unset by the
+   * pre-runtime bootstrap envelope, which reads no workspace settings and so
+   * omits the tag even when the runtime envelope will advertise it.
+   */
+  agentCollaborationEnabled?: boolean;
   mcpPoolActive?: boolean;
   externalToolGuardActive?: boolean;
   allowOriginActive?: boolean;
@@ -565,6 +669,7 @@ export interface AdvertiseFeatureToggles {
   workspaceRuntimeRemovalAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
   workspaceRuntimeAvailable?: boolean;
+  workspaceRuntimeStopAvailable?: boolean;
   localPathOpenAvailable?: boolean;
   localTerminalOpenAvailable?: boolean;
   /**
@@ -573,6 +678,7 @@ export interface AdvertiseFeatureToggles {
    */
   acpHttpEnabled?: boolean;
   realtimeVoiceEnabled?: boolean;
+  realtimeVoiceWebEnabled?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
   standaloneSessionsAvailable?: boolean;
 }
@@ -613,7 +719,17 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ServeFeature,
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
+  ['session_message_deletion', (toggles) => toggles.hostedHarness !== true],
+  ['hosted_harness_private_v1', (toggles) => toggles.hostedHarness === true],
+  [
+    'managed_session_journal_delta_v1',
+    (toggles) => toggles.hostedHarness === true,
+  ],
   ['require_auth', (toggles) => toggles.requireAuth === true],
+  [
+    'agent_collaboration_v1',
+    (toggles) => toggles.agentCollaborationEnabled === true,
+  ],
   [
     'standalone_sessions_v1',
     (toggles) => toggles.standaloneSessionsAvailable === true,
@@ -678,10 +794,18 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'workspace_trust_hot_reload',
     (toggles) => toggles.workspaceTrustHotReloadAvailable === true,
   ],
+  [
+    'workspace_trust_grant',
+    (toggles) => toggles.workspaceTrustHotReloadAvailable === true,
+  ],
   ['channel_reload', (toggles) => toggles.channelReloadAvailable === true],
   ['channel_control', (toggles) => toggles.channelControlAvailable === true],
   [
     'channel_management',
+    (toggles) => toggles.channelManagementAvailable === true,
+  ],
+  [
+    'channel_delete_config_loss_convergence',
     (toggles) => toggles.channelManagementAvailable === true,
   ],
   [
@@ -717,6 +841,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'native_directory_picker',
     (toggles) => toggles.nativeDirectoryPickerAvailable === true,
+  ],
+  [
+    'workspace_runtime_stop',
+    (toggles) => toggles.workspaceRuntimeStopAvailable === true,
   ],
   [
     'workspace_runtime',
@@ -778,6 +906,12 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) =>
       toggles.acpHttpEnabled === true && toggles.realtimeVoiceEnabled === true,
   ],
+  [
+    'realtime_voice_web',
+    (toggles) =>
+      toggles.acpHttpEnabled === true &&
+      toggles.realtimeVoiceWebEnabled === true,
+  ],
   ['web_terminal', (toggles) => toggles.acpHttpEnabled === true],
 ]);
 
@@ -801,6 +935,22 @@ function isFeatureAvailableInProtocol(
 
 export function getRegisteredServeFeatures(): ServeFeature[] {
   return [...SERVE_FEATURES];
+}
+
+/** The hosted persona's curated tag set: exactly the registry entries
+ * carrying `hostedPersona`, filtered to the current protocol. Membership
+ * is a curation fact declared once — in the registry — so adding a tag to
+ * the persona is a registry edit, and a second or third list cannot
+ * exist to drift. */
+export function hostedPersonaServeFeatures(): ServeFeature[] {
+  return SERVE_FEATURES.filter((feature) => {
+    if (!isFeatureAvailableInProtocol(feature, SERVE_PROTOCOL_VERSION))
+      return false;
+    const entry = SERVE_CAPABILITY_REGISTRY[feature] as
+      | { hostedPersona?: boolean }
+      | undefined;
+    return entry?.hostedPersona === true;
+  });
 }
 
 export function getAdvertisedServeFeatures(

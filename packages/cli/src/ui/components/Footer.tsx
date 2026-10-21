@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { formatExecutionSandbox } from '../utils/execution-sandbox-display.js';
 import type React from 'react';
 import { type RefObject, useRef } from 'react';
 import { type DOMElement, Box, Text, useBoxMetrics } from 'ink';
@@ -80,15 +81,17 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
     showAutoAcceptIndicator: uiState.showAutoAcceptIndicator,
   };
 
-  // Determine sandbox info from environment
+  const executionSandbox = formatExecutionSandbox(config);
+  // Legacy whole-CLI backends still use their inherited marker.
   const sandboxEnv = process.env['SANDBOX'];
-  const sandboxInfo = sandboxEnv
-    ? sandboxEnv === 'sandbox-exec'
-      ? 'seatbelt'
-      : sandboxEnv.startsWith('qwen-code')
-        ? 'docker'
-        : sandboxEnv
-    : null;
+  const sandboxInfo =
+    !executionSandbox && sandboxEnv
+      ? sandboxEnv === 'sandbox-exec'
+        ? 'seatbelt'
+        : sandboxEnv.startsWith('qwen-code')
+          ? 'docker'
+          : sandboxEnv
+      : null;
 
   // Check if debug mode is enabled
   const debugMode = config.getDebugMode();
@@ -228,6 +231,11 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
         flexShrink={isNarrow ? 0 : 1}
         minWidth={0}
       >
+        {executionSandbox && (
+          <Text color={theme.text.secondary} wrap="wrap">
+            {executionSandbox}
+          </Text>
+        )}
         {statusLineLines.length > 0 &&
           !uiState.ctrlCPressedOnce &&
           !uiState.ctrlDPressedOnce && (

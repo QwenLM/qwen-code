@@ -18,6 +18,9 @@ REST integration surface also lack dedicated protocol sections.
 
 - Publish an OpenAPI 3.1 definition for the 25 routes that the REST integration
   guide presents as the supported integration surface.
+- Keep every additional HTTP operation with a dedicated protocol section
+  discoverable from the human-readable index without adding it to the stable
+  OpenAPI contract.
 - Give every operation its request parameters or body, success and common error
   responses, capability requirement, ownership scope, stability, and
   TypeScript SDK equivalent when one exists.
@@ -40,13 +43,15 @@ REST integration surface also lack dedicated protocol sections.
 
 ## Public surface
 
-The public REST reference is the 25-operation set already named by
+The stable REST integration contract is the 25-operation set already named by
 `docs/developers/rest-api-integration.md` and guarded by
 `rest-integration-docs-contract.test.ts`. It covers discovery, session
 lifecycle, prompting and SSE, permissions, and read-only workspace context.
 The current daemon registers many additional routes for first-party UI and
 conditional features; documenting those in OpenAPI would incorrectly turn an
-implementation surface into a compatibility promise.
+implementation surface into a compatibility promise. The human-readable index
+may link routes that already have dedicated protocol sections, but must label
+them as conditional or administrative surfaces outside the stable OpenAPI set.
 
 ## Artifacts
 
@@ -77,6 +82,10 @@ this change.
 OpenAPI artifact and provides one capability-grouped operation index. Detailed
 behavior stays in `qwen-serve-protocol.md`; the reference links there instead
 of copying thousands of lines of lifecycle prose.
+
+The index has two explicit tiers: the 25-operation stable OpenAPI contract and
+the additional documented v1 routes. The second tier exists for discovery and
+does not promote first-party or conditional routes into the stable contract.
 
 The integration guide remains task-oriented. It links to the reference and
 keeps the runnable lifecycle walkthrough.
@@ -111,6 +120,10 @@ renames and incomplete new reference entries without loading the full daemon.
 Detailed field semantics still require ordinary review because the handlers do
 not currently use a shared runtime schema system.
 
+The same test compares the operation links in the human-readable index with
+every operation that has a dedicated protocol heading. This keeps the broader
+discovery index complete without expanding the OpenAPI operation set.
+
 ## Documentation-site handoff
 
 After this change merges, `qwen-code-docs` will receive a separate change that
@@ -141,6 +154,8 @@ repository owns presentation, translation, and deployment.
 
 - All 25 integration operations appear exactly once in OpenAPI and have a
   dedicated protocol section.
+- Every additional operation with a dedicated protocol heading appears in the
+  human-readable index and remains clearly outside the stable OpenAPI set.
 - The integration guide contains no "no dedicated reference section" caveat.
 - Its minimal flow assigns `SID`, separates the SSE terminal, and shows how a
   `permission_request` supplies `REQUEST_ID`.

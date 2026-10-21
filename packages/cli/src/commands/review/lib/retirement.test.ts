@@ -8,17 +8,21 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   rmSync,
+  statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { scheduleReverseAuditRound } from './retirement.js';
 import { appendRunSession, recordResume } from './run-ledger.js';
 import {
   findingsPointerOf,
+  briefPath,
   promptRecordDir,
   recordPrompt,
   writeFindingsFile,
@@ -114,7 +118,7 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     filePath: string = diff,
     offset = 0,
     limit = 100,
-  ): void {
+  ): string {
     const id = `aud-${++seq}`;
     const base = {
       agentId: id,
@@ -209,10 +213,9 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
         message: { role: 'model', parts: [{ text: finalText }] },
       }),
     );
-    writeFileSync(
-      join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
-      lines.join('\n') + '\n',
-    );
+    const file = join(dir, 'subagents', 'S1', `agent-${id}.jsonl`);
+    writeFileSync(file, lines.join('\n') + '\n');
+    return file;
   }
 
   function schedule(round: number, chunks = [13, 14, 15]) {
@@ -233,11 +236,1251 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
       due: [13, 14, 15],
       coldChecks: [],
       skipped: [],
+      narrowed: [],
       converged: false,
       // No history yet — nothing is certifiable, so nothing is diagnosed.
       diagnostics: [],
     });
     expect(schedule(2).due).toEqual([13, 14, 15]);
+  });
+
+  it('posture narrowing drops a dry non-delta chunk, keeps yields and unknowns (#10104)', () => {
+    // Delta territory: 13. 14 and 15 are interaction-only chunks.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), YIELD);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), DRY);
+    transcript(record(1, 14, 'chunk 14 round 1 territory walk'), DRY);
+    transcript(record(2, 14, 'chunk 14 round 2 territory walk'), DRY);
+    transcript(record(1, 15, 'chunk 15 round 1 territory walk'), DRY);
+    transcript(record(2, 15, 'chunk 15 round 2 territory walk'), YIELD);
+    record(1, 16, 'chunk 16 round 1 territory walk'); // no transcript: unknown
+    record(2, 16, 'chunk 16 round 2 territory walk');
+
+    const r3 = scheduleReverseAuditRound(
+      plan,
+      [13, 14, 15, 16],
+      3,
+      process.env,
+      diff,
+      { deltaChunkIds: new Set([13]) },
+    );
+    // 13 is delta and keeps the ordinary rules (yield+dry: hot). 14 is
+    // non-delta with a dry latest audit: narrowed out, no cold check. 15
+    // yielded last wave: due. 16 never certified anything: fails toward
+    // auditing, due.
+    expect(r3.due).toEqual([13, 15, 16]);
+    expect(r3.narrowed).toEqual([{ chunkId: 14, dryRound: 2 }]);
+    expect(r3.coldChecks).toEqual([]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('one dry launch narrows a non-delta chunk that YIELDED the launch before (#10136 R1-4)', () => {
+    // The distinguishing fixture: chunk 14's convergence pair yielded (round
+    // 2) and round 3 returned a substantive dry receipt. Round 3 was built
+    // after the pair's findings merged — the loop merges before every round
+    // build — so its single dry receipt prices the non-delta chunk out of
+    // the wave. Ordinary retirement needs two dry audits after the yield and
+    // keeps it hot; delta chunk 13 with the same history stays hot — the
+    // narrowing never touches a delta territory.
+    for (const c of [13, 14]) {
+      transcript(record(1, c, `chunk ${c} round 1 territory walk`, 'b1'), DRY);
+      transcript(
+        record(2, c, `chunk ${c} round 2 territory walk`, 'b1'),
+        YIELD,
+      );
+      transcript(record(3, c, `chunk ${c} round 3 territory walk`, 'b2'), DRY);
+    }
+
+    const r4 = scheduleReverseAuditRound(plan, [13, 14], 4, process.env, diff, {
+      deltaChunkIds: new Set([13]),
+    });
+    expect(r4.due).toEqual([13]);
+    expect(r4.narrowed).toEqual([{ chunkId: 14, dryRound: 3 }]);
+    expect(r4.coldChecks).toEqual([]);
+    // Without the narrowing context the same history keeps BOTH hot — the
+    // one-launch bar is the posture's alone.
+    const plain = scheduleReverseAuditRound(
+      plan,
+      [13, 14],
+      4,
+      process.env,
+      diff,
+    );
+    expect(plain.due).toEqual([13, 14]);
+    expect(plain.narrowed).toEqual([]);
+  });
+
+  it('the convergence pair is ONE launch — its dry member never narrows beside a non-dry partner (#10136 R20-3 round 24)', () => {
+    // Rounds 1 and 2 are built together against one findings list, so round
+    // 2's dry receipt was built before round 1's findings entered it —
+    // whatever that list's bytes or rendering say. Each member here ran on
+    // a DIFFERENT digest (tags cleared between the two builds): the shape
+    // the list-reading arms used to rule fresh on, until a misreading of the
+    // list granted the narrowing. Chunk 14's partner yielded, chunk 15's
+    // never certified; chunk 13's whole pair is dry and narrows.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk', 'a1'), DRY);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk', 'a2'), DRY);
+    transcript(record(1, 14, 'chunk 14 round 1 territory walk', 'a1'), YIELD);
+    transcript(record(2, 14, 'chunk 14 round 2 territory walk', 'a2'), DRY);
+    record(1, 15, 'chunk 15 round 1 territory walk', 'a1'); // no transcript
+    transcript(record(2, 15, 'chunk 15 round 2 territory walk', 'a2'), DRY);
+
+    const r3 = scheduleReverseAuditRound(
+      plan,
+      [13, 14, 15],
+      3,
+      process.env,
+      diff,
+      { deltaChunkIds: new Set([99]) },
+    );
+    expect(r3.due).toEqual([14, 15]);
+    expect(r3.narrowed).toEqual([{ chunkId: 13, dryRound: 2 }]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('a dry launch built on an unmerged round’s very list bytes does not narrow (#10136)', () => {
+    // Order is the bar, and the loop merges before every build — but a later
+    // launch whose findings digest is also an earlier non-dry round's says
+    // that merge never ran. Chunk 14's pair yielded in round 2 under digest
+    // feed01 and round 3 was built on feed01 again; chunk 15's round 2 never
+    // certified, same bytes. Chunk 13 is the control: the same history under
+    // a list the merge changed.
+    for (const c of [13, 14, 15]) {
+      transcript(
+        record(1, c, `chunk ${c} round 1 territory walk`, 'feed00'),
+        DRY,
+      );
+    }
+    transcript(
+      record(2, 13, 'chunk 13 round 2 territory walk', 'feed01'),
+      YIELD,
+    );
+    transcript(record(3, 13, 'chunk 13 round 3 territory walk', 'feed02'), DRY);
+    transcript(
+      record(2, 14, 'chunk 14 round 2 territory walk', 'feed01'),
+      YIELD,
+    );
+    transcript(record(3, 14, 'chunk 14 round 3 territory walk', 'feed01'), DRY);
+    record(2, 15, 'chunk 15 round 2 territory walk', 'feed01'); // no transcript
+    transcript(record(3, 15, 'chunk 15 round 3 territory walk', 'feed01'), DRY);
+
+    const r4 = scheduleReverseAuditRound(
+      plan,
+      [13, 14, 15],
+      4,
+      process.env,
+      diff,
+      { deltaChunkIds: new Set([99]) },
+    );
+    expect(r4.due).toEqual([14, 15]);
+    expect(r4.narrowed).toEqual([{ chunkId: 13, dryRound: 3 }]);
+    expect(r4.converged).toBe(false);
+  });
+
+  it('a PARTIAL merge — one sibling merged, one return dropped — still refuses the narrowing (#10136 R26-1)', () => {
+    // `unmerged`'s byte comparison detects a TOTAL merge skip; a partial
+    // one always changes the bytes, so the tripwire stays false. The
+    // witness reads the list the dry launch was built from: chunk 14's
+    // round-2 yield filed `**File:** src/pay.ts:42`, the round-3 launch's
+    // list carries chunk 13's filing but NOT that line, so the merge
+    // between them dropped chunk 14's return — and the narrowing is
+    // refused. Refusal only, never a grant: a misread keeps the chunk hot.
+    const YIELD_PAY =
+      'Found one gap the prior rounds missed.\n\n' +
+      '- **File:** src/pay.ts:42\n' +
+      '- **Anchor:** const a = 1\n' +
+      '- **Issue:** double charge\n' +
+      '- **Severity:** Critical\n';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk', 'feed00'), DRY);
+    transcript(record(1, 14, 'chunk 14 round 1 territory walk', 'feed00'), DRY);
+    transcript(
+      record(2, 13, 'chunk 13 round 2 territory walk', 'feed01'),
+      YIELD,
+    );
+    transcript(
+      record(2, 14, 'chunk 14 round 2 territory walk', 'feed01'),
+      YIELD_PAY,
+    );
+    // The list round 3 was built from: chunk 13's filing merged, chunk
+    // 14's dropped — the partial merge.
+    writeFindingsFile(plan, 'reverse-audit--round-3--feed02', YIELD);
+    transcript(record(3, 13, 'chunk 13 round 3 territory walk', 'feed02'), DRY);
+    transcript(record(3, 14, 'chunk 14 round 3 territory walk', 'feed02'), DRY);
+
+    const r4 = scheduleReverseAuditRound(plan, [13, 14], 4, process.env, diff, {
+      deltaChunkIds: new Set([13]),
+    });
+    expect(r4.narrowed).toEqual([]);
+    expect(r4.due).toEqual([13, 14]);
+    expect(r4.converged).toBe(false);
+    // The control from the witness: the same history with the round-3 list
+    // carrying BOTH filings narrows chunk 14 exactly as before — the
+    // witness refuses only on evidence of the drop.
+    writeFindingsFile(
+      plan,
+      'reverse-audit--round-3--feed02',
+      `${YIELD}${YIELD_PAY}`,
+    );
+    const r4b = scheduleReverseAuditRound(
+      plan,
+      [13, 14],
+      4,
+      process.env,
+      diff,
+      { deltaChunkIds: new Set([13]) },
+    );
+    expect(r4b.due).toEqual([13]);
+    expect(r4b.narrowed).toEqual([{ chunkId: 14, dryRound: 3 }]);
+  });
+
+  it('a non-delta chunk with NO audit history stays in the wave (#10136)', () => {
+    // The `latest !== undefined` arm alone keeps such a chunk hot: no
+    // receipt at all is not a dry receipt. Chunk 17 has no record in
+    // rounds 1-2; it is due at round 3, not narrowed, beside a narrowed
+    // sibling that holds its single dry receipt.
+    transcript(record(1, 14, 'chunk 14 round 1 territory walk', 'd1'), DRY);
+    transcript(record(2, 14, 'chunk 14 round 2 territory walk', 'd2'), DRY);
+    const r3 = scheduleReverseAuditRound(plan, [14, 17], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([17]);
+    expect(r3.narrowed).toEqual([{ chunkId: 14, dryRound: 2 }]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('the list-bytes tripwire reads only rounds not dry in every member (#10136)', () => {
+    // A dry round leaves the cumulative list unchanged, so a later launch on
+    // the same bytes is the ordinary case, not a skipped merge: chunk 14's
+    // round 3 was dry in every member and must not hold its round-4
+    // narrowing. Chunk 15's round 3 folded dry beside an uncertified
+    // rebuild — a member that may have filed what never merged — and round 4
+    // was built on round 3's bytes, so the tripwire holds that chunk.
+    transcript(record(1, 14, 'chunk 14 round 1 territory walk', 'a0'), DRY);
+    transcript(record(2, 14, 'chunk 14 round 2 territory walk', 'a0'), YIELD);
+    transcript(record(3, 14, 'chunk 14 round 3 territory walk', 'b0'), DRY);
+    transcript(record(4, 14, 'chunk 14 round 4 territory walk', 'b0'), DRY);
+    transcript(record(1, 15, 'chunk 15 round 1 territory walk', 'a0'), DRY);
+    transcript(record(2, 15, 'chunk 15 round 2 territory walk', 'a0'), YIELD);
+    transcript(record(3, 15, 'chunk 15 round 3 territory walk a', 'b0'), DRY);
+    record(3, 15, 'chunk 15 round 3 territory walk b', 'b1'); // no transcript
+    transcript(record(4, 15, 'chunk 15 round 4 territory walk', 'b0'), DRY);
+
+    const r5 = scheduleReverseAuditRound(plan, [14, 15], 5, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r5.narrowed).toEqual([{ chunkId: 14, dryRound: 4 }]);
+  });
+
+  it('a launch that matched several records is an uncertified member — a dry relaunch beside it does not narrow (#10136)', () => {
+    // One agent handed two chunks' round-3 blocks certifies neither, then
+    // chunk 14's block is relaunched alone and returns dry. The ambiguous
+    // launch filed no yield — one would decide the round on its own — but
+    // certified nothing either, so the round is not dry in every member.
+    transcript(record(1, 14, 'chunk 14 round 1 territory walk', 'c1'), DRY);
+    transcript(record(2, 14, 'chunk 14 round 2 territory walk', 'c1'), DRY);
+    const r14 = record(3, 14, 'chunk 14 round 3 territory walk', 'c3');
+    const r15 = record(3, 15, 'chunk 15 round 3 territory walk', 'c3');
+    transcript(`${r14}\n${r15}`, WHIFF);
+    transcript(r14, DRY);
+
+    const r4 = scheduleReverseAuditRound(plan, [14], 4, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r4.narrowed).toEqual([]);
+  });
+
+  describe('a launch whose record was lost (#10136 R25-1)', () => {
+    /**
+     * A record whose prompt points its agent at the brief filed under its own
+     * key — a line every production launch block carries. Its block line
+     * names the list it was built on, as a production block's findings
+     * pointer does.
+     */
+    function launched(round: number, chunk: number, digest = 'abc123'): string {
+      const key = `reverse-audit--chunk-${chunk}--round-${round}--${digest}`;
+      return record(
+        round,
+        chunk,
+        `chunk ${chunk} round ${round} territory walk on list ${digest}\n` +
+          `read_file(file_path="${briefPath(plan, key)}")`,
+        digest,
+      );
+    }
+    const narrow = (round: number) =>
+      scheduleReverseAuditRound(plan, [14], round, process.env, diff, {
+        deltaChunkIds: new Set([99]),
+      });
+    /**
+     * Whether this filesystem keeps a file's birth time across an in-place
+     * rewrite — what the clock reads through a reprint. Where it does not
+     * (no birth time, or one that follows the change time), the module dates
+     * a record from its last write, and the reprint test does not apply.
+     */
+    const keepsBirthTime = (() => {
+      const probe = mkdtempSync(join(tmpdir(), 'retirement-btime-'));
+      try {
+        const file = join(probe, 'record.txt');
+        writeFileSync(file, 'a');
+        const born = statSync(file).birthtimeMs;
+        const until = Date.now() + 200;
+        let st = statSync(file);
+        while (st.mtimeMs === born && Date.now() < until) {
+          writeFileSync(file, 'a');
+          st = statSync(file);
+        }
+        return born > 0 && st.mtimeMs > born && st.birthtimeMs === born;
+      } finally {
+        rmSync(probe, { recursive: true, force: true });
+      }
+    })();
+    /** Record in a transcript that its agent opened `path` right after its launch. */
+    function openBrief(file: string, path: string): void {
+      const [first, ...rest] = readFileSync(file, 'utf8').trimEnd().split('\n');
+      const { agentId, agentName, sessionId } = JSON.parse(first) as {
+        agentId: string;
+        agentName: string;
+        sessionId: string;
+      };
+      const base = { agentId, agentName, sessionId };
+      const opened = [
+        {
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: { name: 'read_file', args: { file_path: path } },
+              },
+            ],
+          },
+        },
+        {
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'a brief' },
+                },
+              },
+            ],
+          },
+        },
+      ].map((l) => JSON.stringify(l));
+      writeFileSync(file, [first, ...opened, ...rest].join('\n') + '\n');
+    }
+
+    it('still ran: its yield counts, so a stale dry pair cannot price the chunk out', () => {
+      // A record's write and its read are both best-effort, and a fail-open
+      // build prints every chunk whatever the schedule said. Chunk 14's pair
+      // was dry; round 3 ran anyway and yielded, and its record is gone.
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      transcript(launched(3, 14), YIELD);
+      rmSync(recordFile(3, 14, 'abc123'));
+
+      const r4 = narrow(4);
+      expect(r4.due).toEqual([14]);
+      expect(r4.narrowed).toEqual([]);
+      expect(r4.converged).toBe(false);
+      // Hot, not a cold check: the ordinary rule reads the lost round too,
+      // and as the yield it filed, which explains its own heat.
+      expect(r4.coldChecks).toEqual([]);
+      expect(r4.diagnostics).toEqual([]);
+    });
+
+    it('a lost launch that filed nothing is uncertified, and the diagnostics say why', () => {
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      transcript(launched(3, 14), WHIFF);
+      rmSync(recordFile(3, 14, 'abc123'));
+
+      const r4 = narrow(4);
+      expect(r4.due).toEqual([14]);
+      expect(r4.narrowed).toEqual([]);
+      expect(r4.diagnostics).toEqual([
+        'chunk 14 — round 3: launch not paired with the record of its block',
+      ]);
+    });
+
+    it('a pair member whose record was lost is still a member of the pair', () => {
+      transcript(launched(1, 14), YIELD);
+      rmSync(recordFile(1, 14, 'abc123'));
+      transcript(launched(2, 14), DRY);
+
+      expect(narrow(3).narrowed).toEqual([]);
+    });
+
+    it('an earlier launch whose record was lost does not hold a later dry launch — the order stands', () => {
+      transcript(launched(1, 14), YIELD);
+      transcript(launched(2, 14), DRY);
+      transcript(launched(3, 14, 'c3'), YIELD);
+      rmSync(recordFile(3, 14, 'c3'));
+      transcript(launched(4, 14, 'c4'), DRY);
+
+      expect(narrow(5).narrowed).toEqual([{ chunkId: 14, dryRound: 4 }]);
+    });
+
+    it("a lost launch's findings digest still trips the list-bytes check", () => {
+      transcript(launched(1, 14), YIELD);
+      transcript(launched(2, 14), DRY);
+      transcript(launched(3, 14, 'd3'), YIELD);
+      rmSync(recordFile(3, 14, 'd3'));
+      transcript(launched(4, 14, 'd3'), DRY);
+
+      expect(narrow(5).narrowed).toEqual([]);
+    });
+
+    it('a lost launch of the round being built is not history', () => {
+      // A transcript of the round now being (re)built names that round; like
+      // a record of it, it is not evidence about the territory yet.
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      transcript(launched(3, 14, 'f3'), YIELD);
+      rmSync(recordFile(3, 14, 'f3'));
+
+      expect(narrow(3).narrowed).toEqual([{ chunkId: 14, dryRound: 2 }]);
+    });
+
+    it('a launch that paired with one record still names the round whose record it lost', () => {
+      // One agent handed chunks 13 and 14's round-3 blocks; chunk 14's record
+      // is gone, so the launch pairs with chunk 13's alone — and still names
+      // chunk 14's key through its brief.
+      for (const c of [13, 14]) {
+        transcript(launched(1, c), DRY);
+        transcript(launched(2, c), DRY);
+      }
+      const both = `${launched(3, 13)}\n${launched(3, 14)}`;
+      transcript(both, YIELD);
+      rmSync(recordFile(3, 14, 'abc123'));
+
+      expect(narrow(4).narrowed).toEqual([]);
+    });
+
+    it('a launch naming two blocks certifies neither, even when one record survived', () => {
+      // The shortcut the pairing walk refuses — one agent handed several
+      // blocks — must not turn back into a certificate because one of the
+      // records is gone: the launch still names both keys.
+      for (const c of [13, 14]) {
+        transcript(launched(1, c), DRY);
+        transcript(launched(2, c), DRY);
+      }
+      const both = `${launched(3, 13)}\n${launched(3, 14)}`;
+      transcript(both, DRY);
+      rmSync(recordFile(3, 14, 'abc123'));
+
+      const r4 = scheduleReverseAuditRound(
+        plan,
+        [13, 14],
+        4,
+        process.env,
+        diff,
+        { deltaChunkIds: new Set([99]) },
+      );
+      expect(r4.narrowed).toEqual([]);
+      expect(r4.due).toEqual([13, 14]);
+      expect(r4.diagnostics).toEqual([
+        'chunk 13 — round 3: launch named several blocks',
+        'chunk 14 — round 3: launch not paired with the record of its block',
+      ]);
+    });
+
+    it('a delivery the orchestrator altered is a member too, beside the record that survived', () => {
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      const prompt = launched(3, 14);
+      // Altered mid-line, so the launch no longer delivers the record's
+      // lines — the brief line it carries survives.
+      transcript(
+        prompt.replace(
+          'round 3 territory walk',
+          'round 3 (retyped) territory walk',
+        ),
+        YIELD,
+      );
+      transcript(prompt, DRY);
+
+      expect(narrow(4).narrowed).toEqual([]);
+    });
+
+    it('a cold check whose record was lost keeps a retired chunk hot — no narrowing needed', () => {
+      // The ordinary rule reads the same history. A retired chunk's round-4
+      // cold check yielded and lost its record; reading the record set as
+      // the rounds that ran skipped the chunk at round 5 and converged.
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      transcript(launched(4, 14), YIELD);
+      rmSync(recordFile(4, 14, 'abc123'));
+
+      const r5 = scheduleReverseAuditRound(plan, [14], 5, process.env, diff);
+      expect(r5.due).toEqual([14]);
+      expect(r5.skipped).toEqual([]);
+      expect(r5.converged).toBe(false);
+    });
+
+    it('a lost launch that yielded outranks the dry sibling of its round', () => {
+      // Round 4's cold check was built twice: the d1 build returned dry, the
+      // d2 rebuild yielded and lost its record. Read as `unknown`, the yield
+      // folded into the dry receipt beside it and the chunk retired over it.
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      transcript(launched(4, 14, 'd1'), DRY);
+      transcript(launched(4, 14, 'd2'), YIELD);
+      rmSync(recordFile(4, 14, 'd2'));
+
+      const r5 = scheduleReverseAuditRound(plan, [14], 5, process.env, diff);
+      expect(r5.due).toEqual([14]);
+      expect(r5.converged).toBe(false);
+    });
+
+    it("a dead attempt's late transcript names a fenced record, not a lost one", () => {
+      // The retry re-captured the plan and the dead attempt's round-3 agent
+      // finished after that: its record is older than the plan, fenced out
+      // as the dead attempt's, and its transcript must not read as a launch
+      // of this attempt whose record went missing.
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      transcript(launched(3, 14, 'dead01'), YIELD);
+      const dead = new Date(2019, 0, 1);
+      utimesSync(recordFile(3, 14, 'dead01'), dead, dead);
+
+      expect(narrow(4).narrowed).toEqual([{ chunkId: 14, dryRound: 2 }]);
+    });
+
+    it('a launch naming a second block still proves heat: its yield outranks a dry relaunch of its record', () => {
+      // Chunk 13's round-4 cold check went out in a block shared with chunk
+      // 14, whose record is gone, and yielded; chunk 13's block was then
+      // relaunched alone and returned dry. The shared launch certifies
+      // nothing, but its yield still joins chunk 13's round.
+      for (const c of [13, 14]) {
+        transcript(launched(1, c), DRY);
+        transcript(launched(2, c), DRY);
+      }
+      const shared = `${launched(4, 13)}\n${launched(4, 14)}`;
+      transcript(shared, YIELD);
+      rmSync(recordFile(4, 14, 'abc123'));
+      transcript(launched(4, 13), DRY);
+
+      const r5 = scheduleReverseAuditRound(plan, [13], 5, process.env, diff);
+      expect(r5.due).toEqual([13]);
+      expect(r5.converged).toBe(false);
+    });
+
+    it('a launch that matched several records still proves heat: its yield outranks a dry relaunch of its record', () => {
+      // Chunks 14 and 15's round-4 cold checks went out to one agent, which
+      // pairs with both records and yielded; chunk 14's block was then
+      // relaunched alone and returned dry.
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      const r14 = record(4, 14, 'chunk 14 round 4 territory walk');
+      const r15 = record(4, 15, 'chunk 15 round 4 territory walk');
+      transcript(`${r14}\n${r15}`, YIELD);
+      transcript(r14, DRY);
+
+      const r5 = scheduleReverseAuditRound(plan, [14], 5, process.env, diff);
+      expect(r5.due).toEqual([14]);
+      expect(r5.converged).toBe(false);
+    });
+
+    it("a launch that names another block's brief but not its own certifies nothing", () => {
+      // The launch delivered chunk 14's round-3 record — one written without
+      // a brief line, so its own key goes unnamed — and points at chunk 13's
+      // brief besides. Pairing with one record is not enough: every key the
+      // launch names must be one it paired with.
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      const sibling = briefPath(
+        plan,
+        'reverse-audit--chunk-13--round-3--abc123',
+      );
+      transcript(
+        `${record(3, 14, 'chunk 14 round 3 territory walk')}\n` +
+          `read_file(file_path="${sibling}")`,
+        DRY,
+      );
+
+      expect(narrow(4).narrowed).toEqual([]);
+    });
+
+    it("a launch that merely mentions another round's brief still proves heat for its own record", () => {
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      const first = briefPath(plan, 'reverse-audit--chunk-14--round-1--abc123');
+      transcript(
+        `${launched(4, 14, 'e4')}\nsee read_file(file_path="${first}")`,
+        YIELD,
+      );
+      transcript(launched(4, 14, 'e4'), DRY);
+
+      const r5 = scheduleReverseAuditRound(plan, [14], 5, process.env, diff);
+      expect(r5.due).toEqual([14]);
+      expect(r5.converged).toBe(false);
+    });
+
+    it("a lost launch's quotation guard never follows a pointer its delivery carries", () => {
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      transcript(launched(4, 14, 'd1'), DRY);
+      // A list the delivered text points at, carrying the very entry the
+      // lost launch filed: read, it turned the filing into a quotation.
+      const planted = writeFindingsFile(
+        plan,
+        'reverse-audit--round-4--feed99',
+        YIELD,
+      );
+      transcript(
+        `read_file(file_path="${planted ?? ''}")\n${launched(4, 14, 'd2')}`,
+        YIELD,
+      );
+      rmSync(recordFile(4, 14, 'd2'));
+
+      const r5 = scheduleReverseAuditRound(plan, [14], 5, process.env, diff);
+      expect(r5.due).toEqual([14]);
+    });
+
+    it("a lost launch's quotation guard reads the list the CLI filed under its round and digest", () => {
+      // Round 4's d2 rebuild went out on a list already carrying the entry
+      // its lost launch returned: the return quotes that list and files
+      // nothing, so the round folds dry on its d1 receipt and the retired
+      // chunk skips round 5.
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      transcript(launched(4, 14, 'd1'), DRY);
+      writeFindingsFile(plan, 'reverse-audit--round-4--d2', YIELD);
+      transcript(launched(4, 14, 'd2'), YIELD);
+      rmSync(recordFile(4, 14, 'd2'));
+
+      const r5 = scheduleReverseAuditRound(plan, [14], 5, process.env, diff);
+      expect(r5.due).toEqual([]);
+    });
+
+    it('a brief path the delivery re-wrapped at one of its spaces still names its key', () => {
+      plan = join(dir, 'with space.json');
+      writeFileSync(plan, '{}');
+      const old = new Date(2020, 0, 1);
+      utimesSync(plan, old, old);
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      transcript(launched(3, 14).replace('with space', 'with\nspace'), YIELD);
+      rmSync(recordFile(3, 14, 'abc123'));
+
+      expect(narrow(4).narrowed).toEqual([]);
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'a plan spelled through a symlinked directory names the same blocks',
+      () => {
+        // The round builds spelled the plan through a link to its directory,
+        // and this schedule spells it through the real one. Chunk 14's
+        // round-3 record is lost; chunk 15's delivery dropped its brief line
+        // beside a dry relaunch; chunk 16's agent opened the brief its retyped
+        // delivery no longer named. Each still names its block.
+        const real = join(dir, 'real');
+        mkdirSync(real);
+        symlinkSync(real, join(dir, 'link'));
+        plan = join(dir, 'link', 'plan.json');
+        writeFileSync(plan, '{}');
+        const old = new Date(2020, 0, 1);
+        utimesSync(plan, old, old);
+        for (const c of [14, 15, 16]) {
+          transcript(launched(1, c), DRY);
+          transcript(launched(2, c), DRY);
+        }
+        transcript(launched(3, 14), YIELD);
+        rmSync(recordFile(3, 14, 'abc123'));
+        const fifteen = launched(3, 15);
+        transcript(
+          fifteen
+            .split('\n')
+            .filter((l) => !l.includes('.brief.md'))
+            .join('\n'),
+          YIELD,
+        );
+        transcript(fifteen, DRY);
+        const brief = briefPath(
+          plan,
+          'reverse-audit--chunk-16--round-3--abc123',
+        );
+        transcript('chunk 16, round 3, retyped', YIELD, 1, brief);
+        transcript(launched(3, 16), DRY);
+        plan = join(real, 'plan.json');
+
+        const r4 = scheduleReverseAuditRound(
+          plan,
+          [14, 15, 16],
+          4,
+          process.env,
+          diff,
+          { deltaChunkIds: new Set([99]) },
+        );
+        expect(r4.narrowed).toEqual([]);
+        expect(r4.due).toEqual([14, 15, 16]);
+      },
+    );
+
+    it('a plan spelled in another letter case names the same blocks', () => {
+      // Round 3 was built with the plan's name in another case — the same
+      // record dir on a case-insensitive filesystem — so every brief path it
+      // printed spells that dir differently. Chunk 14's round-3 record is
+      // lost; chunk 15's delivery dropped its brief line beside a dry
+      // relaunch; chunk 16's agent opened the brief its retyped delivery no
+      // longer named. Each still names its block.
+      const brief = (c: number) =>
+        briefPath(
+          join(dir, 'PLAN.json'),
+          `reverse-audit--chunk-${c}--round-3--abc123`,
+        );
+      const body = (c: number) =>
+        `chunk ${c} round 3 territory walk on list abc123\n` +
+        `read_file(file_path="${brief(c)}")`;
+      for (const c of [14, 15, 16]) {
+        transcript(launched(1, c), DRY);
+        transcript(launched(2, c), DRY);
+      }
+      transcript(`reverse-audit ${body(14)}`, YIELD);
+      const fifteen = record(3, 15, body(15));
+      transcript(
+        fifteen
+          .split('\n')
+          .filter((l) => !l.includes('.brief.md'))
+          .join('\n'),
+        YIELD,
+      );
+      transcript(fifteen, DRY);
+      transcript('chunk 16, round 3, retyped', YIELD, 1, brief(16));
+      transcript(record(3, 16, body(16)), DRY);
+
+      const r4 = scheduleReverseAuditRound(
+        plan,
+        [14, 15, 16],
+        4,
+        process.env,
+        diff,
+        { deltaChunkIds: new Set([99]) },
+      );
+      expect(r4.narrowed).toEqual([]);
+      expect(r4.due).toEqual([14, 15, 16]);
+    });
+
+    it("a brief path that never spells this plan's record dir names nothing here", () => {
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      transcript(
+        'reverse-audit chunk 14 round 2 territory walk, elsewhere\n' +
+          'read_file(file_path="/elsewhere/prompts/reverse-audit--chunk-14--round-2--abc123.brief.md")',
+        YIELD,
+      );
+
+      expect(narrow(3).narrowed).toEqual([{ chunkId: 14, dryRound: 2 }]);
+    });
+
+    it('a delivery that lost its brief line is still a member, beside the record that survived', () => {
+      // The brief line was dropped on the way, so the launch names no key and
+      // pairs with nothing; the block was relaunched verbatim and came back
+      // dry. Every other line of the block arrived.
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      const prompt = launched(3, 14);
+      transcript(
+        prompt
+          .split('\n')
+          .filter((l) => !l.includes('.brief.md'))
+          .join('\n'),
+        YIELD,
+      );
+      transcript(prompt, DRY);
+
+      expect(narrow(4).narrowed).toEqual([]);
+    });
+
+    it('a launch handed a second block whose brief line was lost certifies neither', () => {
+      // One agent took chunks 13 and 14's round-3 blocks, and chunk 14's brief
+      // line was dropped on the way: the launch pairs with chunk 13's record
+      // alone and names only its key, yet it delivered the rest of chunk
+      // 14's block.
+      for (const c of [13, 14]) {
+        transcript(launched(1, c), DRY);
+        transcript(launched(2, c), DRY);
+      }
+      const second = launched(3, 14)
+        .split('\n')
+        .filter((l) => !l.includes('.brief.md'))
+        .join('\n');
+      transcript(`${launched(3, 13)}\n${second}`, DRY);
+
+      const r4 = scheduleReverseAuditRound(
+        plan,
+        [13, 14],
+        4,
+        process.env,
+        diff,
+        { deltaChunkIds: new Set([99]) },
+      );
+      expect(r4.narrowed).toEqual([]);
+      expect(r4.due).toEqual([13, 14]);
+    });
+
+    it('a block launched again inside a later wave holds the narrowing, its record lost or not', () => {
+      // Round 3 was built after the pair merged. Then round-2 blocks went out
+      // again inside round 3's wave and yielded — chunk 14's pairing with its
+      // own round-2 record, chunk 15's naming a record that is gone — while
+      // round 3's blocks came back dry. Those yields were written after round
+      // 3 was built, so its list cannot hold them. Chunk 17's round 3 was
+      // rebuilt a day after its stale yield returned, and its first build
+      // still predates that yield. Chunk 16 is the control.
+      const stamp = (file: string, day: number) =>
+        utimesSync(file, new Date(2021, 0, day), new Date(2021, 0, day));
+      const agents = join(dir, 'subagents', 'S1');
+      for (const c of [14, 15, 16, 17]) {
+        transcript(launched(1, c, 'd1'), DRY);
+        transcript(launched(2, c, 'd1'), DRY);
+        stamp(recordFile(1, c, 'd1'), 1);
+        stamp(recordFile(2, c, 'd1'), 1);
+      }
+      for (const f of readdirSync(agents)) stamp(join(agents, f), 2);
+      for (const c of [14, 15, 16, 17]) {
+        transcript(launched(3, c, 'd3'), DRY);
+        stamp(recordFile(3, c, 'd3'), 3);
+      }
+      transcript(launched(2, 14, 'd1'), YIELD);
+      transcript(launched(2, 15, 'd1'), YIELD);
+      rmSync(recordFile(2, 15, 'd1'));
+      stamp(transcript(launched(2, 17, 'd1'), YIELD), 4);
+      transcript(launched(3, 17, 'd3b'), DRY);
+      stamp(recordFile(3, 17, 'd3b'), 5);
+
+      const r4 = scheduleReverseAuditRound(
+        plan,
+        [14, 15, 16, 17],
+        4,
+        process.env,
+        diff,
+        { deltaChunkIds: new Set([99]) },
+      );
+      expect(r4.narrowed).toEqual([{ chunkId: 16, dryRound: 3 }]);
+      expect(r4.due).toEqual([14, 15, 17]);
+    });
+
+    it('a shared block launched again inside a later wave holds the narrowing even when it filed nothing', () => {
+      // Chunks 13 and 14's round-2 blocks went out again together inside
+      // round 3's wave and came back bare: the launch certifies neither
+      // record, and it returned after round 3 was built.
+      const stamp = (file: string, day: number) =>
+        utimesSync(file, new Date(2021, 0, day), new Date(2021, 0, day));
+      for (const c of [13, 14]) {
+        stamp(transcript(launched(1, c, 'd1'), DRY), 2);
+        stamp(transcript(launched(2, c, 'd1'), DRY), 2);
+        stamp(recordFile(1, c, 'd1'), 1);
+        stamp(recordFile(2, c, 'd1'), 1);
+      }
+      for (const c of [13, 14]) {
+        transcript(launched(3, c, 'd3'), DRY);
+        stamp(recordFile(3, c, 'd3'), 3);
+      }
+      transcript(`${launched(2, 13, 'd1')}\n${launched(2, 14, 'd1')}`, WHIFF);
+
+      const r4 = scheduleReverseAuditRound(
+        plan,
+        [13, 14],
+        4,
+        process.env,
+        diff,
+        { deltaChunkIds: new Set([99]) },
+      );
+      expect(r4.narrowed).toEqual([]);
+      expect(r4.due).toEqual([13, 14]);
+    });
+
+    it.skipIf(!keepsBirthTime)(
+      "a reprint of the dry launch's block keeps the clock of its first build",
+      () => {
+        // Round 3's block was built, a round-2 block then went out again
+        // inside its wave and yielded, and round 3's block was repaired —
+        // reprinted under the same key — before its launch returned dry. The
+        // reprint rewrites the record, not the build the dry launch was made
+        // from. Days count from now, so every stamp falls after the births.
+        const now = Date.now();
+        const day = (n: number) => new Date(now + n * 86_400_000);
+        transcript(launched(1, 14, 'd1'), DRY);
+        transcript(launched(2, 14, 'd1'), DRY);
+        launched(3, 14, 'd3');
+        utimesSync(transcript(launched(2, 14, 'd1'), YIELD), day(1), day(1));
+        const dry = transcript(launched(3, 14, 'd3'), DRY);
+        utimesSync(recordFile(3, 14, 'd3'), day(2), day(2));
+        utimesSync(dry, day(3), day(3));
+
+        expect(narrow(4).narrowed).toEqual([]);
+      },
+    );
+
+    it("a record a dead attempt left under the same key dates from this attempt's rewrite", () => {
+      // A CI retry re-captured the plan after the dead attempt wrote these
+      // records and rebuilt them unchanged, so their birth predates the plan
+      // and their build is this attempt's write. The pair's yield returned
+      // before round 3 was rebuilt — the ordinary merge order. Days count
+      // from now, so the plan postdates every birth.
+      const now = Date.now();
+      const at = (day: number) => new Date(now + day * 86_400_000);
+      const stamp = (file: string, day: number) =>
+        utimesSync(file, at(day), at(day));
+      const pair = [
+        transcript(launched(1, 14), YIELD),
+        transcript(launched(2, 14), DRY),
+      ];
+      const third = transcript(launched(3, 14, 'd3'), DRY);
+      stamp(plan, 1);
+      stamp(recordFile(1, 14, 'abc123'), 2);
+      stamp(recordFile(2, 14, 'abc123'), 2);
+      for (const file of pair) stamp(file, 3);
+      stamp(recordFile(3, 14, 'd3'), 4);
+      stamp(third, 5);
+
+      expect(narrow(4).narrowed).toEqual([{ chunkId: 14, dryRound: 3 }]);
+    });
+
+    for (const { how, spoil } of [
+      { how: 'was lost', spoil: (file: string) => rmSync(file) },
+      {
+        how: 'was left empty by a partial write',
+        spoil: (file: string) => writeFileSync(file, ''),
+      },
+      {
+        how: 'was cut off inside its brief line',
+        spoil: (file: string) => {
+          const text = readFileSync(file, 'utf8');
+          writeFileSync(file, text.slice(0, text.indexOf('.brief.md') - 4));
+        },
+      },
+    ]) {
+      it(`a carried block whose record ${how} is named by the brief its agent opened`, () => {
+        // One agent took chunk 13's round-3 block and, beside it, chunk 14's —
+        // whose brief line was dropped and whose record cannot pair. The launch
+        // pairs with chunk 13's record alone and walked the diff; its agent also
+        // opened chunk 14's brief, so it certifies neither block.
+        for (const c of [13, 14]) {
+          transcript(launched(1, c), DRY);
+          transcript(launched(2, c), DRY);
+        }
+        const carried = launched(3, 14)
+          .split('\n')
+          .filter((l) => !l.includes('.brief.md'))
+          .join('\n');
+        spoil(recordFile(3, 14, 'abc123'));
+        openBrief(
+          transcript(`${launched(3, 13)}\n${carried}`, DRY),
+          briefPath(plan, 'reverse-audit--chunk-14--round-3--abc123'),
+        );
+
+        const r4 = scheduleReverseAuditRound(
+          plan,
+          [13, 14],
+          4,
+          process.env,
+          diff,
+          { deltaChunkIds: new Set([99]) },
+        );
+        expect(r4.narrowed).toEqual([]);
+        expect(r4.due).toEqual([13, 14]);
+      });
+    }
+
+    it("an agent that paired with its record and opened a sibling's brief still certifies its own", () => {
+      // Opening a brief is not running its block: the launch delivered chunk
+      // 14's round-3 block, and its agent also read chunk 13's brief — a block
+      // with its own record and its own dry launch.
+      for (const c of [13, 14]) {
+        transcript(launched(1, c), DRY);
+        transcript(launched(2, c), DRY);
+      }
+      transcript(launched(3, 13), DRY);
+      openBrief(
+        transcript(launched(3, 14), DRY),
+        briefPath(plan, 'reverse-audit--chunk-13--round-3--abc123'),
+      );
+
+      const r4 = scheduleReverseAuditRound(
+        plan,
+        [13, 14],
+        4,
+        process.env,
+        diff,
+        { deltaChunkIds: new Set([99]) },
+      );
+      expect(r4.narrowed).toEqual([
+        { chunkId: 13, dryRound: 3 },
+        { chunkId: 14, dryRound: 3 },
+      ]);
+    });
+
+    it('a cold check whose brief path was re-spelled keeps a retired chunk hot', () => {
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      const prompt = launched(4, 14);
+      const brief = briefPath(plan, 'reverse-audit--chunk-14--round-4--abc123');
+      transcript(prompt.replace(brief, basename(brief)), YIELD);
+      transcript(prompt, DRY);
+
+      const r5 = scheduleReverseAuditRound(plan, [14], 5, process.env, diff);
+      expect(r5.due).toEqual([14]);
+      expect(r5.converged).toBe(false);
+    });
+
+    it('an agent that opened its brief names its block, whatever its delivery lost', () => {
+      // The delivery lost everything that spells the role — the brief line
+      // included — and retyped the block's own line; the agent opened the
+      // brief anyway, and the harness recorded it.
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      const brief = briefPath(plan, 'reverse-audit--chunk-14--round-3--abc123');
+      transcript('chunk 14, round 3, retyped', YIELD, 1, brief);
+      transcript(launched(3, 14), DRY);
+
+      expect(narrow(4).narrowed).toEqual([]);
+    });
+
+    it("a launch that paired with its record is not read against a rebuild's record differing in the brief line alone", () => {
+      // A rules-corrected rebuild on an empty list keeps every launch line
+      // but the brief path, which the digest keys. Each honest launch pairs
+      // with its own record and certifies it; read against the other record
+      // too, each would name two blocks and the cold check would certify
+      // nothing.
+      transcript(launched(1, 14), DRY);
+      transcript(launched(2, 14), DRY);
+      for (const digest of ['aa0001', 'aa0002']) {
+        const key = `reverse-audit--chunk-14--round-4--${digest}`;
+        const body =
+          'chunk 14 round 4 territory walk\n' +
+          `read_file(file_path="${briefPath(plan, key)}")`;
+        transcript(record(4, 14, body, digest), DRY);
+      }
+
+      const r5 = scheduleReverseAuditRound(plan, [14], 5, process.env, diff);
+      expect(r5.due).toEqual([]);
+    });
+  });
+
+  it('a dry relaunch beside its own round’s uncertified return does not narrow (#10136 R20-2)', () => {
+    // The witness shape. One round-1 record, two transcripts — the mandated
+    // relaunch: the first return files a finding the quotation guard
+    // refuses (so it classifies `unknown` while the orchestrator merges the
+    // finding anyway), the second is a substantive dry receipt built
+    // against the SAME list. `mergeOutcomes` folds `['unknown', 'dry']` to
+    // `'dry'`, and the narrowing used to read only round-level folds, so
+    // nothing looked at the sibling and the chunk was priced out of the
+    // wave over a live finding.
+    const L1 =
+      '- **File:** src/pay.ts:42 — the double charge — [unverified]\n' +
+      '- **Severity:** Suggestion\n';
+    const QUOTED_FILING =
+      'Already covered by the confirmed list, not re-reporting:\n\n' +
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+      '- **Severity:** Suggestion\n';
+    const f1 = writeFindingsFile(plan, 'reverse-audit--round-1--d1', L1);
+    const built = record(
+      1,
+      14,
+      'chunk 14 round 1 territory walk\n' +
+        `read_file(file_path="${f1 ?? ''}")`,
+      'd1',
+    );
+    transcript(built, QUOTED_FILING);
+    transcript(built, DRY);
+
+    const r3 = scheduleReverseAuditRound(plan, [14], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([14]);
+    expect(r3.narrowed).toEqual([]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('a dry receipt beside its round’s uncertified rebuild does not narrow (#10136 R20-2)', () => {
+    // The other shape the module's docblock names: a same-round REBUILD is
+    // a second record, under a corrected list — so the two members carry
+    // different digests and the same entries, tag state apart. The rebuild
+    // never returned, and a record no transcript certifies is an
+    // uncertified member of the round, not an absent one.
+    const L1 =
+      '- **File:** src/pay.ts:42 — the double charge — [unverified]\n' +
+      '- **Severity:** Suggestion\n';
+    const L2 =
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+      '- **Severity:** Suggestion\n';
+    const f1 = writeFindingsFile(plan, 'reverse-audit--round-1--d1', L1);
+    const f2 = writeFindingsFile(plan, 'reverse-audit--round-1--d2', L2);
+    transcript(
+      record(
+        1,
+        14,
+        'chunk 14 round 1 territory walk a\n' +
+          `read_file(file_path="${f1 ?? ''}")`,
+        'd1',
+      ),
+      DRY,
+    );
+    record(
+      1,
+      14,
+      'chunk 14 round 1 territory walk b\n' +
+        `read_file(file_path="${f2 ?? ''}")`,
+      'd2',
+    );
+
+    const r3 = scheduleReverseAuditRound(plan, [14], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([14]);
+    expect(r3.narrowed).toEqual([]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('an uncertified sibling blocks whatever list it was built against (#10136 R20-2)', () => {
+    // The launch bar asks NO question about the two members' lists, and
+    // this is the case that says why. A finding an auditor files is merged before
+    // the NEXT round begins, so a filing by any member of THIS round
+    // post-dates every list this round was built against — the newer of
+    // the two included. Within one launch "the dry member saw a different
+    // list" means nothing, and reading it as freshness priced the chunk out
+    // of the wave over a live finding.
+    const L1 =
+      '- **File:** src/pay.ts:42 — the double charge — [unverified]\n' +
+      '- **Severity:** Suggestion\n';
+    // A genuinely NEWER list: another chunk's finding merged between the
+    // round's two builds, so the two members' digests differ.
+    const L2 =
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+      '- **Severity:** Suggestion\n' +
+      '- **File:** src/other.ts:7 — an unrelated finding\n' +
+      '- **Severity:** Suggestion\n';
+    const f1 = writeFindingsFile(plan, 'reverse-audit--round-1--d1', L1);
+    const f2 = writeFindingsFile(plan, 'reverse-audit--round-1--d2', L2);
+    // The certified member is the one built against the NEWER list.
+    transcript(
+      record(
+        1,
+        14,
+        'chunk 14 round 1 territory walk b\n' +
+          `read_file(file_path="${f2 ?? ''}")`,
+        'd2',
+      ),
+      DRY,
+    );
+    // The sibling: an earlier build of the same round, never returned.
+    record(
+      1,
+      14,
+      'chunk 14 round 1 territory walk a\n' +
+        `read_file(file_path="${f1 ?? ''}")`,
+      'd1',
+    );
+
+    const r3 = scheduleReverseAuditRound(plan, [14], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([14]);
+    expect(r3.narrowed).toEqual([]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('an uncertified sibling with no readable list blocks too (#10136 R20-2)', () => {
+    // The prompt-fallback sibling: its record points at no findings file,
+    // so nothing about it can be compared even in principle. Same ruling —
+    // the bar is the launch, not the lists.
+    const L1 =
+      '- **File:** src/pay.ts:42 — the double charge — [unverified]\n' +
+      '- **Severity:** Suggestion\n';
+    const f1 = writeFindingsFile(plan, 'reverse-audit--round-1--d1', L1);
+    transcript(
+      record(
+        1,
+        14,
+        'chunk 14 round 1 territory walk a\n' +
+          `read_file(file_path="${f1 ?? ''}")`,
+        'd1',
+      ),
+      DRY,
+    );
+    record(1, 14, 'chunk 14 round 1 territory walk b', 'd2');
+
+    const r3 = scheduleReverseAuditRound(plan, [14], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([14]);
+    expect(r3.narrowed).toEqual([]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('a lone dry round still narrows — the launch bar rules on siblings only (#10136 R20-2)', () => {
+    // The control: one record, one transcript, one substantive dry receipt.
+    // No sibling, nothing stale, and the non-delta chunk leaves the wave on
+    // its single dry audit exactly as the posture intends.
+    const L1 =
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+      '- **Severity:** Suggestion\n';
+    const f1 = writeFindingsFile(plan, 'reverse-audit--round-1--d1', L1);
+    transcript(
+      record(
+        1,
+        14,
+        'chunk 14 round 1 territory walk\n' +
+          `read_file(file_path="${f1 ?? ''}")`,
+        'd1',
+      ),
+      DRY,
+    );
+
+    const r3 = scheduleReverseAuditRound(plan, [14], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([]);
+    expect(r3.narrowed).toEqual([{ chunkId: 14, dryRound: 1 }]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('a retired DELTA chunk still cold-checks; a narrowed one never does', () => {
+    dryTwice([13, 14]);
+    const narrowing = { deltaChunkIds: new Set([13]) };
+    const r3 = scheduleReverseAuditRound(
+      plan,
+      [13, 14],
+      3,
+      process.env,
+      diff,
+      narrowing,
+    );
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped).toEqual([
+      { chunkId: 13, dryRounds: [1, 2], nextColdCheck: 4 },
+    ]);
+    expect(r3.narrowed).toEqual([{ chunkId: 14, dryRound: 2 }]);
+    // Every chunk left the wave — the audit has converged, and the narrowed
+    // chunk's exit is the posture's own ruling, disclosed, not a gap.
+    expect(r3.converged).toBe(true);
+
+    const r4 = scheduleReverseAuditRound(
+      plan,
+      [13, 14],
+      4,
+      process.env,
+      diff,
+      narrowing,
+    );
+    // The even round: the retired delta chunk takes its cold check; the
+    // narrowed chunk stays out.
+    expect(r4.due).toEqual([13]);
+    expect(r4.coldChecks).toEqual([13]);
+    expect(r4.narrowed).toEqual([{ chunkId: 14, dryRound: 2 }]);
+  });
+
+  it('without a narrowing context the schedule is what it always was', () => {
+    dryTwice([13, 14, 15]);
+    const r3 = schedule(3);
+    expect(r3.due).toEqual([]);
+    expect(r3.narrowed).toEqual([]);
+    expect(r3.skipped).toHaveLength(3);
   });
 
   it('a disclosure cannot BE the receipt — but cannot BLOCK a real one either', () => {
@@ -2442,23 +3685,36 @@ describe('scheduleReverseAuditRound — a resumed run reads the prior attempt', 
     rmSync(dir, { recursive: true, force: true });
   });
 
-  function record(round: number, chunk: number, body: string): string {
+  function record(
+    round: number,
+    chunk: number,
+    body: string,
+    digest = 'abc123',
+  ): string {
     const prompt = `reverse-audit ${body}`;
     recordPrompt(
       plan,
-      `reverse-audit--chunk-${chunk}--round-${round}--abc123`,
+      `reverse-audit--chunk-${chunk}--round-${round}--${digest}`,
       prompt,
     );
     return prompt;
   }
 
-  /** A dry-receipt transcript, written into the named session's dir. */
-  function transcriptIn(session: string, launchPrompt: string): void {
+  /**
+   * A transcript (a dry receipt by default), written into the named session's
+   * dir and stamped with `stamp` (the session, unless a test wants none).
+   */
+  function transcriptIn(
+    session: string,
+    launchPrompt: string,
+    finalText: string = DRY,
+    stamp: string = session,
+  ): void {
     const id = `aud-${++seq}`;
     const base = {
       agentId: id,
       agentName: 'general-purpose',
-      sessionId: session,
+      sessionId: stamp,
     };
     const lines = [
       JSON.stringify({
@@ -2499,7 +3755,7 @@ describe('scheduleReverseAuditRound — a resumed run reads the prior attempt', 
       JSON.stringify({
         ...base,
         type: 'assistant',
-        message: { role: 'model', parts: [{ text: DRY }] },
+        message: { role: 'model', parts: [{ text: finalText }] },
       }),
     ];
     const f = join(dir, 'subagents', session, `agent-${id}.jsonl`);
@@ -2551,6 +3807,160 @@ describe('scheduleReverseAuditRound — a resumed run reads the prior attempt', 
     expect(r3.due).toEqual([]);
     expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
     expect(r3.converged).toBe(true);
+  });
+
+  it('a yield from the interrupted attempt holds the narrowing — only recovery could have merged it (#10136)', () => {
+    // The live orchestrator merges the returns it receives; a resumed one
+    // receives the prior attempt's only through `recover-findings`, whose bar
+    // is stricter than the yield scan's. So a yield filed in another session
+    // is not proven merged into the list the resumed session's dry launch was
+    // built on. Chunk 13 is the control: its yield and its dry round ran in
+    // the same attempt.
+    ledger('S0', 'S1');
+    for (const c of [13, 14]) {
+      transcriptIn('S0', record(1, c, `chunk ${c} round 1 territory walk`));
+      transcriptIn('S0', record(2, c, `chunk ${c} round 2 territory walk`));
+      transcriptIn(
+        'S0',
+        record(3, c, `chunk ${c} round 3 territory walk`, 'ab03'),
+        YIELD,
+      );
+    }
+    transcriptIn(
+      'S0',
+      record(4, 13, 'chunk 13 round 4 territory walk', 'ab04'),
+    );
+    transcriptIn(
+      'S1',
+      record(4, 14, 'chunk 14 round 4 territory walk', 'ab04'),
+    );
+
+    const r5 = scheduleReverseAuditRound(plan, [13, 14], 5, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r5.narrowed).toEqual([{ chunkId: 13, dryRound: 4 }]);
+    expect(r5.due).toEqual([14]);
+  });
+
+  it('one stamped session must cover every dry receipt of the launch and every return that was not dry (#10136)', () => {
+    // Chunk 13 is the control: the whole account ran in S0. Chunk 14's latest
+    // launch holds dry receipts from S0 AND a rebuild in S1 — a union of the
+    // two would let S0's yield pass though the S1 member was built on a list
+    // only recovery could have fed. Chunk 15's non-dry return is a bare
+    // receipt, not a yield: an `unknown` may carry a filing the quotation
+    // guard refused, and across a resume it merges only if recovery carried
+    // it. Chunk 16's transcripts carry no session stamp at all, so nothing
+    // shows the live merge covered them.
+    ledger('S0', 'S1');
+    for (const c of [13, 14, 15, 16]) {
+      const stamp = c === 16 ? '' : 'S0';
+      transcriptIn(
+        'S0',
+        record(1, c, `chunk ${c} round 1 territory walk`),
+        DRY,
+        stamp,
+      );
+      transcriptIn(
+        'S0',
+        record(2, c, `chunk ${c} round 2 territory walk`),
+        DRY,
+        stamp,
+      );
+      transcriptIn(
+        'S0',
+        record(3, c, `chunk ${c} round 3 territory walk`, 'ab03'),
+        c === 15 ? WHIFF : YIELD,
+        stamp,
+      );
+    }
+    transcriptIn(
+      'S0',
+      record(4, 13, 'chunk 13 round 4 territory walk', 'ab04'),
+    );
+    transcriptIn(
+      'S0',
+      record(4, 14, 'chunk 14 round 4 territory walk a', 'ab04'),
+    );
+    transcriptIn(
+      'S1',
+      record(4, 14, 'chunk 14 round 4 territory walk b', 'ab14'),
+    );
+    transcriptIn(
+      'S1',
+      record(4, 15, 'chunk 15 round 4 territory walk', 'ab04'),
+    );
+    transcriptIn(
+      'S1',
+      record(4, 16, 'chunk 16 round 4 territory walk', 'ab04'),
+      DRY,
+      '',
+    );
+
+    const r5 = scheduleReverseAuditRound(
+      plan,
+      [13, 14, 15, 16],
+      5,
+      process.env,
+      diff,
+      { deltaChunkIds: new Set([99]) },
+    );
+    expect(r5.narrowed).toEqual([{ chunkId: 13, dryRound: 4 }]);
+  });
+
+  it('a launch that matched several records still holds the narrowing across a resume (#10136)', () => {
+    // One S0 agent handed two chunks' round-3 blocks certifies neither, and
+    // recovery refuses it the same way, so whatever it filed never reaches
+    // a resumed run's list. Its return is bare — a yield would hold the
+    // chunk as heat on its own — and its session rides as a return that was
+    // not dry.
+    ledger('S0', 'S1');
+    for (const c of [14, 15]) {
+      transcriptIn('S0', record(1, c, `chunk ${c} round 1 territory walk`));
+      transcriptIn('S0', record(2, c, `chunk ${c} round 2 territory walk`));
+    }
+    const both =
+      record(3, 14, 'chunk 14 round 3 territory walk', 'ab03') +
+      '\n' +
+      record(3, 15, 'chunk 15 round 3 territory walk', 'ab03');
+    transcriptIn('S0', both, WHIFF);
+    transcriptIn(
+      'S1',
+      record(4, 14, 'chunk 14 round 4 territory walk', 'ab04'),
+    );
+
+    const r5 = scheduleReverseAuditRound(plan, [14], 5, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r5.narrowed).toEqual([]);
+  });
+
+  it("a lost record's launch keeps its session — a resumed dry launch cannot pass it (#10136 R25-1)", () => {
+    // Chunk 14's round-3 yield ran in S0 and its record is gone; S1 resumed
+    // and ran round 4 dry. The lost launch still names its round through its
+    // brief, and it carries S0 into the resume rule.
+    ledger('S0', 'S1');
+    const key = (r: number, digest: string) =>
+      `reverse-audit--chunk-14--round-${r}--${digest}`;
+    const launched = (r: number, digest = 'abc123') =>
+      record(
+        r,
+        14,
+        `chunk 14 round ${r} territory walk\n` +
+          `read_file(file_path="${briefPath(plan, key(r, digest))}")`,
+        digest,
+      );
+    transcriptIn('S0', launched(1));
+    transcriptIn('S0', launched(2));
+    transcriptIn('S0', launched(3, 'e3'), YIELD);
+    rmSync(
+      join(promptRecordDir(plan), `${encodeURIComponent(key(3, 'e3'))}.txt`),
+    );
+    transcriptIn('S1', launched(4, 'e4'));
+
+    const r5 = scheduleReverseAuditRound(plan, [14], 5, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r5.narrowed).toEqual([]);
   });
 
   it('keeps every chunk hot when no ledger names the prior session', () => {

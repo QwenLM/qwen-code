@@ -7,11 +7,11 @@ manifest and exports the request/result records consumed by the live daemon and
 the UniFFI SDK. Python and TypeScript bindings are generated from the compiled
 Rust library by `scripts/generate-uniffi-bindings.mjs`.
 
-The prototype intentionally keeps execution, platform integration, policy, and
-permission handling in the native Cua Driver process. Imported SDKs call the
-daemon through the shared Rust socket client; they do not route through MCP or
-embed platform code. Agents independently use the public `qwen-cua-driver mcp`
-surface through their runtime's existing MCP client.
+Execution, platform integration, policy and permission checks stay in the native
+runtime. `ComputerUse.create()` embeds that runtime in the SDK host; explicit
+socket connections use the same contract through the selected daemon. Windows
+UIAccess input uses the existing signed worker. SDK calls do not route through
+MCP; MCP remains a separate transport to the same native tools.
 
 ## Scope and compatibility
 

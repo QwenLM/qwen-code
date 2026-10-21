@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import type { CommandContext, SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import type { HistoryItemDoctor } from '../types.js';
@@ -507,11 +508,12 @@ function collectToolResultRetention(
       config?.getTruncateToolOutputThreshold?.() ??
       stats.oversizedThresholdChars;
     // Tool outputs live in `tool_group` items as `tools[].resultDisplay`
-    // strings; scanning top-level text items would count model responses.
+    // text; scanning top-level text items would count model responses.
     // Each display is compared against its own tool's budget, matching the
     // API-history calibration.
     //
-    // Phase-1 scope: only string `resultDisplay` values are measured.
+    // Measure strings and the compatible text of structured shell results.
+    // This is display-text length, not the full retained object size.
     // Structured display objects (file diffs, ANSI captures, agent result
     // summaries) carry their own rendering contracts and are not
     // char-comparable in the same way; they are left for a follow-up PR.
@@ -521,7 +523,8 @@ function collectToolResultRetention(
         continue;
       }
       for (const tool of item.tools) {
-        if (typeof tool.resultDisplay !== 'string') {
+        const displayText = shellResultText(tool.resultDisplay);
+        if (displayText === undefined) {
           continue;
         }
         const migratedName =
@@ -535,7 +538,7 @@ function collectToolResultRetention(
           threshold;
         if (
           Number.isFinite(budget) &&
-          tool.resultDisplay.length > budget * COMBINED_PASS_TOLERANCE_FACTOR
+          displayText.length > budget * COMBINED_PASS_TOLERANCE_FACTOR
         ) {
           largeOutputsInUIHistory += 1;
         }

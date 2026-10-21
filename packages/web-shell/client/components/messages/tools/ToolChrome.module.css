@@ -651,7 +651,6 @@
   overflow: visible;
 }
 
-.expandedBash,
 .expandedRead {
   overflow: hidden;
 }
@@ -702,4 +701,99 @@
 
 .expandedCardBody .todoBody {
   padding: 0;
+}
+
+.shellHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.shellStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.shellBody {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.shellOutput {
+  color: var(--foreground);
+  max-height: 200px;
+}
+
+.shellOutput,
+.shellDetails dl {
+  background: color-mix(in srgb, var(--background) 70%, transparent);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.shellFailure {
+  margin: 0;
+  color: var(--destructive);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.shellSection {
+  position: relative;
+}
+
+.shellSection > button {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+.shellSection summary {
+  min-height: 24px;
+  padding-right: 32px;
+}
+
+.shellSection summary,
+.shellDetails summary {
+  color: color-mix(in srgb, var(--foreground) 75%, var(--muted-foreground));
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.shellSection pre,
+.shellDetails pre,
+.shellDetails dl {
+  margin-top: 8px;
+}
+
+.shellDetails dl {
+  max-height: 200px;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 12px;
+  margin-bottom: 0;
+  font-size: 12px;
+}
+
+.shellDetails dt {
+  color: var(--muted-foreground);
+}
+
+.shellDetails dd {
+  margin: 0;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+
+:global([data-transcript-render-mode='document']) .shellDetails dl {
+  max-height: none;
+  overflow: visible;
 }

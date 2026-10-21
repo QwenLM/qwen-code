@@ -19,6 +19,7 @@ export interface LocalControlStatus {
    */
   urlRedacted?: boolean;
   qrText?: string;
+  expiresInMs?: number;
   interfaceName?: string;
   address?: string;
   sleepInhibited?: boolean;
@@ -35,6 +36,7 @@ export class LocalControlRequestError extends Error {
   constructor(
     message: string,
     readonly payload?: LocalControlStatus,
+    readonly status?: number,
   ) {
     super(message);
     this.name = 'LocalControlRequestError';
@@ -56,6 +58,9 @@ export async function requestLocalControl(
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
+    // A silently stalled socket must settle as an error so the caller's retry
+    // path engages; 10 s stays under the QR popover's 15 s refresh horizon.
+    signal: AbortSignal.timeout(10_000),
   });
   const text = await response.text();
   let payload: (LocalControlStatus & { error?: string }) | undefined;
@@ -72,6 +77,7 @@ export async function requestLocalControl(
         response.statusText ||
         `Local Control request failed (${response.status})`,
       payload,
+      response.status,
     );
   }
   return payload!;

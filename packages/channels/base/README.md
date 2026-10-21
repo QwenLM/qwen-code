@@ -82,7 +82,8 @@ In daemon-managed mode, every named channel's `cwd` must resolve to exactly one 
 Inbound:  Platform message
             → Envelope (with attachments)
             → GroupGate (group policy + mention gating)
-            → SenderGate (allowlist / pairing / open)
+            → SenderGate (privatePolicy for personal messages; groups.senders
+              for group members, default open)
             → Slash commands (/clear, /help, /status)
             → SessionRouter (resolve or create agent session)
             → Resolve attachments (images → bridge, files → prompt text)
@@ -103,7 +104,7 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 | `ChannelBase`   | Abstract base class — extend this to build a channel adapter                         |
 | `AcpBridge`     | Current standalone `qwen channel start` bridge implementation over `qwen-code --acp` |
 | `SessionRouter` | Maps senders to agent sessions with configurable scoping                             |
-| `SenderGate`    | DM access control (allowlist / pairing / open)                                       |
+| `SenderGate`    | Sender access control (allowlist / pairing / open), one axis per side                |
 | `GroupGate`     | Group chat policy and @mention gating                                                |
 | `PairingStore`  | Pairing code generation, approval, and allowlist persistence                         |
 
@@ -118,8 +119,9 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 | `ChannelConfig`      | Channel configuration from `settings.json`                               |
 | `ChannelPlugin`      | Plugin factory interface (what you export)                               |
 | `Envelope`           | Normalized inbound message format                                        |
-| `SenderPolicy`       | `'allowlist' \| 'pairing' \| 'open'`                                     |
+| `PrivatePolicy`      | `'disabled' \| 'allowlist' \| 'pairing' \| 'open'`                       |
 | `GroupPolicy`        | `'disabled' \| 'allowlist' \| 'pairing' \| 'open'`                       |
+| `GroupSenderPolicy`  | `'open' \| 'allowlist'` — never `pairing`                                |
 | `SessionScope`       | `'user' \| 'chat_thread' \| 'single'`; legacy `'thread'` is deprecated   |
 | `GroupConfig`        | Per-group settings (e.g. `requireMention`)                               |
 | `SessionTarget`      | Maps a session back to its channel/sender/chat                           |
@@ -268,7 +270,7 @@ constructor(bridge: ChannelAgentBridge, defaultCwd: string, scope?: SessionScope
 ### SenderGate
 
 ```typescript
-constructor(policy: SenderPolicy, allowedUsers?: string[], pairingStore?: PairingStore)
+constructor(policy: PrivatePolicy, allowedUsers?: string[], pairingStore?: PairingStore)
 ```
 
 | Method                         | Description                                                          |
@@ -279,9 +281,29 @@ constructor(policy: SenderPolicy, allowedUsers?: string[], pairingStore?: Pairin
 
 | Policy      | Behavior                                                                                                  |
 | ----------- | --------------------------------------------------------------------------------------------------------- |
+| `disabled`  | Nobody allowed; no pairing requests                                                                       |
 | `open`      | Everyone allowed                                                                                          |
 | `allowlist` | Only `allowedUsers` allowed                                                                               |
 | `pairing`   | Check allowlist, then approved pairings, then generate a pairing code (8-char, 1hr expiry, max 3 pending) |
+
+**Per-conversation gate:** `this.gate` is the direct-message gate. A group
+resolves its own `senders` (`groups[chatId]`, then `groups["*"]`, field by
+field; every admitted group defaults to `open`). Any
+sender check an adapter makes itself must go through
+`this.senderGateFor({ isGroup, chatId })` rather than `this.gate`, or the
+group's setting is silently ignored on that lane. A group gate never carries
+`pairing`: an approval there would also unlock direct messages.
+
+**Operators:** commands that act on a shared session (`/approve`, `/cancel`,
+`/clear`, `/loop`, the loop tool, steering, ...) check
+`isSharedSessionOperator`, not the sender gates. Only explicit `config.operators`
+grants shared-session operator permissions; omitted or empty means nobody.
+Private policy, user pairing, and group member admission never imply this role.
+
+`resolvePrivatePolicy(config)` resolves the four-value private policy. Explicit
+`privatePolicy` takes precedence over deprecated `dmPolicy` and `senderPolicy`;
+otherwise disabled DM policy wins, then sender policy, then legacy `allowlist`.
+Group sender policy is independent and only accepts `open` or `allowlist`.
 
 ### GroupGate
 

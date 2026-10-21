@@ -15,6 +15,26 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('HOOK_REGISTRY');
 
 /**
+ * The identity the registry uses to spot a duplicate hook within one source,
+ * event, matcher and `sequential` setting: the hook's name when it has one,
+ * otherwise its full command, URL, function id or prompt. Exported so a
+ * listing read straight from settings collapses the same entries the registry
+ * would.
+ */
+export function hookRegistryIdentity(config: HookConfig): string {
+  if (config.name) return config.name;
+  if (config.type === 'command')
+    return (config as { command?: string }).command || 'unknown-command';
+  if (config.type === 'http')
+    return (config as { url?: string }).url || 'unknown-url';
+  if (config.type === 'function')
+    return (config as { id?: string }).id || 'unknown-function';
+  if (config.type === 'prompt')
+    return (config as { prompt?: string }).prompt || 'prompt-hook';
+  return 'unknown-hook';
+}
+
+/**
  * Extension with hooks support
  */
 export interface ExtensionWithHooks {
@@ -59,6 +79,13 @@ export interface HookRegistryEntry {
    * (session/user/project/extension) entries leave this undefined.
    */
   agentScope?: string;
+  owner?: Readonly<{ sessionId: string; agentId: string }>;
+  isSourceTrusted?: () => boolean;
+}
+
+export interface AgentHookRegistration {
+  owner: Readonly<{ sessionId: string; agentId: string }>;
+  isSourceTrusted?: () => boolean;
 }
 
 /**
@@ -101,10 +128,23 @@ export class HookRegistry {
     try {
       this.entries = [...agentEntries];
       this.processHooksFromConfig();
+      const restoredKeys = new Set<string>();
       for (const entry of this.entries) {
-        const enabled = enabledSnapshot.get(this.getHookStateKey(entry));
+        const key = this.getHookStateKey(entry);
+        const enabled = enabledSnapshot.get(key);
         if (enabled !== undefined) {
           entry.enabled = enabled;
+          restoredKeys.add(key);
+        }
+      }
+
+      for (const [key, enabled] of enabledSnapshot) {
+        if (!enabled && !restoredKeys.has(key)) {
+          debugLogger.warn(
+            `A previously disabled hook (key=${key}) did not match any entry ` +
+              'after reload; its enabled state was not carried over. If the ' +
+              'hook still exists, re-disable it by name.',
+          );
         }
       }
     } catch (err) {
@@ -146,23 +186,27 @@ export class HookRegistry {
    * entry is logged and dropped instead of breaking the spawn. Returns an
    * unregister callback that removes exactly the entries added by this call;
    * the caller is responsible for invoking it when the subagent finishes.
-   *
-   * v1 scope limitation: entries added here fire for every event of their
-   * declared type while they remain in the registry, regardless of which
-   * agent is currently active. If two subagents with different per-agent
-   * hook sets run concurrently, both sets fire for both agents. Proper
-   * per-agent scope filtering at firing time is left to a follow-up.
    */
   addAgentHooks(
     hooks: { [K in HookEventName]?: HookDefinition[] },
     agentScope: string,
+    registration: AgentHookRegistration,
   ): () => void {
     const before = this.entries.length;
-    this.processHooksConfiguration(
-      hooks,
-      HooksConfigSource.Session,
-      agentScope,
-    );
+    try {
+      this.processHooksConfiguration(
+        hooks,
+        HooksConfigSource.Session,
+        agentScope,
+      );
+      for (const entry of this.entries.slice(before)) {
+        entry.owner = Object.freeze({ ...registration.owner });
+        entry.isSourceTrusted = registration.isSourceTrusted;
+      }
+    } catch (error) {
+      this.entries.splice(before);
+      throw error;
+    }
     const addedCount = this.entries.length - before;
     debugLogger.debug(
       `Registered ${addedCount} ephemeral hook entries for agent scope "${agentScope}"`,
@@ -186,8 +230,10 @@ export class HookRegistry {
    */
   setHookEnabled(hookName: string, enabled: boolean): void {
     const updated = this.entries.filter((entry) => {
-      const name = this.getHookName(entry);
-      if (name === hookName) {
+      if (!entry.config.name) {
+        return false;
+      }
+      if (entry.config.name === hookName) {
         entry.enabled = enabled;
         return true;
       }
@@ -199,7 +245,11 @@ export class HookRegistry {
         `${enabled ? 'Enabled' : 'Disabled'} ${updated.length} hook(s) matching "${hookName}"`,
       );
     } else {
-      debugLogger.warn(`No hooks found matching "${hookName}"`);
+      debugLogger.warn(
+        `No hooks found matching "${hookName}" to ${enabled ? 'enable' : 'disable'}. ` +
+          'Only hooks with a "name" field can be toggled individually; add a ' +
+          '"name" to the hook definition if it is unnamed.',
+      );
     }
   }
 
@@ -210,17 +260,7 @@ export class HookRegistry {
   private getHookIdentity(
     entry: HookRegistryEntry | { config: HookConfig },
   ): string {
-    const config = entry.config;
-    if (config.name) return config.name;
-    if (config.type === 'command')
-      return (config as { command?: string }).command || 'unknown-command';
-    if (config.type === 'http')
-      return (config as { url?: string }).url || 'unknown-url';
-    if (config.type === 'function')
-      return (config as { id?: string }).id || 'unknown-function';
-    if (config.type === 'prompt')
-      return (config as { prompt?: string }).prompt || 'prompt-hook';
-    return 'unknown-hook';
+    return hookRegistryIdentity(entry.config);
   }
 
   /**
@@ -243,7 +283,7 @@ export class HookRegistry {
       entry.eventName,
       entry.source,
       entry.agentScope ?? null,
-      this.getHookIdentity(entry),
+      entry.config.name ?? null,
       entry.matcher ?? null,
       entry.sequential ?? null,
     ]);

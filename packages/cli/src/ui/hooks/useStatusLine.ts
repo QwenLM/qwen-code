@@ -259,7 +259,9 @@ export function useStatusLine(
       ? statusLineConfigOverride
       : settingsStatusLineConfig;
   const statusLineCommand =
-    statusLineConfig?.type === 'command' ? statusLineConfig.command : undefined;
+    !config.getShellExecutionSandbox?.() && statusLineConfig?.type === 'command'
+      ? statusLineConfig.command
+      : undefined;
   const statusLinePreset =
     statusLineConfig?.type === 'preset' ? statusLineConfig : undefined;
   const statusLineSettingsVersion = uiState.statusLineSettingsVersion ?? 0;
@@ -380,7 +382,11 @@ export function useStatusLine(
       currentDir: string,
       branch: string | undefined,
     ) => {
-      if (!preset.items.includes('pull-request-number') || !branch) {
+      if (
+        configRef.current.getShellExecutionSandbox?.() ||
+        !preset.items.includes('pull-request-number') ||
+        !branch
+      ) {
         clearPullRequestLookup();
         return;
       }

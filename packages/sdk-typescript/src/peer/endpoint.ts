@@ -9,11 +9,12 @@
  *
  * Starting an endpoint binds an inbox and publishes a session record, so
  * the program shows up in `qwen sessions ps`, and in the `list_agents` of
- * every session that has `agents.crossSessionMessaging` on — which is also
- * what lets those sessions address it by name from `send_message`. It can
- * address sessions the same way. It keeps a small ledger of what it sent,
- * so the receipts that come back read as state changes rather than as a
- * stream of unrelated notices.
+ * every session that takes part in cross-session messaging — its
+ * `agents.crossSessionMessaging` setting is on, and it was not started with
+ * `--bare` or `--safe-mode` — which is also what lets those sessions
+ * address it by name from `send_message`. It can address sessions the same
+ * way. It keeps a small ledger of what it sent, so the receipts that come
+ * back read as state changes rather than as a stream of unrelated notices.
  *
  * What the endpoint is trusted to do is not decided here. A message it
  * sends is held for the receiving session's user to review unless the send

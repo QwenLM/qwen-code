@@ -1,11 +1,25 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  afterAll,
+} from 'vitest';
 
-const { mockSendQQMessage, mockFetchAccessToken, mockHandleInbound } =
-  vi.hoisted(() => ({
-    mockSendQQMessage: vi.fn(),
-    mockFetchAccessToken: vi.fn(),
-    mockHandleInbound: vi.fn(),
-  }));
+const {
+  mockSendQQMessage,
+  mockFetchAccessToken,
+  mockHandleInbound,
+  pendingDispatches,
+} = vi.hoisted(() => ({
+  mockSendQQMessage: vi.fn(),
+  mockFetchAccessToken: vi.fn(),
+  mockHandleInbound: vi.fn(),
+  pendingDispatches: [] as Array<Promise<unknown>>,
+}));
 
 const { MockWebSocket } = vi.hoisted(() => {
   class MockWebSocket {
@@ -31,13 +45,16 @@ vi.mock('ws', () => ({
   default: MockWebSocket,
 }));
 
-vi.mock('node:fs', () => ({
-  mkdirSync: vi.fn(),
-  readFileSync: vi.fn(),
-  writeFileSync: vi.fn(),
-  existsSync: vi.fn(() => false),
-  renameSync: vi.fn(),
-}));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    readFileSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    existsSync: vi.fn(() => false),
+    renameSync: vi.fn(),
+  };
+});
 
 vi.mock('./api.js', () => ({
   sendQQMessage: mockSendQQMessage,
@@ -76,6 +93,17 @@ vi.mock('@qwen-code/channel-base', () => ({
     protected handleInbound(env: unknown): Promise<void> {
       mockHandleInbound(env);
       return Promise.resolve();
+    }
+    protected prepareThenHandleInbound(
+      env: unknown,
+      prepare: () => Promise<boolean | void>,
+    ): Promise<void> {
+      const dispatch = (async () => {
+        await prepare();
+        return this.handleInbound(env);
+      })();
+      pendingDispatches.push(dispatch);
+      return dispatch;
     }
     protected onSessionDied(_sessionId: string): void {
       // no-op in mock
@@ -125,6 +153,29 @@ import type {
   GroupMsgToggleEvent,
 } from './types.js';
 import { Intent } from './types.js';
+import {
+  QQ_FILE_MAX_BYTES,
+  QQ_IMAGE_MAX_BYTES,
+  QQ_VOICE_MAX_BYTES,
+} from './media.js';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const suiteTmpDir = await mkdtemp(join(tmpdir(), 'qwen-qqbot-media-'));
+
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const MP4_BYTES = Buffer.from([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]);
+
+function stubFetchBytes(bytes: Buffer, contentType = 'image/jpeg'): void {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(
+      async () =>
+        new Response(bytes, { headers: { 'content-type': contentType } }),
+    ),
+  );
+}
 
 function makeChannel(
   configOverrides?: Record<string, unknown>,
@@ -198,14 +249,40 @@ function makeGroupAllEvent(
   };
 }
 
+/**
+ * Await every dispatch started through the mocked base so a late continuation
+ * can never land in the next test (or after an assertion).
+ */
+async function settleDispatches(): Promise<void> {
+  const pending = pendingDispatches.splice(0);
+  if (pending.length === 0) return;
+  await Promise.allSettled(pending);
+  // dispatchInbound's finally runs just after the tracked promise resolves.
+  await Promise.resolve();
+}
+
 beforeEach(() => {
+  pendingDispatches.length = 0;
   vi.clearAllMocks();
   mockHandleInbound.mockClear();
   vi.useFakeTimers();
 });
 
-afterEach(() => {
+beforeAll(() => {
+  vi.stubEnv('TMPDIR', suiteTmpDir);
+  vi.stubEnv('TMP', suiteTmpDir);
+  vi.stubEnv('TEMP', suiteTmpDir);
+});
+
+afterEach(async () => {
+  await settleDispatches();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
+
+afterAll(async () => {
+  vi.unstubAllEnvs();
+  await rm(suiteTmpDir, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -2235,5 +2312,836 @@ describe('extractBotOpenId', () => {
       expect(chp['tryResume']).toBe(false);
       expect(chp['coldStart']).toBe(true);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inbound media (images and videos)
+// ---------------------------------------------------------------------------
+describe('inbound media', () => {
+  const IMAGE_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=image';
+  const VIDEO_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=video';
+  const FILE_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=file';
+  const VOICE_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=voice';
+  const VOICE_WAV_URL =
+    'https://multimedia.nt.qq.com.cn/download?fileid=voice-wav';
+
+  const DOCX_BYTES = Buffer.from('PK\u0003\u0004docx bytes');
+  const SILK_BYTES = Buffer.from('SILK voice bytes');
+  const WAV_BYTES = Buffer.from('RIFF....WAVEfmt ');
+
+  function imageAttachment(filename = 'photo.png') {
+    return { url: IMAGE_URL, content_type: 'image/jpeg', filename };
+  }
+
+  function videoAttachment(filename = 'clip.mp4') {
+    return { url: VIDEO_URL, content_type: 'video/mp4', filename };
+  }
+
+  function fileAttachment(filename = 'report.docx') {
+    return { url: FILE_URL, content_type: 'file', filename };
+  }
+
+  function voiceAttachment(voiceWavUrl?: string) {
+    return {
+      url: VOICE_URL,
+      content_type: 'voice',
+      ...(voiceWavUrl ? { voice_wav_url: voiceWavUrl } : {}),
+    };
+  }
+
+  function lastEnvelope(): Envelope {
+    return mockHandleInbound.mock.calls[0][0] as Envelope;
+  }
+
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('runs a turn for an image-only C2C message', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [imageAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.syntheticText).toBe(true);
+    const attachments = env.attachments ?? [];
+    expect(attachments).toHaveLength(2);
+    const inline = attachments[0];
+    expect(inline?.type).toBe('image');
+    expect(inline?.mimeType).toBe('image/png');
+    expect(inline?.fileName).toBe('photo.png');
+    expect(inline?.data).toBe(PNG_BYTES.toString('base64'));
+    expect(inline?.filePath).toBeUndefined();
+    const onDisk = attachments[1];
+    expect(onDisk?.type).toBe('file');
+    expect(onDisk?.mimeType).toBe('image/png');
+    expect(onDisk?.fileName).toBe('photo.png');
+    expect(onDisk?.data).toBeUndefined();
+    expect(onDisk?.filePath).toContain(join(suiteTmpDir, 'channel-files'));
+    expect(onDisk?.filePath?.endsWith('photo.png')).toBe(true);
+    await expect(readFile(onDisk!.filePath!)).resolves.toEqual(PNG_BYTES);
+    const stats = await stat(onDisk!.filePath!);
+    expect(stats.mode & 0o777).toBe(0o600);
+
+    pvt['onPromptEnd'](env.chatId, 'session-1', env.messageId);
+
+    await expect(readFile(onDisk!.filePath!)).resolves.toEqual(PNG_BYTES);
+  });
+
+  it('runs a turn for an image-only group @ message', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT>',
+        attachments: [imageAttachment()],
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true, scope: 'single' },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.attachments).toHaveLength(2);
+    expect(env.attachments?.[0]?.type).toBe('image');
+    expect(env.attachments?.[0]?.data).toBe(PNG_BYTES.toString('base64'));
+    expect(env.attachments?.[0]?.filePath).toBeUndefined();
+    expect(env.attachments?.[1]?.type).toBe('file');
+    expect(env.attachments?.[1]?.filePath).toBeDefined();
+  });
+
+  it('runs a turn for an image-only group all-messages message', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: '',
+        attachments: [imageAttachment()],
+        mentions: [{ is_you: true }],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.isMentioned).toBe(true);
+    expect(env.attachments).toHaveLength(2);
+    expect(env.attachments?.[0]?.type).toBe('image');
+    expect(env.attachments?.[0]?.filePath).toBeUndefined();
+    expect(env.attachments?.[1]?.type).toBe('file');
+    expect(env.attachments?.[1]?.filePath).toBeDefined();
+  });
+
+  it('keeps the caption as user text when an image is attached', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '看看这张图', attachments: [imageAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('[atMention=true] [Alice]: 看看这张图');
+    expect(env.syntheticText).toBeUndefined();
+    expect(env.attachments).toHaveLength(2);
+    expect(env.attachments?.[0]?.type).toBe('image');
+    expect(env.attachments?.[0]?.data).toBe(PNG_BYTES.toString('base64'));
+    expect(env.attachments?.[1]?.type).toBe('file');
+  });
+
+  it('writes a video to a temp path and attaches it by path', async () => {
+    stubFetchBytes(MP4_BYTES, 'video/mp4');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [videoAttachment('../clip.mp4')],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(video)');
+    expect(env.syntheticText).toBe(true);
+    const attachment = env.attachments?.[0];
+    expect(attachment?.type).toBe('video');
+    expect(attachment?.mimeType).toBe('video/mp4');
+    expect(attachment?.fileName).toBe('clip.mp4');
+    expect(attachment?.data).toBeUndefined();
+    expect(attachment?.filePath).toContain(join(suiteTmpDir, 'channel-files'));
+    expect(attachment?.filePath?.endsWith(attachment!.fileName!)).toBe(true);
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(MP4_BYTES);
+    const stats = await stat(attachment!.filePath!);
+    expect(stats.mode & 0o777).toBe(0o600);
+  });
+
+  it('downloads a file attachment and keeps the caption', async () => {
+    stubFetchBytes(DOCX_BYTES, 'file');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '请审阅这个文件',
+        attachments: [fileAttachment()],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('[atMention=true] [Alice]: 请审阅这个文件');
+    expect(env.syntheticText).toBeUndefined();
+    const attachments = env.attachments ?? [];
+    // A file is delivered once, by path — never as an inline image entry.
+    expect(attachments).toHaveLength(1);
+    const attachment = attachments[0];
+    // ChannelBase renders this entry into the prompt as
+    // `User sent a file "report.docx". It has been saved to: <path>`
+    // (ChannelBase.ts:7060), which is the line the agent actually sees.
+    expect(attachment?.type).toBe('file');
+    expect(attachment?.data).toBeUndefined();
+    expect(attachment?.mimeType).toBe('application/octet-stream');
+    expect(attachment?.fileName).toBe('report.docx');
+    expect(attachment?.filePath).toContain(join(suiteTmpDir, 'channel-files'));
+    expect(attachment?.filePath?.endsWith('report.docx')).toBe(true);
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(DOCX_BYTES);
+    const stats = await stat(attachment!.filePath!);
+    expect(stats.mode & 0o777).toBe(0o600);
+  });
+
+  it('runs a turn for a file-only C2C message with the (file) placeholder', async () => {
+    stubFetchBytes(DOCX_BYTES, 'file');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [fileAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(file)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.attachments).toHaveLength(1);
+    expect(env.attachments?.[0]?.type).toBe('file');
+    expect(env.attachments?.[0]?.filePath).toBeDefined();
+  });
+
+  it('runs a turn for a file-only group @ message with the (file) placeholder', async () => {
+    stubFetchBytes(DOCX_BYTES, 'file');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT>',
+        attachments: [fileAttachment()],
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true, scope: 'single' },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(file)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.attachments).toHaveLength(1);
+    expect(env.attachments?.[0]?.type).toBe('file');
+    expect(env.attachments?.[0]?.filePath).toBeDefined();
+  });
+
+  it('skips an over-limit file with one stderr line', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(DOCX_BYTES, {
+            headers: { 'content-length': String(QQ_FILE_MAX_BYTES + 1) },
+          }),
+      ),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [fileAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(User sent media but download failed)');
+    expect(env.attachments).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('[QQ:test-bot] skipping file attachment:'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('keeps a file that is over the image cap under the file cap', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // 8 MB + 1 is over the image cap and under the file cap, so the download
+    // only succeeds when the file kind routes to QQ_FILE_MAX_BYTES.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(DOCX_BYTES, {
+            headers: {
+              'content-type': 'file',
+              'content-length': String(QQ_IMAGE_MAX_BYTES + 1),
+            },
+          }),
+      ),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [fileAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    const attachment = env.attachments?.[0];
+    expect(attachment?.type).toBe('file');
+    expect(attachment?.fileName).toBe('report.docx');
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(DOCX_BYTES);
+    expect(
+      stderr.mock.calls.some(([line]) =>
+        String(line).includes('skipping file attachment'),
+      ),
+    ).toBe(false);
+    stderr.mockRestore();
+  });
+
+  it('preserves the sender extension for a file and falls back to .bin', async () => {
+    stubFetchBytes(DOCX_BYTES, 'file');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [
+          fileAttachment('../report.docx'),
+          fileAttachment('README'),
+          fileAttachment('notes.<script>'),
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    expect(lastEnvelope().attachments?.map((a) => a.fileName)).toEqual([
+      'report.docx',
+      'README.bin',
+      'notes.bin',
+    ]);
+  });
+
+  it('prefers the converted WAV URL for a voice attachment', async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(WAV_BYTES, { headers: { 'content-type': 'audio/wav' } }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [voiceAttachment(VOICE_WAV_URL)],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(voice)');
+    expect(env.syntheticText).toBe(true);
+    // The WAV URL is fetched, not the original SILK one.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(VOICE_WAV_URL);
+    const attachments = env.attachments ?? [];
+    // A voice message is delivered once, by path — never as an inline entry.
+    expect(attachments).toHaveLength(1);
+    const attachment = attachments[0];
+    expect(attachment?.type).toBe('audio');
+    expect(attachment?.mimeType).toBe('audio/wav');
+    // QQ sends no filename, so the stem falls back to `qq_voice`.
+    expect(attachment?.fileName).toBe('qq_voice.wav');
+    expect(attachment?.data).toBeUndefined();
+    expect(attachment?.filePath).toContain(join(suiteTmpDir, 'channel-files'));
+    expect(attachment?.filePath?.endsWith('qq_voice.wav')).toBe(true);
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(WAV_BYTES);
+    const stats = await stat(attachment!.filePath!);
+    expect(stats.mode & 0o777).toBe(0o600);
+  });
+
+  it('falls back to the original URL for a voice attachment without a WAV', async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(SILK_BYTES, { headers: { 'content-type': 'voice' } }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [voiceAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(voice)');
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(VOICE_URL);
+    const attachment = env.attachments?.[0];
+    expect(attachment?.type).toBe('audio');
+    expect(attachment?.mimeType).toBe('audio/silk');
+    expect(attachment?.fileName).toBe('qq_voice.silk');
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(SILK_BYTES);
+  });
+
+  it('runs a turn for a voice-only C2C message with the (voice) placeholder', async () => {
+    stubFetchBytes(SILK_BYTES, 'voice');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [voiceAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(voice)');
+    expect(env.syntheticText).toBe(true);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    expect(env.attachments).toHaveLength(1);
+    expect(env.attachments?.[0]?.type).toBe('audio');
+    expect(env.attachments?.[0]?.filePath).toBeDefined();
+  });
+
+  it('runs a turn for a voice-only group @ message with the (voice) placeholder', async () => {
+    stubFetchBytes(SILK_BYTES, 'voice');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT>',
+        attachments: [voiceAttachment()],
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true, scope: 'single' },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(voice)');
+    expect(env.syntheticText).toBe(true);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    expect(env.attachments).toHaveLength(1);
+    expect(env.attachments?.[0]?.type).toBe('audio');
+    expect(env.attachments?.[0]?.filePath).toBeDefined();
+  });
+
+  it('skips an over-limit voice attachment with one stderr line', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(SILK_BYTES, {
+            headers: { 'content-length': String(QQ_VOICE_MAX_BYTES + 1) },
+          }),
+      ),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [voiceAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(User sent media but download failed)');
+    expect(env.attachments).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('[QQ:test-bot] skipping voice attachment:'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('keeps a voice message over the image cap under the voice cap', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // 8 MB + 1 is over the image cap and under the voice cap, so the download
+    // only succeeds when the voice kind routes to QQ_VOICE_MAX_BYTES.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(SILK_BYTES, {
+            headers: {
+              'content-type': 'voice',
+              'content-length': String(QQ_IMAGE_MAX_BYTES + 1),
+            },
+          }),
+      ),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [voiceAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    const attachment = env.attachments?.[0];
+    expect(attachment?.type).toBe('audio');
+    expect(attachment?.fileName).toBe('qq_voice.silk');
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(SILK_BYTES);
+    expect(
+      stderr.mock.calls.some(([line]) =>
+        String(line).includes('skipping voice attachment'),
+      ),
+    ).toBe(false);
+    stderr.mockRestore();
+  });
+
+  it('ignores unsupported attachments and keeps the text', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: 'hello',
+        attachments: [
+          { url: IMAGE_URL, content_type: 'application/octet-stream' },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('[atMention=true] [Alice]: hello');
+    expect(env.attachments).toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('drops a message with no text and only unsupported attachments', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '   ',
+        attachments: [
+          { url: IMAGE_URL, content_type: 'application/octet-stream' },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
+
+  it('skips an over-limit attachment with one stderr line', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(PNG_BYTES, {
+            headers: { 'content-length': String(QQ_IMAGE_MAX_BYTES + 1) },
+          }),
+      ),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [imageAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(User sent media but download failed)');
+    expect(env.attachments).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('[QQ:test-bot] skipping image attachment:'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('runs the turn with a failure placeholder when the download fails', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('nope', { status: 403 })),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [imageAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(User sent media but download failed)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.attachments).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('skipping image attachment: HTTP 403'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('keeps the other attachments when one download fails', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    let call = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        call += 1;
+        return call === 1
+          ? new Response('nope', { status: 500 })
+          : new Response(PNG_BYTES, {
+              headers: { 'content-type': 'image/png' },
+            });
+      }),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [imageAttachment('a.png'), imageAttachment('b.png')],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.attachments).toHaveLength(2);
+    expect(env.attachments?.[0]?.type).toBe('image');
+    expect(env.attachments?.[0]?.fileName).toBe('b.png');
+    expect(env.attachments?.[1]?.type).toBe('file');
+    expect(env.attachments?.[1]?.fileName).toBe('b.png');
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('skipping image attachment: HTTP 500'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('handles at most five attachments per message and logs the excess once', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: Array.from({ length: 6 }, (_, index) =>
+          imageAttachment(`photo-${index}.png`),
+        ),
+      }),
+    );
+
+    await settleDispatches();
+    // Five images, each contributing an inline entry and an on-disk file entry.
+    expect(lastEnvelope().attachments).toHaveLength(10);
+    const capLines = stderr.mock.calls.filter(([chunk]) =>
+      String(chunk).includes('over the per-message limit of 5'),
+    );
+    expect(capLines).toHaveLength(1);
+    expect(String(capLines[0]?.[0])).toContain('skipping 1 attachment(s)');
+    stderr.mockRestore();
+  });
+
+  it('names the on-disk video file from the resolved MIME', async () => {
+    stubFetchBytes(MP4_BYTES, 'video/mp4');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [
+          { url: VIDEO_URL, content_type: 'video/mp4' },
+          {
+            url: VIDEO_URL,
+            content_type: 'video/mp4',
+            filename: 'clip.txt',
+          },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    const attachments = env.attachments ?? [];
+    expect(attachments).toHaveLength(2);
+    expect(attachments[0]?.fileName).toBe('qq_video.mp4');
+    expect(attachments[1]?.fileName).toBe('clip.mp4');
+    await expect(readFile(attachments[0]!.filePath!)).resolves.toEqual(
+      MP4_BYTES,
+    );
+    await expect(readFile(attachments[1]!.filePath!)).resolves.toEqual(
+      MP4_BYTES,
+    );
+  });
+
+  it('uses the sanitized body to detect a media-only group message', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '[bot]',
+        attachments: [imageAttachment()],
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true, scope: 'single' },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.syntheticText).toBe(true);
+  });
+
+  it('keeps the video file after the prompt ends', async () => {
+    stubFetchBytes(MP4_BYTES, 'video/mp4');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [videoAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    const filePath = env.attachments?.[0]?.filePath;
+    expect(filePath).toBeDefined();
+    await expect(readFile(filePath!)).resolves.toEqual(MP4_BYTES);
+
+    pvt['onPromptEnd'](env.chatId, 'session-1', env.messageId);
+
+    await expect(readFile(filePath!)).resolves.toEqual(MP4_BYTES);
+  });
+
+  it('handles a C2C media event with no content field', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    const event = makeC2CEvent({ attachments: [imageAttachment()] });
+    delete (event as { content?: string }).content;
+
+    pvt['handleC2C'](event);
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.attachments?.[0]?.type).toBe('image');
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('Malformed gateway message'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('caps the on-disk video name by bytes, not code points', async () => {
+    stubFetchBytes(MP4_BYTES, 'video/mp4');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [videoAttachment('图'.repeat(200))],
+      }),
+    );
+
+    await settleDispatches();
+    const attachment = lastEnvelope().attachments?.[0];
+    expect(attachment?.fileName).toBeDefined();
+    expect(Buffer.byteLength(attachment!.fileName!)).toBeLessThanOrEqual(204);
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(MP4_BYTES);
+  });
+
+  it('uses the capped list for the media placeholder', async () => {
+    stubFetchBytes(MP4_BYTES, 'video/mp4');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [
+          ...Array.from({ length: 5 }, (_, index) =>
+            videoAttachment(`clip-${index}.mp4`),
+          ),
+          imageAttachment(),
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(video)');
+    expect(env.attachments).toHaveLength(5);
+    expect(env.attachments?.every((entry) => entry.type === 'video')).toBe(
+      true,
+    );
   });
 });

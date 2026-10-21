@@ -11,7 +11,6 @@ import {
   REPORT_FINDINGS_FILE_MAX,
   REPORT_FINDINGS_MAX,
   type ReportFindingsFindingParams,
-  type ReportFindingsParams,
 } from './report-findings.js';
 import type { FindingsResultDisplay } from './tools.js';
 
@@ -28,15 +27,34 @@ function finding(
   };
 }
 
-async function run(params: ReportFindingsParams) {
-  const tool = new ReportFindingsTool();
-  const invocation = tool.build(params);
-  return invocation.execute(new AbortController().signal);
+/** Builds and executes one report on `tool`. */
+function exec(
+  tool: ReportFindingsTool,
+  ...findings: ReportFindingsFindingParams[]
+) {
+  return tool.build({ findings }).execute(new AbortController().signal);
 }
+
+/** Executes one report on a fresh tool. */
+const run = (...findings: ReportFindingsFindingParams[]) =>
+  exec(new ReportFindingsTool(), ...findings);
+
+/** A deferred build on a fresh tool (build commits no state), for toThrow. */
+const tryBuild =
+  (...findings: ReportFindingsFindingParams[]) =>
+  () =>
+    new ReportFindingsTool().build({ findings });
+const tryOne = (overrides: Partial<ReportFindingsFindingParams>) =>
+  tryBuild(finding(overrides));
 
 function displayOf(result: { returnDisplay: unknown }): FindingsResultDisplay {
   return result.returnDisplay as FindingsResultDisplay;
 }
+/** A finding whose failure scenario is an ordering tie. */
+const tie = (overrides: Partial<ReportFindingsFindingParams>) =>
+  finding({ failureScenario: 'tie', ...overrides });
+const summariesOf = (result: { returnDisplay: unknown }) =>
+  displayOf(result).findings.map((f) => f.summary);
 
 describe('ReportFindingsTool', () => {
   it('does not constrain finding summaries in its tool schema', () => {
@@ -55,18 +73,20 @@ describe('ReportFindingsTool', () => {
   });
 
   it('reports findings as a findings_list display with counts in llmContent', async () => {
-    const result = await run({
-      level: 'high',
-      findings: [
-        finding(),
-        finding({
-          severity: 'Suggestion',
-          file: 'src/bar.ts',
-          summary: 'duplicated helper',
-          failureScenario: 'two copies drift',
-        }),
-      ],
-    });
+    const result = await new ReportFindingsTool()
+      .build({
+        level: 'high',
+        findings: [
+          finding(),
+          finding({
+            severity: 'Suggestion',
+            file: 'src/bar.ts',
+            summary: 'duplicated helper',
+            failureScenario: 'two copies drift',
+          }),
+        ],
+      })
+      .execute(new AbortController().signal);
     const display = displayOf(result);
     expect(display.type).toBe('findings_list');
     expect(display.level).toBe('high');
@@ -78,38 +98,35 @@ describe('ReportFindingsTool', () => {
   });
 
   it('sorts severity first, then confidence, then location', async () => {
-    const result = await run({
-      findings: [
-        finding({
-          severity: 'Nice to have',
-          file: 'a.ts',
-          summary: 'nit',
-          failureScenario: 'cost',
-        }),
-        finding({
-          severity: 'Critical',
-          confidence: 'low',
-          file: 'z.ts',
-          summary: 'possible race',
-          failureScenario: 'unlikely interleaving',
-        }),
-        finding({
-          severity: 'Critical',
-          confidence: 'high',
-          file: 'z.ts',
-          summary: 'confirmed race',
-          failureScenario: 'interleaving observed',
-        }),
-        finding({
-          severity: 'Suggestion',
-          file: 'm.ts',
-          summary: 'clearer name',
-          failureScenario: 'reader cost',
-        }),
-      ],
-    });
-    const summaries = displayOf(result).findings.map((f) => f.summary);
-    expect(summaries).toEqual([
+    const result = await run(
+      finding({
+        severity: 'Nice to have',
+        file: 'a.ts',
+        summary: 'nit',
+        failureScenario: 'cost',
+      }),
+      finding({
+        severity: 'Critical',
+        confidence: 'low',
+        file: 'z.ts',
+        summary: 'possible race',
+        failureScenario: 'unlikely interleaving',
+      }),
+      finding({
+        severity: 'Critical',
+        confidence: 'high',
+        file: 'z.ts',
+        summary: 'confirmed race',
+        failureScenario: 'interleaving observed',
+      }),
+      finding({
+        severity: 'Suggestion',
+        file: 'm.ts',
+        summary: 'clearer name',
+        failureScenario: 'reader cost',
+      }),
+    );
+    expect(summariesOf(result)).toEqual([
       'confirmed race',
       'possible race',
       'clearer name',
@@ -122,32 +139,18 @@ describe('ReportFindingsTool', () => {
     // dropped id tiebreak (stable sort keeps input order) flips the expected
     // order; the body finding has no line and must rank before every
     // line-anchored one on the same file (`?? 0`, the artifact's rule).
-    const result = await run({
-      findings: [
-        finding({
-          id: 'R1-2',
-          file: 'z.ts',
-          line: 42,
-          summary: 'second by id',
-          failureScenario: 'tie',
-        }),
-        finding({
-          id: 'R1-10',
-          file: 'z.ts',
-          line: 42,
-          summary: 'first by id',
-          failureScenario: 'tie',
-        }),
-        finding({
-          id: 'R1-3',
-          file: 'z.ts',
-          line: undefined,
-          summary: 'body finding without a line',
-          failureScenario: 'unanchored',
-        }),
-      ],
-    });
-    expect(displayOf(result).findings.map((f) => f.summary)).toEqual([
+    const result = await run(
+      tie({ id: 'R1-2', file: 'z.ts', line: 42, summary: 'second by id' }),
+      tie({ id: 'R1-10', file: 'z.ts', line: 42, summary: 'first by id' }),
+      finding({
+        id: 'R1-3',
+        file: 'z.ts',
+        line: undefined,
+        summary: 'body finding without a line',
+        failureScenario: 'unanchored',
+      }),
+    );
+    expect(summariesOf(result)).toEqual([
       'body finding without a line',
       'first by id',
       'second by id',
@@ -160,37 +163,13 @@ describe('ReportFindingsTool', () => {
     // fixture in this suite is lowercase ASCII, where the two coincide. Each
     // pair arrives lower-sorting first, so a dropped axis (stable sort keeps
     // input order) or one reverted to localeCompare flips the expected order.
-    const result = await run({
-      findings: [
-        finding({
-          id: 'a-1',
-          file: 'a.ts',
-          summary: 'lowercase file',
-          failureScenario: 'tie',
-        }),
-        finding({
-          id: 'B-1',
-          file: 'B.ts',
-          summary: 'uppercase file',
-          failureScenario: 'tie',
-        }),
-        finding({
-          id: 'a-2',
-          file: 'z.ts',
-          line: 7,
-          summary: 'lowercase id',
-          failureScenario: 'tie',
-        }),
-        finding({
-          id: 'B-2',
-          file: 'z.ts',
-          line: 7,
-          summary: 'uppercase id',
-          failureScenario: 'tie',
-        }),
-      ],
-    });
-    expect(displayOf(result).findings.map((f) => f.summary)).toEqual([
+    const result = await run(
+      tie({ id: 'a-1', file: 'a.ts', summary: 'lowercase file' }),
+      tie({ id: 'B-1', file: 'B.ts', summary: 'uppercase file' }),
+      tie({ id: 'a-2', file: 'z.ts', line: 7, summary: 'lowercase id' }),
+      tie({ id: 'B-2', file: 'z.ts', line: 7, summary: 'uppercase id' }),
+    );
+    expect(summariesOf(result)).toEqual([
       'uppercase file',
       'lowercase file',
       'uppercase id',
@@ -204,16 +183,14 @@ describe('ReportFindingsTool', () => {
     // SUMMARY (word-boundary cut), the supplied label must survive as itself.
     const longSummary =
       'the retry guard drops the final attempt when the backoff timer fires after the abort signal has already resolved';
-    const result = await run({
-      findings: [
-        finding({ summary: longSummary }),
-        finding({ file: 'src/other.ts', shortSummary: 'supplied label' }),
-        finding({
-          file: 'src/third.ts',
-          shortSummary: `supplied ${'x'.repeat(100)}`,
-        }),
-      ],
-    });
+    const result = await run(
+      finding({ summary: longSummary }),
+      finding({ file: 'src/other.ts', shortSummary: 'supplied label' }),
+      finding({
+        file: 'src/third.ts',
+        shortSummary: `supplied ${'x'.repeat(100)}`,
+      }),
+    );
     const byFile = Object.fromEntries(
       displayOf(result).findings.map((f) => [f.file, f]),
     );
@@ -228,23 +205,21 @@ describe('ReportFindingsTool', () => {
   });
 
   it('accepts an empty findings list as a valid nothing-found report', async () => {
-    const result = await run({ findings: [] });
+    const result = await run();
     expect(displayOf(result).findings).toEqual([]);
     expect(result.llmContent).toContain('empty findings list');
   });
 
   it('reports outcome counts when every finding carries one', async () => {
-    const result = await run({
-      findings: [
-        finding({ id: 'R1-1', outcome: 'fixed' }),
-        finding({
-          id: 'R1-2',
-          file: 'src/bar.ts',
-          outcome: 'skipped',
-          outcomeNote: 'fix would change intended behaviour',
-        }),
-      ],
-    });
+    const result = await run(
+      finding({ id: 'R1-1', outcome: 'fixed' }),
+      finding({
+        id: 'R1-2',
+        file: 'src/bar.ts',
+        outcome: 'skipped',
+        outcomeNote: 'fix would change intended behaviour',
+      }),
+    );
     expect(result.llmContent).toContain('1 fixed');
     expect(result.llmContent).toContain('1 skipped');
     expect(displayOf(result).findings.map((f) => f.outcome)).toEqual([
@@ -254,26 +229,17 @@ describe('ReportFindingsTool', () => {
   });
 
   it('refuses a partial outcome set', () => {
-    const tool = new ReportFindingsTool();
-    expect(() =>
-      tool.build({
-        findings: [
-          finding({ outcome: 'fixed' }),
-          finding({ file: 'src/bar.ts' }),
-        ],
-      }),
+    expect(
+      tryBuild(finding({ outcome: 'fixed' }), finding({ file: 'src/bar.ts' })),
     ).toThrow(/every finding or none/);
   });
 
   it('refuses duplicate ids', () => {
-    const tool = new ReportFindingsTool();
-    expect(() =>
-      tool.build({
-        findings: [
-          finding({ id: 'R1-1' }),
-          finding({ id: 'R1-1', file: 'src/bar.ts' }),
-        ],
-      }),
+    expect(
+      tryBuild(
+        finding({ id: 'R1-1' }),
+        finding({ id: 'R1-1', file: 'src/bar.ts' }),
+      ),
     ).toThrow(/duplicate id "R1-1"/);
   });
 
@@ -288,97 +254,61 @@ describe('ReportFindingsTool', () => {
   ])(
     'refuses control characters in %s',
     (_field: string, overrides: Partial<ReportFindingsFindingParams>) => {
-      const tool = new ReportFindingsTool();
-      expect(() => tool.build({ findings: [finding(overrides)] })).toThrow(
-        /control characters/,
-      );
+      expect(tryOne(overrides)).toThrow(/control characters/);
     },
   );
 
   it('allows line whitespace only in the prose fields', () => {
-    const tool = new ReportFindingsTool();
-    expect(() =>
-      tool.build({
-        findings: [finding({ summary: 'line one\nline two' })],
-      }),
+    expect(tryOne({ summary: 'line one\nline two' })).not.toThrow();
+    expect(tryOne({ failureScenario: 'step one\nstep two' })).not.toThrow();
+    expect(
+      tryOne({ outcome: 'skipped', outcomeNote: 'reason one\ntwo' }),
     ).not.toThrow();
-    expect(() =>
-      tool.build({
-        findings: [finding({ failureScenario: 'step one\nstep two' })],
-      }),
-    ).not.toThrow();
-    expect(() =>
-      tool.build({
-        findings: [
-          finding({ outcome: 'skipped', outcomeNote: 'reason one\ntwo' }),
-        ],
-      }),
-    ).not.toThrow();
-    expect(() =>
-      tool.build({
-        findings: [finding({ file: 'src/\nfoo.ts' })],
-      }),
-    ).toThrow(/control characters/);
-    expect(() =>
-      tool.build({
-        findings: [finding({ shortSummary: 'one\ntwo' })],
-      }),
-    ).toThrow(/control characters/);
+    expect(tryOne({ file: 'src/\nfoo.ts' })).toThrow(/control characters/);
+    expect(tryOne({ shortSummary: 'one\ntwo' })).toThrow(/control characters/);
   });
 
   it('refuses schema violations: missing failureScenario, bad enums, over-long lists', () => {
-    const tool = new ReportFindingsTool();
-    expect(() =>
-      tool.build({
-        findings: [
-          { severity: 'Critical', file: 'a.ts', summary: 's' },
-        ] as ReportFindingsFindingParams[],
-      }),
+    expect(
+      tryBuild({
+        severity: 'Critical',
+        file: 'a.ts',
+        summary: 's',
+      } as ReportFindingsFindingParams),
     ).toThrow();
+    expect(tryOne({ severity: 'blocker' as 'Critical' })).toThrow();
     expect(() =>
-      tool.build({
-        findings: [finding({ severity: 'blocker' as 'Critical' })],
-      }),
-    ).toThrow();
-    expect(() =>
-      tool.build({
+      new ReportFindingsTool().build({
         level: 'ultra' as 'high',
         findings: [finding()],
       }),
     ).toThrow();
-    expect(() =>
-      tool.build({
-        findings: Array.from({ length: REPORT_FINDINGS_MAX + 1 }, (_, i) =>
+    expect(
+      tryBuild(
+        ...Array.from({ length: REPORT_FINDINGS_MAX + 1 }, (_, i) =>
           finding({ file: `src/f${i}.ts` }),
         ),
-      }),
+      ),
     ).toThrow();
   });
 
   it('refuses blank required fields after trimming', () => {
-    const tool = new ReportFindingsTool();
-    expect(() => tool.build({ findings: [finding({ file: '   ' })] })).toThrow(
-      /"file" must not be empty/,
+    expect(tryOne({ file: '   ' })).toThrow(/"file" must not be empty/);
+    expect(tryOne({ summary: '  ' })).toThrow(/"summary" must not be empty/);
+    expect(tryOne({ failureScenario: ' ' })).toThrow(
+      /"failureScenario" must not be empty/,
     );
-    expect(() =>
-      tool.build({ findings: [finding({ summary: '  ' })] }),
-    ).toThrow(/"summary" must not be empty/);
-    expect(() =>
-      tool.build({ findings: [finding({ failureScenario: ' ' })] }),
-    ).toThrow(/"failureScenario" must not be empty/);
   });
 
   it('trims fields and drops empty optionals in the display', async () => {
-    const result = await run({
-      findings: [
-        finding({
-          id: '  ',
-          file: ' src/foo.ts ',
-          summary: ' padded summary ',
-          category: '',
-        }),
-      ],
-    });
+    const result = await run(
+      finding({
+        id: '  ',
+        file: ' src/foo.ts ',
+        summary: ' padded summary ',
+        category: '',
+      }),
+    );
     const [item] = displayOf(result).findings;
     expect(item.id).toBeUndefined();
     expect(item.file).toBe('src/foo.ts');
@@ -387,9 +317,7 @@ describe('ReportFindingsTool', () => {
   });
 
   it('passes id and line through to the display item', async () => {
-    const result = await run({
-      findings: [finding({ id: 'R2-7', line: 314 })],
-    });
+    const result = await run(finding({ id: 'R2-7', line: 314 }));
     const [item] = displayOf(result).findings;
     expect(item.id).toBe('R2-7');
     expect(item.line).toBe(314);
@@ -400,53 +328,29 @@ describe('ReportFindingsTool', () => {
     // 513-character path it preserves must not refuse the whole in-band list.
     const file = `src/${'a'.repeat(506)}.ts`;
     expect(file).toHaveLength(513);
-    const result = await run({ findings: [finding({ file })] });
+    const result = await run(finding({ file }));
     expect(displayOf(result).findings[0].file).toBe(file);
-    const tool = new ReportFindingsTool();
-    expect(() =>
-      tool.build({
-        findings: [finding({ file: 'a'.repeat(REPORT_FINDINGS_FILE_MAX) })],
-      }),
-    ).not.toThrow();
-    expect(() =>
-      tool.build({
-        findings: [finding({ file: 'a'.repeat(REPORT_FINDINGS_FILE_MAX + 1) })],
-      }),
-    ).toThrow();
+    const max = REPORT_FINDINGS_FILE_MAX;
+    expect(tryOne({ file: 'a'.repeat(max) })).not.toThrow();
+    expect(tryOne({ file: 'a'.repeat(max + 1) })).toThrow();
   });
 
   it('accepts MAX_SAFE_INTEGER line numbers and refuses unsafe ones', async () => {
-    const result = await run({
-      findings: [finding({ line: Number.MAX_SAFE_INTEGER })],
-    });
+    const result = await run(finding({ line: Number.MAX_SAFE_INTEGER }));
     expect(displayOf(result).findings[0].line).toBe(Number.MAX_SAFE_INTEGER);
-    const tool = new ReportFindingsTool();
     // MAX_SAFE_INTEGER + 1 is representable — JSON keeps it, and the
     // rounding that produced it is invisible — so the schema alone cannot
     // catch it.
-    expect(() =>
-      tool.build({
-        findings: [finding({ line: Number.MAX_SAFE_INTEGER + 1 })],
-      }),
-    ).toThrow(/safe range/);
+    expect(tryOne({ line: Number.MAX_SAFE_INTEGER + 1 })).toThrow(/safe range/);
   });
 
   it('requires a non-empty outcomeNote for every skipped outcome', () => {
-    const tool = new ReportFindingsTool();
-    expect(() =>
-      tool.build({ findings: [finding({ outcome: 'skipped' })] }),
-    ).toThrow(/"outcomeNote" is required/);
-    expect(() =>
-      tool.build({
-        findings: [finding({ outcome: 'skipped', outcomeNote: '   ' })],
-      }),
-    ).toThrow(/"outcomeNote" is required/);
-    expect(() =>
-      tool.build({
-        findings: [
-          finding({ outcome: 'skipped', outcomeNote: 'needs a product call' }),
-        ],
-      }),
+    expect(tryOne({ outcome: 'skipped' })).toThrow(/"outcomeNote" is required/);
+    expect(tryOne({ outcome: 'skipped', outcomeNote: '   ' })).toThrow(
+      /"outcomeNote" is required/,
+    );
+    expect(
+      tryOne({ outcome: 'skipped', outcomeNote: 'needs a product call' }),
     ).not.toThrow();
   });
 
@@ -458,7 +362,7 @@ describe('ReportFindingsTool', () => {
     const nine = Array.from({ length: 9 }, (_, i) =>
       finding({ id: `R1-${i + 1}`, file: `src/f${i}.ts` }),
     );
-    await tool.build({ findings: nine }).execute(new AbortController().signal);
+    await exec(tool, ...nine);
 
     const subset = nine
       .slice(0, 6)
@@ -473,26 +377,15 @@ describe('ReportFindingsTool', () => {
     expect(() => tool.build({ findings: ghost })).toThrow(/"R1-10"/);
 
     const full = nine.map((f) => ({ ...f, outcome: 'fixed' as const }));
-    const result = await tool
-      .build({ findings: full })
-      .execute(new AbortController().signal);
+    const result = await exec(tool, ...full);
     expect(displayOf(result).findings).toHaveLength(9);
 
     // A fresh report without outcomes replaces the active identity.
-    await tool
-      .build({ findings: [finding({ id: 'R2-1', file: 'src/new.ts' })] })
-      .execute(new AbortController().signal);
-    await tool
-      .build({
-        findings: [
-          finding({
-            id: 'R2-1',
-            file: 'src/new.ts',
-            outcome: 'no_change_needed',
-          }),
-        ],
-      })
-      .execute(new AbortController().signal);
+    await exec(tool, finding({ id: 'R2-1', file: 'src/new.ts' }));
+    await exec(
+      tool,
+      finding({ id: 'R2-1', file: 'src/new.ts', outcome: 'no_change_needed' }),
+    );
   });
 
   it('does not hold an outcome call to a report that had no identity', async () => {
@@ -500,16 +393,10 @@ describe('ReportFindingsTool', () => {
     // a later outcome call could be joined against; an empty report
     // establishes no identity either.
     const tool = new ReportFindingsTool();
-    await tool
-      .build({ findings: [finding()] })
-      .execute(new AbortController().signal);
-    await tool
-      .build({ findings: [finding({ outcome: 'fixed' })] })
-      .execute(new AbortController().signal);
-    await tool.build({ findings: [] }).execute(new AbortController().signal);
-    await tool
-      .build({ findings: [finding({ outcome: 'fixed' })] })
-      .execute(new AbortController().signal);
+    await exec(tool, finding());
+    await exec(tool, finding({ outcome: 'fixed' }));
+    await exec(tool);
+    await exec(tool, finding({ outcome: 'fixed' }));
   });
 
   it('does not commit the identity at build: an undelivered report blocks nothing', async () => {
@@ -519,17 +406,11 @@ describe('ReportFindingsTool', () => {
     // never-delivered round-2 report the active one, rejecting a
     // legitimate outcome call for the round-1 report the client shows.
     const tool = new ReportFindingsTool();
-    await tool
-      .build({ findings: [finding({ id: 'R1-1' })] })
-      .execute(new AbortController().signal);
+    await exec(tool, finding({ id: 'R1-1' }));
     // Built but never executed — a cancelled turn's dropped call.
     tool.build({ findings: [finding({ id: 'R2-1', file: 'src/new.ts' })] });
 
-    const outcome = await tool
-      .build({
-        findings: [finding({ id: 'R1-1', outcome: 'fixed' })],
-      })
-      .execute(new AbortController().signal);
+    const outcome = await exec(tool, finding({ id: 'R1-1', outcome: 'fixed' }));
     expect(displayOf(outcome).findings[0].outcome).toBe('fixed');
   });
 
@@ -538,18 +419,10 @@ describe('ReportFindingsTool', () => {
     // replaces the active identity with none, so a following outcome call
     // is accepted on its own terms instead of being held to the old ids.
     const tool = new ReportFindingsTool();
-    await tool
-      .build({ findings: [finding({ id: 'R1-1' })] })
-      .execute(new AbortController().signal);
-    await tool
-      .build({ findings: [finding({ file: 'src/new.ts' })] })
-      .execute(new AbortController().signal);
+    await exec(tool, finding({ id: 'R1-1' }));
+    await exec(tool, finding({ file: 'src/new.ts' }));
 
-    const result = await tool
-      .build({
-        findings: [finding({ id: 'R9-9', outcome: 'fixed' })],
-      })
-      .execute(new AbortController().signal);
+    const result = await exec(tool, finding({ id: 'R9-9', outcome: 'fixed' }));
     expect(displayOf(result).findings).toHaveLength(1);
   });
 
@@ -560,27 +433,18 @@ describe('ReportFindingsTool', () => {
     // terms — all-or-nothing outcomes — instead of against the old list.
     // The same subset the original instance rejects is accepted here.
     const original = new ReportFindingsTool();
-    await original
-      .build({
-        findings: [
-          finding({ id: 'R1-1' }),
-          finding({ id: 'R1-2', file: 'src/bar.ts' }),
-          finding({ id: 'R1-3', file: 'src/baz.ts' }),
-        ],
-      })
-      .execute(new AbortController().signal);
-    expect(() =>
-      original.build({
-        findings: [finding({ id: 'R1-1', outcome: 'fixed' })],
-      }),
-    ).toThrow(/drops 2 finding\(s\) from the active report/);
+    await exec(
+      original,
+      finding({ id: 'R1-1' }),
+      finding({ id: 'R1-2', file: 'src/bar.ts' }),
+      finding({ id: 'R1-3', file: 'src/baz.ts' }),
+    );
+    const subset = finding({ id: 'R1-1', outcome: 'fixed' });
+    expect(() => original.build({ findings: [subset] })).toThrow(
+      /drops 2 finding\(s\) from the active report/,
+    );
 
-    const resumed = new ReportFindingsTool();
-    const result = await resumed
-      .build({
-        findings: [finding({ id: 'R1-1', outcome: 'fixed' })],
-      })
-      .execute(new AbortController().signal);
+    const result = await exec(new ReportFindingsTool(), subset);
     expect(displayOf(result).findings).toHaveLength(1);
   });
 });
@@ -613,12 +477,10 @@ describe('compressFindingSummary', () => {
 describe('the finding axes (#10291)', () => {
   it('passes direction and baseline through to the display, and omits them when absent', async () => {
     const display = displayOf(
-      await run({
-        findings: [
-          finding({ direction: 'fails-closed', baseline: 'new-surface' }),
-          finding({ file: 'src/bar.ts' }),
-        ],
-      }),
+      await run(
+        finding({ direction: 'fails-closed', baseline: 'new-surface' }),
+        finding({ file: 'src/bar.ts' }),
+      ),
     );
     // Located by file: the display is sorted, and `src/bar.ts` sorts first.
     const foo = display.findings.find((f) => f.file === 'src/foo.ts')!;
@@ -632,16 +494,7 @@ describe('the finding axes (#10291)', () => {
   });
 
   it('refuses an axis outside its list', () => {
-    const tool = new ReportFindingsTool();
-    expect(() =>
-      tool.build({
-        findings: [finding({ direction: 'fails-open' as 'fails-closed' })],
-      }),
-    ).toThrow();
-    expect(() =>
-      tool.build({
-        findings: [finding({ baseline: 'old-surface' as 'regression' })],
-      }),
-    ).toThrow();
+    expect(tryOne({ direction: 'fails-open' as 'fails-closed' })).toThrow();
+    expect(tryOne({ baseline: 'old-surface' as 'regression' })).toThrow();
   });
 });

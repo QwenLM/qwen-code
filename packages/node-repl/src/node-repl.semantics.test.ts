@@ -314,6 +314,69 @@ describe('binding semantics through the real kernel', () => {
     expect(viaBytes.events.some((e) => e.type === 'image')).toBe(true);
   });
 
+  it('carries structured image metadata across the kernel boundary', async () => {
+    const manager = makeManager();
+    const png =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const result = await manager.exec({
+      code: `await nodeRepl.emitImage({ bytes: Uint8Array.from(atob("${png}"), (c) => c.charCodeAt(0)), mimeType: "image/png", metadata: { width: 1, height: 1, coordinateSpace: "css-pixels" } });`,
+      timeoutMs: 30_000,
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.events.find((event) => event.type === 'image')).toMatchObject(
+      {
+        metadata: '{"width":1,"height":1,"coordinateSpace":"css-pixels"}',
+      },
+    );
+  });
+
+  it('preserves large metadata without a separate size cap', async () => {
+    const manager = makeManager();
+    const png =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const result = await manager.exec({
+      code: `await nodeRepl.emitImage({ bytes: Uint8Array.from(atob("${png}"), c => c.charCodeAt(0)), mimeType: "image/png", metadata: "界".repeat(20000) });`,
+      timeoutMs: 30_000,
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.events.find((event) => event.type === 'image')).toMatchObject(
+      { metadata: JSON.stringify('界'.repeat(20000)) },
+    );
+  });
+
+  it.each([
+    ['function', '() => {}', /metadata must be JSON-serializable/],
+    ['bigint', '1n', /BigInt/],
+    [
+      'circular',
+      '(() => { const value = {}; value.self = value; return value; })()',
+      /circular/i,
+    ],
+  ])(
+    'rejects %s metadata without emitting its image',
+    async (_, value, error) => {
+      const manager = makeManager();
+      const png =
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+      const result = await manager.exec({
+        code: `await nodeRepl.emitImage({ bytes: Uint8Array.from(atob("${png}"), c => c.charCodeAt(0)), mimeType: "image/png", metadata: ${value} });`,
+        timeoutMs: 30_000,
+      });
+
+      expect(result.status).toBe('error');
+      expect(result.error?.message).toMatch(error);
+      expect(result.events.some((event) => event.type === 'image')).toBe(false);
+      const next = await manager.exec({
+        code: 'nodeRepl.write("still usable");',
+        timeoutMs: 30_000,
+      });
+      expect(next.status).toBe('ok');
+      expect(textOf(next.events)).toBe('still usable');
+    },
+  );
+
   it('caps live sandbox timers instead of letting one cell saturate the loop', async () => {
     const manager = makeManager();
     const r = await manager.exec({

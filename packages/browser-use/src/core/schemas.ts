@@ -6,7 +6,11 @@
 
 import { z } from 'zod';
 
-import { SNAPSHOT_REF_PATTERN, type LocatorStep } from './primitives.js';
+import {
+  FINALIZE_TAB_STATUSES,
+  SNAPSHOT_REF_PATTERN,
+  type LocatorStep,
+} from './primitives.js';
 import {
   MAX_SCREENSHOT_EDGE,
   MAX_SCREENSHOT_PIXELS,
@@ -265,6 +269,22 @@ export const commandSchemas = {
   'tabs.list': browserArgs,
   'tabs.get': z.object({ browserId: id, tabId: id }).strict(),
   'tabs.selected': browserArgs,
+  'tabs.finalize': z
+    .object({
+      browserId: id,
+      keep: z
+        .array(
+          z
+            .object({
+              tabId: id,
+              status: z.enum(FINALIZE_TAB_STATUSES),
+            })
+            .strict(),
+        )
+        .max(100)
+        .optional(),
+    })
+    .strict(),
 
   'tab.goto': z
     .object({

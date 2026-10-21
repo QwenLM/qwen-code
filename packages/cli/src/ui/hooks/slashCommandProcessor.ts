@@ -51,6 +51,10 @@ import {
 } from '../commands/types.js';
 import type { RecentSlashCommand } from './useSlashCompletion.js';
 import { CommandService } from '../../services/CommandService.js';
+import {
+  getInteractiveModSession,
+  isModRecoveryCommand,
+} from '../../services/interactive-mod-session.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
@@ -78,6 +82,10 @@ import {
   SLASH_COMMANDS_SKIP_RECORDING,
 } from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
+import {
+  sanitizeTerminalText,
+  stripUnsafeCharacters,
+} from '../utils/textUtils.js';
 import { useKeypress } from './useKeypress.js';
 import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
 import { quitCommand } from '../commands/quitCommand.js';
@@ -180,6 +188,7 @@ export interface SlashCommandProcessorActions {
   openStatusLineDialog: () => void;
   openModelDialog: (options?: {
     fastModelMode?: boolean;
+    advisorModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
     compactionModelMode?: boolean;
@@ -417,15 +426,17 @@ export const useSlashCommandProcessor = (
     setBtwItem(null);
   }, []);
 
-  // AbortController for cancelling async slash commands via ESC
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const activeCommandRef = useRef<{
+    controller: AbortController;
+    canCancel: boolean;
+  } | null>(null);
 
   const cancelSlashCommand = useCallback(() => {
     cancelBtw();
-    if (!abortControllerRef.current) {
+    if (!activeCommandRef.current?.canCancel) {
       return;
     }
-    abortControllerRef.current.abort();
+    activeCommandRef.current.controller.abort();
     addItem(
       {
         type: MessageType.INFO,
@@ -593,7 +604,7 @@ export const useSlashCommandProcessor = (
   );
 
   useEffect(() => {
-    if (!config) {
+    if (!config || config.getShellExecutionSandbox?.()) {
       return;
     }
 
@@ -762,6 +773,7 @@ export const useSlashCommandProcessor = (
     const controller = new AbortController();
     const load = async () => {
       try {
+        const mods = getInteractiveModSession(config);
         const loaders = [
           new McpPromptLoader(config),
           new BuiltinCommandLoader(config),
@@ -769,6 +781,7 @@ export const useSlashCommandProcessor = (
           new SkillCommandLoader(config),
           new SavedWorkflowLoader(config),
           new FileCommandLoader(config),
+          ...(mods ? [mods] : []),
         ];
         const disabled = config?.getDisabledSlashCommands() ?? [];
         const commandService = await CommandService.create(
@@ -880,6 +893,8 @@ export const useSlashCommandProcessor = (
       oneTimeShellAllowlist?: Set<string>,
       overwriteConfirmed?: boolean,
       existingInvocationItemId?: number,
+      // Identity shared by the invocation item and submitted prompt.
+      invocationPromptId?: string,
     ): Promise<SlashCommandProcessorResult | false> => {
       if (typeof rawQuery !== 'string') {
         return false;
@@ -929,7 +944,8 @@ export const useSlashCommandProcessor = (
 
       // Create a new AbortController for this command execution
       const abortController = new AbortController();
-      abortControllerRef.current = abortController;
+      const activeCommand = { controller: abortController, canCancel: true };
+      activeCommandRef.current = activeCommand;
 
       const userMessageTimestamp = Date.now();
       let invocationItemId = existingInvocationItemId;
@@ -989,6 +1005,11 @@ export const useSlashCommandProcessor = (
       };
 
       try {
+        // Some built-ins invoke models directly, before normal prompt dispatch.
+        const mods = getInteractiveModSession(config);
+        if (mods && !isModRecoveryCommand(commandToExecute)) {
+          await mods.ready;
+        }
         // Handle stacked skill invocations (e.g. /feat-dev /e2e-testing implement X)
         const stackedResult = parseStackedSlashCommands(trimmed, commands);
         if (stackedResult.skills.length >= 2) {
@@ -1057,7 +1078,10 @@ export const useSlashCommandProcessor = (
           // Mark as sent to model so chat recording and telemetry work correctly
           invocationSentToModel = true;
           if (invocationItemId !== undefined) {
-            updateItem(invocationItemId, { sentToModel: true });
+            updateItem(invocationItemId, {
+              sentToModel: true,
+              ...(invocationPromptId ? { promptId: invocationPromptId } : {}),
+            });
           }
 
           // Combine all content into a single submit_prompt
@@ -1133,10 +1157,13 @@ export const useSlashCommandProcessor = (
                 { once: true },
               );
             });
-            const result = await Promise.race([
-              commandToExecute.action(fullCommandContext, args),
-              abortPromise,
-            ]);
+            activeCommand.canCancel = commandToExecute.canCancel !== false;
+            const result = abortController.signal.aborted
+              ? undefined
+              : await Promise.race([
+                  commandToExecute.action(fullCommandContext, args),
+                  abortPromise,
+                ]);
 
             // If the command was cancelled via ESC while executing, skip result processing
             if (abortController.signal.aborted) {
@@ -1245,6 +1272,9 @@ export const useSlashCommandProcessor = (
                         fastModelMode: true,
                         persistScope: result.persistScope,
                       });
+                      return { type: 'handled' };
+                    case 'advisor-model':
+                      actions.openModelDialog({ advisorModelMode: true });
                       return { type: 'handled' };
                     case 'voice-model':
                       actions.openModelDialog({
@@ -1400,7 +1430,12 @@ export const useSlashCommandProcessor = (
                     // React applies this update asynchronously. No same-turn
                     // logic reads the UI history classification; rewind/resume
                     // consumers observe it after state has rendered.
-                    updateItem(invocationItemId, { sentToModel: true });
+                    updateItem(invocationItemId, {
+                      sentToModel: true,
+                      ...(invocationPromptId
+                        ? { promptId: invocationPromptId }
+                        : {}),
+                    });
                   }
                   recordSkillCommandInvocation(true);
                   void recordAutoSkillCommandUsage(config, commandToExecute);
@@ -1454,6 +1489,7 @@ export const useSlashCommandProcessor = (
                     new Set(approvedCommands),
                     undefined,
                     invocationItemId,
+                    invocationPromptId,
                   );
                 }
                 case 'confirm_action': {
@@ -1486,6 +1522,7 @@ export const useSlashCommandProcessor = (
                     undefined,
                     true,
                     invocationItemId,
+                    invocationPromptId,
                   );
                 }
                 case 'stream_messages': {
@@ -1543,7 +1580,9 @@ export const useSlashCommandProcessor = (
         addItemWithRecording(
           {
             type: MessageType.ERROR,
-            text: e instanceof Error ? e.message : String(e),
+            text: sanitizeTerminalText(
+              stripUnsafeCharacters(e instanceof Error ? e.message : String(e)),
+            ),
           },
           Date.now(),
         );
@@ -1602,7 +1641,10 @@ export const useSlashCommandProcessor = (
           });
           logSlashCommand(config, event);
         }
-        setIsProcessing(false);
+        if (activeCommandRef.current === activeCommand) {
+          activeCommandRef.current = null;
+          setIsProcessing(false);
+        }
       }
     },
     [

@@ -22,6 +22,10 @@ import {
   updateCronTasks,
 } from '@qwen-code/qwen-code-core';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import type {
+  BridgeClientRequestContext,
+  CloseSessionOpts,
+} from '@qwen-code/acp-bridge';
 import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
@@ -74,7 +78,11 @@ interface StubBridge {
     signal?: AbortSignal,
     context?: { onPromptAdmitted?: () => void },
   ): Promise<unknown>;
-  closeSession(sessionId: string): Promise<unknown>;
+  closeSession(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+    opts?: CloseSessionOpts,
+  ): Promise<unknown>;
   ensureDefaultSessionPersisted(sessionId: string): Promise<void>;
   updateSessionMetadata(
     sessionId: string,
@@ -113,6 +121,7 @@ interface StubBridge {
   spawnApprovalModes: Array<string | undefined>;
   prompts: Array<{ sessionId: string; text: string }>;
   closed: string[];
+  closeOptions: Array<CloseSessionOpts | undefined>;
   persisted: string[];
   named: Array<{
     sessionId: string;
@@ -135,6 +144,7 @@ function makeStubBridge(): StubBridge {
     spawnApprovalModes: [],
     prompts: [],
     closed: [],
+    closeOptions: [],
     persisted: [],
     named: [],
     markSessionCatalogChanged: vi.fn(),
@@ -174,8 +184,9 @@ function makeStubBridge(): StubBridge {
       context?.onPromptAdmitted?.();
       return { stopReason: 'end_turn' };
     },
-    async closeSession(sessionId: string) {
+    async closeSession(sessionId, _context, opts) {
       bridge.closed.push(sessionId);
+      bridge.closeOptions.push(opts);
       bridge.liveSessions.delete(sessionId);
       return undefined;
     },
@@ -2108,8 +2119,15 @@ describe('scheduled-tasks routes', () => {
       },
     });
     expect(deletionGeneration).toBe(1);
-    // The task's dedicated session is torn down with it (no resident leak).
+    // The task's dedicated session is offered a conditional close with it;
+    // production retains it while work holds it.
     expect(h.bridge.closed).toEqual([created.body.sessionId]);
+    expect(h.bridge.closeOptions).toEqual([
+      {
+        closeIfUnheld: true,
+        reason: 'scheduled_task_deleted',
+      },
+    ]);
 
     const again = await request(h.app).delete(`/scheduled-tasks/${id}`);
     expect(again.status).toBe(404);

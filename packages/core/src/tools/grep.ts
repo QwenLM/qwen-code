@@ -283,6 +283,14 @@ class GrepToolInvocation extends BaseToolInvocation<
         llmContent: llmContent.trim(),
         returnDisplay: displayMessage,
         resultFilePaths,
+        // This render is already bounded, so the scheduler must not measure
+        // its own body and report it as the raw size. The pre-reduction size
+        // existed only inside the append loop that skipped it, and rebuilding
+        // the full render to count it is the allocation the limit avoids;
+        // declare it unknown instead (#13652 R2-5).
+        ...(truncatedByLineLimit || truncatedByCharLimit
+          ? { rawOutputSize: null, truncatedByProducer: true }
+          : {}),
       };
     } catch (error) {
       debugLogger.error(`Error during GrepLogic execution: ${error}`);
@@ -684,7 +692,7 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
     super(
       GrepTool.Name,
       ToolDisplayNames.GREP,
-      'A powerful search tool for finding patterns in files\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Case-insensitive by default\n  - Use Agent tool for open-ended searches requiring multiple rounds\n',
+      'A powerful search tool for finding patterns in files\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Case-insensitive by default\n',
       Kind.Search,
       {
         properties: {

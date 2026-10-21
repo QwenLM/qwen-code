@@ -6,6 +6,7 @@
 
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { HookAbortError, HookTimeoutError } from './hook-errors.js';
+import { DEFAULT_FUNCTION_HOOK_TIMEOUT_MS } from './hook-timeout.js';
 import type {
   FunctionHookConfig,
   HookInput,
@@ -17,12 +18,6 @@ import type {
 } from './types.js';
 
 const debugLogger = createDebugLogger('FUNCTION_HOOK_RUNNER');
-
-/**
- * Default timeout for function hook execution (5 seconds)
- * Function hooks are intended for quick validation checks
- */
-const DEFAULT_FUNCTION_TIMEOUT = 5000;
 
 /**
  * Function Hook Runner - executes function hooks (callbacks)
@@ -61,7 +56,7 @@ export class FunctionHookRunner {
     }
 
     try {
-      const timeout = hookConfig.timeout ?? DEFAULT_FUNCTION_TIMEOUT;
+      const timeout = hookConfig.timeout ?? DEFAULT_FUNCTION_HOOK_TIMEOUT_MS;
 
       // Execute callback with timeout and context
       const result = await this.executeWithTimeout(

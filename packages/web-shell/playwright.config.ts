@@ -12,7 +12,10 @@ export default defineConfig({
   outputDir: './client/e2e/test-results',
   timeout: 60_000,
   expect: {
-    timeout: 10_000,
+    // A pool host runs other jobs beside this suite, so its first paint can
+    // miss the hosted 10 s budget: run 39185024821 lost ten @smoke tests to
+    // visibility waits while the same commit passed on a quieter host.
+    timeout: 20_000,
   },
   forbidOnly: !!process.env['CI'],
   retries: process.env['CI'] ? 2 : 0,
@@ -37,6 +40,12 @@ export default defineConfig({
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
       testIgnore: ['**/visuals/**', '**/*.mobile.spec.ts'],
+    },
+    {
+      name: 'mobile-webkit',
+      grep: /@smoke/,
+      use: { ...devices['iPhone 13'] },
+      testMatch: '**/*.mobile.spec.ts',
     },
     {
       // Touch-device emulation for the mobile composer backend (#5958):

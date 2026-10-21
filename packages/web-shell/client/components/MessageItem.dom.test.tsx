@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
+import { TurnCallsProvider } from '../turnCallsContext';
 import {
   WebShellCustomizationProvider,
   type WebShellAssistantTurnFooterRenderInfo,
@@ -541,6 +542,24 @@ describe('MessageItem background notification spacing', () => {
   );
 });
 
+function openMessageMenu(container: HTMLElement) {
+  const trigger = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="More message actions"]',
+  );
+  expect(trigger).not.toBeNull();
+  act(() => {
+    trigger!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+    );
+  });
+}
+
+function messageMenuItem(label: string) {
+  return [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+    (element) => element.textContent === label,
+  );
+}
+
 describe('MessageItem inline message editing', () => {
   function renderEditableUserMessage(
     onSubmitUserMessageEdit: (content: string) => boolean | Promise<boolean>,
@@ -560,11 +579,8 @@ describe('MessageItem inline message editing', () => {
     const onSubmitUserMessageEdit = vi.fn().mockResolvedValue(true);
     const container = renderEditableUserMessage(onSubmitUserMessageEdit);
 
-    act(() => {
-      container
-        .querySelector<HTMLButtonElement>('button[aria-label="Edit message"]')
-        ?.click();
-    });
+    openMessageMenu(container);
+    act(() => messageMenuItem('Edit message')!.click());
     expect(captured.userMessageProps?.editing).toBe(true);
 
     await act(async () => {
@@ -582,11 +598,8 @@ describe('MessageItem inline message editing', () => {
     const onSubmitUserMessageEdit = vi.fn().mockResolvedValue(false);
     const container = renderEditableUserMessage(onSubmitUserMessageEdit);
 
-    act(() => {
-      container
-        .querySelector<HTMLButtonElement>('button[aria-label="Edit message"]')
-        ?.click();
-    });
+    openMessageMenu(container);
+    act(() => messageMenuItem('Edit message')!.click());
 
     await act(async () => {
       container
@@ -599,4 +612,63 @@ describe('MessageItem inline message editing', () => {
     expect(captured.userMessageProps?.editing).toBe(true);
     expect(captured.userMessageProps?.submittingEdit).toBe(false);
   });
+});
+
+it.each([
+  [undefined, 'ordinary prompt', true],
+  ['cron', 'scheduled prompt', true],
+  ['goal_runtime', 'continue goal', false],
+  ['goal_control', 'goal card', false],
+  ['cron', '', false],
+] as const)(
+  'exposes Tool calls only for a navigation prompt (%s)',
+  (source, content, visible) => {
+    const onOpen = vi.fn();
+    const view = render(
+      <I18nProvider language="en">
+        <TurnCallsProvider onOpen={onOpen}>
+          <MessageItem
+            message={{
+              id: 'prompt',
+              role: 'user',
+              content,
+              timestamp: 0,
+              ...(source ? { source } : {}),
+            }}
+          />
+        </TurnCallsProvider>
+      </I18nProvider>,
+    );
+    if (visible) openMessageMenu(view);
+    const entry = messageMenuItem('View tool calls');
+    expect(Boolean(entry)).toBe(visible);
+    if (entry) {
+      act(() => entry.click());
+      expect(onOpen).toHaveBeenCalledWith('prompt');
+    }
+  },
+);
+
+it('updates the Tool calls entry when the user message source is filled in', () => {
+  const onOpen = vi.fn();
+  const row = (source?: string) => (
+    <I18nProvider language="en">
+      <TurnCallsProvider onOpen={onOpen}>
+        <MessageItem
+          message={{
+            id: 'prompt',
+            role: 'user',
+            content: 'Same text',
+            timestamp: 0,
+            source,
+          }}
+        />
+      </TurnCallsProvider>
+    </I18nProvider>
+  );
+  const { root, container } = renderWithRoot(row());
+  openMessageMenu(container);
+  expect(messageMenuItem('View tool calls')).toBeDefined();
+  act(() => root.render(row('goal_runtime')));
+  expect(messageMenuItem('View tool calls')).toBeUndefined();
 });

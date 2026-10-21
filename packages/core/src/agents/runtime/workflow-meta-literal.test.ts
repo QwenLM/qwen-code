@@ -21,12 +21,18 @@ function plain(value: unknown): unknown {
   return value;
 }
 
+/** The parse of every `{ name: 'w', description: 'd' ... }` source. */
+const minimal = { name: 'w', description: 'd' };
+const parsed = (src: string) => plain(parseWorkflowMetaLiteral(src));
+const nameOf = (src: string) =>
+  (parseWorkflowMetaLiteral(src) as { name: string }).name;
+/** A meta with the required fields plus `rest` members. */
+const withExtra = (rest: string) => `{ name: 'x', description: 'd', ${rest} }`;
+
 describe('parseWorkflowMetaLiteral', () => {
   describe('the contract shape', () => {
     it('parses the minimal required fields', () => {
-      expect(
-        plain(parseWorkflowMetaLiteral(`{ name: 'w', description: 'd' }`)),
-      ).toEqual({ name: 'w', description: 'd' });
+      expect(parsed(`{ name: 'w', description: 'd' }`)).toEqual(minimal);
     });
 
     it('parses the full contract including phases', () => {
@@ -40,7 +46,7 @@ describe('parseWorkflowMetaLiteral', () => {
           { title: 'Synthesize' },
         ],
       }`;
-      expect(plain(parseWorkflowMetaLiteral(src))).toEqual({
+      expect(parsed(src)).toEqual({
         name: 'deep-research',
         description: 'Research a question across sources',
         whenToUse: 'when the question spans sources',
@@ -62,27 +68,17 @@ describe('parseWorkflowMetaLiteral', () => {
       ['line comments', `{ // lead\n name: 'w', description: 'd' }`],
       ['block comments', `{ /* a */ name: 'w', /* b */ description: 'd' }`],
     ])('accepts %s', (_label, src) => {
-      expect(plain(parseWorkflowMetaLiteral(src))).toEqual({
-        name: 'w',
-        description: 'd',
-      });
+      expect(parsed(src)).toEqual(minimal);
     });
 
     it('accepts a trailing comma in an array', () => {
       const src = `{ name: 'w', description: 'd', phases: [{ title: 'A' },] }`;
-      expect(plain(parseWorkflowMetaLiteral(src))).toEqual({
-        name: 'w',
-        description: 'd',
-        phases: [{ title: 'A' }],
-      });
+      expect(parsed(src)).toEqual({ ...minimal, phases: [{ title: 'A' }] });
     });
 
     it('accepts a multi-line template string', () => {
       const src = '{ name: `a\nb`, description: `d` }';
-      expect(plain(parseWorkflowMetaLiteral(src))).toEqual({
-        name: 'a\nb',
-        description: 'd',
-      });
+      expect(parsed(src)).toEqual({ name: 'a\nb', description: 'd' });
     });
 
     it.each([
@@ -96,34 +92,19 @@ describe('parseWorkflowMetaLiteral', () => {
         `{ name: 'w', description: 'd' // note` +
         terminator +
         `, whenToUse: 'u' }`;
-      expect(plain(parseWorkflowMetaLiteral(src))).toEqual({
-        name: 'w',
-        description: 'd',
-        whenToUse: 'u',
-      });
+      expect(parsed(src)).toEqual({ ...minimal, whenToUse: 'u' });
     });
 
     it('accepts numbers, booleans and null in non-contract fields', () => {
       const src = `{ name: 'w', description: 'd', n: -1.5e3, b: true, f: false, z: null }`;
-      expect(plain(parseWorkflowMetaLiteral(src))).toEqual({
-        name: 'w',
-        description: 'd',
-        n: -1500,
-        b: true,
-        f: false,
-        z: null,
-      });
+      const want = { ...minimal, n: -1500, b: true, f: false, z: null };
+      expect(parsed(src)).toEqual(want);
     });
 
     it('treats get/set/async as ordinary keys when no property name follows', () => {
       const src = `{ name: 'w', description: 'd', get: 'a', set: 'b', async: 'c' }`;
-      expect(plain(parseWorkflowMetaLiteral(src))).toEqual({
-        name: 'w',
-        description: 'd',
-        get: 'a',
-        set: 'b',
-        async: 'c',
-      });
+      const want = { ...minimal, get: 'a', set: 'b', async: 'c' };
+      expect(parsed(src)).toEqual(want);
     });
   });
 
@@ -147,10 +128,7 @@ describe('parseWorkflowMetaLiteral', () => {
       ['\\u{41}', 'A'],
       ['\\q', 'q'],
     ])('decodes %s', (escape, expected) => {
-      const { name } = parseWorkflowMetaLiteral(
-        `{ name: "${escape}", description: "d" }`,
-      ) as { name: string };
-      expect(name).toBe(expected);
+      expect(nameOf(`{ name: "${escape}", description: "d" }`)).toBe(expected);
     });
 
     it('decodes a quote escaped with its own quote character', () => {
@@ -165,10 +143,7 @@ describe('parseWorkflowMetaLiteral', () => {
     });
 
     it('treats a backslash-newline as a line continuation', () => {
-      const { name } = parseWorkflowMetaLiteral(
-        '{ name: "a\\\nb", description: "d" }',
-      ) as { name: string };
-      expect(name).toBe('ab');
+      expect(nameOf('{ name: "a\\\nb", description: "d" }')).toBe('ab');
     });
 
     it.each([
@@ -181,8 +156,7 @@ describe('parseWorkflowMetaLiteral', () => {
       for (const quote of ['"', "'", '`']) {
         const src =
           `{ name: ${quote}a\\` + terminator + `b${quote}, description: 'd' }`;
-        const { name } = parseWorkflowMetaLiteral(src) as { name: string };
-        expect(name).toBe('ab');
+        expect(nameOf(src)).toBe('ab');
       }
     });
 
@@ -190,17 +164,14 @@ describe('parseWorkflowMetaLiteral', () => {
       ['CR', '\r'],
       ['CRLF', '\r\n'],
     ])('cooks raw %s to LF in a template string', (_label, terminator) => {
-      const { name } = parseWorkflowMetaLiteral(
-        '{ name: `a' + terminator + "b`, description: 'd' }",
-      ) as { name: string };
-      expect(name).toBe('a\nb');
+      const src = '{ name: `a' + terminator + "b`, description: 'd' }";
+      expect(nameOf(src)).toBe('a\nb');
     });
 
     it('preserves non-ASCII text verbatim', () => {
-      const { name } = parseWorkflowMetaLiteral(
-        `{ name: '工作流 🪜', description: 'd' }`,
-      ) as { name: string };
-      expect(name).toBe('工作流 🪜');
+      expect(nameOf(`{ name: '工作流 🪜', description: 'd' }`)).toBe(
+        '工作流 🪜',
+      );
     });
 
     it.each([
@@ -237,35 +208,33 @@ describe('parseWorkflowMetaLiteral', () => {
   // They are not "bounded" now — they are unrepresentable.
   describe('everything that would mean "evaluate something"', () => {
     it.each([
-      [
-        'an identifier',
-        `{ name: someVar, description: 'd' }`,
-        /unsupported value/,
-      ],
-      ['a call', `{ name: compute(), description: 'd' }`, /unsupported value/],
+      ['an identifier', `{ name: someVar, description: 'd' }`],
+      ['a call', `{ name: compute(), description: 'd' }`],
       [
         'an IIFE',
         `{ name: (function(){ while(true){} })(), description: 'd' }`,
-        /unsupported value/,
       ],
+      ['a dynamic import', `{ name: 'x', description: import('node:fs') }`],
+      ['a new expression', `{ name: new String('x'), description: 'd' }`],
+    ])('rejects %s', (_label, src) => {
+      expect(() => parseWorkflowMetaLiteral(src)).toThrow(/unsupported value/);
+    });
+
+    it.each([
       [
         'a getter',
-        `{ name: 'x', description: 'd', get phases() { return []; } }`,
+        withExtra(`get phases() { return []; }`),
         /getters are not allowed/,
       ],
-      [
-        'a setter',
-        `{ name: 'x', description: 'd', set phases(v) {} }`,
-        /setters are not allowed/,
-      ],
+      ['a setter', withExtra(`set phases(v) {}`), /setters are not allowed/],
       [
         'a method',
-        `{ name: 'x', description: 'd', toString() { return 'x'; } }`,
+        withExtra(`toString() { return 'x'; }`),
         /methods are not allowed/,
       ],
       [
         'an async member',
-        `{ name: 'x', description: 'd', async load() {} }`,
+        withExtra(`async load() {}`),
         /async members are not allowed/,
       ],
       [
@@ -285,39 +254,17 @@ describe('parseWorkflowMetaLiteral', () => {
       ],
       [
         'a regex literal',
-        `{ name: 'x', description: 'd', pattern: /a[b]c/g }`,
+        withExtra(`pattern: /a[b]c/g`),
         /regular expressions are not allowed/,
-      ],
-      [
-        'a dynamic import',
-        `{ name: 'x', description: import('node:fs') }`,
-        /unsupported value/,
-      ],
-      [
-        'a new expression',
-        `{ name: new String('x'), description: 'd' }`,
-        /unsupported value/,
       ],
       [
         'an operator',
         `{ name: 'a' + 'b', description: 'd' }`,
         /expected "," or "}"/,
       ],
-      [
-        'a bigint',
-        `{ name: 'x', description: 'd', n: 1n }`,
-        /unsupported numeric literal/,
-      ],
-      [
-        'a hex literal',
-        `{ name: 'x', description: 'd', n: 0x10 }`,
-        /unsupported numeric literal/,
-      ],
-      [
-        'an array hole',
-        `{ name: 'x', description: 'd', phases: [, {}] }`,
-        /missing array element/,
-      ],
+      ['a bigint', withExtra(`n: 1n`), /unsupported numeric literal/],
+      ['a hex literal', withExtra(`n: 0x10`), /unsupported numeric literal/],
+      ['an array hole', withExtra(`phases: [, {}]`), /missing array element/],
     ])('rejects %s', (_label, src, pattern) => {
       expect(() => parseWorkflowMetaLiteral(src)).toThrow(pattern);
     });

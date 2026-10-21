@@ -164,6 +164,9 @@ const vimReducer = (state: VimState, action: VimAction): VimState => {
 // Cached Linux clipboard tool to avoid repeated probe on every call.
 let linuxReadCmd: string[] | null | undefined;
 let linuxWriteCmd: string[] | null | undefined;
+// Set after a failed win32 read so a wedged clipboard degrades to "no
+// system clipboard" instead of freezing the TUI on every paste.
+let win32ClipboardUnavailable = false;
 
 /** Read system clipboard */
 function readClipboard(): string {
@@ -177,11 +180,29 @@ function readClipboard(): string {
       }).toString();
     }
     if (platform === 'win32') {
-      return execFileSync('powershell', ['-c', 'Get-Clipboard'], {
-        encoding: 'utf-8',
-        timeout: 200,
-        stdio: ['pipe', 'pipe', 'ignore'],
-      }).toString();
+      if (win32ClipboardUnavailable) {
+        return '';
+      }
+      // PowerShell startup can exceed 200 ms, and its console output appends
+      // a trailing CRLF that breaks linewise detection and leaves stray \r in
+      // the pasted text. Windows PowerShell also renders redirected stdout in
+      // the console code page, so the script pins UTF-8 output encoding.
+      return execFileSync(
+        'powershell',
+        [
+          '-NoProfile',
+          '-c',
+          '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-Clipboard',
+        ],
+        {
+          encoding: 'utf-8',
+          timeout: 5000,
+          stdio: ['pipe', 'pipe', 'ignore'],
+        },
+      )
+        .toString()
+        .replace(/\r\n/g, '\n')
+        .replace(/\n$/, '');
     }
     // Linux: probe once, then use cached tool
     if (linuxReadCmd === undefined) {
@@ -215,6 +236,9 @@ function readClipboard(): string {
     }
     return '';
   } catch (e) {
+    if (process.platform === 'win32') {
+      win32ClipboardUnavailable = true;
+    }
     debugLogger.warn('readClipboard failed:', e);
     return '';
   }

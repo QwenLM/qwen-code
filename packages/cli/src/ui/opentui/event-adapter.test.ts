@@ -13,6 +13,29 @@ import {
 type AnyEv = Parameters<ReturnType<typeof createEventMapper>>[0];
 
 describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
+  it('formats native Advisor advice and historical structured reviews', () => {
+    expect(
+      toolResultEvent('consult', {
+        type: 'advisor_advice',
+        model: 'reviewer',
+        text: 'Inspect the failing boundary.',
+      }),
+    ).toEqual({
+      type: 'tool-result',
+      id: 'consult',
+      display: 'Inspect the failing boundary.',
+    });
+    expect(
+      renderResultDisplay({
+        type: 'advisor_review',
+        verdict: 'Sound.',
+        risks: 'None.',
+        missingEvidence: 'Tests.',
+        recommendation: 'Verify.',
+      }),
+    ).toContain('## Verdict\n\nSound.');
+  });
+
   it('maps content to text delta', () => {
     const map = createEventMapper();
     expect(
@@ -451,6 +474,27 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ]);
     });
 
+    it('maps a loop_detected with a known cause to the headless explanation', () => {
+      const map = createEventMapper();
+      const out = map({
+        type: 'loop_detected',
+        value: {
+          loopType: 'turn_tool_call_cap',
+          loopReason: 'explicit_cap',
+          toolCallCount: 4,
+          toolCallLimit: 3,
+        },
+      } as unknown as AnyEv);
+      expect(out).toEqual([
+        {
+          type: 'info',
+          text: expect.stringContaining(
+            'the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)',
+          ),
+        },
+      ]);
+    });
+
     it('maps user_cancelled to a retry clear + info notice', () => {
       const map = createEventMapper();
       const out = map({ type: 'user_cancelled' } as unknown as AnyEv);
@@ -635,7 +679,7 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ]);
     });
 
-    it('ignores the legacy active_goal projection (ink parity)', () => {
+    it('ignores an event type it does not know', () => {
       const map = createEventMapper();
       expect(
         map({
@@ -707,14 +751,24 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ).toBe('S\nN');
     });
 
-    it('renders task_execution without dumping toolCalls payloads (R1-68)', () => {
+    it('renders task_execution as ink one-line summary (R1-68)', () => {
       expect(
         renderResultDisplay({
           type: 'task_execution',
           subagentName: 'reviewer',
+          taskDescription: 'check imports',
           status: 'completed',
           terminateReason: 'done',
           result: 'all good',
+          executionSummary: {
+            totalToolCalls: 5,
+            totalDurationMs: 12_000,
+            outputTokens: 2400,
+            toolUsage: [
+              { name: 'read-file', success: 5, failure: 0 },
+              { name: 'task', success: 2, failure: 1 },
+            ],
+          },
           toolCalls: [
             {
               callId: 'c1',
@@ -724,7 +778,34 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
             },
           ],
         }),
-      ).toBe('reviewer: completed\ndone\nall good');
+      ).toBe(
+        ' ✔ reviewer: check imports · 5 tools · 2 sub-agents · 12s · 2.4k tokens',
+      );
+    });
+
+    it('renders nothing for a task_execution that is still running', () => {
+      expect(
+        renderResultDisplay({
+          type: 'task_execution',
+          subagentName: 'reviewer',
+          taskDescription: 'check imports',
+          status: 'running',
+          result: 'partial answer',
+        }),
+      ).toBe('');
+    });
+
+    it('appends the terminate reason only when the subagent did not complete', () => {
+      expect(
+        renderResultDisplay({
+          type: 'task_execution',
+          subagentName: 'reviewer',
+          taskDescription: 'check imports',
+          status: 'failed',
+          terminateReason: 'model error',
+          executionSummary: { totalToolCalls: 1, totalDurationMs: 900 },
+        }),
+      ).toBe(' ✖ reviewer: check imports · 1 tool · 900ms · model error');
     });
 
     it('renders findings_list as a count summary (R1-68)', () => {
@@ -771,6 +852,26 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ).toBe('◌ [2] working');
     });
 
+    it('renders structured shell results as their display text', () => {
+      expect(
+        renderResultDisplay({
+          type: 'shell_result',
+          version: 1,
+          text: 'Health check complete',
+          output: 'raw stdout must not replace display text',
+          directory: '/workspace',
+          exitCode: 0,
+          signal: null,
+          pid: 42,
+          error: null,
+          outcome: 'completed',
+          notices: [],
+          truncated: false,
+          outputFiles: [],
+        }),
+      ).toBe('Health check complete');
+    });
+
     it('renders structured question answers as their display text', () => {
       expect(
         renderResultDisplay({
@@ -804,6 +905,35 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         display: '',
         todos,
       });
+    });
+
+    it('keeps a terminal subagent summary structured for its coloured runs', () => {
+      expect(
+        toolResultEvent('c1', {
+          type: 'task_execution',
+          subagentName: 'reviewer',
+          taskDescription: 'check imports',
+          status: 'cancelled',
+          terminateReason: 'interrupted',
+          executionSummary: { totalToolCalls: 2 },
+        }),
+      ).toEqual({
+        type: 'tool-result',
+        id: 'c1',
+        display: '',
+        subagentSummary: {
+          glyph: '✖',
+          tone: 'warning',
+          prefix: 'reviewer: ',
+          rest: 'check imports · 2 tools · interrupted',
+        },
+      });
+    });
+
+    it('leaves a running subagent to the roster, structured or not', () => {
+      expect(
+        toolResultEvent('c1', { type: 'task_execution', status: 'running' }),
+      ).toBe(null);
     });
 
     it('falls back to the flattened text, and to no event at all', () => {

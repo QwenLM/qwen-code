@@ -37,6 +37,7 @@ const refreshCapabilities = vi.fn();
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', async () => {
   const React = await import('react');
   return {
+    DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
     DaemonWorkspaceProvider: ({ children }: { children: React.ReactNode }) => {
       if (workspaceShouldThrow) throw new Error('provider boom');
       return React.createElement(React.Fragment, null, children);
@@ -123,7 +124,10 @@ afterEach(() => {
 });
 
 it('forwards settings presentation through the public provider wrapper', async () => {
-  const settings = { excludeItems: ['setting:fast-model'] as const };
+  const settings = {
+    includeItems: ['setting:language', 'setting:fast-model'] as const,
+    excludeItems: ['setting:fast-model'] as const,
+  };
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -490,4 +494,10 @@ describe('WebShellWithProviders top-level boundary', () => {
     );
     expect(container.querySelector('[data-testid="app-ok"]')).toBeNull();
   });
+});
+
+it('forwards model management through the public provider wrapper', async () => {
+  const modelManagement = { allowAdd: false, allowDelete: false };
+  render(<WebShellWithProviders modelManagement={modelManagement} />);
+  expect(appProps.at(-1)?.modelManagement).toBe(modelManagement);
 });

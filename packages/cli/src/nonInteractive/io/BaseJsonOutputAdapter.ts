@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import { randomUUID } from 'node:crypto';
 import type {
   Config,
@@ -1531,12 +1532,8 @@ export function toolResultContent(
   if (mcpAppFallback) {
     return mcpAppFallback;
   }
-  if (
-    typeof response.resultDisplay === 'string' &&
-    response.resultDisplay.trim().length > 0
-  ) {
-    return response.resultDisplay;
-  }
+  const displayText = shellResultText(response.resultDisplay);
+  if (displayText?.trim()) return displayText;
   if (response.responseParts && response.responseParts.length > 0) {
     // Always use functionResponsePartsToString to properly handle
     // functionResponse parts that contain output content

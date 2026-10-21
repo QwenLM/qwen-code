@@ -15,8 +15,9 @@ or shell tool.
 
 Preview history belongs to the conversation, independently of the viewing
 panel. Opening an Artifact-published HTTP/HTTPS webpage from a turn opens its URL
-in the preview when the feature is enabled. Ordinary `record_artifact` links
-open metadata with an external action. Closing the panel or its tab does not
+in the preview when the feature is enabled. Other link artifacts open their
+address in a new page from the turn card, which keeps the metadata panel only for
+an address the external opener cannot take. Closing the panel or its tab does not
 remove the artifact card; users can reopen it from the original message.
 Manually entering an address in the panel does not create a transcript record.
 

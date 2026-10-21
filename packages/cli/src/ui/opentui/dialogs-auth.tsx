@@ -15,13 +15,17 @@
  * the same write path useAuth.handleProviderSubmit drives) mirror the ink
  * implementation; only the view layer is OpenTUI.
  *
- * Known simplifications vs ink (recorded in the gap tracker):
- *  - the models step omits the recommended-list search box (list is short);
+ * Known simplification vs ink (recorded in the gap tracker):
  *  - documentation/TOS links render as plain text (no OSC 8 in dialogs).
  */
 
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useKeyboard, usePaste, useRenderer } from '@opentui/react';
+import {
+  useKeyboard,
+  usePaste,
+  useRenderer,
+  useTerminalDimensions,
+} from '@opentui/react';
 import type { PasteEvent } from '@opentui/core';
 import { decodePasteBytes } from '@opentui/core';
 import type {
@@ -32,6 +36,7 @@ import type {
   ModelWireApi,
 } from '@qwen-code/qwen-code-core';
 import {
+  QWENCLOUD_PROVIDERS,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
   AuthEvent,
@@ -43,7 +48,6 @@ import {
   findExistingProviderModels,
   findProviderByCredentials,
   findProviderById,
-  getDefaultModelIds,
   getErrorMessage,
   logAuth,
 } from '@qwen-code/qwen-code-core';
@@ -60,13 +64,36 @@ import {
   type SetupStep,
 } from '../auth/useProviderSetupFlow.js';
 import { normalizeModelIds } from '../auth/useAuth.js';
+import {
+  MAX_MODELS_TO_SHOW,
+  MODEL_CUSTOM_INPUT_FOCUS_INDEX,
+  MODEL_SEARCH_INPUT_FOCUS_INDEX,
+  formatModelOptionLabel,
+  modelOptionSearchText,
+  type ModelOption,
+} from '../auth/ProviderSetupSteps.js';
 import { toOriginalKey } from './key-map.js';
 import { isPrintableKeyInput } from './input-prompt-key.js';
 import { normalizePastedText } from './input-prompt-model.js';
-import { sanitizeTerminalText } from '../utils/textUtils.js';
+import {
+  clipToWidth,
+  sanitizeTerminalText,
+  truncateToWidth,
+} from '../utils/textUtils.js';
 import { caretSpans, useLineEdit } from './line-edit.js';
-import { Shell } from './dialogs-misc.js';
+import { Shell, shellBodyChromeRows } from './dialogs-misc.js';
+import {
+  findNextEnabledIndex,
+  getSelectionScrollOffset,
+  wrappedRows,
+} from './dialogs-core.js';
+import {
+  DEFAULT_MAX_ITEMS_TO_SHOW,
+  dialogContentWidth,
+} from './dialogs-shared.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { C } from './theme.js';
+import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 
 // ---------------------------------------------------------------------------
 // Types & static data (AuthDialog parity)
@@ -74,11 +101,13 @@ import { C } from './theme.js';
 
 type ViewLevel =
   | 'main'
+  | 'qwencloud-select'
   | 'alibaba-select'
   | 'thirdparty-select'
   | 'provider-setup';
 
 type MainOption =
+  | 'QWENCLOUD'
   | 'ALIBABA_MODELSTUDIO'
   | 'THIRD_PARTY_PROVIDERS'
   | 'CUSTOM_PROVIDER';
@@ -91,6 +120,14 @@ interface RadioItem {
 }
 
 const MAIN_ITEMS: RadioItem[] = [
+  {
+    key: 'QWENCLOUD',
+    label: t('QwenCloud'),
+    description: t(
+      'Official recommended setup: Token Plan or Standard API Key',
+    ),
+    value: 'QWENCLOUD',
+  },
   {
     key: 'ALIBABA_MODELSTUDIO',
     label: t('Alibaba ModelStudio'),
@@ -136,10 +173,11 @@ const PROTOCOL_ITEMS: RadioItem[] = [
   },
 ];
 
-const VIEW_TITLES: Record<string, string> = {
-  main: t('Connect a Provider'),
-  'alibaba-select': t('Alibaba ModelStudio · Access Method'),
-  'thirdparty-select': t('Third-party Providers · Provider'),
+const VIEW_TITLES: Record<string, () => string> = {
+  main: () => t('Connect a Provider'),
+  'qwencloud-select': () => t('QwenCloud · Access Method'),
+  'alibaba-select': () => t('Alibaba ModelStudio · Access Method'),
+  'thirdparty-select': () => t('Third-party Providers · Provider'),
 };
 
 function providerToItem(config: ProviderConfig): RadioItem {
@@ -178,37 +216,105 @@ function resolveDocumentationUrl(
 const NAV_HINT_SELECT = t('Enter to select, ↑↓ to navigate, Esc to go back');
 const NAV_HINT_INPUT = t('Enter to submit, Esc to go back');
 
+// The model-IDs step's runs, hoisted so the region budget measures the same
+// strings the step paints.
+const MODELS_INTRO = t(
+  'Enter model IDs directly. Use commas to configure multiple models.',
+);
+const MODELS_CHECKED_NOTE = t(
+  'Checked recommended models are applied on submit but not copied into the input.',
+);
+const MODELS_RECOMMENDED = t('Recommended models');
+const MODELS_SEARCH = t('Search');
+const MODELS_EMPTY = t('No recommended models match.');
+const MODELS_HINT = t(
+  'Enter to submit, ↑↓/Tab to switch input, search, and recommendations, Space to toggle recommendations, Esc to go back',
+);
+
 // ---------------------------------------------------------------------------
 // Shared view primitives
 // ---------------------------------------------------------------------------
 
-function RadioList({ items, cursor }: { items: RadioItem[]; cursor: number }) {
+/**
+ * The item window a wizard radio list pays out of the region: an item paints
+ * its label and, when it carries one, its description — one physical row
+ * each, the runs clipped to the columns the row owns — with a margin row
+ * between items, so a region row budget paints floor((budget + 1) / stride)
+ * items. A zero-row window paints nothing, and the list's keys refuse the
+ * rows nothing painted. ink's selection-list cap applies throughout.
+ */
+function wizardListWindow(
+  regionHeight: number | undefined,
+  chromeRows: number,
+  itemCount: number,
+  rowsPerItem: 1 | 2,
+): number {
+  if (regionHeight === undefined) {
+    return Math.min(DEFAULT_MAX_ITEMS_TO_SHOW, itemCount);
+  }
+  const budget = regionHeight - chromeRows;
+  const stride = rowsPerItem + 1;
+  return Math.max(
+    0,
+    Math.min(
+      DEFAULT_MAX_ITEMS_TO_SHOW,
+      itemCount,
+      Math.floor((budget + 1) / stride),
+    ),
+  );
+}
+
+function RadioList({
+  items,
+  cursor,
+  offset = 0,
+  maxItems,
+  marginTop = 1,
+}: {
+  items: RadioItem[];
+  cursor: number;
+  /** First item the window paints; it follows the cursor. */
+  offset?: number;
+  /** The items the region budget pays for; undefined paints them all. */
+  maxItems?: number;
+  /**
+   * The list's margin row, charged in the caller's chrome count; a region
+   * too short for even one item sheds it (and drops the charge to match)
+   * before it sheds the last item.
+   */
+  marginTop?: number;
+}) {
+  const { width } = useTerminalDimensions();
+  const runWidth = Math.max(1, dialogContentWidth(width) - 2);
+  const windowed =
+    maxItems === undefined ? items : items.slice(offset, offset + maxItems);
   return (
-    <box flexDirection="column" marginTop={1}>
-      {items.map((item, i) => {
-        const selected = i === cursor;
+    <box flexDirection="column" marginTop={marginTop}>
+      {windowed.map((item, windowIndex) => {
+        const selected = offset + windowIndex === cursor;
         return (
           <box
             key={item.key}
             flexDirection="column"
-            marginTop={i === 0 ? 0 : 1}
+            marginTop={windowIndex === 0 ? 0 : 1}
           >
-            <box flexDirection="row">
-              <text fg={selected ? C.accent : C.dim}>
-                {selected ? '› ' : '  '}
-              </text>
-              <text
-                fg={selected ? C.text : C.dim}
-                attributes={selected ? 1 : 0}
-              >
-                {item.label}
-              </text>
-            </box>
-            {item.description ? (
-              <box flexDirection="row" paddingLeft={2}>
-                <text fg={C.dim}>{item.description}</text>
+            <box flexDirection="row" alignItems="flex-start">
+              <box minWidth={2} flexShrink={0}>
+                <text fg={selected ? C.green : C.text}>
+                  {selected ? '›' : ' '}
+                </text>
               </box>
-            ) : null}
+              <box flexDirection="column" flexGrow={1}>
+                <text fg={selected ? C.green : C.text}>
+                  {truncateToWidth(item.label, runWidth)}
+                </text>
+                {item.description ? (
+                  <text fg={C.dim}>
+                    {truncateToWidth(item.description, runWidth)}
+                  </text>
+                ) : null}
+              </box>
+            </box>
           </box>
         );
       })}
@@ -263,14 +369,17 @@ function InputLine({
   caret,
   placeholder,
   active,
+  marginTop = 1,
 }: {
   value: string;
   caret: number;
   placeholder?: string;
   active?: boolean;
+  marginTop?: number;
 }) {
   return (
-    <box flexDirection="row" marginTop={1} paddingLeft={1}>
+    <box flexDirection="row" marginTop={marginTop}>
+      <text fg={C.accent}>{'> '}</text>
       <FieldText
         value={value}
         caret={caret}
@@ -325,7 +434,19 @@ function useLineInputKeys(
 // Setup steps (ProviderSetupSteps parity)
 // ---------------------------------------------------------------------------
 
-function ProtocolStep({ flow }: { flow: ProviderSetupFlow }) {
+/** The region budget a radio-list step windows itself from, and the chrome
+ * rows the step's view already spent (the Shell frame, the footer hint, and
+ * an armed error). */
+interface StepWindow {
+  regionHeight: number | undefined;
+  chromeRows: number;
+  /** The shell and error rows alone, for a step that paints its own hint. */
+  baseChromeRows: number;
+}
+
+type StepWindowProps = { flow: ProviderSetupFlow; window: StepWindow };
+
+function ProtocolStep({ flow, window }: StepWindowProps) {
   const provider = flow.state.provider!;
   const items = useMemo(() => {
     const protocolOpts = provider.protocolOptions ?? [provider.protocol];
@@ -333,26 +454,37 @@ function ProtocolStep({ flow }: { flow: ProviderSetupFlow }) {
       protocolOpts.includes(p.value as AuthType),
     );
   }, [provider]);
-  const [cursor, setCursor] = useState(
+  const { cursor, cursorRef, setCursor } = useBatchSafeCursor(() =>
     Math.max(
       0,
       items.findIndex((item) => item.value === flow.state.protocol),
     ),
   );
+  const maxItems = wizardListWindow(
+    window.regionHeight,
+    window.chromeRows,
+    items.length,
+    2,
+  );
+  const offset = getSelectionScrollOffset(cursor, items.length, maxItems);
   useKeyboard((key) => {
+    if (maxItems < 1) return;
     const o = toOriginalKey(key);
-    if (o.name === 'up') {
-      setCursor((c) => Math.max(0, c - 1));
-    } else if (o.name === 'down') {
-      setCursor((c) => Math.min(items.length - 1, c + 1));
+    if (o.name === 'up' || o.name === 'down') {
+      setCursor(findNextEnabledIndex(items, cursorRef.current, o.name));
     } else if (o.name === 'return') {
-      const item = items[cursor];
+      const item = items[cursorRef.current];
       if (item) flow.selectProtocol(item.value as AuthType);
     }
   });
   return (
     <>
-      <RadioList items={items} cursor={cursor} />
+      <RadioList
+        items={items}
+        cursor={cursor}
+        offset={offset}
+        maxItems={maxItems}
+      />
       <box marginTop={1}>
         <text fg={C.dim}>{NAV_HINT_SELECT}</text>
       </box>
@@ -360,7 +492,7 @@ function ProtocolStep({ flow }: { flow: ProviderSetupFlow }) {
   );
 }
 
-function ApiStep({ flow }: { flow: ProviderSetupFlow }) {
+function ApiStep({ flow, window }: StepWindowProps) {
   const items: RadioItem[] = [
     {
       key: 'chat-completions',
@@ -369,19 +501,32 @@ function ApiStep({ flow }: { flow: ProviderSetupFlow }) {
     },
     { key: 'responses', label: t('Responses'), value: 'responses' },
   ];
-  const [cursor, setCursor] = useState(
+  const { cursor, cursorRef, setCursor } = useBatchSafeCursor(
     flow.state.wireApi === 'responses' ? 1 : 0,
   );
+  const maxItems = wizardListWindow(
+    window.regionHeight,
+    window.chromeRows,
+    items.length,
+    1,
+  );
+  const offset = getSelectionScrollOffset(cursor, items.length, maxItems);
   useKeyboard((key) => {
+    if (maxItems < 1) return;
     const o = toOriginalKey(key);
     if (o.name === 'up') setCursor(0);
     else if (o.name === 'down') setCursor(1);
     else if (o.name === 'return')
-      flow.selectWireApi(items[cursor]!.value as ModelWireApi);
+      flow.selectWireApi(items[cursorRef.current]!.value as ModelWireApi);
   });
   return (
     <>
-      <RadioList items={items} cursor={cursor} />
+      <RadioList
+        items={items}
+        cursor={cursor}
+        offset={offset}
+        maxItems={maxItems}
+      />
       <box marginTop={1}>
         <text fg={C.dim}>{NAV_HINT_SELECT}</text>
       </box>
@@ -392,9 +537,11 @@ function ApiStep({ flow }: { flow: ProviderSetupFlow }) {
 function BaseUrlSelectStep({
   provider,
   flow,
+  window,
 }: {
   provider: ProviderConfig;
   flow: ProviderSetupFlow;
+  window: StepWindow;
 }) {
   const options = provider.baseUrl as BaseUrlOption[];
   const items: RadioItem[] = options.map((opt) => ({
@@ -403,27 +550,39 @@ function BaseUrlSelectStep({
     description: opt.url,
     value: opt.url,
   }));
-  const [cursor, setCursor] = useState(flow.state.baseUrlOptionIndex);
+  const { cursor, cursorRef, setCursor } = useBatchSafeCursor(
+    flow.state.baseUrlOptionIndex,
+  );
+  const maxItems = wizardListWindow(
+    window.regionHeight,
+    window.chromeRows,
+    items.length,
+    2,
+  );
+  const offset = getSelectionScrollOffset(cursor, items.length, maxItems);
   useKeyboard((key) => {
+    if (maxItems < 1) return;
     const o = toOriginalKey(key);
     if (o.name === 'up' || o.name === 'down') {
-      const next =
-        o.name === 'up'
-          ? Math.max(0, cursor - 1)
-          : Math.min(items.length - 1, cursor + 1);
+      const next = findNextEnabledIndex(items, cursorRef.current, o.name);
       setCursor(next);
       // ink onHighlight parity: remember the highlighted option so a
       // go-back later restores the cursor.
       const item = items[next];
       if (item) flow.highlightBaseUrl(item.value);
     } else if (o.name === 'return') {
-      const item = items[cursor];
+      const item = items[cursorRef.current];
       if (item) flow.selectBaseUrl(item.value);
     }
   });
   return (
     <>
-      <RadioList items={items} cursor={cursor} />
+      <RadioList
+        items={items}
+        cursor={cursor}
+        offset={offset}
+        maxItems={maxItems}
+      />
       <box marginTop={1}>
         <text fg={C.dim}>{NAV_HINT_SELECT}</text>
       </box>
@@ -517,28 +676,36 @@ function ApiKeyStep({
   );
 }
 
-const MODEL_CUSTOM_INPUT_FOCUS_INDEX = -2;
-
 function uniqueIds(ids: string[]): string[] {
   return [...new Set(ids)];
 }
 
 /**
- * Model IDs step. Simplified vs ink: no search box over the recommended
- * list; custom IDs and recommended multi-select both feed the shared
- * flow.state.modelIds like the ink ModelIdsStep.
+ * Model IDs step. Custom IDs and the recommended multi-select both feed the
+ * shared flow.state.modelIds, exactly like the ink ModelIdsStep this mirrors.
  */
 function ModelsStep({
   provider,
   flow,
   retrySeq,
+  window,
 }: {
   provider: ProviderConfig;
   flow: ProviderSetupFlow;
   retrySeq: number;
+  window: StepWindow;
 }) {
-  const modelOptions = useMemo(
-    () => provider.models?.map((m) => m.id) ?? [],
+  // ink ModelIdsStep parity: rows carry the formatted label (id padded to the
+  // description column plus context/thinking/modality details), the list is a
+  // search-filtered window of MAX_MODELS_TO_SHOW rows, and focus is conveyed by
+  // colour alone — ink draws no cursor glyph here.
+  const modelOptions = useMemo<ModelOption[]>(
+    () =>
+      provider.models?.map((model) => ({
+        key: model.id,
+        value: model.id,
+        label: formatModelOptionLabel(model),
+      })) ?? [],
     [provider.models],
   );
   const hasSelectableModels = modelOptions.length > 0;
@@ -546,19 +713,32 @@ function ModelsStep({
     () => normalizeModelIds(flow.state.modelIds),
     [flow.state.modelIds],
   );
-  const recommendedIds = useMemo(() => new Set(modelOptions), [modelOptions]);
-  const [focus, setFocus] = useState(MODEL_CUSTOM_INPUT_FOCUS_INDEX);
+  const recommendedIds = useMemo(
+    () => new Set(modelOptions.map((item) => item.key)),
+    [modelOptions],
+  );
+  // The handler below reads the mirror, not this value: arrows and the Space
+  // that follows them arrive in one stdin read, against the render that
+  // registered the handler.
+  const {
+    cursor: focus,
+    cursorRef: focusRef,
+    setCursor: setFocus,
+  } = useBatchSafeCursor(MODEL_CUSTOM_INPUT_FOCUS_INDEX);
   const [customText, setCustomText] = useState(() =>
     selectedModelIds.filter((id) => !recommendedIds.has(id)).join(', '),
   );
-  const [checked, setChecked] = useState<ReadonlySet<string>>(
-    () => new Set(selectedModelIds.filter((id) => recommendedIds.has(id))),
-  );
-
   // Keystrokes of one burst are handled against the render that registered the
   // handler, whose `checked` set is already stale by the second Space. The
   // mirror is written synchronously so each tick sees the previous one.
-  const checkedRef = useRef<ReadonlySet<string>>(checked);
+  const {
+    value: checked,
+    ref: checkedRef,
+    setValue: setChecked,
+  } = useBatchSafeState<ReadonlySet<string>>(
+    () => new Set(selectedModelIds.filter((id) => recommendedIds.has(id))),
+  );
+  const [searchText, setSearchText] = useState('');
 
   const syncModelIds = useCallback(
     (custom: string, keys: ReadonlySet<string>) => {
@@ -574,7 +754,7 @@ function ModelsStep({
       setCustomText(next);
       syncModelIds(next, checkedRef.current);
     },
-    [syncModelIds],
+    [syncModelIds, checkedRef],
   );
 
   // ink keeps this field in a TextInput whose buffer survives the list taking
@@ -583,17 +763,66 @@ function ModelsStep({
   // flow, so its Enter only fires the install, and a rejected install leaves
   // this very step mounted with the latch that Enter armed.
   const custom = useLineEdit(customText, updateCustom, retrySeq);
+  const search = useLineEdit(searchText, setSearchText, retrySeq);
+
+  const filtered = useMemo(() => {
+    const query = searchText.trim().toLowerCase();
+    if (!query) return modelOptions;
+    return modelOptions.filter((item) =>
+      modelOptionSearchText(item).includes(query),
+    );
+  }, [modelOptions, searchText]);
+
+  const { width } = useTerminalDimensions();
+  const contentWidth = dialogContentWidth(width);
+  // The row's radio box owns four columns of the content width.
+  const modelLabelWidth = Math.max(1, contentWidth - 4);
+  const modelIdsError = flow.state.modelIdsError;
+  // Every run the step paints besides the list rows, measured at the content
+  // width so a wrapped run is charged the rows it occupies: the step's own
+  // margin, the intro, the custom-ID input line, the checked-note, the
+  // "Recommended models" heading, the search label and its input line, the
+  // list's margin row, an armed error and the footer key legend. The shell's
+  // rows and its own error come from the caller.
+  const modelsChromeRows =
+    window.baseChromeRows +
+    // the step's own margin row
+    1 +
+    (1 + wrappedRows(MODELS_INTRO, contentWidth)) +
+    // the custom-ID input line and its margin row
+    2 +
+    wrappedRows(MODELS_CHECKED_NOTE, contentWidth) +
+    (1 + wrappedRows(MODELS_RECOMMENDED, contentWidth)) +
+    // the search label, and its input line, which carries no margin
+    wrappedRows(MODELS_SEARCH, contentWidth) +
+    1 +
+    // the list's own margin row
+    1 +
+    (modelIdsError ? 1 + wrappedRows(modelIdsError, contentWidth) : 0) +
+    (1 + wrappedRows(MODELS_HINT, contentWidth)) +
+    (filtered.length === 0 ? wrappedRows(MODELS_EMPTY, contentWidth) : 0);
+  // ink's cap stays the ceiling; the region budget can only lower it. A row
+  // is one physical row here — the list paints no margin between rows — so
+  // the stride charges one, and the list's own margin row is chrome above.
+  const maxItems = Math.min(
+    MAX_MODELS_TO_SHOW,
+    wizardListWindow(window.regionHeight, modelsChromeRows, filtered.length, 1),
+  );
+  const scrollOffset =
+    focus < 0 || maxItems < 1
+      ? 0
+      : Math.max(0, Math.min(focus - maxItems + 1, filtered.length - maxItems));
+  const visible = filtered.slice(scrollOffset, scrollOffset + maxItems);
 
   const toggleRecommended = useCallback(
     (id: string) => {
       const next = new Set(checkedRef.current);
       if (next.has(id)) next.delete(id);
       else next.add(id);
-      checkedRef.current = next;
       setChecked(next);
       syncModelIds(custom.text, next);
     },
-    [custom, syncModelIds],
+    [custom, syncModelIds, checkedRef, setChecked],
   );
 
   const submit = useCallback(() => {
@@ -607,29 +836,51 @@ function ModelsStep({
     ) {
       custom.settle();
     }
-  }, [custom, flow]);
+  }, [custom, flow, checkedRef]);
 
   useKeyboard((key) => {
     if (custom.settled) return;
     const o = toOriginalKey(key);
-    if (focus >= 0) {
+    const focused = focusRef.current;
+    // The rows this render painted. A burst writes `focus` through its ref
+    // while the window stays at the rendered one, so the keys below refuse a
+    // row nothing painted: Space on it would toggle a model the user never
+    // saw, and Enter submits the checked set.
+    const isPainted = (index: number) =>
+      index >= scrollOffset && index < scrollOffset + maxItems;
+    if (focused >= 0) {
       if (o.name === 'tab') {
         setFocus(MODEL_CUSTOM_INPUT_FOCUS_INDEX);
       } else if (o.name === 'up') {
-        setFocus((f) => (f <= 0 ? MODEL_CUSTOM_INPUT_FOCUS_INDEX : f - 1));
+        const next =
+          focused <= 0 ? MODEL_SEARCH_INPUT_FOCUS_INDEX : focused - 1;
+        if (next < 0 || isPainted(next)) setFocus(next);
       } else if (o.name === 'down') {
-        setFocus((f) => Math.min(f + 1, modelOptions.length - 1));
+        const next = Math.max(0, Math.min(focused + 1, filtered.length - 1));
+        if (isPainted(next)) setFocus(next);
       } else if (o.name === 'space') {
-        const id = modelOptions[focus];
-        if (id) toggleRecommended(id);
+        const item = isPainted(focused) ? filtered[focused] : undefined;
+        if (item) toggleRecommended(item.key);
       } else if (o.name === 'return') {
         submit();
       }
       return;
     }
+    if (focused === MODEL_SEARCH_INPUT_FOCUS_INDEX) {
+      if (o.name === 'up') {
+        setFocus(MODEL_CUSTOM_INPUT_FOCUS_INDEX);
+      } else if (o.name === 'tab' || o.name === 'down') {
+        if (isPainted(0)) setFocus(0);
+      } else if (o.name === 'return' || o.name === 'enter') {
+        submit();
+      } else if (!search.handleKey(o) && isPrintableKeyInput(key)) {
+        search.insert(key.sequence);
+      }
+      return;
+    }
     // Custom-ID input focus.
     if (o.name === 'tab' || o.name === 'down') {
-      if (hasSelectableModels) setFocus(0);
+      if (hasSelectableModels) setFocus(MODEL_SEARCH_INPUT_FOCUS_INDEX);
       return;
     }
     if (o.name === 'return' || o.name === 'enter') {
@@ -640,71 +891,122 @@ function ModelsStep({
       custom.insert(key.sequence);
     }
   });
-  // Pastes land in the custom-ID input only when it owns focus; while the
-  // recommended list is focused there is no text field to receive them.
+  // Pastes land in whichever text field owns focus; while the recommended list
+  // is focused there is no text field to receive them.
   usePaste((event: PasteEvent) => {
-    if (focus >= 0) return;
+    const focused = focusRef.current;
+    const target =
+      focused === MODEL_CUSTOM_INPUT_FOCUS_INDEX
+        ? custom
+        : focused === MODEL_SEARCH_INPUT_FOCUS_INDEX
+          ? search
+          : null;
+    if (!target) return;
     const text = normalizePastedText(decodePasteBytes(event.bytes));
     if (!text) return;
     event.preventDefault();
-    custom.insert(text);
+    target.insert(text);
   });
+
+  if (!hasSelectableModels) {
+    const defaultIds = (provider.models ?? [])
+      .map((model) => model.id)
+      .join(', ');
+    return (
+      <box flexDirection="column" marginTop={1}>
+        <box marginTop={1}>
+          <text fg={C.dim}>
+            {defaultIds
+              ? t(
+                  'Enter model IDs separated by commas. Examples: {{modelIds}}',
+                  {
+                    modelIds: defaultIds,
+                  },
+                )
+              : t('Enter model IDs separated by commas.')}
+          </text>
+        </box>
+        <InputLine
+          value={customText}
+          caret={custom.caret}
+          placeholder={defaultIds || 'model-id-1, model-id-2'}
+          active
+        />
+        {flow.state.modelIdsError && (
+          <box marginTop={1}>
+            <text fg={C.red}>{flow.state.modelIdsError}</text>
+          </box>
+        )}
+        <box marginTop={1}>
+          <text fg={C.dim}>{NAV_HINT_INPUT}</text>
+        </box>
+      </box>
+    );
+  }
 
   return (
     <box flexDirection="column" marginTop={1}>
-      <text fg={C.text}>
-        {t(
-          'Enter model IDs directly. Use commas to configure multiple models.',
-        )}
-      </text>
+      <box marginTop={1}>
+        <text fg={C.dim}>{MODELS_INTRO}</text>
+      </box>
       <InputLine
         value={customText}
         caret={custom.caret}
         placeholder="model-id"
-        active={focus < 0}
+        active={focus === MODEL_CUSTOM_INPUT_FOCUS_INDEX}
       />
+      <box>
+        <text fg={C.dim}>{MODELS_CHECKED_NOTE}</text>
+      </box>
+      <box marginTop={1}>
+        <text fg={C.dim}>{MODELS_RECOMMENDED}</text>
+      </box>
+      <box flexDirection="column">
+        <text fg={C.dim}>{MODELS_SEARCH}</text>
+        <InputLine
+          value={searchText}
+          caret={search.caret}
+          placeholder="search"
+          active={focus === MODEL_SEARCH_INPUT_FOCUS_INDEX}
+          marginTop={0}
+        />
+      </box>
+      <box flexDirection="column" marginTop={1}>
+        {filtered.length === 0 ? (
+          <text fg={C.dim}>{MODELS_EMPTY}</text>
+        ) : (
+          visible.map((item, visibleIndex) => {
+            const modelIndex = scrollOffset + visibleIndex;
+            const isFocused = focus === modelIndex;
+            const isSelected = checked.has(item.key);
+            const color = isFocused ? C.green : isSelected ? C.accent : C.text;
+            return (
+              <box key={item.key} flexDirection="row" alignItems="flex-start">
+                <box minWidth={4} flexShrink={0}>
+                  <text fg={color}>
+                    {isSelected ? ICON.RADIO_FILLED : ICON.CIRCLE_EMPTY}
+                  </text>
+                </box>
+                <box flexGrow={1}>
+                  {/* One charged physical row, so the label clips to the
+                      columns the row leaves it instead of wrapping. */}
+                  <text fg={color}>
+                    {clipToWidth(item.label, modelLabelWidth)}
+                  </text>
+                </box>
+              </box>
+            );
+          })
+        )}
+      </box>
       {flow.state.modelIdsError && (
         <box marginTop={1}>
           <text fg={C.red}>{flow.state.modelIdsError}</text>
         </box>
       )}
-      {hasSelectableModels ? (
-        <>
-          <box marginTop={1}>
-            <text fg={C.dim}>{t('Recommended models')}</text>
-          </box>
-          <box flexDirection="column" marginTop={1}>
-            {modelOptions.map((id, i) => {
-              const isChecked = checked.has(id);
-              const focused = i === focus;
-              return (
-                <box key={id} flexDirection="row">
-                  <text fg={focused ? C.accent : C.dim}>
-                    {focused ? '› ' : '  '}
-                  </text>
-                  <text fg={focused ? C.accent : C.dim}>
-                    {isChecked
-                      ? `${ICON.RADIO_FILLED} `
-                      : `${ICON.CIRCLE_EMPTY} `}
-                  </text>
-                  <text fg={focused ? C.text : C.dim}>{id}</text>
-                </box>
-              );
-            })}
-          </box>
-          <box marginTop={1}>
-            <text fg={C.dim}>
-              {t(
-                'Tab toggles input/list, Space toggles a model, Enter to continue, Esc to go back',
-              )}
-            </text>
-          </box>
-        </>
-      ) : (
-        <box marginTop={1}>
-          <text fg={C.dim}>{NAV_HINT_INPUT}</text>
-        </box>
-      )}
+      <box marginTop={1}>
+        <text fg={C.dim}>{MODELS_HINT}</text>
+      </box>
     </box>
   );
 }
@@ -862,20 +1164,22 @@ function ReviewStep({ flow }: { flow: ProviderSetupFlow }) {
 function SetupSteps({
   flow,
   retrySeq,
+  window,
 }: {
   flow: ProviderSetupFlow;
   retrySeq: number;
+  window: StepWindow;
 }) {
   const { provider, step } = flow.state;
   if (!provider || !step) return null;
   switch (step) {
     case 'protocol':
-      return <ProtocolStep flow={flow} />;
+      return <ProtocolStep flow={flow} window={window} />;
     case 'wireApi':
-      return <ApiStep flow={flow} />;
+      return <ApiStep flow={flow} window={window} />;
     case 'baseUrl':
       return Array.isArray(provider.baseUrl) ? (
-        <BaseUrlSelectStep provider={provider} flow={flow} />
+        <BaseUrlSelectStep provider={provider} flow={flow} window={window} />
       ) : (
         <BaseUrlInputStep
           flow={flow}
@@ -889,7 +1193,14 @@ function SetupSteps({
     case 'apiKey':
       return <ApiKeyStep provider={provider} flow={flow} retrySeq={retrySeq} />;
     case 'models':
-      return <ModelsStep provider={provider} flow={flow} retrySeq={retrySeq} />;
+      return (
+        <ModelsStep
+          provider={provider}
+          flow={flow}
+          retrySeq={retrySeq}
+          window={window}
+        />
+      );
     case 'advancedConfig':
       return <AdvancedConfigStep flow={flow} />;
     case 'review':
@@ -912,6 +1223,8 @@ type AuthDialogProps = {
   /** Startup auth failure surfaced by the auto-open (U-6); null when the
    * dialog opened because no auth type is configured. */
   initialError?: string;
+  /** The popup region's row budget; the wizard's radio lists window from it. */
+  availableTerminalHeight?: number;
 };
 
 export function OpenTuiAuthDialog(props: AuthDialogProps) {
@@ -919,7 +1232,7 @@ export function OpenTuiAuthDialog(props: AuthDialogProps) {
   // keep the pre-flow read-only summary instead of a broken wizard.
   if (!props.config) {
     return (
-      <Shell title={t('Auth')} onClose={props.onClose}>
+      <Shell title={t('Auth')} onClose={props.onClose} shrinkable>
         <box flexDirection="column" marginTop={1}>
           <text fg={C.dim}>
             {t('Credentials resolved from settings/env; use /model to switch.')}
@@ -937,6 +1250,7 @@ function AuthDialogFlow({
   onClose,
   notify,
   initialError,
+  availableTerminalHeight,
 }: AuthDialogProps & { config: Config }) {
   const [errorMessage, setErrorMessage] = useState<string | null>(
     initialError ?? null,
@@ -1064,6 +1378,10 @@ function AuthDialogFlow({
 
   // -- Sub-menu items ---------------------------------------------------------
 
+  const qwencloudItems = useMemo(
+    () => QWENCLOUD_PROVIDERS.map(providerToItem),
+    [],
+  );
   const alibabaItems = useMemo(() => ALIBABA_PROVIDERS.map(providerToItem), []);
   const thirdPartyItems = useMemo(
     () => THIRD_PARTY_PROVIDERS.map(providerToItem),
@@ -1090,8 +1408,7 @@ function AuthDialogFlow({
   const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
     const saved = findSavedModels(providerConfig);
     if (!saved) return [];
-    const builtinIds = new Set(getDefaultModelIds(providerConfig));
-    return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
+    return saved.models.map((m) => m.id);
   };
 
   const handleProviderSelect = useCallback(
@@ -1112,6 +1429,7 @@ function AuthDialogFlow({
   );
 
   const subMenus: Record<string, RadioItem[]> = {
+    'qwencloud-select': qwencloudItems,
     'alibaba-select': alibabaItems,
     'thirdparty-select': thirdPartyItems,
   };
@@ -1126,8 +1444,9 @@ function AuthDialogFlow({
   );
   // Land on the tab matching the active provider's uiGroup (ink parity).
   const defaultMainIndex = useMemo(() => {
-    if (matchedProvider?.uiGroup === 'third-party') return 1;
-    if (matchedProvider?.uiGroup === 'custom') return 2;
+    if (matchedProvider?.uiGroup === 'third-party') return 2;
+    if (matchedProvider?.uiGroup === 'custom') return 3;
+    if (matchedProvider?.uiGroup === 'alibaba') return 1;
     return 0;
   }, [matchedProvider]);
 
@@ -1137,6 +1456,9 @@ function AuthDialogFlow({
     (value: MainOption) => {
       clearErrors();
       switch (value) {
+        case 'QWENCLOUD':
+          pushView('qwencloud-select');
+          break;
         case 'ALIBABA_MODELSTUDIO':
           pushView('alibaba-select');
           break;
@@ -1164,34 +1486,142 @@ function AuthDialogFlow({
 
   const mainCursor = mainIndex ?? defaultMainIndex;
   const subCursor = activeSubMenu ? (subMenuIndex[viewLevel] ?? 0) : 0;
+  // A burst of keys reaches the handler registered by the last render, so the
+  // cursors it reads must be written synchronously by the movers below.
+  const mainCursorRef = useRef(mainCursor);
+  mainCursorRef.current = mainCursor;
+  const subCursorRef = useRef(subCursor);
+  subCursorRef.current = subCursor;
+  const moveMain = (index: number) => {
+    mainCursorRef.current = index;
+    setMainIndex(index);
+  };
+  const moveSub = (index: number) => {
+    subCursorRef.current = index;
+    setSubMenuIndex((prev) => ({ ...prev, [viewLevel]: index }));
+  };
+
+  // -- Region windows (F5-1: the list-carrying wizard stays unshrinkable) ---
+
+  // The lists window from the region instead of letting a short one squeeze
+  // them mid-rows while the keys keep committing rows nothing painted. The
+  // frame then fits the region by construction, so it keeps flexShrink 0 —
+  // the shrink opt-in is the static bodies' (the no-config summary, trust),
+  // whose blank rows a short region sheds the way ink's dialogs shed them.
+  const { width } = useTerminalDimensions();
+  const contentWidth = dialogContentWidth(width);
+  const viewTitle = useMemo(() => {
+    if (viewLevel !== 'provider-setup') {
+      return (VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'])();
+    }
+    const p = setupFlow.state.provider;
+    if (!p) return t('Provider Setup');
+    const flowTitle = t(p.uiLabels?.flowTitle ?? p.label);
+    const { stepIndex, totalSteps, step } = setupFlow.state;
+    return t('{{flowTitle}} · Step {{step}}/{{total}} · {{stepLabel}}', {
+      flowTitle,
+      step: String(stepIndex),
+      total: String(totalSteps),
+      stepLabel: getStepLabel(step, p),
+    });
+  }, [viewLevel, setupFlow.state]);
+  const regionHeight = clampDialogHeight(availableTerminalHeight);
+  const tosLabel = `${t('Terms of Services and Privacy Notice')}:`;
+  const tosUrl =
+    'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/';
+  // Chrome charged ahead of every windowed list: the Shell's own rows plus
+  // the rows the view's other runs paint. The Shell's title, the hint and an
+  // armed error are measured at the content width, so a wrapped run is
+  // charged the rows it occupies; the main view also carries the clipped
+  // rule and the terms runs.
+  const shellChromeRows = shellBodyChromeRows(viewTitle, contentWidth);
+  const hintRows = 1 + wrappedRows(NAV_HINT_SELECT, contentWidth);
+  const errorRows = errorMessage
+    ? 1 + wrappedRows(errorMessage, contentWidth)
+    : 0;
+  const listChromeRows = shellChromeRows + hintRows + errorRows;
+  const fullMainChromeRows =
+    shellChromeRows +
+    2 +
+    1 +
+    wrappedRows(tosLabel, contentWidth) +
+    wrappedRows(tosUrl, contentWidth) +
+    errorRows;
+  // The wizard is the first-run setup, not an optional picker: when the
+  // full main-view chrome leaves the list no row, the rule and the ToS
+  // block shed instead of the last item (they reappear as soon as the
+  // region pays for them), and the zero-row refusal below covers only what
+  // even the shed chrome cannot pay.
+  const shedMainFooter =
+    wizardListWindow(regionHeight, fullMainChromeRows, MAIN_ITEMS.length, 2) <
+    1;
+  // Below even the shed chrome's first item the list's own margin row sheds
+  // too: the frame must fit the region, and the alternative is a dead dialog
+  // — a zero-row window refuses every list key while the must-connect gate
+  // and the error swallow keep Esc from leaving.
+  const shedMainMargin =
+    shedMainFooter &&
+    wizardListWindow(
+      regionHeight,
+      shellChromeRows + errorRows,
+      MAIN_ITEMS.length,
+      2,
+    ) < 1;
+  const mainChromeRows =
+    (shedMainFooter ? shellChromeRows + errorRows : fullMainChromeRows) -
+    (shedMainMargin ? 1 : 0);
+  const listWindow: StepWindow = {
+    regionHeight,
+    chromeRows: listChromeRows,
+    baseChromeRows: shellChromeRows + errorRows,
+  };
+  const mainWindow = wizardListWindow(
+    regionHeight,
+    mainChromeRows,
+    MAIN_ITEMS.length,
+    2,
+  );
+  const mainOffset = getSelectionScrollOffset(
+    mainCursor,
+    MAIN_ITEMS.length,
+    mainWindow,
+  );
+  const subMenuItems = activeSubMenu ?? [];
+  const subWindow = wizardListWindow(
+    regionHeight,
+    listChromeRows,
+    subMenuItems.length,
+    2,
+  );
+  const subOffset = getSelectionScrollOffset(
+    subCursor,
+    subMenuItems.length,
+    subWindow,
+  );
 
   useKeyboard((key) => {
     const o = toOriginalKey(key);
     if (viewLevel === 'main') {
-      if (o.name === 'up') {
-        setMainIndex(Math.max(0, mainCursor - 1));
-      } else if (o.name === 'down') {
-        setMainIndex(Math.min(MAIN_ITEMS.length - 1, mainCursor + 1));
+      // A zero-row window paints no row the keys could address; Esc belongs
+      // to the raw-input handler, not this list.
+      if (mainWindow < 1) return;
+      if (o.name === 'up' || o.name === 'down') {
+        moveMain(
+          findNextEnabledIndex(MAIN_ITEMS, mainCursorRef.current, o.name),
+        );
       } else if (o.name === 'return') {
-        const item = MAIN_ITEMS[mainCursor];
+        const item = MAIN_ITEMS[mainCursorRef.current];
         if (item) handleMainSelect(item.value as MainOption);
       }
       return;
     }
     if (activeSubMenu) {
+      if (subWindow < 1) return;
       const items = activeSubMenu;
-      if (o.name === 'up') {
-        setSubMenuIndex((prev) => ({
-          ...prev,
-          [viewLevel]: Math.max(0, subCursor - 1),
-        }));
-      } else if (o.name === 'down') {
-        setSubMenuIndex((prev) => ({
-          ...prev,
-          [viewLevel]: Math.min(items.length - 1, subCursor + 1),
-        }));
+      if (o.name === 'up' || o.name === 'down') {
+        moveSub(findNextEnabledIndex(items, subCursorRef.current, o.name));
       } else if (o.name === 'return') {
-        const item = items[subCursor];
+        const item = items[subCursorRef.current];
         if (item) handleProviderSelect(item.value);
       }
     }
@@ -1205,6 +1635,13 @@ function AuthDialogFlow({
       if (seq !== '\x1b') return false;
       if (viewLevel !== 'main') {
         goBack();
+        return true;
+      }
+      // A main window that paints no row is a dead dialog: the list keys are
+      // refused, so the must-connect gate and the error swallow would wedge
+      // it shut — Esc closes it instead.
+      if (mainWindow < 1) {
+        onClose();
         return true;
       }
       // The swallow is for an error the dialog armed itself; a boot-seeded
@@ -1239,54 +1676,50 @@ function AuthDialogFlow({
     initialError,
     config,
     onClose,
+    mainWindow,
   ]);
-
-  // -- View title -------------------------------------------------------------
-
-  const viewTitle = useMemo(() => {
-    if (viewLevel !== 'provider-setup') {
-      return VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'];
-    }
-    const p = setupFlow.state.provider;
-    if (!p) return t('Provider Setup');
-    const flowTitle = p.uiLabels?.flowTitle ?? p.label;
-    const { stepIndex, totalSteps, step } = setupFlow.state;
-    return t('{{flowTitle}} · Step {{step}}/{{total}} · {{stepLabel}}', {
-      flowTitle,
-      step: String(stepIndex),
-      total: String(totalSteps),
-      stepLabel: getStepLabel(step, p),
-    });
-  }, [viewLevel, setupFlow.state]);
 
   // -- Render -------------------------------------------------------------------
 
   return (
-    <Shell title={viewTitle} onClose={onClose}>
+    <Shell title={viewTitle} onClose={onClose} borderStyle="single">
       {viewLevel === 'main' && (
         <>
-          <RadioList items={MAIN_ITEMS} cursor={mainCursor} />
-          <box marginTop={2}>
-            <text fg={C.dim}>{'─'.repeat(60)}</text>
-          </box>
-          <box marginTop={1}>
-            <text
-              fg={C.text}
-            >{`${t('Terms of Services and Privacy Notice')}:`}</text>
-          </box>
-          <box>
-            <text fg={C.purple}>
-              {
-                'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/'
-              }
-            </text>
-          </box>
+          <RadioList
+            items={MAIN_ITEMS}
+            cursor={mainCursor}
+            offset={mainOffset}
+            maxItems={mainWindow}
+            marginTop={shedMainMargin ? 0 : 1}
+          />
+          {!shedMainFooter && (
+            <>
+              <box marginTop={1}>
+                <text fg={C.borderDefault}>
+                  {clipToWidth('─'.repeat(80), contentWidth)}
+                </text>
+              </box>
+              <box marginTop={1}>
+                <text fg={C.text}>{tosLabel}</text>
+              </box>
+              <box>
+                <text fg={C.dim} attributes={8}>
+                  {tosUrl}
+                </text>
+              </box>
+            </>
+          )}
         </>
       )}
 
       {activeSubMenu && (
         <>
-          <RadioList items={activeSubMenu} cursor={subCursor} />
+          <RadioList
+            items={activeSubMenu}
+            cursor={subCursor}
+            offset={subOffset}
+            maxItems={subWindow}
+          />
           <box marginTop={1}>
             <text fg={C.dim}>{NAV_HINT_SELECT}</text>
           </box>
@@ -1294,7 +1727,7 @@ function AuthDialogFlow({
       )}
 
       {viewLevel === 'provider-setup' && (
-        <SetupSteps flow={setupFlow} retrySeq={retrySeq} />
+        <SetupSteps flow={setupFlow} retrySeq={retrySeq} window={listWindow} />
       )}
 
       {errorMessage && (

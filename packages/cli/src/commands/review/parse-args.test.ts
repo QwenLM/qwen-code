@@ -35,6 +35,7 @@ import {
   writeStdoutLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 // The handler reads the raw string from fd 0 (`--stdin`) and writes the
 // verdict to `--out`; both are intercepted so the wiring tests below can run
@@ -44,6 +45,12 @@ const fsState = vi.hoisted(() => ({
   written: new Map<string, string>(),
   effortReadError: undefined as Error | undefined,
 }));
+
+const ensureReviewTmpDirMock = vi.hoisted(() => vi.fn());
+vi.mock('./lib/paths.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/paths.js')>();
+  return { ...actual, ensureReviewTmpDir: ensureReviewTmpDirMock };
+});
 
 vi.mock('node:fs', async (importOriginal) => {
   const real = (await importOriginal()) as Record<string, unknown>;
@@ -2103,12 +2110,12 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     );
   });
 
-  // chmod is the only lever this case has: on Windows it is a no-op, and a
-  // root user reads through it, so the branch under test is unreachable
-  // there. The case skips rather than running into the OTHER branch — a
-  // readable tree, whose digest merely differs — and failing red against
-  // assertions that match only the unmeasured message.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  // chmod is the only lever this case has: on Windows it is a no-op, and
+  // root with its DAC capabilities reads through it, so the branch under test
+  // is unreachable there. The case skips rather than running into the OTHER
+  // branch — a readable tree, whose digest merely differs — and failing red
+  // against assertions that match only the unmeasured message.
+  it.skipIf(!arePermissionBitsEnforced())(
     'says it could not check when a source cannot be read',
     () => {
       // Distinct from an installed package: the roots are on disk, so the
@@ -2143,7 +2150,7 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     },
   );
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'says it could not check when the roots cannot even be statted',
     () => {
       // An archive extracted with the wrong ownership, or a cache restored
@@ -2331,5 +2338,60 @@ describe('--resume', () => {
     const d = parseReviewArgs('--resume');
     expect(d.effort).toBe('medium'); // the local default, untouched
     expect(d.effortSource).toBe('default');
+  });
+});
+
+describe('parse-args — the scratch directory guard', () => {
+  it('guards a --out under .qwen/tmp, and only there', () => {
+    // Step 0's write is the round's first into `.qwen/tmp`: the shared
+    // entry guard refuses a workspace-planted link before it lands. A
+    // `--out` elsewhere is the caller's directory, not the scratch one.
+    const out = join('.qwen', 'tmp', 'qwen-review-parse-args.json');
+    ensureReviewTmpDirMock.mockClear();
+    fsState.written.delete(out);
+    ensureReviewTmpDirMock.mockImplementationOnce(() => {
+      throw new Error('parse-args: .qwen/tmp is a symbolic link');
+    });
+    expect(() =>
+      (parseArgsCommand.handler as (a: unknown) => void)({
+        raw: '',
+        out,
+        _: ['review', 'parse-args'],
+      }),
+    ).toThrow(/symbolic link/);
+    expect(ensureReviewTmpDirMock).toHaveBeenCalledWith('parse-args');
+    // …and the refusal came BEFORE the write, or the guard is decoration.
+    expect(fsState.written.has(out)).toBe(false);
+    // …and the spelling a case-insensitive filesystem resolves through:
+    // `--out .QWEN/tmp/x` reaches the very directory the guard is about to
+    // check, so the predicate folds case. Over-matching on a case-sensitive
+    // filesystem is the safe direction — the answer only decides whether to
+    // CHECK.
+    ensureReviewTmpDirMock.mockClear();
+    (parseArgsCommand.handler as (a: unknown) => void)({
+      raw: '',
+      out: join('.QWEN', 'tmp', 'qwen-review-parse-args.json'),
+      _: ['review', 'parse-args'],
+    });
+    expect(ensureReviewTmpDirMock).toHaveBeenCalledWith('parse-args');
+
+    // The scratch directory ITSELF must reach the guard: it is equal to the
+    // guard's path rather than under it, and the predicate has to admit
+    // that shape. (The write that follows would then die EISDIR — this
+    // pins which paths are GUARDED, not which are usable.)
+    ensureReviewTmpDirMock.mockClear();
+    (parseArgsCommand.handler as (a: unknown) => void)({
+      raw: '',
+      out: join('.qwen', 'tmp'),
+      _: ['review', 'parse-args'],
+    });
+    expect(ensureReviewTmpDirMock).toHaveBeenCalledWith('parse-args');
+    ensureReviewTmpDirMock.mockClear();
+    (parseArgsCommand.handler as (a: unknown) => void)({
+      raw: '',
+      out: join('elsewhere', 'parse-args.json'),
+      _: ['review', 'parse-args'],
+    });
+    expect(ensureReviewTmpDirMock).not.toHaveBeenCalled();
   });
 });

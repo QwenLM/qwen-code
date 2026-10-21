@@ -117,7 +117,17 @@ export function getRetryAfterDelayMs(error: unknown): number | null {
   return delayMs > 0 ? Math.min(delayMs, MAX_TIMEOUT_MS) : 0;
 }
 
-function getHeaderValue(error: unknown, headerName: string): string | null {
+/**
+ * Reads one response header off the common SDK error shapes.
+ *
+ * Handles both a `Headers` instance (openai-node assigns a real one to
+ * `APIError.headers`, where bracket access reads `undefined` because it has no
+ * own enumerable properties) and a plain record, matched case-insensitively.
+ */
+export function getHeaderValue(
+  error: unknown,
+  headerName: string,
+): string | null {
   if (!hasHeaders(error)) return null;
 
   const { headers } = error;

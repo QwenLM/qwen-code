@@ -54,6 +54,31 @@ async function fixture() {
   return { root, registry, config };
 }
 
+type StartOptions = Parameters<typeof WorkflowRunner.start>[0];
+
+/** Starts a run; `signal` defaults to a fresh, never-aborted one. */
+const start = (
+  config: Config,
+  opts: Omit<StartOptions, 'config' | 'signal'> & { signal?: AbortSignal },
+) =>
+  WorkflowRunner.start({
+    config,
+    signal: new AbortController().signal,
+    ...opts,
+  });
+
+/** Starts a `return 1;` run that dispatches nothing, and waits for it. */
+async function finishedRun(config: Config, extra: Partial<StartOptions> = {}) {
+  const handle = await start(config, {
+    script: 'return 1;',
+    args: undefined,
+    ...extra,
+    dispatch: vi.fn(),
+  });
+  await handle.completion;
+  return handle;
+}
+
 describe('native workflow correlation', () => {
   it('persists source before dispatch and resumes with new step IDs without cache misses', async () => {
     const { config, registry } = await fixture();
@@ -64,16 +89,18 @@ describe('native workflow correlation', () => {
         config.storage.getWorkflowRunJournalPath(task.runId),
         'utf8',
       );
-      expect(JSON.parse(text.split('\n')[0])).toEqual({
+      // Both records are on disk before the first agent is dispatched: the
+      // run's `launched` line, then the source it was started from.
+      const lines = text.split('\n');
+      expect(JSON.parse(lines[0])).toEqual({ type: 'launched', version: 1 });
+      expect(JSON.parse(lines[1])).toEqual({
         type: 'source',
         version: 1,
         sourceRef,
       });
       return 'done';
     });
-    const first = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    const first = await start(config, {
       toolUseId: 'tool-1',
       script: "return await agent('same work', {stepId: 'before'});",
       args: { day: 1 },
@@ -83,9 +110,7 @@ describe('native workflow correlation', () => {
     expect((await first.completion).ok).toBe(true);
     sourceRef.revision = 'changed-after-start';
     expect(first.sourceRef).toEqual({ id: 'daily-report', revision: 'r1' });
-    const second = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    const second = await start(config, {
       toolUseId: 'tool-2',
       script: "return await agent('same work', {stepId: 'after'});",
       args: { day: 1 },
@@ -108,9 +133,7 @@ describe('native workflow correlation', () => {
       ]),
     );
     await expect(
-      WorkflowRunner.start({
-        config,
-        signal: new AbortController().signal,
+      start(config, {
         script: 'return 1;',
         args: {},
         resumeFromRunId: first.runId,
@@ -123,20 +146,12 @@ describe('native workflow correlation', () => {
 
   it('recovers source after restart without reading snapshots', async () => {
     const { config, registry } = await fixture();
-    const first = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
-      script: 'return 1;',
-      args: undefined,
+    const first = await finishedRun(config, {
       sourceRef: { id: 'flow', revision: 'v1' },
-      dispatch: vi.fn(),
     });
-    await first.completion;
     await fs.unlink(config.storage.getWorkflowRunSnapshotPath(first.runId));
     registry.reset();
-    const resumed = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    const resumed = await start(config, {
       script: 'return 2;',
       args: undefined,
       resumeFromRunId: first.runId,
@@ -153,54 +168,37 @@ describe('native workflow correlation', () => {
     } as unknown as Config;
     const dispatch = vi.fn(async () => 'ok');
     const base = {
-      config,
       signal: new AbortController().signal,
       script: "return agent('work');",
       args: undefined,
       dispatch,
     };
     await expect(
-      WorkflowRunner.start({ ...base, sourceRef: { id: 'f', revision: 'r' } }),
+      start(config, { ...base, sourceRef: { id: 'f', revision: 'r' } }),
     ).rejects.toThrow('writable resume journal');
     expect(dispatch).not.toHaveBeenCalled();
-    const old = await WorkflowRunner.start(base);
+    const old = await start(config, base);
     expect((await old.completion).ok).toBe(true);
     expect(dispatch).toHaveBeenCalledOnce();
   });
 
   it('rejects corrupted persisted call statuses instead of coercing them', async () => {
     const { config } = await fixture();
-    const handle = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
-      script: 'return 1;',
-      args: undefined,
-      dispatch: vi.fn(),
-    });
-    await handle.completion;
-    const snapshotPath = config.storage.getWorkflowRunSnapshotPath(
-      handle.runId,
-    );
+    const handle = await finishedRun(config);
+    const file = config.storage.getWorkflowRunSnapshotPath(handle.runId);
     const snapshot: Record<string, unknown> = JSON.parse(
-      await fs.readFile(snapshotPath, 'utf8'),
+      await fs.readFile(file, 'utf8'),
     );
-    const call = {
-      id: 'workflow-call-1',
-      status: 'completed',
-      startedAt: 1,
-      endedAt: 2,
-    };
-    await fs.writeFile(
-      snapshotPath,
-      JSON.stringify({ ...snapshot, workflowCalls: [call] }),
-    );
-    expect(await listWorkflowSnapshots(config)).toHaveLength(1);
-    for (const status of [['completed'], null, 1]) {
+    const call = { id: 'workflow-call-1', startedAt: 1, endedAt: 2 };
+    // 'completed' keeps the snapshot listed; each corrupted status drops it.
+    for (const status of ['completed', ['completed'], null, 1]) {
       await fs.writeFile(
-        snapshotPath,
+        file,
         JSON.stringify({ ...snapshot, workflowCalls: [{ ...call, status }] }),
       );
-      expect(await listWorkflowSnapshots(config)).toEqual([]);
+      expect(await listWorkflowSnapshots(config)).toHaveLength(
+        status === 'completed' ? 1 : 0,
+      );
     }
   });
 
@@ -211,9 +209,7 @@ describe('native workflow correlation', () => {
     );
     const dispatch = vi.fn();
     await expect(
-      WorkflowRunner.start({
-        config,
-        signal: new AbortController().signal,
+      start(config, {
         script: "return agent('work');",
         args: undefined,
         sourceRef: { id: 'f', revision: 'r' },
@@ -226,18 +222,9 @@ describe('native workflow correlation', () => {
 
   it('does not attach new attribution to a legacy journal', async () => {
     const { config } = await fixture();
-    const first = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
-      script: 'return 1;',
-      args: undefined,
-      dispatch: vi.fn(),
-    });
-    await first.completion;
+    const first = await finishedRun(config);
     await expect(
-      WorkflowRunner.start({
-        config,
-        signal: new AbortController().signal,
+      start(config, {
         script: 'return 2;',
         args: undefined,
         resumeFromRunId: first.runId,
@@ -368,15 +355,10 @@ describe('native workflow correlation', () => {
       workflowCallsTruncated: true,
       agentsDispatched: 0,
     });
-    expect(registry.get('wf_a')?.workflowCalls).toHaveLength(
-      MAX_WORKFLOW_CALL_TRACES,
-    );
+    const calls = () => registry.get('wf_a')?.workflowCalls;
+    expect(calls()).toHaveLength(MAX_WORKFLOW_CALL_TRACES);
     registry.cancel('wf_a', 1234);
-    expect(
-      registry
-        .get('wf_a')
-        ?.workflowCalls?.every((call) => call.status === 'cancelled'),
-    ).toBe(true);
+    expect(calls()?.every((call) => call.status === 'cancelled')).toBe(true);
   });
 
   it('rejects contradictory journal attribution while retaining legacy replay maps', () => {

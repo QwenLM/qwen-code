@@ -96,7 +96,11 @@ impl DeliveryMode {
 
     /// Parse from a tool's JSON args, reading the `delivery_mode` field.
     pub fn from_args(args: &Value) -> Self {
-        Self::parse(args.get("delivery_mode").and_then(|v| v.as_str()))
+        if args.get("app_context").and_then(Value::as_bool) == Some(true) {
+            Self::Foreground
+        } else {
+            Self::parse(args.get("delivery_mode").and_then(|v| v.as_str()))
+        }
     }
 
     pub fn is_foreground(self) -> bool {

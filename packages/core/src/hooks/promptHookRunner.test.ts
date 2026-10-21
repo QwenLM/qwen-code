@@ -6,10 +6,18 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PromptHookRunner } from './promptHookRunner.js';
+import {
+  DEFAULT_PROMPT_HOOK_TIMEOUT_SECONDS,
+  describeHookTimeout,
+} from './hook-timeout.js';
 import { HookEventName, HookType } from './types.js';
 import type { PromptHookConfig, HookInput } from './types.js';
 import type { Config } from '../config/config.js';
-import { FinishReason, type GenerateContentResponse } from '@google/genai';
+import {
+  FinishReason,
+  type GenerateContentResponse,
+  type Part,
+} from '@google/genai';
 
 describe('PromptHookRunner', () => {
   let promptRunner: PromptHookRunner;
@@ -20,7 +28,6 @@ describe('PromptHookRunner', () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
-    // Create mock generateContent function
     mockGenerateContent = vi.fn();
     mockResolveForModel = vi.fn().mockResolvedValue({
       contentGenerator: {
@@ -30,7 +37,6 @@ describe('PromptHookRunner', () => {
       model: 'qwen-max',
     });
 
-    // Create mock config
     mockConfig = {
       getFastModel: vi.fn().mockReturnValue('qwen-turbo'),
       getModel: vi.fn().mockReturnValue('qwen-plus'),
@@ -67,35 +73,73 @@ describe('PromptHookRunner', () => {
     ...overrides,
   });
 
+  /** One assistant candidate holding `text` (or the given parts). */
   const createMockResponse = (
-    text: string,
-    overrides: Partial<GenerateContentResponse> = {},
+    text: string | Part[],
+    finishReason?: FinishReason,
   ): GenerateContentResponse =>
     ({
       candidates: [
         {
           content: {
-            parts: [{ text }],
+            parts: typeof text === 'string' ? [{ text }] : text,
             role: 'assistant',
           },
+          ...(finishReason && { finishReason }),
         },
       ],
-      ...overrides,
     }) as GenerateContentResponse;
+
+  /** Executes a PreToolUse prompt hook built from the given overrides. */
+  const run = (
+    config: Partial<PromptHookConfig> = {},
+    input: Partial<HookInput> = {},
+    signal?: AbortSignal,
+  ) =>
+    promptRunner.execute(
+      createMockConfig(config),
+      HookEventName.PreToolUse,
+      createMockInput(input),
+      signal,
+    );
+
+  /** Runs with the model answering `text`. */
+  const runWith = (
+    text: string | Part[],
+    config?: Partial<PromptHookConfig>,
+    input?: Partial<HookInput>,
+  ) => {
+    mockGenerateContent.mockResolvedValue(createMockResponse(text));
+    return run(config, input);
+  };
+
+  /** The request sent to generateContent for an `ok: true` run. */
+  const requestFor = async (
+    config?: Partial<PromptHookConfig>,
+    input?: Partial<HookInput>,
+  ) => {
+    await runWith('{"ok": true}', config, input);
+    return mockGenerateContent.mock.calls[0][0];
+  };
+
+  const promptTextFor = async (
+    config: Partial<PromptHookConfig>,
+    input: Partial<HookInput>,
+  ) =>
+    (await requestFor(config, input)).contents?.[0]?.parts?.[0]?.text as string;
+
+  const withFakeTimers = async <T>(fn: () => Promise<T>): Promise<T> => {
+    vi.useFakeTimers();
+    try {
+      return await fn();
+    } finally {
+      vi.useRealTimers();
+    }
+  };
 
   describe('execute', () => {
     it('should execute prompt hook successfully with ok:true', async () => {
-      const mockResponse = createMockResponse('{"ok": true}');
-      mockGenerateContent.mockResolvedValue(mockResponse);
-
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      const result = await promptRunner.execute(
-        config,
-        HookEventName.PreToolUse,
-        input,
-      );
+      const result = await runWith('{"ok": true}');
 
       expect(result.success).toBe(true);
       expect(result.outcome).toBe('success');
@@ -104,18 +148,8 @@ describe('PromptHookRunner', () => {
     });
 
     it('should execute prompt hook with blocking decision ok:false', async () => {
-      const mockResponse = createMockResponse(
+      const result = await runWith(
         '{"ok": false, "reason": "Security violation"}',
-      );
-      mockGenerateContent.mockResolvedValue(mockResponse);
-
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      const result = await promptRunner.execute(
-        config,
-        HookEventName.PreToolUse,
-        input,
       );
 
       expect(result.success).toBe(false);
@@ -125,18 +159,8 @@ describe('PromptHookRunner', () => {
     });
 
     it('should handle response with additionalContext', async () => {
-      const mockResponse = createMockResponse(
+      const result = await runWith(
         '{"ok": true, "additionalContext": "Some useful info"}',
-      );
-      mockGenerateContent.mockResolvedValue(mockResponse);
-
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      const result = await promptRunner.execute(
-        config,
-        HookEventName.PreToolUse,
-        input,
       );
 
       expect(result.success).toBe(true);
@@ -146,18 +170,8 @@ describe('PromptHookRunner', () => {
     });
 
     it('should handle blocking response with additionalContext', async () => {
-      const mockResponse = createMockResponse(
+      const result = await runWith(
         '{"ok": false, "reason": "Blocked", "additionalContext": "Context info"}',
-      );
-      mockGenerateContent.mockResolvedValue(mockResponse);
-
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      const result = await promptRunner.execute(
-        config,
-        HookEventName.PreToolUse,
-        input,
       );
 
       expect(result.success).toBe(false);
@@ -168,47 +182,23 @@ describe('PromptHookRunner', () => {
     });
 
     it('should replace $ARGUMENTS placeholder with JSON input', async () => {
-      const mockResponse = createMockResponse('{"ok": true}');
-      mockGenerateContent.mockResolvedValue(mockResponse);
-
-      const config = createMockConfig({
-        prompt: 'Analyze this input: $ARGUMENTS and make a decision.',
-      });
-      const input = createMockInput({ cwd: '/custom/path' });
-
-      await promptRunner.execute(config, HookEventName.PreToolUse, input);
-
-      const callArg = mockGenerateContent.mock.calls[0][0];
-      const promptText = callArg.contents?.[0]?.parts?.[0]?.text as string;
+      const promptText = await promptTextFor(
+        { prompt: 'Analyze this input: $ARGUMENTS and make a decision.' },
+        { cwd: '/custom/path' },
+      );
 
       expect(promptText).toContain('/custom/path');
       expect(promptText).not.toContain('$ARGUMENTS');
     });
 
     it('should use main model by default for API compatibility', async () => {
-      const mockResponse = createMockResponse('{"ok": true}');
-      mockGenerateContent.mockResolvedValue(mockResponse);
-
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      await promptRunner.execute(config, HookEventName.PreToolUse, input);
-
-      const callArg = mockGenerateContent.mock.calls[0][0];
-      // Uses main model (getModel) for reliability - user is already authenticated with this model
-      expect(callArg.model).toBe('qwen-plus');
+      // Main model (getModel) for reliability: the user is already authenticated with it.
+      expect((await requestFor()).model).toBe('qwen-plus');
     });
 
     it('should use model override from config when specified', async () => {
-      const mockResponse = createMockResponse('{"ok": true}');
-      mockGenerateContent.mockResolvedValue(mockResponse);
+      const callArg = await requestFor({ model: 'qwen-max' });
 
-      const config = createMockConfig({ model: 'qwen-max' });
-      const input = createMockInput();
-
-      await promptRunner.execute(config, HookEventName.PreToolUse, input);
-
-      const callArg = mockGenerateContent.mock.calls[0][0];
       expect(callArg.model).toBe('qwen-max');
       expect(mockResolveForModel).toHaveBeenCalledWith('qwen-max', {
         failClosed: true,
@@ -224,48 +214,21 @@ describe('PromptHookRunner', () => {
         },
         model: 'qwen-max',
       });
-      mockGenerateContent.mockResolvedValue(createMockResponse('{"ok": true}'));
 
-      await promptRunner.execute(
-        createMockConfig({ model: 'fast' }),
-        HookEventName.PreToolUse,
-        createMockInput(),
-      );
-
-      const callArg = mockGenerateContent.mock.calls[0][0];
+      const callArg = await requestFor({ model: 'fast' });
       expect(callArg.model).toBe('qwen-max');
       expect(callArg.config?.temperature).toBeUndefined();
     });
 
     it('should handle response wrapped in markdown code block', async () => {
-      const mockResponse = createMockResponse('```json\n{"ok": true}\n```');
-      mockGenerateContent.mockResolvedValue(mockResponse);
-
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      const result = await promptRunner.execute(
-        config,
-        HookEventName.PreToolUse,
-        input,
-      );
+      const result = await runWith('```json\n{"ok": true}\n```');
 
       expect(result.success).toBe(true);
       expect(result.output?.decision).toBe('allow');
     });
 
     it('should handle invalid JSON response (fail-open)', async () => {
-      const mockResponse = createMockResponse('This is not JSON');
-      mockGenerateContent.mockResolvedValue(mockResponse);
-
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      const result = await promptRunner.execute(
-        config,
-        HookEventName.PreToolUse,
-        input,
-      );
+      const result = await runWith('This is not JSON');
 
       // Fail-open: invalid response defaults to allow
       expect(result.success).toBe(true);
@@ -273,17 +236,7 @@ describe('PromptHookRunner', () => {
     });
 
     it('should handle empty response', async () => {
-      const mockResponse = createMockResponse('');
-      mockGenerateContent.mockResolvedValue(mockResponse);
-
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      const result = await promptRunner.execute(
-        config,
-        HookEventName.PreToolUse,
-        input,
-      );
+      const result = await runWith('');
 
       // Empty response is treated as non-blocking error
       expect(result.success).toBe(false);
@@ -292,27 +245,14 @@ describe('PromptHookRunner', () => {
     });
 
     it('should treat truncated MAX_TOKENS response as non-blocking error', async () => {
-      const mockResponse = createMockResponse('{"ok": false, "reason": "Bloc', {
-        candidates: [
-          {
-            content: {
-              parts: [{ text: '{"ok": false, "reason": "Bloc' }],
-              role: 'assistant',
-            },
-            finishReason: FinishReason.MAX_TOKENS,
-          },
-        ],
-      });
-      mockGenerateContent.mockResolvedValue(mockResponse);
-
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      const result = await promptRunner.execute(
-        config,
-        HookEventName.PreToolUse,
-        input,
+      mockGenerateContent.mockResolvedValue(
+        createMockResponse(
+          '{"ok": false, "reason": "Bloc',
+          FinishReason.MAX_TOKENS,
+        ),
       );
+
+      const result = await run();
 
       expect(result.success).toBe(false);
       expect(result.outcome).toBe('non_blocking_error');
@@ -329,14 +269,7 @@ describe('PromptHookRunner', () => {
         >,
       );
 
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      const result = await promptRunner.execute(
-        config,
-        HookEventName.PreToolUse,
-        input,
-      );
+      const result = await run();
 
       expect(result.success).toBe(false);
       expect(result.outcome).toBe('non_blocking_error');
@@ -344,50 +277,35 @@ describe('PromptHookRunner', () => {
     });
 
     it('should handle timeout', async () => {
+      // A 5 s response against a 100 ms timeout.
       mockGenerateContent.mockImplementation(
         () =>
           new Promise((resolve) => {
-            setTimeout(
-              () => resolve(createMockResponse('{"ok": true}')),
-              5000, // 5 second delay
-            );
+            setTimeout(() => resolve(createMockResponse('{"ok": true}')), 5000);
           }),
       );
 
-      const config = createMockConfig({ timeout: 0.1 }); // 100ms timeout
-      const input = createMockInput();
-
-      const result = await promptRunner.execute(
-        config,
-        HookEventName.PreToolUse,
-        input,
-      );
+      const result = await run({ timeout: 0.1 });
 
       expect(result.success).toBe(false);
       expect(result.outcome).toBe('timeout');
     });
 
     it('should time out while resolving an override model', async () => {
-      vi.useFakeTimers();
-      let finishResolution: (() => void) | undefined;
-      mockResolveForModel.mockReturnValue(
-        new Promise((resolve) => {
-          finishResolution = () =>
-            resolve({
-              contentGenerator: { generateContent: mockGenerateContent },
-              contentGeneratorConfig: { model: 'qwen-max' },
-              model: 'qwen-max',
-            });
-        }),
-      );
-
-      try {
-        const execution = promptRunner.execute(
-          createMockConfig({ model: 'qwen-max', timeout: 0.1 }),
-          HookEventName.PreToolUse,
-          createMockInput(),
+      await withFakeTimers(async () => {
+        let finishResolution: (() => void) | undefined;
+        mockResolveForModel.mockReturnValue(
+          new Promise((resolve) => {
+            finishResolution = () =>
+              resolve({
+                contentGenerator: { generateContent: mockGenerateContent },
+                contentGeneratorConfig: { model: 'qwen-max' },
+                model: 'qwen-max',
+              });
+          }),
         );
 
+        const execution = run({ model: 'qwen-max', timeout: 0.1 });
         await vi.advanceTimersByTimeAsync(100);
         const result = await execution;
 
@@ -395,24 +313,14 @@ describe('PromptHookRunner', () => {
         finishResolution?.();
         await Promise.resolve();
         expect(mockGenerateContent).not.toHaveBeenCalled();
-      } finally {
-        vi.useRealTimers();
-      }
+      });
     });
 
     it('should handle abort signal (already aborted)', async () => {
       const controller = new AbortController();
       controller.abort();
 
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      const result = await promptRunner.execute(
-        config,
-        HookEventName.PreToolUse,
-        input,
-        controller.signal,
-      );
+      const result = await run({}, {}, controller.signal);
 
       expect(result.success).toBe(false);
       expect(result.outcome).toBe('cancelled');
@@ -420,36 +328,16 @@ describe('PromptHookRunner', () => {
     });
 
     it('should include hook name in error when blocking', async () => {
-      const mockResponse = createMockResponse(
-        '{"ok": false, "reason": "Blocked"}',
-      );
-      mockGenerateContent.mockResolvedValue(mockResponse);
-
-      const config = createMockConfig({ name: 'security-check' });
-      const input = createMockInput();
-
-      const result = await promptRunner.execute(
-        config,
-        HookEventName.PreToolUse,
-        input,
-      );
+      const result = await runWith('{"ok": false, "reason": "Blocked"}', {
+        name: 'security-check',
+      });
 
       expect(result.success).toBe(false);
       expect(result.output?.stopReason).toBe('Blocked');
     });
 
     it('should use default reason when ok:false without reason', async () => {
-      const mockResponse = createMockResponse('{"ok": false}');
-      mockGenerateContent.mockResolvedValue(mockResponse);
-
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      const result = await promptRunner.execute(
-        config,
-        HookEventName.PreToolUse,
-        input,
-      );
+      const result = await runWith('{"ok": false}');
 
       expect(result.success).toBe(false);
       expect(result.output?.reason).toBe('Blocked by prompt hook');
@@ -458,14 +346,7 @@ describe('PromptHookRunner', () => {
     it('should handle LLM error gracefully (non-blocking)', async () => {
       mockGenerateContent.mockRejectedValue(new Error('LLM API error'));
 
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      const result = await promptRunner.execute(
-        config,
-        HookEventName.PreToolUse,
-        input,
-      );
+      const result = await run();
 
       // LLM errors are non-blocking (fail-open)
       expect(result.success).toBe(false);
@@ -474,16 +355,7 @@ describe('PromptHookRunner', () => {
     });
 
     it('should pass system instruction with response format requirements', async () => {
-      const mockResponse = createMockResponse('{"ok": true}');
-      mockGenerateContent.mockResolvedValue(mockResponse);
-
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      await promptRunner.execute(config, HookEventName.PreToolUse, input);
-
-      const callArg = mockGenerateContent.mock.calls[0][0];
-      const systemInstruction = callArg.config?.systemInstruction;
+      const systemInstruction = (await requestFor()).config?.systemInstruction;
 
       expect(systemInstruction).toBeDefined();
       expect(systemInstruction?.parts?.[0]?.text).toContain('valid JSON');
@@ -491,20 +363,11 @@ describe('PromptHookRunner', () => {
     });
 
     it('should pass deterministic generation config for non-reasoning models', async () => {
-      const mockResponse = createMockResponse('{"ok": true}');
-      mockGenerateContent.mockResolvedValue(mockResponse);
+      const callArg = await requestFor();
 
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      await promptRunner.execute(config, HookEventName.PreToolUse, input);
-
-      const callArg = mockGenerateContent.mock.calls[0][0];
-      // Allow/block decisions must be deterministic to keep security
-      // gating reliable across identical inputs.
+      // Deterministic, so allow/block gating is reliable across identical inputs.
       expect(callArg.config?.temperature).toBe(0);
-      // Output is a tiny JSON object — cap tokens to avoid runaway
-      // generations and unnecessary cost.
+      // The output is a tiny JSON object: cap tokens against runaway generations and cost.
       expect(callArg.config?.maxOutputTokens).toBe(500);
       // Prompt hooks must explicitly disable inherited reasoning.
       expect(callArg.config?.reasoning).toBe(false);
@@ -521,15 +384,7 @@ describe('PromptHookRunner', () => {
         reasoning: { effort: 'high' },
       });
 
-      const mockResponse = createMockResponse('{"ok": true}');
-      mockGenerateContent.mockResolvedValue(mockResponse);
-
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      await promptRunner.execute(config, HookEventName.PreToolUse, input);
-
-      const callArg = mockGenerateContent.mock.calls[0][0];
+      const callArg = await requestFor();
       expect(callArg.config?.temperature).toBeUndefined();
       expect(callArg.config?.maxOutputTokens).toBe(500);
       expect(callArg.config?.reasoning).toBe(false);
@@ -539,49 +394,29 @@ describe('PromptHookRunner', () => {
     });
 
     it('should track duration correctly', async () => {
-      vi.useFakeTimers();
-      vi.setSystemTime(0);
-
-      const mockResponse = createMockResponse('{"ok": true}');
-      mockGenerateContent.mockImplementation(
-        () =>
-          new Promise((resolve) => {
-            setTimeout(() => resolve(mockResponse), 50);
-          }),
-      );
-
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      try {
-        const execution = promptRunner.execute(
-          config,
-          HookEventName.PreToolUse,
-          input,
+      await withFakeTimers(async () => {
+        vi.setSystemTime(0);
+        const mockResponse = createMockResponse('{"ok": true}');
+        mockGenerateContent.mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              setTimeout(() => resolve(mockResponse), 50);
+            }),
         );
 
+        const execution = run();
         await vi.advanceTimersByTimeAsync(50);
         const result = await execution;
 
         expect(result.duration).toBe(50);
-      } finally {
-        vi.useRealTimers();
-      }
+      });
     });
 
     it('should handle multiple $ARGUMENTS placeholders', async () => {
-      const mockResponse = createMockResponse('{"ok": true}');
-      mockGenerateContent.mockResolvedValue(mockResponse);
-
-      const config = createMockConfig({
-        prompt: 'First: $ARGUMENTS, Second: $ARGUMENTS',
-      });
-      const input = createMockInput({ cwd: '/test/path' });
-
-      await promptRunner.execute(config, HookEventName.PreToolUse, input);
-
-      const callArg = mockGenerateContent.mock.calls[0][0];
-      const promptText = callArg.contents?.[0]?.parts?.[0]?.text as string;
+      const promptText = await promptTextFor(
+        { prompt: 'First: $ARGUMENTS, Second: $ARGUMENTS' },
+        { cwd: '/test/path' },
+      );
 
       // Both placeholders should be replaced
       expect(promptText).toContain('/test/path');
@@ -589,24 +424,12 @@ describe('PromptHookRunner', () => {
     });
 
     it('should handle special $ patterns in JSON without corruption', async () => {
-      const mockResponse = createMockResponse('{"ok": true}');
-      mockGenerateContent.mockResolvedValue(mockResponse);
+      // cwd carries $ patterns that String.replace() would interpret; they must stay literal.
+      const promptText = await promptTextFor(
+        { prompt: 'Input: $ARGUMENTS' },
+        { cwd: "/path/$& matched $` before $' after $$ dollar" },
+      );
 
-      const config = createMockConfig({
-        prompt: 'Input: $ARGUMENTS',
-      });
-      // Create input with special $ patterns that would be misinterpreted by replace()
-      // Use the cwd field which contains the special patterns
-      const input = createMockInput({
-        cwd: "/path/$& matched $` before $' after $$ dollar",
-      });
-
-      await promptRunner.execute(config, HookEventName.PreToolUse, input);
-
-      const callArg = mockGenerateContent.mock.calls[0][0];
-      const promptText = callArg.contents?.[0]?.parts?.[0]?.text as string;
-
-      // Verify special patterns are preserved literally (not interpreted)
       expect(promptText).toContain('$&');
       expect(promptText).toContain('$`');
       expect(promptText).toContain("$'");
@@ -616,29 +439,10 @@ describe('PromptHookRunner', () => {
     });
 
     it('should handle response with thought parts filtered out', async () => {
-      const mockResponse = {
-        candidates: [
-          {
-            content: {
-              parts: [
-                { thought: true, text: 'internal reasoning' },
-                { text: '{"ok": true}' },
-              ],
-              role: 'assistant',
-            },
-          },
-        ],
-      } as GenerateContentResponse;
-      mockGenerateContent.mockResolvedValue(mockResponse);
-
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      const result = await promptRunner.execute(
-        config,
-        HookEventName.PreToolUse,
-        input,
-      );
+      const result = await runWith([
+        { thought: true, text: 'internal reasoning' },
+        { text: '{"ok": true}' },
+      ]);
 
       expect(result.success).toBe(true);
       expect(result.output?.decision).toBe('allow');
@@ -658,55 +462,36 @@ describe('PromptHookRunner', () => {
       );
 
     it('reports its own timeout as timeout', async () => {
-      vi.useFakeTimers();
-      try {
+      await withFakeTimers(async () => {
         mockGenerateContent.mockReturnValue(new Promise(() => {}));
 
-        const execution = promptRunner.execute(
-          createMockConfig({ timeout: 0.1 }),
-          HookEventName.PreToolUse,
-          createMockInput(),
-        );
+        const execution = run({ timeout: 0.1 });
         await vi.advanceTimersByTimeAsync(100);
         const result = await execution;
 
         expect(result.outcome).toBe('timeout');
         expect(result.success).toBe(false);
         expect(result.error?.message).toBe('Prompt hook timed out after 100ms');
-      } finally {
-        vi.useRealTimers();
-      }
+      });
     });
 
     it('reports a timeout as timeout even when the aborted request rejects first', async () => {
-      vi.useFakeTimers();
-      try {
+      await withFakeTimers(async () => {
         rejectOnRequestAbort('Request was aborted.');
 
-        const execution = promptRunner.execute(
-          createMockConfig({ timeout: 0.1 }),
-          HookEventName.PreToolUse,
-          createMockInput(),
-        );
+        const execution = run({ timeout: 0.1 });
         await vi.advanceTimersByTimeAsync(100);
         const result = await execution;
 
         expect(result.outcome).toBe('timeout');
-      } finally {
-        vi.useRealTimers();
-      }
+      });
     });
 
     it('reports a caller abort during the request as cancelled', async () => {
       rejectOnRequestAbort('Request was aborted.');
       const controller = new AbortController();
 
-      const execution = promptRunner.execute(
-        createMockConfig({ timeout: 60 }),
-        HookEventName.PreToolUse,
-        createMockInput(),
-        controller.signal,
-      );
+      const execution = run({ timeout: 60 }, {}, controller.signal);
       await vi.waitFor(() => expect(mockGenerateContent).toHaveBeenCalled());
       controller.abort();
       const result = await execution;
@@ -720,12 +505,7 @@ describe('PromptHookRunner', () => {
         new Error('Request aborted by server'),
       );
 
-      const result = await promptRunner.execute(
-        createMockConfig(),
-        HookEventName.PreToolUse,
-        createMockInput(),
-        new AbortController().signal,
-      );
+      const result = await run({}, {}, new AbortController().signal);
 
       expect(result.outcome).toBe('non_blocking_error');
     });
@@ -733,13 +513,63 @@ describe('PromptHookRunner', () => {
     it('reports a provider error that mentions a timeout as a failure, not a timeout', async () => {
       mockGenerateContent.mockRejectedValue(new Error('upstream timed out'));
 
-      const result = await promptRunner.execute(
-        createMockConfig(),
-        HookEventName.PreToolUse,
-        createMockInput(),
-      );
+      const result = await run();
 
       expect(result.outcome).toBe('non_blocking_error');
+    });
+  });
+
+  describe('timeout matches describeHookTimeout', () => {
+    /** Under fake timers: still pending after `pendingMs`, and the outcome 1 ms later. */
+    const runUntil = (
+      config: Partial<PromptHookConfig>,
+      pendingMs: number,
+    ): Promise<{ pendingAfter: boolean; outcome: string | undefined }> =>
+      withFakeTimers(async () => {
+        mockGenerateContent.mockReturnValue(new Promise(() => {}));
+        let settled = false;
+        const execution = run(config).then((result) => {
+          settled = true;
+          return result;
+        });
+        await vi.advanceTimersByTimeAsync(pendingMs);
+        const pendingAfter = !settled;
+        await vi.advanceTimersByTimeAsync(1);
+        const result = await execution;
+        return { pendingAfter, outcome: result.outcome };
+      });
+
+    it('times out a configured value in seconds at the described delay', async () => {
+      expect(describeHookTimeout(HookType.Prompt, 1).timeoutMs).toBe(1000);
+      expect(await runUntil({ timeout: 1 }, 999)).toEqual({
+        pendingAfter: true,
+        outcome: 'timeout',
+      });
+    });
+
+    it('times out an unconfigured hook at the described default', async () => {
+      const defaultMs = DEFAULT_PROMPT_HOOK_TIMEOUT_SECONDS * 1000;
+      expect(describeHookTimeout(HookType.Prompt, undefined).timeoutMs).toBe(
+        defaultMs,
+      );
+      expect(await runUntil({}, defaultMs - 1)).toEqual({
+        pendingAfter: true,
+        outcome: 'timeout',
+      });
+    });
+
+    it('times out a negative timeout at once, as described', async () => {
+      // Real timers: Node runs a negative delay after 1 ms.
+      expect(describeHookTimeout(HookType.Prompt, -1)).toEqual({
+        timeoutMs: 1,
+        source: 'unusable',
+        ignoredConfiguredValue: false,
+      });
+      mockGenerateContent.mockReturnValue(new Promise(() => {}));
+      const started = Date.now();
+      const result = await run({ timeout: -1 });
+      expect(result.outcome).toBe('timeout');
+      expect(Date.now() - started).toBeLessThan(1000);
     });
   });
 

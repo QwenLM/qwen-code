@@ -8,12 +8,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import {
+  captureRuntimeFileVersion,
+  writeRuntimeFile,
+} from '../sandbox/runtime-file.js';
 import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
-import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
+import {
+  checkTeamMemorySecrets,
+  checkWorkspaceTeamMemorySecrets,
+} from '../memory/team-memory-secret-guard.js';
 import type {
   FileDiff,
-  ToolArtifact,
-  ToolArtifactKind,
   ToolCallConfirmationDetails,
   ToolEditConfirmationDetails,
   ToolInvocation,
@@ -33,7 +38,11 @@ import {
   needsUtf8Bom,
   detectLineEnding,
 } from '../services/fileSystemService.js';
-import type { LineEnding } from '../services/fileSystemService.js';
+import type {
+  LineEnding,
+  TextFileMutation,
+  TextFileObservation,
+} from '../services/fileSystemService.js';
 import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
@@ -54,38 +63,11 @@ import { getLanguageFromFilePath } from '../utils/language-detection.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
-  ARTIFACT_TITLE_MAX_LENGTH,
-  ARTIFACT_WORKSPACE_PATH_MAX_LENGTH,
-  hasControlCharacter,
-  hasUnsafeDisplayPayload,
-} from './record-artifact.js';
-import {
-  OFFICE_DOCUMENT_EXTENSIONS,
-  pathHasSkippedDirectoryComponent,
-} from '../utils/workspace-artifact-directory.js';
-import { toCanonicalWorkspaceArtifactPath } from '../utils/workspace-artifact-path.js';
+  buildWorkspaceArtifactCandidate,
+  formatRecordArtifactReminder,
+} from './artifact/workspace-auto-record.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
-const ARTIFACT_KIND_BY_EXTENSION = new Map<string, ToolArtifactKind>([
-  ['.csv', 'file'],
-  ['.htm', 'html'],
-  ['.html', 'html'],
-  ['.ipynb', 'notebook'],
-  ['.jpeg', 'image'],
-  ['.jpg', 'image'],
-  ['.pdf', 'pdf'],
-  ['.png', 'image'],
-  ['.svg', 'image'],
-  ['.webp', 'image'],
-]);
-for (const ext of OFFICE_DOCUMENT_EXTENSIONS) {
-  ARTIFACT_KIND_BY_EXTENSION.set(ext, 'document');
-}
-
-type WorkspaceToolArtifact = ToolArtifact & {
-  storage: 'workspace';
-  workspacePath: string;
-};
 
 /**
  * Parameters for the WriteFile tool
@@ -113,9 +95,11 @@ export interface WriteFileToolParams {
 
   /**
    * When false, skip the automatic session-artifact registration that
-   * write_file otherwise does for artifact-like files (html, pdf, images).
+   * write_file otherwise does for artifact-like files (html, pdf, images,
+   * csv, markdown, json, python, and sql).
    * Use this for intermediate files that will be deleted, such as HTML
-   * written only to print a PDF.
+   * written only to print a PDF. An artifact the session already has for
+   * this path is still refreshed.
    */
   record_as_artifact?: boolean;
 }
@@ -152,6 +136,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
    * git diff for review before commit.)
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
+    if (this.config.getFileSystemService().textFileIo) return 'ask';
     const projectRoot = this.config.getProjectRoot();
     const filePath = path.resolve(this.params.file_path);
     if (isTeamAutoMemPath(filePath, projectRoot)) {
@@ -170,7 +155,22 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     let originalContent = '';
-    let fileExists = await isFilefileExists(this.params.file_path);
+    let observation: TextFileObservation | undefined;
+    try {
+      observation = await this.config
+        .getFileSystemService()
+        .textFileIo?.inspect(this.params.file_path, _abortSignal);
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'EISDIR')
+        throw new StructuredToolError(
+          `Path is a directory, not a file: ${this.params.file_path}`,
+          ToolErrorType.TARGET_IS_DIRECTORY,
+        );
+      throw error;
+    }
+    let fileExists = observation
+      ? observation.kind === 'file'
+      : await isFilefileExists(this.params.file_path);
     // Run prior-read enforcement *before* we read the file to render
     // a confirmation diff. Otherwise the user could approve a diff
     // computed from current bytes that the model has never received,
@@ -215,9 +215,12 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     }
     if (fileExists) {
       try {
-        const { content } = await this.config
-          .getFileSystemService()
-          .readTextFile({ path: this.params.file_path });
+        const { content } =
+          observation?.kind === 'file'
+            ? observation.response
+            : await this.config
+                .getFileSystemService()
+                .readTextFile({ path: this.params.file_path });
         originalContent = content;
       } catch (err) {
         // ENOENT here means the file disappeared between
@@ -292,22 +295,60 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     return confirmationDetails;
   }
 
-  async execute(_abortSignal: AbortSignal): Promise<ToolResult> {
+  async execute(abortSignal: AbortSignal): Promise<ToolResult> {
+    const io = this.config.getFileSystemService().textFileIo;
+    if (!io) return this.executeObserved(abortSignal);
+    try {
+      return await io.withMutation(
+        this.params.file_path,
+        abortSignal,
+        (mutation) => this.executeObserved(abortSignal, mutation),
+      );
+    } catch (error) {
+      if (abortSignal.aborted) throw error;
+      return this.writeFailure(error);
+    }
+  }
+
+  private async executeObserved(
+    abortSignal: AbortSignal,
+    mutation?: TextFileMutation,
+  ): Promise<ToolResult> {
     const { file_path, content, ai_proposed_content, modified_by_user } =
       this.params;
 
-    let fileExists = await isFilefileExists(file_path);
+    let sandboxFileVersion: ReturnType<typeof captureRuntimeFileVersion>;
+    try {
+      sandboxFileVersion = captureRuntimeFileVersion(this.config, file_path);
+    } catch (error) {
+      const message = `${file_path}: ${getErrorMessage(error)}`;
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: {
+          message,
+          type:
+            isNodeError(error) && error.code === 'EISDIR'
+              ? ToolErrorType.TARGET_IS_DIRECTORY
+              : ToolErrorType.FILE_WRITE_FAILURE,
+        },
+      };
+    }
+
+    let fileExists = mutation
+      ? mutation.original.kind === 'file'
+      : await isFilefileExists(file_path);
     let originalContent = '';
     let useBOM = false;
     let detectedEncoding: string | undefined;
     let detectedLineEnding: LineEnding | undefined;
     const dirName = path.dirname(file_path);
 
-    const teamMemoryError = checkTeamMemorySecrets(
-      file_path,
-      content,
-      this.config.getProjectRoot(),
-    );
+    const teamMemoryError = (
+      this.config.getFileSystemService().textFileIo
+        ? checkWorkspaceTeamMemorySecrets
+        : checkTeamMemorySecrets
+    )(file_path, content, this.config.getProjectRoot());
     if (teamMemoryError) {
       // Must carry `error` so the framework treats the blocked write as a
       // failure (retry/telemetry), not a silent success. Mirrors edit.ts.
@@ -353,9 +394,12 @@ class WriteFileToolInvocation extends BaseToolInvocation<
 
     if (fileExists) {
       try {
-        const fileInfo = await this.config
-          .getFileSystemService()
-          .readTextFile({ path: file_path });
+        const fileInfo =
+          mutation?.original.kind === 'file'
+            ? mutation.original.response
+            : await this.config
+                .getFileSystemService()
+                .readTextFile({ path: file_path });
         if (fileInfo._meta?.bom !== undefined) {
           useBOM = fileInfo._meta.bom;
         } else {
@@ -467,14 +511,9 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     //
     // It does NOT eliminate the race. A concurrent writer that
     // lands between this stat and the writeTextFile call below
-    // can still be clobbered — that residual is an OS-level
-    // limitation of the stat-then-write pattern, and the only way
-    // to close it is an atomic write (write-to-temp + rename) or
-    // a content-hash post-check that re-reads the bytes after the
-    // write. Both are deferred to a follow-up; operators who care
-    // about strict overwrite-protection should set
-    // `fileReadCacheDisabled: true` and rely on application-level
-    // locking.
+    // can still be clobbered. Atomic replacement is not compare-and-swap;
+    // the sandbox worker rechecks the prepared version before commit,
+    // but strict protection against concurrent writers requires locking.
     //
     // Run unconditionally (not gated on `fileExists`): if the path
     // was absent during the earlier checkPriorRead but a different
@@ -518,26 +557,35 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     // directories on the failure path (rejected new-file writes
     // would otherwise litter the filesystem with empty mkdir'd
     // ancestors).
-    if (!fileExists) {
+    if (!mutation && !fileExists && !this.config.getShellExecutionSandbox?.()) {
       fs.mkdirSync(dirName, { recursive: true });
     }
 
     try {
-      await this.config.getFileSystemService().writeTextFile({
+      const writeParams = {
         path: file_path,
         content,
-        toolWriteOrigin: 'write_file',
+        toolWriteOrigin: 'write_file' as const,
         _meta: {
           bom: useBOM,
           encoding: detectedEncoding,
           lineEnding: detectedLineEnding,
         },
-      });
+      };
+      const committedStats = mutation
+        ? await mutation.write(writeParams)
+        : (await writeRuntimeFile(
+            this.config,
+            writeParams,
+            sandboxFileVersion,
+            abortSignal,
+          ),
+          undefined);
 
       // Track AI contribution for commit attribution.
       // Pass null only when the file truly did not exist before this write;
       // an empty string means the file existed but was empty.
-      if (!modified_by_user) {
+      if (!mutation && !modified_by_user) {
         CommitAttributionService.getInstance().recordEdit(
           file_path,
           fileExists ? originalContent : null,
@@ -553,10 +601,15 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       // and either see fresh content or treat the entry as stale.
       let postWriteSizeBytes: number | undefined;
       try {
-        const postWriteStats = fs.statSync(file_path);
+        if (mutation && !committedStats)
+          throw new Error('Scoped file write returned no committed stats.');
+        const postWriteStats = mutation
+          ? committedStats!
+          : fs.statSync(file_path);
         postWriteSizeBytes = postWriteStats.size;
         this.config.getFileReadCache().recordWrite(file_path, postWriteStats);
-      } catch {
+      } catch (error) {
+        if (mutation) throw error;
         // Non-fatal: leaving a stale entry is preferable to failing
         // the user-visible Write on a transient stat failure.
       }
@@ -594,15 +647,11 @@ class WriteFileToolInvocation extends BaseToolInvocation<
           `User modified the \`content\` to be: ${content}`,
         );
       }
-      const artifact =
-        this.params.record_as_artifact === false
-          ? null
-          : buildWorkspaceArtifactMetadata(
-              this.config,
-              file_path,
-              postWriteSizeBytes,
-            );
-      if (artifact) {
+      const artifact = buildWorkspaceArtifactCandidate(this.config, file_path, {
+        recordAsArtifact: this.params.record_as_artifact,
+        sizeBytes: postWriteSizeBytes,
+      });
+      if (artifact && !artifact.updateOnly) {
         llmSuccessMessageParts.push(
           formatRecordArtifactReminder(artifact.workspacePath),
         );
@@ -644,146 +693,54 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         ...(artifact ? { artifacts: [artifact] } : {}),
       };
     } catch (error) {
-      // Capture detailed error information for debugging
-      let errorMsg: string;
-      let errorType = ToolErrorType.FILE_WRITE_FAILURE;
-
-      if (isNodeError(error)) {
-        // Handle specific Node.js errors with their error codes
-        errorMsg = `Error writing to file '${file_path}': ${error.message} (${error.code})`;
-
-        // Log specific error types for better debugging
-        if (error.code === 'EACCES') {
-          errorMsg = `Permission denied writing to file: ${file_path} (${error.code})`;
-          errorType = ToolErrorType.PERMISSION_DENIED;
-        } else if (error.code === 'ENOSPC') {
-          errorMsg = `No space left on device: ${file_path} (${error.code})`;
-          errorType = ToolErrorType.NO_SPACE_LEFT;
-        } else if (error.code === 'EISDIR') {
-          errorMsg = `Target is a directory, not a file: ${file_path} (${error.code})`;
-          errorType = ToolErrorType.TARGET_IS_DIRECTORY;
-        }
-
-        // Include stack trace in debug mode for better troubleshooting
-        if (this.config.getDebugMode() && error.stack) {
-          debugLogger.debug('Write file error stack:', error.stack);
-        }
-      } else {
-        errorMsg = `Error writing to file: ${getErrorMessage(error)}`;
-      }
-
-      return {
-        llmContent: errorMsg,
-        returnDisplay: errorMsg,
-        error: {
-          message: errorMsg,
-          type: errorType,
-        },
-      };
+      return this.writeFailure(error);
     }
   }
+  private writeFailure(error: unknown): ToolResult {
+    const file_path = this.params.file_path;
+    // Capture detailed error information for debugging
+    let errorMsg: string;
+    let errorType = ToolErrorType.FILE_WRITE_FAILURE;
+
+    if (isNodeError(error)) {
+      // Handle specific Node.js errors with their error codes
+      errorMsg = `Error writing to file '${file_path}': ${error.message} (${error.code})`;
+
+      // Log specific error types for better debugging
+      if (error.code === 'ESTALE' && this.config.getShellExecutionSandbox?.()) {
+        errorType = ToolErrorType.FILE_CHANGED_SINCE_READ;
+      } else if (error.code === 'EACCES') {
+        errorMsg = `Permission denied writing to file: ${file_path} (${error.code})`;
+        errorType = ToolErrorType.PERMISSION_DENIED;
+      } else if (error.code === 'ENOSPC') {
+        errorMsg = `No space left on device: ${file_path} (${error.code})`;
+        errorType = ToolErrorType.NO_SPACE_LEFT;
+      } else if (error.code === 'EISDIR') {
+        errorMsg = `Target is a directory, not a file: ${file_path} (${error.code})`;
+        errorType = ToolErrorType.TARGET_IS_DIRECTORY;
+      }
+
+      // Include stack trace in debug mode for better troubleshooting
+      if (this.config.getDebugMode() && error.stack) {
+        debugLogger.debug('Write file error stack:', error.stack);
+      }
+    } else {
+      errorMsg = `Error writing to file: ${getErrorMessage(error)}`;
+    }
+
+    return {
+      llmContent: errorMsg,
+      returnDisplay: errorMsg,
+      error: {
+        message: errorMsg,
+        type: errorType,
+      },
+    };
+  }
 }
 
-/**
- * Kept for the cross-package contract test in `workspace-file-read.test.ts`:
- * the daemon's `GET /file` route resolves the `workspacePath` this produces.
- * Delegates to `buildWorkspaceArtifactMetadata` so the two agree by construction.
- */
-export function buildRecordArtifactReminder(
-  config: Config,
-  filePath: string,
-): string | null {
-  const artifact = buildWorkspaceArtifactMetadata(config, filePath);
-  return artifact ? formatRecordArtifactReminder(artifact.workspacePath) : null;
-}
-
-function formatRecordArtifactReminder(workspacePath: string): string {
-  return (
-    `This file was automatically recorded as a workspace artifact with ` +
-    `workspacePath "${workspacePath}". No extra artifact registration step ` +
-    `is needed.`
-  );
-}
-
-export function buildWorkspaceArtifactMetadata(
-  config: Config,
-  filePath: string,
-  sizeBytes?: number,
-): WorkspaceToolArtifact | null {
-  const recorded = resolveRecordedWorkspaceFile(config, filePath);
-  if (!recorded) {
-    return null;
-  }
-  const title = path.basename(recorded.filePath);
-  // The daemon store rejects titles and paths that are too long, carry control
-  // characters, or contain markup; skip the artifact rather than tell the model
-  // it was recorded when it will be dropped.
-  if (
-    title.length > ARTIFACT_TITLE_MAX_LENGTH ||
-    hasControlCharacter(title) ||
-    hasUnsafeDisplayPayload(title) ||
-    recorded.workspacePath.length > ARTIFACT_WORKSPACE_PATH_MAX_LENGTH ||
-    hasControlCharacter(recorded.workspacePath) ||
-    hasUnsafeDisplayPayload(recorded.workspacePath)
-  ) {
-    debugLogger.debug('workspace artifact skipped (safety checks)', {
-      path: filePath,
-    });
-    return null;
-  }
-  return {
-    title,
-    kind: inferWorkspaceArtifactKind(recorded.filePath),
-    storage: 'workspace',
-    workspacePath: recorded.workspacePath,
-    mimeType:
-      getSpecificMimeType(recorded.filePath) ??
-      (recorded.filePath.toLowerCase().endsWith('.ipynb')
-        ? 'application/x-ipynb+json'
-        : undefined),
-    sizeBytes,
-  };
-}
-
-function resolveRecordedWorkspaceFile(
-  config: Config,
-  filePath: string,
-): { filePath: string; workspacePath: string } | null {
-  if (!config.isRecordArtifactEnabled()) {
-    return null;
-  }
-  let resolvedFile = filePath;
-  let resolvedRoot = config.getTargetDir();
-  try {
-    resolvedFile = fs.realpathSync(filePath);
-    resolvedRoot = fs.realpathSync(resolvedRoot);
-  } catch {
-    // Keep the lexical path when the file or root cannot be realpath'd yet.
-  }
-  if (
-    !ARTIFACT_KIND_BY_EXTENSION.has(path.extname(resolvedFile).toLowerCase())
-  ) {
-    return null;
-  }
-  const workspacePath = toCanonicalWorkspaceArtifactPath(
-    resolvedFile,
-    resolvedRoot,
-  );
-  if (!workspacePath) {
-    return null;
-  }
-  if (pathHasSkippedDirectoryComponent(workspacePath)) {
-    return null;
-  }
-  return { filePath: resolvedFile, workspacePath };
-}
-
-function inferWorkspaceArtifactKind(filePath: string): ToolArtifactKind {
-  return (
-    ARTIFACT_KIND_BY_EXTENSION.get(path.extname(filePath).toLowerCase()) ??
-    'file'
-  );
-}
+export const WRITE_FILE_ARTIFACT_DESCRIPTION =
+  'Artifact-like files such as HTML, PDF, images, notebooks, office documents, CSV, Markdown, JSON, SQL, and Python files are automatically registered as session artifacts. Set record_as_artifact=false for intermediates, such as HTML written only to print a PDF: that does not create an artifact, but one the session already has for the path is still refreshed. Files under .qwen/tmp/ are not registered. Delete intermediates when done.';
 
 /**
  * Implementation of the WriteFile tool logic
@@ -800,7 +757,7 @@ export class WriteFileTool
       ToolDisplayNames.WRITE_FILE,
       `Writes content to a specified file in the local filesystem. A request to create or generate a file does not establish that the target path is new. Unless the target's absence or current text contents have already been established in this session, you MUST use the ${ToolNames.READ_FILE} tool first; if the file does not exist, then create it. With prior-read enforcement enabled, blind overwrites are rejected. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first.
 
-Artifact-like files such as HTML, PDF, images, notebooks, and office documents are automatically registered as session artifacts. Intermediate files that exist only to produce another artifact — for example HTML written solely to print a PDF — must set record_as_artifact=false, or be written under .qwen/tmp/ so they are not registered. Delete those intermediates when done.
+${WRITE_FILE_ARTIFACT_DESCRIPTION}
 
 The user has the ability to modify \`content\`. If modified, this will be stated in the response.`,
       Kind.Edit,
@@ -817,7 +774,7 @@ The user has the ability to modify \`content\`. If modified, this will be stated
           },
           record_as_artifact: {
             description:
-              'Set false for intermediate files that should not appear as session artifacts, such as HTML used only to print a PDF. Defaults to true for artifact-like extensions.',
+              'Set false to skip creating a session artifact. An artifact the session already has for this path is still refreshed. Defaults to true for artifact-like extensions.',
             type: 'boolean',
           },
         },
@@ -844,7 +801,10 @@ The user has the ability to modify \`content\`. If modified, this will be stated
     }
 
     try {
-      if (fs.existsSync(filePath)) {
+      if (
+        !this.config.getFileSystemService().textFileIo &&
+        fs.existsSync(filePath)
+      ) {
         const stats = fs.lstatSync(filePath);
         if (stats.isDirectory()) {
           return `Path is a directory, not a file: ${filePath}`;
@@ -856,11 +816,11 @@ The user has the ability to modify \`content\`. If modified, this will be stated
       )}`;
     }
 
-    const teamMemoryError = checkTeamMemorySecrets(
-      filePath,
-      params.content ?? '',
-      this.config.getProjectRoot(),
-    );
+    const teamMemoryError = (
+      this.config.getFileSystemService().textFileIo
+        ? checkWorkspaceTeamMemorySecrets
+        : checkTeamMemorySecrets
+    )(filePath, params.content ?? '', this.config.getProjectRoot());
     if (teamMemoryError) {
       return teamMemoryError;
     }
@@ -896,6 +856,13 @@ The user has the ability to modify \`content\`. If modified, this will be stated
     return {
       getFilePath: (params: WriteFileToolParams) => params.file_path,
       getCurrentContent: async (params: WriteFileToolParams) => {
+        const observation = await this.config
+          .getFileSystemService()
+          .textFileIo?.inspect(params.file_path, _abortSignal);
+        if (observation)
+          return observation.kind === 'file'
+            ? observation.response.content
+            : '';
         const fileExists = await isFilefileExists(params.file_path);
         if (fileExists) {
           try {

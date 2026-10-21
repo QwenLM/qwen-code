@@ -110,6 +110,42 @@ describe('selectTuiRenderer', () => {
     expect(selection.reason).toContain('native FFI');
   });
 
+  it('keeps ink in screen-reader mode even on a supported runtime', () => {
+    const selection = selectTuiRenderer(
+      'opentui',
+      supported,
+      {},
+      /* screenReader */ true,
+    );
+    expect(selection.renderer).toBe('ink');
+    expect(selection.reason).toContain('screen-reader');
+    // The gate must not become an unconditional ink fallback.
+    expect(selectTuiRenderer('opentui', supported, {}, false).renderer).toBe(
+      'opentui',
+    );
+  });
+
+  it('strict mode reports the screen-reader reason, not the runtime one', () => {
+    expect(() =>
+      selectTuiRenderer(
+        'opentui',
+        supported,
+        { [TUI_RENDERER_STRICT_ENV_VAR]: '1' },
+        true,
+      ),
+    ).toThrow('screen-reader');
+    // Screen-reader outranks the runtime probe: an unsupported runtime under
+    // SR still names SR, so the failure points at the capability that matters.
+    expect(() =>
+      selectTuiRenderer(
+        'opentui',
+        unsupported,
+        { [TUI_RENDERER_STRICT_ENV_VAR]: '1' },
+        true,
+      ),
+    ).toThrow('screen-reader');
+  });
+
   it('strict mode throws instead of falling back', () => {
     expect(() =>
       selectTuiRenderer('opentui', unsupported, {

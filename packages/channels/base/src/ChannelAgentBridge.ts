@@ -95,7 +95,8 @@ export interface PermissionResolvedEvent {
 export interface BackgroundResponseContext {
   taskId: string;
   status: string;
-  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+  /** `peer`: a message from another session; `taskId` is the message id. */
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
   toolUseId?: string;
   label?: string;
   turnId?: string;
@@ -121,7 +122,8 @@ export function parseBackgroundResponseContext(
     (kind !== 'agent' &&
       kind !== 'monitor' &&
       kind !== 'shell' &&
-      kind !== 'workflow')
+      kind !== 'workflow' &&
+      kind !== 'peer')
   ) {
     return undefined;
   }

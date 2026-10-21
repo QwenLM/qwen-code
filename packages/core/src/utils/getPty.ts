@@ -5,6 +5,7 @@
  */
 
 import { getErrorMessage } from './errors.js';
+import { isBunRuntime } from './runtime-info.js';
 
 export type PtyImplementation = {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -42,7 +43,7 @@ export interface PtyLoadResult {
  */
 export const loadPty = async (): Promise<PtyLoadResult> => {
   // Bun can load @lydell/node-pty, but it hangs under Desktop's runtime.
-  if ('bun' in process.versions) {
+  if (isBunRuntime()) {
     return {
       impl: null,
       loadError:

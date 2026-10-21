@@ -142,7 +142,13 @@ for (const navigation of [true, false]) {
       }
     }
     {
+      await page.setViewportSize({ width: 1440, height: 900 });
       const shell = page.locator('[data-web-shell-root]');
+      const sidebar = page.getByRole('complementary', {
+        name: 'Workspace sidebar',
+      });
+      await expect(sidebar).toBeVisible();
+      const sidebarWidth = (await sidebar.boundingBox())!.width;
       for (const minWidth of [800, 1200, 1000]) {
         await shell.evaluate((element, width) => {
           element.style.setProperty(
@@ -152,14 +158,14 @@ for (const navigation of [true, false]) {
         }, minWidth);
         for (const offset of [-1, 0, 1]) {
           await page.setViewportSize({
-            width: minWidth + 260 + offset,
+            width: minWidth + sidebarWidth + offset,
             height: 900,
           });
           if (offset < 0) await expect(rail).toBeHidden();
           else await expect(rail).toBeVisible();
         }
       }
-      await page.setViewportSize({ width: 1260, height: 900 });
+      await page.setViewportSize({ width: 1000 + sidebarWidth, height: 900 });
       await shell.evaluate((element) => {
         element.style.setProperty('--chat-regular-content-width', '1200px');
       });
@@ -169,7 +175,7 @@ for (const navigation of [true, false]) {
       });
       await expect(rail).toBeVisible();
     }
-    for (const width of [1440, 1260]) {
+    for (const width of [1440, 1360]) {
       await page.setViewportSize({ width, height: 900 });
       const button = rail.locator('button').first();
       const tick = button.locator(':scope > span').first();
@@ -217,6 +223,8 @@ for (const navigation of [true, false]) {
       await expect(preview).toHaveCount(0);
     }
     await test.step('docked environment panel preserves composer alignment', async () => {
+      // 1440 is the most common laptop width; the dock budget excludes the
+      // rail's 56px so the panel still docks here.
       await page.setViewportSize({ width: 1440, height: 900 });
       const toggle = page.locator('[data-web-shell-environment-toggle]');
       const panel = page.getByTestId('environment-panel');

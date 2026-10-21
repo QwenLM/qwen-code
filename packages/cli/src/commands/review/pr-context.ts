@@ -1521,7 +1521,9 @@ export function persistedAnchorSha(sideFilePath: string): string | null {
  *   readable file exists, an anonymous recovery therefore advances only the
  *   ROUND COUNTER (strictly higher rounds — a stale counter re-issues ids
  *   the PR already carries) and adopts the winner's `reviewId` for future
- *   tiebreaks; the findings stay this machine's own (and the cumulative
+ *   tiebreaks, stamped `roundAdoptedAnonymously: true` because that counter
+ *   is the one fact the write adopts without a vouch (#10136 R24-1); the
+ *   findings stay this machine's own (and the cumulative
  *   churn streak carries with them — an unmeasured round carries), and
  *   `sha`/`commitId` are dropped — an anonymous round cannot be re-vouched,
  *   and an anchor
@@ -1600,7 +1602,15 @@ export function persistRecoveredLedger(
       ) {
         return;
       }
-      if (!identityKnown && existing !== null) {
+      // The anonymous branch protects a work list this machine already
+      // holds, so it turns on the file HOLDING one — a real round — not on
+      // the file merely existing (#10136 R20-1). A contentless object (a
+      // torn write, a stub some other writer left) carries no round, reads
+      // `exRound: -1`, and diverted the recovery here: the branch advanced
+      // a counter over nothing and dropped the recovered work list, so the
+      // next round had no ledger to dedup against and re-posted what the
+      // previous round already reported.
+      if (!identityKnown && existing !== null && exRound >= 0) {
         // Anonymous recovery over an existing file: the guard the docblock's
         // fourth outcome describes. A same-round winner changes nothing (the
         // drive-by shape: equal round, later review); a strictly higher one
@@ -1669,7 +1679,20 @@ export function persistRecoveredLedger(
               ...kept,
               round: recovered.ledger.round,
               reviewId: recovered.reviewId,
-              // Both provenance flags ride with `...kept`, deliberately
+              // …but the COUNTER this write advances to is the one thing it
+              // adopts, and nothing vouched for it (#10136 R24-1): with no
+              // `me` the winning marker may be a stranger's. The plan-time
+              // posture reader buys less review WORK off this number, so
+              // the file must say where it came from. A flag of its own,
+              // not `anonymousAdoption`: that one describes the LIST — the
+              // closure mint reads it to decide whether absence can mean
+              // "ruled fixed" — and the list here is still this account's
+              // own. The identity-known whole write below rebuilds the file
+              // from the recovered ledger alone, so a vouched round clears
+              // it; an equal-or-lower recovery returns before any write and
+              // leaves the adopted counter, and its flag, in place.
+              roundAdoptedAnonymously: true,
+              // Both LIST provenance flags ride with `...kept`, deliberately
               // unwritten here. This branch advances only the COUNTER; the
               // work list it describes is kept verbatim, so the flags that
               // describe that list are not stale — they were vouched under a

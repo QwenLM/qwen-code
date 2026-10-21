@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { createChildAbortController } from '../utils/abortController.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { HookAbortError, HookTimeoutError } from './hook-errors.js';
+import { DEFAULT_PROMPT_HOOK_TIMEOUT_SECONDS } from './hook-timeout.js';
 import type {
   PromptHookConfig,
   LLMHookResponse,
@@ -88,7 +89,8 @@ export class PromptHookRunner {
       };
     }
 
-    const timeoutMs = (hookConfig.timeout ?? 30) * 1000;
+    const timeoutMs =
+      (hookConfig.timeout ?? DEFAULT_PROMPT_HOOK_TIMEOUT_SECONDS) * 1000;
 
     try {
       debugLogger.debug(`Executing prompt hook: ${hookName}`);

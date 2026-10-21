@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import type {
   DaemonTurnNavigationSnapshot,
   DaemonTurnNavigationStore,
@@ -46,7 +52,9 @@ export function GlobalTurnNavigation({
   store,
   follow,
   onSelect,
+  action,
 }: {
+  action?: ReactNode;
   state: DaemonTurnNavigationSnapshot;
   store: DaemonTurnNavigationStore;
   follow?: { start: number; end: number; current: number };
@@ -271,6 +279,7 @@ export function GlobalTurnNavigation({
             })}
           </ol>
         </div>
+        {action}
         {failed && (
           <Button
             variant="ghost"

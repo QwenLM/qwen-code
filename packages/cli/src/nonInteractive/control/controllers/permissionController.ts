@@ -227,8 +227,15 @@ export class PermissionController extends BaseController {
       );
     }
 
-    this.context.permissionMode = mode;
+    // Apply the core approval mode first: in an untrusted folder
+    // `setApprovalMode` throws `TrustGateError`. Assigning the context mode
+    // before that call would leave this controller answering `allow` for every
+    // later `can_use_tool` (checkPermissionMode reads context.permissionMode)
+    // while core Config stayed in DEFAULT and the host had been told the
+    // escalation failed. The error keeps propagating so acpAgent can still map
+    // it to a typed `trust_gate` rejection.
     this.context.config.setApprovalMode(mode as ApprovalMode);
+    this.context.permissionMode = mode;
 
     this.debugLogger.info(
       `[PermissionController] Permission mode updated to: ${mode}`,

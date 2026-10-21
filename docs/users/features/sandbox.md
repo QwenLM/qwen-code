@@ -1,6 +1,55 @@
 # Sandbox
 
-This document explains how to run Qwen Code inside a sandbox to reduce risk when tools execute shell commands or modify files.
+This document explains tool execution confinement on Linux and the existing whole-CLI sandbox methods.
+
+## Linux tool execution sandbox
+
+On Linux, install `bwrap` (Bubblewrap) at `/usr/bin/bwrap` (the supported system path) for the strongest supported boundary, then enable the tool execution sandbox in your **User** settings (`~/.qwen/settings.json`, or the directory selected by `QWEN_HOME`) or administrator **System** settings:
+
+```json
+{
+  "tools": {
+    "executionSandbox": {
+      "backend": "auto",
+      "filesystem": "workspace-write",
+      "network": "closed"
+    }
+  }
+}
+```
+
+`filesystem` and `network` are required. `backend` defaults to `auto`, which tries bwrap first. When bwrap is unavailable and `network` is `open`, `auto` can use the bundled Landlock helper on kernels with Landlock ABI 3 or newer. Set `backend` to `bwrap` or `landlock` to require that exact implementation. Landlock cannot enforce `network: closed` or hide explicit masked paths. Either requirement rejects Landlock before any command starts; automatic fallback never discards a remaining path mask. Use `read-only` to deny workspace writes, or `workspace-write` to permit writes inside the current canonical workspace. Each command also gets private scratch space. Ordinary `includeDirectories` settings do not grant write access. Keep the workspace separate from the Qwen installation, user configuration and runtime state directories.
+
+The CLI, model transport, authentication and session storage remain on the host. Shell, terminal `!`, prompt shell interpolation, Monitor, Read/Write/Edit and supported nested in-process Agent/Code Mode calls use the same runtime policy. With bwrap, `network: closed` blocks ordinary host/external IP connections from commands, while `open` shares the host network. Reads remain broad: this mode does not hide host secrets or promise to isolate pathname Unix sockets and host services. Approval and YOLO do not expand the filesystem or network policy. Standard streams are explicit caller-provided capabilities: an already-connected socket, TTY or character device remains usable even with `network: closed`. Closed networking does not revoke those existing descriptors; avoid supplying a host-service connection as stdin when that access is unwanted. Host-backed file and named-FIFO stdin require the bundled Linux x64/arm64 input helper and are copied through a private Unix stream socket with its write half shut; regular-file offsets advance only by bytes consumed from that socket, and an idle FIFO writer does not delay command completion. Read fd 0 directly: this input is a socket rather than a FIFO, and reopening it through `/dev/stdin` or `/proc/self/fd/0` is unsupported. SIGINT/SIGTERM cancel the command but still drain accepted stdout/stderr bytes; a closed output stops that stream with exit 141 while the other valid output drains.
+
+Landlock reports `partial` enforcement because it restricts pathname reads, writes and directory mutations but does not create PID or network namespaces and cannot currently restrict every metadata operation, including `chmod`, `chown`, extended attributes and timestamps. A Landlock command can see host processes and uses host networking. Detached descendants retain the Landlock filesystem restrictions but do not get bwrap's PID-namespace lifetime boundary. Open file descriptors retain their existing access. Qwen Code streams host-backed file and named-FIFO stdin through a private read-only socket instead of passing those descriptors to the payload; sockets, character devices and anonymous pipes can be shared. Output standard streams remain the caller's explicit destinations. The execution-status descriptor closes on payload exec.
+
+Landlock also has a narrower writable device surface: it grants writes to `/dev/null`, but does not create bwrap's private `/dev` and `/proc` mounts. Opening `/dev/full` or `/dev/tty` for writing and creating files in `/dev/shm` are denied, so programs requiring these operations may fail. Use the private scratch directory exposed through `TMPDIR`, `TMP`, and `TEMP` for temporary files. Already-open, caller-provided standard streams keep their existing access. Startup's Landlock policy probe requires `/usr/bin/true`; a host missing it fails the probe even if its kernel supports Landlock.
+
+Workspace settings cannot enable, disable or modify this policy, even in a trusted project. Effective precedence is System over User over SystemDefaults, selecting a complete policy object. Values must be literals; environment substitutions, unknown fields and incomplete objects are rejected. `--bare` and `--safe-mode` retain operator confinement. Changes require a new runtime. A malformed or unreadable SystemDefaults, User or System settings file now blocks startup (configuration exit code 52), instead of silently resetting unknown policy to empty settings. The error names the file and repair action. Repair its JSON object or restore read access, then restart. A User `.corrupted` copy is only a reference; the original operator file is never cleared. Workspace-only recovery remains available without operator confinement. Malformed linked Workspace settings (including a linked `.qwen` directory or a hard-linked file) require manual repair; automatic recovery refuses before changing the original or a previous corruption copy. Valid linked JSON remains readable.
+
+This initial public mode supports the ordinary headless CLI and both terminal UIs. ACP, `qwen serve` and web terminals explicitly reject it. MCP/LSP, executable hooks/extensions, worktree/arena management, external agents, speculative execution, file checkpoints, automatic skill/memory maintenance, and unported process or mutation tools are disabled or rejected. Ordinary same-workspace in-process agents cannot add hooks, MCP servers, external executors or worktree isolation. Custom status commands, external Markdown/image renderers, IDE detection and connection, file restore, and host Git diff previews are disabled. Conversation-only rewind remains available.
+
+Explicit operator diagnostics such as `/doctor`, opening or editing files and folders through `/memory`, and changing settings through `/skills` remain trusted host actions. These management commands are not exposed as model-invocable commands. Picking a skill fills the input field; submitting `/skill-name` currently reports an unsupported-mode error before preparing arguments or updating usage records. Skill command execution and the model Skill tool remain unavailable until their preparation writes are confined. Automatic memory and skill maintenance remain disabled in this runtime even if you change their saved settings.
+
+Inspect and verify the active boundary before running a task:
+
+```bash
+qwen sandbox
+qwen sandbox --verify
+qwen sandbox -- sh -c 'printf "confined command\n"'
+qwen -y -p "Update the project and run its tests"
+```
+
+Linked Git worktrees receive write access to the admitted workspace only. Git common-directory and worktree metadata outside that workspace stay read-only; this mode does not implicitly authorize changing another checkout's repository metadata. Operations requiring those writes can be refused.
+
+The report names the tool boundary, requested/effective backend, enforcement level, Landlock ABI when applicable, workspace, filesystem and command network policy. `--verify` checks workspace writes, denial against a file known to be writable on the host, the expected private or shared PID namespace identity, and the selected network namespace. A passed backend probe establishes admission, not authenticated full-session viability under all inherited environment settings. Run an ordinary task afterwards to test its required tools and services. If verification cannot create its host-side temporary fixture, check `TMPDIR` and directory permissions; this is separate from a boundary refusal. Backend setup errors fail before payload execution and never rerun the command on the host. The one-command subcommand forwards literal arguments and redirected stdin while preserving stdout and stderr byte-for-byte; use terminal `!` for interactive PTY commands.
+
+### Migrating from whole-CLI bwrap
+
+Replace `--sandbox bwrap` and remove `tools.sandbox: "bwrap"`, `QWEN_SANDBOX=bwrap`, `QWEN_SANDBOX_NET` and `QWEN_SANDBOX_PROXY_COMMAND`, then configure `tools.executionSandbox` as above. Restart from a shell outside the old sandbox; inherited `SANDBOX=bwrap` is rejected. `proxied` is not a supported network policy. Do not combine this mode with Docker, Podman, Seatbelt or an inherited whole-CLI sandbox marker. Old bwrap settings produce an explicit migration error.
+
+The Docker, Podman and macOS Seatbelt methods below still run the whole CLI in their existing environment.
 
 ## Prerequisites
 
@@ -98,6 +147,8 @@ qwen -p "run the test suite"
 > [!important]
 >
 > If `QWEN_SANDBOX` is set, it **overrides** the CLI flag and `settings.json`.
+
+`--sandbox` and `-s` accept an optional value: `true`, `false`, `docker`, `podman` or `sandbox-exec`. For automatic selection with a prompt, use `qwen --sandbox=true "query"` or `qwen --sandbox -p "query"`. Unlike the old boolean-only parser, `qwen --sandbox "query"` now treats `query` as a backend value and rejects an unknown backend. Options before `--` use the same grammar even after positional words; use `-p "..."` for literal option text within a prompt. `--` stops option parsing, but its trailing tokens are not forwarded as the default-command prompt. Session sandbox flags are not accepted on management subcommands, whose `-s` aliases retain their own meaning.
 
 ### Configure the sandbox image (Docker/Podman)
 

@@ -25,11 +25,20 @@ import {
 } from '../copy_bundle_assets.js';
 import { copyFiles } from '../copy_files.js';
 import { preparePackage } from '../prepare-package.js';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const realReadFileSync = fs.readFileSync;
 const realReaddirSync = fs.readdirSync;
 const realStatSync = fs.statSync;
 const realRmSync = fs.rmSync;
+
+function reportsMissingArtifact(message, missingArtifact, pathFlavor = path) {
+  const normalized = String(message).split(pathFlavor.sep).join('/');
+  return (
+    normalized.includes('Required package artifact not found') &&
+    normalized.includes(missingArtifact)
+  );
+}
 
 describe('package asset scripts', () => {
   const tempDirs = [];
@@ -39,6 +48,75 @@ describe('package asset scripts', () => {
     for (const tempDir of tempDirs.splice(0)) {
       rmSync(tempDir, { force: true, recursive: true });
     }
+  });
+
+  it('copies the manifest and service worker into the published shell', () => {
+    const rootDir = createFixtureRoot();
+    stubConsole();
+    writeFile(rootDir, 'packages/web-shell/dist/index.html', '<!doctype html>');
+    writeFile(
+      rootDir,
+      'packages/web-shell/dist/assets/index-abc.js',
+      'export {};',
+    );
+    writeFile(
+      rootDir,
+      'packages/web-shell/dist/manifest.webmanifest',
+      '{"name":"Qwen Code"}',
+    );
+    writeFile(
+      rootDir,
+      'packages/web-shell/dist/sw.js',
+      'self.addEventListener("fetch", () => {});',
+    );
+    copyBundleAssets({ root: rootDir });
+    for (const file of ['manifest.webmanifest', 'sw.js']) {
+      expect(
+        readFileSync(path.join(rootDir, 'dist/web-shell', file), 'utf8'),
+      ).toBe(
+        readFileSync(
+          path.join(rootDir, 'packages/web-shell/dist', file),
+          'utf8',
+        ),
+      );
+    }
+  });
+
+  it('warns and skips a missing service worker from a stale shell build', () => {
+    const rootDir = createFixtureRoot();
+    stubConsole();
+    writeFile(rootDir, 'packages/web-shell/dist/index.html', '<!doctype html>');
+    writeFile(
+      rootDir,
+      'packages/web-shell/dist/assets/index-abc.js',
+      'export {};',
+    );
+    writeFile(
+      rootDir,
+      'packages/web-shell/dist/manifest.webmanifest',
+      '{"name":"Qwen Code"}',
+    );
+
+    expect(() => copyBundleAssets({ root: rootDir })).not.toThrow();
+
+    expect(
+      readFileSync(
+        path.join(rootDir, 'dist/web-shell/manifest.webmanifest'),
+        'utf8',
+      ),
+    ).toBe('{"name":"Qwen Code"}');
+    expect(existsSync(path.join(rootDir, 'dist/web-shell/sw.js'))).toBe(false);
+    expect(
+      console.warn.mock.calls
+        .map(([message]) => String(message))
+        .some(
+          (message) =>
+            message.includes('PWA asset not found') &&
+            message.includes(
+              path.join(rootDir, 'packages/web-shell/dist/sw.js'),
+            ),
+        ),
+    ).toBe(true);
   });
 
   it('emits an executable dist/cli.js — shebang plus the exec bit, once', () => {
@@ -492,12 +570,12 @@ describe('package asset scripts', () => {
     ).toBe(false);
   });
 
-  // chmod is the only lever this case has: on Windows it is a no-op, and a
-  // root user reads through it, so the branch under test is unreachable
-  // there. The case skips rather than running into the other branch — a
-  // readable tree, stamped as usual — and failing red against the no-stamp
-  // assertion.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  // chmod is the only lever this case has: on Windows it is a no-op, and
+  // root with its DAC capabilities reads through it, so the branch under
+  // test is unreachable there. The case skips rather than running into the
+  // other branch — a readable tree, stamped as usual — and failing red
+  // against the no-stamp assertion.
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses when a digest root exists but cannot be listed',
     () => {
       // The root-level arm of the unlistable-directory refusal: with the
@@ -596,6 +674,8 @@ describe('package asset scripts', () => {
     );
     expect(distPackageJson.files).toContain('export-transcript-document.js');
     expect(distPackageJson.files).toContain('export-transcript-document.css');
+    expect(distPackageJson.files).toContain('execution-worker.js');
+    expect(distPackageJson.files).toContain('mem0');
   });
 
   it('names the missing stylesheet when only the renderer JS was built', () => {
@@ -634,10 +714,18 @@ describe('package asset scripts', () => {
     ).toBe(false);
   });
 
-  it('fails packaging when the published stylesheet is missing', () => {
+  it.each([
+    'execution-worker.js',
+    'mem0/main.js',
+    'mem0/write-confirmation.js',
+    'sandboxBwrapRelay.js',
+    'sandboxLandlockRelay.js',
+    'sandboxFileWorker.js',
+    'export-transcript-document.css',
+  ])('fails packaging when the published %s is missing', (missingArtifact) => {
     const rootDir = createFixtureRoot();
     createBundleArtifacts(rootDir);
-    rmSync(path.join(rootDir, 'dist', 'export-transcript-document.css'));
+    rmSync(path.join(rootDir, 'dist', missingArtifact));
     stubConsole();
     vi.spyOn(console, 'error').mockImplementation(() => {});
     // verifyBundleArtifacts reports with console.error + process.exit(1), not a
@@ -650,16 +738,59 @@ describe('package asset scripts', () => {
       preparePackage({ rootDir, requireNativeAudioCapture: false }),
     ).toThrow('process.exit(1)');
     expect(exit).toHaveBeenCalledWith(1);
+    // verifyBundleArtifacts builds `requiredPath` with path.join, so on Windows
+    // the reported message carries `\`. The two multi-segment entries above
+    // (`mem0/main.js`, `mem0/write-confirmation.js`) are spelled with `/`, so
+    // normalise the separator before matching; otherwise they pass on POSIX and
+    // go red in the test_windows lane (which runs test:scripts).
     expect(
-      console.error.mock.calls
-        .map(([message]) => String(message))
-        .some(
-          (message) =>
-            message.includes('Required package artifact not found') &&
-            message.includes('export-transcript-document.css'),
-        ),
+      console.error.mock.calls.some(([message]) =>
+        reportsMissingArtifact(message, missingArtifact),
+      ),
     ).toBe(true);
   });
+
+  it.each(['mem0/main.js', 'mem0/write-confirmation.js'])(
+    'recognizes a Windows missing-artifact error for %s',
+    (missingArtifact) => {
+      const message =
+        'Error: Required package artifact not found: ' +
+        path.win32.join('D:\\publish\\dist', ...missingArtifact.split('/'));
+      expect(reportsMissingArtifact(message, missingArtifact, path.win32)).toBe(
+        true,
+      );
+    },
+  );
+
+  it.each(['manifest.webmanifest', 'sw.js'])(
+    'rejects a published shell missing %s',
+    (file) => {
+      const rootDir = createFixtureRoot();
+      createBundleArtifacts(rootDir);
+      rmSync(path.join(rootDir, 'dist', 'web-shell', file));
+      stubConsole();
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      // verifyBundleArtifacts reports with console.error + process.exit(1), not a
+      // throw, so the exit has to become one to keep the rest of the suite alive.
+      const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit(1)');
+      });
+
+      expect(() =>
+        preparePackage({ rootDir, requireNativeAudioCapture: false }),
+      ).toThrow('process.exit(1)');
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(
+        console.error.mock.calls
+          .map(([message]) => String(message))
+          .some(
+            (message) =>
+              message.includes('Required package artifact not found') &&
+              message.includes(file),
+          ),
+      ).toBe(true);
+    },
+  );
 
   it('copies Computer Use platform references to both CLI and core distributions', () => {
     const rootDir = createFixtureRoot();
@@ -903,6 +1034,7 @@ describe('package asset scripts', () => {
     );
 
     expect(distPackageJson.files).toContain('examples');
+    expect(distPackageJson.private).not.toBe(true);
     expect(distPackageJson.bundledDependencies).toBeUndefined();
     expect(distPackageJson.optionalDependencies).toMatchObject({
       '@qwen-code/audio-capture': rootPackageJson.version,
@@ -927,19 +1059,12 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
-  it('falls back to the hoisted lockfile entry when core has no nested sharp', () => {
+  it('falls back to the hoisted sharp when core has no nested copy', () => {
     const rootDir = createFixtureRoot();
-    writeFile(
-      rootDir,
-      'package-lock.json',
-      JSON.stringify({
-        packages: {
-          'node_modules/sharp': {
-            version: '0.35.3',
-          },
-        },
-      }),
-    );
+    rmSync(path.join(rootDir, 'packages/core/node_modules'), {
+      recursive: true,
+      force: true,
+    });
     writeFile(
       rootDir,
       'packages/core/package.json',
@@ -1017,7 +1142,7 @@ describe('package asset scripts', () => {
 
     expect(() =>
       preparePackage({ rootDir, requireNativeAudioCapture: false }),
-    ).toThrow(/resolved 0\.35\.4, packages\/core declares \^0\.34\.0/);
+    ).toThrow(/installed 0\.35\.4, packages\/core declares \^0\.34\.0/);
   });
 
   it('omits browser MCP install hooks and deps from the prepared dist package', () => {
@@ -1103,12 +1228,12 @@ describe('package asset scripts', () => {
     ).toThrow(/Prepared package unpacked size \d+ bytes exceeds 50000 bytes/);
   });
 
-  it('enforces a 128 MiB default unpacked size budget', () => {
+  it('enforces a 160 MiB default unpacked size budget', () => {
     const rootDir = createFixtureRoot();
     createBundleArtifacts(rootDir);
     writeFile(rootDir, 'dist/chunks/large.bin', '');
     const largeFile = path.join(rootDir, 'dist', 'chunks', 'large.bin');
-    truncateSync(largeFile, 127 * 1024 * 1024);
+    truncateSync(largeFile, 159 * 1024 * 1024);
     stubConsole();
 
     expect(() =>
@@ -1118,7 +1243,7 @@ describe('package asset scripts', () => {
       }),
     ).not.toThrow();
 
-    truncateSync(largeFile, 128 * 1024 * 1024);
+    truncateSync(largeFile, 160 * 1024 * 1024);
 
     expect(() =>
       preparePackage({
@@ -1126,7 +1251,7 @@ describe('package asset scripts', () => {
         requireNativeAudioCapture: false,
       }),
     ).toThrow(
-      /Prepared package unpacked size \d+ bytes exceeds 134217728 bytes/,
+      /Prepared package unpacked size \d+ bytes exceeds 167772160 bytes/,
     );
   });
 
@@ -1339,6 +1464,7 @@ describe('package asset scripts', () => {
           name: '@qwen-code/qwen-code',
           version: '0.17.0',
           description: 'Qwen Code',
+          private: true,
           repository: {
             type: 'git',
             url: 'https://github.com/QwenLM/qwen-code.git',
@@ -1358,21 +1484,13 @@ describe('package asset scripts', () => {
 
     writeFile(
       rootDir,
-      'package-lock.json',
-      JSON.stringify(
-        {
-          packages: {
-            'node_modules/sharp': {
-              version: '0.35.3',
-            },
-            'packages/core/node_modules/sharp': {
-              version: '0.35.4',
-            },
-          },
-        },
-        null,
-        2,
-      ),
+      'node_modules/sharp/package.json',
+      JSON.stringify({ name: 'sharp', version: '0.35.3' }),
+    );
+    writeFile(
+      rootDir,
+      'packages/core/node_modules/sharp/package.json',
+      JSON.stringify({ name: 'sharp', version: '0.35.4' }),
     );
 
     writeFile(
@@ -1468,7 +1586,13 @@ describe('package asset scripts', () => {
   }
 
   function createBundleArtifacts(rootDir) {
+    writeFile(rootDir, 'dist/mem0/main.js', '');
+    writeFile(rootDir, 'dist/mem0/write-confirmation.js', '');
     writeFile(rootDir, 'dist/cli.js', '');
+    writeFile(rootDir, 'dist/execution-worker.js', '');
+    writeFile(rootDir, 'dist/sandboxBwrapRelay.js', '');
+    writeFile(rootDir, 'dist/sandboxLandlockRelay.js', '');
+    writeFile(rootDir, 'dist/sandboxFileWorker.js', '');
     mkdirSync(path.join(rootDir, 'dist', 'vendor'), { recursive: true });
     mkdirSync(path.join(rootDir, 'dist', 'bundled', 'qc-helper', 'docs'), {
       recursive: true,
@@ -1476,6 +1600,12 @@ describe('package asset scripts', () => {
     // Web Shell release gate (prepare-package.js verifyBundleArtifacts): the
     // published package must ship the UI, so the fixture provides it too.
     writeFile(rootDir, 'dist/web-shell/index.html', '<!doctype html>');
+    writeFile(rootDir, 'dist/web-shell/manifest.webmanifest', '{}');
+    writeFile(
+      rootDir,
+      'dist/web-shell/sw.js',
+      'self.addEventListener("fetch", () => {});',
+    );
     mkdirSync(path.join(rootDir, 'dist', 'web-shell', 'assets'), {
       recursive: true,
     });

@@ -52,6 +52,7 @@ import {
   buildRestoreOptions,
   rewindReducer,
   createRewindState,
+  stepRestoreOption,
 } from './session-rewind-model.js';
 
 export interface OpentuiRewindSelectorProps {
@@ -84,6 +85,13 @@ export function OpentuiRewindSelector(props: OpentuiRewindSelectorProps) {
       ? null
       : (userTurns[state.selectedTurnIndex] ?? null);
   const restoreOptions = buildRestoreOptions(diffStats);
+  // The renderer gives every key of one burst to the handler the last render
+  // registered, so Enter must not read the reducer's pre-burst index: an
+  // arrow auto-repeat followed by Enter would restore the wrong thing. The
+  // handler advances this itself and the render below keeps it in step with
+  // the resets the reducer performs.
+  const restoreOptionRef = useRef(state.restoreOptionIndex);
+  restoreOptionRef.current = state.restoreOptionIndex;
 
   useEffect(() => {
     if (state.phase !== 'restore-options' || !selectedTurn) return;
@@ -166,7 +174,7 @@ export function OpentuiRewindSelector(props: OpentuiRewindSelectorProps) {
       }
       if (loadingDiff) return;
       if (original.name === 'return') {
-        const option = restoreOptions[state.restoreOptionIndex];
+        const option = restoreOptions[restoreOptionRef.current];
         if (!option || !selectedTurn) return;
         if (option.key === 'cancel') {
           setDiffStats(undefined);
@@ -176,15 +184,23 @@ export function OpentuiRewindSelector(props: OpentuiRewindSelectorProps) {
         }
         return;
       }
+      const stepOption = (delta: -1 | 1) => {
+        restoreOptionRef.current = stepRestoreOption(
+          restoreOptionRef.current,
+          delta,
+          restoreOptions.length,
+        );
+        dispatch({
+          type: delta === -1 ? 'option-up' : 'option-down',
+          optionCount: restoreOptions.length,
+        });
+      };
       if (original.name === 'up' || original.name === 'k') {
-        dispatch({ type: 'option-up' });
+        stepOption(-1);
         return;
       }
       if (original.name === 'down' || original.name === 'j') {
-        dispatch({
-          type: 'option-down',
-          optionCount: restoreOptions.length,
-        });
+        stepOption(1);
       }
       return;
     }
@@ -240,7 +256,7 @@ export function OpentuiRewindSelector(props: OpentuiRewindSelectorProps) {
           <text fg={C.text} attributes={1}>
             {t('Rewind Conversation')}
           </text>
-          <text fg={C.dim}>{separator}</text>
+          <text fg={C.borderDefault}>{separator}</text>
           <box flexDirection="column">
             <box marginBottom={1} flexDirection="row">
               <text fg={C.text}>{t('Rewind to: ')}</text>
@@ -254,7 +270,7 @@ export function OpentuiRewindSelector(props: OpentuiRewindSelectorProps) {
               )}
             </text>
           </box>
-          <text fg={C.dim}>{separator}</text>
+          <text fg={C.borderDefault}>{separator}</text>
           <text fg={C.dim}>{t('Enter/Y to confirm · Esc/N to go back')}</text>
         </DialogFrame>
       );
@@ -268,7 +284,7 @@ export function OpentuiRewindSelector(props: OpentuiRewindSelectorProps) {
         <text fg={C.text} attributes={1}>
           {t('Rewind Conversation')}
         </text>
-        <text fg={C.dim}>{separator}</text>
+        <text fg={C.borderDefault}>{separator}</text>
         <box flexDirection="column">
           <box marginBottom={1} flexDirection="row">
             <text fg={C.text}>{t('Rewind to: ')}</text>
@@ -313,7 +329,7 @@ export function OpentuiRewindSelector(props: OpentuiRewindSelectorProps) {
             </box>
           )}
         </box>
-        <text fg={C.dim}>{separator}</text>
+        <text fg={C.borderDefault}>{separator}</text>
         <text fg={C.dim}>
           {t('↑↓ to navigate · Enter to select · Esc to go back')}
         </text>
@@ -342,7 +358,7 @@ export function OpentuiRewindSelector(props: OpentuiRewindSelectorProps) {
           {t('({{count}} turns)', { count: String(userTurns.length) })}
         </text>
       </box>
-      <text fg={C.dim}>{separator}</text>
+      <text fg={C.borderDefault}>{separator}</text>
       <box flexDirection="column">
         {visibleTurns.map((turn, visibleIndex) => {
           const actualIndex = window_.offset + visibleIndex;
@@ -382,7 +398,7 @@ export function OpentuiRewindSelector(props: OpentuiRewindSelectorProps) {
           );
         })}
       </box>
-      <text fg={C.dim}>{separator}</text>
+      <text fg={C.borderDefault}>{separator}</text>
       <text fg={C.dim}>
         {t('↑↓ to navigate · Enter to select · Esc to cancel')}
       </text>

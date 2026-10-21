@@ -26,6 +26,27 @@ import type {
 } from '../../src/daemon/events.js';
 import type { DaemonEvent } from '../../src/daemon/types.js';
 
+describe('session_messages_deleted', () => {
+  it('validates the identities published on the wire', () => {
+    const event: DaemonEvent = {
+      v: 1,
+      type: 'session_messages_deleted',
+      data: {
+        sessionId: 'session',
+        deletedGroupIds: ['g'],
+        deletedPromptIds: ['p'],
+      },
+    };
+    expect(asKnownDaemonEvent(event)).toBe(event);
+    expect(
+      asKnownDaemonEvent({
+        ...event,
+        data: { ...(event.data as object), deletedPromptIds: [42] },
+      }),
+    ).toBeUndefined();
+  });
+});
+
 describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {
   it('is the wire literal and a registered known event type', () => {
     // The same const is imported by the daemon publisher (acp-bridge) and the
@@ -930,6 +951,33 @@ describe('daemon event schema', () => {
   });
 
   it('validates session_closed events', () => {
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_closed',
+        data: {
+          sessionId: 's-1',
+          reason: 'client_close',
+          cause: 'workspace_runtime_stop',
+          persistenceUnconfirmed: true,
+        },
+      }),
+    ).toBeDefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_closed',
+        data: {
+          sessionId: 's-1',
+          reason: 'client_close',
+          cause: 'workspace_runtime_stop',
+          persistenceUnconfirmed: 'true',
+        },
+      }),
+    ).toBeUndefined();
+
     expect(
       asKnownDaemonEvent({
         id: 1,

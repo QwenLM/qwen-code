@@ -38,7 +38,13 @@ import {
   type CliRenderer,
   type KeyEvent,
 } from '@opentui/core';
-import { createRoot, useKeyboard, useTerminalDimensions } from '@opentui/react';
+import {
+  createRoot,
+  useKeyboard,
+  useTerminalDimensions,
+  useRenderer,
+} from '@opentui/react';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import type { PartListUnion } from '@google/genai';
 import {
   createDebugLogger,
@@ -70,10 +76,14 @@ import {
 } from '../contexts/SessionContext.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import { useUpdateNoticeFlush } from './use-update-notice-flush.js';
+import { applyOpenTuiTheme } from './theme.js';
+import { getActiveOpenTuiTheme } from './theme-parity.js';
 import { useLogger } from '../hooks/useLogger.js';
+import { useAwaySummary } from '../hooks/useAwaySummary.js';
 import type { UpdateObject } from '../utils/updateCheck.js';
 import { OpenTuiApp } from './opentui-app-shell.js';
 import { useFollowupSuggestionGeneration } from './followup-generation.js';
+import { useTerminalFocus } from './focus-tracking.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import { OpenTuiRuntime } from './opentui-runtime.js';
 import { OpenTuiTranscriptView } from './transcript-view.js';
@@ -119,6 +129,13 @@ function OpenTuiEntryApp({
   initialDialog,
 }: OpenTuiEntryAppProps) {
   const { width, height } = useTerminalDimensions();
+  const renderer = useRenderer();
+  useEffect(() => {
+    getInteractiveModSession(config)?.setPresentation({
+      isFullscreen: renderer.screenMode === 'alternate-screen',
+      columns: width,
+    });
+  }, [config, renderer, width]);
   const { stats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, config.getSessionId());
   const live = useOpenTuiLiveTurn({ config });
@@ -135,6 +152,42 @@ function OpenTuiEntryApp({
       items: live.items,
       waitingCalls: live.waitingCalls,
     });
+
+  // --- away recap (ink AppContainer's useAwaySummary parity) ----------------
+  // The entry owns the live transcript and the streaming→idle edge, so the
+  // hook mounts here rather than in the shell. The gate reads only
+  // {type, sentToModel}, which the live rows carry under `kind`.
+  const isFocused = useTerminalFocus();
+  const recapActivity = useMemo(
+    () =>
+      live.items.flatMap((item) =>
+        item.kind === 'user'
+          ? [{ type: 'user', sentToModel: item.sentToModel }]
+          : item.kind === 'away-recap'
+            ? [{ type: 'away_recap' }]
+            : [],
+      ),
+    [live.items],
+  );
+  const addRecapItem = useCallback(
+    (item: HistoryItemWithoutId) => {
+      if (item.type === 'away_recap') {
+        applyEvent({ type: 'away-recap', text: item.text });
+      }
+      return 0;
+    },
+    [applyEvent],
+  );
+  useAwaySummary({
+    enabled: settings.merged.general?.showSessionRecap ?? false,
+    config,
+    isFocused,
+    isIdle: !live.streaming,
+    addItem: addRecapItem,
+    history: recapActivity,
+    awayThresholdMinutes:
+      settings.merged.general?.sessionRecapAwayThresholdMinutes,
+  });
 
   const statsRef = useRef(stats);
   useEffect(() => {
@@ -159,6 +212,9 @@ function OpenTuiEntryApp({
     for (const warning of startupWarnings) {
       applyEvent({ type: 'warning', text: warning });
     }
+    return getInteractiveModSession(config)?.subscribe((text) => {
+      applyEvent({ type: 'info', text });
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -247,6 +303,11 @@ function OpenTuiEntryApp({
           availableTerminalHeight={height}
           thoughtsExpanded={thoughtsExpanded}
           showToolCallArgs={settings.merged.ui?.showToolCallArgs === true}
+          showTimestamps={settings.merged.output?.showTimestamps === true}
+          showToolCallDetails={
+            settings.merged.ui?.showToolCallDetails !== false
+          }
+          mouseTracking={settings.merged.ui?.mouseTracking !== false}
           awaitingCallId={live.waitingCalls[0]?.callId}
         />
       </box>
@@ -303,7 +364,6 @@ function OpenTuiEntryApp({
       onStartNewSession={handleStartNewSession}
       updateNotice={updateNotice}
       exitHint={exitHint}
-      availableTerminalHeight={height}
       streaming={live.streaming}
       streamingCharsRef={live.streamingCharsRef}
       isReceivingContent={live.isReceivingContent}
@@ -348,7 +408,12 @@ export async function startOpenTuiUI(
 
   let renderer: CliRenderer;
   try {
-    renderer = await createCliRenderer({ exitOnCtrlC: false, useMouse: true });
+    renderer = await createCliRenderer({
+      exitOnCtrlC: false,
+      // ink's ui.mouseTracking gate: off means no SGR mouse mode, so the
+      // terminal keeps native right-click menus and OSC 8 link clicks.
+      useMouse: settings.merged.ui?.mouseTracking !== false,
+    });
   } catch (err) {
     debugLogger.error('OpenTUI renderer initialization failed:', err);
     writeStderrLine(
@@ -356,6 +421,10 @@ export async function startOpenTuiUI(
     );
     return false;
   }
+
+  // llm.tsx drained the deferred auto-theme probe before dispatching here, so
+  // the active ink theme is final; mapping it once is enough for first paint.
+  applyOpenTuiTheme(getActiveOpenTuiTheme());
 
   // Everything past renderer creation is also fallible (sidecar I/O, render,
   // prefetch wiring); a rejection must tear the renderer down and fall back

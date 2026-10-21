@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   DaemonSessionMonitorTaskStatus,
+  DaemonSessionShellTaskRuntime,
   DaemonSessionShellTaskStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionWorkflowTasksStatus,
 } from '@qwen-code/sdk/daemon';
+import { CheckIcon, CopyIcon } from 'lucide-react';
 import { isSessionDisconnectedError } from '../../utils/sessionErrors';
 import {
   computeAgentTreeInfo,
@@ -15,16 +17,20 @@ import {
 } from './agentForest';
 import {
   useActions,
+  useConnection,
   type DaemonSessionActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
+import { useCopiedFlash } from '../../hooks/useCopiedFlash';
 import { useI18n } from '../../i18n';
+import { writeClipboardText } from '../../utils/clipboard';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { formatContextTokens } from '../../utils/formatTokenCount';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { PlanExecutionView } from './PlanExecutionView';
+import type { OpenSubagentDetails } from '../../subagentDetailsContext';
 import { WorkflowExecutionView } from './WorkflowExecutionView';
 import {
   localizeAgentTypeName,
@@ -32,6 +38,7 @@ import {
   sanitizeControlChars,
 } from './toolFormatting';
 import { Badge } from '../ui/badge';
+import { Button } from '../ui/button';
 import styles from './TasksStatusMessage.module.css';
 
 const ACTIVE_EVENT = 'web-shell:tasks-panel-active';
@@ -315,6 +322,36 @@ function formatActivityLabel(
   return sanitizeControlChars(label);
 }
 
+/**
+ * The daemon's own sentence for a refused workflow action, when it sent one.
+ *
+ * Some refusals rest on state only the daemon can see — the run is recorded
+ * as live in another process, its history could not keep the args it was
+ * launched with, its journal is gone, the record that would keep a second
+ * runner off it could not be written — and each says what to do instead.
+ * They arrive as a `400`/`409`/`503` whose body carries `{code: 'workflow_…',
+ * error}`. Every other failure keeps the generic message: an unexpected
+ * error's text is not written for a reader.
+ */
+const WORKFLOW_REFUSAL_STATUSES: ReadonlySet<unknown> = new Set([
+  400, 409, 503,
+]);
+
+function workflowRefusalMessage(error: unknown): string | undefined {
+  const status = (error as { status?: unknown } | null)?.status;
+  if (!WORKFLOW_REFUSAL_STATUSES.has(status)) return undefined;
+  const body = (error as { body?: unknown }).body;
+  if (typeof body !== 'object' || body === null) return undefined;
+  const { code, error: message } = body as { code?: unknown; error?: unknown };
+  if (typeof code !== 'string' || !code.startsWith('workflow_')) {
+    return undefined;
+  }
+  if (typeof message !== 'string' || message.trim().length === 0) {
+    return undefined;
+  }
+  return sanitizeControlChars(message.trim());
+}
+
 export function TasksStatusMessage({
   message,
   embedded = false,
@@ -345,7 +382,7 @@ export function TasksStatusMessage({
   onClose?: () => void;
   planTodos?: readonly TodoItem[];
   agentTools?: readonly ACPToolCall[];
-  onOpenSubagent?: (tool: ACPToolCall) => void;
+  onOpenSubagent?: OpenSubagentDetails;
   onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
 }) {
   const { t } = useI18n();
@@ -602,7 +639,9 @@ export function TasksStatusMessage({
       } catch (error: unknown) {
         if (expectedSessionIdRef.current !== sessionId) return;
         console.warn('[web-shell] failed to control workflow:', error);
-        setActionError(t('workflow.action.failed'));
+        setActionError(
+          workflowRefusalMessage(error) ?? t('workflow.action.failed'),
+        );
       } finally {
         if (expectedSessionIdRef.current === sessionId) setBusy(false);
       }
@@ -1020,6 +1059,7 @@ export function TasksStatusMessage({
                   <div className={styles.inlineDetail} data-kind={task.kind}>
                     <TaskDetail
                       task={task}
+                      onOpenSubagent={onOpenSubagent}
                       t={t}
                       hideHeader
                       busy={busy}
@@ -1074,6 +1114,7 @@ export function TasksStatusMessage({
           {actionError && <div className={styles.error}>{actionError}</div>}
           <TaskDetail
             task={selectedTask}
+            onOpenSubagent={onOpenSubagent}
             t={t}
             busy={busy}
             showCancelConfirm={pendingCancelId === selectedTask.id}
@@ -1281,12 +1322,21 @@ export function ShellTaskDetail({
   task: DaemonSessionShellTaskStatus;
   actions?: DaemonSessionActions;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const contextActions = useActions();
   const actions = providedActions ?? contextActions;
   const [currentTask, setCurrentTask] = useState(task);
   const [busy, setBusy] = useState(false);
+  const [stopRequested, setStopRequested] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [runtime, setRuntime] = useState<DaemonSessionShellTaskRuntime | null>(
+    null,
+  );
+  const [runtimeLoaded, setRuntimeLoaded] = useState(false);
+  const [runtimeFailed, setRuntimeFailed] = useState(false);
+  const [runtimeLoading, setRuntimeLoading] = useState(false);
+  const [runtimeRefreshKey, setRuntimeRefreshKey] = useState(0);
+  const lastTaskIdRef = useRef(currentTask.id);
 
   useEffect(() => {
     setCurrentTask((current) =>
@@ -1300,10 +1350,79 @@ export function ShellTaskDetail({
 
   useEffect(() => {
     setActionError(null);
+    setStopRequested(false);
   }, [task.id, task.status]);
 
+  useEffect(() => {
+    let cancelled = false;
+    let pending = false;
+    const taskIdChanged = lastTaskIdRef.current !== currentTask.id;
+    lastTaskIdRef.current = currentTask.id;
+    if (taskIdChanged) {
+      setRuntime(null);
+      setRuntimeLoaded(false);
+      setRuntimeFailed(false);
+    }
+    const load = async () => {
+      if (pending) return;
+      pending = true;
+      setRuntimeLoading(true);
+      try {
+        if (stopRequested && currentTask.status === 'running') {
+          try {
+            const snapshot = await actions.getTasks({ silent: true });
+            if (cancelled) return;
+            const updatedTask = snapshot.tasks.find(
+              (candidate): candidate is DaemonSessionShellTaskStatus =>
+                candidate.kind === 'shell' && candidate.id === currentTask.id,
+            );
+            if (updatedTask && updatedTask.status !== 'running') {
+              setCurrentTask(updatedTask);
+              return;
+            }
+          } catch (error: unknown) {
+            if (cancelled) return;
+            console.warn(
+              '[web-shell] failed to refresh stopping shell task:',
+              error,
+            );
+          }
+        }
+        const result = await actions.getTaskRuntime(currentTask.id);
+        if (cancelled) return;
+        setRuntime(result.runtime);
+        setRuntimeFailed(false);
+        setRuntimeLoaded(true);
+      } catch {
+        if (cancelled) return;
+        setRuntimeFailed(true);
+        setRuntimeLoaded(true);
+      } finally {
+        pending = false;
+        if (!cancelled) setRuntimeLoading(false);
+      }
+    };
+    void load();
+    if (currentTask.status !== 'running') {
+      return () => {
+        cancelled = true;
+      };
+    }
+    const timer = window.setInterval(load, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    actions,
+    currentTask.id,
+    currentTask.status,
+    runtimeRefreshKey,
+    stopRequested,
+  ]);
+
   const handleCancel = useCallback(async () => {
-    if (busy || currentTask.status !== 'running') return;
+    if (busy || stopRequested || currentTask.status !== 'running') return;
     setActionError(null);
     setBusy(true);
     try {
@@ -1312,33 +1431,14 @@ export function ShellTaskDetail({
         setActionError(t('tasks.alreadyStopped'));
         return;
       }
-      setCurrentTask({
-        ...currentTask,
-        status: 'cancelled',
-        endTime: Date.now(),
-      });
-      try {
-        const snapshot = await actions.getTasks();
-        const updatedTask = snapshot.tasks.find(
-          (candidate): candidate is DaemonSessionShellTaskStatus =>
-            candidate.kind === 'shell' && candidate.id === currentTask.id,
-        );
-        if (updatedTask && updatedTask.status !== 'running') {
-          setCurrentTask(updatedTask);
-        }
-      } catch (error: unknown) {
-        console.warn(
-          '[web-shell] failed to refresh stopped shell task:',
-          error,
-        );
-      }
+      setStopRequested(true);
     } catch (error: unknown) {
       console.warn('[web-shell] failed to cancel shell task:', error);
       setActionError(t('tasks.cancelFailed'));
     } finally {
       setBusy(false);
     }
-  }, [actions, busy, currentTask, t]);
+  }, [actions, busy, currentTask, stopRequested, t]);
 
   return (
     <div className={styles.monitorDetail}>
@@ -1359,48 +1459,99 @@ export function ShellTaskDetail({
               <button
                 type="button"
                 className={styles.monitorStopButton}
-                disabled={busy}
+                disabled={busy || stopRequested}
                 onClick={() => void handleCancel()}
               >
-                {busy ? t('common.loading') : t('tasks.action.stop')}
+                {busy || stopRequested
+                  ? t('common.loading')
+                  : t('tasks.action.stop')}
               </button>
             )}
           </div>
         </div>
-        <pre className={styles.monitorCommand}>{currentTask.command}</pre>
+        <div className={styles.monitorCommandSection}>
+          <div className={styles.monitorSectionHeader}>
+            <div className={styles.monitorSectionLabel}>
+              {t('tasks.detail.command')}
+            </div>
+            <CopyValueButton
+              value={currentTask.command}
+              label={t('tasks.detail.command')}
+            />
+          </div>
+          <pre className={styles.monitorCommand}>{currentTask.command}</pre>
+        </div>
         {actionError && (
           <div className={styles.monitorActionError}>{actionError}</div>
         )}
-        <div className={styles.monitorMetrics}>
-          <MonitorMetric
-            label={t('tasks.detail.runtime')}
+        <div className={styles.monitorInlineMetrics}>
+          <InlineMetric
+            label={t('tasks.detail.startedAt')}
+            value={formatClockTime(currentTask.startTime, language)}
+          />
+          <InlineMetric
+            label={t('tasks.detail.endedAt')}
+            value={
+              currentTask.endTime !== undefined
+                ? formatClockTime(currentTask.endTime, language)
+                : '—'
+            }
+          />
+          <InlineMetric
+            label={t('tasks.detail.totalDuration')}
             value={formatRuntime(currentTask.runtimeMs)}
           />
-          {currentTask.pid !== undefined && (
-            <MonitorMetric
-              label={t('tasks.detail.pid')}
-              value={String(currentTask.pid)}
-            />
-          )}
-          {currentTask.exitCode !== undefined && (
-            <MonitorMetric
-              label={t('tasks.detail.exitCode')}
-              value={String(currentTask.exitCode)}
-            />
-          )}
         </div>
+        {(currentTask.pid !== undefined ||
+          currentTask.exitCode !== undefined) && (
+          <div className={styles.monitorInlineMetrics}>
+            {currentTask.pid !== undefined && (
+              <InlineMetric
+                label={t('tasks.detail.pid')}
+                value={String(currentTask.pid)}
+              />
+            )}
+            {currentTask.exitCode !== undefined && (
+              <InlineMetric
+                label={t('tasks.detail.exitCode')}
+                value={String(currentTask.exitCode)}
+              />
+            )}
+          </div>
+        )}
+        {currentTask.status === 'running' &&
+          runtime?.memoryBytes !== undefined && (
+            <div className={styles.monitorInlineMetrics}>
+              <InlineMetric
+                label={t('tasks.detail.residentMemory')}
+                value={formatBytes(runtime.memoryBytes)}
+              />
+            </div>
+          )}
       </div>
       <div className={styles.shellFields}>
         <div className={styles.monitorCommandSection}>
-          <div className={styles.monitorSectionLabel}>
-            {t('tasks.detail.workingDir')}
+          <div className={styles.monitorSectionHeader}>
+            <div className={styles.monitorSectionLabel}>
+              {t('tasks.detail.workingDir')}
+            </div>
+            <CopyValueButton
+              value={currentTask.cwd}
+              label={t('tasks.detail.workingDir')}
+            />
           </div>
           <div className={styles.shellFieldValue}>{currentTask.cwd}</div>
         </div>
         {currentTask.outputFile && (
           <div className={styles.monitorCommandSection}>
-            <div className={styles.monitorSectionLabel}>
-              {t('tasks.detail.outputFile')}
+            <div className={styles.monitorSectionHeader}>
+              <div className={styles.monitorSectionLabel}>
+                {t('tasks.detail.outputFile')}
+              </div>
+              <CopyValueButton
+                value={currentTask.outputFile}
+                label={t('tasks.detail.outputFile')}
+              />
             </div>
             <div className={styles.shellFieldValue}>
               {currentTask.outputFile}
@@ -1408,6 +1559,75 @@ export function ShellTaskDetail({
           </div>
         )}
       </div>
+      {runtimeLoaded && (
+        <div className={styles.monitorCommandSection}>
+          <div
+            className={`${styles.monitorSectionLabel} ${styles.shellOutputLabel}`}
+          >
+            {t('tasks.detail.output')}
+            {runtime?.outputBytes !== undefined && (
+              <span className={styles.shellSectionMeta}>
+                {t('tasks.detail.outputSize', {
+                  size: formatBytes(runtime.outputBytes),
+                })}
+                {runtime.outputModifiedAt !== undefined && (
+                  <>
+                    {' · '}
+                    {t('tasks.detail.lastWrite')}{' '}
+                    {formatClockTime(runtime.outputModifiedAt, language)}
+                  </>
+                )}
+              </span>
+            )}
+          </div>
+          {runtime?.outputTail ? (
+            <>
+              <pre className={styles.shellOutput}>{runtime.outputTail}</pre>
+              {runtime.outputTailTruncated && (
+                <div className={styles.shellOutputHint}>
+                  {t('tasks.detail.outputTruncated')}
+                </div>
+              )}
+            </>
+          ) : runtimeFailed || runtime?.outputError ? (
+            <div className={styles.shellFieldValue}>
+              {t('tasks.detail.outputUnavailable')}
+            </div>
+          ) : runtime === null ? (
+            <div className={styles.shellFieldValue}>
+              {t('tasks.detail.runtimeUnavailable')}
+            </div>
+          ) : (
+            <div className={styles.shellFieldValue}>
+              {t(
+                currentTask.status === 'running'
+                  ? 'tasks.detail.outputEmpty'
+                  : 'tasks.detail.outputNone',
+              )}
+            </div>
+          )}
+          {runtime?.outputTail && runtime.outputError && (
+            <div className={styles.shellOutputHint}>
+              {t('tasks.detail.outputPartial')}
+            </div>
+          )}
+          {(runtimeFailed || runtime?.outputError) && (
+            <div role="status">
+              {runtimeFailed &&
+                runtime?.outputTail &&
+                t('tasks.detail.outputRefreshFailed')}
+              <Button
+                variant="outline"
+                size="xs"
+                disabled={runtimeLoading}
+                onClick={() => setRuntimeRefreshKey((key) => key + 1)}
+              >
+                {t(runtimeLoading ? 'common.loading' : 'common.retry')}
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
       {currentTask.error && (
         <div className={`${styles.monitorError} ${styles.shellError}`}>
           <div className={styles.monitorSectionLabel}>
@@ -1417,6 +1637,85 @@ export function ShellTaskDetail({
         </div>
       )}
     </div>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value >= 100 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function formatClockTime(timestamp: number, language: string): string {
+  const date = new Date(timestamp);
+  if (!Number.isFinite(timestamp)) return '—';
+  return date.toDateString() === new Date().toDateString()
+    ? date.toLocaleTimeString(language)
+    : date.toLocaleString(language);
+}
+
+/**
+ * Tab title for a shell task. The full command is unreadable once the tab
+ * truncates it, so use the executable's basename (`/opt/homebrew/.../mariadbd`
+ * becomes `mariadbd`) and fall back to the first line.
+ */
+export function shellTaskPanelTitle(command: string): string {
+  const firstLine = command.split(/\r?\n/, 1)[0]?.trim() ?? '';
+  const tokens = firstLine.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
+  let index = 0;
+  while (
+    index < tokens.length &&
+    /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index]!)
+  ) {
+    index++;
+  }
+  const executable = tokens[index]?.replace(/^['"]|['"]$/g, '');
+  if (!executable) return firstLine || command;
+  return executable.split('/').filter(Boolean).pop() ?? executable;
+}
+
+function CopyValueButton({ value, label }: { value: string; label: string }) {
+  const { t } = useI18n();
+  const [copied, flash] = useCopiedFlash(1500);
+  const handleCopy = useCallback(async () => {
+    try {
+      await writeClipboardText(value);
+      flash();
+    } catch {
+      // Clipboard access can be denied outside a secure context.
+    }
+  }, [value, flash]);
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-xs"
+      className={styles.shellCopyButton}
+      title={t('common.copy')}
+      aria-label={`${t('common.copy')} ${label}`}
+      onClick={() => void handleCopy()}
+    >
+      {copied ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
+      <span className="sr-only" role="status">
+        {copied ? t('copy.toClipboard', { label }) : ''}
+      </span>
+    </Button>
+  );
+}
+
+function InlineMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <span className={styles.monitorInlineMetric}>
+      <span className={styles.monitorInlineLabel}>{label}</span>
+      <span className={styles.monitorInlineValue}>{value}</span>
+    </span>
   );
 }
 
@@ -1431,6 +1730,7 @@ function MonitorMetric({ label, value }: { label: string; value: string }) {
 
 function TaskDetail({
   task,
+  onOpenSubagent,
   t,
   hideHeader = false,
   busy = false,
@@ -1443,6 +1743,7 @@ function TaskDetail({
   onCancelConfirmDismiss,
 }: {
   task: DaemonSessionTaskStatus;
+  onOpenSubagent?: OpenSubagentDetails;
   t: ReturnType<typeof useI18n>['t'];
   hideHeader?: boolean;
   busy?: boolean;
@@ -1457,6 +1758,12 @@ function TaskDetail({
   onCancelConfirmDismiss?: () => void;
 }) {
   const documentMode = useTranscriptRenderMode() === 'document';
+  // Restarting a run restored from history is a daemon capability: an older
+  // daemon answers those actions with `{changed: false}`, so without the flag
+  // the controls stay hidden for history the way they were before it existed.
+  const retryHistorical =
+    useConnection().supportedCommands?.workflowToolFeatures?.retryHistorical ===
+    true;
   const terminalIcon = terminalStatusIcon(task.status);
   const stClass = statusClassName(task.status);
   const isAbandonable = task.kind === 'agent' && task.status === 'paused';
@@ -1470,11 +1777,29 @@ function TaskDetail({
     task.isBackgrounded &&
     task.status === 'running';
   const canResume = task.kind === 'workflow' && task.status === 'paused';
-  const canRetry =
-    task.kind === 'workflow' && !task.isHistorical && task.status === 'failed';
-  const canRerun =
+  // A run restored from history restarts like a live one, as long as the
+  // daemon takes those actions for history and its history has the args to
+  // start it with -- which covers a run whose args were too large to keep and
+  // one recorded before they were kept at all.
+  //
+  // `argsOmitted` is still read beside it: a daemon older than
+  // `argsUnavailable` sends only that one, and dropping it would put back a
+  // Retry this client had learned to hide.
+  const canRestart =
     task.kind === 'workflow' &&
-    !task.isHistorical &&
+    (!task.isHistorical ||
+      (retryHistorical && !task.argsUnavailable && !task.argsOmitted));
+  // Withholding the buttons takes away the only place the daemon's reason
+  // used to appear: it arrived by pressing Retry and being refused. Say it
+  // without the failed round trip.
+  const restartWithheld =
+    task.kind === 'workflow' &&
+    task.isHistorical === true &&
+    retryHistorical === true &&
+    (task.argsUnavailable === true || task.argsOmitted === true);
+  const canRetry = canRestart && task.status === 'failed';
+  const canRerun =
+    canRestart &&
     (task.status === 'completed' ||
       task.status === 'failed' ||
       task.status === 'cancelled');
@@ -1561,6 +1886,7 @@ function TaskDetail({
   const actionControls =
     !documentMode &&
     ((canCancel && onCancel) ||
+      restartWithheld ||
       ((canPause || canResume || canRetry || canRerun) && onWorkflowAction)) ? (
       <div className={styles.actionBar} data-plan-interactive>
         {showCancelConfirm ? (
@@ -1597,6 +1923,11 @@ function TaskDetail({
                   ? t('workflow.action.pause')
                   : t('workflow.action.resume')}
               </button>
+            )}
+            {restartWithheld && (
+              <span className={styles.actionHint}>
+                {t('workflow.action.argsUnavailable')}
+              </span>
             )}
             {canRetry && onWorkflowAction && (
               <button
@@ -1784,6 +2115,7 @@ function TaskDetail({
       {task.kind === 'workflow' && (
         <WorkflowExecutionView
           task={task}
+          onOpenSubagent={onOpenSubagent}
           sourceTask={sourceWorkflowTask}
           historyTasks={workflowHistoryTasks}
           historyActionBusy={busy}

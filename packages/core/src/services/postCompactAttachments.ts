@@ -106,6 +106,21 @@ export function extractRecentFilePaths(
   // call ids so we can skip them: never re-read a file the agent didn't
   // successfully read.
   const failedCallIds = collectFailedCallIds(history);
+  const successfulBridgeCallIds = new Set<string>();
+  for (const content of history) {
+    for (const part of content.parts ?? []) {
+      const response = part.functionResponse;
+      if (
+        response?.name === ToolNames.TOOL_CALL &&
+        response.id &&
+        response.response &&
+        'output' in response.response &&
+        !('error' in response.response)
+      ) {
+        successfulBridgeCallIds.add(response.id);
+      }
+    }
+  }
 
   const seen = new Set<string>();
   for (let i = history.length - 1; i >= 0; i--) {
@@ -120,10 +135,23 @@ export function extractRecentFilePaths(
     for (let j = parts.length - 1; j >= 0; j--) {
       const part = parts[j];
       const call = part.functionCall;
-      if (!call || !FILE_TOUCHING_TOOLS.has(call.name ?? '')) continue;
-      // Skip paths whose tool call failed (denied / errored).
+      if (!call) continue;
+      // Always pair responses with the outer call id before unwrapping.
       if (call.id && failedCallIds.has(call.id)) continue;
-      const args = call.args as { file_path?: unknown } | undefined;
+      const bridged = call.name === ToolNames.TOOL_CALL;
+      if (bridged && (!call.id || !successfulBridgeCallIds.has(call.id))) {
+        continue;
+      }
+      const name = bridged ? call.args?.['name'] : call.name;
+      if (
+        typeof name !== 'string' ||
+        !FILE_TOUCHING_TOOLS.has(bridged ? name.toLowerCase() : name)
+      ) {
+        continue;
+      }
+      const args = (bridged ? call.args?.['arguments'] : call.args) as
+        | { file_path?: unknown }
+        | undefined;
       const filePath =
         typeof args?.file_path === 'string' ? args.file_path : undefined;
       if (!filePath || seen.has(filePath)) continue;

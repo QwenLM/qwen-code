@@ -8,7 +8,11 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { useDeleteCommand } from './useDeleteCommand.js';
-import type { Config, RemoveSessionsResult } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  Logger,
+  RemoveSessionsResult,
+} from '@qwen-code/qwen-code-core';
 
 function createConfig(opts: {
   currentSessionId: string;
@@ -673,6 +677,144 @@ describe('useDeleteCommand', () => {
       expect(debugLogger.warn).toHaveBeenCalledWith(
         'SessionDelete hook failed for deleted-id: undefined',
       );
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Session deleted successfully.',
+        }),
+        expect.any(Number),
+      );
+    });
+  });
+
+  describe('log-history purge', () => {
+    // Issue #11762: deleting a session removed its transcript but left its
+    // prompts in the project-shared `<tmp>/<project-hash>/logs.json`, so they
+    // kept resurfacing in cross-session ↑-history.
+    function createLogger() {
+      const removeSessionsMessages = vi.fn().mockResolvedValue(true);
+      return {
+        logger: { removeSessionsMessages } as unknown as Logger,
+        removeSessionsMessages,
+      };
+    }
+
+    it('purges the deleted session from the log history', async () => {
+      const { config } = createConfig({
+        currentSessionId: 'current',
+        removeSession: vi.fn().mockResolvedValue(true),
+      });
+      const { logger, removeSessionsMessages } = createLogger();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem: vi.fn(), logger }),
+      );
+
+      await act(async () => {
+        result.current.handleDelete('deleted-id');
+        await flushAsync();
+      });
+
+      expect(removeSessionsMessages).toHaveBeenCalledWith(['deleted-id']);
+    });
+
+    it('does not purge when the session was not removed', async () => {
+      // Nothing was deleted, so its prompts must stay in ↑-history.
+      const { config } = createConfig({
+        currentSessionId: 'current',
+        removeSession: vi.fn().mockResolvedValue(false),
+      });
+      const { logger, removeSessionsMessages } = createLogger();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem: vi.fn(), logger }),
+      );
+
+      await act(async () => {
+        result.current.handleDelete('missing-id');
+        await flushAsync();
+      });
+
+      expect(removeSessionsMessages).not.toHaveBeenCalled();
+    });
+
+    it('purges exactly the sessions a batch delete removed', async () => {
+      const removeSessions = vi.fn().mockResolvedValue({
+        removed: ['a', 'b'],
+        notFound: ['gone'],
+        errors: [
+          { sessionId: 'locked', error: new Error('permission denied') },
+        ],
+      });
+      const { config } = createConfig({
+        currentSessionId: 'current',
+        removeSessions,
+      });
+      const { logger, removeSessionsMessages } = createLogger();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem: vi.fn(), logger }),
+      );
+
+      await act(async () => {
+        result.current.handleDeleteMany(['a', 'b', 'gone', 'locked']);
+        await flushAsync();
+      });
+
+      // One call for the whole batch, not one per id: `.flat()` alone cannot tell
+      // `[['a'],['b']]` from `[['a','b']]`, so the count is what pins the shape.
+      expect(removeSessionsMessages).toHaveBeenCalledTimes(1);
+      expect(removeSessionsMessages).toHaveBeenCalledWith(['a', 'b']);
+    });
+
+    it('still reports success when the purge rejects', async () => {
+      // The purge is fire-and-forget; a failing one must not turn a
+      // successful delete into an error toast or an unhandled rejection.
+      const consoleError = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+      const { config } = createConfig({
+        currentSessionId: 'current',
+        removeSession: vi.fn().mockResolvedValue(true),
+      });
+      const { logger, removeSessionsMessages } = createLogger();
+      removeSessionsMessages.mockRejectedValue(new Error('disk full'));
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem, logger }),
+      );
+
+      await act(async () => {
+        result.current.handleDelete('deleted-id');
+        await flushAsync();
+      });
+
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Session deleted successfully.',
+        }),
+        expect.any(Number),
+      );
+      expect(consoleError).toHaveBeenCalledWith(
+        'Failed to purge deleted sessions from log:',
+        expect.objectContaining({ message: 'disk full' }),
+      );
+      consoleError.mockRestore();
+    });
+
+    it('is a no-op when no logger is wired up', async () => {
+      const { config } = createConfig({
+        currentSessionId: 'current',
+        removeSession: vi.fn().mockResolvedValue(true),
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem }),
+      );
+
+      await act(async () => {
+        result.current.handleDelete('deleted-id');
+        await flushAsync();
+      });
+
       expect(addItem).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'info',

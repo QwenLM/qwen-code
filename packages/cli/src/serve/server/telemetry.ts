@@ -45,6 +45,12 @@ interface LegacySessionTelemetryRoute {
 export const legacySessionTelemetryRoutes = [
   {
     method: 'POST',
+    path: '/sessions/catalog',
+    attribution: 'handler_resolved',
+    route: 'POST /sessions/catalog',
+  },
+  {
+    method: 'POST',
     path: '/session',
     attribution: 'handler_resolved',
     route: 'POST /session',
@@ -147,6 +153,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'GET',
+    path: '/session/:id/tasks/:taskId/runtime',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/tasks/:taskId/runtime',
+  },
+  {
+    method: 'GET',
     path: '/session/:id/agents',
     attribution: 'handler_resolved',
     route: 'GET /session/:id/agents',
@@ -174,6 +186,12 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/lsp',
     attribution: 'handler_resolved',
     route: 'GET /session/:id/lsp',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/mcp-app/tools/call',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/mcp-app/tools/call',
   },
   {
     method: 'GET',
@@ -270,6 +288,30 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/continue',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/continue',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/attachment-uploads',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/attachment-uploads',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/attachment-uploads/:uploadId/chunks',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/attachment-uploads/:uploadId/chunks',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/attachment-uploads/:uploadId/complete',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/attachment-uploads/:uploadId/complete',
+  },
+  {
+    method: 'DELETE',
+    path: '/session/:id/attachment-uploads/:uploadId',
+    attribution: 'handler_resolved',
+    route: 'DELETE /session/:id/attachment-uploads/:uploadId',
   },
   {
     method: 'POST',
@@ -392,6 +434,12 @@ export const legacySessionTelemetryRoutes = [
     route: 'POST /session/:id/mid-turn-message',
   },
   {
+    method: 'POST',
+    path: '/session/:id/mid-turn-messages/send-now',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/mid-turn-messages/send-now',
+  },
+  {
     method: 'DELETE',
     path: '/session/:id/mid-turn-messages/:messageId',
     attribution: 'handler_resolved',
@@ -432,6 +480,18 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/shell',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/shell',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/message-groups',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/message-groups',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/messages/delete',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/messages/delete',
   },
   {
     method: 'GET',
@@ -622,6 +682,15 @@ export function resolveDaemonTelemetryRoute(
       sessionId: decodePathSegment(workspaceTurnIndex[1]),
     };
   }
+  const workspaceToolCalls = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/tool-calls$/,
+  );
+  if (workspaceToolCalls?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /workspaces/:workspace/session/:id/tool-calls',
+      sessionId: decodePathSegment(workspaceToolCalls[1]),
+    };
+  }
   const workspaceExport = path.match(
     /^\/workspaces\/[^/]+\/session\/([^/]+)\/export$/,
   );
@@ -685,11 +754,13 @@ export function resolveDaemonTelemetryRoute(
         suffix === '/workspace/voice/transcribe' ||
         suffix === '/workspace/permissions' ||
         suffix === '/workspace/trust/request' ||
+        suffix === '/workspace/trust/grant' ||
         suffix === '/workspace/init' ||
         suffix === '/workspace/reload' ||
         suffix === '/workspace/file/write' ||
         suffix === '/workspace/file/edit' ||
         suffix === '/workspace/file/upload' ||
+        suffix === '/workspace/file/delete' ||
         suffix === '/workspace/mcp/servers' ||
         suffix === '/workspace/memory' ||
         suffix === '/workspace/agents' ||
@@ -796,6 +867,9 @@ export function resolveDaemonTelemetryRoute(
   }
   if (req.method === 'POST' && path === '/workspace/trust/request') {
     return { route: 'POST /workspace/trust/request' };
+  }
+  if (req.method === 'POST' && path === '/workspace/trust/grant') {
+    return { route: 'POST /workspace/trust/grant' };
   }
   if (path === '/workspace/voice') {
     if (req.method === 'GET') return { route: 'GET /workspace/voice' };

@@ -14,6 +14,7 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { TeamCoordinationHarness } from './test-utils/coordination-harness.js';
+import type { FakeAgent } from './test-utils/fake-agent.js';
 import { Storage } from '../../config/storage.js';
 import { AgentStatus } from '../runtime/agent-types.js';
 import { AgentEventType } from '../runtime/agent-events.js';
@@ -75,6 +76,32 @@ async function runUntilLeaderMessages(
   }
 }
 
+/** Emit one ROUND_TEXT event the way AgentCore does at the end of a turn. */
+function emitRound(agent: FakeAgent, text: string, round = 1, thought = '') {
+  agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
+    subagentId: agent.agentId,
+    round,
+    text,
+    thoughtText: thought,
+    timestamp: Date.now(),
+  });
+}
+
+/** onStart script for a pre-attach initial round: RUNNING, texts, IDLE. */
+function initialRound(...texts: string[]) {
+  return (agent: FakeAgent) => {
+    agent.setStatus(AgentStatus.RUNNING);
+    for (const text of texts) emitRound(agent, text);
+    agent.setStatus(AgentStatus.IDLE);
+  };
+}
+
+/** Exactly once: after coordination settles, no further report arrives. */
+async function expectNoMoreReports(h: TeamCoordinationHarness) {
+  await settleAsyncWork();
+  expect(await h.teamManager.getLeaderMessages()).toEqual([]);
+}
+
 describe('initial teammate result before event bridge attachment (#10211)', () => {
   let harness: TeamCoordinationHarness | undefined;
 
@@ -94,36 +121,16 @@ describe('initial teammate result before event bridge attachment (#10211)', () =
     const h = await createHarness();
 
     // onStart runs inside FakeBackend.spawnAgent(), i.e. before
-    // TeamManager.setupEventBridge() subscribes. Emits the final round
-    // text and settles IDLE while spawnAgent() is still resolving —
-    // the in-process race from the issue.
+    // TeamManager.setupEventBridge() subscribes: final round text and IDLE
+    // land while spawnAgent() is still resolving (the race from the issue).
     const messages = await runUntilLeaderMessages(h, 1, () =>
-      h.spawnTeammate('worker', {
-        onStart: (agent) => {
-          agent.setStatus(AgentStatus.RUNNING);
-          agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
-            subagentId: agent.agentId,
-            round: 1,
-            text: 'initial result',
-            thoughtText: '',
-            timestamp: Date.now(),
-          });
-          agent.setStatus(AgentStatus.IDLE);
-        },
-      }),
+      h.spawnTeammate('worker', { onStart: initialRound('initial result') }),
     );
 
     expect(messages).toEqual([
-      expect.objectContaining({
-        from: 'worker',
-        text: 'initial result',
-      }),
+      expect.objectContaining({ from: 'worker', text: 'initial result' }),
     ]);
-
-    // Exactly once: after coordination settles, no duplicate report
-    // for the same round may arrive.
-    await settleAsyncWork();
-    expect(await h.teamManager.getLeaderMessages()).toEqual([]);
+    await expectNoMoreReports(h);
   });
 
   it('does not re-report the initial result when a later round completes live', async () => {
@@ -131,26 +138,8 @@ describe('initial teammate result before event bridge attachment (#10211)', () =
 
     const initialMessages = await runUntilLeaderMessages(h, 1, () =>
       h.spawnTeammate('worker', {
-        onStart: (agent) => {
-          agent.setStatus(AgentStatus.RUNNING);
-          agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
-            subagentId: agent.agentId,
-            round: 1,
-            text: 'initial result',
-            thoughtText: '',
-            timestamp: Date.now(),
-          });
-          agent.setStatus(AgentStatus.IDLE);
-        },
-        onMessage: (_message, agent) => {
-          agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
-            subagentId: agent.agentId,
-            round: 2,
-            text: 'follow-up result',
-            thoughtText: '',
-            timestamp: Date.now(),
-          });
-        },
+        onStart: initialRound('initial result'),
+        onMessage: (_message, agent) => emitRound(agent, 'follow-up result', 2),
       }),
     );
 
@@ -167,21 +156,16 @@ describe('initial teammate result before event bridge attachment (#10211)', () =
     expect(followUpMessages).toEqual([
       expect.objectContaining({ text: 'follow-up result' }),
     ]);
-
-    await settleAsyncWork();
-    expect(await h.teamManager.getLeaderMessages()).toEqual([]);
+    await expectNoMoreReports(h);
   });
 
   it('does not report anything at spawn when no round ran before the bridge attached', async () => {
     const h = await createHarness();
 
-    // Plain spawn: the harness agent is IDLE at attach time but never
-    // emitted round text (no pre-attach round). The attach-time
-    // reconciliation must not invent a report.
+    // Plain spawn: IDLE at attach time but no pre-attach round text. The
+    // attach-time reconciliation must not invent a report.
     await h.spawnTeammate('worker');
-    await settleAsyncWork();
-
-    expect(await h.teamManager.getLeaderMessages()).toEqual([]);
+    await expectNoMoreReports(h);
 
     // The live path still works afterwards.
     const messages = await runUntilLeaderMessages(h, 1, () =>
@@ -199,25 +183,18 @@ describe('initial teammate result before event bridge attachment (#10211)', () =
   it('still reports the recovered result when the teammate sent an explicit leader message pre-attach', async () => {
     const h = await createHarness();
 
-    // The default initialTask prompt instructs teammates to report via
-    // send_message(to: "leader"). Such a send goes through
-    // TeamManager.sendMessage synchronously — no event bridge needed —
-    // and marks the sender as having reported explicitly. The seed must
-    // clear that flag exactly like the live onRoundText handler does,
-    // or the replayed IDLE settlement skips the recovered answer and
-    // the leader receives zero automatic reports of the initial result.
+    // The default initialTask prompt has teammates report via
+    // send_message(to: "leader"), which goes through TeamManager.sendMessage
+    // synchronously (no bridge needed) and marks the sender as having
+    // reported explicitly. The seed must clear that flag like the live
+    // onRoundText handler does, or the replayed IDLE settlement skips the
+    // recovered answer and the leader gets no automatic report at all.
     const messages = await runUntilLeaderMessages(h, 2, () =>
       h.spawnTeammate('worker', {
         onStart: async (agent) => {
           agent.setStatus(AgentStatus.RUNNING);
           await h.teamManager.sendMessage('leader', 'progress note', 'worker');
-          agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
-            subagentId: agent.agentId,
-            round: 1,
-            text: 'initial result',
-            thoughtText: '',
-            timestamp: Date.now(),
-          });
+          emitRound(agent, 'initial result');
           agent.setStatus(AgentStatus.IDLE);
         },
       }),
@@ -227,78 +204,41 @@ describe('initial teammate result before event bridge attachment (#10211)', () =
       expect.objectContaining({ from: 'worker', text: 'progress note' }),
       expect.objectContaining({ from: 'worker', text: 'initial result' }),
     ]);
-
     // Exactly once: the explicit note plus one automatic forwarding.
-    await settleAsyncWork();
-    expect(await h.teamManager.getLeaderMessages()).toEqual([]);
+    await expectNoMoreReports(h);
   });
 
   it('reports the last pre-attach round text when the round had multiple turns', async () => {
     const h = await createHarness();
 
-    // A multi-turn pre-attach round emits several ROUND_TEXT events;
-    // the recovery scan must walk the history backwards so the most
-    // recent non-empty visible answer wins, not the earliest one.
+    // A multi-turn pre-attach round emits several ROUND_TEXT events; the
+    // recovery scan walks the history backwards so the most recent non-empty
+    // visible answer wins, not the earliest one.
     const messages = await runUntilLeaderMessages(h, 1, () =>
       h.spawnTeammate('worker', {
-        onStart: (agent) => {
-          agent.setStatus(AgentStatus.RUNNING);
-          agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
-            subagentId: agent.agentId,
-            round: 1,
-            text: 'early turn answer',
-            thoughtText: '',
-            timestamp: Date.now(),
-          });
-          agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
-            subagentId: agent.agentId,
-            round: 1,
-            text: 'final turn answer',
-            thoughtText: '',
-            timestamp: Date.now(),
-          });
-          agent.setStatus(AgentStatus.IDLE);
-        },
+        onStart: initialRound('early turn answer', 'final turn answer'),
       }),
     );
 
     expect(messages).toEqual([
-      expect.objectContaining({
-        from: 'worker',
-        text: 'final turn answer',
-      }),
+      expect.objectContaining({ from: 'worker', text: 'final turn answer' }),
     ]);
-
     // The earlier turn text must never be reported on its own.
-    await settleAsyncWork();
-    expect(await h.teamManager.getLeaderMessages()).toEqual([]);
+    await expectNoMoreReports(h);
   });
 
   it('never reports thought-only round text, falling back to the earlier visible answer', async () => {
     const h = await createHarness();
 
-    // AgentCore emits ROUND_TEXT whenever roundThoughtText is
-    // non-empty, so a trailing thought-only event is a reachable
-    // pre-attach shape. The recovery must skip thought messages and
-    // never surface internal reasoning as the round's final answer.
+    // AgentCore emits ROUND_TEXT whenever roundThoughtText is non-empty, so
+    // a trailing thought-only event is a reachable pre-attach shape. Recovery
+    // must skip it and never surface internal reasoning as the final answer.
     const messages = await runUntilLeaderMessages(h, 1, () =>
       h.spawnTeammate('worker', {
         onStart: (agent) => {
           agent.setStatus(AgentStatus.RUNNING);
-          agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
-            subagentId: agent.agentId,
-            round: 1,
-            text: 'visible answer',
-            thoughtText: '',
-            timestamp: Date.now(),
-          });
-          agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
-            subagentId: agent.agentId,
-            round: 1,
-            text: '',
-            thoughtText: 'internal reasoning about the task',
-            timestamp: Date.now(),
-          });
+          emitRound(agent, 'visible answer');
+          emitRound(agent, '', 1, 'internal reasoning about the task');
           agent.setStatus(AgentStatus.IDLE);
         },
       }),
@@ -307,9 +247,7 @@ describe('initial teammate result before event bridge attachment (#10211)', () =
     expect(messages).toEqual([
       expect.objectContaining({ from: 'worker', text: 'visible answer' }),
     ]);
-
-    // Nothing else — in particular no thought content — may arrive.
-    await settleAsyncWork();
-    expect(await h.teamManager.getLeaderMessages()).toEqual([]);
+    // Nothing else, in particular no thought content, may arrive.
+    await expectNoMoreReports(h);
   });
 });

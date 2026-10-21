@@ -283,6 +283,21 @@ describe('<Footer />', () => {
     });
   });
 
+  it('shows the current runtime tool policy in the footer', () => {
+    const { lastFrame } = renderWithWidth(180, createMockUIState(), {
+      getShellExecutionSandbox: () => ({
+        requestedBackend: 'bwrap',
+        effectiveBackend: 'bwrap',
+        enforcement: 'full',
+        filesystem: 'read-only',
+        network: 'closed',
+      }),
+    });
+    expect(lastFrame()).toContain(
+      'tools / bwrap → bwrap (full) / read-only / command network: closed',
+    );
+  });
+
   it('attaches the selectable-region ref to its outer box', () => {
     const containerRef = createRef<DOMElement>();
     const { unmount } = renderAtLayoutWidth(

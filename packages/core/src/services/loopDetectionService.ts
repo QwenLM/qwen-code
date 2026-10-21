@@ -16,10 +16,13 @@ import {
 import {
   LoopDetectedEvent,
   LoopDetectionDisabledEvent,
+  LoopReason,
   LoopType,
 } from '../telemetry/types.js';
+import type { LoopStopDetail } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
 import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
+import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 import {
   FULL_OUTPUT_DIGEST_LABEL,
   PREVIEW_SIZE_CHARS,
@@ -31,6 +34,35 @@ import {
 // toolCallIdUtils can share it without an import cycle through this
 // service's turn.js dependency.
 export { getToolCallRepeatKey };
+
+function getLoopDetectionToolCall<T extends { name: string; args: object }>(
+  toolCall: T,
+): T {
+  if (toolCall.name !== ToolNames.TOOL_CALL) return toolCall;
+
+  const envelopeArgs = toolCall.args as Record<string, unknown>;
+  const targetName = envelopeArgs['name'];
+  if (typeof targetName !== 'string') return toolCall;
+
+  const targetArgs = envelopeArgs['arguments'];
+  return {
+    ...toolCall,
+    // The bridge resolves target names case-insensitively, so loop identity
+    // and read-tool classification must use the same canonical casing.
+    name: canonicalToolName(targetName).toLowerCase(),
+    // A non-object payload (e.g. a JSON-string `arguments` a later repair
+    // pass would normalize) cannot be unwrapped, but dropping it would
+    // collapse every bridged call to the target onto one repeat key; keep
+    // the envelope itself as the key material so distinct payloads stay
+    // distinct.
+    args:
+      typeof targetArgs === 'object' &&
+      targetArgs !== null &&
+      !Array.isArray(targetArgs)
+        ? (targetArgs as Record<string, unknown>)
+        : toolCall.args,
+  } as T;
+}
 
 // Consecutive identical tool calls (same name + identical args) tolerated
 // before the always-on guard halts the turn. Repeating an identical call
@@ -169,26 +201,65 @@ export const DEFAULT_MAX_TOOL_CALLS_PER_TURN = 100;
 const ADAPTIVE_CAP_HARD_MULTIPLIER = 10;
 
 /**
- * Halt predicate of the per-turn tool-call cap, shared with the daemon's
+ * Whether a stream event restarts the current attempt from scratch (the
+ * failed attempt's partial output is discarded and re-streamed), so any
+ * attempt-scoped observations recorded after the last committed round-trip
+ * must be rolled back. The client's stream loop consumes it for both of its
+ * attempt-scoped states — the exploration budget's phase and the loop-guard
+ * feed set (`modelRequestAccepted`/`hasToolCalls`/`loopGuardFedCallIds`) — so
+ * a new restart-style event lands in both of them or in neither.
+ *
+ * It is deliberately not consumed by the loop detector, which has no call
+ * site here: that module's own per-turn cap rollback stays `Retry`-only, and
+ * `checkAlwaysOnSafeties` already treats a fallback as a no-op through its
+ * non-`ToolCallRequest` early return (a fallback cannot have streamed calls,
+ * and clearing the detector's streak evidence per round-trip would silence
+ * the consecutive-identical and stagnation guards). A restart-style event
+ * added here does NOT propagate to the detector; add it there separately and
+ * justify it.
+ */
+export function isAttemptRestartEvent(event: ServerLlmStreamEvent): boolean {
+  return (
+    event.type === LlmEventType.Retry ||
+    event.type === LlmEventType.ModelFallback
+  );
+}
+
+export interface TurnToolCallCapHalt {
+  reason: LoopReason;
+  /** The explicit cap, the hard backstop, or the soft cap for a stuck halt. */
+  limit: number;
+}
+
+/**
+ * Halt classifier of the per-turn tool-call cap, shared with the daemon's
  * turn-loop guard (ACP Session's recordDaemonToolCalls) so both runtimes
  * decide identically and cannot drift. `cap` is the resolved effective cap
  * from getMaxToolCallsPerTurn (Infinity when disabled); `maxKeyRepeat` is
  * the turn's running max count of any single (tool, args) repeat key.
- * Returns true when a turn that has emitted `totalCalls` calls must halt:
- * always past an explicit cap (the released hard-cap contract), and past
- * the adaptive default cap only on a stuck-repetition signal or at the
- * hard backstop (see checkTurnToolCallCap).
+ * Returns null while a turn that has emitted `totalCalls` calls may
+ * continue, and otherwise why it must halt: always past an explicit cap (the
+ * released hard-cap contract), and past the adaptive default cap only on a
+ * stuck-repetition signal or at the hard backstop (see checkTurnToolCallCap).
+ * Past the backstop the reason is BACKSTOP even when a call also repeated,
+ * since the budget is what the user can change.
  */
-export function shouldHaltOnTurnToolCallCap(
+export function getTurnToolCallCapHalt(
   totalCalls: number,
   maxKeyRepeat: number,
   cap: number,
   isExplicitCap: boolean,
-): boolean {
-  if (totalCalls <= cap) return false;
+): TurnToolCallCapHalt | null {
+  if (totalCalls <= cap) return null;
+  if (isExplicitCap) return { reason: LoopReason.EXPLICIT_CAP, limit: cap };
   const hardCap = cap * ADAPTIVE_CAP_HARD_MULTIPLIER;
-  const stuck = maxKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD;
-  return isExplicitCap || totalCalls > hardCap || stuck;
+  if (totalCalls > hardCap) {
+    return { reason: LoopReason.BACKSTOP, limit: hardCap };
+  }
+  if (maxKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD) {
+    return { reason: LoopReason.STUCK_REPETITION, limit: cap };
+  }
+  return null;
 }
 
 // Producer shapes of the oversized-result stubs (see tools/truncation.ts).
@@ -387,12 +458,21 @@ export class LoopDetectionService {
   // the user which detector actually fired.
   private lastLoopType: LoopType | null = null;
 
+  // Reason and tool-call numbers of the most recent firing, for the loop
+  // types that cover several causes. Tagged with its loop type because one
+  // heuristic pass can fire several detectors and the last one sets
+  // lastLoopType; the detail only applies while that type still matches.
+  private lastLoopDetail: {
+    loopType: LoopType;
+    detail: LoopStopDetail;
+  } | null = null;
+
   // Short excerpt of the repeated region captured when the chanting
   // detector fires, for debug logging only. Deliberately NOT part of the
-  // LoopDetected event payload: the event contract stays loop_type-only and
-  // the excerpt rides the debug log instead, so a headless reasoning-channel
-  // halt (empty stdout, label-only stderr) leaves an artifact that tells a
-  // true repetition from a misfire.
+  // LoopDetected event payload: the event contract stays the loop type and
+  // its stop detail, and the excerpt rides the debug log instead, so a
+  // headless reasoning-channel halt (empty stdout, label-only stderr) leaves
+  // an artifact that tells a true repetition from a misfire.
   private lastChantExcerpt = '';
 
   constructor(config: Config) {
@@ -405,6 +485,26 @@ export class LoopDetectionService {
    */
   getLastLoopType(): LoopType | null {
     return this.lastLoopType;
+  }
+
+  /**
+   * Returns the reason and tool-call numbers of the most recent detection,
+   * or an empty object when its loop type carries none.
+   */
+  getLastLoopDetail(): LoopStopDetail {
+    return this.lastLoopDetail &&
+      this.lastLoopDetail.loopType === this.lastLoopType
+      ? this.lastLoopDetail.detail
+      : {};
+  }
+
+  private recordLoopDetail(loopType: LoopType, detail: LoopStopDetail): void {
+    this.lastLoopType = loopType;
+    this.lastLoopDetail = { loopType, detail };
+    logLoopDetected(
+      this.config,
+      new LoopDetectedEvent(loopType, this.promptId, detail),
+    );
   }
 
   getConsecutiveToolCallCount(): number {
@@ -420,6 +520,10 @@ export class LoopDetectionService {
       this.config,
       new LoopDetectionDisabledEvent(this.promptId),
     );
+  }
+
+  isDisabledForSession(): boolean {
+    return this.disabledForSession;
   }
 
   /**
@@ -440,12 +544,13 @@ export class LoopDetectionService {
   ): boolean {
     if (this.loopDetected) return true;
     if (this.disabledForSession) return false;
-    if (!this.isStatefulReadTool(toolCall.name)) return false;
+    const resolvedToolCall = getLoopDetectionToolCall(toolCall);
+    if (!this.isStatefulReadTool(resolvedToolCall.name)) return false;
 
     const resultText = LoopDetectionService.extractResultText(responseParts);
     if (resultText === null) return false;
     const fingerprint = createHash('sha256').update(resultText).digest('hex');
-    const key = this.getToolCallKey(toolCall);
+    const key = this.getToolCallKey(resolvedToolCall);
 
     // Consecutive-streak evidence for the always-on guard. The state entry
     // can predate the streak (lastFingerprint survives streak breaks), so
@@ -478,7 +583,7 @@ export class LoopDetectionService {
 
     // A changed result is observable progress: restart the same-name streak
     // so ACTION_STAGNATION does not fire on productive polling.
-    if (fingerprintChanged && this.lastSeenToolName === toolCall.name) {
+    if (fingerprintChanged && this.lastSeenToolName === resolvedToolCall.name) {
       this.sameNameStreak = 1;
     }
 
@@ -505,14 +610,9 @@ export class LoopDetectionService {
       !this.config.getSkipLoopDetection() &&
       consecutiveCount >= GLOBAL_DUPLICATE_THRESHOLD
     ) {
-      this.lastLoopType = LoopType.GLOBAL_TOOL_CALL_DUPLICATE;
-      logLoopDetected(
-        this.config,
-        new LoopDetectedEvent(
-          LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
-          this.promptId,
-        ),
-      );
+      this.recordLoopDetail(LoopType.GLOBAL_TOOL_CALL_DUPLICATE, {
+        loopReason: LoopReason.REPEATED_CALL,
+      });
       this.loopDetected = true;
       return true;
     }
@@ -606,12 +706,13 @@ export class LoopDetectionService {
         // observable progress — any prior thoughts should not carry over.
         this.thoughtHistory = [];
 
-        this.trackToolCall(event.value);
-        const toolCallKey = this.getToolCallKey(event.value);
+        const toolCall = getLoopDetectionToolCall(event.value);
+        this.trackToolCall(toolCall);
+        const toolCallKey = this.getToolCallKey(toolCall);
         // Stateful read tools are counted post-execution in
         // recordToolResult, on consecutive identical results instead of
         // args alone (issue #9450).
-        const globalDup = this.isStatefulReadTool(event.value.name)
+        const globalDup = this.isStatefulReadTool(toolCall.name)
           ? false
           : this.checkGlobalDuplicate(toolCallKey);
         const alternating = this.checkAlternatingPattern(toolCallKey);
@@ -756,17 +857,18 @@ export class LoopDetectionService {
     // Hash the (tool,args) key once and share it across the guards that need
     // it (consecutive-identical and the adaptive cap's stuck tracker). Args
     // can be large (e.g. write_file content), so avoid recomputing per guard.
-    const key = this.getToolCallKey(event.value);
-    const stateful = this.isStatefulReadTool(event.value.name);
+    const toolCall = getLoopDetectionToolCall(event.value);
+    const key = this.getToolCallKey(toolCall);
+    const stateful = this.isStatefulReadTool(toolCall.name);
 
     // Pair requests with their later results (recordToolResultByCallId).
     // Only stateful read tools participate: recordToolResult rejects every
     // other tool, so tracking them would just accumulate full args objects
     // (write_file args can carry whole file contents) until eviction.
-    if (event.value.callId && stateful) {
-      this.requestByCallId.set(event.value.callId, {
-        name: event.value.name,
-        args: event.value.args,
+    if (toolCall.callId && stateful) {
+      this.requestByCallId.set(toolCall.callId, {
+        name: toolCall.name,
+        args: toolCall.args,
       });
       if (this.requestByCallId.size > MAX_TRACKED_TOOL_REQUESTS) {
         const oldest = this.requestByCallId.keys().next().value;
@@ -792,12 +894,12 @@ export class LoopDetectionService {
     // #5019) far below the per-turn cap, so the gated default left users
     // unprotected. For stateful read tools the guard additionally requires
     // the observed results to be unchanged (issue #9450).
-    if (this.checkToolCallLoop(event.value, key)) {
+    if (this.checkToolCallLoop(toolCall, key)) {
       this.loopDetected = true;
       return true;
     }
 
-    if (this.checkShellCommandStagnation(event.value)) {
+    if (this.checkShellCommandStagnation(toolCall)) {
       this.loopDetected = true;
       return true;
     }
@@ -1570,21 +1672,20 @@ export class LoopDetectionService {
    */
   private checkTurnToolCallCap(): boolean {
     this.turnToolCallTotal++;
-    if (
-      !shouldHaltOnTurnToolCallCap(
-        this.turnToolCallTotal,
-        this.capMaxKeyRepeat,
-        this.config.getMaxToolCallsPerTurn(),
-        this.config.isMaxToolCallsPerTurnExplicit(),
-      )
-    ) {
+    const halt = getTurnToolCallCapHalt(
+      this.turnToolCallTotal,
+      this.capMaxKeyRepeat,
+      this.config.getMaxToolCallsPerTurn(),
+      this.config.isMaxToolCallsPerTurnExplicit(),
+    );
+    if (!halt) {
       return false;
     }
-    this.lastLoopType = LoopType.TURN_TOOL_CALL_CAP;
-    logLoopDetected(
-      this.config,
-      new LoopDetectedEvent(LoopType.TURN_TOOL_CALL_CAP, this.promptId),
-    );
+    this.recordLoopDetail(LoopType.TURN_TOOL_CALL_CAP, {
+      loopReason: halt.reason,
+      toolCallCount: this.turnToolCallTotal,
+      toolCallLimit: halt.limit,
+    });
     return true;
   }
 
@@ -1599,14 +1700,9 @@ export class LoopDetectionService {
     this.globalToolCallCounts.set(toolCallKey, count);
 
     if (count >= GLOBAL_DUPLICATE_THRESHOLD) {
-      this.lastLoopType = LoopType.GLOBAL_TOOL_CALL_DUPLICATE;
-      logLoopDetected(
-        this.config,
-        new LoopDetectedEvent(
-          LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
-          this.promptId,
-        ),
-      );
+      this.recordLoopDetail(LoopType.GLOBAL_TOOL_CALL_DUPLICATE, {
+        loopReason: LoopReason.REPEATED_CALL,
+      });
       return true;
     }
     return false;
@@ -1669,6 +1765,7 @@ export class LoopDetectionService {
     this.lastSeenToolName = null;
     this.hasSeenNonReadTool = false;
     this.lastLoopType = null;
+    this.lastLoopDetail = null;
     this.globalToolCallCounts.clear();
     this.recentToolCallKeys = [];
     this.turnToolCallTotal = 0;
