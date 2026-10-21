@@ -5,17 +5,258 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Content } from '@google/genai';
-import type { ChatRecord } from './chatRecordingService.js';
+import {
+  ChatRecordingService,
+  type ChatRecord,
+} from './chatRecordingService.js';
+import type { Config } from '../config/config.js';
+import { LlmChat } from '../core/llm-chat.js';
 import { CompressionStatus } from '../core/turn.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
+import { buildSessionRecoveryPlanFromApiHistory } from '../core/session-recovery.js';
 import {
   buildApiHistoryFromConversation,
   buildSessionHistoryFromConversation,
   getLastApiHistoryPromptId,
   getLastApiPromptCancellation,
   markApiHistoryPrompt,
+  cloneApiHistory,
 } from './session-api-history.js';
+import { composePostCompactHistory } from './postCompactAttachments.js';
+import { microcompactHistory } from './microcompaction/microcompact.js';
+import {
+  InMemoryImagePayloadStore,
+  replaceImagePayloadsInPlace,
+} from './image-payload-references.js';
+import { getStartupContextLength } from '../core/environmentContext.js';
+import {
+  countApiUserPrompts,
+  findApiRewindCutPoint,
+} from './api-user-prompt.js';
+import { selectForkHistory } from '../tools/agent/fork-subagent.js';
+
+describe('compressed recovery boundaries', () => {
+  const checkpoint = (history: Content[]): ChatRecord => ({
+    uuid: 'compression',
+    parentUuid: null,
+    sessionId: 'session',
+    timestamp: '2026-10-15T00:00:00Z',
+    cwd: '/tmp',
+    version: 'test',
+    type: 'system',
+    subtype: 'chat_compression',
+    systemPayload: {
+      compressedHistory: JSON.parse(JSON.stringify(history)),
+      info: {
+        originalTokenCount: 100,
+        newTokenCount: 20,
+        compressionStatus: CompressionStatus.COMPRESSED,
+      },
+    },
+  });
+  const pending = (text: string): Content => ({
+    role: 'user',
+    parts: [{ text }],
+  });
+
+  it.each([false, true])(
+    'preserves anonymous turns through an actual fast checkpoint file (startup: %s)',
+    async (startup) => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-fast-checkpoint-'));
+      const config = {
+        getResumedSessionData: () => undefined,
+        getSessionId: () => 'session',
+        getProjectRoot: () => dir,
+        getCliVersion: () => 'test',
+        storage: { getProjectDir: () => dir },
+        getClearContextOnIdle: () => ({ toolResultsNumToKeep: 1 }),
+        getToolRegistry: () => undefined,
+        getUsageStatisticsEnabled: () => false,
+      } as unknown as Config;
+      const recorder = new ChatRecordingService(config, undefined, false);
+      try {
+        const compacted = await composePostCompactHistory([], 'Summary.');
+        if (startup)
+          compacted.unshift(
+            pending('<system-reminder>\nStartup\n</system-reminder>'),
+          );
+        const input = pending(
+          'Recently accessed file (full current content embedded):\n\n## /tmp/a.ts\n\n```\nconst a = 1;\n```',
+        );
+        const records: ChatRecord[] = [
+          checkpoint(compacted),
+          ...[
+            input,
+            {
+              role: 'model',
+              parts: [
+                { text: 'reasoning '.repeat(100), thought: true },
+                { text: 'Done.' },
+              ],
+            },
+          ].map(
+            (message, index): ChatRecord => ({
+              ...checkpoint([]),
+              uuid: `turn-${index}`,
+              parentUuid: index ? 'turn-0' : 'compression',
+              type: index ? 'assistant' : 'user',
+              subtype: undefined,
+              systemPayload: undefined,
+              message,
+            }),
+          ),
+        ];
+        const initial = buildApiHistoryFromConversation({ messages: records });
+        expect(countApiUserPrompts(initial)).toBe(1);
+        const chat = new LlmChat(config, {}, initial, recorder);
+        expect(chat.compressFast().info.compressionStatus).toBe(
+          CompressionStatus.COMPRESSED,
+        );
+        await recorder.flush();
+        const saved: ChatRecord[] = readFileSync(
+          join(dir, 'chats', 'session.jsonl'),
+          'utf8',
+        )
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line));
+        expect(saved).toHaveLength(1);
+        expect(saved[0].systemPayload).toMatchObject({
+          contextPrefixLength: compacted.length,
+        });
+        const restored = buildApiHistoryFromConversation({ messages: saved });
+        expect(JSON.stringify(restored)).toBe(
+          JSON.stringify(chat.getHistory()),
+        );
+        expect(JSON.parse(JSON.stringify(restored))).toEqual([
+          ...compacted,
+          input,
+          { role: 'model', parts: [{ text: 'Done.' }] },
+        ]);
+        for (const history of [initial, chat.getHistory(), restored]) {
+          expect(
+            getStartupContextLength(history, { includeCompressed: true }),
+          ).toBe(compacted.length);
+          expect(countApiUserPrompts(history)).toBe(1);
+          expect(findApiRewindCutPoint(history, 0)).toBe(compacted.length);
+          expect(selectForkHistory(history, 1)).toHaveLength(2);
+          expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
+        }
+      } finally {
+        await recorder.flush();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(['inline', 'partial', 'all', 'references'] as const)(
+    'keeps %s image context and the original snapshot layout',
+    async (mode) => {
+      const image = { inlineData: { mimeType: 'image/png', data: 'AA==' } };
+      let history = await composePostCompactHistory(
+        [{ role: 'user', parts: [image, image, image] }],
+        'Summary.',
+        { maxFiles: 0, planModeActive: true },
+      );
+      if (mode === 'references') {
+        replaceImagePayloadsInPlace(history, new InMemoryImagePayloadStore());
+      } else if (mode !== 'inline') {
+        if (mode === 'all')
+          history.push(pending('Next image.'), {
+            role: 'user',
+            parts: [image],
+          });
+        history = microcompactHistory(
+          history,
+          null,
+          { toolResultsNumToKeep: 1 },
+          { force: true },
+        ).history.slice(0, 3);
+      }
+      const wire = JSON.stringify(history);
+      const restored = buildApiHistoryFromConversation({
+        messages: [checkpoint(history)],
+      });
+      expect(JSON.stringify(restored)).toBe(wire);
+      expect(detectTurnInterruption(restored)).toEqual({ kind: 'none' });
+      expect(
+        getStartupContextLength(restored, { includeCompressed: true }),
+      ).toBe(3);
+      expect(countApiUserPrompts(restored)).toBe(0);
+      expect(findApiRewindCutPoint(restored, 0)).toBe(3);
+      expect(selectForkHistory(restored, 1)).toEqual([]);
+      const request = pending('Real failed request.');
+      expect(detectTurnInterruption([...restored, request])).toEqual({
+        kind: 'interrupted_prompt',
+        parts: request.parts,
+      });
+    },
+  );
+
+  it.each([false, true])(
+    'keeps genuine generated-looking input after an empty checkpoint (startup: %s)',
+    async (startup) => {
+      const compacted = await composePostCompactHistory([], 'Summary.');
+      if (startup)
+        compacted.unshift(
+          pending('<system-reminder>\nStartup\n</system-reminder>'),
+        );
+      const texts = [
+        '<background-tasks>\nExplain this tag.',
+        'Recently accessed file (full current content embedded):',
+        'Recently accessed file (full current content embedded):\n\n## /tmp/a.ts\n\n```\nconst a = 1;\n```',
+        '[Old inline media cleared: image/png]',
+        '[Image #0123456789ab: image/png, 3 bytes]',
+      ];
+      for (const text of texts) {
+        for (const promptId of [undefined, 'real-input']) {
+          const request = pending(text);
+          const record: ChatRecord = {
+            ...checkpoint([]),
+            uuid: 'input',
+            type: 'user',
+            subtype: undefined,
+            systemPayload: undefined,
+            message: request,
+            promptId,
+          };
+          const restored = buildApiHistoryFromConversation({
+            messages: [checkpoint(compacted), record],
+          });
+          for (const copy of [
+            restored,
+            cloneApiHistory(restored),
+            selectForkHistory(restored, 'all'),
+            buildSessionRecoveryPlanFromApiHistory({
+              sessionId: 'session',
+              apiHistory: restored,
+            }).apiHistory,
+          ]) {
+            expect(JSON.stringify(copy)).toBe(
+              JSON.stringify([...compacted, request]),
+            );
+            expect(
+              getStartupContextLength(copy, { includeCompressed: true }),
+            ).toBe(compacted.length);
+            expect(countApiUserPrompts(copy)).toBe(1);
+            expect(JSON.stringify(selectForkHistory(copy, 1))).toBe(
+              JSON.stringify([request]),
+            );
+            expect(getLastApiHistoryPromptId(copy)).toBe(promptId);
+            expect(detectTurnInterruption(copy)).toEqual({
+              kind: 'interrupted_prompt',
+              parts: request.parts,
+            });
+          }
+        }
+      }
+    },
+  );
+});
 
 const permit = { goalId: 'goal', revision: 1, turnId: 'turn' };
 
