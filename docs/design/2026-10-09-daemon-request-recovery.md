@@ -30,6 +30,8 @@ Business validation errors, missing sessions or workspaces, and intentional canc
 
 ## Metrics and limits
 
+The exported transcript includes the shared Web Shell translations and availability consumers. With the same dependencies, the renderer grows from 2,048,235 bytes on merged main `65051590d9` to 2,050,022 bytes on this branch (+1,787). Both builds have the same 2,174 inputs and unchanged third-party sources. The JavaScript budget rises from 2,050,000 to 2,052,000 bytes, leaving 1,978 bytes of headroom; the forbidden-dependency guard remains unchanged.
+
 Actual failed requests remain failures. Operations blocked locally are not HTTP requests. Recovery probes use `/health`, followed by `/capabilities` after health succeeds, and must be accounted for by endpoint so the host can account for them separately from business API success. The repository investigation did not find a generic host HTTP-success reporter, so host metric filtering cannot be claimed without integration evidence. The initial failures needed to discover an outage and already-in-flight requests cannot be eliminated. A host-provided transport may perform its own internal retries before returning an error; this gate cannot suppress network activity hidden inside that transport.
 
 ## Validation and acceptance
