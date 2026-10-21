@@ -8,8 +8,8 @@ import { LoopType } from '../telemetry/types.js';
 
 /**
  * What a loop detector does when it fires (`model.loopProtection`, #14828).
- * `stop` keeps every stop point and reminds first; `warn` only reminds; `off`
- * only records telemetry. Budgets stop in every mode.
+ * `warn` (default) only reminds; `stop` keeps every stop point and reminds
+ * first; `off` only records telemetry. Budgets stop in every mode.
  */
 export type LoopProtectionMode = 'off' | 'warn' | 'stop';
 
@@ -19,7 +19,7 @@ export const LOOP_PROTECTION_MODES: readonly LoopProtectionMode[] = [
   'stop',
 ];
 
-export const DEFAULT_LOOP_PROTECTION: LoopProtectionMode = 'stop';
+export const DEFAULT_LOOP_PROTECTION: LoopProtectionMode = 'warn';
 
 export function isLoopProtectionMode(
   value: unknown,

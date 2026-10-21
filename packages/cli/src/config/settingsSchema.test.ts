@@ -533,14 +533,14 @@ describe('SettingsSchema', () => {
       expect(model.maxToolCallsPerTurn.type).toBe('integer');
     });
 
-    it('should define model.loopProtection with stop as the default', () => {
+    it('should define model.loopProtection with warn as the default', () => {
       const loopProtection =
         getSettingsSchema().model.properties.loopProtection;
 
-      expect(loopProtection).toMatchObject({ type: 'enum', default: 'stop' });
+      expect(loopProtection).toMatchObject({ type: 'enum', default: 'warn' });
       expect(loopProtection.options?.map((option) => option.value)).toEqual([
-        'stop',
         'warn',
+        'stop',
         'off',
       ]);
     });

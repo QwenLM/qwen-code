@@ -6309,7 +6309,7 @@ describe('loadCliConfig chatCompression', () => {
     });
   });
 
-  it('passes model.loopProtection to the core config, defaulting to stop', async () => {
+  it('passes model.loopProtection to the core config, defaulting to warn', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const load = (loopProtection?: unknown) =>
@@ -6319,10 +6319,10 @@ describe('loadCliConfig chatCompression', () => {
         undefined,
         [],
       );
-    expect((await load('warn')).getLoopProtection()).toBe('warn');
+    expect((await load('stop')).getLoopProtection()).toBe('stop');
     expect((await load('off')).getLoopProtection()).toBe('off');
-    expect((await load()).getLoopProtection()).toBe('stop');
-    expect((await load('never')).getLoopProtection()).toBe('stop');
+    expect((await load()).getLoopProtection()).toBe('warn');
+    expect((await load('never')).getLoopProtection()).toBe('warn');
   });
 
   it('should have undefined chatCompression if not in settings', async () => {

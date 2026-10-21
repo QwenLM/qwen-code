@@ -10412,10 +10412,10 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
-    it('defaults loopProtection to stop', () => {
-      expect(makeConfig().getLoopProtection()).toBe('stop');
-      expect(makeConfig({ loopProtection: 'warn' }).getLoopProtection()).toBe(
-        'warn',
+    it('defaults loopProtection to warn', () => {
+      expect(makeConfig().getLoopProtection()).toBe('warn');
+      expect(makeConfig({ loopProtection: 'stop' }).getLoopProtection()).toBe(
+        'stop',
       );
     });
 

@@ -28,13 +28,15 @@ Goals:
 
 - One setting, `model.loopProtection: "off" | "warn" | "stop"`, honored by the
   core client, subagents and daemon/ACP sessions.
-- In the default `stop`, every stop point stays where it is today; the
-  always-on detectors give the model one corrective reminder first.
-- A decision telemetry event, so a later default change can be based on data.
+- By default (`warn`), a firing detector gives the model one corrective
+  reminder and lets the turn continue, so an unattended run is not stopped by
+  a detector that may have misjudged it; budgets still bound the turn.
+- `stop` keeps every stop point where it is today, with the always-on
+  detectors reminding first, for users who prefer the old behavior.
+- A decision telemetry event, so the reminders' effect can be measured.
 
 Out of scope:
 
-- Changing the default to `warn`.
 - Budgets: an explicit `model.maxToolCallsPerTurn`, the 1000-call backstop and
   a subagent's `maxTurns` / `maxTimeMinutes` stop in every mode.
 - The duplicate provider tool-call id breaker and the ACP repeated-tool-failure
@@ -46,14 +48,17 @@ Out of scope:
 
 ### Modes
 
-| Mode             | Always-on detectors                                                 | Opt-in heuristics (`model.skipLoopDetection: false`)                                            |
-| ---------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `stop` (default) | One reminder at the reminder point, then the stop at today's point. | Unchanged.                                                                                      |
-| `warn`           | The same reminder, then no stop.                                    | One reminder at today's stop point instead of the stop. Content/thought repetition still stops. |
-| `off`            | No reminder and no stop. Telemetry records the detection.           | No reminder and no stop. Telemetry records the detection.                                       |
+| Mode             | Always-on detectors                                       | Opt-in heuristics (`model.skipLoopDetection: false`)                                            |
+| ---------------- | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `warn` (default) | One reminder at the reminder point, then no stop.         | One reminder at today's stop point instead of the stop. Content/thought repetition still stops. |
+| `stop`           | The same reminder, then the stop at today's point.        | Unchanged.                                                                                      |
+| `off`            | No reminder and no stop. Telemetry records the detection. | No reminder and no stop. Telemetry records the detection.                                       |
 
 Under `warn` and `off` a stuck turn runs until a budget stops it, by default
-the 1000-call backstop. The setting's description says so.
+the 1000-call backstop. The setting's description says so. Defaulting to
+`warn` is a maintainer design decision on #14828: a misjudged stop costs the
+user a stalled run, while a reminded turn that stays stuck is still bounded by
+the budgets, and users who want the old stops set `stop`.
 
 `model.skipLoopDetection` keeps its meaning: it decides whether the heuristics
 run at all. `off` deliberately makes the always-on guards configurable, which
@@ -114,7 +119,13 @@ names the setting too.
 
 ## Compatibility
 
-Without the setting, the behavior is `stop`: the same stop points, the same
+This changes the default behavior. Without the setting, the behavior is
+`warn`: the always-on guards and the opt-in heuristics remind instead of
+stopping, so a turn that used to stop at the 5th identical call, the 8th shell
+inspection, the 3rd daemon invalid-params error or a stuck repetition past the
+soft cap now continues until the model changes course or a budget stops it.
+Content and thought repetition and all budgets stop as before. Setting
+`model.loopProtection` to `stop` restores today's stop points, with the same
 `turn_error`, `loop_detected` and hook payloads, plus the reminders. `loopType`
 values and the PR 1 fields do not change. Reminders add a few dozen tokens to
 the request after the tool results; the cached prefix is untouched.
@@ -140,13 +151,14 @@ daemon, and the setting plumbing.
 
 End-to-end, against a mock OpenAI-compatible server:
 
-- headless `stop`: identical calls get the reminder in the request after the
-  3rd call and still stop at the 5th; the stuck cap and shell cases likewise;
-- headless `warn`: the same cases keep running until the model ends the turn
-  or a budget stops it;
+- headless default (`warn`): identical calls get the reminder in the request
+  after the 3rd call and keep running until the model ends the turn; the
+  stuck cap and shell cases likewise;
+- headless `stop`: the same reminders, and the stops at the 5th identical
+  call, the 6th stuck repeat and the 8th inspection;
 - headless `off`: no reminder and no stop;
-- daemon / Web Shell: invalid params get a reminder after the 2nd error and stop
-  at the 3rd under `stop`.
+- daemon / Web Shell: invalid params get a reminder after the 2nd error, keep
+  running by default, and stop at the 3rd under `stop`.
 
 ## Acceptance criteria
 
@@ -158,6 +170,7 @@ End-to-end, against a mock OpenAI-compatible server:
 
 ## Follow-up
 
-- Decide the default from the `loop_protection` decision data.
+- Review the `loop_protection` decision data: how often a reminded turn
+  recovers, and whether `warn` needs an escalation for turns that stay stuck.
 - The interactive continue / stop prompt, including hiding the dialog's
   disable option where it has no effect.

@@ -5170,9 +5170,9 @@ export class LlmClient {
           }
 
           // Always-on safety checks (consecutive-identical tool-call guard,
-          // shell inspection stagnation, and per-turn tool-call cap). These fire
-          // before the skipLoopDetection gate so they cannot be bypassed by
-          // configuration.
+          // shell inspection stagnation, and per-turn tool-call cap). These run
+          // before the skipLoopDetection gate; model.loopProtection decides
+          // whether they remind or stop.
           const alwaysOnLoop =
             !duplicateLoopGuardRequest &&
             this.loopDetector.checkAlwaysOnSafeties(event, {

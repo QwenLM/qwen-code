@@ -1549,7 +1549,7 @@ export interface ConfigParameters {
   skipNextSpeakerCheck?: boolean;
   shellExecutionConfig?: ShellExecutionConfig;
   skipLoopDetection?: boolean;
-  /** What a firing loop detector does; defaults to `stop`. */
+  /** What a firing loop detector does; defaults to `warn`. */
   loopProtection?: LoopProtectionMode;
   /** Per-turn tool-call cap; <= 0 disables. See getMaxToolCallsPerTurn. */
   maxToolCallsPerTurn?: number;

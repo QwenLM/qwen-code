@@ -175,6 +175,8 @@ async function createMockConfig(
     cwd: process.cwd(),
     // Avoid writing any chat recording records from tests (e.g. via tool-call telemetry).
     chatRecording: false,
+    // The loop tests below pin the stop points; one test switches to `warn`.
+    loopProtection: 'stop',
   });
   await config.initialize();
   await config.refreshAuth(AuthType.USE_GEMINI);
@@ -1677,6 +1679,35 @@ describe('subagent.ts', () => {
             sentParts(n).some((part) => part.text?.includes('in a row')),
           ),
         ).toBe(false);
+      });
+
+      it('reminds without stopping consecutive identical tool calls under warn', async () => {
+        const missingPath = '/workspace/project/missing-directory';
+        const { config, inv, toolConfig } = await setupReadTool(
+          decl('list_directory', 'Lists a directory'),
+          invocation(
+            { path: missingPath },
+            'List directory',
+            toolResult('Error: ENOENT', 'Directory not found'),
+          ),
+          'List Directory',
+          'List directory contents',
+        );
+        vi.spyOn(config, 'getLoopProtection').mockReturnValue('warn');
+        respond(
+          ...rounds(6, 'list_directory', { path: missingPath }, 'call'),
+          'stop',
+        );
+        const scope = await runAgent(config, { tools: toolConfig });
+
+        expect(inv.execute).toHaveBeenCalledTimes(6);
+        expect(scope.getTerminateMode()).not.toBe(
+          AgentTerminateMode.LOOP_DETECTED,
+        );
+        const reminders = [0, 1, 2, 3, 4, 5, 6].filter((n) =>
+          sentParts(n).some((part) => part.text?.includes('in a row')),
+        );
+        expect(reminders).toEqual([3]);
       });
 
       it('keeps polling task_list while the task board changes (issue #9450)', async () => {
