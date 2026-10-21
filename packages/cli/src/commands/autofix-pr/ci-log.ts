@@ -13,8 +13,12 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, setGhHost } from '../review/lib/gh.js';
-import { git } from '../review/lib/git.js';
-import { assertOwnedBySession, autofixPrPaths, requireState } from './state.js';
+import {
+  assertOwnedBySession,
+  autofixPrPaths,
+  repoRoot,
+  requireState,
+} from './state.js';
 
 /**
  * Keep the last `limit` lines of every job. `gh run view --log-failed`
@@ -42,7 +46,11 @@ export function tailPerJob(
 }
 
 export function runCiLog(prNumber: number, runId: number, limit: number): void {
-  const root = git('rev-parse', '--show-toplevel');
+  // `slice(-0)` and `slice(NaN)` both keep the whole log.
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new TypeError(`--lines must be a positive integer, got ${limit}`);
+  }
+  const root = repoRoot();
   const paths = autofixPrPaths(root, prNumber);
   const state = requireState(paths.statePath, prNumber);
   assertOwnedBySession(state);

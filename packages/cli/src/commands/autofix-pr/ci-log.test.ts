@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { tailPerJob } from './ci-log.js';
+import { runCiLog, tailPerJob } from './ci-log.js';
 
 describe('tailPerJob', () => {
   it('keeps the last lines of each job and says how many were dropped', () => {
@@ -26,6 +26,12 @@ describe('tailPerJob', () => {
       ].join('\n'),
       jobs: ['build', 'test'],
     });
+  });
+
+  it('refuses a line count that would keep the whole log', () => {
+    for (const lines of [0, -5, Number.NaN, 1.5]) {
+      expect(() => runCiLog(7, 1, lines)).toThrow(/positive integer/);
+    }
   });
 
   it('keeps a short log whole', () => {

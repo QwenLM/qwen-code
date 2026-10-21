@@ -12,11 +12,11 @@
 import type { CommandModule } from 'yargs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, setGhHost } from '../review/lib/gh.js';
-import { git } from '../review/lib/git.js';
 import {
   REPLY_MARKER,
   assertOwnedBySession,
   autofixPrPaths,
+  repoRoot,
   requireState,
   type AutofixPrState,
 } from './state.js';
@@ -385,7 +385,7 @@ export function fetchPrData(state: AutofixPrState): PrData {
 }
 
 export function runSnapshot(prNumber: number): void {
-  const root = git('rev-parse', '--show-toplevel');
+  const root = repoRoot();
   const state = requireState(
     autofixPrPaths(root, prNumber).statePath,
     prNumber,

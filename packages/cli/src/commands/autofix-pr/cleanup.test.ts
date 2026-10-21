@@ -146,10 +146,74 @@ describe('runCleanup (real git)', () => {
     expect(lastReport()).toMatchObject({ removed: false });
   });
 
-  it('clears leftovers when the state file is already gone', () => {
+  it('keeps a leftover worktree without state unless forced', () => {
     rmSync(paths.statePath);
     runCleanup(7, false);
+    expect(existsSync(paths.worktreePath)).toBe(true);
+    expect(lastReport()).toMatchObject({
+      removed: false,
+      reason: expect.stringMatching(/no PR head is recorded/),
+    });
+    runCleanup(7, true);
     expect(existsSync(paths.worktreePath)).toBe(false);
     expect(branchExists()).toBe(false);
+  });
+
+  it('keeps a branch with unpushed commits after its worktree was rm -rf-ed', () => {
+    run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'fix');
+    rmSync(paths.worktreePath, { recursive: true, force: true });
+    runCleanup(7, false);
+    expect(branchExists()).toBe(true);
+    expect(existsSync(paths.statePath)).toBe(true);
+    expect(lastReport()).toMatchObject({
+      removed: false,
+      reason: expect.stringMatching(
+        /branch qwen-autofix\/pr-7 has 1 commit\(s\) the PR does not have/,
+      ),
+    });
+  });
+
+  it('removes a clean branch after its worktree was rm -rf-ed', () => {
+    rmSync(paths.worktreePath, { recursive: true, force: true });
+    runCleanup(7, false);
+    expect(branchExists()).toBe(false);
+    expect(existsSync(paths.statePath)).toBe(false);
+  });
+
+  it('keeps the state file when the branch cannot be deleted', () => {
+    rmSync(paths.worktreePath, { recursive: true, force: true });
+    run(repo, 'worktree', 'prune');
+    run(repo, 'switch', '-q', paths.branch);
+    expect(() => runCleanup(7, false)).toThrow();
+    expect(branchExists()).toBe(true);
+    expect(existsSync(paths.statePath)).toBe(true);
+  });
+
+  it('discards an unreadable state file only with --force', () => {
+    writeFileSync(paths.statePath, '{');
+    expect(() => runCleanup(7, false)).toThrow(SyntaxError);
+    runCleanup(7, true);
+    expect(existsSync(paths.statePath)).toBe(false);
+    expect(branchExists()).toBe(false);
+  });
+
+  it('refuses to run from inside the worktree it would remove', () => {
+    process.chdir(paths.worktreePath);
+    expect(() => runCleanup(7, false)).toThrow(/from inside it/);
+    expect(existsSync(paths.worktreePath)).toBe(true);
+  });
+
+  it('finds the watch from another worktree of the clone', () => {
+    const other = join(repo, '..', `${repo.split('/').at(-1)}-other`);
+    run(repo, 'worktree', 'add', '-q', '--detach', other);
+    try {
+      process.chdir(other);
+      runCleanup(7, false);
+      expect(existsSync(paths.statePath)).toBe(false);
+      expect(branchExists()).toBe(false);
+    } finally {
+      process.chdir(repo);
+      rmSync(other, { recursive: true, force: true });
+    }
   });
 });

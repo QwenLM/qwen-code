@@ -256,6 +256,20 @@ describe('runPrepare (real git)', () => {
     expect(lastReport()).toMatchObject({ resumed: true, headSha });
   });
 
+  it('resumes from inside the autofix worktree', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    process.chdir(autofixPrPaths(clone, 7).worktreePath);
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({ resumed: true, headSha });
+  });
+
+  it("refuses to resume another repository's PR of the same number", () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(() => runPrepare({ pr: 7, repo: 'fork/r' })).toThrow(
+      /is a watch of github\.com\/o\/r, not github\.com\/fork\/r/,
+    );
+  });
+
   it('recreates a removed worktree and keeps the cursor', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     const paths = autofixPrPaths(clone, 7);

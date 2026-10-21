@@ -82,7 +82,7 @@ PR 提交之后，作者还得一直盯着：CI 在没测过的平台上失败�
   └─ cron_create               session-only, recurring: "Run /autofix-pr tick <owner>/<repo>#<n>"
 ```
 
-辅助命令放在 `packages/cli/src/commands/autofix-pr.ts` 和 `packages/cli/src/commands/autofix-pr/` 下。每个 PR 的状态放在 worktree 旁边，不放在 worktree 里面：
+辅助命令放在 `packages/cli/src/commands/autofix-pr.ts` 和 `packages/cli/src/commands/autofix-pr/` 下。每个 PR 的状态放在 worktree 旁边，不放在 worktree 里面，位于 clone 的主 worktree 下。分支由同一个 clone 的所有 worktree 共享，所以每个辅助命令从其中任何一个 worktree（包括 autofix worktree 本身）运行，都能找到同一次监视：
 
 - worktree：`.qwen/tmp/autofix-pr-<n>/`
 - 状态：`.qwen/tmp/autofix-pr-<n>-state.json`
@@ -98,7 +98,7 @@ PR 提交之后，作者还得一直盯着：CI 在没测过的平台上失败�
 4. 确定推送目标。优先使用唯一一个和 head 仓库匹配的本地 remote；没有的话，按 `gh config get git_protocol` 给出的协议使用 head 仓库的 URL。把结果记到状态文件里。
 5. 状态文件就是锁。它记录会话 id（`QWEN_CODE_SESSION_ID`）；由另一个会话写下的状态文件直接导致拒绝，绝不抢占。
 6. 把 `refs/pull/<n>/head` fetch 到本地分支 `qwen-autofix/pr-<n>`，并在它上面创建 worktree。`prepare` 从不丢弃之前的工作：残留的 worktree，或可能含有超出记录 head 的提交的残留分支，都会导致拒绝，并提示先运行 `cleanup`。
-7. 在拥有这次监视的会话里重新运行 `prepare`，且 worktree 还在时，直接报告现有状态并带上 `resumed: true`，不再调用其他任何东西。如果 worktree 已被删除（包括用 `rm -rf` 删除，`git worktree prune` 会清掉它的登记），就重新创建它，并保留已记录的 `pushedShas`、`handledCommentIds` 和 `postedCommentIds`。
+7. 在拥有这次监视的会话里重新运行 `prepare`，且 worktree 还在时，直接报告现有状态并带上 `resumed: true`，不再调用其他任何东西。如果 worktree 已被删除（包括用 `rm -rf` 删除，`git worktree prune` 会清掉它的登记），就重新创建它，并保留已记录的 `pushedShas`、`handledCommentIds` 和 `postedCommentIds`。状态文件属于另一个仓库的同号 PR 时直接拒绝。
 8. 输出 JSON 报告：worktree 路径、分支、head SHA、base/head ref、推送目标、当前用户和 PR 作者的 login、draft 和 fork 标志，以及 `localUnpushedCommits`，即用户自己那份 head 分支上 PR 还没有的提交数。worktree 看不到这些提交。只有 upstream 是推送 remote 上 head 分支的本地分支才算这份副本，因此 fork 的 `main` 永远不会和用户自己的 `main` 比较。
 
 ### 6.2 `snapshot <pr>`
@@ -168,7 +168,7 @@ PR 提交之后，作者还得一直盯着：CI 在没测过的平台上失败�
 
 ### 6.3 `ci-log <pr> <run-id> [--lines 200]`
 
-把失败 job 的日志（`gh run view --log-failed`）按每个 job 截取最后 `--lines` 行，并注明省略了多少行，写到 `.qwen/tmp/autofix-pr-<n>-ci-<run-id>.log`，然后输出路径和 job 名称。修复 agent 读这个文件，而不是把日志通过 shell 预览输出。
+把失败 job 的日志（`gh run view --log-failed`）按每个 job 截取最后 `--lines` 行，并注明省略了多少行，写到 `.qwen/tmp/autofix-pr-<n>-ci-<run-id>.log`，然后输出路径和 job 名称。修复 agent 读这个文件，而不是把日志通过 shell 预览输出。`--lines` 必须是正整数。
 
 ### 6.4 `push <pr>`
 
@@ -186,7 +186,7 @@ PR 提交之后，作者还得一直盯着：CI 在没测过的平台上失败�
 
 ### 6.6 `cleanup <pr> [--force]`
 
-一起删除 worktree、它的分支和状态文件。worktree 有未提交的改动、或有超出 `lastKnownHeadSha` 的提交时，三者都保留，并在报告里说明原因。状态文件属于另一个会话时直接拒绝。`--force` 跳过这两项检查。没有状态文件时没有记录的 head，因此只有未提交的改动会让 worktree 被保留。
+一起删除 worktree、它的分支和状态文件。worktree 有未提交的改动，或者 worktree（worktree 已被删除时则是分支）有超出 `lastKnownHeadSha` 的提交时，三者都保留，并在报告里说明原因。没有状态文件时没有记录的 head，因此残留的 worktree 或分支都会被保留。状态文件属于另一个会话时直接拒绝。`--force` 跳过这些检查，也会丢弃无法读取的状态文件。分支删不掉时报错，状态文件保留。在要删除的 worktree 内部运行 `cleanup` 会被拒绝。
 
 ## 7. 一轮检查（`tick`）
 
@@ -295,7 +295,7 @@ snapshot
 交付计划：
 
 1. 辅助命令 `prepare`、`snapshot`、`ci-log` 和 `cleanup`，带测试。
-2. 辅助命令 `push` 和 `reply`，带测试；以及支持 `--once` 的 skill。
+2. 辅助命令 `push` 和 `reply`，带测试；以及支持 `--once` 的 skill。状态文件记录每个 head 上已处理过的失败检查，这样 agent 已放弃或已重跑的失败不会在同一个 head 上被再次派发。
 3. 循环：`tick`、`status`、`stop`、预算，以及从状态文件恢复。
 4. 后续工作：cron 前置条件，让无事发生的检查跳过模型；daemon 会话里的持久化监视（`durable` 加 `sessionMode: "current"`）；可配置的 bot 允许名单。
 

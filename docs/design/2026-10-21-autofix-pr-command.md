@@ -111,7 +111,9 @@ with unit tests; judgment stays in the skill.
 
 Helpers live under `packages/cli/src/commands/autofix-pr.ts` and
 `packages/cli/src/commands/autofix-pr/`. Per-PR state lives next to the
-worktree, outside it:
+worktree, outside it, under the clone's main worktree. Branches are shared by
+every worktree of a clone, so each helper finds the same watch from any of
+them, the autofix worktree included:
 
 - worktree: `.qwen/tmp/autofix-pr-<n>/`
 - state: `.qwen/tmp/autofix-pr-<n>-state.json`
@@ -143,7 +145,8 @@ worktree, outside it:
    the existing state with `resumed: true` and calls nothing else. If the
    worktree was removed (also with `rm -rf`, which `git worktree prune`
    clears), it is recreated and the recorded `pushedShas`,
-   `handledCommentIds` and `postedCommentIds` are kept.
+   `handledCommentIds` and `postedCommentIds` are kept. A state file for
+   another repository's PR of the same number is a refusal.
 8. Print a JSON report: worktree path, branch, head SHA, base/head refs, push
    target, viewer and PR author logins, draft and fork flags, and
    `localUnpushedCommits`, the number of commits on the user's own copy of the
@@ -238,7 +241,7 @@ Writes the failed jobs' log (`gh run view --log-failed`), trimmed to the last
 `--lines` lines per job with a note of how many were omitted, to
 `.qwen/tmp/autofix-pr-<n>-ci-<run-id>.log`, and prints the path and the job
 names. The fix agent reads that file instead of piping logs into a shell
-preview.
+preview. `--lines` must be a positive integer.
 
 ### 6.4 `push <pr>`
 
@@ -267,10 +270,14 @@ uses an issue comment.
 ### 6.6 `cleanup <pr> [--force]`
 
 Removes the worktree, its branch and the state file together. When the
-worktree has uncommitted changes or commits beyond `lastKnownHeadSha`, all
-three are kept and the report says why. A state file owned by another session
-is a refusal. `--force` overrides both checks. Without a state file there is
-no recorded head, so only uncommitted changes keep the worktree.
+worktree has uncommitted changes, or the worktree (or the branch, once the
+worktree was deleted) has commits beyond `lastKnownHeadSha`, all three are
+kept and the report says why. Without a state file there is no recorded head,
+so a leftover worktree or branch is kept. A state file owned by another
+session is a refusal. `--force` overrides these checks and also discards an
+unreadable state file. A branch that cannot be deleted is an error, and the
+state file stays. Running `cleanup` from inside the worktree it would remove
+is a refusal.
 
 ## 7. One check (`tick`)
 
@@ -421,7 +428,9 @@ Acceptance criteria:
 Delivery plan:
 
 1. Helpers `prepare`, `snapshot`, `ci-log` and `cleanup` with tests.
-2. Helpers `push` and `reply` with tests, and the skill with `--once`.
+2. Helpers `push` and `reply` with tests, and the skill with `--once`. The
+   state records which failed checks were handled on which head, so a failure
+   the agent declined or reran is not dispatched again on the same head.
 3. The loop: `tick`, `status`, `stop`, budgets and resume from the state file.
 4. Follow-ups: a cron precondition so quiet ticks skip the model, durable
    watching in daemon sessions (`durable` with `sessionMode: "current"`), and a

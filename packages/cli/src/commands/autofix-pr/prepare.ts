@@ -29,6 +29,7 @@ import {
   autofixPrPaths,
   currentSessionId,
   readState,
+  repoRoot,
   writeState,
   type AutofixPrState,
 } from './state.js';
@@ -134,12 +135,21 @@ export function runPrepare(args: PrepareArgs): void {
   }
   const [owner, repoName] = args.repo.split('/');
   const host = resolveGhHost(args.host) ?? 'github.com';
-  const root = git('rev-parse', '--show-toplevel');
+  const root = repoRoot();
   const paths = autofixPrPaths(root, args.pr);
 
   const existing = readState(paths.statePath);
   if (existing) {
     assertOwnedBySession(existing);
+    // State is keyed by PR number alone, and one clone can reach several
+    // repositories with a PR of that number.
+    const watched = `${existing.host}/${existing.owner}/${existing.repo}`;
+    if (watched !== `${host}/${args.repo}`) {
+      throw new Error(
+        `PR #${args.pr} here is a watch of ${watched}, not ${host}/${args.repo}. ` +
+          `Run \`qwen autofix-pr cleanup ${args.pr}\` first.`,
+      );
+    }
     if (existsSync(existing.worktreePath)) {
       report(existing, { resumed: true });
       return;
