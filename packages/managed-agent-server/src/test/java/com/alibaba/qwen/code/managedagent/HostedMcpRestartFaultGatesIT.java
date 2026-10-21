@@ -113,6 +113,7 @@ class HostedMcpRestartFaultGatesIT {
     private volatile CountDownLatch acquireHold;
     private volatile CountDownLatch acquireParked;
     private volatile int acquireParkedSeq;
+    private volatile Throwable acquireProbeFailure;
     private final java.util.concurrent.atomic.AtomicBoolean acquireArmed =
             new java.util.concurrent.atomic.AtomicBoolean();
     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
@@ -741,6 +742,9 @@ class HostedMcpRestartFaultGatesIT {
                             && "intent".equals(record.path("run")
                                     .path("execution").asText()));
         } catch (RuntimeException | AssertionError unreadable) {
+            // A missing record reads as an empty list, so a throw here is a
+            // broken read; keep it for the park assertion's message.
+            acquireProbeFailure = unreadable;
             return false;
         }
     }
@@ -865,7 +869,9 @@ class HostedMcpRestartFaultGatesIT {
                 () -> rawRequest("POST", "/session/" + session.id()
                         + "/mcp/operations", invoke, session.clientId()));
         assertThat(acquireParked.await(60, TimeUnit.SECONDS))
-                .as("the owner acquire after the intent commit is parked")
+                .as("the owner acquire after the intent commit is parked"
+                        + " (last record read failure: %s)",
+                        acquireProbeFailure)
                 .isTrue();
         JsonNode intent = operations(session.id()).getLast();
         assertThat(intent.path("operationId").asText()).isEqualTo(operation);
@@ -1666,6 +1672,9 @@ class HostedMcpRestartFaultGatesIT {
 
     @AfterEach
     void stop() {
+        // A case that fails while the owner acquire is parked would otherwise
+        // leave its pending invoke waiting, and caseExecutor.close() with it.
+        releaseAcquire();
         try {
             caseExecutor.close();
         } catch (Exception ignored) {
