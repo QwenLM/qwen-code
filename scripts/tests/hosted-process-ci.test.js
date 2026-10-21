@@ -528,9 +528,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (185 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (186 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 275, 288],
+    ['hosted-harness-mysql', 276, 289],
     // Twenty failover arms at 10 each.
     ['hosted-failover-e2e', 200, 215],
   ])(
@@ -760,14 +760,15 @@ describe('Hosted real-process gates', () => {
       // the FG11d close-queued cell adds 134 s (2x its measured 67.2 s),
       // moving the fork to 10462 and the step to 185 minutes. The FG11d
       // close-in-flight refusal cell adds 9 s (2x its measured 4.5 s), so the
-      // fork moves to 10471 and the step stays 185 minutes. The FG11d retry-reuse
-      // cell adds 11 s (2x its measured 5.3 s), moving the fork to 10482 and the
-      // step stays 185 minutes):
+      // fork moves to 10471 and the step stays 185 minutes; the FG12d
+      // cancel-before-dispatch cell adds 18 s (2x its measured 9.1 s), so the
+      // fork moves to 10489; the FG11d retry-reuse cell adds 11 s (2x its
+      // measured 5.3 s), moving the fork to 10500 and the step to 186 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(10482);
+        expect(forkSeconds).toBe(10500);
       }
     },
   );
@@ -849,12 +850,14 @@ describe('Hosted real-process gates', () => {
   // cell adds 150s, so it becomes 9728s; the FG11d close-queued cell adds
   // 134s (2x its measured 67.2s), so it becomes 9862s; the close-in-flight
   // refusal cell adds 9s (2x its measured 4.5s), so it becomes 9871s; the
-  // retry-reuse cell adds 11s (2x its measured 5.3s), so it becomes 9882s. The largest
+  // FG12d cancel-before-dispatch cell adds 18s (2x its measured 9.1s), so it
+  // becomes 9889s; the retry-reuse cell adds 11s (2x its measured 5.3s), so it
+  // becomes 9900s. The largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 9882;
+  const hostedForkHealthySeconds = 9900;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')

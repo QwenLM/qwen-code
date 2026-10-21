@@ -570,10 +570,15 @@
                                  185 minutes. The FG11d close-in-flight refusal
                                  cell adds 9 s (2x its measured 4.5 s): healthy
                                  9871 s, fork 10471 s, Verify 185 minutes. The
-                                 FG11d retry-reuse cell adds 11 s (2x its
-                                 measured 5.3 s): healthy 9882 s, fork 10482 s,
-                                 Verify 185 minutes. -->
-                            <forkedProcessTimeoutInSeconds>10482</forkedProcessTimeoutInSeconds>
+                                 FG12d cancel-before-dispatch cell adds 18 s
+                                 (2x its measured 9.1 s): healthy 9889 s, fork
+                                 10489 s, and the 185-minute step still wraps
+                                 (11089 s of fork plus wrap). The FG11d
+                                 retry-reuse cell adds 11 s (2x its measured
+                                 5.3 s): healthy 9900 s, fork 10500 s, and the
+                                 step moves to 186 minutes, 11100 s of fork
+                                 plus wrap being exactly 185. -->
+                            <forkedProcessTimeoutInSeconds>10500</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

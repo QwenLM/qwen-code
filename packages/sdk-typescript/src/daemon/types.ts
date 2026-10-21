@@ -1438,8 +1438,16 @@ export function parseDaemonBackgroundTurn(
   return value as DaemonBackgroundTurn;
 }
 
+/** Effective built-in Generated UI state of the owning runtime session. */
+export interface DaemonGeneratedUiStatus {
+  version: 1;
+  enabled: boolean;
+  reason?: string;
+}
+
 /** Returned from `POST /session`. */
 export interface DaemonSession {
+  generatedUi?: DaemonGeneratedUiStatus;
   startupConfigApplied?: SessionStartupConfigApplied;
   sessionId: string;
   /** Immutable runtime ownership root used for daemon routing. */
