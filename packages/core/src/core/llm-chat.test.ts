@@ -3706,10 +3706,34 @@ describe('LlmChat', async () => {
       expect(
         chat
           .getHistory()
-          .some((entry) =>
-            entry.parts?.some((part) => part.text?.includes('CTX')),
-          ),
-      ).toBe(true);
+          .flatMap((entry) => entry.parts ?? [])
+          .filter((part) => part.text === wrapUserPromptSubmitContext('CTX')),
+      ).toHaveLength(1);
+    });
+
+    it('leaves a suppressed hook block unappended when the send does not compact', async () => {
+      mockCompress(noop());
+      mockStream(textStream('answer'));
+
+      await drain(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'go' },
+          'prompt-id-hook-no-compaction',
+          undefined,
+          { suppressedHookContext: 'CTX' },
+        ),
+      );
+
+      // The COMPRESSED conjunct is the whole gate: `compressionInfo` is
+      // assigned on every send (NOOP on the exact-route arm), so without it
+      // the rescue would re-append on every suppressed turn.
+      expect(
+        chat
+          .getHistory()
+          .flatMap((entry) => entry.parts ?? [])
+          .filter((part) => part.text === wrapUserPromptSubmitContext('CTX')),
+      ).toHaveLength(0);
     });
 
     it('re-appends a suppressed hook block when a reactive compaction replaces history', async () => {
