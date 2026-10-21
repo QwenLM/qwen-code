@@ -45,14 +45,30 @@ export const denyBrowserOriginCors: RequestHandler = (
 };
 
 /**
+ * A loopback host admitted on any port, written `<scheme>://<host>:*`.
+ *
+ * The desktop client loads its own Web Shell from
+ * `http://127.0.0.1:<OS-assigned>` and the port changes on every launch, so
+ * no fixed-port origin can match it. The wildcard is deliberately limited to
+ * a loopback host: the host still has to match exactly, and the `*` literal
+ * keeps its own meaning (any origin, REST only).
+ */
+export interface LoopbackPortWildcard {
+  protocol: string;
+  hostname: string;
+}
+
+/**
  * Parsed shape of `--allow-origin <pattern>...`. The
  * literal `*` collapses into a single boolean flag; explicit origin
  * strings live in a Set keyed by the lowercased origin (RFC 6454 §4
- * scheme/host case-insensitivity, port-sensitive).
+ * scheme/host case-insensitivity, port-sensitive). Loopback hosts may
+ * instead opt into any port through `loopbackPortWildcards`.
  */
 export interface ParsedAllowOriginPatterns {
   allowAny: boolean;
   origins: Set<string>;
+  loopbackPortWildcards?: LoopbackPortWildcard[];
 }
 
 /**
@@ -71,8 +87,10 @@ export class InvalidAllowOriginPatternError extends Error {
   constructor(pattern: string, reason: string) {
     super(
       `Invalid --allow-origin pattern ${JSON.stringify(pattern)}: ${reason}. ` +
-        'Expected `*` or a URL origin of the form `<scheme>://<host>[:<port>]` ' +
-        '(no trailing slash, no path, no userinfo, no query).',
+        'Expected `*`, a URL origin of the form ' +
+        '`<scheme>://<host>[:<port>]`, or a loopback port wildcard ' +
+        '`<scheme>://<loopback-host>:*` (no trailing slash, no path, no ' +
+        'userinfo, no query).',
     );
     this.name = 'InvalidAllowOriginPatternError';
     this.pattern = pattern;
@@ -93,10 +111,50 @@ export function parseAllowOriginPatterns(
   raw: readonly string[],
 ): ParsedAllowOriginPatterns {
   const origins = new Set<string>();
+  const loopbackPortWildcards: LoopbackPortWildcard[] = [];
   let allowAny = false;
   for (const entry of raw) {
     if (entry === '*') {
       allowAny = true;
+      continue;
+    }
+    if (entry.endsWith(':*')) {
+      const base = entry.slice(0, -2);
+      let parsed: URL;
+      try {
+        parsed = new URL(base);
+      } catch {
+        throw new InvalidAllowOriginPatternError(entry, 'not a parseable URL');
+      }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new InvalidAllowOriginPatternError(
+          entry,
+          'port wildcards are only supported for http and https origins',
+        );
+      }
+      if (parsed.origin !== base) {
+        throw new InvalidAllowOriginPatternError(
+          entry,
+          `expected the canonical origin ${JSON.stringify(parsed.origin)} ` +
+            'without trailing slash, path, userinfo, or query',
+        );
+      }
+      if (parsed.port !== '') {
+        throw new InvalidAllowOriginPatternError(
+          entry,
+          'a port wildcard replaces the port; do not name one before `:*`',
+        );
+      }
+      if (!isLoopbackBind(parsed.hostname)) {
+        throw new InvalidAllowOriginPatternError(
+          entry,
+          'port wildcards are only supported for loopback hosts',
+        );
+      }
+      loopbackPortWildcards.push({
+        protocol: parsed.protocol,
+        hostname: parsed.hostname.toLowerCase(),
+      });
       continue;
     }
     let parsed: URL;
@@ -123,7 +181,7 @@ export function parseAllowOriginPatterns(
     }
     origins.add(canonical.toLowerCase());
   }
-  return { allowAny, origins };
+  return { allowAny, origins, loopbackPortWildcards };
 }
 
 export function findNonLoopbackHttpOrigin(
@@ -149,6 +207,57 @@ export interface OriginMatcher {
   allows(origin: string): boolean;
 }
 
+function matchesLoopbackPortWildcard(
+  origin: string,
+  wildcards: readonly LoopbackPortWildcard[] | undefined,
+): boolean {
+  if (!wildcards || wildcards.length === 0) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return false;
+  }
+  // An Origin header carries no path. Accept the canonical serialization,
+  // which drops a scheme-default port (`http://127.0.0.1:80` becomes
+  // `http://127.0.0.1`), so a non-browser client that spells that port still
+  // matches the "any port" contract.
+  if (parsed.origin !== origin) {
+    const defaultPort = parsed.protocol === 'http:' ? '80' : '443';
+    if (origin !== `${parsed.origin}:${defaultPort}`) return false;
+  }
+  return wildcards.some(
+    (wildcard) =>
+      wildcard.protocol === parsed.protocol &&
+      wildcard.hostname === parsed.hostname,
+  );
+}
+
+/**
+ * Match an origin against the explicitly listed entries: static origins and
+ * loopback port wildcards. `*` is intentionally excluded so callers such as
+ * the WebSocket CSRF gate can keep a tighter policy than REST CORS.
+ */
+export function originIsExplicitlyAllowed(
+  patterns: ParsedAllowOriginPatterns,
+  origin: string,
+): boolean {
+  const normalized = origin.toLowerCase();
+  if (patterns.origins.has(normalized)) return true;
+  return matchesLoopbackPortWildcard(
+    normalized,
+    patterns.loopbackPortWildcards,
+  );
+}
+
+/** Match an origin the way the REST CORS middleware does, including `*`. */
+export function allowOriginMatches(
+  patterns: ParsedAllowOriginPatterns,
+  origin: string,
+): boolean {
+  return patterns.allowAny || originIsExplicitlyAllowed(patterns, origin);
+}
+
 /**
  * A CORS allowlist that accepts runtime additions.
  *
@@ -166,17 +275,20 @@ export interface OriginMatcher {
 export class MutableOriginAllowlist implements OriginMatcher {
   readonly #allowAny: boolean;
   readonly #static: ReadonlySet<string>;
+  readonly #wildcards: readonly LoopbackPortWildcard[];
   readonly #dynamic = new Map<string, string>();
 
   constructor(base: ParsedAllowOriginPatterns) {
     this.#allowAny = base.allowAny;
     this.#static = new Set(base.origins);
+    this.#wildcards = base.loopbackPortWildcards ?? [];
   }
 
   allows(origin: string): boolean {
     if (this.#allowAny) return true;
     const normalized = origin.toLowerCase();
     if (this.#static.has(normalized)) return true;
+    if (matchesLoopbackPortWildcard(normalized, this.#wildcards)) return true;
     for (const value of this.#dynamic.values()) {
       if (value === normalized) return true;
     }
@@ -199,8 +311,7 @@ function toMatcher(
   return 'allows' in patterns
     ? patterns
     : {
-        allows: (origin: string) =>
-          patterns.allowAny || patterns.origins.has(origin.toLowerCase()),
+        allows: (origin: string) => allowOriginMatches(patterns, origin),
       };
 }
 
