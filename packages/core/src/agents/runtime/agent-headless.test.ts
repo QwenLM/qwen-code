@@ -1666,6 +1666,17 @@ describe('subagent.ts', () => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
         expect(inv.execute).toHaveBeenCalledTimes(4);
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+        // The 3rd identical call's results carry the loop-protection
+        // reminder, after the tool response (#14828).
+        expect(sentParts(3).at(-1)?.text).toContain(
+          '`list_directory` has been called 3 times in a row',
+        );
+        expect(sentParts(3)[0].functionResponse).toBeDefined();
+        expect(
+          [1, 2, 4].some((n) =>
+            sentParts(n).some((part) => part.text?.includes('in a row')),
+          ),
+        ).toBe(false);
       });
 
       it('keeps polling task_list while the task board changes (issue #9450)', async () => {

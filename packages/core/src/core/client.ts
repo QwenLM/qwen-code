@@ -5006,6 +5006,13 @@ export class LlmClient {
               );
         if (explorationReminder)
           requestToSend.push({ text: explorationReminder });
+        // Ownership-gated like the exploration reminder, so a concurrent side
+        // query neither queues nor drains the running turn's loop-protection
+        // reminders.
+        const loopReminder = ownsExplorationBudget
+          ? this.loopDetector.takeLoopReminder()
+          : undefined;
+        if (loopReminder) requestToSend.push({ text: loopReminder });
         if (activeTodoReminder) {
           const insertAt = requestToSend.findIndex(
             (part) =>
@@ -5168,7 +5175,9 @@ export class LlmClient {
           // configuration.
           const alwaysOnLoop =
             !duplicateLoopGuardRequest &&
-            this.loopDetector.checkAlwaysOnSafeties(event);
+            this.loopDetector.checkAlwaysOnSafeties(event, {
+              queueReminders: ownsExplorationBudget,
+            });
           // Exploration-budget lifecycle, recorded before the halt handling
           // below takes effect: a halted batch's over-count is harmless only
           // because every core halt is terminal (the halt branch returns the
@@ -5246,7 +5255,9 @@ export class LlmClient {
           const heuristicLoop =
             !duplicateLoopGuardRequest &&
             !skipLoopDetection &&
-            this.loopDetector.addAndCheckHeuristicLoops(event);
+            this.loopDetector.addAndCheckHeuristicLoops(event, {
+              queueReminders: ownsExplorationBudget,
+            });
           if (heuristicLoop) {
             for (const goalEvent of await finalizeInterruptedGoalTurn(
               undefined,

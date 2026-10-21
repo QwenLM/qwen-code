@@ -1948,6 +1948,21 @@ const SETTINGS_SCHEMA = {
           'Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. Daemon/ACP sessions run none of the other detectors; setting this to false also enables a global-duplicate tool-call halt there. Core-client sessions keep a minimal always-on guard regardless of this setting (consecutive identical tool calls, shell inspection-command stagnation, and a per-turn tool-call cap, see model.maxToolCallsPerTurn); daemon/ACP sessions keep the per-turn tool-call cap and an invalid-tool-params stagnation guard.',
         showInDialog: false,
       },
+      loopProtection: {
+        type: 'enum',
+        label: 'Loop Protection',
+        category: 'Model',
+        requiresRestart: true,
+        default: 'stop',
+        description:
+          'What a loop detector does when it fires. "stop" (default) keeps every stop point: the always-on guards (identical calls, shell inspection, invalid tool parameters, and stuck repetition past the adaptive cap) remind the model once when the turn reaches their reminder point before the stop, and the opt-in heuristics stop without a reminder as before; "warn" only reminds and never stops, except for content and thought repetition, which cannot carry a reminder; "off" neither reminds nor stops and only records telemetry. Budgets (an explicit model.maxToolCallsPerTurn and the 1000-call backstop of the adaptive default) and the duplicate provider tool-call id guard stop in every mode, so under "warn" and "off" a stuck turn runs until a budget stops it. Applies to the CLI, subagents and daemon/ACP sessions; model.skipLoopDetection still decides whether the heuristic detectors run.',
+        showInDialog: false,
+        options: [
+          { value: 'stop', label: 'Stop after a reminder' },
+          { value: 'warn', label: 'Remind only' },
+          { value: 'off', label: 'Off' },
+        ],
+      },
       maxToolCallsPerTurn: {
         type: 'integer',
         label: 'Max Tool Calls Per Turn',

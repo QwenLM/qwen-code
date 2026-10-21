@@ -533,6 +533,18 @@ describe('SettingsSchema', () => {
       expect(model.maxToolCallsPerTurn.type).toBe('integer');
     });
 
+    it('should define model.loopProtection with stop as the default', () => {
+      const loopProtection =
+        getSettingsSchema().model.properties.loopProtection;
+
+      expect(loopProtection).toMatchObject({ type: 'enum', default: 'stop' });
+      expect(loopProtection.options?.map((option) => option.value)).toEqual([
+        'stop',
+        'warn',
+        'off',
+      ]);
+    });
+
     it('should define streamIdleTimeoutMs as a bounded generation setting', () => {
       const streamIdleTimeout =
         getSettingsSchema().model.properties.generationConfig.properties
