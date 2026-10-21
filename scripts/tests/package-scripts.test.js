@@ -47,6 +47,8 @@ function readWorkflow(relativePath) {
   return readFileSync(path.join(root, relativePath), 'utf8');
 }
 
+const heapCap = (value) => value?.match(/--max-old-space-size=(\d+)/)?.[1];
+
 /**
  * Writes a throwaway package shaped like the generated CLI for the
  * vendored-ripgrep packing cases: `vendor/ripgrep/<platform>/rg` (or `rg.exe`
@@ -1107,7 +1109,7 @@ describe('package scripts', () => {
 
   it('keeps the root build above the heap ceiling that broke the CLI compile', () => {
     const { build } = readPackageJson().scripts;
-    const cap = build.match(/--max-old-space-size=(\d+)/)?.[1];
+    const cap = heapCap(build);
     expect(cap).toBeDefined();
     // The CLI's TypeScript compile crossed the previous 4 GiB ceiling on the
     // shared pool and failed the Java daemon E2E leg before any test ran
@@ -1115,14 +1117,21 @@ describe('package scripts', () => {
     expect(Number(cap)).toBeGreaterThanOrEqual(6144);
   });
 
-  it('keeps the pnpm prepare build above the same heap ceiling', () => {
+  it('keeps the pnpm prepare build above the heap ceiling and the root build cap', () => {
     const { nodeOptions } = parse(readWorkflow('pnpm-workspace.yaml'));
-    const cap = nodeOptions?.match(/--max-old-space-size=(\d+)/)?.[1];
-    expect(cap).toBeDefined();
+    const pnpmCap = heapCap(nodeOptions);
+    const buildCap = heapCap(readPackageJson().scripts.build);
+    expect(pnpmCap).toBeDefined();
+    expect(buildCap).toBeDefined();
     // The pnpm prepare path compiles the same CLI project that crossed the
     // 4 GiB ceiling in #14823; #14827 raised this cap, so pin it beside the
     // root build script instead of leaving one half of the fix unguarded.
-    expect(Number(cap)).toBeGreaterThanOrEqual(6144);
+    expect(Number(pnpmCap)).toBeGreaterThanOrEqual(6144);
+    // pnpm replaces NODE_OPTIONS for every package script, so this cap — not
+    // the root build script's — governs `tsc --build` on both the explicit
+    // and install-time paths. A raise on the root entry point intended for
+    // that compile must be mirrored here.
+    expect(Number(pnpmCap)).toBeGreaterThanOrEqual(Number(buildCap));
   });
 
   it('selects the CLI dependency closure without selecting the same-named root', () => {
