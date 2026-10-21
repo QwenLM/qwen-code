@@ -7331,16 +7331,20 @@ describe('AppContainer State Management', () => {
           await ready;
           if (fails) throw new Error('tool.call is unsupported');
         });
+        const getModSession = interactiveMods.getInteractiveModSession;
+        const modSession = {
+          initialize,
+          subscribe: (listener: (text: string) => void) => {
+            emit = listener;
+            return () => {};
+          },
+          setPresentation: vi.fn(),
+        } as unknown as interactiveMods.InteractiveModSession;
         const owner = vi
           .spyOn(interactiveMods, 'getInteractiveModSession')
-          .mockReturnValue({
-            initialize,
-            subscribe: (listener: (text: string) => void) => {
-              emit = listener;
-              return () => {};
-            },
-            setPresentation: vi.fn(),
-          } as unknown as interactiveMods.InteractiveModSession);
+          .mockImplementation((config) =>
+            config === mockConfig ? modSession : getModSession(config),
+          );
         try {
           render(
             <AppContainer
