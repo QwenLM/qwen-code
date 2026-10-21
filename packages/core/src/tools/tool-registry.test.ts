@@ -441,6 +441,69 @@ describe('ToolRegistry', () => {
   );
 
   describe('registerTool', () => {
+    it('binds pooled Generated UI tools to their owning session without mutating the pool snapshot', async () => {
+      const uri = 'ui://qwen-code-generated-ui/view-v1.html';
+      const bootstrap = new Config(baseConfigParams);
+      let enabled = true;
+      vi.spyOn(config, 'isBundledGeneratedUiServer').mockImplementation(
+        (name) => name === 'generated-ui',
+      );
+      vi.spyOn(config, 'getBundledGeneratedUiStatus').mockImplementation(
+        () => ({
+          version: 1,
+          enabled,
+        }),
+      );
+      const client = {
+        callTool: vi.fn().mockResolvedValue({
+          content: [{ type: 'text', text: 'Saved calculation' }],
+        }),
+        readResource: vi.fn().mockResolvedValue({
+          contents: [
+            {
+              uri,
+              mimeType: 'text/html;profile=mcp-app',
+              text: '<main>Generated UI</main>',
+            },
+          ],
+        }),
+      };
+      const snapshot = new DiscoveredMCPTool(
+        createMockCallableTool([]),
+        'generated-ui',
+        'generated_ui_show',
+        'Generated UI',
+        { type: 'object', properties: {} },
+        false,
+        undefined,
+        bootstrap,
+        client,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        false,
+        uri,
+      );
+      toolRegistry.registerTool(snapshot);
+      const registered = toolRegistry.getTool(snapshot.name)!;
+      const signal = new AbortController().signal;
+      expect(registered).not.toBe(snapshot);
+      const result = await registered.build({}).execute(signal);
+      expect(result.returnDisplay).toMatchObject({
+        type: 'mcp_app',
+        requiredFeature: 'generated-ui',
+      });
+      const pending = registered.build({});
+      enabled = false;
+      await expect(pending.execute(signal)).rejects.toThrow(
+        'Bundled Generated UI is unavailable',
+      );
+      expect(client.callTool).toHaveBeenCalledOnce();
+      const unchanged = await snapshot.build({}).execute(signal);
+      expect(unchanged.returnDisplay).not.toHaveProperty('requiredFeature');
+    });
+
     it('should register a new tool', () => {
       const tool = new MockTool({ name: 'mock-tool' });
       toolRegistry.registerTool(tool);

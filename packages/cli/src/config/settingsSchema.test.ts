@@ -32,6 +32,18 @@ import {
 } from '../serve/create-sub-session.js';
 
 describe('SettingsSchema', () => {
+  it('exposes a default-off Generated UI setting that requires restarting its owner', () => {
+    expect(
+      getSettingsSchema().experimental.properties.generatedUi,
+    ).toMatchObject({
+      type: 'boolean',
+      default: false,
+      category: 'Experimental',
+      requiresRestart: true,
+      showInDialog: true,
+    });
+  });
+
   it('declares a replace-only Web Shell approval mode allowlist', () => {
     const { allowedApprovalModes } = getSettingsSchema().ui.properties;
     expect(allowedApprovalModes).toMatchObject({

@@ -231,3 +231,16 @@ it.each([ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL])(
     }
   },
 );
+
+describe('Generated UI bundled reference gate', () => {
+  it('withholds an unavailable writer even when the reference would otherwise inline', () => {
+    const config = makeFakeConfig({
+      bundledGeneratedUi: { enabled: false },
+      enabledSkillNamesProvider: () => new Set(['generated-ui']),
+    });
+    expect(config.getSkillManager()).toBeNull();
+    expect(resolveBundledReferenceRoute(config, 'generated-ui')).toBe(
+      'withheld',
+    );
+  });
+});

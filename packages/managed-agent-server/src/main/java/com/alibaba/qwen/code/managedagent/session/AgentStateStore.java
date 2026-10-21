@@ -187,6 +187,20 @@ public interface AgentStateStore {
                 approvalMode, approvalSelectionSupported);
     }
 
+    @org.springframework.transaction.annotation.Transactional
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest,
+            WorkspaceSelection selection, String approvalMode, boolean approvalSelectionSupported,
+            Boolean planMode, boolean planModeSupported, List<Map<String, Object>> skills) {
+        if (!skills.isEmpty()) {
+            throw new UnsupportedOperationException("Session Skills are unavailable");
+        }
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
+                approvalSelectionSupported, planMode, planModeSupported);
+    }
+
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest);
 
