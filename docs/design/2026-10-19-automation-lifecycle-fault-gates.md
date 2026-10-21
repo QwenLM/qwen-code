@@ -60,14 +60,8 @@ asserts:
 - the cancelled run reaches `cancelled` from its committed proof, and its
   occurrence settles once;
 - the schedule, future slots, sibling runs and foreground work are untouched;
-- a queued input cancelled before any attempt settles with no model call — no
-  queued run forms behind an open Turn on either public fire path, so nothing
-  reaches that arm: a manual fire arriving while the Session runs this
-  definition's Turn is refused with `409 automation_run_skipped` (`The manual
-run was skipped: overlap.`), the decision is recorded as `skipped` for
-  `overlap` with zero attempts, and no run commits and no Turn starts behind it
-  — delivered: `fg11dSecondFireIsRefusedWhileTheFirstRunsOnMySql`;
-- a run which completes on its own keeps its outcome — delivered: a cancel
+- a queued input cancelled before any attempt settles with no model call. That
+  a run which completes on its own keeps its outcome is delivered: a cancel
   arriving after settlement is refused with `409 task_action_unavailable`
   (`The task does not accept a cancellation now.`), and the run stays
   `completed` with its occurrence `fired`;
@@ -117,15 +111,6 @@ around it.
   `session_not_active`. A close attempted while a turn is in flight is refused
   with `409 turn_active`, which is what bounds the queued-input arm: the queue
   is decided by the turn, never by a close.
-- The queued-input arm is bounded at admission rather than at a cancel path:
-  while the Session runs this definition's Turn, a second manual fire is refused
-  `409 automation_run_skipped` with `overlap`, records `skipped` for `overlap`
-  with zero attempts and commits no run. Both admission arms answer `overlap` —
-  the open Turn and the definition's overlap policy — so
-  `fg11dSecondFireIsRefusedWhileTheFirstRunsOnMySql` pins the answer, not which
-  arm produced it. A fire admitted in the same instant another turn opens is a
-  race this lane does not pin, and the queue such a fire would leave is the only
-  way the arm could be exercised.
 - A task cancel needs the projection's task id, not the run record id:
   passing `arun_…` answers `task_not_found`, and the id from
   `GET /v1/agents/sessions/{id}/tasks` is accepted. With the wake turn kept
