@@ -312,6 +312,9 @@ beforeEach(async () => {
       cwd: root,
       version: 'test',
       daemonPromptId: 'prompt',
+      ...(identity?.clientInitiatedSkills
+        ? { clientInitiatedSkills: true }
+        : {}),
       message: {
         role: type === 'assistant' ? 'model' : 'user',
         parts: messageParts,
@@ -400,6 +403,45 @@ it.each(['none', 'public', 'member'] as const)(
   },
 );
 
+it('persists the model-facing Skill batch budget so replay cannot restore discarded text', async () => {
+  const body = 'FIRST_MARKER' + 'x'.repeat(400 * 1024) + 'LAST_MARKER';
+  const skills = new HostedSkillCatalog([
+    { name: 'first', description: 'First', body, model_invocable: false },
+    { name: 'second', description: 'Second', body, model_invocable: false },
+  ]);
+  turn = createTurn(false, undefined, undefined, skills);
+  turn.setToolOutputBudget(200000);
+  const batch = ['first', 'second'].map((name, index) => ({
+    ...calls[index]!,
+    name: 'skill',
+    args: { skill: name },
+    isClientInitiated: true,
+  }));
+  const parts: Part[] = batch.map((call) => ({
+    functionCall: { id: call.callId, name: call.name, args: call.args },
+  }));
+  const result = await turn.execute(
+    batch,
+    parts,
+    'model',
+    new AbortController().signal,
+  );
+  const outputs = result.map((part) =>
+    String(part.functionResponse?.response?.['output'] ?? ''),
+  );
+  expect(
+    outputs.reduce((total, text) => total + text.length, 0),
+  ).toBeLessThanOrEqual(200000);
+  for (const text of outputs) expect(text).toContain('Tool output truncated.');
+  const saved = (await session.sink.project())
+    .filter((entry) => entry.type === 'tool_result')
+    .flatMap((entry) => entry.message?.parts ?? []);
+  expect(JSON.parse(JSON.stringify(saved))).toEqual(
+    JSON.parse(JSON.stringify(result)),
+  );
+  expect(skills.response({ skill: 'first' })).toContain(body);
+});
+
 it('refuses a mixed Skill and Workspace batch before approval Hooks or tool dispatch', async () => {
   const fire = vi.fn<HostedHookSession['fire']>().mockResolvedValue(undefined);
   turn = createTurn(
@@ -464,6 +506,129 @@ it.each([{ skill: 'unknown' }, { skill: 'review', args: '--post' }])(
     ]);
     expect(broker.acquire).not.toHaveBeenCalled();
     expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it.each([0, 1])(
+  'recovers a large manual Skill batch after %i results committed within its original budget',
+  async (committedResults) => {
+    const body = 'BEGIN_SKILL' + 'x'.repeat(400 * 1024) + 'END_SKILL';
+    const skills = new HostedSkillCatalog(
+      ['first', 'second'].map((name) => ({
+        name,
+        description: name,
+        body,
+        model_invocable: false,
+      })),
+    );
+    const originalCommit = commit;
+    let resultCount = 0;
+    commit = async (...args) => {
+      if (args[0] === 'tool_result' && resultCount++ === committedResults)
+        throw new Error('Store response lost');
+      return originalCommit(...args);
+    };
+    turn = createTurn(false, undefined, undefined, skills);
+    const batch = ['first', 'second'].map((name, index) => ({
+      ...calls[index]!,
+      name: 'skill',
+      args: { skill: name },
+      isClientInitiated: true,
+    }));
+    await expect(
+      turn.execute(
+        batch,
+        batch.map((call) => ({
+          functionCall: { id: call.callId, name: call.name, args: call.args },
+        })),
+        'model',
+        new AbortController().signal,
+      ),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    const recovery = {
+      session,
+      sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+      cwd: root,
+      promptId: 'prompt',
+      skills,
+    };
+    expect(await answerResumedTurnCalls(recovery)).toBe(2 - committedResults);
+    expect(await answerResumedTurnCalls(recovery)).toBe(0);
+    const saved = (await session.sink.project())
+      .filter((entry) => entry.type === 'tool_result')
+      .flatMap((entry) => entry.message?.parts ?? []);
+    const outputs = saved.map((part) =>
+      String(part.functionResponse?.response?.['output'] ?? ''),
+    );
+    expect(outputs).toHaveLength(2);
+    expect(
+      outputs.reduce((total, text) => total + text.length, 0),
+    ).toBeLessThanOrEqual(200000);
+    for (const text of outputs) {
+      expect(text).toContain('Tool output truncated.');
+      expect(text).toContain('BEGIN_SKILL');
+      expect(text).toContain('END_SKILL');
+    }
+    expect(skills.response({ skill: 'first' })).toContain(body);
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it.each([
+  { model_invocable: false, isClientInitiated: false },
+  { user_invocable: false, isClientInitiated: true },
+])(
+  'preserves invocation restrictions and the whole-batch refusal on recovery: %j',
+  async (flags) => {
+    const { isClientInitiated, ...restrictions } = flags;
+    const skills = new HostedSkillCatalog([
+      {
+        name: 'restricted',
+        description: 'Restricted',
+        body: 'MUST_NOT_LOAD',
+        ...restrictions,
+      },
+      { name: 'ordinary', description: 'Ordinary', body: 'ALSO_MUST_NOT_LOAD' },
+    ]);
+    const originalCommit = commit;
+    commit = async (...args) => {
+      if (args[0] === 'tool_result') throw new Error('Store refusal lost');
+      return originalCommit(...args);
+    };
+    turn = createTurn(false, undefined, undefined, skills);
+    const batch = ['restricted', 'ordinary'].map((name, index) => ({
+      ...calls[index]!,
+      name: 'skill',
+      args: { skill: name },
+      isClientInitiated,
+    }));
+    await expect(
+      turn.execute(
+        batch,
+        batch.map((call) => ({
+          functionCall: { id: call.callId, name: call.name, args: call.args },
+        })),
+        'model',
+        new AbortController().signal,
+      ),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(
+      await answerResumedTurnCalls({
+        session,
+        sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        cwd: root,
+        promptId: 'prompt',
+        skills,
+      }),
+    ).toBe(2);
+    const results = (await session.sink.project())
+      .filter((record) => record.type === 'tool_result')
+      .flatMap((record) => record.message?.parts ?? []);
+    expect(results).toHaveLength(2);
+    for (const part of results)
+      expect(part.functionResponse?.response?.['error']).toBeTypeOf('string');
+    expect(JSON.stringify(results)).not.toContain('MUST_NOT_LOAD');
     expect(broker.execute).not.toHaveBeenCalled();
   },
 );

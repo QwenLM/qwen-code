@@ -41,6 +41,7 @@ import {
   type CreateSessionRequest,
   type DaemonApprovalMode,
   type DaemonEvent,
+  type DaemonSessionContextStatus,
   type DaemonSseConnectReason,
   type DaemonStandaloneSessionOptions,
   type DaemonTranscriptBlock,
@@ -77,7 +78,10 @@ import {
   isRecord,
   isAcpChildCapacityError,
 } from './httpErrors.js';
-import { McpAppToolsContext } from '../../mcpAppHostContext.js';
+import {
+  McpAppToolsContext,
+  McpAppGeneratedUiContext,
+} from '../../mcpAppHostContext.js';
 import { createTrajectoryLiveStore } from '../../trajectory/trajectory-live-store.js';
 import { TrajectoryLiveContext } from '../../trajectory/trajectory-live-context.js';
 import { getTranslator } from '../../i18n.js';
@@ -3685,84 +3689,103 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 addNotice,
                 dismissNotice,
               );
-              if (
+              const recoveryEventCurrent =
                 (context?.recovery ||
                   connectionRef.current.context?.recovery) &&
-                (event.id === undefined || event.id > recoveryEventCursor)
-              ) {
-                if (
-                  event.type === 'pending_prompt_started' ||
+                (event.id === undefined || event.id > recoveryEventCursor);
+              if (
+                recoveryEventCurrent &&
+                (event.type === 'pending_prompt_started' ||
                   hasActiveGenerationSignal(uiEvents) ||
-                  uiEvents.some((item) => item.type === 'user.text.delta')
-                ) {
-                  advanceSessionRecoveryGeneration(
-                    sessionRecoveryGenerationRef.current,
-                    activeSession,
-                  );
+                  uiEvents.some((item) => item.type === 'user.text.delta'))
+              ) {
+                advanceSessionRecoveryGeneration(
+                  sessionRecoveryGenerationRef.current,
+                  activeSession,
+                );
+                setConnection((current) =>
+                  sessionRef.current === activeSession &&
+                  current.context?.recovery?.canContinue
+                    ? {
+                        ...current,
+                        context: {
+                          ...current.context,
+                          recovery: {
+                            ...current.context.recovery,
+                            canContinue: false,
+                          },
+                        },
+                      }
+                    : current,
+                );
+              }
+              const generatedUiPolicyChanged = uiEvents.some(
+                (item) =>
+                  item.type === 'workspace.tool.toggled' ||
+                  item.type === 'workspace.mcp.server_changed' ||
+                  item.type === 'workspace.mcp.server_restarted' ||
+                  item.type === 'workspace.extensions.changed' ||
+                  (item.type === 'workspace.settings.changed' &&
+                    (item.key === 'settings_reloaded' ||
+                      item.key === 'mcp' ||
+                      item.key.startsWith('mcp.') ||
+                      item.key === 'mcpServers' ||
+                      item.key.startsWith('mcpServers.') ||
+                      item.key === 'tools' ||
+                      item.key.startsWith('tools.'))),
+              );
+              if (
+                generatedUiPolicyChanged ||
+                (recoveryEventCurrent &&
+                  (event.type === 'turn_complete' ||
+                    event.type === 'turn_error' ||
+                    // A rewind can drop the interrupted turn itself.
+                    event.type === 'session_rewound' ||
+                    uiEvents.some((item) => item.type === 'prompt.cancelled')))
+              ) {
+                const generation = advanceSessionRecoveryGeneration(
+                  sessionRecoveryGenerationRef.current,
+                  activeSession,
+                );
+                const publishContext = (
+                  updated?: DaemonSessionContextStatus,
+                ) => {
+                  // Publish receipt invalidation even when the read fails or
+                  // the response owner is wrong.
+                  if (
+                    disposed ||
+                    abort.signal.aborted ||
+                    eventStreamController.signal.aborted
+                  )
+                    return;
                   setConnection((current) =>
+                    current.sessionId === activeSession.sessionId &&
+                    eventStreamRef.current === eventStream &&
                     sessionRef.current === activeSession &&
-                    current.context?.recovery?.canContinue
+                    generation ===
+                      sessionRecoveryGenerationRef.current.get(activeSession)
                       ? {
                           ...current,
-                          context: {
-                            ...current.context,
-                            recovery: {
-                              ...current.context.recovery,
-                              canContinue: false,
-                            },
-                          },
+                          ...(current.context &&
+                          updated?.sessionId === activeSession.sessionId
+                            ? {
+                                context: {
+                                  ...current.context,
+                                  recovery: updated.recovery,
+                                },
+                              }
+                            : {}),
                         }
                       : current,
                   );
+                };
+                if (generatedUiPolicyChanged) {
+                  activeSession.session.generatedUi = undefined;
+                  publishContext();
                 }
-                if (
-                  event.type === 'turn_complete' ||
-                  event.type === 'turn_error' ||
-                  // A rewind can drop the interrupted turn itself.
-                  event.type === 'session_rewound' ||
-                  uiEvents.some((item) => item.type === 'prompt.cancelled')
-                ) {
-                  const generation = advanceSessionRecoveryGeneration(
-                    sessionRecoveryGenerationRef.current,
-                    activeSession,
-                  );
-                  void activeSession.context().then(
-                    (updated) => {
-                      if (
-                        disposed ||
-                        abort.signal.aborted ||
-                        eventStreamController.signal.aborted ||
-                        eventStreamRef.current !== eventStream ||
-                        sessionRef.current !== activeSession ||
-                        generation !==
-                          sessionRecoveryGenerationRef.current.get(
-                            activeSession,
-                          ) ||
-                        updated.sessionId !== activeSession.sessionId
-                      ) {
-                        return;
-                      }
-                      setConnection((current) =>
-                        current.context &&
-                        eventStreamRef.current === eventStream &&
-                        sessionRef.current === activeSession &&
-                        generation ===
-                          sessionRecoveryGenerationRef.current.get(
-                            activeSession,
-                          )
-                          ? {
-                              ...current,
-                              context: {
-                                ...current.context,
-                                recovery: updated.recovery,
-                              },
-                            }
-                          : current,
-                      );
-                    },
-                    () => {},
-                  );
-                }
+                void activeSession.context().then(publishContext, () => {
+                  publishContext();
+                });
               }
               const transcriptUiEvents =
                 subagentTranscriptModeRef.current === 'summary'
@@ -5487,6 +5510,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   );
 
   const appSession = sessionRef.current;
+  const generatedUi = appSession?.session?.generatedUi;
+  const mcpAppGeneratedUi = useMemo(() => {
+    if (
+      !appSession ||
+      !appSession.clientId ||
+      connection.status !== 'connected' ||
+      appSession.sessionId !== connection.sessionId ||
+      !generatedUi
+    )
+      return undefined;
+    return { sessionId: appSession.sessionId, status: generatedUi };
+  }, [appSession, connection.sessionId, connection.status, generatedUi]);
   const mcpAppTools = useMemo(() => {
     const session = appSession;
     if (
@@ -5518,37 +5553,39 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
   return (
     <TrajectoryLiveContext.Provider value={trajectoryLiveStore}>
-      <McpAppToolsContext.Provider value={mcpAppTools}>
-        <DaemonStoreContext.Provider value={store}>
-          <DaemonTurnNavigationContext.Provider value={turnNavigationStore}>
-            <DaemonConnectionContext.Provider value={connection}>
-              <DaemonPromptStatusContext.Provider value={promptStatus}>
-                <DaemonSessionNoticesContext.Provider value={noticesValue}>
-                  <DaemonWorkspaceEventSignalsContext.Provider
-                    value={workspaceEventSignals}
-                  >
-                    <DaemonActionsContext.Provider value={actions}>
-                      <DaemonSessionOwnerGuardContext.Provider
-                        value={ownerGuardValue}
-                      >
-                        <DaemonTranscriptHistoryContext.Provider
-                          value={transcriptHistoryValue}
+      <McpAppGeneratedUiContext.Provider value={mcpAppGeneratedUi}>
+        <McpAppToolsContext.Provider value={mcpAppTools}>
+          <DaemonStoreContext.Provider value={store}>
+            <DaemonTurnNavigationContext.Provider value={turnNavigationStore}>
+              <DaemonConnectionContext.Provider value={connection}>
+                <DaemonPromptStatusContext.Provider value={promptStatus}>
+                  <DaemonSessionNoticesContext.Provider value={noticesValue}>
+                    <DaemonWorkspaceEventSignalsContext.Provider
+                      value={workspaceEventSignals}
+                    >
+                      <DaemonActionsContext.Provider value={actions}>
+                        <DaemonSessionOwnerGuardContext.Provider
+                          value={ownerGuardValue}
                         >
-                          <DaemonPromptSettlementContext.Provider
-                            value={subscribeToPromptSettlement}
+                          <DaemonTranscriptHistoryContext.Provider
+                            value={transcriptHistoryValue}
                           >
-                            {children}
-                          </DaemonPromptSettlementContext.Provider>
-                        </DaemonTranscriptHistoryContext.Provider>
-                      </DaemonSessionOwnerGuardContext.Provider>
-                    </DaemonActionsContext.Provider>
-                  </DaemonWorkspaceEventSignalsContext.Provider>
-                </DaemonSessionNoticesContext.Provider>
-              </DaemonPromptStatusContext.Provider>
-            </DaemonConnectionContext.Provider>
-          </DaemonTurnNavigationContext.Provider>
-        </DaemonStoreContext.Provider>
-      </McpAppToolsContext.Provider>
+                            <DaemonPromptSettlementContext.Provider
+                              value={subscribeToPromptSettlement}
+                            >
+                              {children}
+                            </DaemonPromptSettlementContext.Provider>
+                          </DaemonTranscriptHistoryContext.Provider>
+                        </DaemonSessionOwnerGuardContext.Provider>
+                      </DaemonActionsContext.Provider>
+                    </DaemonWorkspaceEventSignalsContext.Provider>
+                  </DaemonSessionNoticesContext.Provider>
+                </DaemonPromptStatusContext.Provider>
+              </DaemonConnectionContext.Provider>
+            </DaemonTurnNavigationContext.Provider>
+          </DaemonStoreContext.Provider>
+        </McpAppToolsContext.Provider>
+      </McpAppGeneratedUiContext.Provider>
     </TrajectoryLiveContext.Provider>
   );
 }
