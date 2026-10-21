@@ -24,13 +24,13 @@ Status: implemented, 2026-10-19.
 
 ### Approval store
 
-`packages/cli/src/config/hook-approvals.ts` persists `~/.qwen/hookApprovals.json` (`QWEN_CODE_HOOK_APPROVALS_PATH` overrides it) with one record per project root: `{ hash, status }`, `status` being `approved` or `rejected`. `hash` is a SHA-256 of the project `hooks` object serialised with sorted keys (null-prototype objects, so an own `__proto__` key is hashed too), so key order in the file does not matter but any behavioural edit changes it. A record whose hash does not match the live hooks, or whose status is neither value, counts as `pending`. The project root is the folder holding the `.qwen/settings.json` the hooks came from, not the session's working directory, so `/cd` and `--worktree` do not move the key; it is normalised as in `mcpApprovals.json`. The file is written `0600` (an existing looser mode is tightened), and `QWEN_CODE_HOOK_APPROVALS_PATH` is excluded from project `.env` files like the sibling store paths.
+`packages/cli/src/config/hook-approvals.ts` persists `~/.qwen/hookApprovals.json` (`QWEN_CODE_HOOK_APPROVALS_PATH` overrides it) with one record per project root: `{ hash, status }`, `status` being `approved` or `rejected`. `hash` is a SHA-256 of the project `hooks` object serialised with sorted keys (null-prototype objects, so an own `__proto__` key is hashed too), so key order in the file does not matter but any behavioural edit changes it. A record whose hash does not match the live hooks, or whose status is neither value, counts as `pending`. The hook registry tags a copy of each definition with its source rather than the settings object, so a block keeps its hash after it loads (an ACP daemon reuses one settings instance across sessions). The project root is the folder holding the `.qwen/settings.json` the hooks came from, not the session's working directory, so `/cd` and `--worktree` do not move the key; it is normalised as in `mcpApprovals.json`. The file is written `0600` (an existing looser mode is tightened), and `QWEN_CODE_HOOK_APPROVALS_PATH` is excluded from project `.env` files like the sibling store paths.
 
 `isProjectHooksPendingApproval(projectHooks, projectRoot)` is `true` when the block declares at least one runnable hook and its state is not `approved` (pending or rejected). An absent, `null` or empty block, or one with nothing runnable, is never gated.
 
 ### Core
 
-`ConfigParameters.projectHooksPendingApproval` records the startup decision; `undefined` means the session does not gate project hooks at all. While it is `true`, `getProjectHooks()` returns `undefined` after the existing trust check, and so does the legacy merged-`hooks` fallback in `getUserHooks()`, which can carry the same workspace block when no scopes were separated. `setProjectHooksPendingApproval()` lets the CLI clear the gate mid-session; the next `HookSystem.reload()` then registers them.
+`ConfigParameters.projectHooksPendingApproval` records the startup decision; `undefined` means the session does not gate project hooks at all. While it is `true`, `getProjectHooks()` returns `undefined` after the existing trust check, and so does the legacy merged-`hooks` fallback in `getUserHooks()`, which can carry the same workspace block when no scopes were separated. `setProjectHooksPendingApproval()` lets the CLI clear the gate mid-session; the next `HookSystem.reload()` then registers them. `getWithheldProjectHooks()` returns the withheld block for display only, and the hooks listing behind the OpenTUI `/hooks` browser and the ACP status shows it with the reason `pendingApproval`.
 
 ### CLI startup
 
@@ -38,11 +38,11 @@ Status: implemented, 2026-10-19.
 
 ### Interactive approval
 
-`useProjectHooksApproval` (ink and OpenTUI share it) shows a dialog listing every hook as `Event[matcher]  target [details]` when the state is strictly `pending`: the command with its `env`, `shell` and `async`; the URL with its header names and `allowedEnvVars`; the prompt text. Every repo-supplied string is reduced to one row with escapes, bidi and other format characters removed, and the list is capped to the available height with a "… and N more" row so the options stay visible. Approve persists `approved`, clears the gate on the live `Config` and reloads the hook system; Reject persists `rejected` and leaves the hooks unloaded; Esc closes the dialog without storing anything, so the next start asks again. The dialog ranks after the MCP approval dialog. The ink `/hooks` browser marks withheld project hooks disabled.
+`useProjectHooksApproval` (ink and OpenTUI share it) shows a dialog listing every hook as `Event[matcher]  target [details]` when the state is strictly `pending`: the command with its `env`, `shell` and `async`; the URL with its header names and `allowedEnvVars`; the prompt text. Every repo-supplied string is reduced to one row with escapes, bidi and other format characters removed; a value over 200 characters is cut with a marker giving its length, so an elided tail is never silent. Each hook takes one row and the list is capped to the available height, keeping at least three rows, with a "… and N more" row so the options stay visible. Approve persists `approved`, clears the gate on the live `Config` and reloads the hook system; Reject persists `rejected` and leaves the hooks unloaded; Esc closes the dialog without storing anything and adds a transcript line saying the hooks were not loaded; the next start or `/hooks` asks again. The dialog ranks after the MCP approval dialog. The ink `/hooks` browser marks withheld project hooks as awaiting approval.
 
 ### `/hooks` reload
 
-In a gated session the reload recomputes the gate from the freshly read workspace hooks before `HookSystem.reload()`, so an edited block stays out of the registry, and emits `AppEvent.ProjectHooksPendingApprovalChanged` when the block is `pending` so the dialog asks again. An ungated session is left alone.
+In a gated session the reload re-reads the approvals file and recomputes the gate from the freshly read workspace hooks before `HookSystem.reload()`, so a decision edited by hand applies without a restart and an edited block stays out of the registry. It emits `AppEvent.ProjectHooksPendingApprovalChanged` when the block is `pending` so the dialog asks again. An ungated session is left alone.
 
 ### Headless runs
 
@@ -54,6 +54,7 @@ A non-interactive session cannot prompt. Unapproved project hooks stay unloaded 
 - **One decision per project, not per hook.** Hooks are reviewed as the block the file declares; a per-hook queue would add UI for no extra safety.
 - **Only a command-line YOLO skips the gate.** The user chose to approve everything; a settings value could have been chosen by the repository.
 - **Rejection is remembered** so a rejected repository does not nag on every start, but any edit re-asks. Esc is not a rejection, so a dialog that is closed in passing is offered again.
+- **The hash covers the `hooks` block only.** Other hook settings a project can set, such as `stopHookBlockingCap` (clamped to 100), tune how approved hooks run but run nothing themselves; folding them in would re-prompt every approved project for no new command.
 
 ## Validation
 
@@ -71,6 +72,5 @@ A non-interactive session cannot prompt. Unapproved project hooks stay unloaded 
 
 - ACP: a request to list and approve pending project hooks, mirroring the MCP one.
 - LSP: gate the workspace `.lsp.json` commands the same way.
-- Project skill frontmatter hooks: they still need only folder trust.
+- Project skill and subagent frontmatter hooks: they still need only folder trust.
 - A non-interactive way to approve project hooks (for CI), mirroring `qwen mcp approve`.
-- The OpenTUI and ACP hooks listings: give withheld project hooks a reason row.

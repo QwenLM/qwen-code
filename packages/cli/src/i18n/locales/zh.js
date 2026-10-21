@@ -1384,6 +1384,7 @@ export default {
   'disabled (bare mode)': '已禁用（精简模式）',
   'disabled (safe mode)': '已禁用（安全模式）',
   'disabled (disableAllHooks)': '已禁用（disableAllHooks）',
+  'disabled (awaiting approval)': '已禁用（等待批准）',
   'disabled (folder not trusted)': '已禁用（文件夹未受信任）',
   'disabled (turned off for this session)': '已禁用（本会话中已关闭）',
   'Server:': '服务器：',

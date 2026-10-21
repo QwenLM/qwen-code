@@ -32,7 +32,10 @@ export function HandlerListBody({
       </Text>
       {configs.map((config, index) => {
         const isSelected = index === selectedIndex;
-        const sourceDisplay = getConfigSourceDisplay(config);
+        // Only project hooks withheld by the approval gate are listed disabled.
+        const sourceDisplay = config.enabled
+          ? getConfigSourceDisplay(config)
+          : `${getConfigSourceDisplay(config)} · ${t('disabled (awaiting approval)')}`;
         const hookDisplay = describeHook(config);
         const typeDisplay = formatTypeDisplay(config);
 

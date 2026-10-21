@@ -48,6 +48,34 @@ describe('ProjectHooksApprovalDialog', () => {
     expect(frame).toContain('Approve these hooks');
   });
 
+  it('keeps hook rows on a terminal shorter than the chrome', () => {
+    const { lastFrame } = renderWithProviders(
+      <ProjectHooksApprovalDialog
+        lines={lines}
+        availableTerminalHeight={6}
+        onSelect={vi.fn()}
+      />,
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('hook-1.sh');
+    expect(frame).toContain('… and 28 more');
+  });
+
+  it('keeps each hook to one row so the height budget holds', () => {
+    const budget = PROJECT_HOOKS_DIALOG_CHROME_ROWS + 4;
+    const long = lines.map((line) => `${line} ${'x'.repeat(250)}`);
+    const { lastFrame } = renderWithProviders(
+      <ProjectHooksApprovalDialog
+        lines={long}
+        availableTerminalHeight={budget}
+        onSelect={vi.fn()}
+      />,
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame.split('\n').length).toBeLessThanOrEqual(budget);
+    expect(frame).toContain('Approve these hooks');
+  });
+
   it('dismisses on Esc without choosing reject', async () => {
     const onSelect = vi.fn();
     const { stdin } = renderWithProviders(

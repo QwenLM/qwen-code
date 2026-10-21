@@ -4072,7 +4072,9 @@ export const AppContainer = (props: AppContainerProps) => {
     isProjectHooksApprovalDialogOpen,
     pendingProjectHooks,
     handleProjectHooksApprovalSelect,
-  } = useProjectHooksApproval(config, settings);
+  } = useProjectHooksApproval(config, settings, (text) =>
+    addHistoryItem({ type: MessageType.INFO, text }, Date.now()),
+  );
   const {
     needsRestart: ideNeedsRestart,
     restartReason: ideTrustRestartReason,

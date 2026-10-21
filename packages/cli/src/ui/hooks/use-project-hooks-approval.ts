@@ -15,6 +15,7 @@ import {
 } from '../../config/hook-approvals.js';
 import { ProjectHooksApprovalChoice } from '../components/hooks/ProjectHooksApprovalDialog.js';
 import { appEvents, AppEvent } from '../../utils/events.js';
+import { t } from '../../i18n/index.js';
 
 export interface PendingProjectHooks {
   hooks: Record<string, unknown>;
@@ -29,11 +30,12 @@ export interface PendingProjectHooks {
  * after the user approves this exact configuration. Approving persists the
  * hash-bound decision, un-gates the hooks for this session and reloads the
  * registry; rejecting persists the rejection; dismissing (Esc) leaves the
- * decision open until the next start.
+ * decision open until the next start or `/hooks`, and says so via `addInfo`.
  */
 export const useProjectHooksApproval = (
   config: Config,
   settings: LoadedSettings,
+  addInfo?: (text: string) => void,
 ) => {
   const [pending, setPending] = useState<PendingProjectHooks | undefined>();
 
@@ -79,10 +81,16 @@ export const useProjectHooksApproval = (
         await config.getHookSystem()?.reload();
       } else if (choice === ProjectHooksApprovalChoice.REJECT) {
         await loadHookApprovals().setState(root, pending.hooks, 'rejected');
+      } else {
+        addInfo?.(
+          t(
+            'Project hooks in .qwen/settings.json were not loaded. Open /hooks or restart Qwen Code to review them.',
+          ),
+        );
       }
       setPending(undefined);
     },
-    [config, settings, pending],
+    [config, settings, pending, addInfo],
   );
 
   return {

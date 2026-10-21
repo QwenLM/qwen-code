@@ -84,6 +84,7 @@ import type { ShellConfirmationResolution } from './commands-context.js';
 import { McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
 import {
   PROJECT_HOOKS_DIALOG_CHROME_ROWS,
+  PROJECT_HOOKS_DIALOG_MIN_HOOK_ROWS,
   ProjectHooksApprovalChoice,
 } from '../components/hooks/ProjectHooksApprovalDialog.js';
 import { fitHookLines } from '../../config/hook-approvals.js';
@@ -1516,13 +1517,17 @@ export function OpenTuiProjectHooksApprovalDialog(
             </text>
           </box>
           <box flexDirection="column" marginBottom={1}>
-            {fitHookLines(lines, height - PROJECT_HOOKS_DIALOG_CHROME_ROWS).map(
-              (line, index) => (
-                <text key={`${index}-${line}`} fg={C.text}>
-                  {`  ${line}`}
-                </text>
+            {fitHookLines(
+              lines,
+              Math.max(
+                PROJECT_HOOKS_DIALOG_MIN_HOOK_ROWS,
+                height - PROJECT_HOOKS_DIALOG_CHROME_ROWS,
               ),
-            )}
+            ).map((line, index) => (
+              <text key={`${index}-${line}`} fg={C.text} wrapMode="none">
+                {`  ${line}`}
+              </text>
+            ))}
           </box>
           <DialogSelect
             items={PROJECT_HOOKS_APPROVAL_OPTIONS}

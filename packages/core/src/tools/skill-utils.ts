@@ -328,7 +328,8 @@ ${escapeXml(entry.description)}
  * influences the model, but its side effects grant tool approvals or run
  * repo-supplied commands, so they need a trusted folder. Settings-file
  * project hooks additionally need the user's approval
- * (`Config.getProjectHooks()`); skill frontmatter hooks do not yet. User, extension
+ * (`Config.getProjectHooks()`); skill and subagent frontmatter hooks do not
+ * yet. User, extension
  * and bundled skills are not repo-controlled and are unaffected.
  */
 export function canApplySkillSideEffects(

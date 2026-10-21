@@ -222,6 +222,18 @@ describe('HookRegistry', () => {
       expect(allHooks[1].config.name).toBe('project-hook');
     });
 
+    it('should leave the caller-owned hook definitions unmodified', async () => {
+      const project = pre(cmd('echo project', 'project-hook'));
+      const before = JSON.stringify(project);
+      const registry = await init({ trusted: true, project });
+
+      expect(registry.getAllHooks()[0].config).toHaveProperty(
+        'source',
+        HooksConfigSource.Project,
+      );
+      expect(JSON.stringify(project)).toBe(before);
+    });
+
     it('should not load project hooks in untrusted folder', async () => {
       // Project hooks stay undefined: Config.getProjectHooks() checks trust.
       const registry = await init({

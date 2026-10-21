@@ -1143,6 +1143,7 @@ export default {
   'disabled (bare mode)': 'deaktiviert (Bare-Modus)',
   'disabled (safe mode)': 'deaktiviert (Sicherheitsmodus)',
   'disabled (disableAllHooks)': 'deaktiviert (disableAllHooks)',
+  'disabled (awaiting approval)': 'deaktiviert (wartet auf Freigabe)',
   'disabled (folder not trusted)':
     'deaktiviert (Ordner nicht vertrauenswürdig)',
   'disabled (turned off for this session)':

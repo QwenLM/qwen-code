@@ -18,9 +18,11 @@ import { resolveHookSettingsForConfig } from '../../config/hook-settings.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { hooksCommand } from './hooksCommand.js';
 import {
+  hashProjectHooks,
   loadHookApprovals,
   resetHookApprovalsForTesting,
 } from '../../config/hook-approvals.js';
+import { normalizeProjectRoot } from '../../config/approval-project-root.js';
 
 const hook = (command: string) => [
   { matcher: '*', hooks: [{ type: 'command' as const, command }] },
@@ -166,6 +168,29 @@ describe('/hooks reload with real settings files', () => {
     );
     await hooksCommand.action!(context, '');
     expect(sources(entries)).toEqual([{ eventName: 'Stop', source: 'user' }]);
+  });
+
+  it('re-reads the approvals file, so a decision edited by hand applies', async () => {
+    const repo = path.join(directory, 'repo');
+    const block = { PreToolUse: hook('echo project') };
+    await loadHookApprovals().setState(repo, block, 'rejected');
+    const { context, entries } = await setup(false, true, {}, true);
+    fs.writeFileSync(
+      path.join(directory, 'hookApprovals.json'),
+      JSON.stringify({
+        [normalizeProjectRoot(repo)]: {
+          hash: hashProjectHooks(block),
+          status: 'approved',
+        },
+      }),
+    );
+
+    await hooksCommand.action!(context, '');
+
+    expect(sources(entries)).toContainEqual({
+      eventName: 'PreToolUse',
+      source: 'project',
+    });
   });
 
   it.each(['user', 'workspace'] as const)(

@@ -11249,14 +11249,28 @@ export class Config {
    * Used by HookRegistry to load project-specific hooks with proper source attribution.
    */
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    return this.projectHooksPendingApproval === true
+      ? undefined
+      : this.readProjectHooks();
+  }
+
+  /** The project hooks block `getProjectHooks()` withholds while approval is pending. */
+  getWithheldProjectHooks():
+    | { [K in HookEventName]?: HookDefinition[] }
+    | undefined {
+    return this.projectHooksPendingApproval === true
+      ? this.readProjectHooks()
+      : undefined;
+  }
+
+  private readProjectHooks():
+    | { [K in HookEventName]?: HookDefinition[] }
+    | undefined {
     if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
     // Only return project hooks if workspace is trusted
     if (!this.isTrustedFolder()) {
-      return undefined;
-    }
-    if (this.projectHooksPendingApproval === true) {
       return undefined;
     }
     // The legacy merged `hooks` stands in only when no scope was supplied.

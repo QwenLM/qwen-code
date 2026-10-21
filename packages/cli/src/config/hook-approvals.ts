@@ -89,13 +89,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Repo-controlled text for the dialog: one row, no escapes or format characters. */
+/**
+ * Repo-controlled text for the dialog: one row, no escapes or format
+ * characters, and a cut that says so — the elided tail may be the payload.
+ */
 function displayText(value: unknown, max = 200): string {
   const text = sanitizeTerminalLine(String(value ?? '')).replace(
     /\p{Cf}/gu,
     '',
   );
-  return text.length > max ? `${text.slice(0, max)}…` : text;
+  return text.length > max
+    ? `${text.slice(0, max)}… [${text.length} chars, full value in .qwen/settings.json]`
+    : text;
 }
 
 function keyList(value: unknown): string | undefined {
@@ -126,7 +131,7 @@ function describeHook(hook: Record<string, unknown>): string {
       add('allowedEnvVars', keyList(hook['allowedEnvVars']));
       break;
     case 'prompt':
-      head = `prompt "${displayText(hook['prompt'], 80)}"`;
+      head = `prompt "${displayText(hook['prompt'])}"`;
       break;
     default:
       head = displayText(hook['type'] ?? 'unknown');
@@ -217,6 +222,11 @@ let loadedHookApprovals: LoadedHookApprovals | undefined;
 
 /** FOR TESTING ONLY. Resets the in-memory cache. */
 export function resetHookApprovalsForTesting(): void {
+  loadedHookApprovals = undefined;
+}
+
+/** Drops the cache so the next read sees edits made to the file by hand. */
+export function reloadHookApprovals(): void {
   loadedHookApprovals = undefined;
 }
 

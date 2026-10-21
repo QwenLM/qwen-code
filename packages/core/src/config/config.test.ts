@@ -1233,12 +1233,14 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.isProjectHooksPendingApproval()).toBe(true);
       expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getWithheldProjectHooks()).toBe(projectHooks);
       expect(config.getUserHooks()).toBe(userHooks);
 
       config.setProjectHooksPendingApproval(false);
 
       expect(config.isProjectHooksPendingApproval()).toBe(false);
       expect(config.getProjectHooks()).toBe(projectHooks);
+      expect(config.getWithheldProjectHooks()).toBeUndefined();
     });
 
     it.each([

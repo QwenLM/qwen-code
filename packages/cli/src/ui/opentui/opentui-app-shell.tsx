@@ -513,7 +513,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // app level; without it a `.mcp.json` checked into the project is never
   // offered here and its servers stay silently disconnected.
   const mcpApproval = useMcpApproval(config);
-  const hooksApproval = useProjectHooksApproval(config, settings);
+  const hooksApproval = useProjectHooksApproval(config, settings, (text) =>
+    addInfoItem({ type: MessageType.INFO, text }),
+  );
 
   // ink AppContainer's contextFilesAnnouncedRef: the context-file set is
   // announced once per session, on the first submission that reaches a model.

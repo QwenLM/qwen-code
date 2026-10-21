@@ -418,13 +418,15 @@ export class HookRegistry {
           continue;
         }
 
-        // Add source to hook config (only for command and http hooks)
-        if (hookConfig.type !== 'function') {
-          (hookConfig as { source?: HooksConfigSource }).source = source;
-        }
+        // Tag a copy: the definition belongs to the caller's settings, whose
+        // hooks block is hashed for project-hooks approval.
+        const config =
+          hookConfig.type === 'function'
+            ? hookConfig
+            : { ...hookConfig, source };
 
         this.entries.push({
-          config: hookConfig,
+          config,
           source,
           eventName,
           matcher: definition.matcher,

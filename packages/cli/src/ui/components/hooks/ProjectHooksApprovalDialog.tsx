@@ -21,6 +21,8 @@ export enum ProjectHooksApprovalChoice {
 
 /** Rows the dialog needs besides the hook list. */
 export const PROJECT_HOOKS_DIALOG_CHROME_ROWS = 16;
+/** Hook rows kept even on a short terminal: never ask to approve an empty list. */
+export const PROJECT_HOOKS_DIALOG_MIN_HOOK_ROWS = 3;
 
 interface ProjectHooksApprovalDialogProps {
   /** One line per configured hook, e.g. `SessionStart  ./setup.sh`. */
@@ -58,7 +60,10 @@ export const ProjectHooksApprovalDialog: React.FC<
       ? lines
       : fitHookLines(
           lines,
-          availableTerminalHeight - PROJECT_HOOKS_DIALOG_CHROME_ROWS,
+          Math.max(
+            PROJECT_HOOKS_DIALOG_MIN_HOOK_ROWS,
+            availableTerminalHeight - PROJECT_HOOKS_DIALOG_CHROME_ROWS,
+          ),
         );
 
   return (
@@ -85,7 +90,11 @@ export const ProjectHooksApprovalDialog: React.FC<
 
         <Box flexDirection="column" marginBottom={1}>
           {shown.map((line, index) => (
-            <Text key={`${index}-${line}`} color={theme.text.primary}>
+            <Text
+              key={`${index}-${line}`}
+              color={theme.text.primary}
+              wrap="truncate"
+            >
               {`  ${line}`}
             </Text>
           ))}

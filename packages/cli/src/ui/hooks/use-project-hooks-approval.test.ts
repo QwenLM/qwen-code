@@ -94,6 +94,24 @@ describe('useProjectHooksApproval', () => {
     expect(result.current.isProjectHooksApprovalDialogOpen).toBe(false);
   });
 
+  it.each([
+    [ProjectHooksApprovalChoice.APPROVE, false],
+    [ProjectHooksApprovalChoice.REJECT, false],
+    [ProjectHooksApprovalChoice.DISMISS, true],
+  ])('on %s, notes withheld hooks: %s', async (choice, notes) => {
+    const addInfo = vi.fn();
+    const config = makeConfig();
+    const settings = makeSettings(hooks);
+    const { result } = renderHook(() =>
+      useProjectHooksApproval(config, settings, addInfo),
+    );
+    await act(() => result.current.handleProjectHooksApprovalSelect(choice));
+    expect(addInfo).toHaveBeenCalledTimes(notes ? 1 : 0);
+    if (notes) {
+      expect(addInfo.mock.calls[0][0]).toContain('were not loaded');
+    }
+  });
+
   it('approve persists, un-gates the session, reloads the hooks and closes', async () => {
     const config = makeConfig();
     const settings = makeSettings(hooks);

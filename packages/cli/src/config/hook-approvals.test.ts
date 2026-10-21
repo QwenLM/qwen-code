@@ -13,6 +13,7 @@ import {
   fitHookLines,
   getProjectHooksHeadlessWarning,
   getProjectHooksRoot,
+  getSeparatedHookSettings,
   summarizeProjectHooks,
   hashProjectHooks,
   isProjectHooksPendingApproval,
@@ -20,6 +21,7 @@ import {
   loadHookApprovals,
   resetHookApprovalsForTesting,
 } from './hook-approvals.js';
+import { normalizeProjectRoot } from './approval-project-root.js';
 
 describe('hook-approvals (hash-bound approval store)', () => {
   let dir: string;
@@ -75,11 +77,7 @@ describe('hook-approvals (hash-bound approval store)', () => {
     await loadHookApprovals().setState(projectRoot, hooks, 'approved');
     const file = path.join(dir, HOOK_APPROVALS_FILENAME);
     const onDisk = JSON.parse(fs.readFileSync(file, 'utf-8'));
-    const key =
-      os.platform() === 'win32'
-        ? path.resolve(projectRoot).toLowerCase()
-        : path.resolve(projectRoot);
-    expect(onDisk[key]).toEqual({
+    expect(onDisk[normalizeProjectRoot(projectRoot)]).toEqual({
       hash: hashProjectHooks(hooks),
       status: 'approved',
     });
@@ -95,7 +93,7 @@ describe('hook-approvals (hash-bound approval store)', () => {
     fs.writeFileSync(
       path.join(dir, HOOK_APPROVALS_FILENAME),
       JSON.stringify({
-        [path.resolve(projectRoot)]: {
+        [normalizeProjectRoot(projectRoot)]: {
           hash: hashProjectHooks(hooks),
           ...extra,
         },
@@ -167,6 +165,25 @@ describe('hook-approvals (hash-bound approval store)', () => {
     ).toBe(path.join('/work', 'repo'));
   });
 
+  it.each([
+    ['a runnable block', hooks, true],
+    ['no block', undefined, false],
+    ['an empty block', {}, false],
+    ['a block with nothing runnable', { PreToolUse: [{ hooks: [] }] }, false],
+  ])('gives the gate a project root for %s: %s', (_label, block, rooted) => {
+    const separated = getSeparatedHookSettings({
+      getSystemHooks: () => undefined,
+      getUserHooks: () => undefined,
+      getProjectHooks: () => block,
+      workspace: { path: path.join('/work', 'repo', '.qwen', 'settings.json') },
+    });
+    expect(separated.projectHooks).toBe(block);
+    expect('projectHooksRoot' in separated).toBe(rooted);
+    if (rooted) {
+      expect(separated.projectHooksRoot).toBe(path.join('/work', 'repo'));
+    }
+  });
+
   it('names the recovery for a rejected block and the review for a pending one', () => {
     expect(getProjectHooksHeadlessWarning('pending')).toContain(
       'Run qwen interactively',
@@ -229,6 +246,24 @@ describe('summarizeProjectHooks', () => {
       expect(line).not.toContain(ch);
     }
     expect(line).toContain('curl x | sh');
+  });
+
+  it.each([
+    ['command', { type: 'command', command: `echo ${'a'.repeat(250)}` }],
+    ['prompt', { type: 'prompt', prompt: `Be nice. ${'a'.repeat(250)}` }],
+  ])('flags a cut %s instead of eliding its tail silently', (_type, hook) => {
+    const [line] = summarizeProjectHooks({ Stop: [{ hooks: [hook] }] });
+    expect(line).toMatch(
+      /… \[\d+ chars, full value in \.qwen\/settings\.json\]/,
+    );
+  });
+
+  it('shows a prompt in full up to the command budget', () => {
+    const prompt = `${'a'.repeat(150)} INJECTED`;
+    const [line] = summarizeProjectHooks({
+      Stop: [{ hooks: [{ type: 'prompt', prompt }] }],
+    });
+    expect(line).toContain('INJECTED');
   });
 });
 

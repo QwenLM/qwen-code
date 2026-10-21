@@ -5628,16 +5628,16 @@ describe('loadCliConfig with includeDirectories', () => {
     });
 
     it.each([
-      ['default mode', [], {}, true],
-      ['--yolo', ['--yolo'], {}, undefined],
-      ['--approval-mode yolo', ['--approval-mode', 'yolo'], {}, undefined],
-      ['--safe-mode', ['--safe-mode'], {}, undefined],
-      ['--bare', ['--bare'], {}, undefined],
-      ['disableAllHooks', [], { disableAllHooks: true }, undefined],
-      ['a settings-only yolo', [], { tools: { approvalMode: 'yolo' } }, true],
+      ['default mode', true, [], {}],
+      ['--yolo', undefined, ['--yolo'], {}],
+      ['--approval-mode yolo', undefined, ['--approval-mode', 'yolo'], {}],
+      ['--safe-mode', undefined, ['--safe-mode'], {}],
+      ['--bare', undefined, ['--bare'], {}],
+      ['disableAllHooks', undefined, [], { disableAllHooks: true }],
+      ['a settings-only yolo', true, [], { tools: { approvalMode: 'yolo' } }],
     ] as const)(
       'with %s, an unapproved block gives projectHooksPendingApproval=%s',
-      async (_label, flags, settings, expected) => {
+      async (_label, expected, flags, settings) => {
         process.argv = ['node', 'script.js', ...flags];
         const argv = await parseArguments();
 
