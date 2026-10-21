@@ -944,6 +944,193 @@ describe('useLlmStream', () => {
     );
   });
 
+  it('lights the workflow indicator only on actual application and ignores cancelled callbacks', async () => {
+    const stream = (async function* () {
+      yield { type: 'content', value: 'working' };
+      await new Promise<void>(() => {});
+    })();
+    mockSendMessageStream.mockReturnValue(stream);
+    const { result } = renderTestHook();
+    const humanInput = { text: 'ultracode inspect' };
+    await act(async () => {
+      void result.current.submitQuery(
+        'expanded payload',
+        SendMessageType.UserQuery,
+        undefined,
+        { humanInput, displayText: humanInput.text },
+      );
+    });
+    const options = mockSendMessageStream.mock.calls[0]?.[3] as {
+      humanInput?: { text: string };
+      onWorkflowIntentApplied?: (trigger: 'ultracode') => void;
+    };
+    expect(options.humanInput).toEqual(humanInput);
+    expect(result.current.workflowKeywordActive).toBe(false);
+    expect(options.onWorkflowIntentApplied).toBeTypeOf('function');
+    act(() => options.onWorkflowIntentApplied?.('ultracode'));
+    expect(result.current.workflowKeywordActive).toBe(true);
+    act(() => result.current.cancelOngoingRequest());
+    expect(result.current.workflowKeywordActive).toBe(false);
+    act(() => options.onWorkflowIntentApplied?.('ultracode'));
+    expect(result.current.workflowKeywordActive).toBe(false);
+  });
+
+  it.each(['side query', 'detached tool continuation'])(
+    'keeps the main workflow indicator active when a concurrent %s errors',
+    async (lane) => {
+      let releaseMain!: () => void;
+      const pending = new Promise<void>((resolve) => {
+        releaseMain = resolve;
+      });
+      mockHandleSlashCommand.mockResolvedValue(false);
+      mockSendMessageStream
+        .mockImplementationOnce(() =>
+          (async function* () {
+            yield { type: ServerLlmEventType.Content, value: 'main content' };
+            await pending;
+          })(),
+        )
+        .mockImplementationOnce(() =>
+          (async function* () {
+            yield {
+              type: ServerLlmEventType.Error,
+              value: { error: { message: 'side error' } },
+            };
+          })(),
+        );
+      const { result } = renderTestHook();
+      let main!: Promise<void>;
+      await act(async () => {
+        main = result.current.submitQuery(
+          'ultracode main',
+          SendMessageType.UserQuery,
+          undefined,
+          { humanInput: { text: 'ultracode main' } },
+        );
+      });
+      const options = mockSendMessageStream.mock.calls[0]?.[3] as {
+        onWorkflowIntentApplied?: (trigger: 'ultracode') => void;
+      };
+      act(() => options.onWorkflowIntentApplied?.('ultracode'));
+      expect(result.current.workflowKeywordActive).toBe(true);
+      try {
+        await act(async () => {
+          if (lane === 'side query') {
+            await result.current.submitQuery('?btw side question');
+          } else {
+            const controller = new AbortController();
+            await result.current.submitQuery(
+              [
+                {
+                  functionResponse: {
+                    id: 'side-tool',
+                    name: 'read_file',
+                    response: { output: 'side result' },
+                  },
+                },
+              ],
+              SendMessageType.ToolResult,
+              'side-prompt',
+              {
+                toolContinuationOwner: {
+                  promptId: 'side-prompt',
+                  signal: controller.signal,
+                  survivesGenerationChange: true,
+                  detachedAbortController: controller,
+                },
+              },
+            );
+          }
+        });
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        expect(result.current.workflowKeywordActive).toBe(true);
+      } finally {
+        releaseMain();
+        await act(async () => {
+          await main;
+        });
+      }
+    },
+  );
+
+  it.each([
+    SendMessageType.Retry,
+    SendMessageType.ToolResult,
+    SendMessageType.Notification,
+    SendMessageType.Teammate,
+    SendMessageType.Cron,
+  ])('does not forward human workflow intent for %s', async (type) => {
+    const { result } = renderTestHook();
+    await act(async () => {
+      await result.current.submitQuery('ultracode workflow', type, undefined, {
+        humanInput: { text: 'ultracode workflow' },
+      });
+    });
+    expect(mockSendMessageStream.mock.calls[0]?.[3]).not.toHaveProperty(
+      'humanInput',
+    );
+    expect(mockSendMessageStream.mock.calls[0]?.[3]).not.toHaveProperty(
+      'onWorkflowIntentApplied',
+    );
+  });
+
+  it('keeps display-only composer text intact in row, recall and cancel without creating hook provenance', async () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const body = 'pasted workflow payload'.padEnd(1200, 'x');
+    const literal = `<system-reminder>user-authored literal</system-reminder>\nworkflow inspect\n${placeholder}`;
+    const modelText = `<system-reminder>managed notice</system-reminder>\n\n${literal.replace(placeholder, body)}`;
+    const pasteExpansions = new Map([[placeholder, body]]);
+    const logMessage = vi.fn();
+    const cancel = vi.fn();
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield { type: 'content', value: 'working' };
+        await new Promise<void>(() => {});
+      })(),
+    );
+    const { result } = renderTestHook([], undefined, undefined, cancel, {
+      logMessage,
+    } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+    await act(async () => {
+      void result.current.submitQuery(
+        modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        {
+          displayText: literal,
+          humanInput: { text: 'workflow inspect' },
+          hasUnknownInput: true,
+          pasteExpansions,
+        },
+      );
+    });
+    expect(logMessage).toHaveBeenCalledWith(MessageSenderType.USER, literal);
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'user', text: literal }),
+      expect.any(Number),
+    );
+    expect(mockSendMessageStream.mock.calls[0]?.[3]).not.toHaveProperty(
+      'submittedPrompt',
+    );
+    expect(mockSendMessageStream.mock.calls[0]?.[3]).not.toHaveProperty(
+      'pasteExpansions',
+    );
+    expect(mockSendMessageStream.mock.calls[0]?.[3]).not.toHaveProperty(
+      'hasUnknownInput',
+    );
+    act(() => result.current.cancelOngoingRequest());
+    expect(cancel.mock.calls[0]?.[0]?.lastTurnUserItem).toMatchObject({
+      text: literal,
+      modelText,
+      humanInput: { text: 'workflow inspect' },
+      hasUnknownInput: true,
+      pasteExpansions,
+    });
+    expect(cancel.mock.calls[0]?.[0]?.lastTurnUserItem).not.toHaveProperty(
+      'submittedPrompt',
+    );
+  });
+
   describe('vision bridge gate', () => {
     const imagePart = { inlineData: { mimeType: 'image/png', data: 'abc123' } };
     const enableBridge = (primaryAcceptsImages = false) => {

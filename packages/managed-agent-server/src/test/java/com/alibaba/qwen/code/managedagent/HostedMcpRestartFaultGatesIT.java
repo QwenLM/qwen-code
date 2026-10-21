@@ -64,6 +64,8 @@ import static org.awaitility.Awaitility.await;
 // original `${configurationId}:release` operation instead of minting one.
 // Its pre-dispatch cancel cell parks the owner acquire between `intent` and
 // `dispatch_started` instead of killing a process.
+// Its R1-1 cell refuses the owner release after `drained` and replaces
+// Spring, and with it the embedded Broker, before the retry.
 class HostedMcpRestartFaultGatesIT {
     private static final String PROFILE = "hosted-workspace-mcp/1";
     // Per-case evidence letter: FG12c keeps its directory, FG12d's release
@@ -81,7 +83,9 @@ class HostedMcpRestartFaultGatesIT {
             "fg12d",
             "firstReleaseRefusedBeforeForwardingResumesUnderTheSameId",
             "fg12d",
-            "cancelBeforeDispatchIsNotStartedProvenOnMySql", "fg12d");
+            "cancelBeforeDispatchIsNotStartedProvenOnMySql", "fg12d",
+            "ownerReleaseRefusedThenSpringRestartReleasesTheHolderOnMySql",
+            "fg12d");
     private static final String TOKEN = "extension-process-fixture-token";
     private static final String CAPABILITY = "sha256:" + "a".repeat(64);
     private final ObjectMapper json = new ObjectMapper();
@@ -108,6 +112,10 @@ class HostedMcpRestartFaultGatesIT {
     private volatile String refuseNextKind;
     private final java.util.concurrent.atomic.AtomicBoolean refuseArmed =
             new java.util.concurrent.atomic.AtomicBoolean();
+    private final java.util.concurrent.atomic.AtomicBoolean
+            ownerReleaseRefuseArmed =
+                    new java.util.concurrent.atomic.AtomicBoolean();
+    private boolean springSeeded;
     private volatile String acquireHoldSession;
     private volatile String acquireHoldOperation;
     private volatile CountDownLatch acquireHold;
@@ -940,6 +948,140 @@ class HostedMcpRestartFaultGatesIT {
                 .as("baseline rev 1 only").hasSize(1);
     }
 
+    // FG12d R1-1 (issue #14447, #14880 item 3): the owner release of a
+    // lifecycle v2 close is refused before it reaches the Broker, after every
+    // configuration is `drained`; then Spring, and with it the embedded
+    // Broker, is replaced. The new Broker holds no local context for the
+    // Session, so the Harness's retry lands on the persisted-Session release
+    // path. Detach must recover with that one owner release: no acquire and
+    // no MCP control, and the storage holder clears.
+    @Test
+    @Timeout(600)
+    void ownerReleaseRefusedThenSpringRestartReleasesTheHolderOnMySql()
+            throws Exception {
+        SessionRef session = createSession();
+        baseline(session);
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id ="
+                + " ? AND session_id = ?", PROFILE, tenant, session.id());
+        OperationRecord close = admitClose(session);
+        String closeId = close.operationId();
+        long claimGeneration = close.claimGeneration();
+        driveLifecycle(session, closeId, claimGeneration, "effects");
+        jdbc.update("UPDATE ma_session_head SET phase = 'DRAINING' WHERE"
+                + " tenant_id = ? AND harness_session_id = ? AND"
+                + " operation_id = ?", tenant, session.id(), closeId);
+        driveLifecycle(session, closeId, claimGeneration,
+                "prepare_resources");
+
+        refuseNextOwnerRelease();
+        HttpResponse<String> refused = rawLifecycle(session, closeId,
+                claimGeneration, "settle_resources");
+        assertThat(refused.statusCode()).as(refused.body()).isEqualTo(503);
+        assertThat(json.readTree(refused.body()).path("code").asText())
+                .isEqualTo("workspace_lifecycle_resources_unsettled");
+        assertThat(ownerReleaseCalls()).extracting(ProxyCall::status)
+                .as("the only owner release is refused before forwarding")
+                .containsExactly(503);
+        assertThat(configuration(session.id()).path("releaseState").asText())
+                .as("the drain receipt is committed before the owner release")
+                .isEqualTo("drained");
+        assertThat(storageHolders(session))
+                .as("the refused release keeps the storage holder")
+                .isEqualTo(1);
+        List<Map<String, Object>> runtimeBefore = runtimeState(session);
+        assertThat(runtimeBefore).extracting(row -> row.get("session_state"))
+                .containsExactly("READY");
+
+        restartSpring();
+        int restartSeq = proxySequence.get();
+        assertThat(runtimeState(session))
+                .as("the restart settles nothing on its own")
+                .isEqualTo(runtimeBefore);
+        assertThat(storageHolders(session)).isEqualTo(1);
+
+        // The Harness's Session writer lease may lapse while Spring is down;
+        // the lifecycle route answers unsettled until the writer is active
+        // again, and that attempt sends nothing to the Broker.
+        HttpResponse<String> settled = null;
+        for (int attempt = 0; attempt < 30 && settled == null; attempt++) {
+            HttpResponse<String> response = rawLifecycle(session, closeId,
+                    claimGeneration, "settle_resources");
+            if (response.statusCode() == 200) {
+                settled = response;
+                break;
+            }
+            String code = json.readTree(response.body()).path("code")
+                    .asText();
+            assertThat(code).as("settle: %s", response.body())
+                    .isIn("workspace_lifecycle_resources_unsettled",
+                            "hosted_turn_active");
+            Thread.sleep(1_000);
+        }
+        assertThat(settled).as("detach recovers after the Spring restart")
+                .isNotNull();
+        assertThat(proxyCalls.stream()
+                .filter(call -> call.seq() > restartSeq).toList())
+                .as("after the restart the Harness resends only the owner"
+                        + " release: no acquire and no MCP control")
+                .singleElement()
+                .satisfies(call -> {
+                    assertThat(call.path()).endsWith(":release");
+                    assertThat(call.kind()).isNull();
+                    assertThat(call.status()).isEqualTo(200);
+                });
+        assertThat(ownerReleaseCalls()).extracting(ProxyCall::status)
+                .containsExactly(503, 200);
+        assertThat(storageHolders(session))
+                .as("the replaced Broker releases the original owner")
+                .isZero();
+        assertThat(configuration(session.id()).path("releaseState").asText())
+                .isEqualTo("released");
+        assertThat(runtimeState(session)).extracting(
+                row -> row.get("session_state")).containsExactly("RELEASED");
+        assertThat(controls("mcp-configure")).isEmpty();
+        assertThat(controls("mcp-invoke")).isEmpty();
+        assertThat(controls("mcp-release"))
+                .as("the release was dispatched once, before the restart")
+                .hasSize(1);
+        assertThat(fixtureEvents("mcp.start")).hasSize(1);
+        assertThat(fixtureEvents("mcp.exit")).hasSize(1);
+    }
+
+    private void refuseNextOwnerRelease() {
+        ownerReleaseRefuseArmed.set(true);
+    }
+
+    // A whole-Spring restart replaces the embedded Broker. The Broker's close
+    // writes nothing, and the durable local provisioner leaves the worker
+    // running, so this stands in for a Broker that died between the drain
+    // receipt and the owner release.
+    private void restartSpring() {
+        spring.close();
+        startSpring();
+    }
+
+    private List<ProxyCall> ownerReleaseCalls() {
+        return proxyCalls.stream().filter(call -> "POST".equals(call.method())
+                && call.path().endsWith(":release")).toList();
+    }
+
+    private int storageHolders(SessionRef session) {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner o"
+                + " JOIN ma_runtime_binding b ON o.binding_id = b.binding_id"
+                + " WHERE b.tenant_id = ? AND b.isolation_key = ? AND"
+                + " o.holder_key IS NOT NULL", Integer.class, tenant,
+                session.id());
+    }
+
+    private List<Map<String, Object>> runtimeState(SessionRef session) {
+        return jdbc.queryForList("SELECT b.binding_state, b.runtime_generation"
+                + " AS binding_generation, s.session_state,"
+                + " s.runtime_generation FROM ma_runtime_session s JOIN"
+                + " ma_runtime_binding b ON s.binding_id = b.binding_id WHERE"
+                + " s.tenant_id = ? AND s.harness_session_id = ?", tenant,
+                session.id());
+    }
+
     private void baseline(SessionRef session) throws Exception {
         List<Map<String, Object>> prompt = List.of(
                 Map.of("type", "text", "text", "FG12C_BASE"));
@@ -1403,6 +1545,13 @@ class HostedMcpRestartFaultGatesIT {
                                 + workspace.getParent());
         jdbc = spring.getBean(JdbcTemplate.class);
         store = spring.getBean(ManagedAgentStore.class);
+        // The storage registration and the Workspace rows are durable, so a
+        // restarted context reuses them. Registering again is an operator
+        // action, and the guard refuses it while the holder is booked.
+        if (springSeeded) {
+            return;
+        }
+        springSeeded = true;
         WorkspaceStorageGuard guard = spring
                 .getBean(WorkspaceStorageGuard.class);
         guard.register(tenant, "storage", UUID.randomUUID().toString());
@@ -1489,6 +1638,24 @@ class HostedMcpRestartFaultGatesIT {
         entry.put("seq", wireSequence.incrementAndGet());
         if (parsed != null) {
             entry.put("request", parsed);
+        }
+        if ("POST".equals(exchange.getRequestMethod())
+                && path.endsWith(":release")
+                && ownerReleaseRefuseArmed.compareAndSet(true, false)) {
+            proxyCalls.set(index, call.complete(503));
+            entry.put("status", 503);
+            entry.put("answer", json.createObjectNode()
+                    .put("error", "injected_refusal"));
+            wire.add(entry);
+            byte[] refusal = json.writeValueAsString(
+                    Map.of("error", "injected_refusal"))
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type",
+                    "application/json");
+            exchange.sendResponseHeaders(503, refusal.length);
+            exchange.getResponseBody().write(refusal);
+            exchange.close();
+            return;
         }
         if (refuseNextKind != null && refuseNextKind.equals(kind)
                 && refuseArmed.compareAndSet(true, false)) {
