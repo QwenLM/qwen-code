@@ -1467,6 +1467,39 @@ class HostedAutomationFaultGatesIT {
         request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-settled-retire", 202);
     }
 
+    // FG11d: retrying a cancel under the same key reuses its operation. The
+    // second request answers the already-cancelled task, records nothing new and
+    // starts no Turn.
+    @Test
+    @Timeout(600)
+    void fg11dCancelRetryReusesItsOperationOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("cancel-retry");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11A_HOLD", "0 0 1 1 *"), "fg11d-cancel-retry-base", 202).path("id").asText();
+        String run = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-cancel-retry-run", 202)
+                .path("id").asText();
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("manual:fg11d-cancel-retry-run")));
+        JsonNode task = request("GET", "/v1/agents/sessions/" + session + "/tasks", null, null, 200)
+                .path("data").path(0);
+        assertThat(task.path("kind").asText()).as("the newest task is the run's").isEqualTo("automation_run");
+        String taskId = task.path("id").asText();
+        request("POST", "/v1/agents/sessions/" + session + "/tasks/" + taskId + "/cancel", null,
+                "fg11d-cancel-retry", 202);
+        waiting().atMost(Duration.ofSeconds(120)).untilAsserted(() -> assertThat(runState(run))
+                .as("the run is cancelled").isEqualTo("cancelled"));
+        // The retry reuses the committed cancel instead of acting twice.
+        request("POST", "/v1/agents/sessions/" + session + "/tasks/" + taskId + "/cancel", null,
+                "fg11d-cancel-retry", 202);
+        assertThat(runState(run)).as("the retry changes nothing").isEqualTo("cancelled");
+        assertThat(jdbc.queryForMap("SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                + " AND schedule_id = ? AND occurrence_key = ?", tenant, id, "manual:fg11d-cancel-retry-run"))
+                .as("the occurrence settles once").containsEntry("outcome", "fired");
+        heldModel.countDown();
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-cancel-retry-retire", 202);
+    }
+
     private void boot(String letter) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("FG11 requires real MySQL").startsWith("jdbc:mysql:");
         this.letter = letter;

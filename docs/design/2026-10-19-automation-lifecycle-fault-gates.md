@@ -65,6 +65,9 @@ asserts:
   arriving after settlement is refused with `409 task_action_unavailable`
   (`The task does not accept a cancellation now.`), and the run stays
   `completed` with its occurrence `fired`;
+- a cancel retried under the same key reuses its committed operation and changes
+  nothing — delivered: the second request answers the cancelled task, the run
+  stays `cancelled` and the occurrence settles once;
 - a retry under the same key reuses the original operation and run — delivered:
   the second `POST /runs` answers the run it already made, records no second
   occurrence and starts no second Turn. That a parked cancel is never
