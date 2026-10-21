@@ -28,6 +28,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { mkdtemp, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { ApprovalMode, Storage, type Config } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
@@ -3277,9 +3278,14 @@ describe('composer admission and attachment ownership', () => {
     expect(onSubmit).toHaveBeenCalledTimes(2);
     expect(onSubmit.mock.calls[1]?.[1]).toEqual(['/tmp/clipboard-test.png']);
   });
-  it.each([false, true])(
-    'promotes pure image paths before collapse, retaining the whole paste on partial failure=%s',
-    async (partialFailure) => {
+  it.each([
+    { partialFailure: false, uri: false },
+    { partialFailure: true, uri: false },
+    { partialFailure: false, uri: true },
+    { partialFailure: true, uri: true },
+  ])(
+    'promotes image paste uri=$uri, retaining the whole paste on partial failure=$partialFailure',
+    async ({ partialFailure, uri }) => {
       const scratch = await mkdtemp(join(tmpdir(), 'qwen-paste-test-'));
       const tempDir = vi
         .spyOn(Storage, 'getGlobalTempDir')
@@ -3291,7 +3297,9 @@ describe('composer admission and attachment ownership', () => {
         const paths = partialFailure
           ? [image, join(scratch, 'missing.png')]
           : Array.from({ length: 11 }, () => image);
-        const pasted = paths.map((file) => JSON.stringify(file)).join('\n');
+        const pasted = paths
+          .map((file) => JSON.stringify(uri ? pathToFileURL(file).href : file))
+          .join('\n');
         const onNotice = vi.fn();
         const onSubmit = vi.fn(() => true);
         render(

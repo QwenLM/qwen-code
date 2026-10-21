@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { fileUriToLocalPath, isFileUri, isUncPath } from './file-uri.js';
+
 const PASTED_IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp)$/i;
 
 /**
@@ -33,10 +35,24 @@ export function classifyPastedImagePaths(pasted: string): {
   const imagePaths: string[] = [];
   let allImages = tokens.length > 0;
   for (const token of tokens) {
-    const normalized = token
+    let normalized = token
       .replace(/^@/, '') // strip the `@` reference prefix
       .replace(/^["']|["']$/g, '') // strip surrounding quotes
       .replace(/\\ /g, ' '); // unescape shell-escaped spaces
+    if (isFileUri(normalized)) {
+      // A terminal or helper may inject the uri-list form of a copied file.
+      const localPath = fileUriToLocalPath(normalized);
+      if (localPath === null) {
+        // A remote host or no local path on this platform: nothing to stat.
+        allImages = false;
+        continue;
+      }
+      normalized = localPath;
+    } else if (isUncPath(normalized)) {
+      // fs.stat on a UNC share authenticates to its host (Windows SMB).
+      allImages = false;
+      continue;
+    }
     if (PASTED_IMAGE_EXTENSIONS.test(normalized)) {
       imagePaths.push(normalized);
     } else {
