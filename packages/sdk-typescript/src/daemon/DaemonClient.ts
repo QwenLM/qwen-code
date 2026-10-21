@@ -4295,7 +4295,10 @@ export class DaemonClient {
    *
    * An explicit client deadline is returned verbatim, so the operator's own
    * value reaches `fetchWithTimeout` unchanged — an explicit `0` asks for no
-   * deadline. A *derived* `0` means something else:
+   * deadline. (`resolveSessionOperationTimeoutMs` also maps an explicit value
+   * above `MAX_TIMER_DELAY_MS` onto `0`, so that over-ceiling case stays
+   * unbounded; it is pre-existing and out of scope here.) A *derived* `0`
+   * means something else:
    * `resolveSessionOperationTimeoutMs` returns it when the advertised budget
    * plus headroom overflowed `MAX_TIMER_DELAY_MS`, and `fetchWithTimeout` reads
    * it as the same "no deadline", so the spawn would arm no timer and attach no

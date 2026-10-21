@@ -4399,9 +4399,13 @@ describe('DaemonClient', () => {
           // Clamped to the ceiling, so a deadline is armed at all — the whole
           // point of the fix: before it, `signal` stayed undefined forever.
           expect(signal).toBeDefined();
-          await vi.advanceTimersByTimeAsync(29_999);
+          // One millisecond short of the ceiling it must still be live. The
+          // advances sum to exactly `MAX_TIMER_DELAY_MS`, so the timer fires on
+          // the final tick: flooring the clamp at 30s (or an off-by-one
+          // `MAX_TIMER_DELAY_MS - 1`) aborts earlier and reds this line.
+          await vi.advanceTimersByTimeAsync(2_147_483_647 - 1);
           expect(signal?.aborted).toBe(false);
-          await vi.advanceTimersByTimeAsync(2_147_483_647 - 29_999);
+          await vi.advanceTimersByTimeAsync(1);
           expect(await outcome).toMatchObject({ name: 'TimeoutError' });
         } finally {
           vi.useRealTimers();
