@@ -798,6 +798,14 @@ it.each(
       {
         ...prepared,
         ...(allowPersistentRetry === undefined ? {} : { allowPersistentRetry }),
+        ...(allowPersistentRetry === undefined
+          ? {}
+          : {
+              contextPrefixLength: allowPersistentRetry ? 5 : 0,
+              history: allowPersistentRetry
+                ? Array.from({ length: 5 }, () => prepared.history[0]!)
+                : prepared.history,
+            }),
       },
       round,
       false,
@@ -829,6 +837,38 @@ it.each(
       ).toBe('runnable');
     } finally {
       await replacement.close();
+    }
+  },
+);
+
+it.each([-1, 6, 0.5])(
+  'rejects an invalid saved context prefix %s',
+  async (contextPrefixLength) => {
+    const f = await fixture();
+    try {
+      const request = createHostedModelRequest(
+        f.session,
+        f.promptId,
+        { ...prepared, contextPrefixLength },
+        0,
+        false,
+        undefined,
+        { bootId: 'source-boot', eventEpoch: 'source-epoch' },
+      );
+      await new ManagedHookActivationController(f.session).runTurn(
+        f.promptId,
+        async (scope) => {
+          await scope.beginMainAttempt(
+            'fixture',
+            await publishHostedModelRequest(f.session, request),
+          );
+        },
+      );
+      await expect(
+        findHostedModelRequest(f.session, f.promptId),
+      ).rejects.toThrow('Invalid saved model request');
+    } finally {
+      await f.session.close();
     }
   },
 );

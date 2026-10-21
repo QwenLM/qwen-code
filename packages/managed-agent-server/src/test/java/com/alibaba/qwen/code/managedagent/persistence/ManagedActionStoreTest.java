@@ -15,6 +15,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -53,7 +55,7 @@ class ManagedActionStoreTest {
 
     @BeforeEach
     void initialize() throws Exception {
-        fixture = ConsolidatedStoreFixture.open("action-store");
+        fixture = ConsolidatedStoreFixture.open("action_store");
         var source = fixture.source();
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
@@ -423,6 +425,63 @@ class ManagedActionStoreTest {
         return admitAs(null, key, digest, body, now);
     }
 
+    @ParameterizedTest
+    @CsvSource({"RUNNING,allow,false,3", "ACCEPTED,allow,false,3", "RUNNING,deny,true,2",
+            "CANCELLED,allow,true,2", "COMPLETED,allow,true,2", "CANCELLING,allow,true,2",
+            "FAILED,allow,true,2", "RECOVERY_BLOCKED,allow,true,2"})
+    void planExitUsesItsActiveTurnAfterLivePolicyChanges(String turnStatus, String option,
+            boolean expectedPlan, long expectedRevision) {
+        jdbc.update("UPDATE ma_session SET approval_mode='default', selected_approval_mode='yolo',"
+                + " approval_revision=2, plan_enabled=TRUE WHERE tenant_id=? AND session_id=?", TENANT, SESSION);
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                        + "status,approval_mode,approval_revision,plan_enabled,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,'turn','turn','[]','digest',?,'default',1,TRUE,0,0)",
+                TENANT, SESSION, turnStatus);
+        ObjectNode options = planExitOptions();
+        project("requested", null, 1, options);
+        project("decided", response(option), 2, options);
+        assertThat(jdbc.queryForObject("SELECT plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
+                Boolean.class, TENANT, SESSION)).isEqualTo(expectedPlan);
+        assertThat(jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id=? AND session_id=?",
+                Long.class, TENANT, SESSION)).isEqualTo(expectedRevision);
+        assertThat(jdbc.queryForObject("SELECT selected_approval_mode FROM ma_session WHERE tenant_id=? AND session_id=?",
+                String.class, TENANT, SESSION)).isEqualTo("yolo");
+        assertThat(jdbc.queryForObject("SELECT approval_revision FROM ma_turn WHERE tenant_id=? AND session_id=?",
+                Long.class, TENANT, SESSION)).isEqualTo(1);
+    }
+
+    private ObjectNode planExitOptions() {
+        ObjectNode input = JSON.createObjectNode().put("harnessSessionId", SESSION)
+                .put("runtimeSessionId", "turn").put("payloadJson", "{\"toolName\":\"exit_plan_mode\",\"input\":{\"plan\":\"Read then edit\"}}");
+        ObjectNode inputRef = storeBody("plan-input", "managed-tool-input", input);
+        ObjectNode definitionRef = storeBody("definition", "managed-definition", JSON.createObjectNode());
+        ObjectNode continuation = JSON.createObjectNode().put("v", 1).put("promptId", "turn")
+                .put("batchId", "batch").put("model", "model").put("round", 0)
+                .put("stage", "approval").put("approvalOrdinal", 0).put("actionId", ACTION);
+        continuation.putObject("sessionKey").put("tenantId", TENANT).put("workspaceId", "workspace").put("sessionId", SESSION);
+        continuation.putObject("sourceActivation").put("activationId", "activation").put("epoch", 1);
+        continuation.putObject("runtime").put("runtimeSessionId", "turn").put("bindingId", "binding")
+                .put("generation", "1").put("workspaceGeneration", "1");
+        continuation.set("definitionRef", definitionRef);
+        continuation.set("rootSnapshotRef", storeBody("snapshot", "managed-checkpoint", JSON.createObjectNode()));
+        continuation.set("assistantRef", storeBody("assistant", "managed-message", JSON.createObjectNode()));
+        ObjectNode call = continuation.putArray("calls").addObject().put("runtimeCallId", "runtime-call")
+                .put("requestDigest", "digest").put("argsDigest", "digest").put("prepareKey", "prepare")
+                .put("prepareReference", "reference").put("partIndex", 0).put("actionId", ACTION);
+        call.putNull("refusal");
+        call.putObject("call").put("name", "exit_plan_mode").put("callId", "call");
+        call.set("inputRef", inputRef);
+        call.set("definitionRef", definitionRef);
+        ObjectNode options = JSON.createObjectNode().put("v", 3).put("requestId", ACTION).put("turnId", "turn")
+                .put("functionCallId", "call").put("toolName", "exit_plan_mode").put("policyRevision", "hosted-tool-approval/1")
+                .put("inputRevision", 1).put("createdAt", 1).put("expiresAt", 1000);
+        options.putArray("options").addObject().put("id", "allow").put("label", "Allow");
+        options.withArray("options").addObject().put("id", "deny").put("label", "Deny");
+        options.set("inputRef", inputRef);
+        options.set("continuationRef", storeBody("continuation", "hosted-approval-continuation", continuation));
+        return options;
+    }
+
     private OperationAdmission admitAs(String actor, String key, String digest, JsonNode body, long now) {
         return transactions.execute(status -> actions.admit(TENANT, SESSION, actor,
                 actor == null ? "anonymous" : actor + "-digest", key, digest, ACTION, body, now));
@@ -492,6 +551,10 @@ class ManagedActionStoreTest {
                 .put("inputRevision", 1).put("createdAt", 1).put("expiresAt", expiresAt);
         options.putArray("options").addObject().put("id", "allow").put("label", "Allow");
         options.withArray("options").addObject().put("id", "deny").put("label", "Deny");
+        project(state, answer, sequence, options);
+    }
+
+    private void project(String state, JsonNode answer, long sequence, ObjectNode options) {
         ObjectNode optionsRef = storeBody("options", "managed-action-options", options);
         ObjectNode decision = null;
         if (answer != null) {
