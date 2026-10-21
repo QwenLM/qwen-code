@@ -4926,6 +4926,10 @@ export const useLlmStream = (
 
   const handleCompletedTools = useCallback(
     async (completedToolCallsFromScheduler: TrackedToolCall[]) => {
+      const sessionId = config.getSessionId();
+      const chat = llmClient?.getChat();
+      const isCurrentSession = () =>
+        config.getSessionId() === sessionId && llmClient?.getChat() === chat;
       const completedAndReadyToSubmitTools =
         completedToolCallsFromScheduler.filter(
           (
@@ -5407,6 +5411,10 @@ export const useLlmStream = (
           });
         }
       }
+      if (!isCurrentSession()) {
+        if (toolGoalBinding) releaseGoalTurn(toolGoalBinding);
+        return;
+      }
       if (newSuccessfulMemorySaves.length > 0) {
         if (!didRefreshManagedMemory) {
           // Perform the legacy save_memory refresh only when the managed-memory
@@ -5558,6 +5566,10 @@ export const useLlmStream = (
       const responsesToSend = finalizedResponses.flatMap(
         (entry) => entry.responseParts,
       );
+      if (!isCurrentSession()) {
+        if (toolGoalBinding) releaseGoalTurn(toolGoalBinding);
+        return;
+      }
       orderedResponses.forEach(({ request, response, status }, index) => {
         config.getChatRecordingService?.()?.recordToolResult?.(
           finalizedResponses[index].responseParts,
@@ -5591,7 +5603,12 @@ export const useLlmStream = (
         // this branch owes its own batch the same pairing, whether or not
         // every tool in it was cancelled.
         if (llmClient) {
-          llmClient.addHistory({ role: 'user', parts: responsesToSend });
+          const pairedCallIds = llmClient.getHistoryFunctionResponseIds();
+          const unpairedParts = finalizedResponses
+            .filter((entry) => !pairedCallIds.has(entry.callId))
+            .flatMap((entry) => entry.responseParts);
+          if (unpairedParts.length > 0)
+            llmClient.addHistory({ role: 'user', parts: unpairedParts });
         }
         markToolsAsSubmitted(
           llmTools.map((toolCall) => toolCall.request.callId),
