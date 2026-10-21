@@ -933,6 +933,39 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     });
   });
 
+  it('does not dispatch a call whose tail a comment opener inside it masks', () => {
+    // The opener sits in the block's own body, so the block's start is outside
+    // the masked region while its closing tag is inside it. Probing only the
+    // start dispatched the documented command and excised the opener from the
+    // visible turn, leaving an orphan terminator behind.
+    const text =
+      'Docs:\n\n' +
+      invoke(
+        'run_shell_command',
+        param('command', 'rm -rf /tmp/x') + '\n<!--',
+      ) +
+      '\n-->';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('still extracts a live call that follows a commented-out one', () => {
+    // The two-ended documentation probe must not widen into masking a sibling
+    // whose own extent never enters the region.
+    const text =
+      'Docs:\n\n<!--\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n-->\n\n' +
+      invoke('read_file', param('file_path', 'real.ts'));
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'read_file', args: { file_path: 'real.ts' } },
+    ]);
+  });
+
   it('does not dispatch a call documented in an indented code block', () => {
     const documented = invoke(
       'run_shell_command',

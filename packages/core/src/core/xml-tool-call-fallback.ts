@@ -737,7 +737,13 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     examples: Array<[number, number]> = exampleRanges,
   ): boolean {
     return (
-      !hiddenDocs.some(([from, to]) => start >= from && start < to) &&
+      // Both ends, like the fence and example guards below: a comment opener
+      // inside the block's own body masks its tail, so probing only `start`
+      // dispatches a call the module just classified as documentation.
+      !hiddenDocs.some(
+        ([from, to]) =>
+          (start >= from && start < to) || (end - 1 >= from && end - 1 < to),
+      ) &&
       !positionInsideFence(text, start, parameterRanges) &&
       !positionInsideFence(
         text,
