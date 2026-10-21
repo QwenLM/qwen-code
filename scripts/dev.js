@@ -128,6 +128,11 @@ for (const name of readdirSync(join(root, 'packages', 'channels'))) {
   coreSubpathSourceUrls[channel.name] = pathToFileURL(entry).href;
 }
 
+coreSubpathSourceUrls['@qwen-code/channel-base/markdown-chunks'] =
+  pathToFileURL(
+    join(root, 'packages/channels/base/src/markdown-chunks.ts'),
+  ).href;
+
 const loaderCode = `
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

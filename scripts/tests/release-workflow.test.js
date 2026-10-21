@@ -478,8 +478,10 @@ describe('release workflow', () => {
         ref: '${{ github.workflow_sha }}',
         'fetch-depth': 1,
         'persist-credentials': false,
+        // The tarball gate rides this checkout too: run from the selected
+        // ref's own `scripts/`, it is missing on any ref that predates it.
         'sparse-checkout':
-          '/.github/scripts\n/scripts/assert-release-version.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
+          '/.github/scripts\n/scripts/assert-release-version.mjs\n/scripts/check-release-tarball-exec-bits.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
         'sparse-checkout-cone-mode': false,
         path: '.release-workflow',
       });
@@ -646,9 +648,15 @@ describe('release workflow', () => {
         join(directory, 'dist/package.json'),
         JSON.stringify({ name: '@qwen-code/qwen-code' }),
       );
-      writeFileSync(join(bin, 'npm'), '#!/bin/sh\nexit "$CLI_PUBLISHED"\n', {
-        mode: 0o755,
-      });
+      // `npm view` drives the already-published skip; `npm publish` is the
+      // generated CLI's own publish call, logged like the corepack one so the
+      // assertions below cover both. The CLI goes through npm because pnpm's
+      // packer drops the exec bit on `vendor/ripgrep/*/rg` (#12668).
+      writeFileSync(
+        join(bin, 'npm'),
+        '#!/bin/sh\nif [ "$1" = "view" ]; then exit "$CLI_PUBLISHED"; fi\nprintf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"\nexit "$PUBLISH_FAILURE"\n',
+        { mode: 0o755 },
+      );
       writeFileSync(
         join(bin, 'corepack'),
         '#!/bin/sh\nprintf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"\nexit "$PUBLISH_FAILURE"\n',
@@ -702,6 +710,14 @@ describe('release workflow', () => {
           ),
         );
         expect(publishCalls[0][1]).toContain('pnpm -r publish');
+        if (publishesCli) {
+          // The generated CLI is the only package carrying vendored binaries
+          // and the only one published with npm: pnpm's packer writes 0644 for
+          // every entry outside `bin`, which shipped an unspawnable
+          // `vendor/ripgrep/*/rg` from 0.24.4 on (#12668).
+          expect(publishCalls[1][1]).toMatch(/^publish --provenance /);
+          expect(publishCalls[1][1]).not.toContain('pnpm');
+        }
         for (const [cwd, args] of publishCalls) {
           expect(args, cwd).toContain('--access public');
           expect(args, cwd).toContain('--tag=preview');

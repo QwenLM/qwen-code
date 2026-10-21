@@ -26,6 +26,16 @@ qwen board claim <task-id> --board orders --as web
 qwen board done <task-id> --board orders --as web --note "status is numeric"
 ```
 
+Use `--owner` when creating a task to record a suggested owner:
+
+```bash
+qwen board task "check the API response" --board orders --as api --owner web
+```
+
+The task is still `pending`, and the suggestion does not reserve it. Any actor
+can claim it, replacing the owner and changing its status to `in_progress`.
+Once it is `in_progress`, a different actor cannot claim it.
+
 `--as` is a label recorded with the action, not authentication. There is no
 membership list, join command, heartbeat, or reserved participant name.
 

@@ -14,25 +14,17 @@ import type {
   TurnResultRecordPayload,
 } from './chatRecordingService.js';
 import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
+import { markCompressedHistory } from '../core/environmentContext.js';
+import {
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
+} from '../utils/api-history-metadata.js';
 
-const API_HISTORY_PROMPT_ID = Symbol('apiHistoryPromptId');
-
-type IdentifiedContent = Content & {
-  [API_HISTORY_PROMPT_ID]?: string;
-};
-
-export function markApiHistoryPrompt(
-  content: Content,
-  promptId: unknown,
-): void {
-  if (typeof promptId === 'string' && promptId.length > 0) {
-    (content as IdentifiedContent)[API_HISTORY_PROMPT_ID] = promptId;
-  }
-}
-
-export function getApiHistoryPromptId(content: Content): string | undefined {
-  return (content as IdentifiedContent)[API_HISTORY_PROMPT_ID];
-}
+export {
+  cloneApiHistory,
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
+} from '../utils/api-history-metadata.js';
 
 /** Returns the unique matching entry at or after `startIndex`, or -1. */
 export function findApiHistoryPromptIndex(
@@ -375,6 +367,7 @@ export class SessionApiHistoryAccumulator {
             return copy;
           })
         : [];
+      markCompressedHistory(this.history, payload.contextPrefixLength);
       // Compressed history is raw `Content[]` with no source record behind it,
       // so no entry can claim the authoritative notification stamp.
       this.systemNotificationFlags = this.history.map(() => false);
