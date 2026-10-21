@@ -179,7 +179,7 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
   );
 
   it(
-    'serves a fast ticket ahead of an older normal ticket',
+    'ranks an arriving fast ticket ahead of an older normal ticket',
     { timeout: 30000 },
     async () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-fast-'));
