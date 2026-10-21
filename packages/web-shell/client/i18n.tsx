@@ -226,6 +226,9 @@ const EN: Messages = {
     'Choose the initial model and Agent preset. Supported conversations can change model while idle.',
   'managed.workspaceChoose': 'Choose a Workspace',
   'managed.workspaceDirectory': 'Relative directory',
+  'managed.workspaceWorkingDirectory': 'Working directory',
+  'managed.workspaceWorkingDirectoryDescription':
+    'Choose where this session starts within the Workspace. Use . for the Workspace root.',
   'managed.cwd.change': 'Change directory',
   'managed.cwd.path': 'Directory relative to Workspace root',
   'managed.cwd.description':
@@ -268,6 +271,8 @@ const EN: Messages = {
   'managed.approvalChange.reload': 'Reload policies',
   'managed.approvalChange.nextTurn':
     'Approval policy changes apply to the next turn.',
+  'managed.approvalChange.live':
+    'Approval policy changes apply to subsequent tool calls in this turn.',
   'managed.approvalChange.changing': 'Changing approval policy…',
   'managed.approvalChange.unconfirmed':
     'Approval change is not confirmed. Continue confirming the original request.',
@@ -305,9 +310,11 @@ const EN: Messages = {
     'This session does not support changing its approval policy.',
   'managed.newWorkspaceDescription':
     'Choose an existing project directory, or name a new empty workspace.',
-  'managed.workspaceDirectoryRoot': 'Authorized Linux directories',
+  'managed.workspaceDirectoryRoot': 'Authorized directories',
+  'managed.localDirectoryHint':
+    'Choose an existing project on this computer. Workspace setup is automatic.',
   'managed.workspaceDirectoryHint':
-    'Choose an existing project on the Linux execution host within this authorized root.',
+    'Choose an existing project on the execution host within this authorized root.',
   'managed.workspaceChooseDirectory': 'Choose existing directory',
   'managed.workspaceDirectoryScope':
     'Choose a directory inside the selected root.',
@@ -4637,6 +4644,9 @@ const ZH: Messages = {
     '选择初始模型和 Agent 预设；支持的会话可在空闲时切换模型。',
   'managed.workspaceChoose': '选择工作区',
   'managed.workspaceDirectory': '相对目录',
+  'managed.workspaceWorkingDirectory': '工作目录',
+  'managed.workspaceWorkingDirectoryDescription':
+    '选择此会话在工作区内的起始目录，使用 . 表示工作区根目录。',
   'managed.cwd.change': '切换目录',
   'managed.cwd.path': '相对于 Workspace 根目录的路径',
   'managed.cwd.description':
@@ -4670,6 +4680,7 @@ const ZH: Messages = {
   'managed.approvalChange.optionsError': '加载审批策略失败。',
   'managed.approvalChange.reload': '重新加载策略',
   'managed.approvalChange.nextTurn': '审批策略变更从下一轮生效。',
+  'managed.approvalChange.live': '审批策略变更对当前轮后续工具调用生效。',
   'managed.approvalChange.changing': '正在切换审批策略…',
   'managed.approvalChange.unconfirmed':
     '审批策略切换尚未确认，请继续确认原请求。',
@@ -4699,9 +4710,11 @@ const ZH: Messages = {
   'managed.approvalFixed': '当前会话不支持更改审批策略。',
   'managed.newWorkspaceDescription':
     '选择已有项目目录，或输入名称创建空工作区。',
-  'managed.workspaceDirectoryRoot': '已授权的 Linux 目录',
+  'managed.workspaceDirectoryRoot': '已授权的目录',
+  'managed.localDirectoryHint':
+    '选择这台电脑上已有的项目目录，工作区登记和授权会自动完成。',
   'managed.workspaceDirectoryHint':
-    '选择此授权根目录内、位于 Linux 执行机器上的已有项目。',
+    '选择此授权根目录内、位于执行机器上的已有项目。',
   'managed.workspaceChooseDirectory': '选择已有目录',
   'managed.workspaceDirectoryScope': '请选择已选根目录中的目录。',
   'managed.newWorkspaceName': '工作区名称',
