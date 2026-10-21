@@ -692,10 +692,34 @@ admission: fresh sending also requires `foregroundShell=true`. Controlled W2 cwd
 changes do not execute Shell and retain their own files, actor, path and
 context-revision admission; the Shell flag is not a general Session freeze.
 
-Shell close/archive/unarchive/delete remain unavailable, and are refused before
-creating a lifecycle operation. Existing G3 recovery refusals remain in force;
-no dispatched Shell is automatically replayed. Keep the opt-in off until the
-deployment passes #12904, #13010 and public FG6f physical failure gates. See
+Shell close/archive/unarchive/delete are refused by default, before creating a
+lifecycle operation. The cause is the lifecycle protocol, not a missing guard:
+`WorkspaceToolProfiles.lifecycleProtocol` maps `hosted-workspace-files/1` to
+protocol 1, `hosted-workspace-shell/1` and `hosted-workspace-mcp/1` to protocol
+2, and every other profile — `hosted-workspace-shell/2` included — to 0.
+Protocol 1 commits a single `effects` phase, and the Harness admits it only for
+`hosted-workspace-files/1`. A Shell lane holds monitor loops and a capture
+publisher that only protocol 2's `prepare_resources` and `settle_resources`
+phases stop and close, and for a Shell profile the coordinator drains Workspace
+resources a second time between those two phases.
+
+`hosted-workspace-shell/1` is already a supported lifecycle-v2 profile, so
+adding it to the Harness `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` is what makes
+`QwenHostedHarnessConnector.supportsLifecycle` answer true for it. That
+predicate is the gate `session_close` reads, and the one `session_delete` reads
+beside retention; reliable Runtime stop support is still required next to it.
+`session_archive` and `session_unarchive` read retention instead, which for a
+Shell or MCP profile additionally requires `lifecycleProtocol(profile) == 2`, a
+completed Workspace close and a CLOSED or ARCHIVED status — so they follow from
+a close that succeeded rather than from the variable directly.
+`hosted-workspace-shell/2` cannot be reached at any value of that variable:
+naming a profile outside the supported list fails Harness contract creation at
+startup instead of degrading at request time, so `/2` stays at protocol 0 and
+needs its own scope decision.
+
+Existing G3 recovery refusals remain in force; no dispatched Shell is
+automatically replayed. Keep the Shell switch off until the deployment passes
+#12904, #13010 and public FG6f physical failure gates. See
 [the complete design](../../docs/design/public-hosted-shell-admission.md).
 
 ### Initial Workspace Turn (G0)

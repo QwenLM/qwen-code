@@ -23297,6 +23297,34 @@ describe('Hosted Harness refusal reasons', () => {
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   }
 
+  // The lifecycle protocol is why a Shell Session cannot be retired by
+  // default, so the refusal has to name itself instead of reading like a
+  // missing guard: protocol 1 is admitted only for the files profile, and
+  // protocol 2 only for a profile the Harness contract lists.
+  it('names a lifecycle protocol the Session profile is not admitted for', async () => {
+    const server = await app(true);
+    const load = (toolProfile: string, lifecycleProtocolVersion: 1 | 2) =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+        managedSessionStore: store(),
+        toolProfile,
+        lifecycleProtocolVersion,
+        lifecycleAuthority: {
+          operationId: `lifecycle-${lifecycleProtocolVersion}`,
+          claimGeneration: 1,
+        },
+      });
+    // `/2` maps to lifecycle protocol 0, so no value of
+    // QWEN_HOSTED_LIFECYCLE_V2_PROFILES can admit it.
+    const unlisted = await load('hosted-workspace-shell/2', 2);
+    expect(unlisted.status).toBe(409);
+    expect(unlisted.body.code).toBe('hosted_lifecycle_profile_unavailable');
+    // shell/1 is a lifecycle-v2 profile, but protocol 1 commits a single
+    // effects phase and stays with the files profile.
+    const v1 = await load('hosted-workspace-shell/1', 1);
+    expect(v1.status).toBe(409);
+    expect(v1.body.code).toBe('hosted_lifecycle_profile_unavailable');
+  });
+
   it('names a blocked restore bundle on a cold load', async () => {
     await createAndDetach();
     // A blocked bundle without a basis must carry both refs null
