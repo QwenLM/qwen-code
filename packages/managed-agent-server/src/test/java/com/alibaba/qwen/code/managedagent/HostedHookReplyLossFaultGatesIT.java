@@ -848,6 +848,7 @@ class HostedHookReplyLossFaultGatesIT {
                             "FG13_DENY_LOSS", "FG13_FAILCLOSED_LOSS",
                             "FG13_STORE_INTENT", "FG13_STORE_DISPATCH",
                             "FG13_STORE_SETTLE", "FG13_ACK_SETTLE",
+                            "FG13_ACK_DISPATCH",
                             "FG13_STORE_PLAN_SETTLE").contains(prompt);
             var chunk = json.createObjectNode().put("id", "hook-fault").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "hook-fault-fixture");

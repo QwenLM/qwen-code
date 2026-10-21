@@ -46,9 +46,9 @@ Expectations:
 ## Seam
 
 No new seam. `StoreFaultGate.armAck(HOOK_DISPATCH_STARTED, null)` reuses the
-mode added with the result cell: `inspect` stays silent and `afterApply` throws
-after `super.apply`/`super.applyNative` returns, so the row is durable when the
-caller sees the failure.
+mode added with the result cell: `inspect` stays silent, and `afterApply`
+throws from the transaction's after-commit callback, so the row is durable
+when the caller sees the failure.
 
 ## Coverage
 
