@@ -558,6 +558,7 @@ class Session {
 
     const chat = llmClient.getChat();
     const historyTail =
+      chat.getHistoryForRecovery?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
       chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
       chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
     const cancellation = getLastApiPromptCancellation(
