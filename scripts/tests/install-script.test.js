@@ -794,6 +794,16 @@ describe('standalone release packaging', () => {
       expect(npmOnlyBlock[1]).not.toContain(`'${asset}'`);
       expect(requiredBlock[1]).toContain(`'${asset}'`);
     }
+    expect(allowedBlock[1]).toContain("'generated-ui'");
+    expect(npmOnlyBlock[1]).not.toContain("'generated-ui'");
+    for (const asset of [
+      'main.js',
+      'app.html',
+      'skills/generated-ui/SKILL.md',
+      'THIRD_PARTY_NOTICES.txt',
+    ]) {
+      expect(requiredBlock[1]).toContain(`'generated-ui/${asset}'`);
+    }
   });
 
   it('loads the standalone release packaging helper', () => {
@@ -2195,6 +2205,42 @@ describe('standalone release packaging', () => {
     }
   });
 
+  it.each([
+    'main.js',
+    'app.html',
+    'skills/generated-ui/SKILL.md',
+    'THIRD_PARTY_NOTICES.txt',
+  ])('requires the standalone Generated UI asset %s', (asset) => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+    try {
+      rmSync(path.resolve('dist/generated-ui', asset));
+      const archive = path.join(tmpDir, 'runtime.tar.gz');
+      writeFileSync(
+        archive,
+        'Not extracted before required assets are checked.',
+      );
+      expect(() =>
+        execFileSync(
+          process.execPath,
+          [
+            'scripts/create-standalone-package.js',
+            '--target',
+            'linux-x64',
+            '--node-archive',
+            archive,
+            '--out-dir',
+            path.join(tmpDir, 'out'),
+          ],
+          { stdio: 'pipe' },
+        ),
+      ).toThrow(/Required dist asset missing: .*generated-ui/);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  });
+
   itWithZip('packages a win-x64 standalone archive', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
@@ -2243,6 +2289,18 @@ describe('standalone release packaging', () => {
       const shim = readScript(
         path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd'),
       );
+      for (const asset of [
+        'main.js',
+        'app.html',
+        'skills/generated-ui/SKILL.md',
+        'THIRD_PARTY_NOTICES.txt',
+      ]) {
+        expect(
+          readScript(
+            path.join(extractDir, 'qwen-code/lib/generated-ui', asset),
+          ),
+        ).toBe('generated-ui asset\n');
+      }
       expect(shim).toContain(
         'set "QWEN_CODE_LAUNCHER_PATH=%ROOT%\\bin\\qwen.cmd"',
       );
@@ -5201,6 +5259,16 @@ function ensureMinimalDist({
 
   mkdirSync(path.join(distPath, 'chunks'), { recursive: true });
   mkdirSync(path.join(distPath, 'mem0'), { recursive: true });
+  for (const file of [
+    'main.js',
+    'app.html',
+    'skills/generated-ui/SKILL.md',
+    'THIRD_PARTY_NOTICES.txt',
+  ]) {
+    const asset = path.join(distPath, 'generated-ui', file);
+    mkdirSync(path.dirname(asset), { recursive: true });
+    writeFileSync(asset, 'generated-ui asset\n');
+  }
   writeFileSync(path.join(distPath, 'mem0/main.js'), 'export {};\n');
   writeFileSync(
     path.join(distPath, 'mem0/write-confirmation.js'),

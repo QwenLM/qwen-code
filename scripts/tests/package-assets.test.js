@@ -676,6 +676,7 @@ describe('package asset scripts', () => {
     expect(distPackageJson.files).toContain('export-transcript-document.css');
     expect(distPackageJson.files).toContain('execution-worker.js');
     expect(distPackageJson.files).toContain('mem0');
+    expect(distPackageJson.files).toContain('generated-ui');
   });
 
   it('names the missing stylesheet when only the renderer JS was built', () => {
@@ -718,6 +719,10 @@ describe('package asset scripts', () => {
     'execution-worker.js',
     'mem0/main.js',
     'mem0/write-confirmation.js',
+    'generated-ui/main.js',
+    'generated-ui/app.html',
+    'generated-ui/skills/generated-ui/SKILL.md',
+    'generated-ui/THIRD_PARTY_NOTICES.txt',
     'sandboxBwrapRelay.js',
     'sandboxLandlockRelay.js',
     'sandboxFileWorker.js',
@@ -1588,6 +1593,14 @@ describe('package asset scripts', () => {
   function createBundleArtifacts(rootDir) {
     writeFile(rootDir, 'dist/mem0/main.js', '');
     writeFile(rootDir, 'dist/mem0/write-confirmation.js', '');
+    for (const file of [
+      'main.js',
+      'app.html',
+      'skills/generated-ui/SKILL.md',
+      'THIRD_PARTY_NOTICES.txt',
+    ]) {
+      writeFile(rootDir, `dist/generated-ui/${file}`, 'generated-ui asset\n');
+    }
     writeFile(rootDir, 'dist/cli.js', '');
     writeFile(rootDir, 'dist/execution-worker.js', '');
     writeFile(rootDir, 'dist/sandboxBwrapRelay.js', '');
