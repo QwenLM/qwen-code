@@ -34,6 +34,9 @@ vi.mock('react-dom/client', async (importOriginal) => ({
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonWorkspaceProvider: ({ children }: { children: ReactNode }) => children,
 }));
+vi.mock('./ManagedAgentWebShell', () => ({
+  ManagedAgentWebShell: () => null,
+}));
 vi.mock('./components/WorkspaceSessionProvider', () => ({
   WorkspaceSessionProvider: (props: CapturedWorkspaceSessionProps) => {
     testState.renderCount += 1;

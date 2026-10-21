@@ -161,9 +161,9 @@ class Issue13181QueryBudgetTest {
                 .containsExactly(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 1L);
         // Hot path 1 is bounded the same way hot path 3 is: the whole
         // batch's statement count is pinned, so any added per-row read
-        // shows here.
+        // shows here. Session and stream counters lock separately once per batch.
         assertThat(totals)
-                .containsExactly(60L, 35L, 35L, 35L, 35L, 35L, 35L, 35L, 43L);
+                .containsExactly(61L, 36L, 36L, 36L, 36L, 36L, 36L, 36L, 44L);
         // Batch 1 covers session.created plus nine tool events; the last
         // batch sees all 81 items (80 tool plus the text delta's assistant).
         assertThat(itemRowsRead)
@@ -343,9 +343,9 @@ class Issue13181QueryBudgetTest {
         assertThat(fixture.ledger.count("insert into ma_snapshot"))
                 .isZero();
         // The empty tick — the scheduler's hottest path — is pinned whole:
-        // the event read, the session lock, the progress lock, and the
-        // snapshot read.
-        assertThat(fixture.ledger.total()).isEqualTo(4);
+        // the event read, the session lock, the stream counter lock, the
+        // progress lock, and the snapshot read.
+        assertThat(fixture.ledger.total()).isEqualTo(5);
         // The not-aged exit must leave the deferral marker untouched —
         // clearing or re-stamping it would stop the aged reselection from
         // ever converging the snapshot.

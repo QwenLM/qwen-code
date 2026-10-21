@@ -16,6 +16,66 @@ authentication and writer credentials" below.
 设计说明：[English](../../docs/design/2026-09-19-managed-agent-spring-server.md) |
 [简体中文](../../docs/design/2026-09-19-managed-agent-spring-server.zh-CN.md)
 
+## Local embedded profile
+
+The managed local distribution starts with `qwen serve --managed --open` and
+includes its matching Java 21 runtime, server JAR and native worker entry.
+It needs no MySQL, Docker or systemd. The ordinary server profile keeps its
+existing MySQL defaults. Design:
+[English](../../docs/design/2026-10-20-managed-local-serve.md) |
+[简体中文](../../docs/design/2026-10-20-managed-local-serve.zh-CN.md).
+
+The launcher selects the `managed-local` Spring profile and supplies an
+existing canonical, owner-only `QWEN_MANAGED_AGENT_LOCAL_DATA_DIRECTORY`.
+The directory and its private subdirectories must be owned by the current
+user with mode `0700`; symlinks, noncanonical paths and data-directory paths
+containing `;` are refused. The profile creates these directories:
+
+| Path                     | Persistent contents                                                           |
+| ------------------------ | ----------------------------------------------------------------------------- |
+| `database/managed.mv.db` | Embedded H2 database with the canonical Managed schema                        |
+| `runtime/`               | Durable local Runtime worker state                                            |
+| `workspaces/`            | Application-owned Workspace storage roots and their original identity markers |
+| `legacy/`                | Private fallback cwd for unbound Sessions                                     |
+
+H2 uses MySQL compatibility mode, lowercase catalog metadata,
+`DB_CLOSE_ON_EXIT=FALSE` and `WRITE_DELAY=0`. Its embedded file lock and the
+launcher's data-directory lock admit one local control plane. The connection
+pool retains an idle connection to keep that file lock held. No H2 TCP server,
+`AUTO_SERVER`, or Web console is enabled. Database URL overrides are refused;
+the profile keeps the existing Flyway admission and structure validation and
+never repairs foreign, partial, history-only or unsupported catalogs.
+
+The launcher supplies the existing Harness URL/token/digest, Session Store
+base URL and binding key, Broker token and credential encryption key, Node
+executable and worker entry. `QWEN_MANAGED_AGENT_WORKSPACE_ID` is the first
+16 hexadecimal characters of the SHA-256 of the canonical `legacy/` path;
+it identifies the fallback Runtime and Session Store, independently of
+the bound Workspace IDs created through the API. Public API requests use signed authentication;
+the front door retains the signing key and fixed tenant/actor identity.
+Java, Harness and Broker listeners must stay on loopback. Readiness is
+`GET /actuator/health/readiness`, which includes the database and Spring's
+readiness state. The public front door opens after readiness and the
+authenticated Harness capability probe succeed.
+
+The profile enables verified, durable local-process workers, file tools and
+Shell with `default` approval mode. The launcher creates the first Workspace
+through the existing signed WebShell creation API using a persistent
+idempotency key. It creates a new application-owned Workspace; the shell's
+current Git checkout is not copied, symlinked or imported. The existing
+Workspace ownership and grant checks still apply. Tool publication remains
+disabled unless separately configured; ordinary persisted tool receipts do
+not require an object store.
+
+Keep the database, Runtime state, Workspace roots, credentials and worker
+`QWEN_HOME/file-history` together across restarts. Credentials never rotate
+merely because the application restarts. The local profile defaults trusted
+whole-host reboot recovery to `false`; macOS supports same-boot worker
+adoption only. Linux operators may explicitly enable
+`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY` under its existing
+trusted-host contract. Missing or conflicting physical identity markers
+remain closed to execution; startup does not re-register or repair them.
+
 ## Java package layout
 
 Business components live in `managedagent.session`, `workspace`, `artifact`,

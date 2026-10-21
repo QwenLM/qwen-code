@@ -21,6 +21,10 @@ import { createJavaManagedAgentProvider } from './components/managed/java-manage
 import { managedDevelopmentOptions } from './components/managed/managed-development-options';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import { StandaloneAuth } from './components/StandaloneAuth';
+import {
+  hasManagedAppMarker,
+  ManagedStandaloneApp,
+} from './ManagedStandaloneApp';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
 import {
@@ -44,9 +48,11 @@ import {
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
-const DAEMON_BASE_URL = getDaemonBaseUrl();
+const MANAGED_APP = hasManagedAppMarker();
+const DAEMON_BASE_URL = MANAGED_APP ? '' : getDaemonBaseUrl();
 const REQUESTED_DAEMON_TARGET =
-  new URLSearchParams(window.location.search).get('daemon') || '';
+  (!MANAGED_APP && new URLSearchParams(window.location.search).get('daemon')) ||
+  '';
 const INVALID_DAEMON_TARGET =
   Boolean(REQUESTED_DAEMON_TARGET) && !DAEMON_BASE_URL;
 // A `?daemon=` link can name any origin; one this browser has never connected
@@ -461,6 +467,12 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
 }
 
 async function main() {
+  if (MANAGED_APP) {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('daemon');
+    url.searchParams.delete('fanout');
+    window.history.replaceState(window.history.state, '', url);
+  }
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
   const storedToken = INVALID_DAEMON_TARGET
     ? undefined
@@ -483,9 +495,9 @@ async function main() {
     document.documentElement.hasAttribute('data-web-shell-unsupported-browser')
   )
     return;
-  const pairing = await exchangePairingCode(
-    INVALID_DAEMON_TARGET ? '' : baseUrl,
-  );
+  const pairing = MANAGED_APP
+    ? undefined
+    : await exchangePairingCode(INVALID_DAEMON_TARGET ? '' : baseUrl);
   const daemonToken =
     pairing?.token ??
     storedToken ??
@@ -516,7 +528,19 @@ async function main() {
         invalidTarget={INVALID_DAEMON_TARGET}
         unconfirmedTarget={UNCONFIRMED_DAEMON_TARGET}
       >
-        {(token) => <StandaloneApp daemonToken={token} />}
+        {(token) =>
+          MANAGED_APP ? (
+            <ManagedStandaloneApp
+              daemonToken={token}
+              language={
+                getInitialLanguage() ?? normalizeLanguage(navigator.language)
+              }
+              theme={getInitialTheme()}
+            />
+          ) : (
+            <StandaloneApp daemonToken={token} />
+          )
+        }
       </StandaloneAuth>
     </React.StrictMode>,
   );

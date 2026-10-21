@@ -41,6 +41,9 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 vi.mock('./components/WorkspaceSessionProvider', () => ({
   WorkspaceSessionProvider: () => null,
 }));
+vi.mock('./ManagedAgentWebShell', () => ({
+  ManagedAgentWebShell: () => null,
+}));
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
   getAllowedDaemonOrigin: (value: string) => value,
@@ -73,6 +76,7 @@ describe('web shell boot', () => {
     document.documentElement.removeAttribute(
       'data-web-shell-unsupported-browser',
     );
+    document.querySelector('meta[name="qwen-managed-app"]')?.remove();
     window.history.replaceState(null, '', '/');
     vi.unstubAllGlobals();
   });
@@ -119,6 +123,38 @@ describe('web shell boot', () => {
     // the page's own origin: booting with an invalid ?daemon= burns nothing.
     expect(window.location.hash).toBe('');
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('fixes Managed boot to the page origin and removes daemon and fanout overrides', async () => {
+    const marker = document.createElement('meta');
+    marker.name = 'qwen-managed-app';
+    marker.content = 'true';
+    document.head.appendChild(marker);
+    window.history.replaceState(
+      null,
+      '',
+      '/?daemon=https://attacker.example&fanout=https://other.example#token=browser-token',
+    );
+    testState.storedToken = 'browser-token';
+    document.body.innerHTML = '<div id="root"></div>';
+    await import('./main');
+    await vi.waitFor(() => expect(testState.rendered).toHaveLength(1));
+    const url = new URL(window.location.href);
+    expect(url.searchParams.has('daemon')).toBe(false);
+    expect(url.searchParams.has('fanout')).toBe(false);
+    const strictMode = testState.rendered[0] as React.ReactElement<{
+      children: React.ReactElement<{
+        baseUrl: string;
+        invalidTarget: boolean;
+        children: (token: string) => React.ReactElement;
+      }>;
+    }>;
+    const gate = strictMode.props.children;
+    expect(gate.props.baseUrl).toBe(window.location.origin);
+    expect(gate.props.invalidTarget).toBe(false);
+    expect(gate.props.children('browser-token').type).toBe(
+      (await import('./ManagedStandaloneApp')).ManagedStandaloneApp,
+    );
   });
 
   it('connects with the stored token when the pairing exchange fails', async () => {
