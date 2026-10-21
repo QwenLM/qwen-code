@@ -78,6 +78,12 @@ import { getContextUsageLevel } from '../utils/contextUsage';
 import { pastedTextTitle } from '../utils/largePaste';
 import type { ContextUsageControls } from '../hooks/useContextUsageControls';
 import { ContextUsagePopover } from './ContextUsagePopover';
+import { UnavailableModelTooltip } from './UnavailableModelTooltip';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from '../unavailableModels';
+import { appendUnavailableComposerModels } from '../utils/composerModels';
 import { VoiceButton } from '../voice/VoiceButton';
 import { LiveVoiceButton } from '../live/LiveVoiceButton';
 import type {
@@ -286,6 +292,8 @@ interface ChatEditorProps {
   contextUsageControls?: ContextUsageControls;
   modelRefresh?: ModelRefreshState;
   availableModels?: Array<{ id: string; label?: string }>;
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
   reasoning?: DaemonReasoningControls;
@@ -711,6 +719,8 @@ function ModelIcon() {
 interface DropdownItem extends ToolbarDropdownItem {
   description?: string;
   icon?: ReactNode;
+  disabled?: boolean;
+  tooltip?: string;
 }
 
 function CheckIcon() {
@@ -768,6 +778,7 @@ function ToolbarPopover({
   submenu,
   compact = false,
   modePopover = false,
+  itemTooltipMount,
 }: {
   open: boolean;
   items: DropdownItem[];
@@ -790,6 +801,7 @@ function ToolbarPopover({
   };
   compact?: boolean;
   modePopover?: boolean;
+  itemTooltipMount?: WebShellUnavailableModelTooltipMount;
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [submenuOpen, setSubmenuOpen] = useState(false);
@@ -836,41 +848,70 @@ function ToolbarPopover({
             : ''
       } ${searchable ? styles.dropdownListConstrained : ''}`}
     >
-      {visibleItems.map((item) => (
-        <button
-          key={item.id}
-          type="button"
-          className={`${styles.dropdownItem} ${
-            item.id === activeId ? styles.dropdownItemActive : ''
-          }`}
-          title={item.label}
-          onClick={() => {
-            selectionRef.current = true;
-            onSelect(item.id);
-          }}
-        >
-          {hasCheckItems ? (
-            <>
-              {hasRichItems && (
-                <span className={styles.dropdownItemIcon}>{item.icon}</span>
-              )}
-              <span className={styles.dropdownItemContent}>
-                <span className={styles.dropdownItemLabel}>{item.label}</span>
-                {item.description && (
-                  <span className={styles.dropdownItemDesc}>
-                    {item.description}
-                  </span>
+      {visibleItems.map((item) => {
+        const button = (
+          <button
+            key={item.disabled ? undefined : item.id}
+            type="button"
+            className={`${styles.dropdownItem} ${
+              item.id === activeId && !item.disabled
+                ? styles.dropdownItemActive
+                : ''
+            }`}
+            title={item.disabled ? undefined : item.label}
+            aria-disabled={item.disabled || undefined}
+            data-disabled={item.disabled ? '' : undefined}
+            data-web-shell-unavailable-model={item.disabled ? '' : undefined}
+            data-model-id={item.id}
+            onClick={(event) => {
+              if (item.disabled) {
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+              }
+              selectionRef.current = true;
+              onSelect(item.id);
+            }}
+          >
+            {hasCheckItems ? (
+              <>
+                {hasRichItems && (
+                  <span className={styles.dropdownItemIcon}>{item.icon}</span>
                 )}
-              </span>
-              <span className={styles.dropdownItemCheck}>
-                {item.id === activeId ? <CheckIcon /> : null}
-              </span>
-            </>
-          ) : (
-            item.label
-          )}
-        </button>
-      ))}
+                <span className={styles.dropdownItemContent}>
+                  <span className={styles.dropdownItemLabel}>{item.label}</span>
+                  {item.description && (
+                    <span className={styles.dropdownItemDesc}>
+                      {item.description}
+                    </span>
+                  )}
+                </span>
+                <span className={styles.dropdownItemCheck}>
+                  {item.id === activeId && !item.disabled ? (
+                    <CheckIcon />
+                  ) : null}
+                </span>
+              </>
+            ) : (
+              item.label
+            )}
+          </button>
+        );
+        if (!item.disabled) return button;
+        return (
+          <UnavailableModelTooltip
+            key={item.id}
+            model={{
+              id: item.id,
+              label: item.label,
+              tooltip: item.tooltip,
+            }}
+            mount={itemTooltipMount}
+          >
+            {button}
+          </UnavailableModelTooltip>
+        );
+      })}
       {visibleItems.length === 0 && noResultsLabel && (
         <div className={styles.dropdownEmpty} role="status">
           {noResultsLabel(searchQuery)}
@@ -961,11 +1002,21 @@ function ToolbarPopover({
         }}
         onPointerDownOutside={(event) => {
           const target = event.target;
+          if (!(target instanceof Element)) return;
+          if (target.closest('[data-web-shell-toolbar-popover-trigger]')) {
+            handoffRef.current = true;
+          }
+          if (target.closest('[data-web-shell-unavailable-model-tooltip]')) {
+            event.preventDefault();
+          }
+        }}
+        onInteractOutside={(event) => {
+          const target = event.target;
           if (
             target instanceof Element &&
-            target.closest('[data-web-shell-toolbar-popover-trigger]')
+            target.closest('[data-web-shell-unavailable-model-tooltip]')
           ) {
-            handoffRef.current = true;
+            event.preventDefault();
           }
         }}
         onCloseAutoFocus={(event) => {
@@ -1031,6 +1082,28 @@ function ToolbarPopover({
                   data-web-shell-toolbar-popover
                   data-web-shell-model-submenu
                   onClick={(event) => event.stopPropagation()}
+                  onPointerDownOutside={(event) => {
+                    const target = event.target;
+                    if (
+                      target instanceof Element &&
+                      target.closest(
+                        '[data-web-shell-unavailable-model-tooltip]',
+                      )
+                    ) {
+                      event.preventDefault();
+                    }
+                  }}
+                  onInteractOutside={(event) => {
+                    const target = event.target;
+                    if (
+                      target instanceof Element &&
+                      target.closest(
+                        '[data-web-shell-unavailable-model-tooltip]',
+                      )
+                    ) {
+                      event.preventDefault();
+                    }
+                  }}
                 >
                   {searchableItems}
                 </PopoverContent>
@@ -1480,6 +1553,8 @@ export const ChatEditor = memo(
       contextUsageControls,
       modelRefresh,
       availableModels = [],
+      unavailableModels,
+      mountUnavailableModelTooltip,
       onSelectMode,
       onSelectModel,
       reasoning,
@@ -2305,12 +2380,16 @@ export const ChatEditor = memo(
     const showCommandAction = showToolbarAction('commands');
     const modelItems = useMemo<DropdownItem[]>(
       () =>
-        availableModels.map((m) => ({
-          id: m.id,
-          label: getModelDisplayName(m.label || m.id),
-          searchText: `${m.label ?? ''}\n${m.id}`,
-        })),
-      [availableModels],
+        appendUnavailableComposerModels(availableModels, unavailableModels).map(
+          (m) => ({
+            id: m.id,
+            label: getModelDisplayName(m.label || m.id),
+            searchText: `${m.label ?? ''}\n${m.id}`,
+            disabled: m.disabled,
+            tooltip: m.tooltip,
+          }),
+        ),
+      [availableModels, unavailableModels],
     );
 
     const handleModeSelect = useCallback(
@@ -2335,11 +2414,14 @@ export const ChatEditor = memo(
     const handleModelSelect = useCallback(
       (modelId: string) => {
         if (modelControlsDisabled) return;
+        if (modelItems.some((item) => item.id === modelId && item.disabled)) {
+          return;
+        }
         onSelectModel?.(modelId);
         setModelDropdownOpen(false);
         core.focus();
       },
-      [onSelectModel, core, modelControlsDisabled],
+      [onSelectModel, core, modelControlsDisabled, modelItems],
     );
     const showCancelButton = isRunning && !core.hasContent;
     const composerPreparing = isPreparing || core.pendingImageBatchCount > 0;
@@ -3748,6 +3830,7 @@ export const ChatEditor = memo(
                           if (open) setModeDropdownOpen(false);
                         }}
                         onSelect={handleModelSelect}
+                        itemTooltipMount={mountUnavailableModelTooltip}
                         tooltip={modelLabel}
                         showCheck
                         searchable
