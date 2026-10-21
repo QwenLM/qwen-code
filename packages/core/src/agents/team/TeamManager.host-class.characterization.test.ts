@@ -22,7 +22,9 @@
  *                   time of writing)
  *
  * The four observations per class:
- *   delivered  - teammate reports handed to the leader sink
+ *   delivered  - teammate reports handed to the leader sink. `null` for a
+ *                sinkless class: there is no sink to observe, so the cell
+ *                has no value to pin (0 would be unfalsifiable there).
  *   unread     - reports still unread in the leader inbox afterwards
  *   terminated - ALL_TEAMMATES_TERMINATED events a subscribed host saw
  *   pollArmed  - whether the 500ms leader poll is still running
@@ -30,6 +32,10 @@
  * `terminated` is probed with a subscription in every class. The single
  * emit site sits after the null-sink guard in pollLeaderInbox, so
  * subscribing does not help a sinkless host.
+ *
+ * Timing: only setInterval/clearInterval are faked, so the two 500ms polls
+ * are stepped explicitly and the real file I/O between them is awaited on a
+ * settling condition. No assertion depends on a wall-clock margin.
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -62,13 +68,16 @@ function setMockDir(dir: string): void {
   ).__setMockGlobalDir(dir);
 }
 
-/** Longer than two 500ms leader polls, so every poll that will fire has. */
-const POLL_WINDOW_MS = 1300;
+/** The leader poll period in TeamManager. */
+const POLL_MS = 500;
+/** Upper bound for real file I/O to settle; only ever reached on failure. */
+const SETTLE_DEADLINE_MS = 10_000;
 
 const REPORTS = ['report one', 'report two'];
 
 interface Observation {
-  delivered: number;
+  /** `null` = no sink attached, nothing to observe. */
+  delivered: number | null;
   unread: number;
   terminated: number;
   pollArmed: boolean;
@@ -76,18 +85,21 @@ interface Observation {
 
 type HostClass = 'wired' | 'listener-only' | 'bare';
 
+/**
+ * #13785 acceptance for a sinkless host: it never sees team tools at all,
+ * so there is no row to observe, rather than delivery parity with a wired
+ * host.
+ */
+const NOT_ADVERTISED = 'team tools not advertised' as const;
+
 interface Row {
   host: HostClass;
   today: Observation;
-  afterM4: Observation;
+  /** Asserted nowhere; `observe()` has no path to produce `NOT_ADVERTISED`. */
+  afterM4: Observation | typeof NOT_ADVERTISED;
 }
 
-/**
- * Expectations, one row per host class. `afterM4` is the target stated in
- * #13785: a sinkless host either does not advertise team tools (no row to
- * observe) or gets the same terminal signal as a wired one. It is recorded
- * here as the delivery-equivalent outcome and is not asserted.
- */
+/** Expectations, one row per host class. `afterM4` is not asserted. */
 const ROWS: Row[] = [
   {
     host: 'wired',
@@ -96,13 +108,13 @@ const ROWS: Row[] = [
   },
   {
     host: 'listener-only',
-    today: { delivered: 0, unread: 2, terminated: 0, pollArmed: true },
-    afterM4: { delivered: 2, unread: 0, terminated: 1, pollArmed: false },
+    today: { delivered: null, unread: 2, terminated: 0, pollArmed: true },
+    afterM4: NOT_ADVERTISED,
   },
   {
     host: 'bare',
-    today: { delivered: 0, unread: 2, terminated: 0, pollArmed: true },
-    afterM4: { delivered: 2, unread: 0, terminated: 1, pollArmed: false },
+    today: { delivered: null, unread: 2, terminated: 0, pollArmed: true },
+    afterM4: NOT_ADVERTISED,
   },
 ];
 
@@ -110,11 +122,21 @@ describe('host-class characterization of leader delivery and terminal state (#13
   let harness: TeamCoordinationHarness | undefined;
 
   afterEach(async () => {
+    vi.useRealTimers();
     await harness?.cleanup();
     harness = undefined;
   });
 
+  /** Let real file I/O finish; true polling on a condition, not a delay. */
+  async function settle(condition: () => boolean): Promise<void> {
+    const deadline = Date.now() + SETTLE_DEADLINE_MS;
+    while (!condition() && Date.now() < deadline) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
+
   async function observe(host: HostClass): Promise<Observation> {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     const h = await TeamCoordinationHarness.create();
     setMockDir(h.tmpDir);
     harness = h;
@@ -143,18 +165,37 @@ describe('host-class characterization of leader delivery and terminal state (#13
     }
     agent.setStatus(AgentStatus.COMPLETED);
 
-    await new Promise((resolve) => setTimeout(resolve, POLL_WINDOW_MS));
+    const deliveredCount = () =>
+      REPORTS.filter((text) => sinkCalls.some((call) => call.includes(text)))
+        .length;
+
+    // Poll 1 consumes the reports; poll 2 finds an empty inbox and, with
+    // every teammate terminated, emits ALL_TEAMMATES_TERMINATED. A sinkless
+    // host returns before any I/O, so stepping its ticks needs no settling.
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    if (host === 'wired') {
+      await settle(() => deliveredCount() === REPORTS.length);
+    }
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    if (host === 'wired') {
+      await settle(() => terminated === 1);
+    }
+    // One more tick: a sinkless host stays armed, a wired one is already
+    // stopped, so this cannot flip any cell in the direction of a pass.
+    await vi.advanceTimersByTimeAsync(POLL_MS);
 
     const pollArmed =
       (manager as unknown as { pollingInterval: unknown }).pollingInterval !==
       null;
     // Draining here is the measurement of "left unread"; do it last.
     const unread = (await manager.getLeaderMessages()).length;
-    const delivered = REPORTS.filter((text) =>
-      sinkCalls.some((call) => call.includes(text)),
-    ).length;
 
-    return { delivered, unread, terminated, pollArmed };
+    return {
+      delivered: host === 'wired' ? deliveredCount() : null,
+      unread,
+      terminated,
+      pollArmed,
+    };
   }
 
   it.each(ROWS)('$host host matches today column', async ({ host, today }) => {
