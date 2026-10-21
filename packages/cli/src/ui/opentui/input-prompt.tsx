@@ -231,6 +231,7 @@ export interface InputPromptProps {
   onCancelCommand?: () => boolean;
   approvalMode?: ApprovalMode;
   placeholder?: string;
+  topRightLabel?: string;
   focus?: boolean;
   /** Reports the double-Esc armed state (the footer hint). */
   onEscapeArmedChange?: (armed: boolean) => void;
@@ -283,6 +284,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     onCancelCommand,
     approvalMode,
     placeholder = DEFAULT_PLACEHOLDER,
+    topRightLabel,
     focus = true,
     onEscapeArmedChange,
     queueLength = 0,
@@ -1657,7 +1659,17 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   }, []);
 
   const columns = Math.max(width, 1);
-  const dashLine = '─'.repeat(columns);
+  const renderedLabel = truncateToWidth(
+    sanitizeTerminalLine(topRightLabel ?? ''),
+    columns - 5,
+  );
+  const labelWidth = renderedLabel
+    ? getCachedStringWidth(renderedLabel) + 4
+    : 0;
+  const dashLine = '─'.repeat(columns - labelWidth);
+  const topBorderLine = renderedLabel
+    ? `${dashLine} ${renderedLabel} ──`
+    : dashLine;
   const { visible, startIndex, hasMoreAbove, hasMoreBelow } = suggestionWindow(
     suggestions,
     activeIndex,
@@ -1725,7 +1737,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           ))}
         </box>
       )}
-      <text fg={borderColor}>{dashLine}</text>
+      <text fg={borderColor}>{topBorderLine}</text>
       <box
         flexDirection="row"
         border={['bottom']}

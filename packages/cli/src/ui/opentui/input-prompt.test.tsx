@@ -430,6 +430,46 @@ async function pressKey(name: string, ctrl = false) {
     lastKeyboardHandler()(baseKeyEvent({ name, ctrl, sequence: '' })),
   );
 }
+describe('OpenTuiInputPrompt session title border', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.editors.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.slashCommands = [];
+  });
+
+  it.each([
+    {
+      kind: 'ASCII',
+      label: 'owned session',
+      expected: `${'─'.repeat(63)} owned session ──`,
+    },
+    {
+      kind: 'long CJK',
+      label: '界'.repeat(50),
+      expected: `─ ${'界'.repeat(37)}… ──`,
+    },
+    {
+      kind: 'unsafe controls before long CJK',
+      label: `\u001b[31mA\u0007\u202eB\u202c\n\t${'界'.repeat(50)}\u001b[0m`,
+      expected: `── AB ${'界'.repeat(35)}… ──`,
+    },
+  ])('renders and clears the $kind border', ({ label, expected }) => {
+    const { container, rerender } = renderPrompt({ topRightLabel: label });
+    const editor = currentEditor();
+    const topBorder = container.firstElementChild?.firstElementChild;
+    expect(topBorder?.tagName).toBe('SPAN');
+    expect(topBorder?.textContent).toBe(expected);
+
+    rerender(<OpenTuiInputPrompt userMessages={[]} onSubmit={() => true} />);
+    expect(container.firstElementChild?.firstElementChild?.textContent).toBe(
+      '─'.repeat(80),
+    );
+    expect(currentEditor()).toBe(editor);
+  });
+});
+
 describe('OpenTuiInputPrompt queued source restoration', () => {
   beforeEach(() => {
     mocks.state.inputHandlers.length = 0;
