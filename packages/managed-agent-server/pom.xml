@@ -231,6 +231,12 @@
                 <configuration>
                     <failIfNoTests>true</failIfNoTests>
                     <excludedGroups>fault-gate</excludedGroups>
+                    <!-- Runtime worker launch tests read these back from a spawned worker. -->
+                    <environmentVariables>
+                        <QWEN_MANAGED_AGENT_WORKER_ENV_PROBE>present</QWEN_MANAGED_AGENT_WORKER_ENV_PROBE>
+                        <spring_worker_env_probe>present</spring_worker_env_probe>
+                        <WORKER_ENV_PASSTHROUGH_PROBE>present</WORKER_ENV_PASSTHROUGH_PROBE>
+                    </environmentVariables>
                 </configuration>
             </plugin>
             <plugin>

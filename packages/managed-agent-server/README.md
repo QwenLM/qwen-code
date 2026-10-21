@@ -936,7 +936,10 @@ Local-process workers run model-directed tools, so the Broker starts them
 without any environment variable whose name begins, in any letter case, with
 `QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `SPRING_` or `OSS_`. Every other
 variable of the server process still reaches the worker and its tools. Keep
-unrelated secrets out of the service environment. This does not isolate files:
+unrelated secrets out of the service environment. A worker that uses the
+artifact tool's `oss` publisher therefore needs its credentials under the
+`ALIBABA_CLOUD_ACCESS_KEY_ID`, `ALIBABA_CLOUD_ACCESS_KEY_SECRET` and
+`ALIBABA_CLOUD_SECURITY_TOKEN` names, which that publisher also accepts. This does not isolate files:
 a worker runs as the service account and can read whatever that account can.
 
 After a credential-key rotation, keep each prior key in
