@@ -189,8 +189,12 @@ export type LiveAssistantItem = Extract<HistoryItem, { kind: 'assistant' }> & {
 export type LiveHistoryItem =
   | Exclude<
       HistoryItem,
-      { kind: 'tool' } | { kind: 'thinking' } | { kind: 'assistant' }
+      | { kind: 'tool' }
+      | { kind: 'thinking' }
+      | { kind: 'assistant' }
+      | { kind: 'user' }
     >
+  | (Extract<HistoryItem, { kind: 'user' }> & { recallText?: string })
   | LiveAssistantItem
   | LiveThinkingItem
   | LiveToolItem
@@ -231,13 +235,20 @@ export function foldLiveEvent(
       // Both `addItem` implementations collapse a user item identical to the
       // one before it, and this is the chokepoint the projected and live
       // echoes share: two identical steers in a row are one row.
-      if (last?.kind === 'user' && last.text === ev.text) return prev;
+      if (
+        last?.kind === 'user' &&
+        last.text === ev.text &&
+        last.recallText === ev.recallText
+      ) {
+        return prev;
+      }
       if (last?.kind === 'assistant' && last.streaming)
         items[items.length - 1] = { ...last, streaming: false };
       items.push({
         kind: 'user',
         id: nid('u'),
         text: ev.text,
+        ...(ev.recallText === undefined ? {} : { recallText: ev.recallText }),
         promptId: ev.promptId,
         sentToModel: ev.sentToModel,
       });

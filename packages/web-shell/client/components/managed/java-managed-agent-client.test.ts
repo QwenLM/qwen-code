@@ -23,6 +23,72 @@ afterEach(() => {
 });
 
 describe('JavaManagedAgentClient', () => {
+  it('renames through the authenticated WebShell POST using the original key and signal', async () => {
+    const result = { sessionId: 's1', title: 'Confirmed', replayed: false };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(result));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example/gateway',
+      getHeaders: () => ({ authorization: 'Bearer scoped' }),
+      fetch: fetchImpl,
+    });
+    const abort = new AbortController();
+    const request = {
+      sessionId: 's1',
+      title: 'Confirmed',
+      idempotencyKey: 'original',
+    };
+    expect(await client.renameSession(request, abort.signal)).toEqual(result);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      'https://product.example/gateway/api/agent/web-shell/v1/sessions/rename',
+    );
+    expect(init?.method).toBe('POST');
+    expect(init?.credentials).toBe('include');
+    expect(init?.signal).toBe(abort.signal);
+    expect(new Headers(init?.headers).get('authorization')).toBe(
+      'Bearer scoped',
+    );
+    expect(JSON.parse(String(init?.body))).toEqual(request);
+  });
+
+  it('does not treat an accepted or refused rename as confirmed', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ sessionId: 's1', title: 'Unconfirmed' }, 202),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            error: {
+              code: 'session_operation_forbidden',
+              message: 'Forbidden',
+            },
+          },
+          403,
+        ),
+      );
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    const request = {
+      sessionId: 's1',
+      title: 'Name',
+      idempotencyKey: 'original',
+    };
+    await expect(client.renameSession(request)).rejects.toMatchObject({
+      status: 202,
+      code: 'session_rename_unconfirmed',
+    });
+    await expect(client.renameSession(request)).rejects.toMatchObject({
+      status: 403,
+      code: 'session_operation_forbidden',
+    });
+  });
+
   it('uses authorized Workspace registration POST routes without putting credentials in request bodies', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
