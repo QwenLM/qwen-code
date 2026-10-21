@@ -1004,6 +1004,13 @@ export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/absolute/path/to/node'
 export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 ```
 
+Local-process workers run model-directed tools, so the Broker starts them
+without any environment variable whose name begins, in any letter case, with
+`QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `SPRING_` or `OSS_`. Every other
+variable of the server process still reaches the worker and its tools. Keep
+unrelated secrets out of the service environment. This does not isolate files:
+a worker runs as the service account and can read whatever that account can.
+
 After a credential-key rotation, keep each prior key in
 `previous-credential-keys` until no persisted Runtime binding references its
 key ID. The brackets are not decoration: Spring's relaxed binder strips `/`,
@@ -1293,7 +1300,7 @@ Marker v2 stores birth time as a canonical `Instant` string. Linux reads creatio
 
 Keep the storage root outside **every Git worktree**, with Session cwd in a child project directory. `.qwen-managed-storage.json` is an administrator maintenance file: do not read/write it through model tools or subject it to Git cleanup/stash. Tools are not confined by this layout. Missing or conflicting markers close admission; completed registrations never automatically republish them, including on a same-UUID retry. Marker repair needs a separate design.
 
-The retired V1–V68 migration chain and marker v1 are historical formats. This application initializes a new database with the shared V1 baseline and marker v2; it does not upgrade or migrate an existing database. Preserve old deployments and their data for historical access. Do not attach this binary to an old catalog or bypass refusal with Flyway `repair`, `outOfOrder` or manual history edits.
+The retired V1–V68 migration chain and marker v1 are historical formats. This application initializes a new database with the shared V1 baseline and marker v2; it refuses catalogs from that retired chain. Additive migrations within the current canonical chain follow their own rollout requirements, including the [V15 drained cutover](#hosted-recovery-scope). Preserve retired deployments and their data for historical access. Do not attach this binary to a retired catalog or bypass refusal with Flyway `repair`, `outOfOrder` or manual history edits.
 
 Stop all processes and external jobs that can write the storage, account for
 old Runtime holders and verify the original root before registration. Initialize
@@ -1625,6 +1632,12 @@ itself, so a failing test in the Hosted MySQL job does not skip the arms, and
 each arm runs even when an earlier one failed.
 
 ### Hosted recovery scope
+
+Ordinary LOCAL and SSH_LOCAL Managed Workspace Sessions may execute concurrently in the same directory, with one active Turn per Session. An UNKNOWN tool result on a READY binding retains its original Runtime Session and cannot be replayed, but does not exclude another ordinary Session. Existing LOST, DRAINING, OPERATOR_RECOVERY and attested RECOVERY_BLOCKED placement barriers remain in force. Physical registration, fencing, migration and maintenance still require every execution membership and unproven writer to drain. Shared files have no transactional isolation. Past execution overlap does not disable file undo. Undo requires other current memberships to release, then briefly excludes new acquisitions; existing file-level history checks still apply. Resident/private CSI and existing Agent/Workflow child-admission restrictions are unchanged. See the [concurrency design](../../docs/design/2026-10-21-managed-workspace-concurrency.md) ([简体中文](../../docs/design/2026-10-21-managed-workspace-concurrency.zh-CN.md)).
+
+V15 stores ordinary execution memberships per Runtime Session. Use the matching Server/Broker build and schema. There is no singleton-holder conversion or fallback execution authority; CSI reservation and physical-maintenance ownership keep their existing roles.
+
+Fresh installations initialize an empty catalog. An existing canonical V1–V14 catalog requires a drained cutover, not a mixed-version rolling upgrade: disable new Turn admission, then use the old build to finish or recover and release every ordinary LOCAL/SSH_LOCAL holder. Stop the old Server, Broker, Harness, Runtime workers and other storage writers, then verify that no `ma_storage_owner` row with `storage_kind IN ('LOCAL', 'SSH_LOCAL')` and `maintenance_id IS NULL` has a non-null `holder_key`. Only then apply V15 and start the matching build. An UNKNOWN holder with unconfirmed writer cleanup must remain on the old deployment until recovery and release succeed. Do not manually clear its ownership or start the new build against that catalog.
 
 The [SQL wake scan](#wake-recovery-after-harness-loss) has separate local
 macOS/MySQL 8.4 evidence; it does not yet have Linux/Windows, real-MQ or deployed
