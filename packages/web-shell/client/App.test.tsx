@@ -89,6 +89,7 @@ import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
 import { WebShellNavigationBoundary } from './navigation';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
+import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
 
 vi.mock('./components/managed/ManagedSessionsPage', async () => {
   const React = await import('react');
@@ -100,6 +101,16 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
       onOpenSession?: (id: string, workspaceId?: string) => void;
       workspaceId?: string;
       onSelectWorkspace?: (workspaceId: string) => void;
+      daemonWorkspaces?: WorkspaceSelectorOption[];
+      onSelectDaemonWorkspace?: (workspace: WorkspaceSelectorOption) => void;
+      onWorkspacesChange?: (
+        workspaces: {
+          workspaceId: string;
+          displayName: string;
+          state: string;
+          canCreateSession: boolean;
+        }[],
+      ) => void;
       onSessionWorkspaceChange?: (workspaceId: string | null) => void;
       navigationActive?: boolean;
       navigationSearch?: string;
@@ -134,6 +145,34 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
           />
+          {props.daemonWorkspaces?.map((workspace) => (
+            <button
+              key={workspace.id}
+              onClick={() => props.onSelectDaemonWorkspace?.(workspace)}
+            >
+              Choose daemon {workspace.label}
+            </button>
+          ))}
+          <button
+            onClick={() =>
+              props.onWorkspacesChange?.([
+                {
+                  workspaceId: 'managed-target',
+                  displayName: 'Managed Project',
+                  state: 'active',
+                  canCreateSession: true,
+                },
+                {
+                  workspaceId: 'blocked-target',
+                  displayName: 'Blocked Project',
+                  state: 'active',
+                  canCreateSession: false,
+                },
+              ])
+            }
+          >
+            Discover Managed workspaces
+          </button>
           <button onClick={() => props.onWorkspaceCreationOpenChange?.(false)}>
             Close workspace creation
           </button>
@@ -365,6 +404,7 @@ type ChatEditorTestProps = {
   workspaceFeaturesEnabled?: boolean;
   attachmentsEnabled?: boolean;
   selectedWorkspaceCwd?: string;
+  workspaceMenuItems?: React.ReactNode;
   onSelectWorkspace?: (cwd: string | undefined) => void;
   standaloneTargetSupported?: boolean;
   selectedStandaloneTarget?: boolean;
@@ -1343,6 +1383,7 @@ vi.mock('./daemon/session/DaemonSessionProvider', async (importOriginal) => {
 vi.mock('./components/ChatEditor', async () => {
   const React = await import('react');
   const { useWebShellCustomization } = await import('./customization');
+  const { WorkspaceSelector } = await import('./components/WorkspaceSelector');
   return {
     ChatEditor: React.memo(
       React.forwardRef(function ChatEditor(
@@ -1439,6 +1480,19 @@ vi.mock('./components/ChatEditor', async () => {
             ),
             'data-file-drop-action': customization.fileDropAction,
           },
+          props.workspaceMenuItems
+            ? React.createElement(WorkspaceSelector, {
+                workspaces: props.workspaces ?? [],
+                selectedWorkspaceCwd: props.selectedWorkspaceCwd,
+                alwaysVisible: true,
+                scratchSupported: false,
+                existingFolderSupported: false,
+                onSelectWorkspace: props.onSelectWorkspace ?? (() => {}),
+                onCreateScratch: () => {},
+                onOpenExistingFolder: () => {},
+                menuItems: props.workspaceMenuItems,
+              })
+            : null,
           React.createElement(
             'button',
             {
@@ -48757,6 +48811,135 @@ describe('approval mode allowlist', () => {
 });
 
 describe('Managed home integration', () => {
+  it.each([
+    ['primary', '/workspace'],
+    ['other', '/other-project'],
+  ])(
+    'selects the %s daemon workspace as a new task and retains the Managed draft',
+    async (_id, cwd) => {
+      window.history.replaceState(null, '', '/?managed=1');
+      mockConnection.sessionId = 'old-local-session';
+      mockConnection.workspaceCwd = '/workspace';
+      mockWorkspace.capabilities = {
+        workspaces: [
+          {
+            id: 'primary',
+            displayName: 'qwen-code',
+            cwd: '/workspace',
+            primary: true,
+            trusted: true,
+          },
+          {
+            id: 'other',
+            displayName: 'Other',
+            cwd: '/other-project',
+            primary: false,
+            trusted: true,
+          },
+        ],
+      } as typeof mockWorkspace.capabilities;
+      mockSessionActions.clearSession.mockImplementationOnce(async () => {
+        mockConnection.sessionId = undefined;
+      });
+      const { container } = renderApp({
+        managedAgentProvider: managedProvider(),
+        language: 'en',
+      });
+      await flush();
+      const draft = container.querySelector<HTMLInputElement>(
+        '[aria-label="Managed draft"]',
+      )!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(draft, 'Unsent Managed draft');
+        draft.dispatchEvent(new Event('input', { bubbles: true }));
+        draft.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      const label = cwd === '/workspace' ? 'qwen-code' : 'Other';
+      await act(async () =>
+        [...container.querySelectorAll<HTMLButtonElement>('button')]
+          .find(
+            (item) => item.textContent === `Choose daemon ${label} · Local`,
+          )!
+          .click(),
+      );
+      await flush();
+      expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+      expect(testState.latestChatEditorProps?.selectedWorkspaceCwd).toBe(cwd);
+      expect(
+        container
+          .querySelector('[data-testid="managed-conversation"]')!
+          .getAttribute('data-interactive'),
+      ).toBe('false');
+      await chooseBackend(container, 'Managed');
+      expect(draft.value).toBe('Unsent Managed draft');
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+      expect(mockWorkspaceActions.addWorkspace).not.toHaveBeenCalled();
+    },
+  );
+
+  it('offers the shared Managed catalog from a Local draft, respects availability and scopes it to its provider', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    mockConnection.sessionId = undefined;
+    const provider = managedProvider();
+    const { container, rerender } = renderApp({
+      managedAgentProvider: provider,
+      language: 'en',
+    });
+    await flush();
+    testState.prompt = 'Unsent Local draft';
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((item) => item.textContent === 'Discover Managed workspaces')!
+        .click(),
+    );
+    await flush();
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('button[aria-label="Workspace"]')!
+        .dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        ),
+    );
+    const options = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ];
+    const blocked = options.find(
+      (item) => item.textContent === 'Blocked Project · Managed',
+    )!;
+    expect(blocked.getAttribute('data-disabled')).not.toBeNull();
+    await act(async () => blocked.click());
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')!
+        .getAttribute('data-interactive'),
+    ).toBe('false');
+    await act(async () =>
+      options
+        .find((item) => item.textContent === 'Managed Project · Managed')!
+        .click(),
+    );
+    await flush();
+    const managed = container.querySelector(
+      '[data-testid="managed-conversation"]',
+    )!;
+    expect(managed.getAttribute('data-workspace')).toBe('managed-target');
+    expect(managed.getAttribute('data-session')).toBe('new');
+    expect(managed.getAttribute('data-interactive')).toBe('true');
+    expect(testState.prompt).toBe('Unsent Local draft');
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.addWorkspace).not.toHaveBeenCalled();
+    rerender({
+      managedAgentProvider: { ...provider, storageKey: 'different-provider' },
+      language: 'en',
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.workspaceMenuItems).toBe(false);
+  });
+
   function providerWithWorkspaceCreation(): ManagedAgentProvider {
     return {
       ...managedProvider(),

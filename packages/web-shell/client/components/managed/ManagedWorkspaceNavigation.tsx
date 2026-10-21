@@ -30,6 +30,7 @@ export function ManagedWorkspaceNavigation({
   revision,
   onSelectWorkspace,
   onSelectSession,
+  onWorkspacesChange,
 }: {
   provider: ManagedAgentProvider;
   clientId: string;
@@ -41,6 +42,7 @@ export function ManagedWorkspaceNavigation({
   revision: number;
   onSelectWorkspace?: (workspaceId: string) => void;
   onSelectSession: (sessionId: string, workspaceId?: string) => void;
+  onWorkspacesChange?: (workspaces: ManagedAgentWorkspace[]) => void;
 }) {
   const { t } = useI18n();
   const binding = provider.workspaceBinding!;
@@ -83,6 +85,10 @@ export function ManagedWorkspaceNavigation({
     );
     return () => abort.abort();
   }, [binding, clientId, revision]);
+
+  useEffect(() => {
+    onWorkspacesChange?.(supported ? workspaces : []);
+  }, [onWorkspacesChange, supported, workspaces]);
 
   async function loadMore() {
     const abort = lifetime.current;

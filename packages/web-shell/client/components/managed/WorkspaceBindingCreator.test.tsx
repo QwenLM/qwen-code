@@ -2230,6 +2230,128 @@ describe('WorkspaceBindingCreator', () => {
     );
   });
 
+  it('selects trusted daemon targets with their original host and cwd without creating resources', async () => {
+    const createSession = directCreation();
+    const onSelectDaemonWorkspace = vi.fn();
+    const daemonWorkspaces = [
+      {
+        id: 'primary',
+        cwd: '/qwen-code',
+        label: 'qwen-code · Local',
+        primary: true,
+        trusted: true,
+      },
+      {
+        id: 'secondary',
+        cwd: '/other',
+        label: 'Other · Local',
+        primary: false,
+        trusted: true,
+      },
+      {
+        id: 'remote',
+        cwd: '/qwen-code',
+        label: 'Remote · Local',
+        primary: true,
+        trusted: true,
+        hostOrigin: 'https://remote.example',
+      },
+      {
+        id: 'untrusted',
+        cwd: '/untrusted',
+        label: 'Untrusted · Local',
+        primary: false,
+        trusted: false,
+      },
+    ];
+    await render(true, false, undefined, {
+      daemonWorkspaces,
+      onSelectDaemonWorkspace,
+    });
+    for (const target of daemonWorkspaces.slice(0, 2)) {
+      await workspaceAction(target.label);
+      expect(onSelectDaemonWorkspace).toHaveBeenLastCalledWith(target);
+    }
+    await workspaceAction('Remote · Localremote.example');
+    expect(onSelectDaemonWorkspace).toHaveBeenLastCalledWith(
+      daemonWorkspaces[2],
+    );
+    await workspaceAction('Untrusted · Local');
+    expect(onSelectDaemonWorkspace).toHaveBeenCalledTimes(3);
+    expect(createSession).not.toHaveBeenCalled();
+    expect(createEmpty).not.toHaveBeenCalled();
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
+    expect(editorMocks.props!.selectedWorkspaceCwd).toBe('ws-a');
+  });
+
+  it('blocks a daemon choice already open when Managed creation becomes uncertain', async () => {
+    const createSession = directCreation();
+    createSession.mockRejectedValue(new TypeError('Lost response'));
+    const onSelectDaemonWorkspace = vi.fn();
+    await render(true, false, undefined, {
+      daemonWorkspaces: [
+        {
+          id: 'daemon',
+          cwd: '/qwen-code',
+          label: 'qwen-code · Local',
+          primary: true,
+          trusted: true,
+        },
+      ],
+      onSelectDaemonWorkspace,
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLElement>('button[aria-label="Workspace"]')!
+        .dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+    });
+    const choice = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ].find((item) => item.textContent === 'qwen-code · Local')!;
+    expect(choice).toBeDefined();
+    await sendInitial('Keep this Managed request');
+    await act(async () => choice.click());
+    expect(onSelectDaemonWorkspace).not.toHaveBeenCalled();
+    expect(editorMocks.props!.workspaceSelectionDisabled).toBe(true);
+    expect(
+      sessionStorage.getItem(
+        `qwen-managed-workspace-create:${provider.storageKey}`,
+      ),
+    ).toContain('Keep this Managed request');
+    expect(editorMocks.clear).not.toHaveBeenCalled();
+  });
+
+  it('keeps daemon selection disabled while a workspace registration is uncertain', async () => {
+    directCreation();
+    const key = `qwen-managed-workspace-registration:${provider.storageKey}`;
+    const receipt = JSON.stringify({
+      displayName: 'Project',
+      localPath: '/project',
+      idempotencyKey: 'pending-registration',
+    });
+    sessionStorage.setItem(key, receipt);
+    const onSelectDaemonWorkspace = vi.fn();
+    await render(true, false, undefined, {
+      daemonWorkspaces: [
+        {
+          id: 'daemon',
+          cwd: '/qwen-code',
+          label: 'qwen-code · Local',
+          primary: true,
+          trusted: true,
+        },
+      ],
+      onSelectDaemonWorkspace,
+    });
+    await click('Close');
+    await workspaceAction('qwen-code · Local');
+    expect(onSelectDaemonWorkspace).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(key)).toBe(receipt);
+  });
+
   it('cancels directory edits and saves an override without resetting the composer', async () => {
     const createSession = directCreation();
     await render();

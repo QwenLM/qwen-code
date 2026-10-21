@@ -9,6 +9,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import shellStyles from '../../App.module.css';
 import { useI18n } from '../../i18n';
 import { ChatEditor } from '../ChatEditor';
+import type { WorkspaceSelectorOption } from '../WorkspaceSelector';
+import { HostLabel } from '../workspaces/HostLabel';
 import { WelcomeHeader } from '../WelcomeHeader';
 import { AddWorkspaceDialog } from '../dialogs/AddWorkspaceDialog';
 import { WorkspaceExecutionSelect } from '../workspaces/WorkspaceExecutionSelect';
@@ -36,7 +38,7 @@ import {
   DialogTitle,
 } from '../ui/dialog';
 import { Input } from '../ui/input';
-import { DropdownMenuItem } from '../ui/dropdown-menu';
+import { DropdownMenuItem, DropdownMenuSeparator } from '../ui/dropdown-menu';
 import {
   Select,
   SelectContent,
@@ -180,6 +182,8 @@ export function WorkspaceBindingCreator({
   workspaceCreationOpen,
   onWorkspaceCreationOpenChange,
   onOpenLocalWorkspace,
+  daemonWorkspaces,
+  onSelectDaemonWorkspace,
   creationOnly = false,
   clientId,
   onCreated,
@@ -195,6 +199,8 @@ export function WorkspaceBindingCreator({
   workspaceCreationOpen?: boolean;
   onWorkspaceCreationOpenChange?: (open: boolean) => void;
   onOpenLocalWorkspace?: () => void;
+  daemonWorkspaces?: WorkspaceSelectorOption[];
+  onSelectDaemonWorkspace?: (workspace: WorkspaceSelectorOption) => void;
   creationOnly?: boolean;
   clientId: string;
   onCreated: (sessionId: string, workspaceId: string) => void;
@@ -1498,6 +1504,41 @@ export function WorkspaceBindingCreator({
               workspaceSelectorAlwaysVisible
               workspaceMenuItems={
                 <>
+                  {onSelectDaemonWorkspace &&
+                    daemonWorkspaces?.map((item) => (
+                      <DropdownMenuItem
+                        key={item.id}
+                        disabled={!item.trusted || Boolean(pendingWorkspace)}
+                        title={item.cwd}
+                        onSelect={() => {
+                          if (
+                            interactive &&
+                            !creationOnly &&
+                            !loading &&
+                            !workspaceSelectionBlocked &&
+                            !busy &&
+                            !workspaceCreatingRef.current &&
+                            !pendingRef.current &&
+                            !pendingWorkspaceRef.current &&
+                            !encoding.current &&
+                            item.trusted
+                          )
+                            onSelectDaemonWorkspace(item);
+                        }}
+                      >
+                        {item.label}
+                        {item.hostOrigin &&
+                          item.hostOrigin !== window.location.origin && (
+                            <span className="ml-auto flex items-center gap-1.5 text-muted-foreground">
+                              <HostLabel origin={item.hostOrigin} />
+                            </span>
+                          )}
+                      </DropdownMenuItem>
+                    ))}
+                  {onSelectDaemonWorkspace &&
+                    Boolean(daemonWorkspaces?.length) && (
+                      <DropdownMenuSeparator />
+                    )}
                   <DropdownMenuItem
                     disabled={
                       !supported ||

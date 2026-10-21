@@ -15,6 +15,7 @@ import {
   type ToolDetailsLoader,
 } from '../messages/tools/ToolDetailsContext';
 import { ChatEditor } from '../ChatEditor';
+import type { WorkspaceSelectorOption } from '../WorkspaceSelector';
 import { WelcomeHeader } from '../WelcomeHeader';
 import { ChatContextHeader } from '../ChatContextHeader';
 import { SessionRenameDialog } from '../dialogs/SessionRenameDialog';
@@ -58,6 +59,7 @@ import { useManagedTaskCancel } from './use-managed-task-cancel';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
+  ManagedAgentWorkspace,
   ManagedInputBlock,
 } from './managed-agent-provider';
 import type { PromptImage, PromptFile } from '../../adapters/promptTypes';
@@ -126,6 +128,9 @@ export function ManagedSessionsPage({
   onWorkspaceCreationOpenChange,
   onWorkspaceCreated,
   onOpenLocalWorkspace,
+  daemonWorkspaces,
+  onSelectDaemonWorkspace,
+  onWorkspacesChange,
   onSelectSession,
   onOpenSession,
   workspaceId,
@@ -145,6 +150,9 @@ export function ManagedSessionsPage({
   onWorkspaceCreationOpenChange?: (open: boolean) => void;
   onWorkspaceCreated?: (workspaceId: string) => void;
   onOpenLocalWorkspace?: () => void;
+  daemonWorkspaces?: WorkspaceSelectorOption[];
+  onSelectDaemonWorkspace?: (workspace: WorkspaceSelectorOption) => void;
+  onWorkspacesChange?: (workspaces: ManagedAgentWorkspace[]) => void;
   onSelectSession: (
     sessionId: string | undefined,
     workspaceId?: string,
@@ -173,6 +181,9 @@ export function ManagedSessionsPage({
         onWorkspaceCreationOpenChange={onWorkspaceCreationOpenChange}
         onWorkspaceCreated={onWorkspaceCreated}
         onOpenLocalWorkspace={onOpenLocalWorkspace}
+        daemonWorkspaces={daemonWorkspaces}
+        onSelectDaemonWorkspace={onSelectDaemonWorkspace}
+        onWorkspacesChange={onWorkspacesChange}
         onSelectSession={onSelectSession}
         onOpenSession={onOpenSession}
         workspaceId={workspaceId}
@@ -199,6 +210,9 @@ function ManagedSessionsContent({
   onWorkspaceCreationOpenChange,
   onWorkspaceCreated,
   onOpenLocalWorkspace,
+  daemonWorkspaces,
+  onSelectDaemonWorkspace,
+  onWorkspacesChange,
   onSelectSession,
   onOpenSession,
   workspaceId,
@@ -219,6 +233,9 @@ function ManagedSessionsContent({
   onWorkspaceCreationOpenChange?: (open: boolean) => void;
   onWorkspaceCreated?: (workspaceId: string) => void;
   onOpenLocalWorkspace?: () => void;
+  daemonWorkspaces?: WorkspaceSelectorOption[];
+  onSelectDaemonWorkspace?: (workspace: WorkspaceSelectorOption) => void;
+  onWorkspacesChange?: (workspaces: ManagedAgentWorkspace[]) => void;
   onSelectSession: (
     sessionId: string | undefined,
     workspaceId?: string,
@@ -885,6 +902,7 @@ function ManagedSessionsContent({
           revision={workspaceRevision}
           onSelectWorkspace={onSelectWorkspace}
           onSelectSession={openSession}
+          onWorkspacesChange={onWorkspacesChange}
         />
       ) : (
         sessions
@@ -1252,6 +1270,8 @@ function ManagedSessionsContent({
                 workspaceCreationOpen={workspaceCreationOpen}
                 onWorkspaceCreationOpenChange={onWorkspaceCreationOpenChange}
                 onOpenLocalWorkspace={onOpenLocalWorkspace}
+                daemonWorkspaces={daemonWorkspaces}
+                onSelectDaemonWorkspace={onSelectDaemonWorkspace}
                 creationOnly={Boolean(sessionId)}
                 clientId={clientId}
                 workspaceId={workspaceId}

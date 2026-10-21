@@ -222,7 +222,12 @@ import {
 } from './components/dialogs/ModelDialog';
 import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
 import { ManagedSessionsPage } from './components/managed/ManagedSessionsPage';
-import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
+import type {
+  ManagedAgentProvider,
+  ManagedAgentWorkspace,
+} from './components/managed/managed-agent-provider';
+import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
+import { DropdownMenuItem } from './components/ui/dropdown-menu';
 import {
   managedSelectionFromUrl,
   saveManagedSelection,
@@ -3519,6 +3524,22 @@ export function App({
     useState(false);
   const managedWorkspaceCreationOpenRef = useRef(managedWorkspaceCreationOpen);
   managedWorkspaceCreationOpenRef.current = managedWorkspaceCreationOpen;
+  const managedProviderKey = managedAgentProvider?.storageKey;
+  const [managedWorkspaceCatalog, setManagedWorkspaceCatalog] = useState<{
+    providerKey: string;
+    workspaces: ManagedAgentWorkspace[];
+  }>();
+  const handleManagedWorkspacesChange = useCallback(
+    (workspaces: ManagedAgentWorkspace[]) => {
+      if (managedProviderKey) {
+        setManagedWorkspaceCatalog({
+          providerKey: managedProviderKey,
+          workspaces,
+        });
+      }
+    },
+    [managedProviderKey],
+  );
   useAssistantTurnSettlementProjection(onAssistantTurnSettled);
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
@@ -15646,6 +15667,47 @@ export function App({
     },
     [daemonTarget, focusedHostOrigin, handleSelectComposerWorkspace],
   );
+  const handleSelectDaemonWorkspace = useCallback(
+    (workspace: WorkspaceSelectorOption) => {
+      const target = composerWorkspaces?.find(
+        (item) =>
+          item.id === workspace.id &&
+          item.cwd === workspace.cwd &&
+          item.hostOrigin === workspace.hostOrigin,
+      );
+      if (!target?.trusted) return;
+      if (target.hostOrigin && target.hostOrigin !== focusedHostOrigin) {
+        if (!daemonTarget) return;
+        setManagedHome(false);
+        handleSelectHostedWorkspace(target.hostOrigin, target.cwd);
+      } else if (connectionRef.current.sessionId) {
+        void createNewSession({ kind: 'workspace', cwd: target.cwd });
+      } else {
+        setManagedHome(false);
+        void switchWorkspace(target.cwd);
+        returnToChat();
+      }
+    },
+    [
+      composerWorkspaces,
+      createNewSession,
+      daemonTarget,
+      focusedHostOrigin,
+      handleSelectHostedWorkspace,
+      returnToChat,
+      switchWorkspace,
+    ],
+  );
+  const handleSelectManagedWorkspace = useCallback(
+    (workspaceId: string) => {
+      setManagedWorkspaceId(workspaceId);
+      setManagedSessionId(undefined);
+      setManagedHome(true);
+      closeMobileDrawer();
+      returnToChat();
+    },
+    [closeMobileDrawer, returnToChat],
+  );
   const handleSelectComposerStandalone = useCallback(() => {
     if (connectionRef.current.sessionId) {
       void createNewSession({ kind: 'global' });
@@ -23023,13 +23085,10 @@ export function App({
                       }
                       workspaceId={managedWorkspaceId ?? undefined}
                       onSessionWorkspaceChange={setManagedWorkspaceId}
-                      onSelectWorkspace={(workspaceId) => {
-                        setManagedWorkspaceId(workspaceId);
-                        setManagedSessionId(undefined);
-                        setManagedHome(true);
-                        closeMobileDrawer();
-                        returnToChat();
-                      }}
+                      onSelectWorkspace={handleSelectManagedWorkspace}
+                      daemonWorkspaces={composerWorkspaces}
+                      onSelectDaemonWorkspace={handleSelectDaemonWorkspace}
+                      onWorkspacesChange={handleManagedWorkspacesChange}
                       navigationActive={managedMode}
                       navigationSearch={managedNavigationSearch}
                       onOpenSession={(id, workspaceId) => {
@@ -23986,6 +24045,21 @@ export function App({
                               : undefined
                           }
                           workspaceSelectorAlwaysVisible={Boolean(managedAgentProvider) && composerWorkspaceSelectEnabled}
+                          workspaceMenuItems={
+                            composerWorkspaceSelectEnabled && !lockedWorkspaceCwd &&
+                            managedAgentProvider &&
+                            managedWorkspaceCatalog &&
+                            managedWorkspaceCatalog.providerKey === managedProviderKey &&
+                            managedWorkspaceCatalog.workspaces.map((item) => (
+                              <DropdownMenuItem
+                                key={item.workspaceId}
+                                disabled={!item.canCreateSession}
+                                onSelect={() => handleSelectManagedWorkspace(item.workspaceId)}
+                              >
+                                {item.displayName} · {t('managed.managedMode')}
+                              </DropdownMenuItem>
+                            ))
+                          }
                           selectedWorkspaceCwd={
                             workspaceContextActive
                               ? connection.sessionId

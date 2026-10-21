@@ -14,6 +14,8 @@ The common Add workspace entry offers an Execution mode field: Local (daemon) or
 
 The existing backend catalogs persist ownership. A daemon workspace remains a daemon workspace; a Managed workspace retains its server workspace ID and provider identity. The same physical directory can be registered separately in both catalogs. Neither directory text nor the page URL reclassifies a workspace. Workspace rows and New task show Local or Managed, and the Managed composer also includes its type beside the selected workspace name. Creating a task from a workspace continues to use its owning service.
 
+The New task workspace menu also offers existing workspaces from the other service, with Local or Managed in each label. Choosing one opens a draft owned by that service without registering or importing it again. Each service keeps its own unsent draft and pending-operation receipts. Managed discovery is projected from the shared navigation catalog, remains provider scoped, and only advertises supported workspaces; creation revalidates an explicit Managed target. Daemon selection retains its host, cwd and trust checks. Busy or uncertain Managed creation cannot switch execution through the menu.
+
 ## Components and decisions
 
 Reuse a small shared execution field inside AddWorkspaceDialog and WorkspaceBindingCreator. App coordinates mode changes and controls the workspace dialog through ManagedSessionsPage. The existing Managed creator also serves this dialog above a history conversation without replacing that conversation. It mounts only for a draft or an explicitly open history creation dialog, preserving the existing session-creation lifetime. This preserves its pending-command receipts, idempotency, validation and directory authorization rather than duplicating the creation implementation. Changing an unsubmitted form is allowed; pending or uncertain Managed operations lock their execution type until resolved or explicitly abandoned. A successful local registration activates the local target. Background Managed completion keeps its existing non-navigation callback.
@@ -22,15 +24,19 @@ WorkspaceSection accepts a display label for local rows when Managed is availabl
 
 ## Validation and acceptance
 
-Add focused tests for switching forms without mutation, preserving conversations on cancel, disabling switches during submission or pending Managed operations, provider-specific registration and inherited New task routing. Test the global CLI baseline, then build, typecheck and bundle the local CLI. Use isolated native services and disposable project directories to register the same directory through both services, verify distinct catalog identities and sessions, and read back registrations after restart. Root performs browser checks with screenshots and verifies the user preview after restarting only its owned launcher. No actual user directory is registered for testing.
+Add focused tests for switching forms without mutation, preserving conversations on cancel, disabling switches during submission or pending Managed operations, provider-specific registration and inherited New task routing. Verify task-picker selection in both directions, primary and secondary daemon targets, independent drafts and no registration or session creation before submission. Test the global CLI baseline, then build, typecheck and bundle the local CLI. Use isolated native services and disposable project directories to register the same directory through both services, verify distinct catalog identities and sessions, and read back registrations after restart. Root performs browser checks with screenshots and verifies the user preview after restarting only its owned launcher. No actual user directory is registered for testing.
 
 ## Scope and open questions
 
-This change adds explicit choice at workspace creation and visible task routing. It does not migrate an existing workspace or session between services, merge their storage, or add a combined cross-provider composer picker. There are no unresolved decisions for this scope.
+This change adds explicit choice at workspace creation and shared task-target selection. It does not migrate an existing workspace or session between services or merge their storage. There are no unresolved decisions for this scope.
 
 ## Verified UI
 
 The follow-up PR was verified against the latest local-launcher parent on native macOS with a fresh matching JAR. The same disposable directory was registered through both browser forms, both services performed a real file read, and each history's New task inherited its service and workspace. Canceling preserved the Local conversation; Managed rename survived refresh and its creation Skills control remained available. The browser reported no console errors. Build, typecheck, bundle, 548 CLI tests, 406 focused frontend tests and full Maven verification passed (5,148 Java tests, 18 skipped).
+
+The shared task-picker follow-up passes build, typecheck, bundle and 334 focused frontend tests. Browser selection in both directions preserves independent drafts and creates no workspace or session before submission. Three submitted file reads target the daemon primary, daemon secondary and Managed workspace respectively; independent API/transcript checks confirm the exact IDs, directories, real tool results and unchanged fixture files. Refresh restores the selected task and history. The Java runtime is unchanged.
+
+![Shared task workspace menu](assets/managed-unified-workspace-picker.jpg)
 
 ![Workspace execution choice](assets/managed-workspace-execution-choice.jpg)
 

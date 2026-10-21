@@ -188,6 +188,7 @@ describe('Managed workspace navigation', () => {
   });
 
   it('loads workspace pages explicitly and deduplicates IDs without fetching sessions again', async () => {
+    const onWorkspacesChange = vi.fn();
     list
       .mockResolvedValueOnce({
         data: [workspace],
@@ -201,7 +202,7 @@ describe('Managed workspace navigation', () => {
         ],
         supported: true,
       });
-    await render();
+    await render({ onWorkspacesChange });
     expect(container.querySelector('[data-managed-workspace="c"]')).toBeNull();
     await act(async () =>
       container
@@ -218,6 +219,36 @@ describe('Managed workspace navigation', () => {
       container.querySelectorAll('[data-managed-workspace="a"]'),
     ).toHaveLength(1);
     expect(provider.listSessions).not.toHaveBeenCalled();
+    expect(onWorkspacesChange).toHaveBeenLastCalledWith([
+      { ...workspace, displayName: 'Updated' },
+      { ...workspace, workspaceId: 'c', displayName: 'Third' },
+    ]);
+  });
+
+  it('projects the supported default catalog and removes task choices after discovery fails', async () => {
+    const onWorkspacesChange = vi.fn();
+    const defaultWorkspace = {
+      ...workspace,
+      workspaceId: 'default',
+      displayName: 'Default',
+    };
+    list
+      .mockResolvedValueOnce({
+        data: [workspace],
+        defaultWorkspace,
+        supported: true,
+      })
+      .mockRejectedValueOnce(new Error('Offline'))
+      .mockResolvedValueOnce({ data: [workspace], supported: false });
+    await render({ onWorkspacesChange });
+    expect(onWorkspacesChange).toHaveBeenLastCalledWith([
+      workspace,
+      defaultWorkspace,
+    ]);
+    await render({ revision: 1 });
+    expect(onWorkspacesChange).toHaveBeenLastCalledWith([]);
+    await render({ revision: 2 });
+    expect(onWorkspacesChange).toHaveBeenLastCalledWith([]);
   });
 
   it('retains reachable history when workspace discovery fails and refreshes after creation', async () => {
