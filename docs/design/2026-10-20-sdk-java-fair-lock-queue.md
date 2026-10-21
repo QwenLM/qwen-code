@@ -4,7 +4,7 @@
 
 ## Problem
 
-`.github/workflows/sdk-java.yml` serializes every self-hosted Maven step on one
+`.github/workflows/sdk-java.yml` serializes its self-hosted Java work on one
 file, `~/.cache/qwen-code-ci/sdk-java-tests.lock`, via `flock --wait`. On
 2026-10-18/19 and 2026-10-20 the shared ECS pool starved repeatedly: jobs
 waited the full 2400 s, then 3600 s, then 5400 s budget and failed before
@@ -71,6 +71,13 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
   budget — before it blocks, and at most once a minute after. A blocked head
   cannot print while it is blocked, but the line it printed before blocking
   names it, so a hang is attributable from the step's first lines.
+- The lock covers only host-shared state. The test lane runs Maven straight
+  against `~/.m2` and holds the lock for that suite; the integration lane
+  resolves from a job-local repository, so it takes the lock only around the
+  shared-cache write-back and its read-only seed takes none. A multi-hour
+  `clean verify` therefore cannot consume a fast-tier waiter's budget (run
+  39603296748, #15113). Both sites still close the lock descriptor on every
+  child, so a cancelled step's survivor cannot keep the flock.
 - Failing closed is worse than falling back here: `release-sdk-java.yml`
   resumes an existing tag by checking out that immutable commit, which may
   predate the helper. Both sites therefore fall back to the bare
@@ -120,6 +127,8 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
 ## Acceptance criteria
 
 - Both lock sites in `sdk-java.yml` acquire through the helper at 5400 s.
+- No acquisition spans an integration-lane Maven run, and every command the
+  lock-bearing sections spawn closes fd 9.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.

@@ -4,8 +4,8 @@
 
 ## 问题
 
-`.github/workflows/sdk-java.yml` 通过 `flock --wait` 把所有 self-hosted 的
-Maven 步骤串行在一个文件 `~/.cache/qwen-code-ci/sdk-java-tests.lock` 上。
+`.github/workflows/sdk-java.yml` 通过 `flock --wait` 把 self-hosted 的
+Java 工作串行在一个文件 `~/.cache/qwen-code-ci/sdk-java-tests.lock` 上。
 2026-10-18/19 和 2026-10-20 共享 ECS 池反复饥饿：job 在 2400 秒、随后
 3600 秒、再随后 5400 秒的预算内等满后失败，一条测试都没有执行，而且至少
 三台物理宿主机同时中招（#14566、#14743）。
@@ -64,6 +64,12 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
   票据号与剩余预算 —— 在进入阻塞之前打印，之后最多每分钟一次。队首
   阻塞期间无法再打印，但阻塞前那行已经点名了它，因此挂死从 step 的
   头几行日志就能归因。
+- 锁只覆盖宿主机共享状态。test lane 直接对 `~/.m2` 跑 Maven，并为这套
+  测试持有锁；integration lane 使用 job-local 仓库，因此只在共享缓存
+  回写期间取锁，其只读 seed 不取锁。一次数小时的 `clean verify` 因而
+  无法耗尽 fast tier 的等待预算（run 39603296748，#15113）。两处取锁点
+  仍让每个子进程关闭锁文件描述符，被取消 step 的残留子进程无法继续持有
+  flock。
 - 在这里 fail-closed 比回退更糟：`release-sdk-java.yml` 续跑既有
   tag 时会检出那个不可变的 commit，它可能早于本辅助脚本。因此两处
   站点在脚本文件不存在时回退到它们替换掉的裸
@@ -107,6 +113,8 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 ## 验收标准
 
 - `sdk-java.yml` 的两处取锁点都以 5400 秒通过该辅助脚本获取。
+- 没有任何一次取锁横跨 integration lane 的 Maven 运行；取锁段启动的
+  每个子进程都关闭 fd 9。
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   通过。

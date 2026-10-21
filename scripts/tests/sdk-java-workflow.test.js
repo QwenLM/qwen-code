@@ -130,34 +130,80 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it('keeps the host lock out of every Maven child', () => {
+  it('keeps the host lock out of every child the locked section runs', () => {
     const jobs = parse(workflow).jobs;
-    const lockedSteps = ['test', 'mysql-integration'].flatMap((name) =>
-      jobs[name].steps.filter((s) => s.run?.includes('sdk-java-tests.lock')),
+    // The test job holds the lock across its Maven suite; every Maven child
+    // closes fd 9 so a survivor cannot keep the flock after the step exits.
+    const testStep = jobs.test.steps.find((s) =>
+      s.run?.includes('sdk-java-tests.lock'),
     );
-    // The MariaDB lane's two Maven steps are one step now (#14903), so the
-    // lock-bearing steps are the test job's and this job's single one.
-    expect(lockedSteps).toHaveLength(2);
-    for (const s of lockedSteps) {
-      const commands = s.run.replace(/\\\n/g, ' ').match(/^\s*mvn .+$/gm);
-      expect(commands?.length, s.name).toBeGreaterThan(0);
-      for (const command of commands) {
-        expect(command.trim(), s.name).toMatch(/ 9>&-$/);
-      }
+    const testCommands = testStep.run
+      .replace(/\\\n/g, ' ')
+      .match(/^\s*mvn .+$/gm);
+    expect(testCommands?.length).toBeGreaterThan(0);
+    for (const command of testCommands) {
+      expect(command.trim()).toMatch(/ 9>&-$/);
     }
+
+    // The integration lane holds the lock only for the cache write-back, so
+    // its Maven runs stay outside the locked section: a multi-hour verify
+    // must not starve the fast tier (run 39603296748, #15113).
+    const cacheStep = jobs['mysql-integration'].steps.find((s) =>
+      s.run?.includes('sdk-java-tests.lock'),
+    );
+    const lockedAt = cacheStep.run.indexOf('sdk_java_lock_acquire 5400');
+    const writeBackAt = cacheStep.run.indexOf(
+      'if [ "${cache_locked}" != \'1\' ]; then',
+    );
+    expect(lockedAt).toBeGreaterThan(-1);
+    expect(writeBackAt).toBeGreaterThan(lockedAt);
+    expect(
+      cacheStep.run.indexOf('-f packages/sdk-java/qwencode/pom.xml'),
+    ).toBeLessThan(lockedAt);
+    expect(cacheStep.run.indexOf('-Pmysql-integration')).toBeLessThan(lockedAt);
+    const lockedCommands = cacheStep.run
+      .slice(writeBackAt)
+      .replace(/\\\n/g, ' ')
+      .split('\n')
+      .flatMap((line) => line.split('|'))
+      .map((command) => command.trim())
+      .filter((command) => /^(?:mkdir|tar)\b/.test(command));
+    expect(lockedCommands).toHaveLength(3);
+    for (const command of lockedCommands) {
+      expect(command).toContain('9>&-');
+    }
+    // A lost write-back wait only skips the optional cache refresh; the
+    // suite above already passed, so the step must stay green.
+    expect(cacheStep.run).toContain(
+      '::warning::skipping the Maven cache write-back: the sdk-java host lock was not acquired within 90 minutes',
+    );
   });
 
   it.skipIf(process.platform !== 'linux')(
-    'retains serialization while Maven runs and releases it with a surviving child',
+    'releases the host lock once a locked command spawns a surviving child',
     () => {
       const jobs = parse(workflow).jobs;
-      const commands = ['test', 'mysql-integration'].flatMap((name) =>
-        jobs[name].steps.flatMap((s) =>
-          s.run?.includes('sdk-java-tests.lock')
-            ? (s.run.replace(/\\\n/g, ' ').match(/^\s*mvn .+$/gm) ?? [])
-            : [],
-        ),
+      const testStep = jobs.test.steps.find((s) =>
+        s.run?.includes('sdk-java-tests.lock'),
       );
+      const testCommands = (
+        testStep.run.replace(/\\\n/g, ' ').match(/^\s*mvn .+$/gm) ?? []
+      ).map((command) => command.trim());
+      const cacheStep = jobs['mysql-integration'].steps.find((s) =>
+        s.run?.includes('sdk-java-tests.lock'),
+      );
+      const writeBackAt = cacheStep.run.indexOf(
+        'if [ "${cache_locked}" != \'1\' ]; then',
+      );
+      const cacheCommands = cacheStep.run
+        .slice(writeBackAt)
+        .replace(/\\\n/g, ' ')
+        .split('\n')
+        .flatMap((line) => line.split('|'))
+        .map((command) => command.trim())
+        .filter((command) => /^(?:mkdir|tar)\b/.test(command));
+      const commands = [...testCommands, ...cacheCommands];
+      expect(commands.length).toBeGreaterThan(0);
       const dir = mkdtempSync(join(tmpdir(), 'sdk-java-lock-'));
       try {
         for (const command of commands) {
@@ -167,18 +213,22 @@ describe('SDK Java self-hosted workflow guards', () => {
               '-e',
               '-c',
               `
-              trap 'kill "\${child_pid:-}" 2>/dev/null || true' EXIT
+              pids_file="$LOCK_FILE.pids"
+              trap 'while read -r pid; do kill "$pid" 2>/dev/null || true; done < "$pids_file"' EXIT
               exec 9>"$LOCK_FILE"
               flock --nonblock 9
-              mvn() {
+              survive() {
                 sleep 30 </dev/null >/dev/null 2>&1 &
-                child_pid=$!
+                echo $! >> "$pids_file"
               }
+              mvn() { survive; }
+              mkdir() { survive; }
+              tar() { survive; }
               ${command}
               if flock --nonblock "$LOCK_FILE" true; then exit 91; fi
               exec 9>&-
               flock --nonblock "$LOCK_FILE" true
-              kill -0 "$child_pid"
+              kill -0 "$(tail -n 1 "$pids_file")"
             `,
             ],
             {
@@ -954,13 +1004,11 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     },
   );
 
-  it('holds the per-host sdk-java lock once around both Maven runs', () => {
-    // Derived from the parsed steps, not a string count: the install and
-    // verify commands share one acquisition — the shared path pinned for the
-    // test job above is what makes the two jobs mutually exclusive on one ECS
-    // host — and wait on it with the pinned literal. Run 39353663670's second
-    // acquisition lost the queue between the two steps and exhausted the wait
-    // without starting Maven.
+  it('takes the per-host lock only for the host-shared cache write-back', () => {
+    // The integration lane resolves from a job-local repository, so its Maven
+    // runs do not touch host-shared state. Holding the lock across them lets a
+    // multi-hour verify consume the fast tier's whole 90-minute budget (run
+    // 39603296748, #15113).
     const parsed = parse(workflow);
     const mavenSteps = parsed.jobs['mysql-integration'].steps.filter(
       (s) => typeof s.run === 'string' && s.run.includes('mvn '),
@@ -975,17 +1023,10 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // Same ref-independence guard as the test job: a resumed release tag may
     // predate the helper, so this site must also keep the bare-lock arm.
     expect(step.run).toContain('flock --wait 5400 9');
-    expect(step.run).toContain(
-      '::error::sdk-java host lock not acquired within',
-    );
+    expect(step.run).toContain('sdk_java_lock_acquire 5400');
     const seconds = Number(step.run.match(/sdk_java_lock_acquire (\d+)/)?.[1]);
-    // The fast tier owns the same lock and waits behind this job, so one
-    // acquisition budget applies to every lane; run 39229303984 died at the
-    // old 60-minute wait before Maven started.
     expect(seconds).toBe(90 * 60);
-    const lockWait = step.run.match(/sdk_java_lock_acquire \d+/)?.[0];
-    expect(lockWait).toBeDefined();
-    const lockAt = step.run.indexOf(lockWait);
+    const lockAt = step.run.indexOf('sdk_java_lock_acquire 5400');
     const installAt = step.run.indexOf('-f packages/sdk-java/qwencode/pom.xml');
     // The deleted `working-directory:` applied to the whole step; its `cd`
     // replacement only applies from where it sits, so pin it between the two
@@ -993,12 +1034,20 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // verify it runs `clean verify` in the wrong module.
     const cdAt = step.run.indexOf('cd packages/managed-agent-server');
     const verifyAt = step.run.indexOf('-Pmysql-integration');
+    const writeBackAt = step.run.indexOf('tar -C "${RUNNER_TEMP}/m2-repo"');
     expect(lockAt).toBeGreaterThan(-1);
-    expect(installAt).toBeGreaterThan(lockAt);
+    expect(installAt).toBeGreaterThan(-1);
     expect(cdAt).toBeGreaterThan(installAt);
     expect(verifyAt).toBeGreaterThan(cdAt);
-    // The ceiling must absorb one full lock wait plus the ~60 minutes of
-    // measured Maven work and ~30 minutes of uncapped setup.
+    // Both Maven runs finish before the only acquisition, so the lock cannot
+    // be held across them.
+    expect(lockAt).toBeGreaterThan(verifyAt);
+    expect(writeBackAt).toBeGreaterThan(lockAt);
+    // A failed acquisition only skips the optional write-back; it must not
+    // redden a job whose suite already passed.
+    expect(step.run).toContain('exit 0');
+    // The ceiling must absorb one full write-back wait plus the ~60 minutes
+    // of measured Maven work and ~30 minutes of uncapped setup.
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
     ).toBeGreaterThanOrEqual(seconds + 60 * 60 + 30 * 60);
