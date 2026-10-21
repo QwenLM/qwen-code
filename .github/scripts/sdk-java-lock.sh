@@ -29,18 +29,16 @@ sdk_java_lock_acquire() {
   printf '%s\n' "${seq}" >>"${queue}/.seq"
   local ticket
   ticket=$(printf '%s/%010d-%s' "${queue}" "${seq}" "$$")
-  # Publish before releasing the counter lock: a later arrival that takes
-  # seq+1 while this ticket is still unpublished sees an empty queue, names
-  # itself head and wins the lock out of arrival order.
+  # Publish inside the critical section: a later arrival that sees an empty
+  # queue names itself head and wins out of arrival order.
   : >"${ticket}"
   exec 8>&-
 
   local start=${SECONDS} head name pid mtime age remaining announced=0
   while true; do
-    # Drop owners that are gone. A live waiter re-touches its ticket every
-    # loop, so an untouched ticket means its owner is gone even when that PID
-    # has been recycled to a live process; without the age-alone arm one such
-    # head ticket makes an idle lock unreachable for every job on the host.
+    # Drop owners that are gone. A live waiter re-touches every loop, so a
+    # stale mtime means the owner is gone even when its PID was recycled to a
+    # live process -- that case otherwise wedges an idle lock for every job.
     for head in "${queue}/"*; do
       [[ -e ${head} && ${head##*/} != .seq ]] || continue
       name=${head##*/}
@@ -65,11 +63,8 @@ sdk_java_lock_acquire() {
     # so the budget stays sharp.
     if [[ ${head} == "${ticket}" && ${remaining} -gt 0 ]] \
       && flock --wait "$((remaining < 5 ? remaining : 5))" 9; then
-      # Leave the queue at acquisition. Traps cannot do this: `ticket` is
-      # local, so by the time the sourcing step's shell exits it is out of
-      # scope and the trap runs `rm -f ''`, leaking the head ticket on every
-      # success and every cancellation. A holder needs no place in line once
-      # the kernel holds the lock.
+      # Leave the queue at acquisition: a holder needs no place in line once
+      # the kernel holds the lock, and a trap cannot see this `local` anyway.
       rm -f "${ticket}"
       return 0
     fi
