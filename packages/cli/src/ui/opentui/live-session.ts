@@ -1047,6 +1047,12 @@ export async function* livePromptEvents(
               : 'ok',
       };
       if (resp) {
+        if (call.nativeAttemptsObserved) {
+          client.recordCompletedToolCall(call.request.name, call.request.args, {
+            ...resp,
+            status: call.status,
+          });
+        }
         const final = finalResponses[index];
         responseParts.push(...final.responseParts);
         if (usesMods)

@@ -9085,7 +9085,7 @@ describe('useLlmStream', () => {
     expect(mockScheduleToolCalls).not.toHaveBeenCalled();
   });
 
-  it('suppresses duplicate provider tool-call ids before TUI scheduling', async () => {
+  it('suppresses duplicate provider tool-call ids before TUI scheduling with Mod attempts', async () => {
     const recordToolResult = vi.fn();
     (
       mockConfig as Config & {
@@ -9205,6 +9205,7 @@ describe('useLlmStream', () => {
         prompt_id: 'prompt-tui-dup',
       },
       status: 'success',
+      nativeAttemptsObserved: true,
       responseSubmittedToLlm: false,
       response: {
         callId: 'tool-dup',

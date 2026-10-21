@@ -5065,7 +5065,6 @@ export const useLlmStream = (
         // belong to this completion bookkeeping.
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
-          if (tc.nativeAttemptsObserved) continue;
           llmClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,
@@ -5223,13 +5222,11 @@ export const useLlmStream = (
             toolCall.request.prompt_id,
           );
         }
-        if (!toolCall.nativeAttemptsObserved) {
-          llmClient?.recordCompletedToolCall(
-            toolCall.request.name,
-            toolCall.request.args as Record<string, unknown>,
-            { ...toolCall.response, status: toolCall.status },
-          );
-        }
+        llmClient?.recordCompletedToolCall(
+          toolCall.request.name,
+          toolCall.request.args as Record<string, unknown>,
+          { ...toolCall.response, status: toolCall.status },
+        );
         dualOutput?.emitToolResult(toolCall.request, toolCall.response);
       }
       if (secondaryTools.length > 0) {
@@ -5512,7 +5509,6 @@ export const useLlmStream = (
       }
 
       for (const toolCall of llmTools) {
-        if (toolCall.nativeAttemptsObserved) continue;
         llmClient?.recordCompletedToolCall(
           toolCall.request.name,
           toolCall.request.args as Record<string, unknown>,
