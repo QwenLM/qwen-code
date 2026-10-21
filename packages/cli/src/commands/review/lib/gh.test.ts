@@ -28,17 +28,32 @@ import {
   isOwnerRepo,
 } from './gh.js';
 
+// The spawn-env pins below read CLICOLOR_FORCE, so stub it to the value that
+// makes `env: ghEnv()` and `env: process.env` observably differ — otherwise
+// those pins go inert on a machine that already exports CLICOLOR_FORCE=0.
+beforeEach(() => {
+  vi.stubEnv('CLICOLOR_FORCE', '1');
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 // Host targeting is code, not prose: the subcommands thread `--host` here,
 // and every gh child gets GH_HOST from ghEnv(). These tests pin the pure
-// state machine; the spawn itself is exercised by the commands' own runs.
+// state machine; the spawn-level cells below pin that the env actually
+// reaches `execFileSync`.
 describe('setGhHost / ghEnv', () => {
   afterEach(() => setGhHost(undefined));
 
-  it('inherits the parent env and sets no host by default', () => {
+  it('inherits the parent env and adds no GH_HOST of its own by default', () => {
     const env = ghEnv();
     // Inherited keys survive — gh still needs PATH, HOME, its auth env.
     expect(env['PATH']).toBe(process.env['PATH']);
-    expect(env['GH_HOST']).toBeUndefined();
+    // Pass-through, not absence: an operator-exported GH_HOST must still reach
+    // the child, so asserting `undefined` here would go red in a GHE shell
+    // against correct code.
+    expect(env['GH_HOST']).toBe(process.env['GH_HOST']);
   });
 
   it('turns off forced colour and TTY emulation before spawning gh', () => {
@@ -82,13 +97,13 @@ describe('setGhHost / ghEnv', () => {
   it('accepts a host:port and resets on undefined or empty string', () => {
     setGhHost('ghe.internal:8443');
     expect(ghEnv()['GH_HOST']).toBe('ghe.internal:8443');
-    // Reset means "no GH_HOST key", not "no env object": the colour/TTY
-    // neutralising below is unconditional, so ghEnv() always returns one.
+    // Reset means "adds no GH_HOST of its own", not "no env object": the
+    // colour/TTY neutralising is unconditional, so ghEnv() always returns one.
     setGhHost('');
-    expect(ghEnv()['GH_HOST']).toBeUndefined();
+    expect(ghEnv()['GH_HOST']).toBe(process.env['GH_HOST']);
     setGhHost('ghe.internal');
     setGhHost(undefined);
-    expect(ghEnv()['GH_HOST']).toBeUndefined();
+    expect(ghEnv()['GH_HOST']).toBe(process.env['GH_HOST']);
   });
 
   it('rejects non-hostname input (an env value must never smuggle shell or spaces)', () => {
@@ -337,6 +352,10 @@ describe('ghWithInput() does NOT retry (non-idempotent POST)', () => {
       'input',
       '{"body":"review"}',
     );
+    expect(mockExecFileSync.mock.calls[0]![2]).toHaveProperty(
+      'env.CLICOLOR_FORCE',
+      '0',
+    );
   });
 });
 
@@ -363,6 +382,10 @@ describe('ensureAuthenticated() transient retry', () => {
     expect(mockExecFileSync).toHaveBeenCalledTimes(2);
     expect(atomsWaitSpy).toHaveBeenCalledTimes(1);
     expect(atomsWaitSpy.mock.calls[0]![3]).toBe(2000);
+    expect(mockExecFileSync.mock.calls[0]![2]).toHaveProperty(
+      'env.CLICOLOR_FORCE',
+      '0',
+    );
   });
 
   it('throws after one retry when auth genuinely fails', () => {
@@ -411,7 +434,12 @@ describe('ghRaw()', () => {
     expect(mockExecFileSync).toHaveBeenCalledWith(
       'gh',
       expect.any(Array),
-      expect.objectContaining({ encoding: 'buffer' }),
+      expect.objectContaining({
+        encoding: 'buffer',
+        // The spawn must hand over ghEnv(), not the raw parent env — that is
+        // the delivery path for the colour/TTY neutralising.
+        env: expect.objectContaining({ CLICOLOR_FORCE: '0' }),
+      }),
     );
   });
 

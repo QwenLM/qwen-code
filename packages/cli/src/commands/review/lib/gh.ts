@@ -127,8 +127,9 @@ export function isOwnerRepo(repo: string): boolean {
  * a dropped host silently reads from and posts to github.com's same-named
  * `owner/repo`.
  *
- * `undefined` (or `''`) restores the default: the child then inherits the
- * parent env untouched, so an operator-exported GH_HOST stays in effect.
+ * `undefined` (or `''`) restores the default: no `GH_HOST` key is added, so an
+ * operator-exported GH_HOST still reaches the child. {@link ghEnv} neutralises
+ * forced colour/TTY on every spawn regardless of the host.
  */
 export function setGhHost(host: string | undefined): void {
   // Trim once here so every caller is consistent — `resolveGhHost` trims
