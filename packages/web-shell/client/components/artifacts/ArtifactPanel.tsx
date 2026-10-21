@@ -97,6 +97,7 @@ import {
   getImageMimeTypeFromPath,
   getReviewDownloadMimeType,
   isDownloadOnlyWorkspaceArtifact,
+  isDocxFile,
   isExcelFile,
   isPdfArtifact,
   normalizeArtifactMimeType,
@@ -117,6 +118,7 @@ import { LineStats, sumLineStats } from './LineStats';
 import styles from './ArtifactPanel.module.css';
 import { CodeReviewArtifactDetail } from './CodeReviewArtifactDetail';
 import { ArtifactIcon } from './ArtifactIcon';
+import DocxPreview from './DocxPreview';
 import { measureSessionTitleScroll } from '../sidebar/sessionTitleScroll';
 import { SubagentDetail } from './SubagentDetail';
 import { AgentWorkflow } from './AgentWorkflow';
@@ -1559,6 +1561,10 @@ export function ArtifactPanel({
             </div>
           ) : activeTab.sourcePreview &&
             activeTab.previewData &&
+            !isDocxFile(
+              activeTab.workspacePath,
+              activeTab.previewMimeType || activeTab.previewData.type,
+            ) &&
             !isExcelFile(
               activeTab.workspacePath,
               activeTab.previewMimeType || activeTab.previewData.type,
@@ -3310,7 +3316,8 @@ function ArtifactDetail({
   if (canPreviewWorkspaceFile && artifact.workspacePath) {
     if (
       isDownloadOnlyWorkspaceArtifact(artifact) ||
-      ((isExcelFile(artifact.workspacePath, artifact.mimeType) ||
+      ((isDocxFile(artifact.workspacePath, artifact.mimeType) ||
+        isExcelFile(artifact.workspacePath, artifact.mimeType) ||
         isPdfArtifact(artifact)) &&
         artifact.status !== 'available' &&
         artifact.status !== 'changed')
@@ -3709,6 +3716,7 @@ function SourceDetail({
           {t('common.loading')}
         </div>
       ) : data &&
+        !isDocxFile(path, data.type) &&
         !isExcelFile(path, data.type) &&
         !isPdfArtifact({ workspacePath: path, mimeType: data.type }) &&
         !normalizeTextMediaType(data.type, path) ? (
@@ -3731,6 +3739,9 @@ function SourceDetail({
             onLoadError={setError}
             previewData={data}
             previewOnly={locator.type === 'attachment'}
+            downloadName={
+              locator.type === 'attachment' ? source.title : undefined
+            }
             previewMimeType={data?.type}
             previewKind={
               /\.html?$/i.test(path) ||
@@ -3798,8 +3809,10 @@ function WorkspaceFilePreview({
   previewOnly,
   onLoadError,
   sourceRenderer,
+  downloadName,
 }: {
   sourceRenderer?: (content: string) => ReactNode;
+  downloadName?: string;
   workspacePath: string;
   artifactVersion?: string;
   workspaceActions: ArtifactWorkspaceActions;
@@ -3813,6 +3826,17 @@ function WorkspaceFilePreview({
   onLoadError?: (error: string) => void;
 }) {
   const { t } = useI18n();
+  if (isDocxFile(workspacePath, previewMimeType || previewData?.type)) {
+    return (
+      <DocxPreview
+        workspacePath={workspacePath}
+        workspaceActions={workspaceActions}
+        data={previewData}
+        artifactVersion={artifactVersion}
+        downloadName={downloadName}
+      />
+    );
+  }
   if (isExcelFile(workspacePath, previewMimeType || previewData?.type)) {
     return (
       <ErrorBoundary

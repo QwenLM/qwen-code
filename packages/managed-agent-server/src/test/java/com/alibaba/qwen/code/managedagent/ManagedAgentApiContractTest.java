@@ -1449,6 +1449,22 @@ class ManagedAgentApiContractTest {
                 get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId)
                         .header(TENANT, workspaceTenant).principal(actor), null);
         assertThat(json(mcpCatalog).path("servers")).isEmpty();
+        String webMcp = exchange(drift, "queryWebShellSessionMcp", 200,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        assertThat(json(webMcp)).isEqualTo(json(mcpCatalog));
+        exchange(drift, "queryWebShellSessionMcp", 401,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionMcp", 404,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, otherTenant).principal(actor(otherTenant)),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionMcp", 403,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant).principal(actor(otherTenant)),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionMcp", 400,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant).principal(actor),
+                "{}");
         exchange(drift, "getSessionMcpCatalog", 404,
                 get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId)
                         .header(TENANT, otherTenant), null);
@@ -1516,6 +1532,23 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/workspaces/register").header(TENANT, tenant), create);
         exchange(drift, "webShellGetWorkspaceOperation", 401,
                 post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant), "{\"operationId\":\"missing\"}");
+    }
+
+    @Test
+    void localPathContractRequiresExplicitImportCapability() throws Exception {
+        String tenant = "contract-local-import-" + UUID.randomUUID();
+        Map<String, String> drift = new TreeMap<>();
+        assertThat(json(exchange(drift, "webShellCreateWorkspace", 409,
+                post(WEB_SHELL + "/workspaces/create").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"displayName\":\"Project\",\"idempotencyKey\":\"local\",\"localPath\":\"/not-admitted\"}"))
+                .at("/error/code").asText()).isEqualTo("workspace_creation_unavailable");
+        assertThat(json(exchange(drift, "queryWebShellWorkspaceDirectories", 409,
+                post(WEB_SHELL + "/workspaces/directories/query").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"localPath\":\"\"}"))
+                .at("/error/code").asText()).isEqualTo("workspace_creation_unavailable");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id = ?",
+                Integer.class, tenant)).isZero();
+        assertThat(drift).isEmpty();
     }
 
     @Test

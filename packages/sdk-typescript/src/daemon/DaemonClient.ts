@@ -97,6 +97,7 @@ import type {
   DaemonStatusReport,
   DaemonUpdateStatus,
   DaemonStatusReportDetail,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
@@ -265,6 +266,7 @@ import type {
   DaemonWorkspacePermissionsStatus,
   DaemonSettingUpdateResult,
   DaemonModelConfiguration,
+  DaemonModelProviderRuntimeSyncResult,
   DaemonModelConfigurationUpdateResult,
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,
@@ -3960,6 +3962,26 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /session/:id/tasks');
         }
         return (await res.json()) as DaemonSessionTasksStatus;
+      },
+    );
+  }
+
+  async sessionTaskRuntime(
+    sessionId: string,
+    taskId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionTaskRuntimeStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks/${urlEncode(taskId)}/runtime`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/tasks/:taskId/runtime',
+          );
+        }
+        return (await res.json()) as DaemonSessionTaskRuntimeStatus;
       },
     );
   }
@@ -8846,6 +8868,18 @@ export class WorkspaceDaemonClient {
       {},
       opts?.clientId,
       opts?.timeoutMs ?? MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  reloadModelProviders(opts?: {
+    clientId?: string;
+  }): Promise<DaemonModelProviderRuntimeSyncResult> {
+    return this.post(
+      '/models/reload',
+      'POST /workspaces/:workspace/models/reload',
+      {},
+      opts?.clientId,
+      35_000,
     );
   }
 

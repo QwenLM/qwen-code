@@ -387,7 +387,54 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.editorProps?.skillsLoaded).toBe(true);
   });
 
-  it('keeps Workspace file references available alongside the pinned Skill catalog', async () => {
+  it('connects MCP independently of file attachments without enabling daemon features', async () => {
+    const list = vi.fn().mockResolvedValue({
+      object: 'agent.mcp_catalog',
+      session_id: 's1',
+      servers: [],
+    });
+    provider = { ...provider, mcp: { list } };
+    await render('s1');
+    expect(mocks.editorProps?.visibleToolbarActions).toContain('addMenu');
+    expect(mocks.editorProps?.workspaceFeaturesEnabled).toBe(false);
+    expect(list).not.toHaveBeenCalled();
+    await expect(
+      mocks.editorProps!.fileReferenceActions!.loadMcpStatus!(),
+    ).resolves.toEqual({ servers: [] });
+    expect(list).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ clientId: expect.any(String) }),
+    );
+  });
+
+  it('invalidates the composer MCP cache scope when the selected Session changes without file actions', async () => {
+    const list = vi.fn(async (sessionId: string) => ({
+      object: 'agent.mcp_catalog' as const,
+      session_id: sessionId,
+      servers: [],
+    }));
+    provider = { ...provider, mcp: { list } };
+    await render('s1');
+    const first = mocks.editorProps!.fileReferenceActions!;
+    expect(first.scopeKey).toBeTruthy();
+    await first.loadMcpStatus!();
+
+    await render('s1');
+    expect(mocks.editorProps!.fileReferenceActions!.scopeKey).toBe(
+      first.scopeKey,
+    );
+
+    await render('s2');
+    const second = mocks.editorProps!.fileReferenceActions!;
+    expect(second.scopeKey).not.toBe(first.scopeKey);
+    await second.loadMcpStatus!();
+    expect(list.mock.calls.map(([sessionId]) => sessionId)).toEqual([
+      's1',
+      's2',
+    ]);
+  });
+
+  it('keeps Workspace file references available alongside MCP and the pinned Skill catalog', async () => {
     const skills = [{ name: 'review', description: 'Pinned review.' }];
     const list = vi.fn().mockResolvedValue({ skills });
     const query = vi.fn().mockResolvedValue({
@@ -399,6 +446,9 @@ describe('ManagedSessionsPage', () => {
     provider = {
       ...provider,
       skills: { list },
+      mcp: {
+        list: vi.fn().mockResolvedValue({ session_id: 's1', servers: [] }),
+      },
       workspaceFiles: { query, read: vi.fn() },
     };
     mocks.client.getSession.mockResolvedValue(
@@ -414,6 +464,9 @@ describe('ManagedSessionsPage', () => {
     );
     await render('s1');
     expect(mocks.editorProps?.fileReferenceActions).toBeDefined();
+    expect(
+      mocks.editorProps?.fileReferenceActions?.loadMcpStatus,
+    ).toBeDefined();
     expect(mocks.editorProps?.persistFileReferences).toBe(true);
     expect(mocks.editorProps?.workspaceFeaturesEnabled).toBe(false);
     expect(mocks.editorProps?.visibleToolbarActions).toContain('addMenu');
@@ -623,6 +676,62 @@ describe('ManagedSessionsPage', () => {
       expect(mocks.commitAccepted).not.toHaveBeenCalled();
     },
   );
+
+  it('changes approval during a live Turn without enabling Plan or changing the draft', async () => {
+    let session = switchableSession({
+      approvalMode: 'default',
+      approvalRevision: 0,
+      phase: 'agent_running',
+      planModeSupported: true,
+      capabilities: {
+        canSend: true,
+        canCancel: true,
+        workspaceTurns: true,
+        approvalModeChange: true,
+      },
+    });
+    mocks.client.getSession.mockImplementation(async () => session);
+    provider.approvalChange = {
+      queryOptions: vi.fn(async () => ({
+        supported: true,
+        liveSupported: true,
+        approvalMode: session.approvalMode!,
+        approvalRevision: session.approvalRevision!,
+        availableApprovalModes: ['default', 'auto-edit', 'yolo'],
+        planModeSupported: true,
+      })),
+      submit: vi.fn(async () => {
+        session = { ...session, approvalMode: 'yolo', approvalRevision: 1 };
+        return {
+          sessionId: 's1',
+          approvalMode: 'yolo',
+          approvalRevision: 1,
+          replayed: false,
+        };
+      }),
+    };
+    await render('s1');
+    await input('Keep my next message');
+    expect(mocks.editorProps?.modeControlsDisabled).toBe(false);
+    expect(mocks.editorProps?.planControlsDisabled).toBe(true);
+    await act(async () => {
+      mocks.editorProps!.onTogglePlan!();
+    });
+    expect(provider.approvalChange.submit).not.toHaveBeenCalled();
+    await act(async () => {
+      mocks.editorProps!.onSelectMode!('yolo');
+      await flush();
+    });
+    expect(provider.approvalChange.submit).toHaveBeenCalledOnce();
+    expect(mocks.editorProps?.currentMode).toBe('yolo');
+    expect(container.querySelector('textarea')?.value).toBe(
+      'Keep my next message',
+    );
+    expect(container.textContent).toContain(
+      'subsequent tool calls in this turn',
+    );
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+  });
 
   it.each(['agent_running', 'cancelling'] as const)(
     'refuses approval callbacks during a %s Turn',
@@ -2060,6 +2169,50 @@ describe('ManagedSessionsPage', () => {
     expect(container.querySelector('[data-managed-progress]')).toBeNull();
     expect(container.querySelector('textarea')).toBeNull();
     expect(container.textContent).not.toContain('Preparing environment');
+  });
+
+  it('compacts the bound Workspace row into one line in the home layout', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('bound', {
+        workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+      }),
+    );
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    try {
+      await render('bound', 'en', provider, target);
+      const binding = container.querySelector(
+        '[data-managed-workspace-binding]',
+      );
+      expect(binding?.querySelector('summary')?.getAttribute('title')).toBe(
+        'ws-a',
+      );
+      expect(binding?.textContent).toContain('ws-a');
+      expect(binding?.textContent).toContain('services/api');
+      // The compact row repeats neither label: a regression that restores the
+      // standalone lines inside the details row is what this pins.
+      expect(binding?.textContent).not.toContain('Bound Workspace');
+      expect(binding?.textContent).not.toContain('Relative directory');
+    } finally {
+      target.remove();
+    }
+  });
+
+  it('keeps the labeled Workspace lines in the standalone layout', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('bound', {
+        workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+      }),
+    );
+    await render('bound');
+    const binding = container.querySelector('[data-managed-workspace-binding]');
+    expect(binding?.textContent).toContain('Bound Workspace');
+    expect(binding?.textContent).toContain('Relative directory');
+    expect(binding?.textContent).toContain('ws-a');
+    expect(binding?.textContent).toContain('services/api');
+    // The compact summary belongs to the home layout only: rendering it here
+    // would repeat the row above the two labeled lines, inside a plain div.
+    expect(binding?.querySelector('summary')).toBeNull();
   });
 
   it('lets the creator send a later Turn to a bound Session', async () => {
