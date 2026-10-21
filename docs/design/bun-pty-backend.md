@@ -202,6 +202,13 @@ was located. The bounded hold reads at full speed and stays byte-exact
 below the cap, and parking at the cap bounds memory without dropping a
 byte.
 
+The per-pty parking byte test explicitly disables ONLCR in its child before
+the flood. It compares the complete LF stream and an explicit CRLF sentinel
+without normalizing received bytes. Default-mode macOS controls produced extra
+CR through both wrappers; their failures remain recorded. This isolates the
+adapter's byte-preservation contract from terminal output conversion, without
+claiming that the exact source of those extra CR has been established.
+
 ### Consumer wiring of the failure
 
 - **ShellExecutionService (foreground PTY path)**: a `QWEN_PTY_WRITE_LIMIT`
