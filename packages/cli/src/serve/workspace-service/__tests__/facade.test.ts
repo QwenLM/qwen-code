@@ -1288,21 +1288,34 @@ describe('createDaemonWorkspaceService', () => {
         },
       );
 
-      it('bounds cold reads to five seconds and retries without accepting late results', async () => {
+      it('uses the ACP timeout for cold reads and retries without accepting late results', async () => {
         const late = deferred<ServeWorkspaceSkillsStatus>();
         const query = vi
           .fn()
-          .mockImplementationOnce(() => late.promise)
+          .mockImplementationOnce(() =>
+            Promise.race([
+              late.promise,
+              new Promise((_, reject) => {
+                setTimeout(() => reject(new Error('ACP timed out')), 10_000);
+              }),
+            ]),
+          )
           .mockResolvedValue(status('new'));
         const svc = createDaemonWorkspaceService(
           makeDeps({ queryWorkspaceStatus: query }),
         );
         const first = svc.getWorkspaceSkillsStatus(makeCtx());
         const concurrent = svc.getWorkspaceSkillsStatus(makeCtx());
+        const settled = vi.fn();
+        void first.then(settled);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(settled).not.toHaveBeenCalled();
+        expect(query).toHaveBeenCalledOnce();
         await vi.advanceTimersByTimeAsync(5_000);
         await expect(first).resolves.toMatchObject({
           initialized: false,
           skills: [],
+          errors: [{ kind: 'skills', status: 'error' }],
         });
         await expect(concurrent).resolves.toMatchObject({ initialized: false });
         const fresh = await svc.getWorkspaceSkillsStatus(makeCtx());
@@ -1358,23 +1371,32 @@ describe('createDaemonWorkspaceService', () => {
         expect(query).toHaveBeenCalledTimes(2);
       });
 
-      it('rejects an overdue result even before the deadline timer can run', async () => {
+      it('rejects an overdue background result even before the deadline timer can run', async () => {
         const pending = deferred<ServeWorkspaceSkillsStatus>();
-        const query = vi.fn().mockImplementation(() => pending.promise);
+        const query = vi
+          .fn()
+          .mockResolvedValueOnce(status('retained'))
+          .mockImplementation(() => pending.promise);
         const svc = createDaemonWorkspaceService(
           makeDeps({ queryWorkspaceStatus: query }),
         );
-        const read = svc.getWorkspaceSkillsStatus(makeCtx());
+        await svc.getWorkspaceSkillsStatus(makeCtx());
+        await vi.advanceTimersByTimeAsync(1_000);
+        await svc.getWorkspaceSkillsStatus(makeCtx());
         await vi.advanceTimersByTimeAsync(0);
-        vi.setSystemTime(16_000);
+        vi.setSystemTime(17_000);
         pending.resolve(status('late'));
-        await expect(read).resolves.toMatchObject({
-          initialized: false,
-          skills: [],
+        await vi.advanceTimersByTimeAsync(0);
+        await expect(
+          svc.getWorkspaceSkillsStatus(makeCtx()),
+        ).resolves.toMatchObject({
+          initialized: true,
+          skills: [{ name: 'retained' }],
+          snapshot: { observedAt: 10_000, ageMs: 7_000 },
         });
       });
 
-      it('bounds daemon-local fallback work by the same deadline', async () => {
+      it('waits for slow daemon-local fallback without applying the background deadline', async () => {
         const local = deferred<ServeWorkspaceSkillsStatus>();
         const svc = createDaemonWorkspaceService(
           makeDeps({
@@ -1382,12 +1404,16 @@ describe('createDaemonWorkspaceService', () => {
           }),
         );
         const read = svc.getWorkspaceSkillsStatus(makeCtx());
-        await vi.advanceTimersByTimeAsync(5_000);
-        await expect(read).resolves.toMatchObject({ initialized: false });
-        local.resolve(status('late local data'));
-        await vi.advanceTimersByTimeAsync(0);
-        const next = svc.getWorkspaceSkillsStatus(makeCtx());
-        expect((await next).snapshot?.observedAt).toBe(15_000);
+        const settled = vi.fn();
+        void read.then(settled);
+        await vi.advanceTimersByTimeAsync(6_000);
+        expect(settled).not.toHaveBeenCalled();
+        local.resolve(status('local data'));
+        await expect(read).resolves.toMatchObject({
+          initialized: true,
+          skills: [{ name: 'local data' }],
+          snapshot: { observedAt: 10_000, ageMs: 6_000 },
+        });
       });
 
       it('waits for current inventory before deleting a Skill', async () => {
@@ -1405,6 +1431,10 @@ describe('createDaemonWorkspaceService', () => {
           name: 'WorkspaceSkillNotFoundError',
           skillName: 'review',
         });
+        expect(query).toHaveBeenCalledTimes(2);
+        expect(
+          (await svc.getWorkspaceSkillsStatus(makeCtx())).skills[0]?.name,
+        ).toBe('review');
         expect(query).toHaveBeenCalledTimes(2);
       });
 
@@ -3780,6 +3810,46 @@ describe('createDaemonWorkspaceService', () => {
   });
 
   describe('preheatAcpChild', () => {
+    it.each([false, true])(
+      're-reads the child inventory after successful preheat (already live: %s)',
+      async (alreadyLive) => {
+        let live = alreadyLive;
+        const query = vi
+          .fn()
+          .mockResolvedValueOnce({
+            v: 1,
+            workspaceCwd: '/ws',
+            initialized: true,
+            skills: [{ name: 'local-review' }],
+          })
+          .mockResolvedValueOnce({
+            v: 1,
+            workspaceCwd: '/ws',
+            initialized: true,
+            skills: [{ name: 'child-review' }],
+          });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            queryWorkspaceStatus: query,
+            isChannelLive: () => live,
+            preheatAcpChild: async () => {
+              live = true;
+            },
+          }),
+        );
+        expect((await svc.getWorkspaceSkillsStatus(makeCtx())).skills).toEqual([
+          { name: 'local-review' },
+        ]);
+        await expect(svc.preheatAcpChild(makeCtx())).resolves.toMatchObject({
+          ready: true,
+        });
+        expect((await svc.getWorkspaceSkillsStatus(makeCtx())).skills).toEqual([
+          { name: 'child-review' },
+        ]);
+        expect(query).toHaveBeenCalledTimes(2);
+      },
+    );
+
     it('returns the current ACP channel status', async () => {
       const svc = createDaemonWorkspaceService(
         makeDeps({ isChannelLive: () => true }),

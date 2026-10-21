@@ -1,5 +1,7 @@
 # Workspace skills read model
 
+[English](workspace-skills-read-model.md) | [简体中文](workspace-skills-read-model.zh-CN.md)
+
 ## Problem
 
 `GET /workspace/skills` currently delegates to the ACP child. The child status
@@ -27,10 +29,11 @@ The fix is staged:
    mode, which deliberately never populate the extension cache at all.
 3. Retain the last initialized child or daemon-local fallback snapshot in the
    workspace facade. Concurrent cold reads share one request, and a generation
-   guard prevents an invalidated in-flight result from being cached or from
-   extending the freshness window of a snapshot committed after it. The facade
-   revalidates against the child's in-memory snapshot every five seconds so
-   child watcher updates remain visible without request-triggered discovery.
+   guard prevents an invalidated in-flight result from being cached. The
+   [background refresh design](workspace-skills-background-refresh.md)
+   supersedes the original five-second TTL: warm reads return immediately,
+   starts are throttled to once per second, and background work has a five-second
+   deadline. Cold reads await a real observation and preserve local fallback.
 4. Split explicit refreshes into settings and content reasons. Settings changes
    only notify derived consumers; content changes refresh each distinct
    `SkillManager` once before publishing session command updates.

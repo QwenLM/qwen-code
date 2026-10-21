@@ -1725,10 +1725,18 @@ Recommended poll cadence: aligned with whatever already polls `/workspace/mcp`; 
 
 The primary and workspace-qualified inventory routes return a retained snapshot
 immediately while revalidating in the background. Starts are throttled to once
-per second and concurrent readers share a task. Cold reads wait for that task.
-Revalidation has a five-second deadline; a timeout allows retry but does not
-cancel work already executing in ACP. Timed-out or invalidated tasks cannot
-publish late results. Explicit invalidation drops known-invalid inventory.
+per second and concurrent readers share a task. Warm background revalidation
+has a five-second deadline; timeout allows retry but does not cancel ACP work.
+Cold reads honor ACP's configured request timeout (ten seconds by default),
+then daemon-local enumeration if ACP is unavailable. They do not impose the
+background deadline on either source. After a failed cold read, another read
+inside the one-second throttle window returns an unavailable status immediately.
+Timed-out background tasks and invalidated tasks cannot publish late results;
+a successful invalidated observation can still answer its original caller.
+Explicit invalidation drops known-invalid inventory and clears the throttle.
+Successful ACP preheat also invalidates pre-child inventory so the subsequent
+read sees the child. Skill deletion and enablement identity reads bypass the
+snapshot and throttle, awaiting a new observation with local fallback.
 
 Initialized inventory responses additionally include optional observation
 metadata (older daemons and direct config/runtime status reads omit it):
@@ -1750,9 +1758,12 @@ metadata (older daemons and direct config/runtime status reads omit it):
 whether a revalidation is currently pending. Failed reads, timeouts, and replay
 after the runtime stops do not renew the timestamp. Clients may display this
 age, but it is not a filesystem revision or proof that every session is current.
-If no initialized snapshot exists and the cold read times out, the response has
-`initialized: false` and no `snapshot` metadata. Status reads do not invoke
-session-affecting Skill refresh commands.
+If no initialized snapshot exists and both sources are unavailable (or the cold
+read is throttled), the response has `initialized: false`, an `errors` entry,
+and no `snapshot` metadata. This is retryable unavailability, not an empty catalog;
+a valid empty catalog has `initialized: true`. Status reads do not invoke
+session-affecting Skill refresh commands. Closed or draining workspace runtimes
+reject reads; retained data survives child-channel reap, not runtime retirement.
 
 ```json
 {
@@ -1805,12 +1816,15 @@ localized presentation value and may be non-unique. New clients should display
 `extensionDisplayName ?? extensionName`; older daemons omit the display field.
 
 Repeated reads are served from the last committed workspace snapshot,
-periodically revalidated against the child's in-memory cache. A read never
-scans skill directories or reparses `SKILL.md` files. The child does verify
+periodically revalidated against the child's in-memory cache. Steady-state reads
+do not scan skill directories or reparse `SKILL.md` files; cold daemon-local
+fallback can enumerate from disk. The child does verify
 that its extension sources are unchanged — one `readdir` of the extensions
 directory plus a `stat` per entry, the enablement file, and the store's
 activation state — and refreshes only when they moved, so an extension
-installed or toggled outside the daemon is still picked up on the next read.
+installed or toggled outside the daemon is picked up by revalidation and appears
+on a subsequent read after that revalidation publishes. A warm read always
+returns the retained observation, even when it starts background work.
 Safe and bare mode skip the check, matching their exclusion of extensions.
 
 ### `GET /workspace/providers`

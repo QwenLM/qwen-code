@@ -10,11 +10,13 @@ import type {
   BridgePendingUserQuestion,
   BridgePendingUserQuestionInteraction,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import type {
   DaemonPendingInteractionOption,
   DaemonPendingPermissionInteraction,
   DaemonPendingUserQuestion,
   DaemonPendingUserQuestionInteraction,
+  DaemonWorkspaceSkillsStatus,
 } from './types.js';
 
 type Assert<T extends true> = T;
@@ -53,3 +55,10 @@ export const pendingInteractionWireTypesInSync: [
   PendingUserQuestionStaysInSync,
   PendingUserQuestionInteractionStaysInSync,
 ] = [true, true, true, true];
+
+export const skillsSnapshotWireTypesInSync: Assert<
+  MutuallyAssignable<
+    NonNullable<ServeWorkspaceSkillsStatus['snapshot']>,
+    NonNullable<DaemonWorkspaceSkillsStatus['snapshot']>
+  >
+> = true;

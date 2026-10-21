@@ -5850,10 +5850,13 @@ async function runQwenServeImpl(
         const workspaceRuntime =
           workspaceRegistryForPersistence.current?.getByWorkspaceCwd(workspace);
         const status =
-          await workspaceRuntime?.workspaceService.getWorkspaceSkillsStatus({
-            route: 'skill settings persistence',
-            workspaceCwd: workspace,
-          });
+          await workspaceRuntime?.workspaceService.getWorkspaceSkillsStatus(
+            {
+              route: 'skill settings persistence',
+              workspaceCwd: workspace,
+            },
+            { requireFresh: true },
+          );
         if (status?.initialized) skills = status.skills;
       } catch {
         // Preserve the legacy name heuristic when the catalog is unavailable.

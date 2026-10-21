@@ -1404,6 +1404,70 @@ describe('workspace skill settings persistence', () => {
     });
   });
 
+  it.each(['single', 'batch'] as const)(
+    'retries catalog identity for a %s enable inside the cold-read throttle window',
+    async (mode) => {
+      writeSkillSettings(['rust:chat'], ['chat']);
+      const idle = {
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: false,
+        skills: [],
+      };
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce(idle)
+        .mockResolvedValue({
+          ...idle,
+          initialized: true,
+          skills: [skillStatus('rust:chat', 'project')],
+        });
+      const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+      vi.spyOn(
+        workspaceServiceRuntime,
+        'createDaemonWorkspaceService',
+      ).mockImplementation((deps) =>
+        original({
+          ...deps,
+          queryWorkspaceStatus: query,
+          workspaceSkillsStatusProvider: vi.fn().mockResolvedValue(idle),
+        }),
+      );
+      const deps = await captureSkillPersistence([]);
+      vi.spyOn(Date, 'now').mockReturnValue(10_000);
+      const service = deps.workspaceRegistry!.primary.workspaceService;
+      const context = { route: 'TEST', workspaceCwd: workspace };
+      expect(
+        (await service.getWorkspaceSkillsStatus(context)).initialized,
+      ).toBe(false);
+      expect(
+        (await service.getWorkspaceSkillsStatus(context)).initialized,
+      ).toBe(false);
+      expect(query).toHaveBeenCalledOnce();
+
+      if (mode === 'single') {
+        await expect(
+          deps.persistDisabledSkills!(workspace, 'rust:chat', true),
+        ).resolves.toMatchObject({ changed: true, disabled: [] });
+      } else {
+        await expect(
+          deps.persistDisabledSkillsBatch!(workspace, ['rust:chat'], true),
+        ).resolves.toMatchObject({
+          outcomes: [{ skillName: 'rust:chat', changed: true }],
+        });
+      }
+      expect(query).toHaveBeenCalledTimes(2);
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(workspace, '.qwen', 'settings.json'),
+            'utf8',
+          ),
+        ).skills,
+      ).toEqual({ enabled: ['rust:chat'] });
+    },
+  );
+
   it('preserves the legacy bare-name block for extensions and uncatalogued skills', async () => {
     writeSkillSettings([], ['pdf', 'legacy']);
     const { persistDisabledSkills } = await captureSkillPersistence([
