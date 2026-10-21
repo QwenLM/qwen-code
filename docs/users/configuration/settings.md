@@ -586,10 +586,23 @@ Controls which [Skills](../features/skills) are exposed to the model.
 | `skills.disabled`        | array of strings | Hard-disabled skill names. Matched case-insensitively and **merged as a union** across settings scopes, so project settings cannot override a user or system entry. Hidden skills do not appear in `<available_skills>` or as `/<name>` slash commands. An extension skill is matched under either spelling — its registered name (`rust:pdf`) or the name its `SKILL.md` authors (`pdf`) — so an entry written before the prefix existed keeps biting.                                                                                                                                                                                                                                                                                    | `undefined` |
 | `skills.defaultDisabled` | array of strings | Skill names that start disabled but can be opted into through `skills.enabled`. Matched case-insensitively and merged as a union across settings scopes. An extension skill is matched under either spelling, as in `skills.disabled`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | `undefined` |
 | `skills.enabled`         | array of strings | Explicit opt-ins. Override a matching `skills.defaultDisabled` entry and, for an extension skill, the owning extension's own default and this workspace's stored enablement for it. Matched case-insensitively and merged as a union across settings scopes — against the skill's registered name **only**, so an extension skill needs `rust:pdf`: a bare `pdf` never matches as a grant — it only cancels an identically-spelled `skills.defaultDisabled` entry (per the identical-spelling rule below), and once cancelled the enablement stored for this workspace decides, else the owning extension's own default. This setting cannot override `skills.disabled` or re-enable skills from a `skills.disabledLevels`-excluded level. | `undefined` |
+| `skills.directories`     | array of strings | Additional directories to scan for skills. Use absolute or `~`-prefixed paths; a relative path resolves against the working directory, not the project root. Each directory is scanned one level deep for `<name>/SKILL.md`. Skills found here load at the `user` level after `~/.qwen/skills/` and `~/.agents/skills/`, so a same-named skill in those wins. Merged as a union across settings scopes. Requires a restart and is ignored in bare and safe mode. Their `allowedTools` and hooks apply without the folder-trust check that gates project skills, so list only directories you control.                                                                                                                                      | `undefined` |
 
 The precedence is `skills.disabled` > `skills.enabled` > `skills.defaultDisabled`. For example, a user can put a skill in `defaultDisabled` and a project can add the same name to `enabled`; a hard `disabled` entry at any scope still wins.
 
 Every list holds literal skill names, matched case-insensitively after trimming, with no glob support. `skills.enabled` cancels a `skills.defaultDisabled` entry only when the two entries are spelled the same, because that step compares the entries themselves rather than resolving them to a skill — so an extension skill that must be both un-defaulted and opted in is written `rust:pdf` in both lists. See [Extension Skills](../features/skills#extension-skills) for why the two lists above accept either spelling and this one does not.
+
+`skills.directories` lets you reuse a skills folder you already keep for another agent instead of copying it into `~/.qwen/skills/`:
+
+```json
+{
+  "skills": {
+    "directories": ["~/.claude/skills"]
+  }
+}
+```
+
+See [Share Skills with other tools](../features/skills#share-skills-with-other-tools).
 
 #### mcp
 
