@@ -178,6 +178,10 @@ import {
   cloneApiHistory,
 } from '../services/session-api-history.js';
 import { isAgentEnvelopeContent } from '../agents/session-agents/envelope.js';
+import {
+  clearApiHistoryDirectoryContext,
+  isApiHistoryDirectoryContext,
+} from '../utils/api-history-metadata.js';
 
 export { InvalidStreamError };
 
@@ -1770,6 +1774,13 @@ function appendCuratedContent(
       ...lastContent,
       parts: [...(lastContent.parts ?? []), ...(content.parts ?? [])],
     };
+    if (
+      isApiHistoryDirectoryContext(lastContent) &&
+      !isApiHistoryDirectoryContext(content)
+    ) {
+      // Object spread copies the Symbol; real input must not inherit it.
+      clearApiHistoryDirectoryContext(curatedHistory[lastIndex]!);
+    }
     return;
   }
 
@@ -6177,6 +6188,7 @@ export class LlmChat {
       if (lastEntry && isAgentEnvelopeContent(lastEntry)) {
         break;
       }
+      // Keeping directory context here would duplicate it on Retry.
       strippedEntries.unshift(this.history.pop()!);
     }
     // Today this is safe even without the reset — only trailing user

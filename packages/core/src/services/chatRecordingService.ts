@@ -70,7 +70,10 @@ import {
   SessionWriterLease,
 } from './session-writer-lease.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
-import { getApiHistoryPromptId } from '../utils/api-history-metadata.js';
+import {
+  getApiHistoryPromptId,
+  isApiHistoryDirectoryContext,
+} from '../utils/api-history-metadata.js';
 import { getStartupContextLength } from '../core/environmentContext.js';
 import { computeInitialTurnFromHistory } from './session-turn-state.js';
 import {
@@ -673,6 +676,8 @@ export interface ChatCompressionRecordPayload {
   summaryPrefixLength?: number;
   /** Prompt identities parallel to compressedHistory. */
   promptIds?: Array<string | null>;
+  /** Internal directory context, without changing the model-facing snapshot. */
+  directoryContextIndices?: number[];
   completedToolCallIds?: string[];
 }
 
@@ -3260,6 +3265,10 @@ export class ChatRecordingService {
       const promptIds = compressedHistory.map(
         (content) => getApiHistoryPromptId(content) ?? null,
       );
+      const directoryContextIndices = compressedHistory.flatMap(
+        (content, index) =>
+          isApiHistoryDirectoryContext(content) ? [index] : [],
+      );
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
         type: 'system',
@@ -3272,6 +3281,9 @@ export class ChatRecordingService {
           }),
           summaryPrefixLength,
           ...(promptIds.some(Boolean) ? { promptIds } : {}),
+          ...(directoryContextIndices.length
+            ? { directoryContextIndices }
+            : {}),
         },
       };
 
