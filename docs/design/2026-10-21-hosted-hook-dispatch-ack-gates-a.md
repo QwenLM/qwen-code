@@ -28,19 +28,18 @@ previous slice added.
 | Step | What happens                                                         |
 | ---- | -------------------------------------------------------------------- |
 | 1    | The `dispatch_started` commit lands, then the seam reports the loss. |
-| 2    | The cell reads the record the failure left behind.                   |
-| 3    | The gate is cleared and the cell waits for quiescence.               |
-| 4    | The cell bounds the physical calls recovery may issue.               |
+| 2    | The store client retries; the committed command replays.             |
+| 3    | The Hook runs once from that durable dispatch and settles.           |
+| 4    | The cell asserts the single fault and the settled result.            |
 
 Expectations:
 
-- The durable record is `dispatch_started` with no result, which is what
-  separates this cell from the FG13b rejection that leaves `intent`.
-- At most one physical call: the acknowledgement was lost before the dispatch
-  was issued, so a recovery may resume the durable dispatch once, never twice.
-- The forward resume itself — a new `fire()` over a durable
-  `dispatch_started` issues exactly one dispatch — is pinned at the TypeScript
-  layer.
+- The fault fires exactly once: the retry replays the committed command
+  instead of re-running the record store. A rollback would re-commit the
+  dispatch and fire the fault a second time.
+- One physical call and one allow decision; the record settles with a result.
+- A new `fire()` over an existing `dispatch_started` takes the `lookup`
+  branch; this cell does not cover that path.
 
 ## Seam
 
@@ -55,10 +54,10 @@ when the caller sees the failure.
   is dispatched.
 - This cell pins the landed commit: the record is durable and the failure
   cannot be read as "no dispatch was recorded".
-- The forward resume path — a new `fire()` over a durable `dispatch_started`
-  issues exactly one dispatch — is pinned at the TypeScript layer by
-  `dispatches a recovered intent through its original Runtime Session` in
-  `hosted-hook-session.test.ts`.
+- A new `fire()` over an existing `dispatch_started` takes the `lookup`
+  branch instead of dispatching; that path stays out of scope here. The
+  TypeScript case `dispatches a recovered intent through its original Runtime
+Session` covers only the `intent` window.
 
 ## Mutation witnesses
 
