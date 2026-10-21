@@ -12,6 +12,7 @@ import {
   MANAGED_RUNTIME_PROVIDER_PROTOCOL,
   ManagedRuntimeProviderProtocolError,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
+  MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
   fitManagedRuntimeProviderResult,
   managedRuntimeProviderLimit,
   parseManagedRuntimeProviderOperation,
@@ -273,6 +274,44 @@ describe('managed-runtime-provider/1', () => {
         session,
       ),
     ).toThrow('digest changed');
+  });
+
+  it('admits only the known context files, in order and within the cap', () => {
+    const operation = { kind: 'workspace-context' } as const;
+    const parse = (files: unknown) =>
+      parseManagedRuntimeProviderResult(operation, { files }, session);
+    const files = [
+      { name: 'QWEN.md', text: 'rules' },
+      { name: 'AGENTS.md', text: '' },
+    ];
+    expect(parse(files)).toEqual(files);
+    expect(parse([])).toEqual([]);
+    expect(
+      parseManagedRuntimeProviderOperation(
+        { kind: 'workspace-context' },
+        session,
+      ),
+    ).toEqual(operation);
+    for (const invalid of [
+      [{ name: '../etc/passwd', text: 'x' }],
+      [files[1], files[0]],
+      [files[0], files[0]],
+      [{ name: 'QWEN.md', text: 1 }],
+      [{ name: 'QWEN.md', text: 'x', path: '/etc' }],
+      [
+        {
+          name: 'QWEN.md',
+          text: 'x'.repeat(MANAGED_WORKSPACE_CONTEXT_FILE_CHARS + 1),
+        },
+      ],
+    ])
+      expect(() => parse(invalid)).toThrow();
+    expect(() =>
+      parseManagedRuntimeProviderOperation(
+        { kind: 'workspace-context', path: '/' },
+        session,
+      ),
+    ).toThrow();
   });
 
   it('pins prepared references and normalized arguments to the original request', () => {

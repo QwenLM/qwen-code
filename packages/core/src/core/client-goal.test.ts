@@ -273,6 +273,11 @@ function setupGoalClient() {
     getModel: vi.fn(() => 'test-model'),
     getSkipNextSpeakerCheck: vi.fn(() => false),
     getSkipLoopDetection: vi.fn(() => false),
+    getMaxToolCallsPerTurn: vi.fn(() => Number.POSITIVE_INFINITY),
+    getToolRegistry: vi.fn(() => ({
+      getAllToolNames: () => [],
+      getTool: () => undefined,
+    })),
     startActiveTodoWorkChain: vi.fn(),
     startAutomaticActiveTodoWorkChain: vi.fn(),
     endAutomaticActiveTodoWorkChain: vi.fn(),
@@ -1244,6 +1249,9 @@ describe('LlmClient Goal admission', () => {
       'Dependency completed',
       undefined,
       permit,
+      // The send path stamps every delivered notification turn entry, which
+      // is what lets recovery tell it apart from a cold pre-send record.
+      true,
     );
     expect(recorder.recordGoalRuntimeMessage).not.toHaveBeenCalled();
     expect(order).toEqual(['flush', 'finish']);

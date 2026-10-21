@@ -13,6 +13,8 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
+import { relayUpstream } from './hosted-relay-headers.js';
+import { isLegitimateMountRelease } from './hosted-mount-release.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -36,8 +38,11 @@ const report = {
   idempotencyKey: '',
   modelCalls: 0,
   operations: [] as string[],
+  statusReads: [] as Array<{ reconcile: boolean }>,
   signalEvidence: [] as unknown[],
   restoreTransactions: [] as Transaction[],
+  staleWriterConflicts: 0,
+  fencedWriterRenewals: 0,
   target: undefined as Transaction | undefined,
 };
 const proof = path.join(config.directory, 'proof.txt');
@@ -49,6 +54,9 @@ let restoring = false;
 let injected = false;
 let serviceKilled = false;
 let proxyFailure: unknown;
+const sealedWriters = new Set<string>();
+// Writer identities (bootIds) of Harness processes this driver has SIGKILLed.
+const killedWriters = new Set<string>();
 
 function events(transaction: Transaction) {
   return Buffer.from(transaction.recordBytesBase64, 'base64')
@@ -73,12 +81,14 @@ async function control(operation: string) {
 async function killHarness() {
   assert(cli.child?.pid);
   const pid = cli.child.pid;
+  killedWriters.add(cli.bootId);
   const exited = once(cli.child, 'exit');
   assert(cli.child.kill('SIGKILL'));
   const [code, signal] = await exited;
   assert.equal(code, null);
   assert.equal(signal, 'SIGKILL');
   report.signalEvidence.push({ process: 'harness', pid, signal });
+  killedWriters.add(cli.bootId);
 }
 
 async function enteredTool() {
@@ -128,14 +138,28 @@ const proxy = createServer(async (req, res) => {
     const operation =
       req.method === 'GET' ? 'status' : url.pathname.split(':').at(-1)!;
     if (!store) {
+      const harnessScoped =
+        req.method === 'POST' &&
+        [
+          '/internal/runtime-broker/v1/runtimes:warm',
+          '/internal/runtime-broker/v1/tool-sessions:active-holds',
+        ].includes(url.pathname);
       assert.equal(fields.harnessSessionId, config.sessionId);
-      assert.equal(fields.runtimeSessionId, report.promptId);
+      assert.equal(
+        fields.runtimeSessionId,
+        harnessScoped ? undefined : report.promptId,
+      );
       assert.notEqual(
         operation,
         'release',
         'Unsettled execution must retain its owner',
       );
-      report.operations.push(operation);
+      if (!(harnessScoped && operation === 'active-holds'))
+        report.operations.push(operation);
+      if (req.method === 'GET')
+        report.statusReads.push({
+          reconcile: url.searchParams.get('reconcile') === 'true',
+        });
       const executionId = url.pathname.match(/\/executions\/([^/:]+)/)?.[1];
       if (executionId) assert.equal(executionId, report.executionCallId);
       if (operation === 'start' && inFlight)
@@ -153,8 +177,52 @@ const proxy = createServer(async (req, res) => {
       ?.includes('application/json')
       ? JSON.parse(bytes.toString())
       : undefined;
+    const writerGrant = `${fields.writerId}:${fields.writerGeneration}`;
+    if (
+      store &&
+      url.pathname.endsWith('/writers:seal') &&
+      upstream.status === 200
+    )
+      sealedWriters.add(writerGrant);
     if (!serviceKilled) {
-      if (upstream.status === 409) {
+      if (
+        upstream.status === 409 &&
+        store &&
+        url.pathname.endsWith('/writers:renew') &&
+        (sealedWriters.has(writerGrant) ||
+          (killedWriters.has(fields.writerId) &&
+            fields.writerId !== cli.bootId))
+      ) {
+        // A renewal already in flight may reach the Store after its writer
+        // sealed, or after the driver SIGKILLed the harness holding it. The
+        // current boot's grant is never tolerated: catching that conflict is
+        // the whole reason the fence exists.
+        assert.equal(
+          json.error.code,
+          'managed_session_writer_conflict',
+          `${url}: ${bytes}`,
+        );
+        report.fencedWriterRenewals++;
+      } else if (
+        upstream.status === 409 &&
+        store &&
+        killedWriters.has(fields.writerId)
+      ) {
+        // A write the killed Harness sent before SIGKILL can be answered only
+        // after the cold load's acquire bumped the writer generation; the
+        // writer fence rejecting it is the designed outcome, not a failure.
+        assert.equal(
+          json?.error?.code,
+          'managed_session_writer_conflict',
+          `${url}: ${bytes}`,
+        );
+        report.staleWriterConflicts++;
+      } else if (url.pathname.endsWith(':release-mount')) {
+        assert(
+          isLegitimateMountRelease(upstream.status, json.code),
+          `${upstream.status} ${url}: ${bytes}`,
+        );
+      } else if (upstream.status === 409) {
         assert(
           injected &&
             !store &&
@@ -186,9 +254,16 @@ const proxy = createServer(async (req, res) => {
       assert.equal(injected, false);
       assert.equal(json.status.state, 'executing');
       await enteredTool();
-      if (config.fault === 'harness-start') {
+      if (
+        config.fault === 'harness-start' ||
+        config.fault === 'harness-unknown'
+      ) {
         await killHarness();
-        await unlink(`${proof}.read-gate`);
+        // harness-start lets the tool settle before the takeover. The unknown
+        // case keeps it in flight so the cancellation load must ask the
+        // Runtime for evidence instead of re-dispatching it.
+        if (config.fault === 'harness-start')
+          await unlink(`${proof}.read-gate`);
         injected = true;
         res.destroy();
         return;
@@ -203,11 +278,7 @@ const proxy = createServer(async (req, res) => {
       }
       injected = true;
     }
-    for (const [name, value] of upstream.headers)
-      if (!['content-length', 'transfer-encoding', 'connection'].includes(name))
-        res.setHeader(name, value);
-    res.writeHead(upstream.status);
-    res.end(bytes);
+    relayUpstream(res, upstream, bytes);
   } catch (cause) {
     if (!serviceKilled || !(cause instanceof TypeError)) proxyFailure = cause;
     res.destroy();
@@ -281,7 +352,11 @@ async function assertEffect() {
   assert((await lstat(proof)).isFile());
   assert.equal(
     await readFile(proof, 'utf8'),
-    ['harness-start', 'harness-result'].includes(config.fault) ? 'xx' : 'x',
+    ['harness-start', 'harness-result', 'harness-unknown'].includes(
+      config.fault,
+    )
+      ? 'xx'
+      : 'x',
   );
   assert.equal(
     await readFile(path.join(cli.root, 'proof.txt'), 'utf8'),
@@ -352,7 +427,9 @@ try {
     }
     await killHarness();
   }
-  await assertEffect();
+  // harness-unknown holds the tool at its read gate until the cancellation
+  // load has asked the Runtime; its effect is asserted after that release.
+  if (config.fault !== 'harness-unknown') await assertEffect();
   assert.equal(report.modelCalls, 1);
   for (const [operation, count] of [
     ['acquire', 1],
@@ -370,42 +447,79 @@ try {
   await start();
   assert.notEqual(cli.bootId, boot);
   restoring = true;
+  const unknown = config.fault === 'harness-unknown';
   const operations = report.operations.length;
-  const loaded = await json(`${route}/load`, connection(), 409);
-  assert.equal(loaded.error, 'hosted_turn_recovery_required');
-  assert(report.restoreTransactions.length > 0);
-  const restored = report.restoreTransactions.flatMap(events);
-  assert.equal(
-    restored.filter(
-      (event) =>
-        event.kind === 'input.accepted' &&
-        event.payload.turnId === report.promptId,
-    ).length,
-    1,
+  // A plain load refuses a Turn whose file history is still pending; the
+  // takeover flag routes it through the cancellation recovery load, where
+  // decision 9 asks the Broker for evidence.
+  const loaded = await json(
+    `${route}/load`,
+    unknown
+      ? { ...connection(), passiveManagedRuntimeRecovery: true }
+      : connection(),
+    unknown ? 200 : 409,
   );
-  assert.equal(
-    restored.filter((event) => event.kind === 'turn.settled').length,
-    0,
-  );
-  assert.equal(
-    restored.filter(
-      (event) =>
-        event.kind === 'message.committed' &&
-        event.payload.role === 'tool_result',
-    ).length,
-    0,
-  );
-  assert.equal(
-    report.operations.length,
-    operations,
-    'Cold load must not contact Broker',
-  );
+  if (unknown) {
+    const executions =
+      loaded._meta['qwen.daemon.managedRuntimeRecovery'].executions;
+    assert.equal(executions.length, 1);
+    assert.equal(executions[0].outcome, 'known');
+    assert.equal(executions[0].status.state, 'executing');
+  } else {
+    assert.equal(loaded.error, 'hosted_turn_recovery_required');
+    assert(report.restoreTransactions.length > 0);
+    const restored = report.restoreTransactions.flatMap(events);
+    assert.equal(
+      restored.filter(
+        (event) =>
+          event.kind === 'input.accepted' &&
+          event.payload.turnId === report.promptId,
+      ).length,
+      1,
+    );
+    assert.equal(
+      restored.filter((event) => event.kind === 'turn.settled').length,
+      0,
+    );
+    assert.equal(
+      restored.filter(
+        (event) =>
+          event.kind === 'message.committed' &&
+          event.payload.role === 'tool_result',
+      ).length,
+      0,
+    );
+  }
+  if (unknown) {
+    // Re-attaching and reading status are not dispatches; a parked tool must
+    // never be started a second time.
+    assert.equal(
+      report.operations.filter((value) => value === 'start').length,
+      config.fault === 'harness-prepare' ? 0 : 1,
+      'Cold load must not re-dispatch the parked tool',
+    );
+    assert(
+      report.statusReads.some((read) => read.reconcile),
+      'the cancellation load asks the Runtime about the parked execution once',
+    );
+    await unlink(`${proof}.read-gate`);
+    await waitUntil(
+      async () => (await control('evidence')).executionState === 'SETTLED',
+      60_000,
+    );
+  } else {
+    assert.equal(
+      report.operations.length,
+      operations,
+      'Cold load must not execute Broker operations',
+    );
+  }
   assert.equal(report.modelCalls, 1, 'Cold load must not call the model');
   await assertEffect();
   if (proxyFailure) throw proxyFailure;
   await writeFile(`${configPath}.results`, JSON.stringify(report));
   console.log(
-    `FG6C ${config.fault}: execution=${report.executionCallId}, signals=${JSON.stringify(report.signalEvidence)}, cold=blocked`,
+    `FG6C ${config.fault}: execution=${report.executionCallId}, signals=${JSON.stringify(report.signalEvidence)}, cold=blocked, statusReads=${JSON.stringify(report.statusReads)}`,
   );
   console.log('HOSTED_PROCESS_CRASH_OK');
 } catch (cause) {

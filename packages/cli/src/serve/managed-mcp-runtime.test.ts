@@ -211,6 +211,144 @@ function invoke(
 }
 
 describe('Managed MCP Runtime', () => {
+  it('refuses a parked configuration after sealing before any connection starts', async () => {
+    let enter!: () => void;
+    let resume!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const instance = new ManagedMcpRuntime(
+      { ...sessionKey, workspaceGeneration: '1' },
+      async () => {
+        enter();
+        await gate;
+        return directory;
+      },
+      { version: 1, servers: [stdioDefinition()] },
+    );
+    runtimes.push(instance);
+    const executor = new ManagedToolExecutor(
+      async () => undefined,
+      undefined,
+      instance,
+    );
+    const connect = vi.spyOn(Client.prototype, 'connect');
+    const request = instance.control(runtimeSessionId, configure());
+    const refusal = request.catch((error: unknown) => error);
+    await entered;
+    const retirementId = '550e8400-e29b-41d4-a716-446655440000';
+    executor.sealAdmission(retirementId);
+    expect(instance.getDrainInspection()).toEqual({
+      pendingStarts: 1,
+      pendingInvocations: 0,
+      hasActivity: true,
+    });
+    resume();
+    expect(await refusal).toMatchObject({ code: 'managed_mcp_closed' });
+    expect(connect).not.toHaveBeenCalled();
+    expect(instance.getDrainInspection()).toEqual({
+      pendingStarts: 0,
+      pendingInvocations: 0,
+      hasActivity: true,
+    });
+    expect(executor.getDrainObservation(retirementId).workState).toBe(
+      'BLOCKED',
+    );
+    expect(executor.getDrainObservation(retirementId).blockers).toContain(
+      'mcp_lifecycle_unqualified',
+    );
+    connect.mockRestore();
+  });
+
+  it('preserves original MCP observation and release while refusing new work', async () => {
+    const instance = runtime();
+    const executor = new ManagedToolExecutor(
+      async () => undefined,
+      undefined,
+      instance,
+    );
+    const original = await settled(instance, configure());
+    const catalog = original.catalog!;
+    const request = invoke(catalog, 'original-invoke', {
+      kind: 'tool_call',
+      name: 'echo',
+      arguments: {},
+    });
+    const result = await instance.invokeTool(runtimeSessionId, request);
+    const retirementId = '550e8400-e29b-41d4-a716-446655440000';
+    executor.sealAdmission(retirementId);
+    expect(await instance.control(runtimeSessionId, configure())).toEqual(
+      original,
+    );
+    expect(await instance.invokeTool(runtimeSessionId, request)).toEqual(
+      result,
+    );
+    expect(
+      await instance.control(runtimeSessionId, {
+        kind: 'mcp-cancel',
+        sessionKey,
+        operationId: 'cancel',
+        targetOperationId: request.operationId,
+      }),
+    ).toEqual(result);
+    await expect(
+      instance.control(runtimeSessionId, {
+        ...configure(),
+        operationId: 'fresh-configure',
+        grant: grant('fresh-configure'),
+      }),
+    ).rejects.toMatchObject({ code: 'managed_mcp_closed' });
+    await expect(
+      instance.control(runtimeSessionId, {
+        kind: 'mcp-discover',
+        sessionKey,
+        operationId: 'fresh-discover',
+        serverId: catalog.serverId,
+        serverRevision: catalog.serverRevision,
+        connectionGeneration: catalog.connectionGeneration,
+        grant: grant('configuration-1'),
+      }),
+    ).rejects.toMatchObject({ code: 'managed_mcp_closed' });
+    await expect(
+      instance.invokeTool(
+        runtimeSessionId,
+        invoke(catalog, 'fresh-invoke', {
+          kind: 'tool_call',
+          name: 'echo',
+          arguments: {},
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'managed_mcp_closed' });
+    expect(
+      (
+        await settled(instance, {
+          kind: 'mcp-release',
+          sessionKey,
+          operationId: 'original-release',
+          serverId: catalog.serverId,
+          serverRevision: catalog.serverRevision,
+          connectionGeneration: catalog.connectionGeneration,
+          grant: grant('configuration-1'),
+        })
+      ).response,
+    ).toEqual({ released: true });
+    expect(instance.hasHolds(runtimeSessionId)).toBe(false);
+    expect(executor.getDrainObservation(retirementId).blockers).toContain(
+      'mcp_lifecycle_unqualified',
+    );
+    await instance.close();
+    expect(executor.getDrainObservation(retirementId).workState).toBe(
+      'BLOCKED',
+    );
+    const calls = await readFile(path.join(directory, 'calls-1'), 'utf8');
+    expect(
+      calls.split('\n').filter((method) => method === 'tools/call'),
+    ).toHaveLength(1);
+  });
+
   it.each(['toString', 'constructor', '__proto__'])(
     'ignores inherited notification names without changing the catalog: %s',
     async (method) => {

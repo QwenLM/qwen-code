@@ -1,3 +1,20 @@
+import { plural } from './utils/plural.js';
+import {
+  MESSAGE_DELETION_MESSAGES_EN,
+  MESSAGE_DELETION_MESSAGES_ZH,
+} from './components/message-deletion-messages.js';
+import {
+  TRAJECTORY_EXECUTION_MESSAGES_EN,
+  TRAJECTORY_EXECUTION_MESSAGES_ZH,
+} from './trajectory/execution-messages.js';
+import {
+  FILES_MESSAGES_EN,
+  FILES_MESSAGES_ZH,
+} from './components/artifacts/files-messages.js';
+import {
+  TOKEN_USAGE_MESSAGES_EN,
+  TOKEN_USAGE_MESSAGES_ZH,
+} from './components/artifacts/token-usage-messages.js';
 import {
   createContext,
   useContext,
@@ -5,7 +22,22 @@ import {
   type PropsWithChildren,
 } from 'react';
 
+import {
+  TRAJECTORY_FILTER_MESSAGES_EN,
+  TRAJECTORY_FILTER_MESSAGES_ZH,
+} from './trajectory/filter-messages.js';
+
+import {
+  TRAJECTORY_WINDOW_MESSAGES_EN,
+  TRAJECTORY_WINDOW_MESSAGES_ZH,
+} from './trajectory/window-messages.js';
+
+import { VOICE_MESSAGES_EN, VOICE_MESSAGES_ZH } from './voice/messages.js';
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
+import {
+  MCP_APP_MESSAGES_EN,
+  MCP_APP_MESSAGES_ZH,
+} from './mcp-app/messages.js';
 import {
   COLLAB_MESSAGES_EN,
   COLLAB_MESSAGES_ZH,
@@ -14,6 +46,16 @@ import {
   SETTINGS_MESSAGES_EN,
   SETTINGS_MESSAGES_ZH,
 } from './settings/messages.js';
+
+import {
+  MANAGED_TASK_MESSAGES_EN,
+  MANAGED_TASK_MESSAGES_ZH,
+} from './components/managed/managed-task-messages.js';
+
+import {
+  WORKSPACE_REGISTRATION_MESSAGES_EN,
+  WORKSPACE_REGISTRATION_MESSAGES_ZH,
+} from './components/managed/managed-workspace-messages.js';
 
 export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
 
@@ -24,13 +66,6 @@ type MessageValue =
   | ((vars?: Record<string, string | number>) => string);
 
 type Messages = Record<string, MessageValue>;
-
-/** English count plus its noun, pluralised the regular way. */
-function plural(count: string | number | undefined, noun: string): string {
-  const value = typeof count === 'number' ? count : Number(count ?? 0);
-  const safe = Number.isFinite(value) ? value : 0;
-  return `${safe} ${noun}${safe === 1 ? '' : 's'}`;
-}
 
 const EN: Messages = {
   'capacityChoice.persistenceUnconfirmed':
@@ -105,6 +140,9 @@ const EN: Messages = {
   'daemon.capacity.exhausted':
     'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
   'managed.title': 'Managed Agents',
+  'managed.executionMode': 'Execution mode',
+  'managed.localMode': 'Local',
+  'managed.managedMode': 'Managed',
   'managed.sessions': 'Managed sessions',
   'managed.conversation': 'Managed conversation',
   'managed.new': 'New managed task',
@@ -124,6 +162,12 @@ const EN: Messages = {
   'managed.cancel': 'Cancel turn',
   'managed.uncertain':
     'The request outcome is unconfirmed. Retry to check or complete the same submission.',
+  'managed.discard': 'Discard this request',
+  'managed.pendingRestoreFailed':
+    'The pending request cannot be restored and may already have been submitted. Check the session before discarding this pending record.',
+  'managed.pendingDiscardFailed':
+    'Could not discard this request. Browser storage is unavailable. Retry or reload the page.',
+  'managed.discarded': 'Request discarded. The draft is back in the composer.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
   'managed.approval.failed':
@@ -132,9 +176,13 @@ const EN: Messages = {
   'managed.approval.refreshFailed': 'Pending approvals could not be refreshed.',
   'managed.approval.retry': 'Retry loading approvals',
   'managed.approval.forbidden':
-    'Only the Session creator can answer this approval.',
+    "Only the Session's owner or a Workspace operator can answer this approval.",
   'managed.approval.argumentsUnavailable':
     'Tool arguments are unavailable for this approval.',
+  'managed.approval.previewComplete': (v) =>
+    `Input preview: ${v?.bytes ?? 0} bytes.`,
+  'managed.approval.previewTruncated': (v) =>
+    `Input preview truncated. Full input: ${v?.bytes ?? 0} bytes.`,
   'managed.result.range': (v) => `Bytes ${v?.start}–${v?.end} of ${v?.total}`,
   'managed.result.outputs': 'Outputs',
   'managed.result.view': 'View output',
@@ -170,17 +218,124 @@ const EN: Messages = {
   'managed.result.close': 'Close output',
   'managed.result.refresh': 'Refresh output',
   'managed.phase.created': 'Created',
+  'managed.creationSkillsFromSettings':
+    'Enabled Skills on the Skills page are added to new Managed sessions. Existing sessions keep their original Skills.',
+  'managed.creationSkillsManage': 'Manage Skills',
+  'managed.creationSkillsPinned': (v) =>
+    `${v?.count ?? 0} Skills are saved with this creation request.`,
+  'managed.creationSkillsSourceChanged':
+    'The Skills source changed. Retry with the selected source.',
+  'managed.creationSkillsUnavailable':
+    'Enabled Skills could not be loaded for this Managed session.',
   'managed.workspaceCreateTitle': 'Create a Workspace session',
   'managed.workspaceLabel': 'Workspace',
+  'managed.modelPreset': 'Model / Agent preset',
+  'managed.modelDefault': 'Server default model',
+  'managed.modelPinned':
+    'Choose the initial model and Agent preset. Supported conversations can change model while idle.',
   'managed.workspaceChoose': 'Choose a Workspace',
   'managed.workspaceDirectory': 'Relative directory',
+  'managed.workspaceWorkingDirectory': 'Working directory',
+  'managed.workspaceWorkingDirectoryDescription':
+    'Choose where this session starts within the Workspace. Use . for the Workspace root.',
+  'managed.cwd.change': 'Change directory',
+  'managed.cwd.path': 'Directory relative to Workspace root',
+  'managed.cwd.description':
+    'Enter a path relative to the Workspace root. Use . for the root. Future tasks run in the new directory; conversation history is kept.',
+  'managed.cwd.close': 'Close',
+  'managed.cwd.changing': 'Changing directory…',
+  'managed.cwd.confirm': 'Continue confirming',
+  'managed.cwd.unconfirmed':
+    'The directory change is not confirmed yet. Continue confirming the original request.',
+  'managed.cwd.unconfirmedForbidden':
+    'Your account cannot confirm this change. Its result remains unconfirmed, and sending stays blocked until the server settles it or you open a new tab.',
+  'managed.cwd.busy':
+    'Finish the active task, approval or unconfirmed request before changing directory.',
+  'managed.cwd.invalid': 'The directory is invalid or cannot be accessed.',
+  'managed.cwd.conflict':
+    'The current directory has changed. Review it before submitting again.',
+  'managed.cwd.unavailable':
+    'The Workspace is currently unavailable for a directory change.',
+  'managed.cwd.forbidden':
+    'Your account does not have permission to change this directory.',
+  'managed.cwd.storage':
+    'Browser session storage is unavailable. The directory change cannot start safely.',
+  'managed.cwd.failed':
+    'The directory change failed. Review the current directory before trying again.',
+  'managed.cwd.updated': (v) =>
+    `The current directory changed to ${v?.cwd ?? ''}. Confirm this context before submitting.`,
+  'managed.cwd.useCurrent': 'Use the current directory context',
   'managed.workspaceCreate': 'Create session',
   'managed.workspaceBound': 'Bound Workspace',
   'managed.workspaceExecutionUnavailable':
-    'Workspace is bound. Message execution is not available in this service yet.',
+    'Workspace is bound. You cannot send messages in this Session.',
   'managed.workspaceSharedFiles':
     'Sessions in the same Workspace share files. Directory availability is checked before execution.',
   'managed.workspaceEmpty': 'No readable Workspaces are available.',
+  'managed.newWorkspaceTitle': 'New workspace',
+  'managed.modelFixed':
+    'The model is fixed for this task. Start a new task to choose another model.',
+  'managed.approvalChange.loading': 'Loading approval policies…',
+  'managed.approvalChange.optionsError': 'Could not load approval policies.',
+  'managed.approvalChange.reload': 'Reload policies',
+  'managed.approvalChange.nextTurn':
+    'Approval policy changes apply to the next turn.',
+  'managed.approvalChange.live':
+    'Approval policy changes apply to subsequent tool calls in this turn.',
+  'managed.approvalChange.changing': 'Changing approval policy…',
+  'managed.approvalChange.unconfirmed':
+    'Approval change is not confirmed. Continue confirming the original request.',
+  'managed.approvalChange.confirm': 'Continue confirming',
+  'managed.approvalChange.busy':
+    'Finish the current turn or recovery before changing approval policy.',
+  'managed.approvalChange.storage':
+    'Browser session storage is unavailable. The approval change was not sent.',
+  'managed.approvalChange.conflict':
+    'Approval policy changed elsewhere. Review the current selection.',
+  'managed.approvalChange.failed':
+    'Approval change was refused. Review the available policies.',
+  'managed.model.loading': 'Loading available models…',
+  'managed.model.optionsError': 'Could not load available models.',
+  'managed.model.reload': 'Reload models',
+  'managed.model.nextTurn':
+    'Change the model while idle. Your next message uses the selected model; conversation history is kept.',
+  'managed.model.changing': 'Changing model…',
+  'managed.model.unconfirmed':
+    'The model change is not confirmed. Continue confirming the original request.',
+  'managed.model.confirm': 'Continue confirming',
+  'managed.model.busy':
+    'Finish the active task, approval or unconfirmed request before changing model.',
+  'managed.model.storage':
+    'Browser session storage is unavailable. The model change cannot start safely.',
+  'managed.model.conflict':
+    'The model has changed. Review the current selection and try again.',
+  'managed.model.failed':
+    'The model change was refused. Review the available models and try again.',
+  'managed.approvalOptionsLoading': 'Loading approval modes…',
+  'managed.approvalOptionsLoadFailed': 'Could not load approval modes.',
+  'managed.approvalOptionsInvalid':
+    'The service returned unsupported approval modes.',
+  'managed.approvalFixed':
+    'This session does not support changing its approval policy.',
+  'managed.newWorkspaceDescription':
+    'Choose an existing project directory, or name a new empty workspace.',
+  'managed.workspaceDirectoryRoot': 'Authorized directories',
+  'managed.localDirectoryHint':
+    'Choose an existing project on this computer. Workspace setup is automatic.',
+  'managed.workspaceDirectoryHint':
+    'Choose an existing project on the execution host within this authorized root.',
+  'managed.workspaceChooseDirectory': 'Choose existing directory',
+  'managed.workspaceDirectoryScope':
+    'Choose a directory inside the selected root.',
+  'managed.newWorkspaceName': 'Workspace name',
+  'managed.newWorkspaceNameInvalid':
+    'Use a name of 1–128 characters without control characters.',
+  'managed.newWorkspaceCreate': 'Create workspace',
+  'managed.newWorkspaceCreating': 'Creating workspace…',
+  'managed.newWorkspaceUncertain':
+    'The creation is not yet confirmed. Retry to check the same workspace, or abandon local confirmation to start again. Abandoning does not delete a workspace that may already exist.',
+  'managed.newWorkspaceResume': 'Resume workspace creation',
+  'managed.newWorkspaceClose': 'Close',
   'managed.workspaceUnsupported':
     'This service does not support Workspace binding.',
   'managed.workspacePermission':
@@ -197,6 +352,8 @@ const EN: Messages = {
   'managed.workspaceAbandon': 'Abandon local confirmation',
   'managed.workspaceAbandonWarning':
     'The original empty session may still exist. Abandoning this record does not delete it.',
+  'managed.workspaceAbandonInputWarning':
+    'A session with this input may already exist or be running. Abandoning this record does not cancel it. Sending it again starts a new request and may repeat its effects.',
   'managed.workspaceSwitchTitle': 'Switch Workspace?',
   'managed.workspaceSwitchDescription':
     'Switching resets the relative directory to the Workspace root.',
@@ -367,9 +524,9 @@ const EN: Messages = {
   'gitMode.branchHint': 'Switches the working directory to a new branch',
   'gitMode.branchInvalidName': 'Invalid branch name',
   'gitMode.worktree': 'Worktree',
-  'gitMode.worktreeDesc': 'Isolated copy · can run in parallel',
+  'gitMode.worktreeDesc':
+    'Creates an isolated copy when you send your first message',
   'gitMode.confirmBranch': 'Create branch',
-  'gitMode.confirmWorktree': 'Create worktree',
   'gitMode.resetToCurrent': 'Reset to current branch',
   'gitLog.title': 'History',
   'gitLog.subtitle': (v) => `${v?.count ?? 0} commits`,
@@ -717,6 +874,26 @@ const EN: Messages = {
   'common.downloadFailed': (v) => `Download failed: ${v?.message ?? ''}`,
   'common.open': 'Open',
   'common.openFailed': (v) => `Could not open link: ${v?.message ?? ''}`,
+  'excel.worksheet': 'Worksheet',
+  'excel.row': 'Row',
+  'excel.truncated': (v) =>
+    `Preview limited to ${v?.cells} cells per worksheet. Download the original for all content.`,
+  'excel.previousWorksheets': 'Previous worksheets',
+  'excel.nextWorksheets': 'Next worksheets',
+  'excel.empty': 'This worksheet is empty.',
+  'excel.notCalculated': 'Not calculated',
+  'excel.tooLarge':
+    'Excel preview supports files up to 10 MiB. Download the original to open it.',
+  'excel.invalid':
+    'Unable to preview this workbook. It may be damaged, password protected, too complex, or unsupported by this browser. You can download the original.',
+  'excel.timeout':
+    'This workbook took too long to preview. Download the original to open it.',
+  'docx.tooLarge':
+    'DOCX preview supports files up to 10 MiB. Download the original to open it.',
+  'docx.invalid':
+    'Unable to preview this DOCX document. You can download the original.',
+  'docx.timeout':
+    'This document took too long to preview. Download the original or try again.',
   'artifact.openLink': 'Open link',
   'artifact.longDocument': 'File is large. Source is shown by default.',
   'artifact.renderFullPreview': 'Render full preview',
@@ -739,15 +916,6 @@ const EN: Messages = {
   'mermaid.label': 'mermaid',
   'mermaid.errorLabel': 'mermaid (error)',
   'user.uploadedImage': (v) => `User uploaded image ${v?.index ?? 1}`,
-  'voice.noSpeech': 'No speech detected.',
-  'voice.stopDictation': 'Stop dictation',
-  'voice.transcribing': 'Transcribing…',
-  'voice.starting': 'Starting…',
-  'voice.errorRetry': (v) =>
-    `Voice error — click to retry${v?.message ? `: ${v.message}` : ''}`,
-  'voice.noSpeechRetry': 'No speech detected — click to retry',
-  'voice.startDictation': 'Start voice dictation',
-  'voice.error': 'Voice error',
   'resume.failedToLoad': 'Failed to load sessions',
   'toast.dismiss': 'Dismiss notification',
   'toast.dismissShort': 'Dismiss',
@@ -798,8 +966,23 @@ const EN: Messages = {
   'approval.option.allowAlwaysTool': 'Always allow for this tool',
   'assistant.branch': 'Branch',
   'assistant.copy': 'Copy',
+  'assistant.selectionCopy': 'Copy selection',
+  'assistant.copyPlainText': 'Copy plain text',
+  'assistant.copyMarkdown': 'Copy Markdown',
   'assistant.dissatisfied': 'Not satisfied',
   'assistant.satisfied': 'Satisfied',
+  // A workspace agent's reply in a chat session. These render in exported
+  // transcripts too, so they live here rather than in the collab dictionary.
+  'agentMessage.status.failed': 'Failed',
+  'agentMessage.status.cancelled': 'Stopped',
+  'agentMessage.status.offline': 'Runtime offline',
+  'agentMessage.tokens': (v) => `${v?.count ?? 0} tokens`,
+  'agentMessage.steps': 'Steps',
+  'agentMessage.noAction': (v) => `${v?.name ?? ''} had nothing to do`,
+  'agentMessage.step.running': 'Running',
+  'agentMessage.step.completed': 'Done',
+  'agentMessage.step.failed': 'Failed',
+  'agentMessage.step.stopped': 'Stopped',
   'at.category.extensions': 'Extensions',
   'at.category.extensions.description': 'Reference active extensions',
   'at.category.files': 'Files',
@@ -839,8 +1022,6 @@ const EN: Messages = {
   'composerMobile.commands': 'All commands',
   'composerMobile.searchCommands': 'Search commands',
   'composerMobile.history': 'Input history',
-  'composerMobile.previousInput': 'Previous input',
-  'composerMobile.nextInput': 'Next input',
   'composerMobile.stop': 'Stop',
   'composerMobile.attachments': (v) =>
     `Attached files/images: ${v?.count ?? 0}`,
@@ -857,6 +1038,12 @@ const EN: Messages = {
   'composerAdd.extensions.empty': 'No extensions are enabled',
   'composerAdd.mcp.label': 'MCP',
   'composerAdd.mcp.empty': 'No MCP servers are available',
+  'managed.mcp.catalog': (v) =>
+    `Catalog snapshot: ${plural(v?.tools, 'tool')} (${v?.toolsState}); ${plural(v?.resources, 'resource')} (${v?.resourcesState}); ${plural(v?.prompts, 'prompt')} (${v?.promptsState})`,
+  'managed.mcp.discovery.complete': 'complete',
+  'managed.mcp.discovery.partial': 'partial',
+  'managed.mcp.discovery.failed': 'failed',
+  'managed.mcp.discovery.stale': 'stale',
   'composerAdd.skills.label': 'Skills',
   'composerAdd.plan.label': 'Plan mode',
   'composerAdd.plan.description': 'Plan first, run after you approve',
@@ -889,8 +1076,13 @@ const EN: Messages = {
   'session.recovery.degraded_history':
     'Conversation history is incomplete. The interrupted task cannot be continued.',
   'session.recovery.continue': 'Continue execution',
+  'session.recovery.confirmContinue': 'Confirm and continue',
   'session.recovery.continuing': 'Continuing…',
   'session.recovery.failed': 'Could not continue the conversation.',
+  'session.recovery.unknownCancellation':
+    'This older session was cancelled, but the reason was not recorded. Confirm before continuing.',
+  'session.recovery.confirmCancellation':
+    'This turn may have been stopped intentionally. Do you want to continue it?',
   'session.archived': 'This conversation is archived',
   'session.archivedDescription':
     'Unarchive it before opening the conversation.',
@@ -1028,9 +1220,10 @@ const EN: Messages = {
   'markdownTable.selection.average': 'Average',
   'markdownTable.selection.min': 'Min',
   'markdownTable.selection.max': 'Max',
-  'markdownTable.copyTsv': 'Copy TSV',
-  'markdownTable.copyTsvHint': 'Copy as TSV for pasting into spreadsheet apps',
-  'markdownTable.copyVisible': 'Copy table',
+  'markdownTable.copyTsv': 'Copy text',
+  'markdownTable.copyTsvHint': 'Copy text for pasting into spreadsheet apps',
+  'markdownTable.copyVisible': 'Copy',
+  'markdownTable.copyMarkdown': 'Copy Markdown',
   'markdownTable.customColumns': 'Custom columns',
   'markdownTable.customColumns.tableSection': 'Columns shown in the table',
   'markdownTable.customColumns.detailSection': 'Fields shown in expanded rows',
@@ -1156,6 +1349,18 @@ const EN: Messages = {
   'daemon.connection.add': 'Add connection',
   'daemon.connection.saved': 'Connected computers',
   'daemon.connection.forget': (v) => `Forget ${v?.address}`,
+  'workspaceHost.local': 'Local',
+  'workspaceHost.remote': 'Remote',
+  'workspaceHost.openHost': (v) => `Open ${v?.host ?? ''}`,
+  'workspaceHost.statusOffline': 'offline',
+  'workspaceHost.statusUnauthorized': 'unauthorized',
+  'workspaceHost.focused': 'connected',
+  'workspaceHost.focusedHint':
+    'This page is connected to this daemon — the chat runs against it.',
+  'workspaceHost.offlineHint':
+    'This host could not be reached; showing its last known projects.',
+  'workspaceHost.unauthorizedHint':
+    'The saved credential was rejected. Open this host to sign in again.',
   'daemon.connection.invalid': 'Enter a valid HTTP or HTTPS origin.',
   'daemon.connection.notReady':
     'The daemon did not accept the connection; the stored credential was left unchanged.',
@@ -1693,6 +1898,7 @@ const EN: Messages = {
   'codeReview.failureScenario': 'Failure scenario',
   'codeReview.witness': 'Witness',
   'codeReview.suggestedFix': 'Suggested fix',
+  'codeReview.fixWitness': 'Fix witness',
   'codeReview.outcome': 'Outcome',
   'codeReview.locations': 'Locations',
   'codeReview.evidence': 'Evidence',
@@ -1710,8 +1916,10 @@ const EN: Messages = {
   'sideTask.description': 'View or create side tasks',
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
+  'sideTask.archiveCompleted': 'Archive completed',
+  'sideTask.archiveUnavailable': 'Only completed side tasks can be archived.',
   'webPreview.title': 'Web preview',
-  'webPreview.openHint': 'Preview a running web app',
+  'webPreview.openHint': 'Preview web apps',
   'webPreview.address': 'Development URL',
   'webPreview.open': 'Open',
   'webPreview.refresh': 'Refresh preview',
@@ -1779,6 +1987,7 @@ const EN: Messages = {
     'Which workspace this conversation belongs to is not known yet.',
   'localFiles.blocker.unsupportedDaemon':
     'This daemon does not advertise the client filesystem bridge (client_mcp_over_ws). Start the daemon with QWEN_SERVE_CLIENT_MCP_OVER_WS=1 to enable local files.',
+  ...FILES_MESSAGES_EN,
   'rightPanel.add': 'Add panel',
   'attachment.showPreview': 'Preview',
   'attachment.showSource': 'Source',
@@ -1804,11 +2013,19 @@ const EN: Messages = {
   'turnOutputs.openFileTree': 'Open file tree',
   'turnOutputs.closeFileTree': 'Close file tree',
   'turnOutputs.artifactMissing': 'File not found in the workspace',
+  'turnOutputs.artifactChanged': 'Modified since recorded',
   'turnOutputs.artifactUnavailable': (v) =>
     v?.path
       ? `File not found in the workspace · ${v.path}`
       : 'File not found in the workspace',
   'sidebar.label': 'Workspace sidebar',
+  'sidebar.home': 'Home',
+  'sidebar.channelSettings': 'Settings',
+  'sidebar.liveSettings': 'Settings',
+  'sidebar.liveSettingsUnavailable':
+    'Live settings are not available on this server.',
+  'sidebar.more': 'More',
+  'sidebar.navigation': 'Main navigation',
   'sidebar.toggleMenu': 'Toggle menu',
   'sidebar.newChat': 'New chat',
   'sidebar.newTask': 'New task',
@@ -2104,6 +2321,10 @@ const EN: Messages = {
   'queue.insertFailed': 'Failed to insert queued message',
   'queue.insertTip': 'Insert into the current turn',
   'queue.insertCommandDisabled': 'Commands cannot be inserted mid-turn',
+  'queue.sendNow': 'Send now',
+  'queue.sendNowTip':
+    "Send queued messages now, cutting the model's current response short unless it has started a tool call; running tools finish first",
+  'queue.sendNowFailed': 'Failed to send queued messages now',
   'queue.footer':
     'Press ↑ to edit the latest queued message · Esc to clear queue',
   'queue.imageCount': (v) => `(+${v?.count ?? 0} images)`,
@@ -2222,6 +2443,20 @@ const EN: Messages = {
     'Model response stream was interrupted. Please retry.',
   'error.loopDetected':
     'The model got stuck while using tools or reached a safety limit, so this turn was stopped. Your session is still open—try a more specific instruction to continue.',
+  'error.loopDetected.explicitCap': (vars) =>
+    `This turn reached the limit of ${vars?.limit} tool calls set by model.maxToolCallsPerTurn, so it was stopped. Your session is still open—raise the limit in your settings, or send a new instruction to continue.`,
+  'error.loopDetected.backstop': (vars) =>
+    `This turn reached the safety limit of ${vars?.limit} tool calls, so it was stopped. Your session is still open—send a new instruction to continue, or set model.maxToolCallsPerTurn to choose a different limit.`,
+  'error.loopDetected.stuckRepetition': (vars) =>
+    `After more than ${vars?.limit} tool calls, the model kept repeating the same call, so this turn was stopped. Your session is still open—try a different or more specific instruction.`,
+  'error.loopDetected.repeatedCall':
+    'The model kept repeating the same tool call during this turn, so it was stopped. Your session is still open—try a different or more specific instruction.',
+  'error.loopDetected.providerDuplicateId':
+    'The model service sent a tool call that had already run, so this turn was stopped instead of running it again. Your session is still open—send a new message to continue.',
+  'error.loopDetected.invalidToolParams':
+    'The model kept sending invalid arguments to the same tool, so this turn was stopped. Your session is still open—try a more specific instruction to continue.',
+  'error.loopDetected.repeatedToolFailure':
+    'The same tool kept failing for the same reason after a reminder, so this turn was stopped. Your session is still open—check the errors above, or try a different approach.',
   'shell.command': 'Shell Command',
   'shell.result.timedOut': 'Timed out',
   'shell.result.notices': 'Notices',
@@ -2247,6 +2482,7 @@ const EN: Messages = {
   'shell.result.cancelled': 'Cancelled',
   'shell.result.waiting': 'Waiting for output…',
   'shell.result.empty': 'No output',
+  'shell.result.unavailable': 'Output is unavailable for this tool call.',
   'shell.result.exited': (v) => `Exited with code ${v?.code}`,
   'turnCalls.open': 'View tool calls',
   'turnCalls.title': 'Tool calls',
@@ -2983,6 +3219,9 @@ const EN: Messages = {
   'model.footer': 'Enter select, ↑↓ navigate, Esc close',
   'model.searchHint': 'Press / to search',
   'model.fastHint': 'for suggestions and side tasks',
+  'model.refresh': 'Refresh models',
+  'model.refreshing': 'Refreshing models…',
+  'model.refreshFailed': (v) => `Unable to refresh models: ${v?.error ?? ''}`,
   'model.noMatch': (v) => `No model matching "${v?.query ?? ''}"`,
   'model.unavailable':
     'Models are unavailable; the daemon default will be used.',
@@ -3210,34 +3449,14 @@ const EN: Messages = {
   'contextUsage.previousReading':
     'Could not refresh. Showing a previous reading.',
   'contextUsage.unavailable': 'Context usage is unavailable for this session.',
-  'tokenUsage.avgLatency': 'Avg latency',
-  'tokenUsage.cached': 'Cached input',
-  'tokenUsage.input': 'Input',
-  'tokenUsage.loadError': 'Failed to load token usage.',
-  'tokenUsage.models': 'By model',
-  'tokenUsage.noData': 'No API calls in this session yet.',
-  'tokenUsage.noSubagents': 'No subagent calls in this session yet.',
-  'tokenUsage.noTools': 'No tool calls in this session yet.',
-  'tokenUsage.open': 'Session token usage',
-  'tokenUsage.output': 'Total output',
-  'tokenUsage.refresh': 'Refresh',
-  'tokenUsage.requests': 'Requests',
-  'tokenUsage.retry': 'Retry',
-  'tokenUsage.subagents': 'Subagents',
-  'tokenUsage.thoughts': 'Reasoning (included in total output)',
-  'tokenUsage.title': 'Token Usage',
-  'tokenUsage.toolRow': (v) =>
-    `${v?.count ?? 0} calls · ${v?.rate ?? 0}% ok · ${v?.duration ?? ''}`,
-  'tokenUsage.tools': 'Tools',
-  'tokenUsage.updatedAt': (v) => `Updated ${v?.time ?? ''}`,
-  'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
+  'contextUsage.unknown':
+    'Context usage has not been observed for this session yet.',
+  ...TOKEN_USAGE_MESSAGES_EN,
   'trajectory.title': 'Trajectory',
-  'trajectory.description': 'See where a run spent its time and tokens',
+  'trajectory.description': 'View time and tokens',
   'trajectory.empty': 'No records in this session yet.',
   'trajectory.noTiming':
     'No request or tool durations are recorded for these records.',
-  'trajectory.truncated':
-    'Showing the most recent records; earlier history is not loaded.',
   'trajectory.loadingPages': (v) =>
     `Loading records… (${v?.pages ?? 0} ${Number(v?.pages) === 1 ? 'page' : 'pages'} so far)`,
   'trajectory.olderFailed': (v) =>
@@ -3248,8 +3467,6 @@ const EN: Messages = {
     `Could not read the transcript: ${v?.message ?? ''}`,
   'trajectory.partial':
     'Part of this transcript could not be read, so some records are missing.',
-  'trajectory.totals': (v) =>
-    `Loaded window · ${plural(v?.turns, 'turn')} · ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')}`,
   'trajectory.turn': (v) => `Turn ${v?.index ?? 0}`,
   'trajectory.turnPartial': (v) => `Turn ${v?.index ?? 0} (continued)`,
   'trajectory.turnSummary': (v) =>
@@ -3302,12 +3519,6 @@ const EN: Messages = {
     `Showing ${v?.from ?? ''}–${v?.to ?? ''} of ${v?.busy ?? ''}`,
   'trajectory.range.aria': (v) =>
     `, ${v?.from ?? ''} to ${v?.to ?? ''} selected`,
-  'trajectory.metric.elapsed': 'Elapsed span',
-  'trajectory.metric.active': 'Active coverage',
-  'trajectory.metric.main': 'Main model total',
-  'trajectory.metric.help': 'Metric definitions',
-  'trajectory.metric.scope':
-    'Counts cover projected rows in the loaded window, including loaded subagent records. Selection and zoom do not change them.',
   'trajectory.metric.elapsed.help':
     'Elapsed span: earliest recorded start to latest end, including gaps; plotted records only.',
   'trajectory.metric.active.help':
@@ -3316,39 +3527,27 @@ const EN: Messages = {
     'Main model total: sum of main-session model request durations, excluding subagent requests and tools. Failed attempts may count.',
   'trajectory.metric.missing.help':
     'Unplotted requests and tools remain in the list. An em dash means unrecorded; zero is a measured zero.',
-  'trajectory.failures': (v) =>
-    `Failed requests ${v?.requests ?? 0} · failed tools ${v?.tools ?? 0}`,
-  'trajectory.unrecorded': 'unrecorded',
   'trajectory.unplotted': (v) =>
     `Unplotted: ${v?.starts ?? 0} without start · ${v?.timing ?? 0} without duration`,
-  'trajectory.missingStart': (v) =>
-    `${v?.count ?? 0} timed records have no start`,
-  'trajectory.missingTiming': (v) => `${v?.count ?? 0} tools have no duration`,
   'trajectory.noStart':
     'Recorded durations have no start time, so no bars can be plotted.',
   'trajectory.refreshStale': 'Refresh failed; showing the last successful read',
-  'trajectory.selected.label': 'Selected',
-  'trajectory.selected.none': 'Choose a record',
-  'trajectory.selected.noTiming': 'no request or tool timing',
+  'trajectory.historyGap':
+    'History may have changed while disconnected. Refresh the latest window to update.',
+  'trajectory.lifecycleIncomplete':
+    'Lifecycle details may be incomplete or outside the retained limit.',
   'trajectory.inspector.title': 'Record details',
-  'trajectory.inspector.open': 'View details',
   'trajectory.inspector.close': 'Close details',
   'trajectory.inspector.selectRecord': 'Select a record to inspect.',
-  'trajectory.inspector.selectRowInTurn':
-    'Turn selected. Select a record to inspect.',
   'trajectory.inspector.stale':
     'The record window changed. Select a record again.',
   'trajectory.inspector.hiddenByRange':
     'This record is outside the selected time.',
-  'trajectory.inspector.tab.summary': 'Summary',
-  'trajectory.inspector.tab.input': 'Input',
-  'trajectory.inspector.tab.output': 'Output',
-  'trajectory.inspector.tab.metrics': 'Metrics',
-  'trajectory.inspector.tab.body': 'Body',
   'trajectory.inspector.model': 'Model',
   'trajectory.inspector.status': 'Status',
   'trajectory.inspector.permissionTitle': 'Title',
   'trajectory.inspector.permissionPending': 'pending',
+  'trajectory.inspector.executionId': 'Execution ID',
   'trajectory.inspector.responseId': 'Response ID',
   'trajectory.inspector.promptId': 'Prompt ID',
   'trajectory.inspector.subagent': 'Subagent',
@@ -3357,22 +3556,10 @@ const EN: Messages = {
   'trajectory.inspector.start': 'Recorded start',
   'trajectory.inspector.end': 'Calculated end',
   'trajectory.inspector.ttft': 'First token',
-  'trajectory.inspector.afterFirst': 'After first token',
   'trajectory.inspector.invalidTtft':
     'Recorded first-token timing is inconsistent',
-  'trajectory.inspector.inputTokens': 'Input tokens',
-  'trajectory.inspector.outputTokens': 'Output tokens',
-  'trajectory.inspector.cachedTokens':
-    'Cached input tokens (included in input)',
   'trajectory.inspector.tool': 'Tool',
   'trajectory.inspector.callId': 'Call ID',
-  'trajectory.inspector.details': 'Recorded details',
-  'trajectory.inspector.preview': 'Recorded preview',
-  'trajectory.inspector.input': 'Recorded input',
-  'trajectory.inspector.output': 'Recorded output',
-  'trajectory.inspector.contentFallback':
-    'Tool content (no separate raw output)',
-  'trajectory.inspector.body': 'Recorded text',
   'trajectory.inspector.kind': 'Kind',
   'trajectory.inspector.images': 'Image types',
   'trajectory.inspector.files': 'Files',
@@ -3382,8 +3569,7 @@ const EN: Messages = {
   'trajectory.inspector.truncated': 'Content truncated',
   'trajectory.inspector.formatFailed': 'Could not format recorded field',
   'trajectory.inspector.expand': 'Show more',
-  'trajectory.inspector.copy': 'Copy displayed content',
-  'trajectory.inspector.copied': 'Copied displayed content',
+  'trajectory.inspector.copied': 'Copied',
   'trajectory.inspector.copyFailed': 'Could not copy content',
   'trajectory.mode.group': 'Time scale',
   'trajectory.mode.active': 'Active time, idle removed',
@@ -3562,6 +3748,8 @@ const EN: Messages = {
   'userMessage.sendFailed': 'Failed to send',
   'userMessage.retrySend': 'Retry sending message',
   'userMessage.edit': 'Edit message',
+  'message.moreActions': 'More message actions',
+  ...MESSAGE_DELETION_MESSAGES_EN,
   'userMessage.editSubmit': 'Send',
   'userMessage.editSending': 'Sending…',
   'userMessage.editBusy': 'Wait for the current turn to finish before editing.',
@@ -3699,6 +3887,21 @@ const EN: Messages = {
   'tasks.shortcut.cancelConfirm': 'Esc cancel',
   'tasks.detail.workingDir': 'Working dir',
   'tasks.detail.outputFile': 'Output file',
+  'tasks.detail.startedAt': 'Started',
+  'tasks.detail.endedAt': 'Ended',
+  'tasks.detail.totalDuration': 'Total duration',
+  'tasks.detail.residentMemory': 'Resident memory',
+  'tasks.detail.output': 'Output',
+  'tasks.detail.outputSize': (v) => `: ${v?.size ?? ''}`,
+  'tasks.detail.outputEmpty': 'No output yet',
+  'tasks.detail.outputNone': 'No output',
+  'tasks.detail.runtimeUnavailable': 'Task details are no longer available',
+  'tasks.detail.outputPartial':
+    'Output is available, but file details could not be read',
+  'tasks.detail.outputRefreshFailed': 'Could not refresh output. ',
+  'tasks.detail.outputTruncated': 'Showing the end only',
+  'tasks.detail.outputUnavailable': 'Output unavailable',
+  'tasks.detail.lastWrite': 'Last write',
   'tasks.detail.command': 'Command',
   'tasks.detail.events': (v) => `${v?.count ?? 0} events`,
   'tasks.detail.exit': (v) => `exit ${v?.exitCode ?? ''}`,
@@ -3887,6 +4090,9 @@ const EN: Messages = {
   'workspacesOverview.dirty': (v) => `${v?.count ?? 0} changed`,
   'workspacesOverview.mcpFailed': (v) => `${v?.count ?? 0} failed`,
   'workspacesOverview.newTask': 'New task',
+  'workspacesOverview.trust': 'Trust',
+  'workspacesOverview.trusting': 'Trusting…',
+  'workspacesOverview.trustFailed': 'Could not trust the workspace',
   'workspacesOverview.remove': 'Remove workspace',
   'workspacesOverview.back': 'Back',
   'splitView.title': 'Split View',
@@ -3915,6 +4121,7 @@ const EN: Messages = {
   'channels.workspace.label': 'Workspace',
   'channels.workspace.primary': 'Primary',
   'channels.loading': 'Loading channels',
+  'channels.configuredCount': (v) => plural(v?.count, 'configured channel'),
   'channels.configured': 'Configured channels',
   'channels.configured.description':
     'Manage the bots that receive and deliver messages for this workspace.',
@@ -4225,9 +4432,9 @@ const EN: Messages = {
   'localControl.disabledHint':
     'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
   'localControl.openSettings': 'Open Settings',
-  'browserNotifications.label': 'Browser task notifications',
+  'browserNotifications.label': 'Task notifications',
   'browserNotifications.description':
-    'Notify when the current chat or a split-view chat finishes or fails while this page is in the background or unfocused. Shows the session title, prompt and reply excerpts. Saved for this browser site only; the page must remain open.',
+    'Notify when the current chat or a split-view chat finishes, fails, needs approval or waits for your answer while this page is in the background or unfocused. Completed turns show prompt and reply excerpts; action reminders show the session title and waiting status. Saved for this browser site only; the page must remain open.',
   'browserNotifications.prompt': (v) => `Prompt: ${v?.text ?? ''}`,
   'browserNotifications.reply': (v) => `Reply: ${v?.text ?? ''}`,
   'browserNotifications.completed': 'This turn has completed.',
@@ -4235,7 +4442,22 @@ const EN: Messages = {
     'This turn failed. Return to view the details.',
   'browserNotifications.ended':
     'This turn has ended. Return to check the result.',
+  'browserNotifications.approval':
+    'This session needs your approval. Return to review the request.',
+  'browserNotifications.question':
+    'This session is waiting for your answer. Return to respond.',
   'browserNotifications.allow': 'Allow notifications',
+  'browserNotifications.enable': 'Enable notifications',
+  'browserNotifications.helpEnabled': 'Enabled for this site.',
+  'browserNotifications.helpWaiting': 'Notifications are not authorized yet.',
+  'browserNotifications.helpWhen':
+    'While this page is in the background or you switch to another tab, get reminders when the current chat needs approval, waits for your answer, finishes or fails. Clicking a notification returns to its chat without approving or answering.',
+  'browserNotifications.helpSystem':
+    'If no reminders appear, follow the steps below to check system notifications.',
+  'browserNotifications.helpMac':
+    'Open System Settings → Notifications. Select your browser (for Chrome, also check Google Chrome Helper (Alerts) if listed), enable notifications and desktop banners/alerts. Check Focus and whether notifications are allowed during screen sharing.',
+  'browserNotifications.helpWindows':
+    'Open Settings → System → Notifications (Windows 10: Notifications & actions). Enable notifications and your browser, including notification banners. Turn off Do not disturb / Focus assist, or allow your browser through its rules.',
   'browserNotifications.enabled': 'Enabled.',
   'browserNotifications.disabled': 'Disabled.',
   'browserNotifications.waiting': 'Waiting for browser permission.',
@@ -4254,9 +4476,16 @@ const EN: Messages = {
   'welcome.prompt': 'What would you like to do?',
   'welcome.titlePrefix': 'Welcome to',
   'welcome.tipLabel': 'Tips:',
+  ...MCP_APP_MESSAGES_EN,
+  ...VOICE_MESSAGES_EN,
   ...LIVE_MESSAGES_EN,
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
+  ...MANAGED_TASK_MESSAGES_EN,
+  ...WORKSPACE_REGISTRATION_MESSAGES_EN,
+  ...TRAJECTORY_EXECUTION_MESSAGES_EN,
+  ...TRAJECTORY_FILTER_MESSAGES_EN,
+  ...TRAJECTORY_WINDOW_MESSAGES_EN,
 };
 
 const ZH: Messages = {
@@ -4323,6 +4552,9 @@ const ZH: Messages = {
   'daemon.capacity.exhausted':
     '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
   'managed.title': '托管 Agent',
+  'managed.executionMode': '执行方式',
+  'managed.localMode': '本地',
+  'managed.managedMode': '托管',
   'managed.sessions': '托管会话',
   'managed.conversation': '托管会话内容',
   'managed.new': '新建托管任务',
@@ -4340,6 +4572,12 @@ const ZH: Messages = {
   'managed.retry': '重试同一请求',
   'managed.cancel': '取消本轮',
   'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
+  'managed.discard': '丢弃本次请求',
+  'managed.pendingRestoreFailed':
+    '无法恢复待确认请求，此前的提交可能已成功。请先检查会话，再决定是否丢弃这条待确认记录。',
+  'managed.pendingDiscardFailed':
+    '无法丢弃此请求，浏览器存储不可用。请重试或刷新页面。',
+  'managed.discarded': '已丢弃本次请求。草稿已放回输入框。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
   'managed.approval.failed':
@@ -4347,8 +4585,13 @@ const ZH: Messages = {
   'managed.approval.loadFailed': '待审批请求加载失败。',
   'managed.approval.refreshFailed': '待审批请求刷新失败。',
   'managed.approval.retry': '重新读取审批',
-  'managed.approval.forbidden': '只有此会话的创建者可以回答这项审批。',
+  'managed.approval.forbidden':
+    '只有此会话的拥有者或所属 Workspace 的操作者可以回答这项审批。',
   'managed.approval.argumentsUnavailable': '此项审批的工具参数暂不可见。',
+  'managed.approval.previewComplete': (v) =>
+    `输入预览：${v?.bytes ?? 0} 字节。`,
+  'managed.approval.previewTruncated': (v) =>
+    `输入预览已截断，完整输入共 ${v?.bytes ?? 0} 字节。`,
   'managed.result.range': (v) => `字节 ${v?.start}–${v?.end}，共 ${v?.total}`,
   'managed.result.outputs': '输出',
   'managed.result.view': '查看输出',
@@ -4380,17 +4623,105 @@ const ZH: Messages = {
   'managed.result.close': '关闭输出',
   'managed.result.refresh': '刷新输出',
   'managed.phase.created': '已创建',
+  'managed.creationSkillsFromSettings':
+    '技能页面中已启用的 Skills 会用于新建 Managed 会话。已有会话保留创建时的 Skills。',
+  'managed.creationSkillsManage': '管理 Skills',
+  'managed.creationSkillsPinned': (v) =>
+    `本次创建请求已保存 ${v?.count ?? 0} 个 Skills。`,
+  'managed.creationSkillsSourceChanged':
+    'Skills 来源已变化，请按当前选择重试。',
+  'managed.creationSkillsUnavailable':
+    '无法为此 Managed 会话加载已启用的 Skills。',
   'managed.workspaceCreateTitle': '创建工作区会话',
   'managed.workspaceLabel': '工作区',
+  'managed.modelPreset': '模型 / Agent 预设',
+  'managed.modelDefault': '服务端默认模型',
+  'managed.modelPinned':
+    '选择初始模型和 Agent 预设；支持的会话可在空闲时切换模型。',
   'managed.workspaceChoose': '选择工作区',
   'managed.workspaceDirectory': '相对目录',
+  'managed.workspaceWorkingDirectory': '工作目录',
+  'managed.workspaceWorkingDirectoryDescription':
+    '选择此会话在工作区内的起始目录，使用 . 表示工作区根目录。',
+  'managed.cwd.change': '切换目录',
+  'managed.cwd.path': '相对于 Workspace 根目录的路径',
+  'managed.cwd.description':
+    '输入相对于 Workspace 根目录的路径，. 表示根目录。后续任务在新目录执行，对话历史保留。',
+  'managed.cwd.close': '关闭',
+  'managed.cwd.changing': '正在切换目录…',
+  'managed.cwd.confirm': '继续确认',
+  'managed.cwd.unconfirmed': '目录切换结果尚未确认，请继续确认原请求。',
+  'managed.cwd.unconfirmedForbidden':
+    '当前账号无权确认此操作，切换结果仍待确认；在服务器给出最终结果或新开标签页之前，发送将保持禁用。',
+  'managed.cwd.busy': '请先完成正在执行的任务、审批或未确认请求，再切换目录。',
+  'managed.cwd.invalid': '目录无效或无法访问。',
+  'managed.cwd.conflict': '当前目录已变化，请检查后重新提交。',
+  'managed.cwd.unavailable': 'Workspace 当前无法切换目录。',
+  'managed.cwd.forbidden': '当前账号没有切换此目录的权限。',
+  'managed.cwd.storage': '浏览器会话存储不可用，无法安全发起目录切换。',
+  'managed.cwd.failed': '目录切换失败，请检查当前目录后重试。',
+  'managed.cwd.updated': (v) =>
+    `当前目录已变为 ${v?.cwd ?? ''}，请先确认此上下文再提交。`,
+  'managed.cwd.useCurrent': '使用当前目录上下文',
   'managed.workspaceCreate': '创建会话',
   'managed.workspaceBound': '已绑定工作区',
   'managed.workspaceExecutionUnavailable':
-    '工作区已绑定；当前服务暂未开放消息执行。',
+    '工作区已绑定；你不能在此会话中发送消息。',
   'managed.workspaceSharedFiles':
     '同一工作区的会话共享文件；目录可用性将在执行前验证。',
   'managed.workspaceEmpty': '没有可读取的工作区。',
+  'managed.newWorkspaceTitle': '新建工作区',
+  'managed.modelFixed': '当前任务的模型已固定；如需更换，请新建任务。',
+  'managed.approvalChange.loading': '正在加载审批策略…',
+  'managed.approvalChange.optionsError': '加载审批策略失败。',
+  'managed.approvalChange.reload': '重新加载策略',
+  'managed.approvalChange.nextTurn': '审批策略变更从下一轮生效。',
+  'managed.approvalChange.live': '审批策略变更对当前轮后续工具调用生效。',
+  'managed.approvalChange.changing': '正在切换审批策略…',
+  'managed.approvalChange.unconfirmed':
+    '审批策略切换尚未确认，请继续确认原请求。',
+  'managed.approvalChange.confirm': '继续确认',
+  'managed.approvalChange.busy': '当前回合或恢复完成后才能切换审批策略。',
+  'managed.approvalChange.storage':
+    '浏览器会话存储不可用，审批策略变更未发送。',
+  'managed.approvalChange.conflict':
+    '审批策略已在其他页面修改，请检查当前选择。',
+  'managed.approvalChange.failed': '审批策略切换被拒绝，请检查可用策略。',
+  'managed.model.loading': '正在加载可用模型…',
+  'managed.model.optionsError': '加载可用模型失败。',
+  'managed.model.reload': '重新加载模型',
+  'managed.model.nextTurn':
+    '空闲时可切换模型；下一条消息使用所选模型，对话历史保留。',
+  'managed.model.changing': '正在切换模型…',
+  'managed.model.unconfirmed': '模型切换尚未确认，请继续确认原请求。',
+  'managed.model.confirm': '继续确认',
+  'managed.model.busy':
+    '请先完成正在执行的任务、审批或未确认请求，再切换模型。',
+  'managed.model.storage': '浏览器会话存储不可用，无法安全发起模型切换。',
+  'managed.model.conflict': '当前模型已变化，请检查选择后重试。',
+  'managed.model.failed': '模型切换被拒绝，请检查可用模型后重试。',
+  'managed.approvalOptionsLoading': '正在加载审批策略…',
+  'managed.approvalOptionsLoadFailed': '加载审批策略失败。',
+  'managed.approvalOptionsInvalid': '服务返回了不支持的审批策略。',
+  'managed.approvalFixed': '当前会话不支持更改审批策略。',
+  'managed.newWorkspaceDescription':
+    '选择已有项目目录，或输入名称创建空工作区。',
+  'managed.workspaceDirectoryRoot': '已授权的目录',
+  'managed.localDirectoryHint':
+    '选择这台电脑上已有的项目目录，工作区登记和授权会自动完成。',
+  'managed.workspaceDirectoryHint':
+    '选择此授权根目录内、位于执行机器上的已有项目。',
+  'managed.workspaceChooseDirectory': '选择已有目录',
+  'managed.workspaceDirectoryScope': '请选择已选根目录中的目录。',
+  'managed.newWorkspaceName': '工作区名称',
+  'managed.newWorkspaceNameInvalid':
+    '名称需为 1–128 个字符，不能包含控制字符。',
+  'managed.newWorkspaceCreate': '创建工作区',
+  'managed.newWorkspaceCreating': '正在创建工作区…',
+  'managed.newWorkspaceUncertain':
+    '创建结果尚未确认。重试将查询同一个工作区，也可放弃本地确认后重新开始。放弃不会删除可能已经创建的工作区。',
+  'managed.newWorkspaceResume': '继续确认工作区创建',
+  'managed.newWorkspaceClose': '关闭',
   'managed.workspaceUnsupported': '当前服务不支持工作区绑定。',
   'managed.workspacePermission': '没有发现工作区的权限。',
   'managed.workspaceLoadFailed': '加载工作区失败。',
@@ -4405,6 +4736,8 @@ const ZH: Messages = {
   'managed.workspaceAbandon': '放弃本地确认记录',
   'managed.workspaceAbandonWarning':
     '原空会话可能已经存在；放弃记录不会删除服务端会话。',
+  'managed.workspaceAbandonInputWarning':
+    '包含该输入的会话可能已存在或仍在运行；放弃记录不会取消它。再次发送会开启新请求，可能重复执行。',
   'managed.workspaceSwitchTitle': '切换工作区？',
   'managed.workspaceSwitchDescription': '切换后相对目录将重置为工作区根目录。',
   'managed.workspaceKeep': '保留原选择',
@@ -4566,9 +4899,8 @@ const ZH: Messages = {
   'gitMode.branchHint': '在工作目录中切换到新分支',
   'gitMode.branchInvalidName': '分支名不合法',
   'gitMode.worktree': 'Worktree 隔离',
-  'gitMode.worktreeDesc': '独立副本 · 可并行',
+  'gitMode.worktreeDesc': '发送首条消息时自动创建独立副本',
   'gitMode.confirmBranch': '创建分支',
-  'gitMode.confirmWorktree': '创建 Worktree',
   'gitMode.resetToCurrent': '恢复当前分支',
   'gitLog.title': '提交历史',
   'gitLog.subtitle': (v) => `${v?.count ?? 0} 条提交`,
@@ -4985,6 +5317,21 @@ const ZH: Messages = {
   'common.downloadFailed': (v) => `下载失败：${v?.message ?? ''}`,
   'common.open': '打开',
   'common.openFailed': (v) => `无法打开链接：${v?.message ?? ''}`,
+  'excel.worksheet': '工作表',
+  'excel.row': '行',
+  'excel.truncated': (v) =>
+    `每个工作表最多预览 ${v?.cells} 个单元格。下载原文件查看全部内容。`,
+  'excel.previousWorksheets': '上一组工作表',
+  'excel.nextWorksheets': '下一组工作表',
+  'excel.empty': '此工作表为空。',
+  'excel.notCalculated': '未计算',
+  'excel.tooLarge': 'Excel 预览支持最大 10 MiB 的文件，请下载原文件打开。',
+  'excel.invalid':
+    '无法预览此工作簿，文件可能已损坏、受密码保护、复杂度过高，或当前浏览器不支持。你可以下载原文件。',
+  'excel.timeout': '工作簿预览超时，请下载原文件打开。',
+  'docx.tooLarge': 'DOCX 预览支持最大 10 MiB 的文件，请下载原文件打开。',
+  'docx.invalid': '无法预览此 DOCX 文档，你可以下载原文件。',
+  'docx.timeout': '文档预览超时，你可以下载原文件或重试。',
   'artifact.openLink': '打开链接',
   'artifact.longDocument': '文件过大，默认展示源码。',
   'artifact.renderFullPreview': '完整排版预览',
@@ -5005,15 +5352,6 @@ const ZH: Messages = {
   'mermaid.label': 'mermaid',
   'mermaid.errorLabel': 'mermaid（错误）',
   'user.uploadedImage': (v) => `用户上传的图片 ${v?.index ?? 1}`,
-  'voice.noSpeech': '未检测到语音。',
-  'voice.stopDictation': '停止语音输入',
-  'voice.transcribing': '正在转录…',
-  'voice.starting': '正在启动…',
-  'voice.errorRetry': (v) =>
-    `语音错误 — 点击重试${v?.message ? `：${v.message}` : ''}`,
-  'voice.noSpeechRetry': '未检测到语音 — 点击重试',
-  'voice.startDictation': '开始语音输入',
-  'voice.error': '语音错误',
   'resume.failedToLoad': '加载会话失败',
   'toast.dismiss': '关闭通知',
   'toast.dismissShort': '关闭',
@@ -5063,8 +5401,21 @@ const ZH: Messages = {
   'approval.option.allowAlwaysTool': '对此工具始终允许',
   'assistant.branch': '分叉',
   'assistant.copy': '复制',
+  'assistant.selectionCopy': '复制所选内容',
+  'assistant.copyPlainText': '复制纯文本',
+  'assistant.copyMarkdown': '复制 Markdown',
   'assistant.dissatisfied': '不满意',
   'assistant.satisfied': '满意',
+  'agentMessage.status.failed': '失败',
+  'agentMessage.status.cancelled': '已停止',
+  'agentMessage.status.offline': 'Runtime 离线',
+  'agentMessage.tokens': (v) => `${v?.count ?? 0} tokens`,
+  'agentMessage.steps': '步骤',
+  'agentMessage.noAction': (v) => `${v?.name ?? ''} 这次无需动作`,
+  'agentMessage.step.running': '进行中',
+  'agentMessage.step.completed': '已完成',
+  'agentMessage.step.failed': '失败',
+  'agentMessage.step.stopped': '已停止',
   'at.category.extensions': '扩展',
   'at.category.extensions.description': '引用已启用扩展',
   'at.category.files': '文件',
@@ -5101,8 +5452,6 @@ const ZH: Messages = {
   'composerMobile.commands': '全部命令',
   'composerMobile.searchCommands': '搜索命令',
   'composerMobile.history': '输入历史',
-  'composerMobile.previousInput': '上一条输入',
-  'composerMobile.nextInput': '下一条输入',
   'composerMobile.stop': '停止',
   'composerMobile.attachments': (v) => `已添加附件/图片：${v?.count ?? 0}`,
   'composerAdd.emptyState': '此处没有可用的添加操作',
@@ -5118,6 +5467,12 @@ const ZH: Messages = {
   'composerAdd.extensions.empty': '没有已启用的扩展',
   'composerAdd.mcp.label': 'MCP',
   'composerAdd.mcp.empty': '没有可用的 MCP 服务',
+  'managed.mcp.catalog': (v) =>
+    `目录快照：${v?.tools} 个工具（${v?.toolsState}）；${v?.resources} 个资源（${v?.resourcesState}）；${v?.prompts} 个提示（${v?.promptsState}）`,
+  'managed.mcp.discovery.complete': '已完成',
+  'managed.mcp.discovery.partial': '部分完成',
+  'managed.mcp.discovery.failed': '失败',
+  'managed.mcp.discovery.stale': '已过期',
   'composerAdd.skills.label': '技能',
   'composerAdd.plan.label': '计划模式',
   'composerAdd.plan.description': '先出计划，批准后再执行',
@@ -5147,8 +5502,13 @@ const ZH: Messages = {
   'session.recovery.interrupted_turn': '上次任务已中断，部分工具结果未保存。',
   'session.recovery.degraded_history': '会话历史不完整，无法继续中断的任务。',
   'session.recovery.continue': '继续执行',
+  'session.recovery.confirmContinue': '确认并继续',
   'session.recovery.continuing': '正在继续…',
   'session.recovery.failed': '无法继续此会话。',
+  'session.recovery.unknownCancellation':
+    '此旧会话已取消，但未记录来源。继续前需要你确认。',
+  'session.recovery.confirmCancellation':
+    '此轮任务可能已被主动停止，但未记录原因。确定要继续执行吗？',
   'session.archived': '该会话已归档',
   'session.archivedDescription': '需要先取消归档，才能打开该会话。',
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',
@@ -5267,9 +5627,10 @@ const ZH: Messages = {
   'markdownTable.selection.average': '平均',
   'markdownTable.selection.min': '最小',
   'markdownTable.selection.max': '最大',
-  'markdownTable.copyTsv': '复制 TSV',
-  'markdownTable.copyTsvHint': '复制为 TSV，可粘贴到 Excel 等表格应用',
-  'markdownTable.copyVisible': '复制表格',
+  'markdownTable.copyTsv': '复制文本',
+  'markdownTable.copyTsvHint': '复制文本，可粘贴到 Excel 等表格应用',
+  'markdownTable.copyVisible': '复制',
+  'markdownTable.copyMarkdown': '复制 Markdown',
   'markdownTable.customColumns': '自定义列',
   'markdownTable.customColumns.tableSection': '显示在表格列的信息',
   'markdownTable.customColumns.detailSection': '显示在折叠面板的信息',
@@ -5384,6 +5745,17 @@ const ZH: Messages = {
   'daemon.connection.add': '添加连接',
   'daemon.connection.saved': '已连接的计算机',
   'daemon.connection.forget': (v) => `移除 ${v?.address}`,
+  'workspaceHost.local': '本地',
+  'workspaceHost.remote': '远程',
+  'workspaceHost.openHost': (v) => `打开 ${v?.host ?? ''}`,
+  'workspaceHost.statusOffline': '离线',
+  'workspaceHost.statusUnauthorized': '未授权',
+  'workspaceHost.focused': '已连接',
+  'workspaceHost.focusedHint': '本页面正连到这台 daemon，会话在这里运行。',
+  'workspaceHost.offlineHint':
+    '无法连接这台主机，当前显示的是最近一次已知的项目。',
+  'workspaceHost.unauthorizedHint':
+    '此主机保存的凭据已被拒绝，请打开该主机重新登录。',
   'daemon.connection.invalid': '请输入有效的 HTTP 或 HTTPS origin。',
   'daemon.connection.notReady': 'Daemon 未接受该连接，已保存的凭据未被修改。',
   'daemon.connection.authFailed':
@@ -5884,6 +6256,7 @@ const ZH: Messages = {
   'codeReview.failureScenario': '失败场景',
   'codeReview.witness': '实测证据',
   'codeReview.suggestedFix': '建议修复',
+  'codeReview.fixWitness': '修复验收标准',
   'codeReview.outcome': '处理结果',
   'codeReview.locations': '位置',
   'codeReview.evidence': '证据',
@@ -5899,8 +6272,10 @@ const ZH: Messages = {
   'sideTask.description': '查看或新增侧边任务',
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
+  'sideTask.archiveCompleted': '归档已完成任务',
+  'sideTask.archiveUnavailable': '只能归档已完成的侧边任务。',
   'webPreview.title': '网页预览',
-  'webPreview.openHint': '预览正在运行的网页应用',
+  'webPreview.openHint': '预览网页应用',
   'webPreview.address': '开发地址',
   'webPreview.open': '打开',
   'webPreview.refresh': '刷新预览',
@@ -5964,6 +6339,7 @@ const ZH: Messages = {
   'localFiles.blocker.workspaceResolving': '尚不能确定该会话所属的工作区。',
   'localFiles.blocker.unsupportedDaemon':
     '该 daemon 未启用客户端文件桥（client_mcp_over_ws）。以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动 daemon 即可启用本地文件。',
+  ...FILES_MESSAGES_ZH,
   'rightPanel.add': '添加页签',
   'attachment.showPreview': '预览',
   'attachment.showSource': '源码',
@@ -5987,9 +6363,16 @@ const ZH: Messages = {
   'turnOutputs.openFileTree': '打开文件树',
   'turnOutputs.closeFileTree': '关闭文件树',
   'turnOutputs.artifactMissing': '工作区中未找到该文件',
+  'turnOutputs.artifactChanged': '登记后已被修改',
   'turnOutputs.artifactUnavailable': (v) =>
     v?.path ? `工作区中未找到该文件 · ${v.path}` : '工作区中未找到该文件',
   'sidebar.label': '工作区侧边栏',
+  'sidebar.home': '首页',
+  'sidebar.channelSettings': '设置',
+  'sidebar.liveSettings': '设置',
+  'sidebar.liveSettingsUnavailable': '当前服务未提供 Live 设置。',
+  'sidebar.more': '更多',
+  'sidebar.navigation': '主导航',
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',
   'sidebar.newTask': '新建任务',
@@ -6259,6 +6642,10 @@ const ZH: Messages = {
   'queue.insertFailed': '插入排队消息失败',
   'queue.insertTip': '插入当前回合',
   'queue.insertCommandDisabled': '命令不能插入当前回合',
+  'queue.sendNow': '立即发送',
+  'queue.sendNowTip':
+    '立即发送排队的消息，并截断模型当前的回复（回复已开始调用工具时不截断）；正在运行的工具会先执行完',
+  'queue.sendNowFailed': '立即发送排队消息失败',
   'queue.footer': '按 ↑ 编辑最后一条排队消息 · Esc 清空队列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 张图片）`,
   'queue.fileCount': (v) => `（+${v?.count ?? 0} 个文件）`,
@@ -6364,6 +6751,20 @@ const ZH: Messages = {
   'error.modelStreamInterrupted': '模型响应流已中断，请重试。',
   'error.loopDetected':
     '模型在调用工具时反复尝试或达到了安全上限，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
+  'error.loopDetected.explicitCap': (vars) =>
+    `本轮工具调用达到了 model.maxToolCallsPerTurn 设定的上限（${vars?.limit} 次），因此系统停止了本轮操作。会话并未结束，你可以在设置中调高上限，或发送新的指令继续。`,
+  'error.loopDetected.backstop': (vars) =>
+    `本轮工具调用达到了 ${vars?.limit} 次的安全上限，因此系统停止了本轮操作。会话并未结束，你可以发送新的指令继续，也可以通过 model.maxToolCallsPerTurn 设定其他上限。`,
+  'error.loopDetected.stuckRepetition': (vars) =>
+    `工具调用超过 ${vars?.limit} 次后，模型仍在重复同一个调用，因此系统停止了本轮操作。会话并未结束，你可以换一种方式或给出更明确的指令。`,
+  'error.loopDetected.repeatedCall':
+    '模型在本轮中反复发起同一个工具调用，因此系统停止了本轮操作。会话并未结束，你可以换一种方式或给出更明确的指令。',
+  'error.loopDetected.providerDuplicateId':
+    '模型服务发来了一个已经执行过的工具调用，为避免重复执行，系统停止了本轮操作。会话并未结束，你可以发送新消息继续。',
+  'error.loopDetected.invalidToolParams':
+    '模型反复向同一个工具传入无效参数，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
+  'error.loopDetected.repeatedToolFailure':
+    '同一个工具在收到提醒后仍因相同原因失败，因此系统停止了本轮操作。会话并未结束，你可以查看上面的错误，或换一种方式。',
   'shell.command': 'Shell 命令',
   'shell.result.timedOut': '执行超时',
   'shell.result.notices': '提示',
@@ -6389,6 +6790,7 @@ const ZH: Messages = {
   'shell.result.cancelled': '已取消',
   'shell.result.waiting': '等待输出…',
   'shell.result.empty': '无输出',
+  'shell.result.unavailable': '无法获取此工具调用的输出。',
   'shell.result.exited': (v) => `退出码 ${v?.code}`,
   'turnCalls.open': '查看工具调用',
   'turnCalls.title': '工具调用',
@@ -7066,6 +7468,9 @@ const ZH: Messages = {
   'model.footer': 'Enter 选择，↑↓ 导航，Esc 关闭',
   'model.searchHint': '按 / 搜索',
   'model.fastHint': '用于建议和旁路任务',
+  'model.refresh': '刷新模型列表',
+  'model.refreshing': '正在刷新模型…',
+  'model.refreshFailed': (v) => `刷新模型失败：${v?.error ?? ''}`,
   'model.noMatch': (v) => `没有匹配 "${v?.query ?? ''}" 的模型`,
   'model.unavailable': '模型列表暂不可用，将使用守护进程默认模型。',
   'model.none': '没有可用模型',
@@ -7279,39 +7684,17 @@ const ZH: Messages = {
   'contextUsage.loadError': '上下文使用情况加载失败。',
   'contextUsage.previousReading': '刷新失败，当前显示先前读数。',
   'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
-  'tokenUsage.avgLatency': '平均延迟',
-  'tokenUsage.cached': '缓存输入',
-  'tokenUsage.input': '输入',
-  'tokenUsage.loadError': 'Token 消耗加载失败。',
-  'tokenUsage.models': '按模型',
-  'tokenUsage.noData': '本会话还没有 API 调用。',
-  'tokenUsage.noSubagents': '本会话还没有子 agent 调用。',
-  'tokenUsage.noTools': '本会话还没有工具调用。',
-  'tokenUsage.open': '会话 Token 消耗',
-  'tokenUsage.output': '总输出',
-  'tokenUsage.refresh': '刷新',
-  'tokenUsage.requests': '请求',
-  'tokenUsage.retry': '重试',
-  'tokenUsage.subagents': '子agent',
-  'tokenUsage.thoughts': '思考（包含在总输出中）',
-  'tokenUsage.title': 'Token 消耗',
-  'tokenUsage.toolRow': (v) =>
-    `${v?.count ?? 0} 次 · 成功率 ${v?.rate ?? 0}% · ${v?.duration ?? ''}`,
-  'tokenUsage.tools': '工具',
-  'tokenUsage.updatedAt': (v) => `更新于 ${v?.time ?? ''}`,
-  'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
+  'contextUsage.unknown': '当前会话尚无已观测的上下文占用数据。',
+  ...TOKEN_USAGE_MESSAGES_ZH,
   'trajectory.title': '轨迹',
-  'trajectory.description': '查看这次运行把时间和 token 花在了哪里',
+  'trajectory.description': '查看时间和 token',
   'trajectory.empty': '这个会话还没有记录。',
   'trajectory.noTiming': '这些记录没有请求或工具的耗时数据。',
-  'trajectory.truncated': '只显示最近的记录，更早的历史没有加载。',
   'trajectory.loadingPages': (v) => `正在读取记录…（已 ${v?.pages ?? 0} 页）`,
   'trajectory.olderFailed': (v) => `更早的记录没有读到：${v?.message ?? ''}`,
   'trajectory.olderPartial': '更早的记录只读到一部分，所以没有显示。',
   'trajectory.loadFailed': (v) => `读取会话记录失败：${v?.message ?? ''}`,
   'trajectory.partial': '这份会话记录有一部分读不出来，缺少了一些记录。',
-  'trajectory.totals': (v) =>
-    `已加载窗口 · ${v?.turns ?? 0} 轮 · ${v?.requests ?? 0} 请求 · ${v?.tools ?? 0} 工具`,
   'trajectory.turn': (v) => `第 ${v?.index ?? 0} 轮`,
   'trajectory.turnPartial': (v) => `第 ${v?.index ?? 0} 轮（接上文）`,
   'trajectory.turnSummary': (v) =>
@@ -7362,12 +7745,6 @@ const ZH: Messages = {
   'trajectory.zoom.status': (v) =>
     `显示 ${v?.from ?? ''}–${v?.to ?? ''}，共 ${v?.busy ?? ''}`,
   'trajectory.range.aria': (v) => `，已选 ${v?.from ?? ''} 到 ${v?.to ?? ''}`,
-  'trajectory.metric.elapsed': '执行跨度',
-  'trajectory.metric.active': '活跃覆盖',
-  'trajectory.metric.main': '主模型请求累计',
-  'trajectory.metric.help': '指标说明',
-  'trajectory.metric.scope':
-    '计数针对已加载窗口内投影后的记录，包含已加载的子代理记录；时间框选和缩放不改变总计。',
   'trajectory.metric.elapsed.help':
     '执行跨度：已记录开始到结束的跨度，含间隔；仅覆盖可绘制记录。',
   'trajectory.metric.active.help':
@@ -7376,34 +7753,22 @@ const ZH: Messages = {
     '主模型请求累计：主会话模型请求耗时之和，不含子代理请求和工具；可能包含失败尝试。',
   'trajectory.metric.missing.help':
     '未绘制的请求和工具仍保留在列表。破折号表示未记录，零表示真实零值。',
-  'trajectory.failures': (v) =>
-    `失败请求 ${v?.requests ?? 0} · 失败工具 ${v?.tools ?? 0}`,
-  'trajectory.unrecorded': '未记录',
   'trajectory.unplotted': (v) =>
     `未绘制：有耗时无起点 ${v?.starts ?? 0} 条 · 无耗时 ${v?.timing ?? 0} 条`,
-  'trajectory.missingStart': (v) => `${v?.count ?? 0} 条有耗时记录缺少起点`,
-  'trajectory.missingTiming': (v) => `${v?.count ?? 0} 条工具记录无耗时`,
   'trajectory.noStart': '已记录耗时，但均无起点，无法绘制条带。',
   'trajectory.refreshStale': '刷新失败，当前为上次成功读取的数据',
-  'trajectory.selected.label': '所选',
-  'trajectory.selected.none': '请选择一条记录',
-  'trajectory.selected.noTiming': '无请求或工具计时',
+  'trajectory.historyGap': '断线期间历史记录可能已变化，请刷新最新窗口。',
+  'trajectory.lifecycleIncomplete': '生命周期详情可能不完整或超出保留上限。',
   'trajectory.inspector.title': '记录详情',
-  'trajectory.inspector.open': '查看详情',
   'trajectory.inspector.close': '关闭详情',
   'trajectory.inspector.selectRecord': '请选择一条记录查看。',
-  'trajectory.inspector.selectRowInTurn': '已选择轮次，请选择一条记录查看。',
   'trajectory.inspector.stale': '记录窗口已更新，请重新选择记录。',
   'trajectory.inspector.hiddenByRange': '此记录不在所选时间内。',
-  'trajectory.inspector.tab.summary': '摘要',
-  'trajectory.inspector.tab.input': '输入',
-  'trajectory.inspector.tab.output': '输出',
-  'trajectory.inspector.tab.metrics': '指标',
-  'trajectory.inspector.tab.body': '正文',
   'trajectory.inspector.model': '模型',
   'trajectory.inspector.status': '状态',
   'trajectory.inspector.permissionTitle': '标题',
   'trajectory.inspector.permissionPending': '等待处理',
+  'trajectory.inspector.executionId': '执行 ID',
   'trajectory.inspector.responseId': '响应 ID',
   'trajectory.inspector.promptId': '提示 ID',
   'trajectory.inspector.subagent': '子代理',
@@ -7412,19 +7777,9 @@ const ZH: Messages = {
   'trajectory.inspector.start': '记录起点',
   'trajectory.inspector.end': '推算结束',
   'trajectory.inspector.ttft': '首 token',
-  'trajectory.inspector.afterFirst': '首 token 后耗时',
   'trajectory.inspector.invalidTtft': '记录的首 token 时间与总耗时不一致',
-  'trajectory.inspector.inputTokens': '输入 token',
-  'trajectory.inspector.outputTokens': '输出 token',
-  'trajectory.inspector.cachedTokens': '缓存输入 token（包含在输入中）',
   'trajectory.inspector.tool': '工具',
   'trajectory.inspector.callId': '调用 ID',
-  'trajectory.inspector.details': '记录详情',
-  'trajectory.inspector.preview': '记录预览',
-  'trajectory.inspector.input': '记录输入',
-  'trajectory.inspector.output': '记录输出',
-  'trajectory.inspector.contentFallback': '工具内容（无独立原始输出）',
-  'trajectory.inspector.body': '记录正文',
   'trajectory.inspector.kind': '类型',
   'trajectory.inspector.images': '图片类型',
   'trajectory.inspector.files': '文件',
@@ -7434,8 +7789,7 @@ const ZH: Messages = {
   'trajectory.inspector.truncated': '内容已截断',
   'trajectory.inspector.formatFailed': '无法格式化这项记录',
   'trajectory.inspector.expand': '展开更多',
-  'trajectory.inspector.copy': '复制显示内容',
-  'trajectory.inspector.copied': '已复制显示内容',
+  'trajectory.inspector.copied': '已复制',
   'trajectory.inspector.copyFailed': '无法复制内容',
   'trajectory.mode.group': '时间模式',
   'trajectory.mode.active': '活跃时间，去除间隔',
@@ -7605,6 +7959,8 @@ const ZH: Messages = {
   'userMessage.sendFailed': '发送失败',
   'userMessage.retrySend': '重新发送消息',
   'userMessage.edit': '编辑消息',
+  'message.moreActions': '更多操作',
+  ...MESSAGE_DELETION_MESSAGES_ZH,
   'userMessage.editSubmit': '发送',
   'userMessage.editSending': '发送中…',
   'userMessage.editBusy': '请先等待当前轮次结束再编辑。',
@@ -7723,6 +8079,20 @@ const ZH: Messages = {
   'tasks.shortcut.cancelConfirm': 'Esc 取消',
   'tasks.detail.workingDir': '工作目录',
   'tasks.detail.outputFile': '输出文件',
+  'tasks.detail.startedAt': '开始时间',
+  'tasks.detail.endedAt': '结束时间',
+  'tasks.detail.totalDuration': '总时长',
+  'tasks.detail.residentMemory': '常驻内存',
+  'tasks.detail.output': '输出',
+  'tasks.detail.outputSize': (v) => `：${v?.size ?? ''}`,
+  'tasks.detail.outputEmpty': '暂无输出',
+  'tasks.detail.outputNone': '无输出',
+  'tasks.detail.runtimeUnavailable': '任务详情已不可用',
+  'tasks.detail.outputPartial': '输出可用，但无法读取文件信息',
+  'tasks.detail.outputRefreshFailed': '无法刷新输出。',
+  'tasks.detail.outputTruncated': '仅显示末尾',
+  'tasks.detail.outputUnavailable': '无法读取输出',
+  'tasks.detail.lastWrite': '最后写入',
   'tasks.detail.command': '命令',
   'tasks.detail.events': (v) => `${v?.count ?? 0} 个事件`,
   'tasks.detail.exit': (v) => `退出码 ${v?.exitCode ?? ''}`,
@@ -7902,6 +8272,9 @@ const ZH: Messages = {
   'workspacesOverview.dirty': (v) => `${v?.count ?? 0} 处改动`,
   'workspacesOverview.mcpFailed': (v) => `${v?.count ?? 0} 个失败`,
   'workspacesOverview.newTask': '新建任务',
+  'workspacesOverview.trust': '信任',
+  'workspacesOverview.trusting': '正在信任…',
+  'workspacesOverview.trustFailed': '无法信任该工作区',
   'workspacesOverview.remove': '移除工作区',
   'workspacesOverview.back': '返回',
   'splitView.title': '分屏',
@@ -7928,6 +8301,7 @@ const ZH: Messages = {
   'channels.workspace.label': '工作区',
   'channels.workspace.primary': '主工作区',
   'channels.loading': '正在加载频道',
+  'channels.configuredCount': (v) => `已配置 ${v?.count ?? 0} 个频道`,
   'channels.configured': '已配置频道',
   'channels.configured.description': '管理当前工作区中负责收发消息的机器人。',
   'channels.availablePlatforms': '可连接平台',
@@ -8218,15 +8592,28 @@ const ZH: Messages = {
   'localControl.disabledHint':
     '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
   'localControl.openSettings': '打开设置',
-  'browserNotifications.label': '浏览器任务通知',
+  'browserNotifications.label': '任务通知',
   'browserNotifications.description':
-    '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束或失败。通知包含会话标题、提问和回复摘录。仅保存在此浏览器站点；网页需保持打开。',
+    '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束、失败、需要审批或等待回答。回合结束通知包含提问和回复摘录；待处理提醒只显示会话标题和等待状态。仅保存在此浏览器站点；网页需保持打开。',
   'browserNotifications.prompt': (v) => `提问：${v?.text ?? ''}`,
   'browserNotifications.reply': (v) => `回复：${v?.text ?? ''}`,
   'browserNotifications.completed': '本轮已完成。',
   'browserNotifications.failed': '本轮执行失败，请返回查看。',
   'browserNotifications.ended': '本轮已结束，请返回查看结果。',
+  'browserNotifications.approval': '此会话需要你的审批，请返回查看请求。',
+  'browserNotifications.question': '此会话正在等待你的回答，请返回处理。',
   'browserNotifications.allow': '允许通知',
+  'browserNotifications.enable': '开启通知',
+  'browserNotifications.helpEnabled': '已为此站点开启通知。',
+  'browserNotifications.helpWaiting': '尚未获得浏览器通知授权。',
+  'browserNotifications.helpWhen':
+    '页面在后台或者切换到其他页签时，当前聊天需要审批、等待回答、回合结束或失败会发送提醒，点击通知返回对应聊天，不会自动审批或回答。',
+  'browserNotifications.helpSystem':
+    '如果没有收到提醒，请按下方指引检查系统通知',
+  'browserNotifications.helpMac':
+    '打开“系统设置 → 通知”，选择浏览器（Chrome 如列有 Google Chrome Helper (Alerts)，也需检查），开启允许通知及桌面横幅／提醒。检查专注模式，以及屏幕共享时是否允许通知。',
+  'browserNotifications.helpWindows':
+    '打开“设置 → 系统 → 通知”（Windows 10 为“通知和操作”），开启通知及浏览器通知，并允许显示通知横幅。关闭“请勿打扰／专注助手”，或在其规则中允许浏览器通知。',
   'browserNotifications.enabled': '已开启。',
   'browserNotifications.disabled': '未开启。',
   'browserNotifications.waiting': '等待浏览器授权。',
@@ -8239,9 +8626,16 @@ const ZH: Messages = {
   'welcome.prompt': '你想构建什么？',
   'welcome.titlePrefix': '欢迎使用',
   'welcome.tipLabel': '提示：',
+  ...MCP_APP_MESSAGES_ZH,
+  ...VOICE_MESSAGES_ZH,
   ...LIVE_MESSAGES_ZH,
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
+  ...MANAGED_TASK_MESSAGES_ZH,
+  ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
+  ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
+  ...TRAJECTORY_FILTER_MESSAGES_ZH,
+  ...TRAJECTORY_WINDOW_MESSAGES_ZH,
 };
 
 const MESSAGES: Record<WebShellLanguage, Messages> = {

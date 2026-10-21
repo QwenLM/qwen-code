@@ -135,6 +135,13 @@ describe('runAutoMemoryExtractionByAgent', () => {
       expect(systemPrompt).toContain(category);
     }
     expect(systemPrompt).toContain('at most 64 characters');
+    expect(systemPrompt).toContain(
+      'When editing an existing memory file, preserve its existing emphasis delimiter style',
+    );
+    expect(systemPrompt).toContain(
+      'For new files, follow the format reference and keep emphasis style consistent within each file.',
+    );
+    expect(systemPrompt).toContain('Keep a blank line before and after lists.');
   });
 
   it('strips runtime reminders and hidden reasoning from inherited history', async () => {

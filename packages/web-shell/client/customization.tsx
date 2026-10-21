@@ -1,3 +1,4 @@
+import type { WebShellApprovalMode } from './utils/planMode';
 import type { ArtifactFilter } from './components/artifacts/TurnOutputs';
 import {
   createContext,
@@ -19,7 +20,10 @@ import type {
   SessionSource,
   GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
-import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
+import type {
+  DaemonSessionActions,
+  DaemonStreamingState,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
 import type { WebShellTheme } from './themeContext';
@@ -201,6 +205,7 @@ export interface WebShellChatHeaderOptions {
 }
 
 export type WebShellRightPanelItem =
+  | 'files'
   | 'review'
   | 'sideTask'
   | 'terminal'
@@ -284,6 +289,7 @@ export interface WebShellSubmitSnapshot {
   sessionId?: string;
   prompt: string;
   inputAnnotations: readonly DaemonInputAnnotation[];
+  source?: 'mcp-app';
 }
 
 export type UserMessageContentRenderer = (
@@ -703,6 +709,8 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  onRefreshModels?: Parameters<DaemonSessionActions['refreshModels']>[0];
+  allowedApprovalModes?: readonly WebShellApprovalMode[];
   filterArtifact?: ArtifactFilter;
   artifact?: WebShellArtifactCustomization;
   /** Host-specific label for the Ask User Question free-text choice. */
@@ -749,8 +757,8 @@ export interface WebShellCustomization {
   markdown?: WebShellMarkdownCustomization;
   loadingPhrases?: LoadingPhrasesResolver;
   /**
-   * Controls whether the composer's file-upload entry points (drag-and-drop
-   * and the @ panel upload item) are enabled. Does not disable attachments.
+   * Controls composer uploads (drag-and-drop and the @ panel upload item)
+   * and Files tree drag-and-drop uploads. Does not disable attachments.
    * Works alongside the daemon's
    * `workspace_file_upload` capability, not instead of it: setting `false`
    * force-disables upload even when the daemon advertises the capability,
@@ -763,13 +771,14 @@ export interface WebShellCustomization {
    */
   fileDropAction?: 'upload' | 'attach';
   /**
-   * Directory that drag-and-dropped files upload into, **relative to the
+   * Directory that composer-dropped files upload into, **relative to the
    * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.
    * `'uploads'`, `'uploads/images'`, or omit it to upload into the
    * workspace root (the default). A leading-slash path like `'/uploads'`
    * is rejected by the daemon as outside the workspace. The directory
    * (including intermediate components) is created automatically on upload
-   * when it does not exist.
+   * when it does not exist. Files tree drops use the explicit tree destination
+   * instead of this setting.
    */
   fileUploadDirectory?: string;
 }

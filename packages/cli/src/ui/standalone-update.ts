@@ -16,11 +16,9 @@ import type { Response as UndiciResponse } from 'undici';
 import * as tar from 'tar';
 import type { ReadEntry } from 'tar';
 import semver from 'semver';
+import type { JsRuntime } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
-import {
-  hasStandaloneRuntimeLayout,
-  standaloneRuntimePaths,
-} from '../utils/installationInfo.js';
+import { hasStandaloneRuntimeLayout } from '../utils/installationInfo.js';
 import { loadUndici } from '../utils/load-undici.js';
 import { verifySignature } from '../utils/standalone-update-verify.js';
 import { updateEventEmitter } from '../utils/updateEventEmitter.js';
@@ -66,14 +64,10 @@ function validateTarget(target: string): void {
   }
 }
 
-// Archive names mirror standaloneArchiveName in
-// scripts/create-standalone-package.js: the bun runtime ships as the
-// -opentui-preview flavor, and SHA256SUMS entries match by filename, so both
-// call sites must derive the name from the installed build's runtime.
-function archiveFilename(target: string, runtime: string): string {
+function archiveFilename(target: string, runtime: JsRuntime): string {
   const ext = target.startsWith('win') ? 'zip' : 'tar.gz';
-  const flavor = runtime === 'bun' ? '-opentui-preview' : '';
-  return `qwen-code-${target}${flavor}.${ext}`;
+  const suffix = runtime === 'bun' ? '-opentui-preview' : '';
+  return `qwen-code-${target}${suffix}.${ext}`;
 }
 
 function escapePS(s: string): string {
@@ -447,13 +441,30 @@ function spawnAndCapture(
   command: string,
   args: string[],
   timeoutMs: number,
+  cwd: string,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const env = { ...process.env };
+  // Probe the shipped interpreter and CLI without inherited startup overrides.
+  for (const key of Object.keys(env)) {
+    if (
+      /^(NODE_OPTIONS|BUN_OPTIONS|CLI_VERSION|QWEN_CODE_RELAUNCH_ARGS)$/i.test(
+        key,
+      )
+    )
+      delete env[key];
+  }
   return new Promise((resolve, reject) => {
     let settled = false;
     const child = execFile(
       command,
       args,
-      { timeout: timeoutMs },
+      {
+        env,
+        cwd,
+        timeout: timeoutMs,
+        killSignal: 'SIGKILL',
+        maxBuffer: 64 * 1024,
+      },
       (err, out, stderr) => {
         if (settled) return;
         settled = true;
@@ -473,57 +484,118 @@ function spawnAndCapture(
         resolve({ exitCode: 0, stdout: out || '', stderr: stderr || '' });
       },
     );
-    child.on('error', (e) => {
+    child.on('error', () => {
       if (settled) return;
       settled = true;
-      reject(e);
+      reject(new Error('Smoke test failed: unable to start new binary'));
     });
   });
 }
 
 /**
- * Verifies the new installation can actually run by invoking --version.
+ * Verifies the bundled CLI runs and its launcher can load it.
  * Prevents replacing a working install with a broken binary.
  */
 async function smokeTest(
   newInstallDir: string,
   target: string,
+  runtime: JsRuntime,
   expectedVersion: string,
 ): Promise<void> {
   const resolvedInstallDir = path.resolve(newInstallDir);
-  const nodeBin = standaloneRuntimePaths(resolvedInstallDir, target).node;
+  const interpreter = target.startsWith('win')
+    ? path.join(resolvedInstallDir, runtime, `${runtime}.exe`)
+    : path.join(resolvedInstallDir, runtime, 'bin', runtime);
   const cliBin = path.join(resolvedInstallDir, 'lib', 'cli.js');
 
-  if (!fs.existsSync(nodeBin)) {
-    throw new Error(`Smoke test failed: node binary not found at ${nodeBin}`);
+  if (!fs.existsSync(interpreter)) {
+    throw new Error(
+      `Smoke test failed: ${runtime} binary not found at ${interpreter}`,
+    );
   }
   if (!fs.existsSync(cliBin)) {
-    throw new Error(`Smoke test failed: cli.js not found at ${cliBin}`);
+    throw new Error(`Smoke test failed: CLI entry not found at ${cliBin}`);
   }
 
-  const { exitCode, stdout, stderr } = await spawnAndCapture(
-    nodeBin,
-    [cliBin, '--version'],
-    10_000,
-  );
-  if (exitCode !== 0) {
-    const detail = stderr.trim() ? `: ${stderr.trim()}` : '';
-    throw new Error(
-      `Smoke test failed: new binary exited with code ${exitCode}${detail}`,
+  // The archive and the user's project may both contain bunfig preloads.
+  // mkdtemp creates an empty private directory (0700), shared by all probes.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-smoke-'));
+  try {
+    const identity = await spawnAndCapture(
+      interpreter,
+      [
+        '-e',
+        'console.log(JSON.stringify({runtime:process.versions.bun?"bun":"node",platform:process.platform,arch:process.arch}))',
+      ],
+      10_000,
+      cwd,
     );
-  }
-  const version = stdout.trim();
-  if (!isConcreteVersion(version)) {
-    throw new Error(
-      `Smoke test failed: unexpected version output "${version}"`,
+    let actual: unknown;
+    try {
+      actual = JSON.parse(identity.stdout);
+    } catch {
+      throw new Error('Smoke test failed: invalid interpreter identity');
+    }
+    const [platform, arch] = target.split('-');
+    if (
+      identity.exitCode !== 0 ||
+      !actual ||
+      typeof actual !== 'object' ||
+      Array.isArray(actual) ||
+      Reflect.get(actual, 'runtime') !== runtime ||
+      Reflect.get(actual, 'platform') !==
+        (platform === 'win' ? 'win32' : platform) ||
+      Reflect.get(actual, 'arch') !== arch
+    ) {
+      throw new Error(
+        'Smoke test failed: interpreter identity does not match the expected runtime and target',
+      );
+    }
+
+    const { exitCode, stdout } = await spawnAndCapture(
+      interpreter,
+      [cliBin, '--version'],
+      10_000,
+      cwd,
     );
-  }
-  if (normalizeVersion(version) !== normalizeVersion(expectedVersion)) {
-    throw new Error(
-      `Smoke test failed: expected version ${expectedVersion}, got ${version}`,
+    if (exitCode !== 0) {
+      throw new Error(
+        `Smoke test failed: new binary exited with code ${exitCode}`,
+      );
+    }
+    const version = stdout.trim();
+    if (!SEMVER_RE.test(version)) {
+      throw new Error('Smoke test failed: unexpected version output');
+    }
+    let versionMatches: boolean;
+    try {
+      versionMatches = semver.eq(version, expectedVersion);
+    } catch {
+      versionMatches = false;
+    }
+    if (!versionMatches) {
+      throw new Error(
+        'Smoke test failed: CLI version does not match the expected version',
+      );
+    }
+    // The launcher's --version fast path only reads package metadata.
+    const launcher = await spawnAndCapture(
+      interpreter,
+      [path.join(resolvedInstallDir, 'lib', 'cli-entry.js'), '--help'],
+      10_000,
+      cwd,
     );
+    if (launcher.exitCode !== 0) {
+      throw new Error('Smoke test failed: launcher could not load CLI');
+    }
+    debugLogger.info(`Smoke test passed: ${version}`);
+  } finally {
+    try {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    } catch {
+      debugLogger.warn('Could not remove the smoke test temporary directory');
+    }
   }
-  debugLogger.info(`Smoke test passed: ${version}`);
 }
 
 // Check .deferred marker and .new directory for an in-flight swap from a
@@ -1120,26 +1192,45 @@ function detectTarget(): string {
 
 function standaloneUpdateTarget(standaloneDir: string): {
   target: string;
+  runtime: JsRuntime;
   version?: string;
-  runtime: string;
   isFirstTimeMigration: boolean;
 } {
   let target: string;
+  let runtime: JsRuntime = 'node';
   let version: string | undefined;
-  // writeManifest defaults a missing runtime to 'node'; mirror that here.
-  let runtime = 'node';
   let isFirstTimeMigration = false;
   const manifestPath = path.join(standaloneDir, 'manifest.json');
   if (fs.existsSync(manifestPath)) {
-    const manifestRaw = fs.readFileSync(manifestPath, 'utf-8');
-    const manifest = JSON.parse(manifestRaw) as {
+    const invalidManifestMessage =
+      `Invalid installed standalone manifest at ${manifestPath}. ` +
+      "Restore this installation's manifest from a known-good backup, or " +
+      'reinstall the same runtime flavor in a new directory. ' +
+      'Keep the current installation and backup until recovery is verified.';
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    } catch {
+      throw new Error(invalidManifestMessage);
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(invalidManifestMessage);
+    }
+    const manifest = parsed as {
       target?: string;
+      runtime?: unknown;
       version?: string;
-      runtime?: string;
     };
+    if (
+      manifest.runtime !== undefined &&
+      manifest.runtime !== 'node' &&
+      manifest.runtime !== 'bun'
+    ) {
+      throw new Error('Unknown standalone runtime');
+    }
+    runtime = manifest.runtime ?? 'node';
     target = manifest.target ?? detectTarget();
     version = manifest.version;
-    runtime = manifest.runtime ?? 'node';
   } else if (fs.existsSync(standaloneDir)) {
     // Directory exists but has no manifest — not a managed Qwen install.
     // Refuse to overwrite to avoid data loss.
@@ -1152,7 +1243,43 @@ function standaloneUpdateTarget(standaloneDir: string): {
     isFirstTimeMigration = true;
   }
   validateTarget(target);
-  return { target, version, runtime, isFirstTimeMigration };
+  return { target, runtime, version, isFirstTimeMigration };
+}
+
+function standaloneDirectoryIdentity(standaloneDir: string) {
+  if (!fs.existsSync(standaloneDir)) return undefined;
+  const { dev, ino, birthtimeMs } = fs.statSync(standaloneDir);
+  return { dev, ino, birthtimeMs };
+}
+
+function downloadedStandaloneManifest(standaloneDir: string) {
+  const manifest: unknown = JSON.parse(
+    fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+  );
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new Error('Invalid downloaded standalone manifest');
+  }
+  const { name, version, target, runtime } = manifest as Record<
+    string,
+    unknown
+  >;
+  if (
+    name !== '@qwen-code/qwen-code' ||
+    typeof version !== 'string' ||
+    !isConcreteVersion(version)
+  ) {
+    throw new Error('Invalid downloaded standalone name or version');
+  }
+  if (typeof target !== 'string') {
+    throw new Error(
+      'Downloaded standalone manifest requires an explicit target',
+    );
+  }
+  validateTarget(target);
+  if (runtime !== 'node' && runtime !== 'bun') {
+    throw new Error('Downloaded standalone manifest requires a valid runtime');
+  }
+  return { target, runtime, version };
 }
 
 export async function prepareStandaloneUpdate(
@@ -1164,7 +1291,8 @@ export async function prepareStandaloneUpdate(
 }> {
   const versionPath = normalizeVersion(newVersion);
   const baseUrl = resolveUpdateBaseUrl();
-  const { target, runtime } = standaloneUpdateTarget(standaloneDir);
+  const { target, runtime, version } = standaloneUpdateTarget(standaloneDir);
+  const identity = standaloneDirectoryIdentity(standaloneDir);
   const filename = archiveFilename(target, runtime);
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-update-'));
   const cleanup = () => {
@@ -1190,6 +1318,9 @@ export async function prepareStandaloneUpdate(
           return await applyStandaloneUpdate(standaloneDir, newVersion, {
             directory,
             target,
+            runtime,
+            version,
+            identity,
           });
         } finally {
           cleanup();
@@ -1213,16 +1344,19 @@ export async function performStandaloneUpdate(
 async function applyStandaloneUpdate(
   standaloneDir: string,
   newVersion: string,
-  preparedArchive?: { directory: string; target: string },
+  preparedArchive?: {
+    directory: string;
+    target: string;
+    runtime: JsRuntime;
+    version?: string;
+    identity: ReturnType<typeof standaloneDirectoryIdentity>;
+  },
 ): Promise<'done' | 'deferred'> {
   const versionPath = normalizeVersion(newVersion);
   const baseUrl = preparedArchive ? undefined : resolveUpdateBaseUrl();
-  const {
-    target,
-    runtime: installedRuntime,
-    isFirstTimeMigration,
-  } = standaloneUpdateTarget(standaloneDir);
-  const filename = archiveFilename(target, installedRuntime);
+  const { target, runtime, isFirstTimeMigration } =
+    standaloneUpdateTarget(standaloneDir);
+  const filename = archiveFilename(target, runtime);
   const parentDir = path.dirname(standaloneDir);
 
   // Ensure the parent directory exists so the lock file can be created.
@@ -1236,15 +1370,6 @@ async function applyStandaloneUpdate(
   const lockPath = path.join(parentDir, '.qwen-update.lock');
   if (!acquireLock(lockPath, standaloneDir)) {
     throw new Error('Another update is already in progress');
-  }
-
-  if (isFirstTimeMigration) {
-    try {
-      fs.mkdirSync(standaloneDir, { recursive: true });
-    } catch (err) {
-      releaseLock(lockPath);
-      throw err;
-    }
   }
 
   // Download to a temp dir in os.tmpdir(), then extract to a sibling dir
@@ -1268,7 +1393,10 @@ async function applyStandaloneUpdate(
   try {
     if (preparedArchive) {
       const installed = standaloneUpdateTarget(standaloneDir);
-      if (installed.target !== preparedArchive.target) {
+      if (
+        installed.target !== preparedArchive.target ||
+        installed.runtime !== preparedArchive.runtime
+      ) {
         throw new Error('The standalone installation changed during download');
       }
       if (
@@ -1278,6 +1406,18 @@ async function applyStandaloneUpdate(
       ) {
         return 'done';
       }
+      const identity = standaloneDirectoryIdentity(standaloneDir);
+      if (
+        installed.version !== preparedArchive.version ||
+        identity?.dev !== preparedArchive.identity?.dev ||
+        identity?.ino !== preparedArchive.identity?.ino ||
+        identity?.birthtimeMs !== preparedArchive.identity?.birthtimeMs
+      ) {
+        throw new Error('The standalone installation changed during download');
+      }
+    }
+    if (isFirstTimeMigration) {
+      fs.mkdirSync(standaloneDir, { recursive: true });
     }
     const archivePath = path.join(tempDir, filename);
     if (!preparedArchive) {
@@ -1300,48 +1440,30 @@ async function applyStandaloneUpdate(
     await extractArchive(archivePath, extractDir, target);
 
     const newInstallDir = path.join(extractDir, 'qwen-code');
-    const newManifestPath = path.join(newInstallDir, 'manifest.json');
-    if (!fs.existsSync(newManifestPath)) {
+    if (!fs.existsSync(path.join(newInstallDir, 'manifest.json'))) {
       throw new Error(
         'Extracted archive does not contain expected qwen-code directory',
       );
     }
-    // The smoke test pins the version the executable reports; the manifest
-    // is what isStandaloneInstallDir reads back to keep recognising the
-    // directory as a managed standalone install — installation does not
-    // rewrite it, so the archive must carry the requested release's name,
-    // target, version and runtime flavor, plus the executable layout
-    // (bin/qwen, node/bin/node) that classification requires. The launcher
-    // execs lib/cli-entry.js while the smoke test probes lib/cli.js, so the
-    // entry point is required here explicitly — the shared layout helper
-    // must not grow the requirement, or installs that predate cli-entry.js
-    // would stop classifying as standalone.
-    const manifest = JSON.parse(fs.readFileSync(newManifestPath, 'utf-8')) as {
-      name?: unknown;
-      target?: unknown;
-      version?: unknown;
-      runtime?: unknown;
-    };
-    const manifestVersion = manifest.version;
-    const manifestRuntime =
-      typeof manifest.runtime === 'string' ? manifest.runtime : 'node';
+
+    const extracted = downloadedStandaloneManifest(newInstallDir);
     if (
-      manifest.name !== '@qwen-code/qwen-code' ||
-      manifest.target !== target ||
-      typeof manifestVersion !== 'string' ||
-      !isConcreteVersion(manifestVersion) ||
-      normalizeVersion(manifestVersion) !== normalizeVersion(newVersion) ||
-      manifestRuntime !== installedRuntime ||
+      extracted.target !== target ||
+      extracted.runtime !== runtime ||
+      !semver.eq(extracted.version, newVersion)
+    ) {
+      throw new Error(
+        'Downloaded archive does not match the expected target, runtime and version',
+      );
+    }
+    if (
       !hasStandaloneRuntimeLayout(newInstallDir, target) ||
       !fs.existsSync(path.join(newInstallDir, 'lib', 'cli-entry.js'))
     ) {
-      throw new Error(
-        `Archive manifest does not match the requested release: ${JSON.stringify(manifest)}`,
-      );
+      throw new Error('Archive manifest does not match the requested release');
     }
-
     debugLogger.info('Running smoke test...');
-    await smokeTest(newInstallDir, target, newVersion);
+    await smokeTest(newInstallDir, target, runtime, newVersion);
 
     debugLogger.info('Replacing installation...');
     updateResult = atomicReplace(standaloneDir, newInstallDir, lockPath);

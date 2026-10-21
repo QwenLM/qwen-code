@@ -10,7 +10,10 @@ import type {
   FileHistorySnapshotRecordPayload,
 } from './chatRecordingService.js';
 import { MAX_SNAPSHOTS } from './fileHistoryService.js';
-import { SessionFileHistoryAccumulator } from './session-file-history-state.js';
+import {
+  readFileHistorySnapshotPayload,
+  SessionFileHistoryAccumulator,
+} from './session-file-history-state.js';
 
 function snapshotRecord(
   snapshots: FileHistorySnapshotRecordPayload['snapshots'],
@@ -86,5 +89,46 @@ describe('SessionFileHistoryAccumulator', () => {
     expect(accumulator.finish()?.map((item) => item.promptId)).toEqual([
       'before',
     ]);
+  });
+});
+
+describe('readFileHistorySnapshotPayload', () => {
+  it('gates on record type, subtype and the snapshots array', () => {
+    const payload = { snapshots: [] };
+    expect(
+      readFileHistorySnapshotPayload({
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        systemPayload: payload,
+      }),
+    ).toBe(payload);
+    expect(
+      readFileHistorySnapshotPayload({
+        type: 'user',
+        subtype: 'file_history_snapshot',
+        systemPayload: payload,
+      }),
+    ).toBeUndefined();
+    expect(
+      readFileHistorySnapshotPayload({
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: payload,
+      }),
+    ).toBeUndefined();
+    expect(
+      readFileHistorySnapshotPayload({
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        systemPayload: undefined,
+      }),
+    ).toBeUndefined();
+    expect(
+      readFileHistorySnapshotPayload({
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        systemPayload: { snapshots: 'nope' } as never,
+      }),
+    ).toBeUndefined();
   });
 });

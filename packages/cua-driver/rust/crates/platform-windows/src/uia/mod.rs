@@ -407,10 +407,40 @@ unsafe fn walk_tree_unsafe(
     max_elements: usize,
     max_depth: usize,
     collect_runtime_ids: bool,
-    mut progress: Option<&mut dyn FnMut(UiaNode, String)>,
+    progress: Option<&mut dyn FnMut(UiaNode, String)>,
 ) -> UiaTreeResult {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    walk_tree_initialized(
+        hwnd,
+        query,
+        max_elements,
+        max_depth,
+        collect_runtime_ids,
+        progress,
+    )
+}
 
+/// The recording caller owns COM initialization through serialization and
+/// release of every retained node binding.
+pub(crate) unsafe fn walk_tree_for_recording(hwnd: u64) -> UiaTreeResult {
+    walk_tree_initialized(
+        hwnd,
+        None,
+        DEFAULT_MAX_TOTAL_ELEMENTS,
+        DEFAULT_MAX_DEPTH,
+        false,
+        None,
+    )
+}
+
+unsafe fn walk_tree_initialized(
+    hwnd: u64,
+    query: Option<&str>,
+    max_elements: usize,
+    max_depth: usize,
+    collect_runtime_ids: bool,
+    mut progress: Option<&mut dyn FnMut(UiaNode, String)>,
+) -> UiaTreeResult {
     let automation: IUIAutomation =
         match CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
             Ok(a) => a,

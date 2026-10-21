@@ -6,6 +6,7 @@
 
 import type { Application, Request, Response } from 'express';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   redactMcpServersSetting,
@@ -37,8 +38,14 @@ import {
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import {
+  ACP_ROUTE_ID_PREFIX,
+  parseAcpModelOption,
+  resolveAcpFastModelSelector,
+} from '../../utils/acpModelUtils.js';
 
 const TUI_ONLY_SETTINGS = new Set([
+  'experimental.mods',
   'general.vimMode',
   'general.terminalBell',
   'general.notificationMode',
@@ -50,6 +57,7 @@ const TUI_ONLY_SETTINGS = new Set([
   'ui.renderMode',
   'ui.useTerminalBuffer',
   'ui.mouseTracking',
+  'ui.arrowKeysScrollTranscript',
   'ui.showScrollbar',
   'ui.hideBanner',
   'ui.accessibility.enableLoadingPhrases',
@@ -61,6 +69,7 @@ const TUI_ONLY_SETTINGS = new Set([
 // their rows and needs to read + persist them; for `voiceModel` the daemon
 // `/voice/stream` then reads it back via `loadSettings`.
 const WEB_SHELL_SETTINGS = new Set([
+  'ui.allowedApprovalModes',
   'ui.compactMode',
   'voiceModel',
   'imageModel',
@@ -258,15 +267,39 @@ export function prepareSettingWrite(
   workspaceTrusted = true,
 ): { persistedValue: unknown; publicValue: unknown } {
   if (key !== 'mcpServers') {
+    let persistedValue = value;
+    if (
+      key === 'fastModel' &&
+      typeof value === 'string' &&
+      (value.startsWith(ACP_ROUTE_ID_PREFIX) ||
+        parseAcpModelOption(value).authType)
+    ) {
+      const { merged } = loadSettings(workspace, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: !workspaceTrusted,
+        workspaceTrusted,
+      });
+      const models = new ModelsConfig({
+        modelProvidersConfig: merged.modelProviders,
+        providerProtocolConfig: merged.providerProtocol,
+      });
+      persistedValue = resolveAcpFastModelSelector(
+        value,
+        models.getAllConfiguredModels(),
+      );
+      if (persistedValue === null) {
+        throw new Error('Fast model ACP route is unavailable');
+      }
+    }
     return {
-      persistedValue: value,
+      persistedValue,
       // Aux-model selectors persist with their endpoint suffix (runtime
       // routing resolves against it), but the value answered to and
       // broadcast to clients must not carry userinfo credentials.
       publicValue:
-        typeof value === 'string' && isAuxModelSelectorSettingKey(key)
-          ? publicAuxModelSelectorValue(value)
-          : value,
+        typeof persistedValue === 'string' && isAuxModelSelectorSettingKey(key)
+          ? publicAuxModelSelectorValue(persistedValue)
+          : persistedValue,
     };
   }
   const existing =

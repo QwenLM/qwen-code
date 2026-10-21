@@ -33,6 +33,8 @@
  *    the line, Shift+Enter inserts a newline.
  */
 
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import type { OpenTuiRestoredDraft } from './live-turn.js';
 import {
   useCallback,
   useEffect,
@@ -62,7 +64,14 @@ import path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
 import { normalizeDescription, type Suggestion } from '../utils/suggestions.js';
-import { cpLen, toCodePoints, truncateToWidth } from '../utils/textUtils.js';
+import {
+  clipToWidth,
+  cpLen,
+  getCachedStringWidth,
+  sanitizeTerminalLine,
+  toCodePoints,
+  truncateToWidth,
+} from '../utils/textUtils.js';
 import { C } from './theme.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
@@ -177,7 +186,16 @@ function promptChrome(approvalMode: ApprovalMode | undefined): {
 }
 
 export interface InputPromptProps {
-  onSubmit: (text: string, imagePaths?: string[]) => void;
+  onSubmit: (
+    text: string,
+    imagePaths?: string[],
+    metadata?: {
+      displayText?: string;
+      humanInput?: HumanPromptInput;
+      pasteExpansions?: ReadonlyMap<string, string>;
+      restoredDraft?: OpenTuiRestoredDraft;
+    },
+  ) => void;
   /** Submitted prompts (chronological) feeding history navigation. */
   userMessages: readonly string[];
   config?: Config;
@@ -185,6 +203,7 @@ export interface InputPromptProps {
   streaming?: boolean;
   /** Esc-while-streaming hook (aborts the live turn in the parent). */
   onInterrupt?: () => void;
+  onCancelCommand?: () => boolean;
   approvalMode?: ApprovalMode;
   placeholder?: string;
   focus?: boolean;
@@ -197,7 +216,10 @@ export interface InputPromptProps {
   /** Queued prompts awaiting the next turn (drives Esc/↑ pop-back parity). */
   queueLength?: number;
   /** Pops all queued prompts into the composer (returns joined text). */
-  onPopQueue?: () => string | null;
+  onPopQueue?: (
+    pendingPastes?: ReadonlyMap<string, string>,
+    restoreDraft?: (draft: OpenTuiRestoredDraft, release: () => void) => void,
+  ) => string | null;
   /** Recently used slash commands feeding recency-weighted ranking. */
   recentSlashCommands?: ReadonlyMap<string, RecentSlashCommand>;
   /** U-7: finished follow-up suggestion published by the entry layer. */
@@ -235,6 +257,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     config,
     streaming = false,
     onInterrupt,
+    onCancelCommand,
     approvalMode,
     placeholder = DEFAULT_PLACEHOLDER,
     focus = true,
@@ -315,6 +338,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   // History-restored text suppresses re-opening the dropdown, like the
   // original's isHistoryRestoredText.
   const historyRestoredTextRef = useRef<string | null>(null);
+  const unknownHistoryInputRef = useRef(false);
+  const restoredQueueDraftRef = useRef<{
+    draft: OpenTuiRestoredDraft;
+    release: () => void;
+  } | null>(null);
   const dismissedUntilChangeRef = useRef<string | null>(null);
   const commandsRef = useRef<readonly SlashCommand[]>([]);
   // Query-relative replacement range for the current buffer's SLASH target.
@@ -331,6 +359,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   // submit (ink pendingPastes).
   const pendingPastesRef = useRef<Map<string, string>>(new Map());
   const activePlaceholderIdsRef = useRef<Map<number, Set<number>>>(new Map());
+  useLayoutEffect(
+    () => () => {
+      restoredQueueDraftRef.current?.release();
+      restoredQueueDraftRef.current = null;
+    },
+    [],
+  );
 
   // U-7: follow-up suggestion lifecycle, shared with ink via the
   // renderer-neutral controller hook. Acceptance inserts into the composer
@@ -361,6 +396,26 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     followupState.isVisible || promptSuggestion
       ? (followupState.suggestion ?? promptSuggestion ?? null)
       : null;
+
+  const restoreQueuedDraft = useCallback(
+    (draft: OpenTuiRestoredDraft, release: () => void) => {
+      const snapshot = draft.pasteExpansions ?? new Map<string, string>();
+      pendingPastesRef.current = new Map(snapshot);
+      unknownHistoryInputRef.current ||= draft.hasUnknownInput;
+      restoredQueueDraftRef.current = { draft, release };
+      activePlaceholderIdsRef.current.clear();
+      for (const placeholder of snapshot.keys()) {
+        const parsed = parsePastePlaceholder(placeholder);
+        if (!parsed) continue;
+        const ids =
+          activePlaceholderIdsRef.current.get(parsed.charCount) ??
+          new Set<number>();
+        ids.add(parsed.id);
+        activePlaceholderIdsRef.current.set(parsed.charCount, ids);
+      }
+    },
+    [],
+  );
 
   // Shell mode overrides the approval chrome (ink InputPrompt order: `!` wins
   // over the approval-mode prefix). The label itself lives in the footer, as
@@ -518,6 +573,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   useEffect(() => {
     const el = editorRef.current;
     if (!el || textVersion === 0) return;
+    if (el.plainText.length === 0) {
+      unknownHistoryInputRef.current = false;
+      restoredQueueDraftRef.current?.release();
+      restoredQueueDraftRef.current = null;
+      pendingPastesRef.current.clear();
+      activePlaceholderIdsRef.current.clear();
+    }
     // Any real edit that moves away from a restored history entry re-enables
     // completions, mirroring the original's historyRestoredText handling.
     if (
@@ -574,7 +636,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         // pending paste placeholders, collect attachments, then clear
         // everything — an accepted completion must not leave placeholders or
         // chips behind.
-        let finalText = applied.submitNow;
+        const rawText = applied.submitNow;
+        const pasteExpansions =
+          pendingPastesRef.current.size > 0
+            ? new Map(pendingPastesRef.current)
+            : undefined;
+        let finalText = rawText;
         if (pendingPastesRef.current.size > 0) {
           finalText = expandPendingPastePlaceholders(
             finalText,
@@ -583,14 +650,25 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           pendingPastesRef.current.clear();
           activePlaceholderIdsRef.current.clear();
         }
+        const humanInput = unknownHistoryInputRef.current
+          ? undefined
+          : { text: finalText };
         const images = attachments.map((a) => a.path);
+        const restoredDraft = restoredQueueDraftRef.current?.draft;
+        restoredQueueDraftRef.current?.release();
+        restoredQueueDraftRef.current = null;
         el.clear();
         setTextVersion((v) => v + 1);
         historyRef.current?.reset();
         historyRestoredTextRef.current = null;
         setRawSuggestions([]);
         setAttachments([]);
-        onSubmit(finalText, images.length > 0 ? images : undefined);
+        onSubmit(finalText, images.length > 0 ? images : undefined, {
+          displayText: rawText,
+          humanInput,
+          ...(pasteExpansions ? { pasteExpansions } : {}),
+          ...(restoredDraft ? { restoredDraft } : {}),
+        });
         // Same dismissal as the real submit path below: a submitOnAccept
         // command that only opens a dialog never flips streaming, so without
         // this the consumed suggestion survives as the ghost placeholder
@@ -836,7 +914,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         return;
       }
 
-      let finalText = decision.text.trim();
+      const rawText = decision.text.trim();
+      const pasteExpansions =
+        pendingPastesRef.current.size > 0
+          ? new Map(pendingPastesRef.current)
+          : undefined;
+      let finalText = rawText;
       if (pendingPastesRef.current.size > 0) {
         finalText = expandPendingPastePlaceholders(
           finalText,
@@ -845,7 +928,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         pendingPastesRef.current.clear();
         activePlaceholderIdsRef.current.clear();
       }
+      const humanInput = unknownHistoryInputRef.current
+        ? undefined
+        : { text: finalText };
       const images = attachments.map((a) => a.path);
+      const restoredDraft = restoredQueueDraftRef.current?.draft;
+      restoredQueueDraftRef.current?.release();
+      restoredQueueDraftRef.current = null;
       el.clear();
       setTextVersion((v) => v + 1);
       setAttachments([]);
@@ -853,7 +942,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       historyRestoredTextRef.current = null;
       setRawSuggestions([]);
       setLoadingSuggestions(false);
-      onSubmit(finalText, images.length > 0 ? images : undefined);
+      onSubmit(finalText, images.length > 0 ? images : undefined, {
+        displayText: rawText,
+        humanInput,
+        ...(pasteExpansions ? { pasteExpansions } : {}),
+        ...(restoredDraft ? { restoredDraft } : {}),
+      });
       // Ink dismisses on submit so a synchronous command (/clear, /help)
       // can't leave the stale suggestion as the ghost placeholder.
       dismissFollowup();
@@ -938,6 +1032,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         onInterrupt?.();
         return;
       }
+      const commandCancelled = onCancelCommand?.() ?? false;
+      if (commandCancelled) return;
       if (completionModeRef.current !== CompletionMode.IDLE) {
         completionModeRef.current = CompletionMode.IDLE;
         setRawSuggestions([]);
@@ -955,7 +1051,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       // clear (original parity; the streaming branch above already guards
       // the respond-cancel case).
       if (queueLength > 0) {
-        const popped = onPopQueue?.();
+        const popped = onPopQueue?.(
+          pendingPastesRef.current,
+          restoreQueuedDraft,
+        );
         if (popped) {
           const current = el.plainText;
           el.setText(current ? `${popped}\n${current}` : popped);
@@ -1092,7 +1191,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     if (historyNavActive && navigationUp && queueLength > 0) {
       const topCursor = el.logicalCursor;
       if (topCursor.row === 0 && topCursor.col === 0) {
-        const popped = onPopQueue?.();
+        const popped = onPopQueue?.(
+          pendingPastesRef.current,
+          restoreQueuedDraft,
+        );
         if (popped) {
           const current = el.plainText;
           el.setText(current ? `${popped}\n${current}` : popped);
@@ -1121,7 +1223,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         el.setCursor(0, 0);
         return;
       }
+      restoredQueueDraftRef.current?.release();
+      restoredQueueDraftRef.current = null;
       historyRestoredTextRef.current = decision.text;
+      unknownHistoryInputRef.current = decision.text.length > 0;
       el.setText(decision.text);
       el.setCursor(0, 0);
       setTextVersion((v) => v + 1);
@@ -1147,7 +1252,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         el.gotoLineEnd();
         return;
       }
+      restoredQueueDraftRef.current?.release();
+      restoredQueueDraftRef.current = null;
       historyRestoredTextRef.current = decision.text;
+      unknownHistoryInputRef.current = decision.text.length > 0;
       el.setText(decision.text);
       setTextVersion((v) => v + 1);
       return;
@@ -1199,10 +1307,18 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   // column it was sized for. completionModeRef only ever changes inside
   // refreshCompletion, alongside the setRawSuggestions that re-renders this
   // block.
+  // The column is sized from the text as it will paint: sanitized (the rows
+  // below sanitize the hint and badge) and measured in display columns — a
+  // raw `.length` charges ANSI escape bytes as columns and under-counts CJK,
+  // so the two halves of the row would disagree.
   const fullLabelWidth = (s: Suggestion) =>
-    [s.label ?? s.value, s.argumentHint, s.sourceBadge]
-      .filter(Boolean)
-      .join(' ').length;
+    getCachedStringWidth(
+      sanitizeTerminalLine(
+        [s.label ?? s.value, s.argumentHint, s.sourceBadge]
+          .filter(Boolean)
+          .join(' '),
+      ),
+    );
   const slashColumn = completionModeRef.current === CompletionMode.SLASH;
   // The half-width cap applies to ink's `contentWidth` — the row after the
   // 2-column active marker — not to the terminal width.
@@ -1256,6 +1372,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           placeholderColor={C.dim}
           textColor={C.text}
           cursorColor={C.accent}
+          // The library default asks the terminal for a blinking block. ink
+          // never emits DECSCUSR, and a caret the terminal blinks away reads as
+          // a missing caret, so pin the shape and keep it steady.
+          cursorStyle={{ style: 'block', blinking: false }}
           selectionBg={C.selectionBg}
           selectionFg={C.selectionFg}
           wrapMode="char"
@@ -1300,8 +1420,66 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
             const originalIndex = startIndex + index;
             const isActive = originalIndex === activeIndex;
             const color = isActive ? C.accent : C.dim;
-            const label = suggestion.label ?? suggestion.value;
+            // The row's one-physical-row charge covers the label too: like
+            // the hint and badge, its bytes come from extensions/servers.
+            const label = sanitizeTerminalLine(
+              suggestion.label ?? suggestion.value,
+            );
             const sharedColumn = slashColumn || !!suggestion.description;
+            // ink truncates the hint and the badge (`wrap="truncate-end"`) in
+            // the columns the label column leaves after the label. @opentui has
+            // no truncate wrap mode, so an over-long hint wrapped onto a second
+            // row and doubled the row height instead.
+            // ink measures these with `string-width`, which reads an ANSI
+            // sequence as zero-width in a whole string, and its terminal then
+            // paints the colour. This renderer has no content-level ANSI
+            // handling, so the same bytes would be charged against the budget
+            // as five columns and cut mid-sequence; strip them instead.
+            const hintText = suggestion.argumentHint
+              ? ` ${sanitizeTerminalLine(suggestion.argumentHint)}`
+              : '';
+            const badgeText = suggestion.sourceBadge
+              ? ` ${sanitizeTerminalLine(suggestion.sourceBadge)}`
+              : '';
+            // A row with no shared column has no description gutter to pay, so
+            // its budget drops only the dropdown margins and the active marker:
+            // columns - 6.
+            const columnWidth = Math.max(
+              0,
+              sharedColumn ? labelColumnWidth : columns - 6,
+            );
+            // Yoga measures each tail item against the column, so an item
+            // shrinks from a basis already capped at the column width rather
+            // than from its full text width, and the overflow splits between
+            // the two in proportion to those bases. Fitted against ink across 23
+            // hint/badge/column combinations; shrinking from the uncapped width
+            // hands the hint a larger share and eats the badge.
+            const hintBasis = Math.min(
+              getCachedStringWidth(hintText),
+              columnWidth,
+            );
+            const badgeBasis = Math.min(
+              getCachedStringWidth(badgeText),
+              columnWidth,
+            );
+            const shrinkTotal = hintBasis + badgeBasis;
+            const overflow =
+              getCachedStringWidth(label) + shrinkTotal - columnWidth;
+            const share = (basis: number) =>
+              basis - (overflow * basis) / shrinkTotal;
+            let hint = truncateToWidth(hintText, hintBasis);
+            let badge = badgeText;
+            if (overflow > 0 && shrinkTotal > 0) {
+              // Yoga leaves both widths fractional and ink's renderer floors the
+              // badge's start column, so the hint's own ellipsis is drawn one
+              // column past the text it kept and the badge paints over it: what
+              // survives is ceil(width - 1) plain columns. With no badge there
+              // is nothing to paint over it and the ellipsis is its last column.
+              hint = badgeText
+                ? clipToWidth(hintText, Math.ceil(share(hintBasis) - 1))
+                : truncateToWidth(hintText, Math.floor(share(hintBasis)));
+              badge = truncateToWidth(badgeText, Math.ceil(share(badgeBasis)));
+            }
             return (
               <box
                 key={`${suggestion.value}-${originalIndex}`}
@@ -1318,9 +1496,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
                   // every `@` row after one slash completion.
                   width={sharedColumn ? labelColumnWidth : 'auto'}
                 >
-                  {/* Separate flex children, not one text: an over-long hint then
-                      wraps in the width left after the label. Char wrap matches
-                      ink's hard wrap-ansi; word wrap strands `[` on its own row. */}
+                  {/* Separate flex children, not one text: the label keeps its
+                      own char wrap, matching ink's hard wrap-ansi. Word wrap
+                      strands `[` on its own row. */}
                   <box flexDirection="row">
                     <box flexShrink={0}>
                       <text
@@ -1331,27 +1509,21 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
                         {label}
                       </text>
                     </box>
-                    {suggestion.argumentHint && (
-                      <text fg={C.dim} wrapMode="char">
-                        {` ${suggestion.argumentHint}`}
+                    {hint ? <text fg={C.dim}>{hint}</text> : null}
+                    {badge ? (
+                      <text fg={color} attributes={isActive ? 1 : 0}>
+                        {badge}
                       </text>
-                    )}
-                    {suggestion.sourceBadge && (
-                      <text
-                        fg={color}
-                        attributes={isActive ? 1 : 0}
-                        wrapMode="char"
-                      >
-                        {` ${suggestion.sourceBadge}`}
-                      </text>
-                    )}
+                    ) : null}
                   </box>
                 </box>
                 {suggestion.description && (
                   <box paddingLeft={2} flexGrow={1}>
                     <text fg={color}>
                       {truncateToWidth(
-                        normalizeDescription(suggestion.description),
+                        normalizeDescription(
+                          sanitizeTerminalLine(suggestion.description),
+                        ),
                         descriptionWidth,
                       )}
                     </text>

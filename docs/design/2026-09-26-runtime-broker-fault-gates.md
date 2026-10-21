@@ -2,7 +2,7 @@
 
 [English](2026-09-26-runtime-broker-fault-gates.md) | [简体中文](2026-09-26-runtime-broker-fault-gates.zh-CN.md)
 
-Status: implemented as tests in `packages/sdk-java/runtime-broker`; no
+Status: implemented as tests in `packages/managed-agent-server`; no
 production code changes
 
 Related: #12748 (FG1–FG4), Stage F of #12380, and the designs the gates
@@ -39,10 +39,12 @@ real HTTP, a real database and real process deaths.
 Out of scope: Hosted Harness session and SSE gates, output capture and
 delivery gates (after O1b–O3), the managed agent server's W0c-3 storage
 ownership row and grant rechecks (unit-tested in `WorkspaceRuntimeTest`),
-Kubernetes provisioning, and Stage G failover. The `--session-failover`
-mode of `scripts/run-managed-agent-server-e2e.ts` stays outside CI; the
-in-flight and continuation modes run in the `hosted-harness-mysql` job (see
-[Hosted Turn failover E2E](2026-09-30-hosted-turn-failover-e2e.md)).
+Kubernetes provisioning, and Stage G failover. The three failover modes of
+`scripts/run-managed-agent-server-e2e.ts` (`--session-failover`,
+`--inflight-failover`, `--continuation-failover`) and the `--big-output`
+long-answer/cold-restore mode run in the `hosted-failover-e2e` job (first
+added to `hosted-harness-mysql` in #13258);
+only the real-model check stays outside CI (see [Hosted Turn failover E2E](2026-09-30-hosted-turn-failover-e2e.md)).
 
 ## 3. Design
 
@@ -221,7 +223,7 @@ that assertion changes from `EXECUTING` to the committed result.
 8.4 / Java 21` job of `sdk-java.yml` (#12733), the Java 21 lane that
    already installs, builds and bundles the CLI for the Hosted process gates.
    A step after those gates runs `mvn -Pfault-gates test` in
-   `packages/sdk-java/runtime-broker` with
+   `packages/managed-agent-server` with
    `-Dqwen.cli.entry=$GITHUB_WORKSPACE/dist/cli.js`, bounded at 10 minutes.
 2. **Database.** H2 in file mode behind its TCP server, shared by every
    Broker process. The gates do not run on MySQL or MariaDB yet; the lane
@@ -235,7 +237,7 @@ that assertion changes from `EXECUTING` to the committed result.
 ## 4. Validation
 
 With the bundle built at the repository root (`npm run build && npm run
-bundle`), run in `packages/sdk-java/runtime-broker`:
+bundle`), run in `packages/managed-agent-server`:
 
 ```bash
 mvn -Pfault-gates test   # every fault gate (44 today), about 4 minutes

@@ -526,6 +526,30 @@ describe('evaluateWebSearchGate', () => {
       models: [dsModel({ baseUrl: 'https://gw.some-team.alibaba-inc.com/v1' })],
     });
   });
+
+  it('accepts the QwenCloud pay-as-you-go and Token Plan MaaS endpoints', () => {
+    for (const baseUrl of [
+      'https://maas.qianwenaiapi.com/compatible-mode/v1',
+      'https://maas.qwencloudapi.com/compatible-mode/v1',
+      'https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1',
+      'https://token-plan.maas.qwencloudapi.com/compatible-mode/v1',
+    ]) {
+      passedFor({ models: [dsModel({ baseUrl })] });
+    }
+  });
+
+  it('rejects lookalike hosts around the QwenCloud suffixes', () => {
+    // The gate matches hostname === suffix or a dot-anchored subdomain, so an
+    // appended suffix, a forged prefix, or userinfo smuggling must not pass.
+    for (const baseUrl of [
+      'https://maas.qianwenaiapi.com.evil.com/compatible-mode/v1',
+      'https://evilmaas.qwencloudapi.com/compatible-mode/v1',
+      'https://maas.qianwenaiapi.com@evil.com/compatible-mode/v1',
+    ]) {
+      const gate = rejectedFor({ models: [dsModel({ baseUrl })] });
+      expect(gate.notice).toContain('non-DashScope');
+    }
+  });
 });
 
 describe('evaluateWebSearchGate auto derivation', () => {

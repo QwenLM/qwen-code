@@ -26,7 +26,7 @@ It is independent of the model and the window, and you cannot make it look bette
 
 ### 1. Turn off features you do not use
 
-Each feature that registers a tool pays for that tool's schema on every request. The largest single built-in entries are the ones belonging to optional features, so a deployment that does not use workflows, goals, scheduled tasks, or the review tooling saves more by switching those features off than by any amount of prompt editing. This also removes the tool from subagents, which the next lever does not always do.
+Each tool declared to the model adds its schema to every request. Switching off optional features with large resident tools can therefore save request tokens. Deferred tools instead contribute short catalog entries and the cost of later discovery or invocation. Disabling a feature also removes its tools from subagents, which the next lever does not always do.
 
 ### 2. Keep the eager tool surface to what you actually use
 
@@ -59,6 +59,8 @@ Four things to know before you use it:
 
 `tools.visible` is the escape hatch for one tool you want declared up front even though it is deferred by default.
 
+Agent and Goal coordination (`agent`, `list_agents`, `get_goal`, `update_goal`, and `propose_goal`) is deferred by default; no `tools.eager` configuration is needed. The model sees short discovery entries instead of the full schemas. Their first use needs discovery through the bridge, so compare whole-task cost and successful delegation/Goal completion as well as the first request. These are ordinary deferred tools: `tools.visible`, preloading, and the incomplete-bridge eager fallback described above still apply. Preloading is all-or-nothing over the whole deferred candidate pool, and these five declarations are large, so a `tools.toolSearch.threshold` that used to reveal every deferred tool at session start can now reveal none of them. Re-take a `/context` reading after changing either one.
+
 ### 3. Move scenario guidance out of context files into skills
 
 A context file is concatenated into every request of every session it applies to, with no relevance gating. A [skill](skills.md) is listed by its name and description only — in one measured sample, 84 skills averaged about 55 tokens each — and loads its body when invoked, and a skill [gated on `paths:`](skills.md#optional-gate-a-skill-on-file-paths-paths) is not even listed until a matching file is touched.
@@ -67,7 +69,7 @@ Keep in a context file only what is always true — identity, vocabulary, a hard
 
 ### 4. The system prompt, last
 
-The base prompt is already the smallest of the resident categories, and roughly a third of it is safety and permission text that must not be edited. It also now describes only the tools the session actually declared, so trimming your tool surface shrinks it a little for free. Replacing it wholesale with `--system-prompt` is possible and is the highest-risk change on this page; if you do, diff the upstream prompt on every upgrade.
+The base prompt is already the smallest of the resident categories, and roughly a third of it is safety and permission text that must not be edited. Its gated tool guidance follows the declared set, with an exception for bridge-reachable Agent; other tools named by those entries still need declarations. Trimming your tool surface can therefore shrink that guidance as well. Replacing it wholesale with `--system-prompt` is possible and is the highest-risk change on this page; if you do, diff the upstream prompt on every upgrade.
 
 ## Traps
 

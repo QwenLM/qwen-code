@@ -10,7 +10,7 @@
 
 ## 持久身份与启动顺序
 
-显式启用 `runtime-broker.durable-local-process` 后使用配置的状态目录，且目录必须在 Workspace 根目录之外。Linux `/etc/machine-id` 和 `/proc/sys/kernel/random/boot_id` 提供 host 与 boot 身份。检查进程前还必须匹配 `/proc/self/ns/pid` 保存的 PID namespace 和 `/proc/self/ns/time` 保存的 time namespace，因为 [Linux PID 仅在本 namespace 有效](https://docs.kernel.org/admin-guide/namespaces/compatibility-list.html)。要求内核暴露这两种 namespace 身份；不支持或无法读取时启动失败。测试通过包内构造器注入身份；部署配置不接受调用方提供的 boot 证据。
+`runtime-broker.durable-local-process`（默认开启）使用配置的状态目录，且目录必须在 Workspace 根目录之外。Linux `/etc/machine-id` 和 `/proc/sys/kernel/random/boot_id` 提供 host 与 boot 身份。检查进程前还必须匹配 `/proc/self/ns/pid` 保存的 PID namespace 和 `/proc/self/ns/time` 保存的 time namespace，因为 [Linux PID 仅在本 namespace 有效](https://docs.kernel.org/admin-guide/namespaces/compatibility-list.html)。要求内核暴露这两种 namespace 身份；不支持或无法读取时启动失败。测试通过包内构造器注入身份；部署配置不接受调用方提供的 boot 证据。
 
 machine ID 必须非空且稳定。服务管理器必须允许 Broker 退出后 worker 继续存活；默认 systemd `KillMode=control-group` 单元或以 Broker 为主进程的容器也会杀死 worker。配置服务保留子进程（例如 systemd `KillMode=process`），并使用会回收孤儿进程的 init，避免积累僵尸进程。
 
@@ -34,7 +34,7 @@ machine ID 必须非空且稳定。服务管理器必须允许 Broker 退出后 
 
 ## 影响组件与兼容性
 
-`LocalProcessRuntimeProvisioner` 的临时与持久模式共用 boot/ready 解析。包内本地 store 负责锁和持久记录。`RuntimeProvisioner` 及 Workspace wrapper 提供范围明确的启动恢复支持；`RuntimeBrokerService` 允许观察受支持的已保存启动记录。嵌入配置显式启用模式，并拒绝落在任何配置 Workspace 根目录下的恢复目录。无需数据库迁移或公共 API 变更。现有构造器与默认配置保持临时模式。
+`LocalProcessRuntimeProvisioner` 的临时与持久模式共用 boot/ready 解析。包内本地 store 负责锁和持久记录。`RuntimeProvisioner` 及 Workspace wrapper 提供范围明确的启动恢复支持；`RuntimeBrokerService` 允许观察受支持的已保存启动记录。嵌入配置默认启用该模式（同时设置 `runtime-broker.durable-local-process=false` 与 `runtime-broker.trusted-local-reboot-recovery=false` 可退出；打包服务把这两个开关分别映射为 `QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS` 与 `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY`），并拒绝落在任何配置 Workspace 根目录下的恢复目录。无需数据库迁移或公共 API 变更。现有构造器保持临时模式，默认配置使用持久模式。
 
 ## 验证与验收
 

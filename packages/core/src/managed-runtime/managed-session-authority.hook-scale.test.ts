@@ -243,12 +243,14 @@ async function history() {
 it('admits a Hook execution without validating the history it accumulated', async () => {
   const session = await history();
   try {
+    // Crosses the 32-revision replay window and ends at ordinal 1.
+    const executions = 34;
     let early = 0;
-    for (let index = 0; index < 106; index++) {
+    for (let index = 0; index < executions; index++) {
       const admission = await session.settle(index);
       // Equal modulo 4: ordinal 1 beside a committed sibling, with a once key.
       if (index === 9) early = admission;
-      if (index === 105) expect(admission).toBe(early);
+      if (index === executions - 1) expect(admission).toBe(early);
     }
     expect(early).toBeGreaterThan(0);
 
@@ -258,18 +260,20 @@ it('admits a Hook execution without validating the history it accumulated', asyn
     parsed.executions = 0;
     const reopened = await session.reopen();
     expect(reopened.extensionRecordsInDomain('hook_execution')).toHaveLength(
-      106,
+      executions,
     );
     expect(session.reads.length).toBe(new Set(session.reads).size);
-    // 106 records, 3 revisions each, 1 input and 1 result each, a plan per
-    // occurrence, the catalog and 3 registration revisions.
-    expect(session.reads.length).toBe(106 * 5 + 27 + 4);
+    // Each execution has 3 revisions, 1 input and 1 result; each occurrence
+    // has a plan, plus the catalog and 3 registration revisions.
+    expect(session.reads.length).toBe(
+      executions * 5 + Math.ceil(executions / 4) + 4,
+    );
     // A window of 32 revisions, each reading its record and then at most
     // three resources at once; an unbounded one reads hundreds here.
     expect(session.io.peak).toBeLessThanOrEqual(32 * 3);
     // A bounded number per revision; reading the history at each admission
     // takes several thousand here.
-    expect(parsed.executions).toBeLessThanOrEqual(106 * 3 * 4);
+    expect(parsed.executions).toBeLessThanOrEqual(executions * 3 * 4);
   } finally {
     await session.release();
   }

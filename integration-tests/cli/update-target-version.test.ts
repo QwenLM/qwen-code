@@ -280,9 +280,10 @@ describe.skipIf(process.platform === 'win32')(
           runtime: 'node',
         }),
       );
+      const [fixturePlatform, fixtureArch] = target.split('-');
       fs.writeFileSync(
         path.join(fixtureDir, 'qwen-code', 'node', 'bin', 'node'),
-        `#!/bin/sh\nprintf '%s\\n' '${TARGET_VERSION}'\n`,
+        `#!/bin/sh\nif [ "$1" = "-e" ]; then\n  printf '%s\\n' '${JSON.stringify({ runtime: 'node', platform: fixturePlatform, arch: fixtureArch })}'\nelse\n  printf '%s\\n' '${TARGET_VERSION}'\nfi\n`,
         { mode: 0o755 },
       );
       fs.writeFileSync(

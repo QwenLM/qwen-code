@@ -5,6 +5,9 @@
  */
 
 import { createHash } from 'node:crypto';
+import { realpath } from 'node:fs/promises';
+import { join, isAbsolute } from 'node:path';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import type { Readable, Writable } from 'node:stream';
 import {
   parseStoredTransaction,
@@ -36,6 +39,10 @@ interface RecoveryContext {
     fileHistoryRoot: string;
     fenceOperationId: string;
     mountRevision: number;
+  };
+  migration?: {
+    targetRoot: string;
+    targetMarker: { digest: string; byteLength: number };
   };
   registration: Record<string, unknown>;
   sourceDigest: string;
@@ -335,6 +342,29 @@ export async function runRecoveryWorker(rpc: RecoveryRpc): Promise<unknown> {
       context.request.sourceRoot,
       context.request.fileHistoryRoot,
     );
+    if (context.migration) {
+      const home = Storage.getGlobalQwenDir()
+        .replace(/\/+/g, '/')
+        .replace(/(.+)\/$/, '$1');
+      const samePath = (left: string, right: string) =>
+        process.platform === 'win32' || process.platform === 'darwin'
+          ? left.toLowerCase() === right.toLowerCase()
+          : left === right;
+      if (
+        !process.env['QWEN_HOME'] ||
+        !isAbsolute(process.env['QWEN_HOME']) ||
+        !samePath(await realpath(home), home) ||
+        !samePath(
+          join(home, 'file-history'),
+          context.request.fileHistoryRoot,
+        ) ||
+        !samePath(
+          await realpath(context.request.fileHistoryRoot),
+          context.request.fileHistoryRoot,
+        )
+      )
+        throw new Error('migration_history_environment_mismatch');
+    }
     let manifest: Record<string, unknown> | undefined;
     if (context.mode === 'verify') {
       if (!context.capture) throw new Error('capture_not_sealed');
@@ -357,6 +387,7 @@ export async function runRecoveryWorker(rpc: RecoveryRpc): Promise<unknown> {
         const summary = await verifyRecoverySession(
           row.source,
           sessionIO(row, bundle, rpc),
+          context.migration ? 'migration' : 'recovery',
         );
         await rpc('sessionComplete', { sessionId: row.sessionId, summary });
         const bytes = Buffer.from(`${row.sourceJson}\n`);
@@ -390,6 +421,20 @@ export async function runRecoveryWorker(rpc: RecoveryRpc): Promise<unknown> {
       throw new Error('source_set_mismatch');
     if (context.mode === 'capture') {
       await bundle.recheckTree(context.request.sourceRoot, 'workspace');
+      for await (const row of sources(rpc)) {
+        await bundle.recheckHistory(
+          row.sessionId,
+          context.request.fileHistoryRoot,
+        );
+      }
+    }
+    if (context.migration) {
+      await bundle.verifyMigrationTree(context.request.sourceRoot, 'workspace');
+      await bundle.verifyMigrationTree(
+        context.migration.targetRoot,
+        'workspace',
+        context.migration.targetMarker,
+      );
       for await (const row of sources(rpc)) {
         await bundle.recheckHistory(
           row.sessionId,

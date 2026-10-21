@@ -46,6 +46,7 @@ import {
   type Config,
   type Logger,
 } from '@qwen-code/qwen-code-core';
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import type { PartListUnion } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
@@ -69,7 +70,11 @@ import {
   selectAutoApprovals,
   type WaitingCallInfo,
 } from './live-session.js';
-import type { OpenTuiSubmitOptions } from './live-turn.js';
+import type {
+  OpenTuiLiveTurn,
+  OpenTuiRestoredDraft,
+  OpenTuiSubmitOptions,
+} from './live-turn.js';
 import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
@@ -101,6 +106,10 @@ import {
 } from './dialogs-confirm.js';
 import { useMcpApproval } from '../hooks/useMcpApproval.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
+import {
+  getDialogMaxHeight,
+  STATIC_EXTRA_HEIGHT,
+} from '../utils/layoutUtils.js';
 
 export interface OpenTuiAppProps {
   config: Config;
@@ -124,6 +133,7 @@ export interface OpenTuiAppProps {
   // --- seams owned by the renderer / entry layer ---------------------------
   /** Renders the transcript + status line (needs the real OpenTUI renderer). */
   renderMain?: () => ReactNode;
+  userMessages?: readonly string[];
   /**
    * Runs a model turn for a plain prompt or a `submit_prompt` outcome. A
    * composer prompt passes its pasted image paths as a second, structured
@@ -166,7 +176,6 @@ export interface OpenTuiAppProps {
    * transcript region.
    */
   exitHint?: string | null;
-  availableTerminalHeight?: number;
 
   // --- Batch 6: live-turn + confirmation wiring ---------------------------
   /** A live model turn is in flight (composer Esc interrupts, footer spins). */
@@ -180,7 +189,7 @@ export interface OpenTuiAppProps {
   approvalMode?: ApprovalMode;
   /** Mid-turn queued prompts (queue rows + badge + Esc pop-back). */
   messageQueue?: readonly string[];
-  onPopQueue?: () => string | null;
+  onPopQueue?: OpenTuiLiveTurn['popQueue'];
   /**
    * Scheduler calls parked in `awaiting_approval`. The shell renders the
    * first one as a modal dialog; settlement flows through the call's own
@@ -271,6 +280,20 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const shellControllersRef = useRef<Set<AbortController>>(new Set());
   const { width: terminalWidth, height: terminalHeight } =
     useTerminalDimensions();
+  // ink renders every dialog inside a region of exactly this height, clipped,
+  // with the composer swapped out (`DefaultAppLayout`'s dialog wrapper) — in
+  // ink's default state: its show-more-lines key lifts `constrainHeight`, which
+  // drops both the height and the clip, while this port keeps the region fixed
+  // in every state (recorded as a divergence in the parity design doc). The
+  // clip reaches content that shrinks with the region; a child that holds its
+  // own size paints past the bottom edge instead of being cut. A
+  // content-height region bottom-anchors the popup instead: the transcript
+  // keeps the free rows above it, so the box sits lower than ink's and a
+  // dialog ink stretches to fill the viewport stays short.
+  const dialogRegionHeight = getDialogMaxHeight(
+    terminalHeight,
+    STATIC_EXTRA_HEIGHT,
+  );
   const toggleShellMode = useCallback(
     () => setShellModeActive((active) => !active),
     [],
@@ -561,6 +584,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     host.setStreaming(!!streaming);
   }, [host, streaming]);
 
+  useEffect(() => {
+    config.setWorkflowKeywordTriggerEnabled?.(
+      settings.merged.ui?.disableWorkflowKeywordTrigger !== true,
+    );
+  }, [config, settings.merged.ui?.disableWorkflowKeywordTrigger]);
+
   const gateway = useMemo(() => new OpenTuiSlashGateway(), []);
   const reloadRef = useRef<(() => void | Promise<void>) | null>(null);
   // Slash and shell submissions held back while a model turn streams (ink's
@@ -572,6 +601,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       shell?: boolean;
       prompt?: boolean;
       imagePaths?: string[];
+      humanInput?: HumanPromptInput;
+      displayText?: string;
+      pasteExpansions?: ReadonlyMap<string, string>;
+      restoredDraft?: OpenTuiRestoredDraft;
     }>
   >([]);
   // Push nonce for the drain (ink's queueDrainNonce). The queue itself stays a
@@ -682,7 +715,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   );
 
   const onSubmit = useCallback(
-    async (text: string, imagePaths?: string[]) => {
+    async (
+      text: string,
+      imagePaths?: string[],
+      composer?: Pick<
+        OpenTuiSubmitOptions,
+        'humanInput' | 'displayText' | 'pasteExpansions' | 'restoredDraft'
+      >,
+    ) => {
       setNoticeText(null);
       // Ahead of the gate and the dispatch, exactly where ink's
       // handleFinalSubmit puts it: a quit has to be able to stop the stream, so
@@ -724,7 +764,18 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             // running-`!` gate held back must not lose them in the queue
             // (R5-5 fix-induced).
             ...(blockedByRunningShell && !shellEntry
-              ? { prompt: true, imagePaths }
+              ? {
+                  prompt: true,
+                  imagePaths,
+                  humanInput: composer?.humanInput,
+                  ...(composer?.pasteExpansions?.size
+                    ? { pasteExpansions: composer.pasteExpansions }
+                    : {}),
+                  ...(composer?.restoredDraft
+                    ? { restoredDraft: composer.restoredDraft }
+                    : {}),
+                  displayText: composer?.displayText,
+                }
               : {}),
           });
           setDeferredRevision((revision) => revision + 1);
@@ -776,6 +827,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         // stream (live-session), so text queued mid-turn expands too.
         onSubmitPrompt(query, imagePaths, {
           submittedPrompt: query || undefined,
+          displayText: composer?.displayText ?? query,
+          humanInput: composer?.humanInput,
+          ...(composer?.pasteExpansions?.size
+            ? { pasteExpansions: composer.pasteExpansions }
+            : {}),
+          ...(composer?.restoredDraft
+            ? { restoredDraft: composer.restoredDraft }
+            : {}),
         });
         return;
       }
@@ -858,6 +917,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             }
             onSubmitPrompt(entry.text, entry.imagePaths, {
               submittedPrompt: entry.text || undefined,
+              displayText: entry.displayText ?? entry.text,
+              humanInput: entry.humanInput,
+              ...(entry.pasteExpansions?.size
+                ? { pasteExpansions: entry.pasteExpansions }
+                : {}),
+              ...(entry.restoredDraft
+                ? { restoredDraft: entry.restoredDraft }
+                : {}),
             });
             // The turn it starts owns the drain until it ends, exactly like a
             // dispatched submit_prompt outcome below.
@@ -908,7 +975,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     runShellCommand,
   ]);
 
-  const userMessages = useMemo(
+  const hostUserMessages = useMemo(
     () =>
       host
         .getHistory()
@@ -1030,8 +1097,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             // the previous branch's layout stuck on the node.
             <box
               key="dialog-area"
+              flexDirection="column"
               marginLeft={2}
               width={dialogAreaWidth(terminalWidth)}
+              height={dialogRegionHeight}
+              overflow="hidden"
             >
               <OpenTuiDialogMount
                 key={dialog.dialog}
@@ -1044,8 +1114,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 notify={notify}
                 fillInput={fillComposer}
                 onSelectSetting={handleSelectSetting}
+                onRestartRequest={() =>
+                  applyOutcome({ kind: 'quit', messages: [] })
+                }
                 onApprovalModeChanged={adoptApprovalMode}
-                availableTerminalHeight={props.availableTerminalHeight}
+                availableTerminalHeight={dialogRegionHeight}
               />
             </box>
           ) : (
@@ -1058,14 +1131,19 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               />
               <OpenTuiQueuedMessageDisplay messageQueue={messageQueue ?? []} />
               <OpenTuiInputPrompt
-                onSubmit={(text, imagePaths) => {
-                  void onSubmit(text, imagePaths);
+                onSubmit={(text, imagePaths, composer) => {
+                  void onSubmit(text, imagePaths, composer);
                 }}
-                userMessages={userMessages}
+                userMessages={props.userMessages ?? hostUserMessages}
                 config={config}
                 focus
                 streaming={streaming}
                 onInterrupt={onInterrupt}
+                onCancelCommand={() => {
+                  if (!gateway.isBusy()) return false;
+                  gateway.cancel();
+                  return true;
+                }}
                 approvalMode={currentApprovalMode}
                 queueLength={queueLength}
                 onPopQueue={onPopQueue}

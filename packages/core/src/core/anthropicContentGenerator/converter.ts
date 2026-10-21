@@ -28,6 +28,7 @@ import {
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
 import { isResponsesReasoningSignature } from '../../utils/thoughtUtils.js';
+import { trailingReattachPartCount } from '../../services/image-payload-references.js';
 
 type AnthropicMessageParam = Anthropic.MessageParam;
 // `scope: 'global'` is sent under the `prompt-caching-scope-2026-01-05` beta
@@ -105,6 +106,21 @@ export interface ConvertLlmRequestToAnthropicOptions {
    * Gemini-Part round trip.
    */
   normalizeAssistantThinkingSignature?: boolean;
+  /**
+   * Same `signature: ''` fill as `normalizeAssistantThinkingSignature`, for
+   * the non-DeepSeek, non-4.6 Anthropic-compatible proxy quadrant: strict
+   * backends (verified against SGLang v0.5.19, #11772; llama.cpp/vLLM
+   * expected to behave the same but untested) reject a `thinking` block
+   * that carries no `signature` field at all (HTTP 400, e.g. SGLang
+   * `thinking.signature`) while accepting an empty signature. The repaired
+   * blocks come from history, so the caller does not gate this on the
+   * outgoing `thinking` parameter. The caller gates it off 4.6+ adaptive
+   * models (whose unsigned blocks are owned by
+   * `dropUnsignedAssistantThinking`) and off native base URLs, so the two
+   * passes stay disjoint and native API history is left untouched.
+   * https://github.com/QwenLM/qwen-code/issues/11772
+   */
+  fillUnsignedThinkingSignature?: boolean;
   /**
    * Remove assistant thinking blocks whose opaque signature is missing or
    * empty. Completed turns can safely omit thinking during replay. The active
@@ -205,8 +221,8 @@ export interface ConvertLlmRequestToAnthropicOptions {
   useGlobalCacheScope?: boolean;
   /**
    * The cross-session-stable prefix of the system prompt (everything the
-   * client assembles before appending volatile tails like git status or
-   * session-start context). When it exactly matches the beginning of the
+   * client assembles before appending the managed auto-memory section).
+   * When it exactly matches the beginning of the
    * request's system text and a suffix follows, the system prompt is split
    * into two text blocks with one cache breakpoint each, making the stable
    * prefix independently cacheable. No match (subagent prompts, stale
@@ -275,8 +291,13 @@ export class AnthropicContentConverter {
       this.stripThinkingFromAssistantMessages(messages);
     }
     // Normalization runs before injection so non-compliant blocks are seen
-    // as already-present (and not duplicated) by the injection pass.
-    if (options.normalizeAssistantThinkingSignature) {
+    // as already-present (and not duplicated) by the injection pass. The
+    // two flags share the same fill: normalize is the DeepSeek path,
+    // fillUnsignedThinkingSignature is the non-DeepSeek proxy path.
+    if (
+      options.normalizeAssistantThinkingSignature ||
+      options.fillUnsignedThinkingSignature
+    ) {
       this.fillMissingThinkingSignatures(messages);
     }
     if (options.injectThinkingOnToolUseTurns) {
@@ -379,6 +400,7 @@ export class AnthropicContentConverter {
           cacheRetention,
           cacheRetentionByBlock,
         ),
+        trailingReattachPartCount(request.contents),
       );
     }
 
@@ -638,7 +660,8 @@ export class AnthropicContentConverter {
               // unsigned (never attach the foreign payload as a signature) so
               // `stripThinkingFromAssistantMessages` removes it under
               // `stripAssistantThinking` and `fillMissingThinkingSignatures`
-              // fills `signature: ''` under DeepSeek normalization.
+              // fills `signature: ''` under DeepSeek normalization or on
+              // non-4.6 proxy-hosted Claude.
               if (demoteForeignThoughtToText) {
                 dropThinkingBlock = true;
                 if (part.text) {
@@ -1056,18 +1079,18 @@ export class AnthropicContentConverter {
    * extension they may not recognize.
    *
    * When `staticSystemPrefix` matches the beginning of the system text and
-   * a suffix follows (git status, session-start context — the volatile
-   * tails the client appends after the stable prompt), the text is split
-   * into two blocks carrying one breakpoint each:
+   * a suffix follows (the managed auto-memory section the client appends
+   * after the stable prompt), the text is split into two blocks carrying
+   * one breakpoint each:
    *   1. the stable prefix — scoped per `useGlobalCacheScope`, so new
    *      sessions reuse it even though their suffix differs;
    *   2. the end of the full system prompt — always the per-session
-   *      `{ type: 'ephemeral' }` shape. The suffix varies across sessions,
+   *      `{ type: 'ephemeral' }` shape. The suffix can vary across sessions,
    *      so a global-scope entry here would churn cache for zero hits
    *      (same reasoning as `addCacheControlToMessages`). Within a session
    *      it still caches the suffix, and when the suffix changes mid-session
-   *      (/cd refreshes git status, session-start context lands) the prefix
-   *      breakpoint keeps the big block from re-billing.
+   *      (a memory recall mode switch) the prefix breakpoint keeps the big
+   *      block from re-billing.
    * The split only shapes the outgoing request; stored history and
    * non-Anthropic transports keep seeing a single system string.
    */
@@ -1385,6 +1408,7 @@ export class AnthropicContentConverter {
   private addCacheControlToMessages(
     messages: Anthropic.MessageParam[],
     cacheRetention: CacheRetention = 'ephemeral',
+    volatileTailBlockCount = 0,
   ): void {
     // Find the last user message to add cache_control. The Anthropic docs
     // (https://docs.claude.com/en/docs/build-with-claude/prompt-caching)
@@ -1402,7 +1426,17 @@ export class AnthropicContentConverter {
           : [{ type: 'text' as const, text: msg.content }];
 
         if (content.length > 0) {
-          const lastContent = content[content.length - 1];
+          // Skip the trailing volatile blocks (reattached images, the
+          // request-only auto-memory catalog): stored history never reproduces
+          // them, so a breakpoint there writes an entry no later request can
+          // read back (issue #11627). If the whole message is volatile, use
+          // an earlier user message; without one, omit the message breakpoint.
+          const anchorIndex = content.length - 1 - volatileTailBlockCount;
+          if (anchorIndex < 0) {
+            volatileTailBlockCount = 0;
+            continue;
+          }
+          const lastContent = content[anchorIndex];
           if (typeof lastContent === 'object' && 'type' in lastContent) {
             const type = lastContent.type;
             // Empty text blocks cannot be cached (per Anthropic docs).

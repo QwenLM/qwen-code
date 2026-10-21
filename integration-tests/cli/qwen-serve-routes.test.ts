@@ -394,10 +394,12 @@ describe('qwen serve — capabilities envelope', () => {
       'session_attachment_list',
       'session_mid_turn_message_mutation',
       'session_mid_turn_message_query',
+      'session_mid_turn_send_now',
       'session_cancel',
       'session_events',
       'session_artifacts',
       'session_artifacts_persistence',
+      'session_artifact_library',
       'session_sources',
       'slow_client_warning',
       'typed_event_schema',
@@ -437,6 +439,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_status',
       'session_close',
       'session_archive',
+      'session_archive_idle_guard',
       'session_storage_conflict_repair',
       'session_metadata',
       'session_organization',
@@ -455,10 +458,14 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_file_read_cursor',
       'workspace_file_write',
       'workspace_file_upload',
+      'workspace_file_delete',
+      'workspace_directory_create',
+      'workspace_directory_delete',
       'session_approval_mode_control',
       'workspace_tool_toggle',
       'workspace_skill_settings_toggle',
       'workspace_skill_settings_batch_toggle',
+      'workspace_session_refresh',
       'extension_batch_activation_v2',
       'extension_activation_explicit_refresh',
       'workspace_skill_manage',
@@ -467,6 +474,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_permissions',
       'workspace_voice',
       'workspace_trust',
+      'workspace_trust_grant',
       'workspace_trust_hot_reload',
       'workspace_init',
       'workspace_github_setup',
@@ -484,6 +492,7 @@ describe('qwen serve — capabilities envelope', () => {
       'non_blocking_prompt',
       'session_language',
       'user_language_sync',
+      'session_message_deletion',
       'session_rewind',
       'workspace_hooks',
       'session_hooks',
@@ -491,9 +500,11 @@ describe('qwen serve — capabilities envelope', () => {
       'session_branch',
       'session_branch_worktree',
       'workspace_reload',
+      'workspace_model_reload',
       'channel_delivery',
       'channel_control',
       'channel_management',
+      'channel_delete_config_loss_convergence',
       'workspace_channel_observed_contacts',
       'dynamic_workspace_registration',
       'persistent_workspace_registration',
@@ -506,6 +517,7 @@ describe('qwen serve — capabilities envelope', () => {
       ...(localTerminalOpenAtBoot ? ['workspace_local_terminal'] : []),
       'workspace_qualified_rest_core',
       'extension_management_v2',
+      'extension_list_details',
       'extension_state',
       'extension_git_credentials',
       'extension_local_path_install',
@@ -780,27 +792,34 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
   });
 
   it('honors and reserves a normalized caller-supplied session ID', async () => {
-    const requestedId = '550E8400-E29B-41D4-A716-446655440000';
+    // Fresh id per attempt: vitest `retry` re-enters this body against the
+    // same long-lived daemon, and a fixed id turns one timed-out create into
+    // deterministic 409 session_id_conflict failures on every retry — the
+    // session a failed attempt left live (or abandoned-but-later-registered)
+    // still owns the reservation the retry's first POST collides with. The
+    // ACP_INITIALIZE_TIMEOUT_MS note above names the load class.
+    const requestedId = randomUUID().toUpperCase();
     const normalizedId = requestedId.toLowerCase();
-    const created = await fetch(`${base}/session`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${TOKEN}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        cwd: REPO_ROOT,
-        sessionId: requestedId,
-        sessionScope: 'single',
-      }),
-    });
-    expect(created.status).toBe(200);
-    await expect(created.json()).resolves.toMatchObject({
-      sessionId: normalizedId,
-      attached: false,
-    });
-
     try {
+      const created = await fetch(`${base}/session`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          cwd: REPO_ROOT,
+          sessionId: requestedId,
+          sessionScope: 'single',
+        }),
+      });
+      const createdBody = await created.json();
+      expect(created.status, JSON.stringify(createdBody)).toBe(200);
+      expect(createdBody).toMatchObject({
+        sessionId: normalizedId,
+        attached: false,
+      });
+
       let conflict: unknown;
       try {
         await client.createOrAttachSession({

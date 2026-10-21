@@ -28,6 +28,7 @@ import type {
 } from '../core/turn.js';
 import { EditTool } from '../tools/edit.js';
 import { OutputFormat } from '../output/types.js';
+import { RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV } from '../memory/recall-experiment.js';
 import {
   EVENT_API_REQUEST,
   EVENT_API_RESPONSE,
@@ -82,6 +83,7 @@ import {
   logApiError,
   logApiRetry,
   logProtocolTagSanitized,
+  logMemoryRecall,
   logMemoryRecallDelivery,
   logMemorySearch,
   logMemoryMigration,
@@ -119,6 +121,7 @@ import {
   ApiRetryEvent,
   ProtocolTagSanitizedEvent,
   MemoryRecallDeliveryEvent,
+  MemoryRecallEvent,
   MemorySearchEvent,
   MemoryMigrationEvent,
   MemoryRecallModeTransitionEvent,
@@ -318,6 +321,99 @@ describe('loggers', () => {
       );
       expect(JSON.stringify(mockLogger.emit.mock.calls[0])).not.toMatch(
         /response_text|reasoning|tool_name|arguments/,
+      );
+    });
+  });
+
+  describe('logMemoryRecall', () => {
+    const SKIP_SELECTOR_EXPERIMENT_ENV =
+      RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV;
+
+    const makeRecallEvent = (selectorSkipped: boolean) =>
+      new MemoryRecallEvent({
+        query_length: 12,
+        docs_scanned: 3,
+        docs_selected: 1,
+        strategy: 'heuristic',
+        duration_ms: 42,
+        selector_skipped: selectorSkipped,
+      });
+
+    beforeEach(() => {
+      vi.spyOn(metrics, 'recordMemoryRecallMetrics');
+    });
+
+    afterEach(() => {
+      delete process.env[SKIP_SELECTOR_EXPERIMENT_ENV];
+    });
+
+    it('keeps selector_skipped off the recall metrics while the #13003 experiment is disabled', () => {
+      delete process.env[SKIP_SELECTOR_EXPERIMENT_ENV];
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+
+      logMemoryRecall(config, makeRecallEvent(false));
+
+      expect(metrics.recordMemoryRecallMetrics).toHaveBeenCalledWith(
+        config,
+        42,
+        {
+          strategy: 'heuristic',
+          docs_selected: 1,
+        },
+      );
+      // Only the metric dimensions are gated on the experiment.
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Memory recall: strategy=heuristic. Selected 1/3 docs.',
+        attributes: expect.objectContaining({ selector_skipped: false }),
+      });
+    });
+
+    it.each([true, false])(
+      'preserves selector_skipped=%s while enabled',
+      (skipped) => {
+        process.env[SKIP_SELECTOR_EXPERIMENT_ENV] = '1';
+        const config = makeFakeConfig({ sessionId: 'test-session-id' });
+
+        logMemoryRecall(config, makeRecallEvent(skipped));
+
+        expect(metrics.recordMemoryRecallMetrics).toHaveBeenCalledWith(
+          config,
+          42,
+          {
+            strategy: 'heuristic',
+            docs_selected: 1,
+            selector_skipped: skipped,
+          },
+        );
+        expect(mockLogger.emit.mock.lastCall?.[0].attributes).toHaveProperty(
+          'selector_skipped',
+          skipped,
+        );
+      },
+    );
+
+    it('omits selector_skipped when the recall had no skip decision', () => {
+      // Legacy-mode recalls never reach the skip guard; stamping a constant
+      // `false` there would mix a no-decision series into the experiment's
+      // control arm.
+      process.env[SKIP_SELECTOR_EXPERIMENT_ENV] = '1';
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      const event = makeRecallEvent(false);
+      // The producer leaves the field unset for a legacy recall.
+      event.selector_skipped = undefined;
+
+      logMemoryRecall(config, event);
+
+      expect(metrics.recordMemoryRecallMetrics).toHaveBeenCalledWith(
+        config,
+        42,
+        {
+          strategy: 'heuristic',
+          docs_selected: 1,
+        },
+      );
+      expect(mockLogger.emit.mock.lastCall?.[0].attributes).not.toHaveProperty(
+        'selector_skipped',
       );
     });
   });
@@ -1417,6 +1513,20 @@ describe('loggers', () => {
         function_args: JSON.stringify({ arg1: 'value1', arg2: 2 }, null, 2),
         duration_ms: 100,
         tool_type: 'native',
+        content_length: undefined,
+        processed_estimated_tokens: 4,
+        raw_content_length: undefined,
+        raw_estimated_tokens: undefined,
+        applied_budget: undefined,
+        budget_source: undefined,
+        truncated: undefined,
+        decision: undefined,
+        parent_call_id: undefined,
+        source: undefined,
+        started_at_ms: undefined,
+        response_id: undefined,
+        mcp_server_name: undefined,
+        metadata: undefined,
         ...attributes,
       });
       if (otelOnly) return;

@@ -293,6 +293,9 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .title("Qwen Code")
         .inner_size(width, height)
         .min_inner_size(900.0, 600.0)
+        // The native handler swallows OS file drops before the page sees them;
+        // Web Shell owns drag-and-drop through HTML5 events.
+        .disable_drag_drop_handler()
         .initialization_script(ZOOM_HOTKEY_SCRIPT)
         .on_page_load(|webview, payload| {
             // Re-apply on every document: the bootstrap page and the

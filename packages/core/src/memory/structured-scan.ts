@@ -878,6 +878,9 @@ export async function rereadAutoMemoryDocument(
     if (!trustedFile) return null;
     const stats = await fs.stat(trustedFile);
     const content = await fs.readFile(trustedFile, 'utf-8');
+    if ((await fs.stat(trustedFile)).mtimeMs !== stats.mtimeMs) {
+      return null;
+    }
     return parseAutoMemoryTopicDocument(
       doc.filePath,
       content,

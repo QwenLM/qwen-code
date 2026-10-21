@@ -351,11 +351,29 @@ describe('createMemoryScopedAgentConfig', () => {
       await expect(
         delegated.getToolRegistrationStatus(WEB_FETCH),
       ).resolves.toBe('disabled');
-      expect(status).toHaveBeenCalledWith(WEB_FETCH);
+      expect(status).toHaveBeenCalledWith(WEB_FETCH, undefined, undefined);
 
       await expect(
         scopedPm().getToolRegistrationStatus(WEB_FETCH),
       ).resolves.toBe('registered');
+    });
+
+    it('isToolEnabled forwards the alias and identity channels to the base PM', async () => {
+      const isToolEnabled = vi.fn().mockResolvedValue(false);
+      const delegated = scopedPm(undefined, { isToolEnabled });
+      const identity = { serverName: 'foo:bar', serverToolName: 'a.b' };
+      await expect(
+        delegated.isToolEnabled(
+          'mcp__foo_bar__a_b_1aofxjh',
+          ['mcp__foo:bar__a.b'],
+          identity,
+        ),
+      ).resolves.toBe(false);
+      expect(isToolEnabled).toHaveBeenCalledWith(
+        'mcp__foo_bar__a_b_1aofxjh',
+        ['mcp__foo:bar__a.b'],
+        identity,
+      );
     });
 
     it('gates the shell registration status on allowShell', async () => {

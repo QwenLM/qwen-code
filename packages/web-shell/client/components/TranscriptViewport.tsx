@@ -19,6 +19,8 @@ import {
   type MessageListProps,
 } from './MessageList';
 import { Button } from './ui/button';
+import { useMessageDeletion } from '../hooks/useMessageDeletion';
+import { MessageDeletionToolbar } from './MessageDeletionToolbar';
 import { GlobalTurnNavigation } from './GlobalTurnNavigation';
 import styles from './TranscriptViewport.module.css';
 import { useTranscriptViewport } from '../hooks/useTranscriptViewport';
@@ -80,6 +82,14 @@ export const TranscriptViewport = forwardRef<
   const { onCanScrollToBottomChange } = props;
   const { t } = useI18n();
   const viewport = useTranscriptViewport(props.messages, t);
+  const deletion = useMessageDeletion(
+    viewport.messages,
+    props.isResponding === true ||
+      props.loadingTranscript === true ||
+      props.catchingUp === true ||
+      props.pendingApproval !== null,
+    viewport.historical,
+  );
   const openTurnCalls = useOpenTurnCalls();
   const openViewportTurnCalls = useCallback(
     (turnId: string) => {
@@ -107,7 +117,10 @@ export const TranscriptViewport = forwardRef<
     viewport.navigation.effectiveTurnCount >=
       SESSION_TIMELINE_MIN_VISIBLE_ENTRIES;
   const root = useRef<HTMLDivElement>(null);
-  const navigationVisible = useChatNavigationVisible(root, globalNavigation);
+  const navigationVisible = useChatNavigationVisible(
+    root,
+    !props.hideSessionTimeline,
+  );
   const list = useRef<MessageListHandle>(null);
   const anchor = useRef<ReadingAnchor | undefined>(undefined);
   const entryDirection = useRef<'older' | 'newer'>('older');
@@ -450,10 +463,15 @@ export const TranscriptViewport = forwardRef<
       className={`${styles.root} relative flex min-h-0 flex-1`}
       data-history-viewport={historical ? 'historical' : 'live'}
     >
+      {!props.hideSessionTimeline &&
+        !navigationVisible &&
+        props.timelineAction && (
+          <div className={styles.searchAction}>{props.timelineAction}</div>
+        )}
       {globalNavigation && (
         <div className={styles.navigation} hidden={!navigationVisible}>
           <GlobalTurnNavigation
-            action={props.timelineAction}
+            action={navigationVisible ? props.timelineAction : undefined}
             state={viewport.navigation}
             store={viewport.store}
             follow={navigationVisible ? follow : undefined}
@@ -526,9 +544,12 @@ export const TranscriptViewport = forwardRef<
               key={viewport.viewKey}
               ref={list}
               messages={viewport.messages}
+              deletion={historical ? undefined : deletion}
               mcpAppSessionId={props.mcpAppSessionId ?? props.sourceSessionId}
               timelineAction={
-                globalNavigation ? undefined : props.timelineAction
+                globalNavigation || !navigationVisible
+                  ? undefined
+                  : props.timelineAction
               }
               hideSessionTimeline={
                 historical || globalNavigation || props.hideSessionTimeline
@@ -573,6 +594,9 @@ export const TranscriptViewport = forwardRef<
                 : {})}
             />
           </TurnCallsProvider>
+          {deletion && !historical && (
+            <MessageDeletionToolbar controls={deletion} />
+          )}
           {historical && !onCanScrollToBottomChange && (
             <Button
               className="absolute bottom-3 left-1/2 -translate-x-1/2"

@@ -82,6 +82,10 @@ for (const required of [
   'cli-entry.js',
   'web-shell/index.html',
   'web-shell/assets',
+  'generated-ui/main.js',
+  'generated-ui/app.html',
+  'generated-ui/skills/generated-ui/SKILL.md',
+  'generated-ui/THIRD_PARTY_NOTICES.txt',
 ]) {
   const candidate = path.join(distDir, required);
   if (!fs.existsSync(candidate)) {

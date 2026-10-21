@@ -7,6 +7,10 @@
 // Traductions françaises pour Qwen Code CLI
 
 export default {
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Active Generated UI intégré dans les sessions locales compatibles. Redémarrez la session concernée pour appliquer les modifications.',
+
   // ============================================================================
   // Aide / Composants UI
   // ============================================================================
@@ -2140,6 +2144,10 @@ export default {
     "Impossible d'écrire dans le terminal — copiez manuellement l'URL ci-dessus.",
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'API Key invalide. Les Coding Plan API Keys commencent par "sk-sp-". Veuillez vérifier.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'API Key invalide. Les clés à la demande commencent par "sk-" ou "sk-ws-". Les clés Token Plan ("sk-sp-") nécessitent l\'entrée Token Plan.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'API Key invalide. Les Token Plan API Keys commencent par "sk-sp-". Générez-en une depuis la console Token Plan, ou utilisez l\'entrée Standard API Key pour une clé à la demande.',
   'Lock release warning': 'Avertissement de libération du verrou',
   'Metadata write warning': "Avertissement d'écriture des métadonnées",
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":

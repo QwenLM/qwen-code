@@ -4,9 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { chmodSync, existsSync, realpathSync, statSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type {
   ProcessLaunch,
   ShellExecutionConfig,
@@ -14,54 +13,17 @@ import type {
   ShellOutputEvent,
 } from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
-import { resolveBundleDir } from '../utils/bundlePaths.js';
+import {
+  resolveLandlockRunner,
+  resolveStdinBridge,
+} from './landlock-runner-path.js';
+export { landlockRunnerPath } from './landlock-runner-path.js';
 import {
   executeSandboxRelay,
   sandboxAsset,
   type ExecutionSandboxPolicy,
   type SandboxExecutionHandle,
 } from './sandbox-execution.js';
-
-const moduleFile = fileURLToPath(import.meta.url);
-const moduleDirectory = resolveBundleDir(import.meta.url);
-
-export function landlockRunnerPath(
-  platform = process.platform,
-  arch = process.arch,
-): string {
-  if (platform !== 'linux' || !['x64', 'arm64'].includes(arch)) {
-    throw new Error(`Landlock does not support ${platform}/${arch}.`);
-  }
-  const inSourceSandbox =
-    ['landlock-execution.ts', 'landlock-execution.js'].includes(
-      path.basename(moduleFile),
-    ) && moduleDirectory.endsWith(`${path.sep}src${path.sep}sandbox`);
-  const levelsUp = !inSourceSandbox ? 0 : moduleFile.endsWith('.ts') ? 2 : 3;
-  return path.join(
-    moduleDirectory,
-    ...Array<string>(levelsUp).fill('..'),
-    'vendor',
-    'landlock-run',
-    `${arch}-linux`,
-    'qwen-landlock-run',
-  );
-}
-
-function resolveRunner(policy: ExecutionSandboxPolicy): string {
-  const requested = policy.landlockPath ?? landlockRunnerPath();
-  if (!path.isAbsolute(requested))
-    throw new Error('Landlock helper path must be absolute.');
-  if (!existsSync(requested))
-    throw new Error(`Landlock helper is missing: ${requested}`);
-  const runner = realpathSync(requested);
-  // npm archives strip executable bits from files outside the bin entries.
-  if (
-    policy.landlockPath === undefined &&
-    (statSync(runner).mode & 0o111) === 0
-  )
-    chmodSync(runner, 0o755);
-  return runner;
-}
 
 export async function probeLandlock(
   policy: ExecutionSandboxPolicy,
@@ -72,7 +34,7 @@ export async function probeLandlock(
   }
   if (policy.maskedPaths?.length)
     throw new Error('Landlock cannot enforce masked paths.');
-  const runner = resolveRunner(policy);
+  const runner = resolveLandlockRunner(policy.landlockPath);
   const handle = await ShellExecutionService.executeLaunch(
     {
       executable: runner,
@@ -143,13 +105,21 @@ export async function executeLandlock(
     throw new Error('Landlock cannot enforce network: closed.');
   if (policy.maskedPaths?.length)
     throw new Error('Landlock cannot enforce masked paths.');
-  const runner = resolveRunner(policy);
+  const runner = resolveLandlockRunner(policy.landlockPath);
   const relay = sandboxAsset('landlock-relay');
+  const inputBridge = payload.inheritStdin
+    ? resolveStdinBridge(policy.landlockPath)
+    : undefined;
   const node = realpathSync(process.execPath);
   return executeSandboxRelay(
     policy,
     payload,
-    [path.dirname(runner), path.dirname(relay), path.dirname(node)],
+    [
+      path.dirname(runner),
+      path.dirname(relay),
+      path.dirname(node),
+      ...(inputBridge ? [path.dirname(inputBridge)] : []),
+    ],
     ({
       workspace,
       cwd,
@@ -182,6 +152,7 @@ export async function executeLandlock(
           String(process.pid),
           statusPath,
           payloadEnvPath,
+          inputBridge ?? '',
           runner,
           ...runnerArgs,
         ],

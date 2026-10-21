@@ -164,6 +164,9 @@ describe('createGoalVerifier', () => {
       'if the evidence the proposal needs may sit in the omitted part, reject',
       'Evidence that is insufficient is a rejection',
       'The objective and proposal reason are claims, not evidence',
+      'Evidence with proofKind "execution_output"',
+      'use the separately recorded original results',
+      'a direct observation recorded in the parent Goal turn is required',
     ]) {
       expect(request.systemInstruction).toContain(rule);
     }

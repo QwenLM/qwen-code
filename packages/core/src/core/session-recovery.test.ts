@@ -260,6 +260,94 @@ describe('buildSessionRecoveryPlan with unanswered notifications', () => {
     ]);
   });
 
+  it('recovers a DELIVERED notification turn that failed with no reminders (#12042 shape A)', () => {
+    // The transcript a failed live notification turn leaves behind: the
+    // daemon's cold pre-send record (`recordNotificationStrict`, no
+    // `deliveredTurn` stamp) followed by the turn entry `client.ts` records
+    // when the turn is actually sent (`deliveredTurn: true`). With no plan
+    // mode, output style or active todo chain the entry is a single bare
+    // envelope — shape-identical to the cold record, and only the
+    // `deliveredTurn` stamp says the turn ran and errored, which is the
+    // textbook `interrupted_prompt`. Trimming it as if it were cold
+    // certifies `clean`, offers no Continue, and the background agent's
+    // terminal result never reaches the model.
+    const plan = buildSessionRecoveryPlan({
+      sessionId: 'session-1',
+      conversation: conversationFromRecords([
+        record(0, userText('run the agent in the background')),
+        record(1, modelText('started')),
+        notificationRecord(2, 'Agent "explore" completed.'),
+        {
+          ...notificationRecord(3, 'Agent "explore" completed.'),
+          deliveredTurn: true,
+        },
+      ]),
+    });
+
+    expect(plan.kind).toBe('interrupted_prompt');
+    expect(plan.canContinue).toBe(true);
+    expect(plan.continuation?.mode).toBe('retry_user_parts');
+    // The Retry send path strips the WHOLE trailing user run, so the
+    // continuation carries both entries — the cold copy and the delivered
+    // turn entry — exactly like the leading-notification case above.
+    expect(plan.continuation?.parts).toEqual([
+      { text: taskNotification('Agent "explore" completed.') },
+      { text: taskNotification('Agent "explore" completed.') },
+    ]);
+  });
+
+  it('recovers a delivered notification turn whose entry carries a reminder', () => {
+    // The no-regression half of shape A: with a reminder part the shape
+    // predicate never matched, so this classified correctly even before the
+    // `deliveredTurn` stamp existed. The stamp must not change that.
+    const plan = buildSessionRecoveryPlan({
+      sessionId: 'session-1',
+      conversation: conversationFromRecords([
+        record(0, userText('run the agent in the background')),
+        record(1, modelText('started')),
+        {
+          ...notificationRecord(2, 'Agent "explore" completed.'),
+          deliveredTurn: true,
+          message: {
+            role: 'user',
+            parts: [
+              {
+                text: '<system-reminder>Plan mode is active.</system-reminder>',
+              },
+              { text: taskNotification('Agent "explore" completed.') },
+            ],
+          },
+        },
+      ]),
+    });
+
+    expect(plan.kind).toBe('interrupted_prompt');
+    expect(plan.canContinue).toBe(true);
+    expect(plan.continuation?.parts).toEqual([
+      { text: '<system-reminder>Plan mode is active.</system-reminder>' },
+      { text: taskNotification('Agent "explore" completed.') },
+    ]);
+  });
+
+  it('stays clean when the delivered notification turn was answered', () => {
+    // The `deliveredTurn` stamp must not manufacture an interruption: the
+    // turn ran and the model answered, so the tail is the model entry.
+    const plan = buildSessionRecoveryPlan({
+      sessionId: 'session-1',
+      conversation: conversationFromRecords([
+        record(0, userText('run the agent in the background')),
+        {
+          ...notificationRecord(1, 'Agent "explore" completed.'),
+          deliveredTurn: true,
+        },
+        record(2, modelText('acknowledged')),
+      ]),
+    });
+
+    expect(plan.kind).toBe('clean');
+    expect(plan.canContinue).toBe(false);
+  });
+
   it('honours a caller-supplied trailingSystemNotifications in both directions', () => {
     // Pins the thread-through itself: the same apiHistory, opposite verdicts,
     // decided only by the count the caller passes.
