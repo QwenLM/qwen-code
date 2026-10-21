@@ -195,4 +195,23 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       );
     },
   );
+
+  it(
+    'names the blocking head ticket when it times out behind one',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-blocked-'));
+      const queue = queueDir(home);
+      mkdirSync(queue, { recursive: true });
+      // A live owner with a fresh mtime is not reapable, so the lock stays out
+      // of reach and the timeout has to name what blocked it.
+      const name = `0000000001-${process.pid}`;
+      writeFileSync(join(queue, name), '');
+      const stub = flockStub(freeFlock);
+      const result = await acquire(home, 3, stub);
+      expect(result.code).toBe(1);
+      expect(result.out).toContain(`head of queue is ${name}`);
+      expect(readdirSync(queue).filter((f) => f !== '.seq')).toEqual([name]);
+    },
+  );
 });

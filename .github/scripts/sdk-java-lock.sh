@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-# flock(2) does not order its wakeups: under continuous arrivals one waiter
-# can lose every release and starve to its wait budget (qwen-code#14743).
-# Take a ticket first, so only the oldest live ticket touches the lock; the
-# rest sleep. Tickets carry their owner's PID, and a dead owner's ticket is
-# dropped by the next waiter. The lock itself still releases at the step
-# boundary, so release semantics are unchanged.
+# flock(2) does not promise an order for blocked waiters, and a waiter that
+# re-enters the wait queue loses its place behind every waiter that stayed
+# resident -- under continuous arrivals that starves it to its wait budget
+# (qwen-code#14743). Take a ticket first, so only the head of line touches
+# the lock; the rest sleep. Tickets carry their owner's PID, and a ticket
+# whose owner is gone is dropped by the next waiter. The lock itself still
+# releases at the step boundary, so release semantics are unchanged.
 #
 # Source this file and call `sdk_java_lock_acquire <wait-seconds>`; it returns
 # non-zero on timeout with the pinned `lock not acquired within` error.
@@ -36,9 +37,9 @@ sdk_java_lock_acquire() {
 
   local start=${SECONDS} head name pid mtime age remaining last_log=-60
   while true; do
-    # Drop owners that are gone. A live waiter re-touches every loop, so a
-    # stale mtime means the owner is gone even when its PID was recycled to a
-    # live process -- that case otherwise wedges an idle lock for every job.
+    # Drop tickets whose owner is gone. A waiter waiting its turn re-touches
+    # every loop; the head cannot while it is blocked in `flock`, so the mtime
+    # arm below also bounds a ticket whose PID was recycled to a live process.
     for head in "${queue}/"*; do
       [[ -e ${head} && ${head##*/} != .seq ]] || continue
       name=${head##*/}
@@ -48,7 +49,8 @@ sdk_java_lock_acquire() {
           || { stat -f %m "${head}" 2>/dev/null; } || echo 0
       )
       age=$((${EPOCHSECONDS:-$(date +%s)} - mtime))
-      # ponytail: 1800s is far above the ~7s touch cadence of a live waiter.
+      # 1800s is far above one full hold (~925s): this is the arm that clears
+      # a ticket whose PID was recycled, since `kill -0` still answers for it.
       if ((age > 1800)) ||
         { ((age > 10)) && ! kill -0 "${pid}" 2>/dev/null; }; then
         rm -f "${head}"
@@ -74,7 +76,7 @@ sdk_java_lock_acquire() {
     fi
     if ((SECONDS - start >= wait_seconds)); then
       rm -f "${ticket}"
-      echo "::error::sdk-java host lock not acquired within $((wait_seconds / 60)) minutes as queue ticket ${seq}"
+      echo "::error::sdk-java host lock not acquired within $((wait_seconds / 60)) minutes as queue ticket ${seq}; head of queue is ${head##*/}"
       return 1
     fi
     touch "${ticket}"

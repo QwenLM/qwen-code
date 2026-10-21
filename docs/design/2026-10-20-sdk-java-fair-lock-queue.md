@@ -10,18 +10,21 @@ file, `~/.cache/qwen-code-ci/sdk-java-tests.lock`, via `flock --wait`. On
 waited the full 2400 s, then 3600 s, then 5400 s budget and failed before
 executing a test, on at least three physical hosts at once (#14566, #14743).
 
-`flock(2)` does not queue waiters. A release wakes every sleeping waiter and
-the kernel wakes them with no ordering, so under continuous arrivals one
-waiter can lose every release and starve without bound. A wait budget bounds
-one attempt, not the wait: raising 2400 → 3600 → 5400 s only lowers the
-failure probability. At least three hosts each run several runner
-registrations against the same lock, so demand scales with arrival while
-capacity is one hold at a time — no constant budget bounds the queue.
+`flock(2)` makes no promise about the order in which blocked waiters are
+granted the lock, and the order measured on Linux is insertion order: a
+waiter keeps its place only while it stays blocked in one call. Re-entering
+the queue — a second acquisition in a later step, a poll, or a wait cut into
+slices — puts it behind every waiter that stayed resident, and under
+continuous arrivals that can repeat without bound. A wait budget bounds one
+attempt, not the wait: raising 2400 → 3600 → 5400 s only lowers the failure
+probability. At least three hosts each run several runner registrations
+against the same lock, so demand scales with arrival while capacity is one
+hold at a time — no constant budget bounds the queue.
 
 ## Goals and non-goals
 
 - Goal: make the wait deterministic. A waiter's worst-case wait is the work
-  ahead of it in line, not a wake-up race.
+  ahead of it in line, not how often it has re-entered the queue.
 - Goal: preserve the current semantics elsewhere. The lock still releases
   automatically at the step boundary; the pinned infrastructure-signature
   error text (`lock not acquired within`) stays so the rerun classifier in
@@ -49,18 +52,20 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
   to waiters that stayed blocked. Entering once keeps its arrival position.
 - Tickets carry their owner's PID. A cancelled or killed step leaves an
   orphaned ticket; the next head-of-line check reaps a ticket whose owner
-  PID is dead and whose mtime is older than 10 seconds, and also one whose
-  mtime is older than 1800 seconds even if that PID was recycled to a live
-  process. A live waiter touches its ticket every loop, so a stale mtime
-  means the owner is gone and an untouched head cannot wedge an idle lock.
+  PID is dead and whose mtime is older than 10 seconds. A waiter that is
+  still waiting its turn re-touches its ticket every two seconds, but the
+  head cannot touch while it is blocked in `flock`, so a second arm reaps
+  any ticket older than 1800 seconds — far above one full hold — which is
+  what keeps a ticket whose PID was recycled from wedging an idle lock.
 - On success the ticket is removed immediately: a holder needs no place in
   line once the kernel holds the lock, and a trap cannot see the helper's
   local after `return`. The lock stays on fd 9 in the step shell, so it
   still releases automatically at the step boundary — the helper changes
   acquisition order, not release semantics.
 - On timeout the helper prints
-  `::error::sdk-java host lock not acquired within N minutes as queue ticket S`
-  and returns 1, keeping the existing error-message contract.
+  `::error::sdk-java host lock not acquired within N minutes as queue ticket S; head of queue is H`
+  naming the ticket that blocked it when it was not the head, and returns 1,
+  keeping the existing error-message contract.
 - Wait observability: the helper prints its ticket number and the remaining
   budget on the first wait and at most once a minute after, which makes a
   hang attributable from the log instead of silent.
@@ -76,18 +81,26 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
   bare flock, and it rides on an untested assumption that concurrent suites
   share the host safely on a pool that just OOMed a build.
 - Cap registrations per host: needs pool topology changes outside the repo
-  and leaves the same unbounded wake race per host.
+  and leaves the same lost-place race per host.
 - Second host: at least three hosts starved simultaneously; host count is
   proven not to be the binding constraint.
 
 ### Residual failure modes, accepted deliberately
 
 - A dead waiter whose PID is recycled by a long-lived process keeps its
-  ticket until that process exits; waiters behind it still time out at the
-  existing budget. This is the same worst case as today, not a new one.
-- The counter-lock aging is a one-minute worst case for a pathological
-  kill-inside-critical-section; it costs one lost minute in a fetch-sized
-  budget.
+  ticket until the 1800 s mtime arm reaps it, so an idle lock is
+  unreachable for at most that long and a waiter behind it still has the
+  rest of its budget. If a host is wedged anyway, the operator recovery is
+  `rm -rf ~/.cache/qwen-code-ci/sdk-java-tests.lock.queue/`; nothing in the
+  repo performs it.
+- The 1800 s arm can also reap a live head's ticket, because the head is
+  blocked in `flock` and cannot touch it. That is harmless: the head is
+  already ahead of later tickets in the kernel's wait queue and keeps that
+  position.
+- The counter is serialised by `flock` on the append-only `.seq` file, and
+  the kernel releases that lock when the holder dies, so there is no aging
+  path to clear; a kill inside the read-increment-write costs at most one
+  retry.
 
 ## Validation plan
 
@@ -104,7 +117,7 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
 
 ## Acceptance criteria
 
-- All three lock sites in `sdk-java.yml` acquire through the helper at 5400 s.
+- Both lock sites in `sdk-java.yml` acquire through the helper at 5400 s.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.
