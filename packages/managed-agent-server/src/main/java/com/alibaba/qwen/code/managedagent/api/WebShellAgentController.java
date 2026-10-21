@@ -1,40 +1,46 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellAdmission;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCancelRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellChangeCwdRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellChangeModelRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCommandOperation;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCreateRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCwdOperation;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellLifecycleRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellListRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelChangeResult;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellOperationRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionModels;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionModelsRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionOptions;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionOptionsRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellStreamRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSubmitRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTask;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskCancelRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEvent;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEventQueryRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskGetRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskQueryRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscriptRequest;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.service.ManagedEventStreamService;
-import com.alibaba.qwen.code.managedagent.service.ManagedTaskCancelService;
-import com.alibaba.qwen.code.managedagent.service.ManagedTaskService;
-import com.alibaba.qwen.code.managedagent.service.SessionLifecycleService;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.ApiModels;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellAdmission;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCancelRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellChangeCwdRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellChangeModelRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCommandOperation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCreateRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCwdOperation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellListRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelChangeResult;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellOperationRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellPage;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellRenameRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellRenameResult;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSession;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionModels;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionModelsRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionOptions;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionOptionsRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellStreamRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSubmitRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTask;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskCancelRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskEvent;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskEventQueryRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskGetRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskQueryRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscript;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscriptRequest;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.session.ManagedEventStreamService;
+import com.alibaba.qwen.code.managedagent.session.ManagedTaskCancelService;
+import com.alibaba.qwen.code.managedagent.session.ManagedTaskService;
+import com.alibaba.qwen.code.managedagent.session.SessionLifecycleService;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
@@ -119,6 +125,18 @@ public class WebShellAgentController {
                 request.sessionId());
     }
 
+    @PostMapping("/sessions/rename")
+    public ResponseEntity<WebShellRenameResult> rename(TenantContext tenant,
+            @Valid @RequestBody WebShellRenameRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
+        var result = service.renameSession(tenant.tenantId(), tenant.actorId(),
+                request.idempotencyKey(), request.sessionId(), request.title());
+        return ResponseEntity.ok().header("X-Qwen-Idempotent-Replay", Boolean.toString(result.replayed()))
+                .body(new WebShellRenameResult(result.body().id(),
+                        (String) result.body().metadata().get("title"), result.replayed()));
+    }
+
     @PostMapping("/transcript/query")
     public WebShellTranscript transcript(TenantContext tenant,
             @Valid @RequestBody WebShellTranscriptRequest request) {
@@ -148,7 +166,7 @@ public class WebShellAgentController {
         WorkspaceSelection selection = null;
         if (request.workspace() != null) {
             if (request.workspace().isNull()) {
-                throw new ApiException(HttpStatus.BAD_REQUEST,
+                throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
                         "invalid_request", "Workspace cannot be null.");
             }
             selection = WorkspaceSelection.parse(request.workspace(), true);
@@ -156,14 +174,18 @@ public class WebShellAgentController {
         }
         if (request.environmentId() != null
                 && !request.environmentId().isBlank()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST,
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
                     "unsupported_feature",
                     "Standalone Phase 1 has no environment templates.");
         }
         if (selection == null && (request.approvalMode() != null || request.planMode() != null)) {
-            throw new ApiException(HttpStatus.BAD_REQUEST,
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
                     "unsupported_approval_mode",
                     "Approval mode selection requires a bound Workspace.");
+        }
+        if (selection == null && request.skills() != null && !request.skills().isEmpty()) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature",
+                    "Session Skills require a bound Workspace.");
         }
         // The WebShell handlers forward no metadata at all (null in its
         // slot): whatever the client sends is accepted and ignored, so no
@@ -176,7 +198,7 @@ public class WebShellAgentController {
                 : service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), request.idempotencyKey(),
                         request.agentId(), null, request.title(), null,
-                        request.input(), selection, request.approvalMode(), request.planMode()));
+                        request.input(), selection, request.approvalMode(), request.planMode(), request.skills()));
         return ResponseEntity.accepted().body(admission);
     }
 

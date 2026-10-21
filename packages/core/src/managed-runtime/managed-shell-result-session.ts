@@ -239,13 +239,7 @@ export class ManagedShellResultSession {
   private receiptEvent(
     executionCallId: string,
   ): ManagedSessionEvent | undefined {
-    return this.session.authority
-      .eventsInSequenceRange(1, this.session.authority.committedSequence)
-      .find(
-        (event) =>
-          event.kind === 'tool.receipt' &&
-          event.payload['executionCallId'] === executionCallId,
-      );
+    return this.session.authority.committedReceipt(executionCallId);
   }
 
   private async saved(event: ManagedSessionEvent): Promise<SavedOutcome> {

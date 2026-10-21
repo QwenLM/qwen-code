@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.HarnessEventStream;
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -173,7 +173,7 @@ final class HostedMonitorRunProbe implements AutoCloseable {
     // case), so each later letter polls slower. The record read leads with
     // the same key.
     private String scopeKey(String sessionId) {
-        return com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+        return com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore
                 .sessionScopeKey(tenant, sessionId);
     }
 

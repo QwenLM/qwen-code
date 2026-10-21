@@ -482,8 +482,17 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         const gate = managedRuntimeDispatchGate(
           this.authority.sessionHeader.sessionKey,
         );
+        // A settled binding needs no handoff: resolving it returns early, so
+        // handing it off would only re-insert an already-settled id that
+        // pruning may have evicted, as a handed-off entry that never settles.
+        const settled = new Set(
+          (authorization.checkpoint.tools?.items ?? [])
+            .filter((item) => item.state === 'settled')
+            .map((item) => item.executionCallId),
+        );
         for (const binding of authorization.checkpoint.runtime?.bindings ??
           []) {
+          if (settled.has(binding.executionCallId)) continue;
           gate.handoff(binding.executionCallId);
         }
       }
@@ -578,7 +587,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         },
       });
       await this.commitHarnessCheckpoint(
-        `harness:await_action:${this.activation.activationId}:${request.requestId}:${identity.coveredSequence}`,
+        `harness:await_action:${this.activation.activationId}:${request.requestId}`,
         checkpoint,
         HARNESS_DURABLE_WAIT_BOUNDARY,
         request.source === 'tool_call' ? request : undefined,
@@ -633,7 +642,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         ...identity,
       });
       await this.commitHarnessCheckpoint(
-        `harness:model_output_committed:${this.activation.activationId}:${identity.coveredSequence}`,
+        `harness:model_output_committed:${this.activation.activationId}`,
         checkpoint,
         null,
       );
@@ -770,7 +779,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         agentWait: { runs },
       });
       await this.commitHarnessCheckpoint(
-        `harness:await_agent:${this.activation.activationId}:${runs.map((run) => run.childRunId).join(',')}:${identity.coveredSequence}`,
+        `harness:await_agent:${this.activation.activationId}:${runs.map((run) => run.childRunId).join(',')}`,
         checkpoint,
         HARNESS_DURABLE_WAIT_BOUNDARY,
       );
@@ -926,7 +935,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         },
       });
       await this.commitHarnessCheckpoint(
-        `harness:await_command:${this.activation.activationId}:${runs.map((run) => run.commandId).join(',')}:${identity.coveredSequence}`,
+        `harness:await_command:${this.activation.activationId}:${runs.map((run) => run.commandId).join(',')}`,
         checkpoint,
         HARNESS_DURABLE_WAIT_BOUNDARY,
       );
@@ -992,7 +1001,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
           },
         };
         await this.commitHarnessCheckpoint(
-          `harness:model_output_committed:${this.activation.activationId}:${childRunId}:${identity.coveredSequence}`,
+          `harness:model_output_committed:${this.activation.activationId}:${childRunId}`,
           adopted,
           null,
         );
@@ -1036,7 +1045,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       const advanced =
         checkpoint.continuation.phase === 'model_output_committed';
       await this.commitHarnessCheckpoint(
-        `harness:${checkpoint.continuation.phase}:${this.activation.activationId}:${childRunId}:${identity.coveredSequence}`,
+        `harness:${checkpoint.continuation.phase}:${this.activation.activationId}:${childRunId}`,
         checkpoint,
         advanced ? null : HARNESS_DURABLE_WAIT_BOUNDARY,
       );
@@ -1085,7 +1094,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
           },
         };
         await this.commitHarnessCheckpoint(
-          `harness:model_output_committed:${this.activation.activationId}:${commandId}:${identity.coveredSequence}`,
+          `harness:model_output_committed:${this.activation.activationId}:${commandId}`,
           adopted,
           null,
         );
@@ -1130,7 +1139,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       const advanced =
         checkpoint.continuation.phase === 'model_output_committed';
       await this.commitHarnessCheckpoint(
-        `harness:${checkpoint.continuation.phase}:${this.activation.activationId}:${commandId}:${identity.coveredSequence}`,
+        `harness:${checkpoint.continuation.phase}:${this.activation.activationId}:${commandId}`,
         checkpoint,
         advanced ? null : HARNESS_DURABLE_WAIT_BOUNDARY,
       );
@@ -1172,7 +1181,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         },
       };
       await this.commitHarnessCheckpoint(
-        `harness:await_command:${this.activation.activationId}:timedout:${identity.coveredSequence}`,
+        `harness:await_command:${this.activation.activationId}:timedout`,
         checkpoint,
         HARNESS_DURABLE_WAIT_BOUNDARY,
       );
@@ -1234,7 +1243,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         },
       };
       await this.commitHarnessCheckpoint(
-        `harness:prepared_adopt:${this.activation.activationId}:${promptId}:${checkpoint.identity.coveredSequence}`,
+        `harness:prepared_adopt:${this.activation.activationId}:${promptId}`,
         checkpoint,
         null,
       );
@@ -1395,7 +1404,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
           },
         });
         await this.commitHarnessCheckpoint(
-          `harness:await_runtime:${this.activation.activationId}:${pending.map((request) => request.executionCallId).join(',')}:${identity.coveredSequence}`,
+          `harness:await_runtime:${this.activation.activationId}:${pending.map((request) => request.executionCallId).join(',')}`,
           checkpoint,
           HARNESS_DURABLE_WAIT_BOUNDARY,
         );
@@ -1437,7 +1446,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       });
       const resultsReady = checkpoint.continuation.phase === 'results_ready';
       await this.commitHarnessCheckpoint(
-        `harness:${checkpoint.continuation.phase}:${this.activation.activationId}:${executionCallId}:${identity.coveredSequence}`,
+        `harness:${checkpoint.continuation.phase}:${this.activation.activationId}:${executionCallId}`,
         checkpoint,
         resultsReady ? null : HARNESS_DURABLE_WAIT_BOUNDARY,
       );
@@ -1485,7 +1494,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         ...identity,
       });
       await this.commitHarnessCheckpoint(
-        `harness:results_consumed:${this.activation.activationId}:${identity.coveredSequence}`,
+        `harness:results_consumed:${this.activation.activationId}`,
         checkpoint,
         null,
       );
@@ -1512,7 +1521,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         ...identity,
       });
       await this.commitHarnessCheckpoint(
-        `harness:turn_settled:${this.activation.activationId}:${identity.coveredSequence}`,
+        `harness:turn_settled:${this.activation.activationId}`,
         checkpoint,
         null,
       );
@@ -1540,7 +1549,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         ...identity,
       });
       await this.commitHarnessCheckpoint(
-        `harness:hook_stopped:${this.activation.activationId}:${identity.coveredSequence}`,
+        `harness:hook_stopped:${this.activation.activationId}`,
         checkpoint,
         null,
       );
@@ -1671,14 +1680,14 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       inputDigest: header.definitionRef.digest,
     });
     await this.commitHarnessCheckpoint(
-      `harness:before_model:${this.activation.activationId}:${identity.coveredSequence}`,
+      `harness:before_model:${this.activation.activationId}`,
       checkpoint,
       null,
     );
   }
 
   private async commitHarnessCheckpoint(
-    commandId: string,
+    commandPrefix: string,
     checkpoint: HarnessCheckpointV1,
     boundary: string | null,
     action?: ManagedDurableWaitCommit,
@@ -1686,12 +1695,12 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
     const header = this.authority.sessionHeader;
     const state = encodeHarnessCheckpointV1(checkpoint);
     await this.authority.commitCheckpoint(
-      {
+      (assignedState, coveredSequence) => ({
         operation: 'commitCheckpoint',
-        commandId,
+        commandId: `${commandPrefix}:${coveredSequence}`,
         sessionKey: header.sessionKey,
-        contentDigest: createHash('sha256').update(state).digest('hex'),
-      },
+        contentDigest: createHash('sha256').update(assignedState).digest('hex'),
+      }),
       {
         state,
         boundary,

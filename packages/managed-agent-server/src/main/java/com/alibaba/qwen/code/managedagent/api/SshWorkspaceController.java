@@ -1,9 +1,10 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.service.SshWorkspaceService;
-import com.alibaba.qwen.code.managedagent.service.SshWorkspaceService.Directory;
-import com.alibaba.qwen.code.managedagent.service.SshWorkspaceService.NodePage;
-import com.alibaba.qwen.code.managedagent.store.SshWorkspaceStore.Operation;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.persistence.SshWorkspaceStore.Operation;
+import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
+import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService.Directory;
+import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService.NodePage;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;

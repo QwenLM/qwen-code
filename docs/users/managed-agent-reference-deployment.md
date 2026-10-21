@@ -45,7 +45,7 @@ Keep the Harness on loopback. Record the port it reports; `--port` may advance w
 
 ## Start the Java control plane
 
-In another terminal, configure the same Harness and the database:
+In another terminal, configure the same Harness, the database and an existing Workspace directory:
 
 ```bash
 export SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent'
@@ -55,21 +55,55 @@ export QWEN_MANAGED_AGENT_HARNESS_ENABLED='true'
 export QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4170'
 export QWEN_MANAGED_AGENT_HARNESS_TOKEN='<private-random-token>'
 export QWEN_MANAGED_AGENT_CAPABILITY_DIGEST='sha256:<64-hex-digest>'
+export QWEN_MANAGED_AGENT_WORKSPACE_CWD='/srv/qwen-workspace'
 
 bin/qwen-managed-agent-server
 ```
 
-The launcher uses the server JAR in this archive. Spring Flyway applies forward database migrations before the service becomes ready. Wait for:
+Settings that cannot be expressed as environment variables, such as the Runtime credential key ring, belong in `config/application.yml`. Start from the bundled template and keep the file private:
+
+```bash
+cp config/application.example.yml config/application.yml
+chmod 600 config/application.yml
+```
+
+Both launchers load that file automatically when it exists. The launcher uses the server JAR in this archive. Spring Flyway applies forward database migrations before the service becomes ready. Wait for:
 
 ```bash
 curl --fail http://127.0.0.1:8080/actuator/health
 ```
 
+The enabled Harness turns on the Managed Session Store. The Store's base URL defaults to this server's plaintext loopback listener. Its workspace ID defaults to the one the Runtime Broker derives from `QWEN_MANAGED_AGENT_WORKSPACE_CWD`, so the identity stays the same when the tool path below is enabled. A deployment that already set `QWEN_MANAGED_AGENT_WORKSPACE_ID` must keep it: unbound Sessions resolve their Store scope from that ID. Set `QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL` only when the Harness reaches this server through another address, or when the listener serves TLS.
+
 This base configuration supports text-only Hosted Sessions. Keep the listener on loopback unless a signed or authenticated ingress is configured. The complete authentication, API, and capability configuration is bundled as `docs/server-reference.md`.
+
+## Bootstrap credentials
+
+`bin/qwen-managed-agent-bootstrap` generates the shared Harness token and capability digest, the broker token and the Runtime credential key. It writes `config/harness.env`, `config/server.env` and `config/application.yml` with mode 0600, refuses to overwrite existing files unless `--force` is given, and prints paths only:
+
+```bash
+bin/qwen-managed-agent-bootstrap
+```
+
+The generated `harness.env` and `server.env` are shell-sourceable and also valid systemd `EnvironmentFile`s. Pass `--directory /etc/qwen-managed-agent` for the systemd layout, fill in `SPRING_DATASOURCE_PASSWORD`, and adjust ownership to the service account.
+
+## Preflight check
+
+Run the bundled launcher with `--check` before the first start and after installing each new artifact. It binds the same configuration (`config/application.yml` plus the environment), starts no listener, and prints one row per input:
+
+```bash
+bin/qwen-managed-agent-server --check
+```
+
+It covers the JDK, the configuration file and its permissions, the credential key ring, the startup property validation, the auth/bind combination, Harness reachability, the Workspace files and Shell cross-settings (including the mount, creation-root or SSH-node requirement), broker credentials and directories, the Workspace `cwd`, free ports, and MySQL connectivity, the `performance_schema` grant and the Flyway version against `manifest.json`. `WARN` and `SKIP` do not fail; any `FAIL` exits 1. The port checks bind the configured addresses, so stop the service first. The command does not verify the Harness capability digest or the native Workspace storage registration.
+
+## systemd
+
+The distribution includes `systemd/` unit and environment templates for the accepted single-host topology. The control-plane unit uses `KillMode=process` so Runtime workers survive a Broker restart; the Harness unit uses `KillMode=mixed` so its tool processes terminate with it. Follow `systemd/README.md` to install them.
 
 ## Enable the accepted local-process tool path
 
-Tool execution requires the existing fail-closed Runtime and Workspace setup. At minimum, configure:
+Tool execution requires the existing fail-closed Runtime and Workspace setup. On top of the base configuration, at minimum, configure:
 
 ```bash
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED='true'
@@ -79,8 +113,6 @@ export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY='<base64-encoded-32-byte-key>'
 export QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY='/var/lib/qwen-managed-agent/runtime'
 export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/usr/bin/node'
 export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/opt/qwen-code/dist/cli.js'
-export QWEN_MANAGED_AGENT_WORKSPACE_ID='reference-workspace'
-export QWEN_MANAGED_AGENT_WORKSPACE_CWD='/srv/qwen-workspace'
 export QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED='true'
 ```
 
@@ -91,7 +123,7 @@ Before admitting file, Shell, or child Git work, complete the native storage reg
 1. Download and verify the new archive and read both manifests. Confirm the new Qwen Code/Harness, Java, protocol, and database requirements before touching the running deployment.
 2. Stop new ingress. Wait for admitted work to settle according to the deployment's existing drain procedure.
 3. Back up MySQL, `QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`, the complete Runtime credential key ring, and the exact old distribution. Do not rotate the credential key during the distribution upgrade.
-4. Stop the Java service and Hosted Harness. Preserve the Workspace and durable Runtime state.
+4. Stop the Java service and Hosted Harness. Preserve the Workspace and durable Runtime state. The shipped control-plane unit uses `KillMode=process`, so `systemctl stop` leaves Runtime workers running; reap them with `systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server` before starting the new version.
 5. Install the manifest-compatible Qwen Code/Harness and start it with the existing token and capability digest.
 6. Start the new `bin/qwen-managed-agent-server` with the same database and durable settings. Flyway migrates the schema forward.
 7. Require a healthy actuator response, read an existing Session and history, then complete one new no-tool Turn before reopening ingress. Requalify any optional tool capability before enabling it.
@@ -128,9 +160,9 @@ FROM ma_runtime_binding WHERE runtime_credential_key_id IS NOT NULL;
 
 The result lists the key IDs that persisted rows still require: expect the active ID (`reference-v2`) only. While `reference-v1` appears, that key must stay configured.
 
-The key ring is a map and cannot be supplied through a `QWEN_MANAGED_AGENT_*` environment variable: relaxed binding silently resolves an env-var form to an empty or mis-keyed ring, with no startup error. Configure `previous-credential-keys` in an `application.yml` that the server process actually loads. The reference distribution ships no configuration file, and Spring resolves an external `application.yml` against the process working directory (`./` and `./config/`), not against the distribution root; `bin/qwen-managed-agent-server` forwards its arguments to the JVM, so `--spring.config.additional-location=file:<absolute-path>` pins the location. A deployment that relies on environment variables alone starts with an empty ring, so rotating `credential-key-id` without configuration of the previous key makes rows written under it unreadable.
+The key ring is a map and cannot be supplied through a `QWEN_MANAGED_AGENT_*` environment variable: relaxed binding silently resolves an env-var form to an empty or mis-keyed ring, with no startup error. Configure `previous-credential-keys` in `config/application.yml`. The distribution ships `config/application.example.yml`, and both launchers export `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<distribution-root>/config/application.yml` when that file exists, so the location no longer depends on the process working directory and no option is added to the command's positional arguments. When the variable is already set, the launchers leave it in effect instead. A deployment that relies on environment variables alone starts with an empty ring, so rotating `credential-key-id` without configuration of the previous key makes rows written under it unreadable. An explicit `--spring.config.additional-location` command-line argument outranks this environment default; when both are present, the command-line value wins and the bundled `config/application.yml` is not loaded.
 
-The operator-recovery entry reads the same active pair and `previous-credential-keys` map as the server. Load the same external YAML for recovery, for example with `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<absolute-path>/application.yml`, and keep the new key active while retaining every key still referenced by a binding. The CSI/migration maintenance mains, including the CSI Hosted probe, still read a single credential key pair; launch those entries with the key that encrypted their target binding as the active pair.
+The operator-recovery entry reads the same active pair and `previous-credential-keys` map as the server. Its launcher loads `config/application.yml` the same way; when the file lives elsewhere, set `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<absolute-path>/application.yml`. Keep the new key active while retaining every key still referenced by a binding. The CSI/migration maintenance mains, including the CSI Hosted probe, still read a single credential key pair; launch those entries with the key that encrypted their target binding as the active pair.
 
 After successful key-ring configuration, the server and recovery entry log the resolved active ID and configured IDs once per protector instance. These IDs are non-secret identifiers already stored beside ciphertext; diagnostics JSON-escape controls and non-ASCII characters, preserve spaces and case, and never include key material, ciphertext or tokens. Compare the configured IDs with the exact IDs returned by the retirement query before using the rotated deployment. An unavailable-key error names the requested, active and configured IDs, so a silently normalised or mistyped mapping can be located without exposing secrets. This diagnostic does not prove that every stored row can be decrypted.
 

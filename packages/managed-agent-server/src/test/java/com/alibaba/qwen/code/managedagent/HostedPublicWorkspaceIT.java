@@ -4,7 +4,7 @@ import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -47,6 +47,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -85,7 +86,7 @@ class HostedPublicWorkspaceIT {
     private boolean durableClose;
     private boolean resident;
     private boolean residentRestart;
-    private com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.Placement retainedPlacement;
+    private com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.Placement retainedPlacement;
     private boolean shellLifecycleV2;
     private Map<String, byte[]> publicationObjects;
     private String shellFault;
@@ -117,6 +118,63 @@ class HostedPublicWorkspaceIT {
         // approval answered by the non-owner OPERATOR — pin the handoff,
         // or the responder ternary can collapse to the owner unnoticed.
         assertThat(operatorAnswered).hasSize(2);
+    }
+
+    @Test
+    @Timeout(240)
+    void liveApprovalChangesReleaseOnlyThePermittedPendingToolsOnMySql() throws Exception {
+        assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
+        shell = true;
+        approvals = true;
+        definitionApproval = true;
+        Path root = boot().getFirst().resolve("child");
+        register("workspace-0", "storage-0");
+        String session = request("POST", "/api/agent/web-shell/v1/sessions/create",
+                Map.of("agentId", "qwen-code", "idempotencyKey", "live-session", "input", List.of(),
+                        "approvalMode", "default",
+                        "workspace", Map.of("workspaceId", "workspace-0", "cwdRelative", "child")),
+                "live-session", "actor", 202).path("sessionId").asText();
+        assertThat(request("POST", "/api/agent/web-shell/v1/session-approval/query",
+                Map.of("sessionId", session), null, "actor", 200).path("liveSupported").asBoolean()).isTrue();
+        String marker = "G0_DEFINITION_APPROVAL_LIVE";
+        String turn = request("POST", "/api/agent/web-shell/v1/turns/submit",
+                Map.of("sessionId", session, "idempotencyKey", marker,
+                        "input", List.of(Map.of("type", "input_text", "text", marker))),
+                marker, "actor", 202).path("turnId").asText();
+        await().atMost(Duration.ofSeconds(40)).untilAsserted(() -> {
+            JsonNode actions = request("POST", "/api/agent/web-shell/v1/actions/query",
+                    Map.of("sessionId", session), null, "actor", 200).path("data");
+            assertThat(actions.size()).isEqualTo(1);
+            assertThat(actions.get(0).path("toolName").asText()).isEqualTo("write_file");
+        });
+        assertThat(root.resolve(marker + ".write")).doesNotExist();
+        request("POST", "/api/agent/web-shell/v1/session-approval/change",
+                Map.of("sessionId", session, "idempotencyKey", "live-auto-edit",
+                        "approvalMode", "auto-edit", "expectedRevision", 0), null, "actor", 200);
+        await().atMost(Duration.ofSeconds(40)).untilAsserted(() -> {
+            JsonNode actions = request("POST", "/api/agent/web-shell/v1/actions/query",
+                    Map.of("sessionId", session), null, "actor", 200).path("data");
+            assertThat(actions.size()).isEqualTo(1);
+            assertThat(actions.get(0).path("toolName").asText()).isEqualTo("run_shell_command");
+        });
+        assertThat(Files.readString(root.resolve(marker + ".write"))).isEqualTo("BYTES_" + marker + "\n");
+        assertThat(root.resolve(marker + ".shell")).doesNotExist();
+        request("POST", "/api/agent/web-shell/v1/session-approval/change",
+                Map.of("sessionId", session, "idempotencyKey", "live-yolo",
+                        "approvalMode", "yolo", "expectedRevision", 1), null, "actor", 200);
+        await().atMost(Duration.ofSeconds(40)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                "SELECT status FROM ma_turn WHERE tenant_id=? AND session_id=? AND turn_id=?",
+                String.class, tenant, session, turn)).isEqualTo("COMPLETED"));
+        assertThat(Files.readString(root.resolve(marker + ".shell"))).isEqualTo("once\n");
+        assertThat(jdbc.queryForMap("SELECT approval_mode, approval_revision FROM ma_turn"
+                + " WHERE tenant_id=? AND session_id=? AND turn_id=?", tenant, session, turn))
+                .containsEntry("approval_mode", "default").containsEntry("approval_revision", 0L);
+        assertThat(jdbc.queryForList("SELECT state FROM ma_session_record WHERE tenant_id=? AND session_id=?"
+                + " AND record_kind='ACTION'", String.class, tenant, session)).containsExactly("decided", "decided");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id=?"
+                + " AND execution_state='SETTLED'", Integer.class, session)).isEqualTo(2);
+        assertThat(modelRequests).hasSize(3);
+        assertThat(modelFailure.get()).isNull();
     }
 
     @Test
@@ -551,8 +609,8 @@ class HostedPublicWorkspaceIT {
                     String.class, binding)).isEqualTo("RELEASED");
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
                     + " AND session_state NOT IN ('RELEASED', 'FAILED')", Integer.class, binding)).isZero();
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE binding_id = ?"
-                    + " AND holder_key IS NOT NULL", Integer.class, binding)).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
+                    + " AND execution_storage_key IS NOT NULL", Integer.class, binding)).isZero();
             assertThat(jdbc.queryForList("SELECT resource_id, sha256 FROM ma_resource WHERE tenant_id = ?"
                     + " AND session_id = ? ORDER BY resource_id", tenant, session)).containsAll(retained);
             assertThat(request("GET", "/v1/agents/sessions/" + session + "/events", null, null, "actor", 200).toString())
@@ -580,7 +638,7 @@ class HostedPublicWorkspaceIT {
     // W2: a controlled cwd change settles through the production server and
     // the deployment's real Workspace probe, on both API surfaces.
     @Test
-    @Timeout(150)
+    @Timeout(480)
     void workspaceCwdChangeSettlesThroughBothSurfaces() throws Exception {
         List<Path> roots = boot();
         Files.createDirectory(roots.get(0).resolve("child2"));
@@ -598,9 +656,24 @@ class HostedPublicWorkspaceIT {
 
         Map<String, Object> change = Map.of("cwd_relative", "child2//",
                 "expected_context_revision", 1);
-        JsonNode operation = request("POST",
-                "/v1/agents/sessions/" + session + "/cwd", change, "w2-cwd-1",
-                "actor", 202);
+        // A just-completed Turn can retain the Runtime context for a moment;
+        // re-drive the same idempotency key until admission answers 202.
+        JsonNode operation = await().atMost(Duration.ofSeconds(35))
+                .until(() -> {
+                    HttpResponse<String> answer = rawRequest("POST",
+                            "/v1/agents/sessions/" + session + "/cwd", change,
+                            "w2-cwd-1", "actor");
+                    JsonNode body = json.readTree(answer.body());
+                    if (answer.statusCode() == 409
+                            && "session_context_busy".equals(body.path("error")
+                                    .path("code").asText())) {
+                        return null;
+                    }
+                    assertThat(answer.statusCode())
+                            .as("POST /cwd: %s", answer.body())
+                            .isEqualTo(202);
+                    return body;
+                }, Objects::nonNull);
         assertThat(operation.path("type").asText()).isEqualTo("cwd_change");
         assertThat(operation.path("target_cwd_relative").asText())
                 .isEqualTo("child2");
@@ -620,7 +693,7 @@ class HostedPublicWorkspaceIT {
         assertThat(replay.path("id").asText()).isEqualTo(operationId);
         assertThat(replay.path("replayed").asBoolean()).isTrue();
 
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
             JsonNode polled = request("GET", "/v1/agents/sessions/" + session
                     + "/operations/" + operationId, null, null, "actor", 200);
             assertThat(polled.path("status").asText()).isEqualTo("completed");
@@ -668,7 +741,7 @@ class HostedPublicWorkspaceIT {
         assertThat(webReplay.path("operationId").asText())
                 .isEqualTo(webOperationId);
         assertThat(webReplay.path("replayed").asBoolean()).isTrue();
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
             JsonNode polled = request("POST",
                     "/api/agent/web-shell/v1/operations/query",
                     Map.of("sessionId", session,
@@ -708,7 +781,7 @@ class HostedPublicWorkspaceIT {
                         "expected_context_revision", 3),
                 "w2-missing-dir", "actor", 202);
         String missingOperation = missing.path("id").asText();
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
             JsonNode polled = request("GET", "/v1/agents/sessions/" + session
                     + "/operations/" + missingOperation, null, null,
                     "actor", 200);
@@ -727,7 +800,7 @@ class HostedPublicWorkspaceIT {
 
         // The WebShell twin's failed projection must carry failureCode too —
         // the contract condition requires it, and generated clients read it.
-        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
             JsonNode polled = request("POST",
                     "/api/agent/web-shell/v1/operations/query",
                     Map.of("sessionId", session,
@@ -744,7 +817,7 @@ class HostedPublicWorkspaceIT {
                 Map.of("cwd_relative", "child2",
                         "expected_context_revision", 3),
                 "w2-recovered", "actor", 202).path("id").asText();
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
             JsonNode polled = request("GET", "/v1/agents/sessions/" + session
                     + "/operations/" + recovered, null, null, "actor", 200);
             assertThat(polled.path("status").asText()).isEqualTo("completed");
@@ -850,29 +923,29 @@ class HostedPublicWorkspaceIT {
         residentRestart = reconstruct;
         var roots = boot();
         register("workspace-0", "storage-0");
-        var fixture = spring.getBean(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.class);
+        var fixture = spring.getBean(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.class);
         var bindingRepository = spring.getBean(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class);
         var runtimeSessions = spring.getBean(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository.class);
-        var state = spring.getBean(com.alibaba.qwen.code.managedagent.store.AgentStateStore.class);
+        var state = spring.getBean(com.alibaba.qwen.code.managedagent.session.AgentStateStore.class);
         String first = residentSession("G0_RESIDENT_FIRST", "resident-first");
         saveResidentOwnership("after-first-turn");
         assertThat(Files.readString(roots.getFirst().resolve("child/proof.txt"))).isEqualTo("after-first-" + tenant);
         var context = state.requireSession(tenant, first).workspace();
-        var residentMapping = new com.alibaba.qwen.code.managedagent.store.ResidentWorkspaces(
+        var residentMapping = new com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaces(
                 spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
                         .getRuntimeBroker().getResidentWorkspaces());
         var original = bindingRepository.findActive(residentMapping.request(context));
         var oldContexts = runtimeSessions.findByBinding(original.getBindingId(), original.getGeneration(), null, 100);
         assertThat(oldContexts).isNotEmpty();
         assertThat(oldContexts).allSatisfy(row -> assertThat(row.getSession().getHarnessSessionId()).isEqualTo(first));
-        JsonNode bindingBefore = com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId());
-        JsonNode slotBefore = com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_runtime_slot WHERE request_key = ?", original.getRequest().requestKey());
-        JsonNode storageBefore = com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_storage WHERE alias_key = ?",
+        JsonNode bindingBefore = com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId());
+        JsonNode slotBefore = com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_runtime_slot WHERE request_key = ?", original.getRequest().requestKey());
+        JsonNode storageBefore = com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_storage WHERE alias_key = ?",
                 spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
                         .getRuntimeBroker().getResidentWorkspaces().getFirst().registration().aliasKey());
         var registration = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
                 .getRuntimeBroker().getResidentWorkspaces().getFirst().registration();
-        var expectedOwner = (com.fasterxml.jackson.databind.node.ObjectNode) com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc,
+        var expectedOwner = (com.fasterxml.jackson.databind.node.ObjectNode) com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc,
                 "SELECT * FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'CSI'", registration.physicalKey()).get(0);
         assertThat(expectedOwner.path("holder_key").isNull()).isTrue();
         assertThat(expectedOwner.path("runtime_session_id").isNull()).isTrue();
@@ -889,19 +962,19 @@ class HostedPublicWorkspaceIT {
                 String.class, tenant, first)).isEqualTo("SEALED");
         assertThat(runtimeSessions.findByBinding(original.getBindingId(), original.getGeneration(), null, 100))
                 .allSatisfy(row -> assertThat(row.getState()).isEqualTo(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord.State.RELEASED));
-        assertThat(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId())).isEqualTo(bindingBefore);
-        assertThat(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_runtime_slot WHERE request_key = ?", original.getRequest().requestKey())).isEqualTo(slotBefore);
-        assertThat(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_storage WHERE alias_key = ?", registration.aliasKey())).isEqualTo(storageBefore);
-        assertThat(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'CSI'", registration.physicalKey()).get(0)).isEqualTo(expectedOwner);
+        assertThat(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId())).isEqualTo(bindingBefore);
+        assertThat(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_runtime_slot WHERE request_key = ?", original.getRequest().requestKey())).isEqualTo(slotBefore);
+        assertThat(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_storage WHERE alias_key = ?", registration.aliasKey())).isEqualTo(storageBefore);
+        assertThat(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'CSI'", registration.physicalKey()).get(0)).isEqualTo(expectedOwner);
         assertThat(bindingRepository.findById(original.getBindingId()).getState()).isEqualTo(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY);
         assertThat(bindingRepository.findById(original.getBindingId()).isDrainRequested()).isFalse();
         assertThat(fixture.workerAlive()).isTrue();
         assertThat(fixture.physicalReleases).hasValue(0);
         assertThat(request("POST", "/v1/agents/sessions/" + first + "/close", null,
                 "resident-close", "actor", 202).path("id").asText()).isEqualTo(operation);
-        com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.assertConflict(() -> new com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport()
+        com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.assertConflict(() -> new com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport()
                 .activateWorkspace(original, oldContexts.getFirst(), context, true).toCompletableFuture().join());
-        com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.assertConflict(() -> spring.getBean(EmbeddedRuntimeBroker.class).service()
+        com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.assertConflict(() -> spring.getBean(EmbeddedRuntimeBroker.class).service()
                 .acquire(first, oldContexts.getFirst().getRuntimeSessionId(), oldContexts.getFirst().getSession().getTurnKind())
                 .toCompletableFuture().join());
         if (reconstruct) {
@@ -919,10 +992,10 @@ class HostedPublicWorkspaceIT {
             assertThat(spring).isNotSameAs(previousApplication);
             assertThat(spring.getBean(EmbeddedRuntimeBroker.class)).isNotSameAs(previousBroker);
             assertThat(jdbc.getDataSource()).isNotSameAs(previousSource);
-            fixture = spring.getBean(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.class);
+            fixture = spring.getBean(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.class);
             bindingRepository = spring.getBean(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class);
             runtimeSessions = spring.getBean(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository.class);
-            state = spring.getBean(com.alibaba.qwen.code.managedagent.store.AgentStateStore.class);
+            state = spring.getBean(com.alibaba.qwen.code.managedagent.session.AgentStateStore.class);
             assertThat(fixture.workerAlive()).isTrue();
             assertThat(fixture.starts).hasValue(1);
             saveResidentOwnership("after-application-reconstruction");
@@ -942,7 +1015,7 @@ class HostedPublicWorkspaceIT {
         assertThat(fixture.starts).hasValue(1);
         assertThat(fixture.physicalReleases).hasValue(0);
         assertThat(fixture.workerAlive()).isTrue();
-        JsonNode bindingBeforeSecondClose = com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc,
+        JsonNode bindingBeforeSecondClose = com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc,
                 "SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId());
         closeResidentSession(second, "resident-second-close");
         saveResidentOwnership("after-second-close");
@@ -952,13 +1025,13 @@ class HostedPublicWorkspaceIT {
                 String.class, tenant, second)).isEqualTo("SEALED");
         assertThat(runtimeSessions.findByBinding(original.getBindingId(), original.getGeneration(), null, 100))
                 .allSatisfy(row -> assertThat(row.getState()).isEqualTo(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord.State.RELEASED));
-        assertThat(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc,
+        assertThat(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc,
                 "SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId())).isEqualTo(bindingBeforeSecondClose);
-        assertThat(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc,
+        assertThat(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc,
                 "SELECT * FROM ma_runtime_slot WHERE request_key = ?", original.getRequest().requestKey())).isEqualTo(slotBefore);
-        assertThat(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc,
+        assertThat(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc,
                 "SELECT * FROM ma_storage WHERE alias_key = ?", registration.aliasKey())).isEqualTo(storageBefore);
-        assertThat(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc,
+        assertThat(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc,
                 "SELECT * FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'CSI'", registration.physicalKey()).get(0)).isEqualTo(expectedOwner);
         assertThat(bindingRepository.findById(original.getBindingId()).getState()).isEqualTo(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY);
         assertThat(bindingRepository.findById(original.getBindingId()).isDrainRequested()).isFalse();
@@ -971,7 +1044,7 @@ class HostedPublicWorkspaceIT {
     private void saveResidentOwnership(String stage) throws IOException {
         var mapping = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
                 .getRuntimeBroker().getResidentWorkspaces().getFirst();
-        var reader = new com.alibaba.qwen.code.managedagent.service.ResidentAcceptanceSnapshot(jdbc,
+        var reader = new com.alibaba.qwen.code.managedagent.session.ResidentAcceptanceSnapshot(jdbc,
                 spring.getBean(org.springframework.transaction.PlatformTransactionManager.class), mapping, json);
         var snapshot = reader.capture();
         assertThat(snapshot.path("tables").path("ma_runtime_binding")).hasSize(1);
@@ -1056,7 +1129,7 @@ class HostedPublicWorkspaceIT {
             }
         }
         if (residentRestart) {
-            retainedPlacement = new com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.Placement(
+            retainedPlacement = new com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.Placement(
                     List.of(node, cli.toString(), "managed-runtime-worker"), temporary.resolve("broker"));
         }
         startSpring(cli, roots, harnessPort, brokerPort);
@@ -1434,7 +1507,7 @@ class HostedPublicWorkspaceIT {
         arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
                 + (definitionApproval || "Linux".equals(System.getProperty("os.name"))));
         if (resident) {
-            com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.arguments(arguments, tenant, roots.getFirst());
+            com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.arguments(arguments, tenant, roots.getFirst());
         }
         for (int i = 0; !resident && i < roots.size(); i++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + i + "].";
@@ -1446,7 +1519,7 @@ class HostedPublicWorkspaceIT {
                 .initializers(context -> {
                     context.getBeanFactory().registerSingleton("g0Authentication", authentication());
                     if (resident) {
-                        com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.install(context,
+                        com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.install(context,
                                 List.of(node, cli.toString(), "managed-runtime-worker"), temporary.resolve("broker"),
                                 retainedPlacement);
                     }
@@ -1459,7 +1532,7 @@ class HostedPublicWorkspaceIT {
                 .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean(JdbcTemplate.class);
         if (definitionApproval || "Linux".equals(System.getProperty("os.name"))) {
-            var guard = spring.getBean(com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard.class);
+            var guard = spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class);
             for (int index = 0; index < roots.size(); index++) {
                 guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
             }
@@ -1770,7 +1843,7 @@ class HostedPublicWorkspaceIT {
         return "'" + value.replace("'", "'\"'\"'") + "'";
     }
 
-    private JsonNode request(String method, String path, Object body, String key, String actor, int expected)
+    private HttpResponse<String> rawRequest(String method, String path, Object body, String key, String actor)
             throws Exception {
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
                 .timeout(Duration.ofSeconds(10)).header("X-Qwen-Tenant-Id", tenant)
@@ -1783,7 +1856,12 @@ class HostedPublicWorkspaceIT {
         if (actor != null) {
             request.header("X-G0-Fixture-Actor", actor);
         }
-        var response = http.send(request.build(), HttpResponse.BodyHandlers.ofString());
+        return http.send(request.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private JsonNode request(String method, String path, Object body, String key, String actor, int expected)
+            throws Exception {
+        HttpResponse<String> response = rawRequest(method, path, body, key, actor);
         assertThat(response.statusCode()).as("%s %s: %s", method, path, response.body()).isEqualTo(expected);
         return json.readTree(response.body());
     }

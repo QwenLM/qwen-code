@@ -565,21 +565,26 @@ Web Shell 时生效。配置变化不会自动改变当前会话模式；当前�
 
 ### Workspace 会话创建超时
 
-Workspace 创建由 SDK 分别约束能力查询和创建请求，WebShell 另设 75 秒的
-兜底总超时，覆盖常见的单次能力预检与创建两个默认 30 秒请求，并留出 15 秒余量。冷缓存或缓存过期时，
-能力查询 20 秒、创建请求 15 秒可以在约 35 秒后成功，无需调整配置。
+Workspace 创建由 SDK 分别约束能力查询和创建请求。能力查询沿用 SDK 的通用 30 秒
+请求预算；创建请求按 daemon 通告的会话预算 `limits.sessionRestoreTimeoutMs` 加 10 秒余量，
+低于 30 秒时按 30 秒计，尚未读到能力时使用 70 秒。WebShell 再按同一通告预算推导
+创建动作的总上限：一次 30 秒能力预检 + 一次创建请求 + 15 秒余量，默认会话预算
+60 秒下为 115 秒。冷缓存或缓存过期时，能力查询 20 秒、创建请求 15 秒可以在约
+35 秒后成功，无需调整配置。
 此规则也适用于已有会话时创建新会话；SDK standalone 创建保持原有超时行为。
 并发能力刷新可能取代原预检并延长请求链；即使每个请求都未超过自身截止时间，
-创建动作仍可能先触及 75 秒上限。
+创建动作仍可能先触及该总上限。
 
-| 配置／机制                  | 默认值     | 作用与边界                                                           |
-| --------------------------- | ---------- | -------------------------------------------------------------------- |
-| WebShell workspace 创建动作 | `75000` ms | 兜底限制不响应 SDK 取消信号的传输；超时后成功返回的会话会被 detach。 |
-| `onSessionCreated` 回调     | `30000` ms | 创建完成后才开始计时的独立宿主回调限制；没有公开的超时配置属性。     |
+| 配置／机制                  | 默认值                           | 作用与边界                                                                                                 |
+| --------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| WebShell workspace 创建动作 | 由通告预算推导，默认 `115000` ms | 兜底限制不响应 SDK 取消信号的传输；超时后成功返回的会话会被 detach。上限按 JavaScript 定时器的最大值截断。 |
+| `onSessionCreated` 回调     | `30000` ms                       | 创建完成后才开始计时的独立宿主回调限制；没有公开的超时配置属性。                                           |
 
 WebShell Provider 不透传 SDK 的
 [`fetchTimeoutMs`](../../docs/developers/daemon/13-sdk-daemon-client.md#configuration)，
-能力预检和创建请求使用 SDK 默认请求预算；提高 daemon 的初始化超时不会提高这两类请求的 SDK 超时。
+能力预检使用 SDK 的通用请求预算；创建与 worktree reset 请求，以及上面的创建动作上限，
+都随 daemon 通告的会话预算增长。提高 `--initialize-timeout-ms` 会提高该通告预算，
+但不改变能力预检的 30 秒超时；显式设置的 `--session-restore-timeout-ms` 优先。
 load/resume 使用独立预算；服务端优先级、客户端覆盖顺序、能力缓存前提和缺失时的回退值见
 [restore 超时契约](../../docs/design/2026-08-07-safe-session-restore-timeout.md#timeout-contract)，
 SDK 和 WebShell 的 restore 余量见
@@ -594,24 +599,25 @@ daemon 参数的完整含义和配置方式见
 
 ### WebShell
 
-| 属性                       | 类型                                                                                                                                  | 说明                                                                                                                                           |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `onSessionIdChange`        | `(sessionId: string \| undefined, workspaceId?: string, workspaceCwd?: string, sessionContext?: DaemonProductSessionContext) => void` | 当前 session、工作区或显式产品上下文变化时触发；standalone 和 Live 通过第四个参数上报                                                          |
-| `onSessionCreated`         | `(sessionId: string) => Promise<void> \| void`                                                                                        | 新 session 创建后触发；完成前会阻塞 session 初始化和 prompt 提交，最长等待 30 秒                                                               |
-| `theme`                    | `'dark' \| 'light'`                                                                                                                   | UI 主题，默认 `dark`                                                                                                                           |
-| `onThemeChange`            | `(theme: WebShellTheme) => void`                                                                                                      | `/theme` 命令切换主题后触发                                                                                                                    |
-| `onThemeResolved`          | `(theme: WebShellTheme) => void`                                                                                                      | 未提供 `theme` 且 shell 从 daemon 设置解析出主题时触发；仅供宿主同步文档外观，不应持久化为宿主偏好                                             |
-| `language`                 | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`                                                                                                  | UI 语言                                                                                                                                        |
-| `onLanguageChange`         | `(language: WebShellLanguage) => void`                                                                                                | `/language ui` 切换 UI 语言后触发                                                                                                              |
-| `onLanguageResolved`       | `(language: WebShellLanguage) => void`                                                                                                | 未提供 `language` 时，有效 UI 语言在未成为宿主偏好时触发，包括设置解析、乐观切换与回滚；仅供同步文档外观                                       |
-| `brand`                    | `WebShellBrand`                                                                                                                       | 产品品牌（名称与 Logo，`logo` 为 React 节点）；提供时整体取代 daemon 解析出的品牌，见下方「品牌（白标）」                                      |
-| `onBrandResolved`          | `(brand: WebShellResolvedBrand) => void`                                                                                              | 品牌解析完成后触发，载荷只含 `name` 与 `logoDataUri`（不含 `logo` 节点），供宿主应用到自己的文档；shell 自身从不写 `document.title` 或 favicon |
-| `onSlashCommand`           | `(command: WebShellSlashCommand) => boolean \| void`                                                                                  | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为                                                                             |
-| `onSessionArtifactsChange` | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                                                                                  |
-| `onAssistantTurnSettled`   | `(event: WebShellAssistantTurnSettledEvent) => void`                                                                                  | daemon 权威终态提交后触发；多个 provider 可能重复上报，宿主按 `(sessionId, promptId)` 去重                                                     |
-| `settings`                 | `WebShellSettingsOptions`                                                                                                             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                      |
-| `showToolCalls`            | `boolean`                                                                                                                             | 是否展示用户消息旁的工具调用入口；默认 `false`，独立页面设置为 `true`。                                                                        |
-| `modelManagement`          | `WebShellModelManagementOptions`                                                                                                      | 可选。控制 WebShell 内模型新增/删除交互，默认均允许；见 [模型增删交互](#模型增删交互)。                                                        |
+| 属性                       | 类型                                                                                                                                  | 说明                                                                                                                                                                         |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `onSessionIdChange`        | `(sessionId: string \| undefined, workspaceId?: string, workspaceCwd?: string, sessionContext?: DaemonProductSessionContext) => void` | 当前 session、工作区或显式产品上下文变化时触发；standalone 和 Live 通过第四个参数上报                                                                                        |
+| `onRefreshModels`          | `({ workspaceCwd: string, sessionId?: string }) => void \| Promise<void>`                                                             | 用户刷新模型选择器时先调用；宿主可拉取并保存平台目录。未提供或返回空值都会继续重载 Qwen 模型目录并回读当前列表；拒绝则保留旧列表并显示错误。不会自动切换模型或通知其他页面。 |
+| `onSessionCreated`         | `(sessionId: string) => Promise<void> \| void`                                                                                        | 新 session 创建后触发；完成前会阻塞 session 初始化和 prompt 提交，最长等待 30 秒                                                                                             |
+| `theme`                    | `'dark' \| 'light'`                                                                                                                   | UI 主题，默认 `dark`                                                                                                                                                         |
+| `onThemeChange`            | `(theme: WebShellTheme) => void`                                                                                                      | `/theme` 命令切换主题后触发                                                                                                                                                  |
+| `onThemeResolved`          | `(theme: WebShellTheme) => void`                                                                                                      | 未提供 `theme` 且 shell 从 daemon 设置解析出主题时触发；仅供宿主同步文档外观，不应持久化为宿主偏好                                                                           |
+| `language`                 | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`                                                                                                  | UI 语言                                                                                                                                                                      |
+| `onLanguageChange`         | `(language: WebShellLanguage) => void`                                                                                                | `/language ui` 切换 UI 语言后触发                                                                                                                                            |
+| `onLanguageResolved`       | `(language: WebShellLanguage) => void`                                                                                                | 未提供 `language` 时，有效 UI 语言在未成为宿主偏好时触发，包括设置解析、乐观切换与回滚；仅供同步文档外观                                                                     |
+| `brand`                    | `WebShellBrand`                                                                                                                       | 产品品牌（名称与 Logo，`logo` 为 React 节点）；提供时整体取代 daemon 解析出的品牌，见下方「品牌（白标）」                                                                    |
+| `onBrandResolved`          | `(brand: WebShellResolvedBrand) => void`                                                                                              | 品牌解析完成后触发，载荷只含 `name` 与 `logoDataUri`（不含 `logo` 节点），供宿主应用到自己的文档；shell 自身从不写 `document.title` 或 favicon                               |
+| `onSlashCommand`           | `(command: WebShellSlashCommand) => boolean \| void`                                                                                  | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为                                                                                                           |
+| `onSessionArtifactsChange` | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                                                                                                                |
+| `onAssistantTurnSettled`   | `(event: WebShellAssistantTurnSettledEvent) => void`                                                                                  | daemon 权威终态提交后触发；多个 provider 可能重复上报，宿主按 `(sessionId, promptId)` 去重                                                                                   |
+| `settings`                 | `WebShellSettingsOptions`                                                                                                             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                                                    |
+| `showToolCalls`            | `boolean`                                                                                                                             | 是否展示用户消息旁的工具调用入口；默认 `false`，独立页面设置为 `true`。                                                                                                      |
+| `modelManagement`          | `WebShellModelManagementOptions`                                                                                                      | 可选。控制 WebShell 内模型新增/删除交互，默认均允许；见 [模型增删交互](#模型增删交互)。                                                                                      |
 
 移动访问二维码入口由 `header.showMobileAccess?: boolean` 控制，默认隐藏，适用于主聊天和分屏页头。独立入口 `main.tsx` 显式设为 `true`，保留本地 Qwen Code 用户的入口。
 

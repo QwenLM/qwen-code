@@ -1,17 +1,17 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.service.RequestDigests;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -169,12 +169,12 @@ class ManagedAgentDefinitionAdmissionTest {
         assertThatThrownBy(() -> transaction.execute(status -> disabled.insertWorkspaceSessionCommand(
                 tenant, "actor", "fresh", "fresh-digest", agentId, null,
                 null, input, "payload-digest", workspace)))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
         assertThatThrownBy(() -> transaction.execute(status -> disabled.insertTurnCommand(
                 tenant, "SUBMIT_TURN", "later", "later-digest", empty.sessionId(),
                 input, "payload-digest")))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ?",
                 Integer.class, tenant)).isEqualTo(2);
@@ -421,7 +421,7 @@ class ManagedAgentDefinitionAdmissionTest {
         // The dispatch is refused only by the unavailable Harness.
         assertThatThrownBy(() -> service.submitTurn(tenant, "actor", "later",
                 sessionId, List.of(new InputBlock("text", "go"))))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isNotEqualTo("workspace_unavailable"));
     }
@@ -466,10 +466,10 @@ class ManagedAgentDefinitionAdmissionTest {
                                 + "\",\"input\":[]}"))
                 .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString());
         var session = store.requireSession(tenant, receipt.get("id").asText());
-        var definitions = new com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore(jdbc, new RequestDigests());
+        var definitions = new com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore(jdbc, new RequestDigests());
         assertThat(definitions.pinnedContent(session).get("instructions"))
                 .isEqualTo("Review in Chinese.");
-        var resources = new com.alibaba.qwen.code.managedagent.store.ManagedSessionStore(jdbc);
+        var resources = new com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore(jdbc);
         var first = resources.publishAgentInstructions(tenant, "workspace", session.sessionId(),
                 "Review in Chinese.");
         assertThat(resources.publishAgentInstructions(tenant, "workspace", session.sessionId(),
@@ -482,7 +482,7 @@ class ManagedAgentDefinitionAdmissionTest {
         jdbc.update("UPDATE ma_session SET agent_definition_digest = ?"
                         + " WHERE tenant_id = ? AND session_id = ?", "0".repeat(64), tenant, session.sessionId());
         assertThatThrownBy(() -> definitions.pinnedContent(store.requireSession(tenant, session.sessionId())))
-                .isInstanceOf(ApiException.class);
+                .isInstanceOf(ManagedAgentException.class);
     }
 
     @Test

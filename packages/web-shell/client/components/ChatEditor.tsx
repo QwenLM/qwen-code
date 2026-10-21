@@ -1,4 +1,9 @@
 import {
+  ModelRefreshControl,
+  ModelRefreshError,
+  type ModelRefreshState,
+} from './ModelRefreshControl';
+import {
   forwardRef,
   memo,
   useImperativeHandle,
@@ -20,6 +25,7 @@ import type {
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import { useOptionalWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
+import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
 import { EXECUTION_APPROVAL_MODES } from '../utils/planMode';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -221,6 +227,7 @@ interface ChatEditorProps {
   availableModes?: readonly string[];
   planMode?: boolean;
   modeControlsDisabled?: boolean;
+  planControlsDisabled?: boolean;
   onTogglePlan?: () => void;
   sessionWorkflowEnabled?: boolean;
   currentModel?: string;
@@ -277,6 +284,7 @@ interface ChatEditorProps {
   onShowContextUsage?: () => void;
   onOpenContextUsage?: () => void;
   contextUsageControls?: ContextUsageControls;
+  modelRefresh?: ModelRefreshState;
   availableModels?: Array<{ id: string; label?: string }>;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
@@ -289,6 +297,7 @@ interface ChatEditorProps {
   selectedWorkspaceCwd?: string;
   workspaceSelectionDisabled?: boolean;
   workspaceSelectorAlwaysVisible?: boolean;
+  workspaceMenuItems?: ReactNode;
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
   /** Host-aware variant; see WorkspaceSelector. */
   onSelectHostedWorkspace?: (
@@ -308,6 +317,8 @@ interface ChatEditorProps {
   disableLegacyHistoryFallback?: boolean;
   shellModeEnabled?: boolean;
   workspaceFeaturesEnabled?: boolean;
+  fileReferenceActions?: AtMentionWorkspaceActions;
+  persistFileReferences?: boolean;
   attachmentsEnabled?: boolean;
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
   onFocusFooter?: () => boolean;
@@ -751,6 +762,8 @@ function ToolbarPopover({
   searchable = false,
   searchLabel,
   noResultsLabel,
+  searchAction,
+  searchStatus,
   header,
   submenu,
   compact = false,
@@ -767,6 +780,8 @@ function ToolbarPopover({
   searchable?: boolean;
   searchLabel?: string;
   noResultsLabel?: (query: string) => string;
+  searchAction?: ReactNode;
+  searchStatus?: ReactNode;
   header?: ReactNode;
   submenu?: {
     triggerLabel: string;
@@ -863,25 +878,37 @@ function ToolbarPopover({
       )}
     </div>
   );
+  const searchInput = searchable ? (
+    <Input
+      ref={searchInputRef}
+      type="search"
+      value={searchQuery}
+      aria-label={searchLabel}
+      placeholder={searchLabel}
+      autoComplete="off"
+      onChange={(event) => setSearchQuery(event.target.value)}
+      onKeyDown={(event) => {
+        if (!submenu || event.key !== 'ArrowLeft' || searchQuery) return;
+        event.preventDefault();
+        returningFromSubmenuRef.current = true;
+        setSubmenuOpen(false);
+      }}
+    />
+  ) : null;
   const searchableItems = (
     <>
-      {searchable && (
-        <Input
-          ref={searchInputRef}
-          type="search"
-          value={searchQuery}
-          aria-label={searchLabel}
-          placeholder={searchLabel}
-          autoComplete="off"
-          onChange={(event) => setSearchQuery(event.target.value)}
-          onKeyDown={(event) => {
-            if (!submenu || event.key !== 'ArrowLeft' || searchQuery) return;
-            event.preventDefault();
-            returningFromSubmenuRef.current = true;
-            setSubmenuOpen(false);
-          }}
-        />
-      )}
+      {searchable &&
+        (searchAction ? (
+          <div className={styles.dropdownSearch}>
+            <div className={styles.dropdownSearchRow}>
+              {searchInput}
+              {searchAction}
+            </div>
+            {searchStatus}
+          </div>
+        ) : (
+          searchInput
+        ))}
       {dropdownItems}
     </>
   );
@@ -1421,6 +1448,7 @@ export const ChatEditor = memo(
       availableModes = EXECUTION_APPROVAL_MODES,
       planMode = false,
       modeControlsDisabled = false,
+      planControlsDisabled = modeControlsDisabled,
       onTogglePlan,
       currentModel = '',
       modelControlsDisabled = false,
@@ -1450,6 +1478,7 @@ export const ChatEditor = memo(
       onShowContextUsage,
       onOpenContextUsage,
       contextUsageControls,
+      modelRefresh,
       availableModels = [],
       onSelectMode,
       onSelectModel,
@@ -1459,6 +1488,7 @@ export const ChatEditor = memo(
       selectedWorkspaceCwd,
       workspaceSelectionDisabled = false,
       workspaceSelectorAlwaysVisible = false,
+      workspaceMenuItems,
       onSelectWorkspace,
       onSelectHostedWorkspace,
       scratchWorkspaceSupported = false,
@@ -1474,6 +1504,8 @@ export const ChatEditor = memo(
       disableLegacyHistoryFallback,
       shellModeEnabled = true,
       workspaceFeaturesEnabled = true,
+      fileReferenceActions,
+      persistFileReferences,
       attachmentsEnabled = workspaceFeaturesEnabled,
       onChatWidthModeChange,
       onFocusFooter,
@@ -1661,6 +1693,8 @@ export const ChatEditor = memo(
       shellModeEnabled,
       attachmentsEnabled,
       workspaceFeaturesEnabled,
+      fileReferenceActions,
+      persistFileReferences,
       composerTagIcons,
       parseUserMessageContent,
       renderComposerTag,
@@ -1881,7 +1915,16 @@ export const ChatEditor = memo(
       ],
     );
     const handleAddMenuInsertReference = useCallback(
-      (tag: WebShellComposerTag) => {
+      async (tag: WebShellComposerTag) => {
+        const actions = core.workspaceActionsRef.current;
+        try {
+          if (tag.kind === 'file' && actions?.prepareFileReference) {
+            tag = await actions.prepareFileReference(tag);
+            if (core.workspaceActionsRef.current !== actions) return;
+          }
+        } catch {
+          return;
+        }
         addComposerTags([tag], { placement: 'inline', position: 'end' });
         const view = core.viewRef.current;
         if (view) {
@@ -1892,7 +1935,7 @@ export const ChatEditor = memo(
         }
         focusComposer();
       },
-      [addComposerTags, core.viewRef, focusComposer],
+      [addComposerTags, core.viewRef, core.workspaceActionsRef, focusComposer],
     );
     const handleAddMenuPrependSkill = useCallback(
       (invocation: string) => {
@@ -2284,9 +2327,10 @@ export const ChatEditor = memo(
     // entry is not selectable while mode controls are busy, and the host
     // rejects a toggle that races a mode transition.
     const handlePlanMenuToggle = useCallback(() => {
+      if (planControlsDisabled) return;
       onTogglePlan?.();
       core.focus();
-    }, [onTogglePlan, core]);
+    }, [onTogglePlan, core, planControlsDisabled]);
 
     const handleModelSelect = useCallback(
       (modelId: string) => {
@@ -2457,6 +2501,7 @@ export const ChatEditor = memo(
         onSelectWorkspace &&
         showToolbarAction('workspace') &&
         (workspaceSelectorAlwaysVisible ||
+          workspaceMenuItems ||
           workspaces.length > 1 ||
           scratchWorkspaceSupported ||
           existingFolderWorkspaceSupported ||
@@ -2502,6 +2547,7 @@ export const ChatEditor = memo(
           disabled={workspaceSelectionDisabled}
           busy={workspaceMutationBusy}
           alwaysVisible={workspaceSelectorAlwaysVisible}
+          menuItems={workspaceMenuItems}
           scratchSupported={scratchWorkspaceSupported}
           existingFolderSupported={existingFolderWorkspaceSupported}
           standaloneSupported={standaloneTargetSupported}
@@ -3436,6 +3482,7 @@ export const ChatEditor = memo(
                           : undefined
                       }
                       availabilityKey={JSON.stringify([
+                        core.workspaceActionsRef.current?.scopeKey,
                         fileUploadEnabled === false,
                         attachmentsEnabled,
                         uploadEnabled,
@@ -3484,7 +3531,7 @@ export const ChatEditor = memo(
                         showPlanInAddMenu
                           ? {
                               checked: planMode,
-                              disabled: modeControlsDisabled,
+                              disabled: planControlsDisabled,
                               onToggle: handlePlanMenuToggle,
                             }
                           : undefined
@@ -3580,7 +3627,7 @@ export const ChatEditor = memo(
                             // inside the chip's own click, and a focused button
                             // that becomes disabled loses focus to the body
                             // there and then.
-                            aria-disabled={modeControlsDisabled || undefined}
+                            aria-disabled={planControlsDisabled || undefined}
                             onFocus={() => {
                               planChipHadFocusRef.current = true;
                             }}
@@ -3591,7 +3638,7 @@ export const ChatEditor = memo(
                               // Inert while busy; the click still reaches the
                               // composer surface, as one on a bare part of the
                               // toolbar would.
-                              if (modeControlsDisabled) return;
+                              if (planControlsDisabled) return;
                               onTogglePlan?.();
                               // The chip unmounts once Plan is off, so it
                               // hands focus on rather than dropping it to the
@@ -3644,7 +3691,7 @@ export const ChatEditor = memo(
                             className={`${styles.toolBtn} ${styles.planControl}`}
                             data-web-shell-plan-control
                             data-disabled={
-                              modeControlsDisabled ? '' : undefined
+                              planControlsDisabled ? '' : undefined
                             }
                           >
                             {showPlanLabel ? (
@@ -3663,7 +3710,7 @@ export const ChatEditor = memo(
                               aria-label={planLabel}
                               aria-describedby={planDescriptionId}
                               checked={planMode}
-                              disabled={modeControlsDisabled}
+                              disabled={planControlsDisabled}
                               onCheckedChange={onTogglePlan}
                             />
                           </label>
@@ -3687,6 +3734,14 @@ export const ChatEditor = memo(
                         compact={compactOverlays}
                         open={modelDropdownOpen}
                         items={modelItems}
+                        searchAction={
+                          modelRefresh?.refresh ? (
+                            <ModelRefreshControl state={modelRefresh} />
+                          ) : undefined
+                        }
+                        searchStatus={
+                          <ModelRefreshError state={modelRefresh} />
+                        }
                         activeId={currentModel}
                         onOpenChange={(open) => {
                           setModelDropdownOpen(open);

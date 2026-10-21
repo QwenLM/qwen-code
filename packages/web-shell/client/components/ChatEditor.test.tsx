@@ -431,6 +431,7 @@ interface ChatEditorRenderProps
   availableModes?: ComponentProps<typeof ChatEditor>['availableModes'];
   planMode?: boolean;
   modeControlsDisabled?: boolean;
+  planControlsDisabled?: boolean;
   onTogglePlan?: () => void;
   isRunning?: boolean;
   onSubmit?: ComponentProps<typeof ChatEditor>['onSubmit'];
@@ -3470,6 +3471,36 @@ describe('ChatEditor Plan toolbar switch fallback', () => {
     }
   });
 
+  it('can disable Plan independently while keeping execution approval selectable', () => {
+    const onSelectMode = vi.fn();
+    const onTogglePlan = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode', 'plan'],
+      planControlsDisabled: true,
+      planMode: true,
+      currentMode: 'default',
+      onSelectMode,
+      onTogglePlan,
+    });
+    const plan = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-plan-button]',
+    );
+    expect(plan?.disabled).toBe(true);
+    act(() => plan!.click());
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.click(),
+    );
+    const choice = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Full Access'));
+    expect(choice).toBeDefined();
+    act(() => choice!.click());
+    expect(onSelectMode).toHaveBeenCalledWith('yolo');
+    expect(onTogglePlan).not.toHaveBeenCalled();
+  });
+
   it('keeps permission and Plan controls operable while approval disables input', () => {
     const onSelectMode = vi.fn();
     const onTogglePlan = vi.fn();
@@ -3918,6 +3949,70 @@ describe('ChatEditor toolbar popovers', () => {
           'toggle',
         );
       }
+    },
+  );
+
+  it.each([
+    ['official', ['low', 'high', 'max']],
+    ['maas-pro', ['high', 'max']],
+  ] as const)(
+    'renders only supported DeepSeek %s efforts with off and default controls',
+    async (route, efforts) => {
+      const onSelectReasoningEffort = vi.fn();
+      const props: ChatEditorRenderProps = {
+        visibleToolbarActions: ['model'],
+        currentModel: route,
+        availableModels: [{ id: route, label: 'DeepSeek' }],
+        reasoning: {
+          enabled: true,
+          effort: 'high',
+          defaultEffort: 'high',
+          efforts: [...efforts],
+        },
+        onSelectReasoningEffort,
+      };
+      const container = renderChatEditor(props);
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+          ?.click(),
+      );
+      const controls = document.querySelector(
+        '[data-web-shell-model-reasoning]',
+      );
+      expect(
+        Array.from(
+          controls?.querySelectorAll('[data-web-shell-effort]') ?? [],
+        ).map((button) => button.getAttribute('data-web-shell-effort')),
+      ).toEqual(efforts);
+      await act(async () =>
+        controls
+          ?.querySelector<HTMLButtonElement>('[data-web-shell-effort="max"]')
+          ?.click(),
+      );
+      expect(onSelectReasoningEffort).toHaveBeenLastCalledWith('max');
+      await act(async () =>
+        controls
+          ?.querySelector<HTMLButtonElement>('[data-web-shell-thinking-toggle]')
+          ?.click(),
+      );
+      expect(onSelectReasoningEffort).toHaveBeenLastCalledWith(
+        'none',
+        'toggle',
+      );
+      rerenderChatEditor(container, {
+        ...props,
+        reasoning: { ...props.reasoning!, enabled: false, effort: 'none' },
+      });
+      await act(async () =>
+        document
+          .querySelector<HTMLButtonElement>('[data-web-shell-thinking-toggle]')
+          ?.click(),
+      );
+      expect(onSelectReasoningEffort).toHaveBeenLastCalledWith(
+        'high',
+        'toggle',
+      );
     },
   );
 

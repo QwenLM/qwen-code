@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import com.alibaba.qwen.code.managedagent.service.RuntimeRetentionJob;
-import com.alibaba.qwen.code.managedagent.store.ManagedRuntimeRetentionGuard;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedRuntimeRetentionGuard;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeRetentionJob;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeRetention;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;

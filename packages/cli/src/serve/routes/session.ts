@@ -163,6 +163,10 @@ import {
   type SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
+import {
+  readWorkspaceArtifactLibrary,
+  removeWorkspaceLibraryArtifact,
+} from '../server/session-artifact-library.js';
 import { acquireWorktreeOwnershipOp } from '../server/worktree-ownership-op.js';
 import {
   exportSessionTranscript,
@@ -309,6 +313,7 @@ interface RegisterSessionRoutesDeps {
   channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
+  sessionArtifactsPersistenceAvailable?: boolean;
   languageCodes: string[];
   virtualSubagentSessions?: VirtualSubagentSessions;
   materializeLiveConversationDirectory?: (sessionId: string) => Promise<string>;
@@ -7052,6 +7057,25 @@ export function registerSessionRoutes(
   );
 
   app.get(
+    '/session/:id/tasks/:taskId/runtime',
+    withOwnerReadSession(
+      'GET /session/:id/tasks/:taskId/runtime',
+      async (req, res, sessionId, runtime) => {
+        const taskId = req.params['taskId'];
+        if (!taskId) {
+          res.status(400).json({
+            error: '`taskId` route parameter is required',
+          });
+          return;
+        }
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionTaskRuntime(sessionId, taskId));
+      },
+    ),
+  );
+
+  app.get(
     '/session/:id/agents',
     withOwnerReadSession(
       'GET /session/:id/agents',
@@ -7278,6 +7302,88 @@ export function registerSessionRoutes(
       },
     ),
   );
+
+  // Persisted workspace management neither borrows a session client identity
+  // nor loads cold sessions.
+  for (const operation of ['read', 'remove'] as const) {
+    const route =
+      '/workspaces/:workspace/session/:id/artifact-library' +
+      (operation === 'remove' ? '/:artifactId' : '');
+    const handler: RequestHandler = async (req, res) => {
+      const sessionId = requireSessionId(req, res);
+      if (sessionId === null) return;
+      if (deps.sessionArtifactsPersistenceAvailable === false) {
+        res.status(409).json({
+          code: 'artifact_library_unavailable',
+          error: 'Artifact persistence is unavailable',
+        });
+        return;
+      }
+      try {
+        const runtime = await resolveQualifiedSessionRuntime(
+          req,
+          res,
+          route,
+          [sessionId],
+          'any',
+        );
+        if (!runtime) return;
+        const assertOpen = captureRuntimeGenerationAssertion(runtime);
+        const run = async () => {
+          assertOpen?.();
+          const liveOwner =
+            workspaceRegistry.resolveLiveSessionOwner(sessionId);
+          if (liveOwner.kind === 'unavailable') {
+            sendWorkspaceRuntimeUnavailable(res);
+            return undefined;
+          }
+          if (liveOwner.kind === 'ambiguous') {
+            sendAmbiguousSessionOwner(
+              res,
+              route,
+              sessionId,
+              liveOwner.runtimes,
+            );
+            return undefined;
+          }
+          if (liveOwner.kind === 'found' && liveOwner.runtime !== runtime) {
+            sendSessionWorkspaceConflict(
+              res,
+              route,
+              sessionId,
+              runtime,
+              liveOwner.runtime,
+            );
+            return undefined;
+          }
+          const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
+            operation === 'read'
+              ? readWorkspaceArtifactLibrary(runtime, sessionId)
+              : removeWorkspaceLibraryArtifact(
+                  runtime,
+                  sessionId,
+                  req.params['artifactId']!,
+                  () => assertOpen?.(),
+                ),
+          );
+          assertOpen?.();
+          return result;
+        };
+        const result = await runOwnerRuntimeActivity(runtime, () =>
+          operation === 'read'
+            ? archiveCoordinator.runSharedMany([sessionId], run)
+            : archiveCoordinator.runExclusiveMany([sessionId], run),
+        );
+        if (result)
+          res.status(200).set('Cache-Control', 'no-store').json(result);
+      } catch (error) {
+        if (sendArtifactValidationError(res, error)) return;
+        sendBridgeError(res, error, { route, sessionId });
+      }
+    };
+    if (operation === 'read') app.get(route, handler);
+    else app.delete(route, mutate({ strict: true }), handler);
+  }
 
   app.get(
     '/session/:id/artifacts',
@@ -10279,6 +10385,54 @@ export function registerSessionRoutes(
         }
       },
       { cwdBound: 'always' },
+    ),
+  );
+
+  app.get(
+    '/session/:id/message-groups',
+    withOwnerReadSession(
+      'GET /session/:id/message-groups',
+      async (_req, res, sessionId, runtime) => {
+        res.status(200).json(await runtime.bridge.getMessageGroups(sessionId));
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/messages/delete',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/messages/delete',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const snapshot = body['snapshot'];
+        const groupIds = body['groupIds'];
+        if (
+          typeof snapshot !== 'string' ||
+          snapshot.length === 0 ||
+          !Array.isArray(groupIds) ||
+          groupIds.length === 0 ||
+          !groupIds.every((id) => typeof id === 'string' && id.length > 0) ||
+          new Set(groupIds).size !== groupIds.length
+        ) {
+          res.status(400).json({
+            error: 'A snapshot and distinct non-empty groupIds are required',
+            code: 'invalid_message_groups',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.deleteMessageGroups(
+              sessionId,
+              { snapshot, groupIds },
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
+      },
     ),
   );
 

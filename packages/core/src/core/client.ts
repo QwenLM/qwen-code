@@ -5,6 +5,14 @@
  */
 
 import type { LlmPreparedRequestCallback } from './llm-chat.js';
+import {
+  resolveWorkflowIntent,
+  type HumanPromptInput,
+  type WorkflowIntentTrigger,
+} from './workflow-intent.js';
+import { isTopLevelSession } from '../agents/runtime/agent-context.js';
+import { logWorkflowKeyword } from '../telemetry/loggers.js';
+import { WorkflowKeywordEvent } from '../telemetry/types.js';
 
 import {
   captureHookExecutionOwner,
@@ -260,6 +268,8 @@ export interface SendMessageOptions {
   type: SendMessageType;
   /** User-submitted text captured before prompt expansion. */
   submittedPrompt?: string;
+  humanInput?: HumanPromptInput;
+  onWorkflowIntentApplied?: (trigger: WorkflowIntentTrigger) => void;
   /**
    * {@link LlmClient.admitUserPrompt}'s verdict on this prompt, applied in
    * place of running UserPromptSubmit again. It is spent by the UserQuery with
@@ -776,6 +786,14 @@ export class LlmClient {
 
   async addHistory(content: Content) {
     this.getChat().addHistory(content);
+  }
+
+  /**
+   * Marks replayed content as already injected. Only for parts another chat
+   * already reported (speculation accept); see `LlmChat.markToolResultsInjected`.
+   */
+  markToolResultsInjected(contents: readonly Content[]): void {
+    this.getChat().markToolResultsInjected(contents);
   }
 
   getChat(): LlmChat {
@@ -3617,6 +3635,21 @@ export class LlmClient {
       SendMessageType.UserQuery,
   ): AsyncGenerator<ServerLlmStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    const humanInput =
+      messageType === SendMessageType.UserQuery &&
+      !options?.isConcurrentSideQuery &&
+      isTopLevelSession() &&
+      options?.humanInput
+        ? { text: options.humanInput.text }
+        : undefined;
+    const onWorkflowIntentApplied = options?.onWorkflowIntentApplied;
+    if (options && (options.humanInput || onWorkflowIntentApplied)) {
+      options = {
+        ...options,
+        humanInput: undefined,
+        onWorkflowIntentApplied: undefined,
+      };
+    }
     const startsInteraction =
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Retry ||
@@ -3951,7 +3984,9 @@ export class LlmClient {
         ? partToString(request)
         : undefined;
     if (startsInteraction) {
-      this.loopDetector.reset(prompt_id);
+      this.loopDetector.reset(prompt_id, {
+        keepReminders: options?.isConcurrentSideQuery,
+      });
       this.lastPromptId = prompt_id;
       // A side question asked while a turn is running is not a new turn: it
       // must not move the running turn's starting point or drop its target —
@@ -4803,6 +4838,15 @@ export class LlmClient {
         requestToSend = [...systemReminders, ...requestToSend];
       }
 
+      if (!signal.aborted) {
+        const workflowIntent = resolveWorkflowIntent(this.config, humanInput);
+        if (workflowIntent) {
+          requestToSend.unshift({ text: workflowIntent.reminder });
+          logWorkflowKeyword(this.config, new WorkflowKeywordEvent());
+          onWorkflowIntentApplied?.(workflowIntent.trigger);
+        }
+      }
+
       if (
         messageType === SendMessageType.Retry ||
         messageType === SendMessageType.Cron ||
@@ -4854,9 +4898,11 @@ export class LlmClient {
           const functionResponseId = (part as Part).functionResponse?.id;
           if (!functionResponseId) continue;
           if (
-            this.loopDetector.recordToolResultByCallId(functionResponseId, [
-              part as Part,
-            ])
+            this.loopDetector.recordToolResultByCallId(
+              functionResponseId,
+              [part as Part],
+              { queueReminders: ownsExplorationBudget },
+            )
           ) {
             for (const goalEvent of await finalizeInterruptedGoalTurn(
               undefined,
@@ -4867,7 +4913,9 @@ export class LlmClient {
             const loopType = this.loopDetector.getLastLoopType();
             yield {
               type: LlmEventType.LoopDetected,
-              ...(loopType && { value: { loopType } }),
+              ...(loopType && {
+                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
+              }),
             };
             await arenaAgentClient?.reportError('Loop detected');
             this.lastApiCompletionTimestamp = Date.now();
@@ -4962,6 +5010,13 @@ export class LlmClient {
               );
         if (explorationReminder)
           requestToSend.push({ text: explorationReminder });
+        // Ownership-gated like the exploration reminder, so a concurrent side
+        // query neither queues nor drains the running turn's loop-protection
+        // reminders.
+        const loopReminder = ownsExplorationBudget
+          ? this.loopDetector.takeLoopReminder()
+          : undefined;
+        if (loopReminder) requestToSend.push({ text: loopReminder });
         if (activeTodoReminder) {
           const insertAt = requestToSend.findIndex(
             (part) =>
@@ -5119,12 +5174,14 @@ export class LlmClient {
           }
 
           // Always-on safety checks (consecutive-identical tool-call guard,
-          // shell inspection stagnation, and per-turn tool-call cap). These fire
-          // before the skipLoopDetection gate so they cannot be bypassed by
-          // configuration.
+          // shell inspection stagnation, and per-turn tool-call cap). These run
+          // before the skipLoopDetection gate; model.loopProtection decides
+          // whether they remind or stop.
           const alwaysOnLoop =
             !duplicateLoopGuardRequest &&
-            this.loopDetector.checkAlwaysOnSafeties(event);
+            this.loopDetector.checkAlwaysOnSafeties(event, {
+              queueReminders: ownsExplorationBudget,
+            });
           // Exploration-budget lifecycle, recorded before the halt handling
           // below takes effect: a halted batch's over-count is harmless only
           // because every core halt is terminal (the halt branch returns the
@@ -5174,7 +5231,9 @@ export class LlmClient {
             const loopType = this.loopDetector.getLastLoopType();
             yield {
               type: LlmEventType.LoopDetected,
-              ...(loopType && { value: { loopType } }),
+              ...(loopType && {
+                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
+              }),
             };
             if (arenaAgentClient) {
               await arenaAgentClient.reportError('Loop detected');
@@ -5200,7 +5259,9 @@ export class LlmClient {
           const heuristicLoop =
             !duplicateLoopGuardRequest &&
             !skipLoopDetection &&
-            this.loopDetector.addAndCheckHeuristicLoops(event);
+            this.loopDetector.addAndCheckHeuristicLoops(event, {
+              queueReminders: ownsExplorationBudget,
+            });
           if (heuristicLoop) {
             for (const goalEvent of await finalizeInterruptedGoalTurn(
               undefined,
@@ -5211,7 +5272,9 @@ export class LlmClient {
             const loopType = this.loopDetector.getLastLoopType();
             yield {
               type: LlmEventType.LoopDetected,
-              ...(loopType && { value: { loopType } }),
+              ...(loopType && {
+                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
+              }),
             };
             if (arenaAgentClient) {
               await arenaAgentClient.reportError('Loop detected');
