@@ -574,8 +574,12 @@
                                  healthy 10021 s, fork 10621 s, Verify 188
                                  minutes. The FG12d cancel-before-dispatch cell
                                  adds 18 s (2x its measured 9.1 s): healthy
-                                 10039 s, fork 10639 s, Verify 188 minutes. -->
-                            <forkedProcessTimeoutInSeconds>10639</forkedProcessTimeoutInSeconds>
+                                 10039 s, fork 10639 s, Verify 188 minutes. The
+                                 FG12d Spring-restart owner-release cell adds
+                                 24 s (2x its measured 11.9 s): healthy
+                                 10063 s, fork 10663 s, and the 188-minute
+                                 step still wraps (11263 s of fork plus wrap). -->
+                            <forkedProcessTimeoutInSeconds>10663</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
