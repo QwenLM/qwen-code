@@ -66,7 +66,6 @@ fn native_event(
 pub(super) fn focus_events(
     preparation: super::app_focus::Preparation,
     window_id: u32,
-    activation_point: Option<((f64, f64), (f64, f64))>,
 ) -> anyhow::Result<Vec<CGEvent>> {
     use super::app_focus::Preparation;
     let (kind, subtype, window_number, flags) = match preparation {
@@ -86,24 +85,7 @@ pub(super) fn focus_events(
         CFRetain(raw as CFTypeRef);
         Ok(CGEvent::from_ptr(raw as _))
     })?;
-    let mut events = vec![notification];
-    if preparation == Preparation::Activate {
-        if let Some((point, local)) = activation_point {
-            for (kind, number) in [(1, 1), (2, 2)] {
-                events.push(native_event(
-                    kind,
-                    0,
-                    1,
-                    number,
-                    point,
-                    local,
-                    window_id,
-                    CGEventFlags::empty(),
-                )?);
-            }
-        }
-    }
-    Ok(events)
+    Ok(vec![notification])
 }
 
 fn next_event_number() -> isize {
@@ -182,38 +164,20 @@ mod tests {
     }
 
     #[test]
-    fn activation_uses_notification_then_paired_native_activation_click() {
-        let events = focus_events(
-            super::super::app_focus::Preparation::Activate,
-            1234,
-            Some(((620.0, 350.0), (20.0, 50.0))),
-        )
-        .unwrap();
-        assert_eq!(events.len(), 3);
+    fn background_activation_never_adds_a_mouse_click() {
+        let events = focus_events(super::super::app_focus::Preparation::Activate, 1234).unwrap();
+        assert_eq!(events.len(), 1);
         assert_eq!(
             unsafe { CGEventGetType(events[0].as_ptr() as *mut c_void) },
             13
         );
-        for (index, event) in events.iter().enumerate().skip(1) {
-            assert_eq!(event.get_integer_value_field(0), index as i64);
-            assert_eq!(event.get_integer_value_field(1), 1);
-            assert_eq!(event.get_integer_value_field(7), 3);
-            assert_eq!(event.get_integer_value_field(91), 1234);
-            assert_eq!(event.get_flags(), CGEventFlags::empty());
-        }
-        assert_eq!(events[1].get_type() as u32, 1);
-        assert_eq!(events[2].get_type() as u32, 2);
         assert_eq!(events[0].get_flags().bits(), 0xc0000);
     }
 
     #[test]
-    fn focus_return_never_clicks_activation_point() {
-        let events = focus_events(
-            super::super::app_focus::Preparation::ReturnKeyFocus,
-            1234,
-            Some(((620.0, 350.0), (20.0, 50.0))),
-        )
-        .unwrap();
+    fn background_focus_return_never_adds_a_mouse_click() {
+        let events =
+            focus_events(super::super::app_focus::Preparation::ReturnKeyFocus, 1234).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(
             unsafe { CGEventGetType(events[0].as_ptr() as *mut c_void) },

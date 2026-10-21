@@ -10750,10 +10750,15 @@ async function runQwenServeImpl(
           hostname: opts.hostname,
           url: daemonDiscoveryUrl(url),
           workspaces: workspaceInputs.map((workspace) => workspace.cwd),
+          startupWorkspaces: workspaceInputs
+            .filter((workspace) => !workspace.removable)
+            .map((workspace) => workspace.cwd),
           primaryWorkspace: boundWorkspace,
           startedAt: new Date().toISOString(),
           auth: token ? 'bearer' : 'none',
           ...(generatedToken ? { tokenGenerated: true } : {}),
+          web: opts.serveWebShell !== false,
+          requireAuth: opts.requireAuth === true,
           ...(discoveryLogPath ? { logPath: discoveryLogPath } : {}),
           pidNamespace: currentPidNamespace(),
         });

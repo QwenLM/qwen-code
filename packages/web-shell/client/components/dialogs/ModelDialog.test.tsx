@@ -98,6 +98,12 @@ describe('ModelDialog keyboard confirmation', () => {
       </ThemeProvider>,
     );
     expect.soft(document.activeElement?.getAttribute('role')).toBe('listbox');
+    const refreshButton = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Refresh models"]',
+    );
+    expect(refreshButton).not.toBeNull();
+    expect(refreshButton!.textContent).toBe('');
+    expect(refreshButton!.querySelector('svg')).not.toBeNull();
     act(() =>
       document.activeElement!.dispatchEvent(
         new KeyboardEvent('keydown', {

@@ -485,6 +485,8 @@ export interface ChatRecord {
   usageMetadata?: GenerateContentResponseUsageMetadata;
   /** Model used for this response */
   model?: string;
+  /** Hosted assistant batch synthesized from explicit user Skill invocations. */
+  clientInitiatedSkills?: true;
   /** Effective session settings when user input reaches the recorder. */
   executionContext?: {
     modelId: string;

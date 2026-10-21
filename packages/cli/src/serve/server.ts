@@ -3461,6 +3461,8 @@ export function createServeApp(
 
   registerSessionCatalogRoutes(app, workspaceRegistry);
   const { resolveSubagentSessionRuntime } = registerSessionRoutes(app, {
+    sessionArtifactsPersistenceAvailable:
+      deps.sessionArtifactsPersistenceAvailable !== false,
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     workspaceRegistry,
@@ -3655,6 +3657,8 @@ export function createServeApp(
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
   registerWorkspaceQualifiedSkillsRoutes(app, {
+    getSkillsSnapshot: (workspaceCwd) =>
+      trustedSkillsConfigStatus.snapshot(workspaceCwd),
     workspaceRegistry,
     mutate,
     safeBody,
