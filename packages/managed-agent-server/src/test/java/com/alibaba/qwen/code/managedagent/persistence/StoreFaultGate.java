@@ -14,6 +14,10 @@ import java.util.function.Function;
  * of the MCP or Hook record state machine. The wrapper calls it from inside
  * the Session store's commit transaction, before the record is applied, so the
  * whole commit rolls back exactly as a store failure would.
+ *
+ * <p>FG13a adds the acknowledgement-loss mode: the same phase is matched from
+ * the faulting store's after-commit callback, so the commit lands and only the
+ * caller's receipt is lost.
  */
 public final class StoreFaultGate {
     public enum Phase {

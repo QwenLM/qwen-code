@@ -29,19 +29,18 @@ previous slice added.
 | ---- | -------------------------------------------------------------------- |
 | 1    | The `dispatch_started` commit lands, then the seam reports the loss. |
 | 2    | The cell reads the record the failure left behind.                   |
-| 3    | The Harness status route reports a parked turn.                      |
-| 4    | The gate is cleared and the cell waits for quiescence.               |
+| 3    | The gate is cleared and the cell waits for quiescence.               |
+| 4    | The cell bounds the physical calls recovery may issue.               |
 
 Expectations:
 
 - The durable record is `dispatch_started` with no result, which is what
   separates this cell from the FG13b rejection that leaves `intent`.
-- No physical Hook call: the acknowledgement is lost inside the commit, and
-  the dispatch is issued only after that commit returns.
-- The turn is parked (`hasActivePrompt` false, `recoveryBlocked` true) and the
-  model never receives the tool result.
-- After the gate clears, the Hook still runs at most once: a recovery that
-  re-issued the durable dispatch would make the count two.
+- At most one physical call: the acknowledgement was lost before the dispatch
+  was issued, so a recovery may resume the durable dispatch once, never twice.
+- The forward resume itself — a new `fire()` over a durable
+  `dispatch_started` issues exactly one dispatch — is pinned at the TypeScript
+  layer.
 
 ## Seam
 
@@ -81,5 +80,5 @@ when the caller sees the failure.
 The `hosted-harness-mysql` lane on Linux with MySQL 8.4 and a delegated
 cgroup v2 root is the evidence. `managed-agent-gate.yml` selects the `fast`
 tier on `pull_request`; the full suite runs on the first maintainer approval
-of the head commit. The cell adds 150 s to the shared fork: healthy 10339 s,
-fork 10939 s, Verify 193 minutes.
+of the head commit. The cell adds 150 s to the shared fork: healthy 10350 s,
+fork 10950 s, Verify 193 minutes.
