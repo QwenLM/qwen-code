@@ -120,7 +120,7 @@ describe('<HistoryItemDisplay />', () => {
         text: "This is a long paragraph about the history of computing from the earliest mechanical counting machines and Babbage's analytic engine through vacuum tube and transistor computers, integrated circuits and modern processors with many cores and caches.",
       };
       const terminalWidth = 100;
-      const { lastFrame } = renderWithProviders(
+      const { lastFrame, stdout } = renderWithProviders(
         <Static
           items={[
             <HistoryItemDisplay
@@ -135,6 +135,9 @@ describe('<HistoryItemDisplay />', () => {
         </Static>,
       );
 
+      // ink-testing-library's fake stdout is fixed at 100 columns; keep the
+      // budget prop aligned with the frame the assertions measure.
+      expect(stdout.columns).toBe(terminalWidth);
       const lines = stripAnsi(lastFrame() ?? '').split('\n');
       // HistoryItemDisplay leaves a 2-column margin on each side.
       const overWide = lines.filter(
