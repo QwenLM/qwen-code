@@ -46,6 +46,7 @@ import {
   type Config,
   type Logger,
 } from '@qwen-code/qwen-code-core';
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import type { PartListUnion } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
@@ -69,7 +70,11 @@ import {
   selectAutoApprovals,
   type WaitingCallInfo,
 } from './live-session.js';
-import type { OpenTuiSubmitOptions } from './live-turn.js';
+import type {
+  OpenTuiLiveTurn,
+  OpenTuiRestoredDraft,
+  OpenTuiSubmitOptions,
+} from './live-turn.js';
 import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
@@ -128,6 +133,7 @@ export interface OpenTuiAppProps {
   // --- seams owned by the renderer / entry layer ---------------------------
   /** Renders the transcript + status line (needs the real OpenTUI renderer). */
   renderMain?: () => ReactNode;
+  userMessages?: readonly string[];
   /**
    * Runs a model turn for a plain prompt or a `submit_prompt` outcome. A
    * composer prompt passes its pasted image paths as a second, structured
@@ -183,7 +189,7 @@ export interface OpenTuiAppProps {
   approvalMode?: ApprovalMode;
   /** Mid-turn queued prompts (queue rows + badge + Esc pop-back). */
   messageQueue?: readonly string[];
-  onPopQueue?: () => string | null;
+  onPopQueue?: OpenTuiLiveTurn['popQueue'];
   /**
    * Scheduler calls parked in `awaiting_approval`. The shell renders the
    * first one as a modal dialog; settlement flows through the call's own
@@ -578,6 +584,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     host.setStreaming(!!streaming);
   }, [host, streaming]);
 
+  useEffect(() => {
+    config.setWorkflowKeywordTriggerEnabled?.(
+      settings.merged.ui?.disableWorkflowKeywordTrigger !== true,
+    );
+  }, [config, settings.merged.ui?.disableWorkflowKeywordTrigger]);
+
   const gateway = useMemo(() => new OpenTuiSlashGateway(), []);
   const reloadRef = useRef<(() => void | Promise<void>) | null>(null);
   // Slash and shell submissions held back while a model turn streams (ink's
@@ -589,6 +601,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       shell?: boolean;
       prompt?: boolean;
       imagePaths?: string[];
+      humanInput?: HumanPromptInput;
+      displayText?: string;
+      pasteExpansions?: ReadonlyMap<string, string>;
+      restoredDraft?: OpenTuiRestoredDraft;
     }>
   >([]);
   // Push nonce for the drain (ink's queueDrainNonce). The queue itself stays a
@@ -699,7 +715,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   );
 
   const onSubmit = useCallback(
-    async (text: string, imagePaths?: string[]) => {
+    async (
+      text: string,
+      imagePaths?: string[],
+      composer?: Pick<
+        OpenTuiSubmitOptions,
+        'humanInput' | 'displayText' | 'pasteExpansions' | 'restoredDraft'
+      >,
+    ) => {
       setNoticeText(null);
       // Ahead of the gate and the dispatch, exactly where ink's
       // handleFinalSubmit puts it: a quit has to be able to stop the stream, so
@@ -741,7 +764,18 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             // running-`!` gate held back must not lose them in the queue
             // (R5-5 fix-induced).
             ...(blockedByRunningShell && !shellEntry
-              ? { prompt: true, imagePaths }
+              ? {
+                  prompt: true,
+                  imagePaths,
+                  humanInput: composer?.humanInput,
+                  ...(composer?.pasteExpansions?.size
+                    ? { pasteExpansions: composer.pasteExpansions }
+                    : {}),
+                  ...(composer?.restoredDraft
+                    ? { restoredDraft: composer.restoredDraft }
+                    : {}),
+                  displayText: composer?.displayText,
+                }
               : {}),
           });
           setDeferredRevision((revision) => revision + 1);
@@ -793,6 +827,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         // stream (live-session), so text queued mid-turn expands too.
         onSubmitPrompt(query, imagePaths, {
           submittedPrompt: query || undefined,
+          displayText: composer?.displayText ?? query,
+          humanInput: composer?.humanInput,
+          ...(composer?.pasteExpansions?.size
+            ? { pasteExpansions: composer.pasteExpansions }
+            : {}),
+          ...(composer?.restoredDraft
+            ? { restoredDraft: composer.restoredDraft }
+            : {}),
         });
         return;
       }
@@ -875,6 +917,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             }
             onSubmitPrompt(entry.text, entry.imagePaths, {
               submittedPrompt: entry.text || undefined,
+              displayText: entry.displayText ?? entry.text,
+              humanInput: entry.humanInput,
+              ...(entry.pasteExpansions?.size
+                ? { pasteExpansions: entry.pasteExpansions }
+                : {}),
+              ...(entry.restoredDraft
+                ? { restoredDraft: entry.restoredDraft }
+                : {}),
             });
             // The turn it starts owns the drain until it ends, exactly like a
             // dispatched submit_prompt outcome below.
@@ -925,7 +975,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     runShellCommand,
   ]);
 
-  const userMessages = useMemo(
+  const hostUserMessages = useMemo(
     () =>
       host
         .getHistory()
@@ -1081,10 +1131,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               />
               <OpenTuiQueuedMessageDisplay messageQueue={messageQueue ?? []} />
               <OpenTuiInputPrompt
-                onSubmit={(text, imagePaths) => {
-                  void onSubmit(text, imagePaths);
+                onSubmit={(text, imagePaths, composer) => {
+                  void onSubmit(text, imagePaths, composer);
                 }}
-                userMessages={userMessages}
+                userMessages={props.userMessages ?? hostUserMessages}
                 config={config}
                 focus
                 streaming={streaming}

@@ -25,7 +25,6 @@ import type {
   DaemonToolTranscriptBlock,
   DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
-import { isShellResultDisplay } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
 import { useSharedNow } from '../../hooks/useSharedNow';
 import { WEB_SHELL_TURN_INDEX_PAGE_SIZE } from '../../constants/sessions';
@@ -39,7 +38,6 @@ import {
   localizeToolDisplayName,
   getToolSummaryDescription,
   getSubagentDetailsUnavailableReason,
-  extractText,
   isShellToolName,
   isActiveToolStatus,
   sanitizeControlChars,
@@ -47,14 +45,14 @@ import {
 } from '../messages/toolFormatting';
 import { formatDurationMs } from '../messages/tools/toolDisplay';
 import { ToolFilePreviewButton } from '../messages/ToolFilePreviewButton';
-import {
-  extractDiff,
-  fencedCodeBlock,
-  ToolSummaryIcon,
-} from '../messages/ToolGroup';
-import { Markdown } from '../messages/Markdown';
+import { ToolSummaryIcon } from '../messages/ToolGroup';
 import { DiffView } from '../messages/tools/DiffView';
-import { parseShellLiveOutput } from '../messages/tools/shellLiveOutput';
+import {
+  MAX_DETAIL_LENGTH,
+  ToolCallDetail,
+  toolCallContent,
+} from './tool-call-content';
+import contentStyles from './tool-call-content.module.css';
 import type { TurnOutputOpenRequest } from './TurnOutputs';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
@@ -83,7 +81,6 @@ import { TurnCallPromptSelect } from './TurnCallPromptSelect';
  * arbitrarily large; the panel keeps them readable instead of letting a
  * multi-megabyte payload reach the DOM.
  */
-const MAX_DETAIL_LENGTH = 4000;
 
 export interface TurnCallRow {
   block: DaemonToolTranscriptBlock;
@@ -157,91 +154,6 @@ export function collectTurnCallRows(
     durationMs: block.durationMs,
     live: true,
   }));
-}
-
-function stringifyValue(value: unknown): string {
-  if (value === undefined || value === null) return '';
-  const text = typeof value === 'string' ? value : safeJson(value);
-  return text.trim();
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2) ?? '';
-  } catch {
-    return '';
-  }
-}
-
-function ToolCallDetail({ text }: { text: string }) {
-  const json = useMemo(() => {
-    try {
-      JSON.parse(text);
-      return text;
-    } catch {
-      return undefined;
-    }
-  }, [text]);
-  const displayed = truncateText(json ?? text, MAX_DETAIL_LENGTH);
-  return json !== undefined ? (
-    <div className="max-h-60 overflow-auto">
-      <Markdown content={fencedCodeBlock('json', displayed)} />
-    </div>
-  ) : (
-    <pre className={styles.detailBody}>{displayed}</pre>
-  );
-}
-
-function shellDetails(tool: ACPToolCall) {
-  const raw = tool.rawOutput;
-  const result = isShellResultDisplay(raw) ? raw : undefined;
-  const live = parseShellLiveOutput(raw);
-  const command =
-    typeof tool.args?.command === 'string' ? tool.args.command : '';
-  const unknownVersion =
-    raw &&
-    typeof raw === 'object' &&
-    'type' in raw &&
-    raw.type === 'shell_result' &&
-    !result;
-  const output =
-    result?.output ??
-    (live
-      ? (live.segments?.map((segment) => segment.text).join('') ?? '')
-      : typeof raw === 'string'
-        ? raw
-        : unknownVersion
-          ? 'text' in raw && typeof raw.text === 'string'
-            ? raw.text
-            : stringifyValue(raw)
-          : (extractText(tool) ?? stringifyValue(raw)));
-  const args = Object.fromEntries(
-    Object.entries(tool.args ?? {}).filter(([key]) => key !== 'command'),
-  );
-  const metadata = result
-    ? Object.fromEntries(
-        Object.entries(result).filter(
-          ([key]) => !['type', 'version', 'text', 'output'].includes(key),
-        ),
-      )
-    : live
-      ? Object.fromEntries(
-          Object.entries(live).filter(
-            ([key, value]) => key !== 'segments' && value !== undefined,
-          ),
-        )
-      : undefined;
-  const other = {
-    ...(Object.keys(args).length ? { arguments: args } : {}),
-    ...(metadata && Object.keys(metadata).length ? { result: metadata } : {}),
-  };
-  return {
-    command: sanitizeControlChars(command),
-    output: sanitizeControlChars(output),
-    other: Object.keys(other).length
-      ? truncateText(stringifyValue(other), MAX_DETAIL_LENGTH)
-      : '',
-  };
 }
 
 export function TurnCallsPanel({
@@ -673,9 +585,6 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
     /^(read|read_file|readfile|edit|editfile|write|write_file|writefile)$/.test(
       tool.toolName.toLowerCase(),
     );
-  const editTool = /^(edit|editfile|write|write_file|writefile)$/.test(
-    tool.toolName.toLowerCase(),
-  );
   const explicitDescription = tool.args?.description;
   const description = truncateText(
     sanitizeControlChars(
@@ -685,29 +594,13 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
     2000,
   );
   const isShell = isShellToolName(tool.toolName);
-  const { diff, shell, argumentsText, resultText } = useMemo(() => {
-    if (!expanded) return { diff: '', argumentsText: '', resultText: '' };
-    const diff = editTool ? extractDiff(tool) : '';
-    const shell = isShell ? shellDetails(tool) : undefined;
-    return {
-      diff,
-      shell,
-      argumentsText: shell ? shell.command : stringifyValue(block.rawInput),
-      resultText: diff
-        ? ''
-        : shell
-          ? shell.output
-          : stringifyValue(block.rawOutput ?? block.content),
-    };
-  }, [
-    expanded,
-    editTool,
-    isShell,
-    tool,
-    block.rawInput,
-    block.rawOutput,
-    block.content,
-  ]);
+  const { diff, shell, argumentsText, resultText } = useMemo(
+    () =>
+      expanded
+        ? toolCallContent(tool, block)
+        : { diff: '', shell: undefined, argumentsText: '', resultText: '' },
+    [expanded, tool, block],
+  );
   const hasDetails = Boolean(
     isShell ||
       block.rawInput != null ||
@@ -881,7 +774,7 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
           {shell?.other && (
             <details className={styles.other}>
               <summary>{t('turnCalls.other')}</summary>
-              <pre className={styles.detailBody}>{shell.other}</pre>
+              <pre className={contentStyles.detailBody}>{shell.other}</pre>
             </details>
           )}
         </div>
