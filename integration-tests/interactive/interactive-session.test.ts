@@ -30,9 +30,12 @@ describe('InteractiveSession.start ready-prompt budget', () => {
   let session: InteractiveSession | undefined;
 
   afterEach(async () => {
-    await session?.close();
-    session = undefined;
-    vi.unstubAllEnvs();
+    try {
+      await session?.close();
+    } finally {
+      session = undefined;
+      vi.unstubAllEnvs();
+    }
   });
 
   it('keeps the tight 30s signal outside self-hosted runners', async () => {
