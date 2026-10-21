@@ -34,6 +34,7 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'schemaCompliance',
   'reasoning',
   'contextWindowSize',
+  'autoCompactThreshold',
   'customHeaders',
   'extra_body',
   'thinkingMandatory',

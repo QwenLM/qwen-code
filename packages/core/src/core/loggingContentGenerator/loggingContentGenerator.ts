@@ -222,6 +222,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         request,
         this.config,
         this.generatorConfig.contextWindowSize ?? DEFAULT_TOKEN_LIMIT,
+        this.generatorConfig,
       );
     } catch (error) {
       debugLogger.warn(

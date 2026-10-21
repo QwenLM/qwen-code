@@ -15,6 +15,7 @@ import type {
 } from '@google/genai';
 import * as path from 'node:path';
 import type { Config } from '../../config/config.js';
+import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import { getCustomSystemPrompt } from '../prompts.js';
 import { computeThresholds } from '../../services/chatCompressionService.js';
 import {
@@ -247,6 +248,7 @@ export function createContextUsageSnapshot(
   request: GenerateContentParameters,
   config: Config,
   contextWindowSize: number,
+  generationConfig?: ContentGeneratorConfig,
 ): ContextUsageV1 | undefined {
   if (!Number.isSafeInteger(contextWindowSize) || contextWindowSize <= 0) {
     return undefined;
@@ -272,7 +274,7 @@ export function createContextUsageSnapshot(
   );
   const thresholds = computeThresholds(
     contextWindowSize,
-    config.getAutoCompactThreshold(),
+    config.getAutoCompactThreshold(generationConfig),
   );
   const snapshot: ContextUsageV1 = {
     version: 1,

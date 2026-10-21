@@ -11395,6 +11395,22 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['modalities']?.kind).toBe('computed');
   });
 
+  it('replaces the auto-compaction ratio on a qwen-oauth hot model switch', async () => {
+    const config = await authenticated(
+      qwenGenerator('qwen3-coder-plus', { autoCompactThreshold: 0.25 }),
+    );
+    expect(config.getAutoCompactThreshold()).toBe(0.25);
+
+    await switchTo(
+      config,
+      qwenGenerator('qwen-max', { autoCompactThreshold: 0.5 }),
+    );
+    expect(config.getAutoCompactThreshold()).toBe(0.5);
+
+    await switchTo(config, qwenGenerator('qwen3-coder-plus'));
+    expect(config.getAutoCompactThreshold()).toBeUndefined();
+  });
+
   it('carries enableRequestMetadata across a qwen-oauth hot model switch', async () => {
     // The DashScope provider reads enableRequestMetadata off its own
     // contentGeneratorConfig, which on the main route is this same object. A

@@ -24,8 +24,7 @@ import { CompressionStatus } from '../core/turn.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import type { LlmChat } from '../core/llm-chat.js';
-import type { Config } from '../config/config.js';
-import { ApprovalMode } from '../config/config.js';
+import { ApprovalMode, Config } from '../config/config.js';
 import type {
   BaseLlmClient,
   GenerateTextOptions,
@@ -2558,6 +2557,88 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     // computeThresholds(32000).auto = 27200 (degenerate → 0.85 × 32K)
     // 20K < 27.2K → NOOP
     expectGate(false, 32_000, 20_000));
+});
+
+describe('ChatCompressionService.compress model compaction thresholds', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it.each([
+    ['large-window', 1_000_000, 0.25, 250_000],
+    ['small-window', 262_144, undefined, 222_823],
+    ['invalid-ratio', 1_000_000, 0, 850_000],
+  ] as const)(
+    'uses the resolved window and ratio for %s at the compression gate',
+    async (model, contextWindowSize, autoCompactThreshold, boundary) => {
+      const directory = mkdtempSync(join(tmpdir(), 'compaction-threshold-'));
+      vi.stubEnv('QWEN_HOME', directory);
+      vi.stubEnv('QWEN_RUNTIME_DIR', join(directory, 'runtime'));
+      vi.stubEnv('COMPACTION_TEST_API_KEY', 'unused-local-test-key');
+      const config = new Config({
+        cwd: directory,
+        targetDir: directory,
+        debugMode: false,
+        model,
+        authType: AuthType.USE_OPENAI,
+        telemetry: { enabled: false },
+        chatRecording: false,
+        usageStatisticsEnabled: false,
+        disableAllHooks: true,
+        autoCompactThreshold: 0.85,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: model,
+              baseUrl: 'http://127.0.0.1:9/v1',
+              envKey: 'COMPACTION_TEST_API_KEY',
+              generationConfig: {
+                contextWindowSize,
+                autoCompactThreshold,
+                enableCacheControl: false,
+              },
+            },
+          ],
+        },
+      });
+      const actualTokenLimits = await vi.importActual<
+        typeof import('../core/tokenLimits.js')
+      >('../core/tokenLimits.js');
+      try {
+        await vi
+          .mocked(tokenLimit)
+          .withImplementation(actualTokenLimits.tokenLimit, async () => {
+            await config.refreshAuth(AuthType.USE_OPENAI);
+            expect(config.getContentGeneratorConfig()).toMatchObject({
+              contextWindowSize,
+              autoCompactThreshold,
+            });
+            for (const originalTokenCount of [boundary - 1, boundary]) {
+              const spy = spySideQuery(
+                '<state_snapshot>summary</state_snapshot>',
+                usage(originalTokenCount, 100),
+              );
+              spy.mockClear();
+              const result = await compressWith(fakeChat(msgs(2)), config, {
+                force: false,
+                originalTokenCount,
+              });
+              if (originalTokenCount === boundary) {
+                expect(spy).toHaveBeenCalledOnce();
+                expectCompressed(result);
+              } else {
+                expect(spy).not.toHaveBeenCalled();
+                expectNoNewHistory(result, CompressionStatus.NOOP);
+              }
+            }
+          });
+      } finally {
+        await config.shutdown();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe('ChatCompressionService.compress cheap-gate runs against the full window', () => {

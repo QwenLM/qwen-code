@@ -12,7 +12,7 @@ import type {
 } from '@google/genai';
 import { GenerateContentResponse } from '@google/genai';
 import { SpanStatusCode } from '@opentelemetry/api';
-import type { Config } from '../../config/config.js';
+import { Config } from '../../config/config.js';
 import type { RequestLifecycleEvent } from '../../telemetry/request-lifecycle.js';
 import type {
   ContentGenerator,
@@ -1031,6 +1031,40 @@ describe('LoggingContentGenerator', () => {
       estimated: true,
     });
   });
+
+  it.each([undefined, 0.8])(
+    'snapshots the request model ratio %s outside the main model runtime context',
+    async (autoCompactThreshold) => {
+      const mainConfig = createConfig({ autoCompactThreshold: 0.25 });
+      Object.defineProperty(mainConfig, 'autoCompactThreshold', {
+        value: 0.85,
+      });
+      const config = createConfig();
+      config.getAutoCompactThreshold =
+        Config.prototype.getAutoCompactThreshold.bind(mainConfig);
+      const generator = new LoggingContentGenerator(
+        createWrappedGenerator(resolving(resp('resp-context')), vi.fn()),
+        config,
+        {
+          model: 'request-model',
+          contextWindowSize: 262_144,
+          autoCompactThreshold,
+        },
+      );
+
+      await generator.generateContent(
+        textRequest('hello'),
+        'request-model-prompt',
+      );
+
+      expect(
+        spanOptions()?.contextUsage?.compaction_reserve_tokens,
+      ).toBeCloseTo(262_144 * (1 - (autoCompactThreshold ?? 0.85)));
+      expect(Config.prototype.getAutoCompactThreshold.call(mainConfig)).toBe(
+        0.25,
+      );
+    },
+  );
 
   it('reads the live context window after a hot model switch', async () => {
     const generatorConfig = {
