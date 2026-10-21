@@ -30,6 +30,21 @@ class ManagedAgentPropertiesTest {
             "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery";
 
     @Test
+    void verifiedFileRuntimeCanResolvePersistedImportsWithNewImportsDisabled() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setEnabled(true);
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+        assertThat(properties.getRuntimeBroker().isLocalDirectoryImportEnabled()).isFalse();
+        assertThat(properties.getRuntimeBroker().getWorkspaceMounts()).isEmpty();
+        assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+        properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(false);
+        assertThatThrownBy(properties::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
     void applicationYmlBindsTheDurableAndTrustedDefaults() throws java.io.IOException {
         var values = applicationYmlValues();
         // The named contract itself: reverting either fallback flips the

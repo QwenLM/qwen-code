@@ -12,11 +12,21 @@ export const INDEX_TRUNCATION_WARNING =
   '> WARNING: MEMORY.md is too large; only part of it was written. Keep index entries concise and move detail into topic files.';
 export const INDEX_TRUNCATION_NOTICE = `\n\n${INDEX_TRUNCATION_WARNING}`;
 
-export function trimIndexToBudget(lines: readonly string[]): string {
+export interface IndexTrimResult {
+  /** Surviving entries, in index order. */
+  content: string;
+  /** Entries removed by the line cap or the character budget, in index order. */
+  dropped: readonly string[];
+}
+
+export function trimIndexToBudgetDetailed(
+  lines: readonly string[],
+): IndexTrimResult {
   const entries = lines.slice(0, MAX_INDEX_LINES);
+  const overLineCap = lines.slice(MAX_INDEX_LINES);
   const raw = entries.join('\n');
   if (raw.length <= MAX_INDEX_CHARS) {
-    return raw;
+    return { content: raw, dropped: overLineCap };
   }
 
   // Reserve space for ordinary entries before long links, then restore order.
@@ -35,5 +45,17 @@ export function trimIndexToBudget(lines: readonly string[]): string {
       kept.add(index);
     }
   }
-  return entries.filter((_, index) => kept.has(index)).join('\n');
+  const surviving: string[] = [];
+  const dropped: string[] = [];
+  for (const [index, line] of entries.entries()) {
+    (kept.has(index) ? surviving : dropped).push(line);
+  }
+  return {
+    content: surviving.join('\n'),
+    dropped: [...dropped, ...overLineCap],
+  };
+}
+
+export function trimIndexToBudget(lines: readonly string[]): string {
+  return trimIndexToBudgetDetailed(lines).content;
 }

@@ -243,6 +243,8 @@ import {
   SessionExecutionEngineError,
   type SessionExecutionEngine,
 } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+import { readBackgroundShellOutputTail } from '@qwen-code/qwen-code-core/services/backgroundShellRegistry.js';
+import { sampleProcessTreeRssBytes } from '@qwen-code/qwen-code-core/utils/process-resources.js';
 import type { Stats } from 'node:fs';
 import { realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -425,6 +427,8 @@ import {
   type ServeSessionResourcesStatus,
   type ServeSessionSavedWorkflowDetail,
   type ServeSessionSavedWorkflowStatus,
+  type ServeSessionShellTaskRuntime,
+  type ServeSessionTaskRuntimeStatus,
   type ServeSessionTasksStatus,
   type ServeStatus,
   type ServeStatusCell,
@@ -3144,6 +3148,7 @@ export async function runAcpAgent(
       // pool-routed discovery, so bootstrap-level spawns would be
       // redundant subprocess leaks (W119).
       skipMcpDiscovery: true,
+      disableBundledGeneratedUi: true,
       // Bind the workspace-level manager's SDK callback so a runtime-added
       // client-hosted MCP server (#5626) round-trips over the parent WS.
       sendSdkMcpMessage: bootstrapClientMcpSender,
@@ -3920,6 +3925,7 @@ async function assertManagedConversationDirectoryIdentity(
 }
 
 class QwenAgent implements Agent {
+  private readonly workspaceSettings: LoadedSettings;
   private sessions: Map<string, Session> = new Map();
   /**
    * Cross-session messaging for every session this process hosts.
@@ -4322,7 +4328,11 @@ class QwenAgent implements Agent {
       const errors: unknown[] = [];
       if (skillsOnly) {
         try {
-          this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+          if (
+            !this.workspaceSettings.reloadScopeFromDisk(SettingScope.Workspace)
+          ) {
+            throw new Error('Failed to reload workspace skill settings');
+          }
         } catch (error) {
           errors.push(error);
         }
@@ -4532,9 +4542,10 @@ class QwenAgent implements Agent {
     return this.enqueueWorkspaceMcpDiscovery('reload', async () => {
       const settings = loadSettings(this.config.getTargetDir());
       const discoveryConfig = this.workspaceMcpDiscoveryConfig;
+      const sessions = this.getActiveSessions();
       const liveConfigs = new Set([
         this.config,
-        ...this.getActiveSessions().map((session) => session.getConfig()),
+        ...sessions.map((session) => session.getConfig()),
         ...(discoveryConfig ? [discoveryConfig] : []),
       ]);
       const syncErrors: unknown[] = [];
@@ -4580,6 +4591,20 @@ class QwenAgent implements Agent {
           }
         } catch (error) {
           syncErrors.push(error);
+        } finally {
+          // Policy can change even when reconnecting fails.
+          for (const session of sessions) {
+            if (session.getConfig() !== config) continue;
+            void this.connection
+              .extNotification('qwen/notify/session/mcp-changed', {
+                sessionId: session.getId(),
+              })
+              .catch((error: unknown) => {
+                debugLogger.debug(
+                  `MCP reload notification failed for session ${session.getId()}: ${error instanceof Error ? error.message : String(error)}`,
+                );
+              });
+          }
         }
       }
       if (!discoveryConfig) {
@@ -4853,11 +4878,17 @@ class QwenAgent implements Agent {
   ): T {
     const backgroundTurn = session?.getBackgroundTurn?.();
     const hasRunningBackgroundTasks = session?.hasRunningBackgroundTasks?.();
-    if (backgroundTurn || hasRunningBackgroundTasks !== undefined) {
+    const generatedUi = session?.getConfig().getBundledGeneratedUiStatus?.();
+    if (
+      backgroundTurn ||
+      hasRunningBackgroundTasks !== undefined ||
+      generatedUi
+    ) {
       response = {
         ...response,
         _meta: {
           ...response._meta,
+          ...(generatedUi ? { generatedUi } : {}),
           ...(backgroundTurn ? { backgroundTurn } : {}),
           ...(hasRunningBackgroundTasks !== undefined
             ? { hasRunningBackgroundTasks }
@@ -5316,6 +5347,7 @@ class QwenAgent implements Agent {
     private readonly hostExecutionEngine: SessionExecutionEngine = 'legacy',
     private readonly managedRuntimeEnvironment?: ConfigParameters['managedRuntimeEnvironment'],
   ) {
+    this.workspaceSettings = settings;
     if (expectedPrivateParentCapability !== undefined) {
       const onClosed = () => {
         this.workflowAncestorTrustConnected = false;
@@ -5922,6 +5954,13 @@ class QwenAgent implements Agent {
             withExecutionEngineReceipt<NewSessionResponse>(
               {
                 sessionId: session.getId(),
+                ...(config.getBundledGeneratedUiStatus?.()
+                  ? {
+                      _meta: {
+                        generatedUi: config.getBundledGeneratedUiStatus(),
+                      },
+                    }
+                  : {}),
                 models: this.buildAvailableModels(config),
                 modes: this.buildModesData(config),
                 configOptions: this.buildConfigOptions(
@@ -8392,7 +8431,7 @@ class QwenAgent implements Agent {
 
   private async buildWorkspaceSkillsStatus(
     config: Config,
-    settings: LoadedSettings = this.settings,
+    settings: LoadedSettings,
   ): Promise<ServeWorkspaceSkillsStatus> {
     const skillManager = config.getSkillManager();
     if (!skillManager) {
@@ -9090,12 +9129,15 @@ class QwenAgent implements Agent {
   ): Promise<ServeSessionContextStatus> {
     const session = this.sessionOrThrow(sessionId);
     const config = session.getConfig();
+    const recovery = await session.getRecoveryStatusForClient();
+    const generatedUi = config.getBundledGeneratedUiStatus?.();
     return {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
       workspaceCwd: this.workspaceCwd(config),
-      recovery: await session.getRecoveryStatusForClient(),
+      recovery,
       state: {
+        ...(generatedUi ? { _meta: { generatedUi } } : {}),
         models: this.buildAvailableModels(config),
         modes: this.buildModesData(config),
         configOptions: this.buildConfigOptions(
@@ -9229,6 +9271,66 @@ class QwenAgent implements Agent {
       includeWorkflows ? await session.refreshWorkflowHistory() : [],
       { includeWorkflows },
     );
+  }
+
+  /**
+   * On-demand detail for one shell task. Kept separate from the tasks list
+   * because both parts cost more than a snapshot read: the output tail reads
+   * the captured file, and the memory number spawns a platform process probe.
+   * Only an open detail panel asks for it, and only while it is visible.
+   */
+  private async buildSessionTaskRuntimeStatus(
+    sessionId: string,
+    taskId: string,
+  ): Promise<ServeSessionTaskRuntimeStatus> {
+    const session = this.sessionOrThrow(sessionId);
+    const entry = session.getConfig().getBackgroundShellRegistry().get(taskId);
+    if (!entry) {
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        sessionId,
+        taskId,
+        runtime: null,
+      };
+    }
+
+    const runtime: ServeSessionShellTaskRuntime = {};
+    if (entry.status === 'running' && entry.pid !== undefined) {
+      const memoryBytes = await sampleProcessTreeRssBytes(entry.pid);
+      if (memoryBytes !== undefined) runtime.memoryBytes = memoryBytes;
+    }
+
+    try {
+      const stat = await fs.lstat(entry.outputFile);
+      if (stat.isFile()) {
+        runtime.outputBytes = stat.size;
+        runtime.outputModifiedAt = stat.mtimeMs;
+      }
+    } catch (error) {
+      // A missing file is the normal state before the first write; anything
+      // else is worth surfacing instead of pretending there is no output.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        runtime.outputError =
+          error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    const tail = readBackgroundShellOutputTail(entry.outputFile);
+    if (tail) {
+      if ('error' in tail) {
+        runtime.outputError ??= tail.error;
+      } else {
+        runtime.outputTail = tail.text;
+        if (tail.truncated) runtime.outputTailTruncated = true;
+      }
+    }
+
+    return {
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      taskId,
+      runtime,
+    };
   }
 
   private async buildSessionAgentsStatus(
@@ -10077,6 +10179,7 @@ class QwenAgent implements Agent {
       case SERVE_STATUS_EXT_METHODS.workspaceSkills:
         return (await this.buildWorkspaceSkillsStatus(
           this.config,
+          this.workspaceSettings,
         )) as unknown as Record<string, unknown>;
       case SERVE_STATUS_EXT_METHODS.workspaceTools:
         return this.buildWorkspaceToolsStatus(this.config) as unknown as Record<
@@ -10193,6 +10296,25 @@ class QwenAgent implements Agent {
           sessionId,
           params['includeWorkflows'] === true &&
             this.canUseWorkflowControls(session.getConfig()),
+        )) as unknown as Record<string, unknown>;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionTaskRuntime: {
+        const sessionId = params['sessionId'];
+        const taskId = params['taskId'];
+        if (
+          typeof sessionId !== 'string' ||
+          sessionId.length === 0 ||
+          typeof taskId !== 'string' ||
+          taskId.length === 0
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId/taskId',
+          );
+        }
+        return (await this.buildSessionTaskRuntimeStatus(
+          sessionId,
+          taskId,
         )) as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.sessionAgents: {
@@ -15438,7 +15560,11 @@ class QwenAgent implements Agent {
         const refreshSettings = reason !== 'content';
         const refreshContent = reason !== 'settings';
         if (refreshSettings) {
-          this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+          if (
+            !this.workspaceSettings.reloadScopeFromDisk(SettingScope.Workspace)
+          ) {
+            throw new Error('Failed to reload workspace skill settings');
+          }
         }
         const sessions = selectedSessions ?? this.getActiveSessions();
         const settingsReloadResults = refreshSettings

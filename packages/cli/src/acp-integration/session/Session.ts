@@ -10,6 +10,8 @@ import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/ag
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
+import { getTurnToolCallCapHalt } from '@qwen-code/qwen-code-core/services/loopDetectionService.js';
+import { LoopReason } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -20,7 +22,11 @@ import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  getStartupContextLength,
+  markCompressedHistory,
+} from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -35,6 +41,7 @@ import {
   type Config,
   type ContentGeneratorConfig,
   type LlmChat,
+  type LoopStopDetail,
   type ToolCallConfirmationDetails,
   type ToolConfirmationPayload,
   type ToolResult,
@@ -195,7 +202,6 @@ import {
   GLOBAL_DUPLICATE_THRESHOLD,
   canonicalToolName,
   getToolCallRepeatKey,
-  shouldHaltOnTurnToolCallCap,
   logLoopDetected,
   logRepeatedToolFailureGuard,
   LoopDetectedEvent,
@@ -274,13 +280,13 @@ import {
   MANAGED_RUNTIME_OUTCOME_UNKNOWN,
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
-import { getStartupContextLength } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   buildSessionHistoryFromConversation,
   getLastApiHistoryPromptId,
   getLastApiPromptCancellation,
   markApiHistoryPrompt,
+  cloneApiHistory,
 } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import {
   CHANNEL_OUTPUT_MODE_META_KEY,
@@ -856,6 +862,8 @@ export type DaemonToolLoopState = {
   maxToolCallKeyRepeat: number;
   loopDetected: boolean;
   loopType?: LoopType;
+  /** Reason and tool-call numbers of the stop, for shared loop types. */
+  loopDetail?: LoopStopDetail;
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
   repeatedToolFailureState: RepeatedToolFailureGuardState;
   explorationBudget?: ToolExplorationBudget;
@@ -1027,17 +1035,19 @@ function recordDaemonLoopDetected(
   loopType: LoopType,
   message: string,
   loopState: DaemonToolLoopState,
-  options: { recordToQwenLogger?: boolean } = {},
+  options: { recordToQwenLogger?: boolean; loopDetail?: LoopStopDetail } = {},
 ): true {
   if (!loopState.loopDetected) {
+    const { loopDetail, ...logOptions } = options;
     loopState.loopDetected = true;
     loopState.loopType = loopType;
+    loopState.loopDetail = loopDetail;
     debugLogger.warn(message);
     try {
       logLoopDetected(
         config,
-        new LoopDetectedEvent(loopType, promptId),
-        options,
+        new LoopDetectedEvent(loopType, promptId, loopDetail),
+        logOptions,
       );
     } catch (error) {
       debugLogger.debug(
@@ -1066,10 +1076,18 @@ function managedOutcomeUnknownError(error: Error): RequestError {
 function createLoopDetectedTurnError(
   loopState: DaemonToolLoopState,
 ): RequestError {
+  const detail = loopState.loopDetail;
   return new RequestError(-32603, LOOP_DETECTED_TURN_ERROR_MESSAGE, {
     code: 'LOOP_DETECTED',
     errorKind: 'loop_detected',
     ...(loopState.loopType ? { loopType: loopState.loopType } : {}),
+    ...(detail?.loopReason ? { loopReason: detail.loopReason } : {}),
+    ...(detail?.toolCallCount !== undefined
+      ? { toolCallCount: detail.toolCallCount }
+      : {}),
+    ...(detail?.toolCallLimit !== undefined
+      ? { toolCallLimit: detail.toolCallLimit }
+      : {}),
   });
 }
 
@@ -1110,7 +1128,7 @@ function recordDaemonToolCalls(
     }
   }
   // Same per-turn cap semantics as the core LoopDetectionService — the
-  // shouldHaltOnTurnToolCallCap predicate is shared with core's
+  // getTurnToolCallCapHalt classifier is shared with core's
   // checkTurnToolCallCap so the two runtimes cannot drift (an explicit
   // model.maxToolCallsPerTurn is a hard cap; the default is adaptive —
   // past the soft cap a productive turn continues until the
@@ -1125,20 +1143,26 @@ function recordDaemonToolCalls(
   // daemon stream loops discard the failed attempt's accumulated calls
   // (functionCalls.length = 0) before re-streaming, so a failed attempt's
   // calls never reach this function to be double-counted.
-  if (
-    shouldHaltOnTurnToolCallCap(
-      loopState.totalToolCalls,
-      loopState.maxToolCallKeyRepeat,
-      config.getMaxToolCallsPerTurn(),
-      config.isMaxToolCallsPerTurnExplicit(),
-    )
-  ) {
+  const capHalt = getTurnToolCallCapHalt(
+    loopState.totalToolCalls,
+    loopState.maxToolCallKeyRepeat,
+    config.getMaxToolCallsPerTurn(),
+    config.isMaxToolCallsPerTurnExplicit(),
+  );
+  if (capHalt) {
     return recordDaemonLoopDetected(
       config,
       promptId,
       LoopType.TURN_TOOL_CALL_CAP,
       `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`,
       loopState,
+      {
+        loopDetail: {
+          loopReason: capHalt.reason,
+          toolCallCount: loopState.totalToolCalls,
+          toolCallLimit: capHalt.limit,
+        },
+      },
     );
   }
   // Mirror of core's checkGlobalDuplicate: the same (tool, args) pair
@@ -1162,6 +1186,7 @@ function recordDaemonToolCalls(
       LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
       `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
       loopState,
+      { loopDetail: { loopReason: LoopReason.REPEATED_CALL } },
     );
   }
   // Deliberately after both halt checks: a halted batch is skipped whole and
@@ -2504,6 +2529,7 @@ export class Session implements SessionContext {
   readonly sessionId: string;
   private sessionReasoningSelection?: ReasoningSelection;
   private readonly restoredHistoryGaps?: HistoryGap[];
+  private historySnapshotBoundary?: { hash: string; prefixLength: number };
   /**
    * Tail of this session's permission queue. The serialization unit is the
    * session, not the `AgentSideConnection`: one daemon child owns a single
@@ -5104,12 +5130,19 @@ export class Session implements SessionContext {
   }
 
   captureHistorySnapshot(): Content[] {
-    return this.config.getLlmClient()!.getChat().getHistoryShallow();
+    const history = this.config.getLlmClient()!.getChat().getHistoryShallow();
+    this.historySnapshotBoundary = {
+      hash: createHash('sha256').update(JSON.stringify(history)).digest('hex'),
+      prefixLength: getStartupContextLength(history, {
+        includeCompressed: true,
+      }),
+    };
+    return history;
   }
 
   getRewindableUserTurnCount(): number {
     return countApiUserPrompts(
-      this.captureHistorySnapshot(),
+      this.config.getLlmClient()!.getChat().getHistoryShallow(),
       ACP_API_USER_PROMPT_OPTIONS,
     );
   }
@@ -5122,7 +5155,17 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config.getLlmClient()!.setHistory(structuredClone(history));
+    const restored = cloneApiHistory(history);
+    if (
+      this.historySnapshotBoundary?.hash ===
+      createHash('sha256').update(JSON.stringify(history)).digest('hex')
+    ) {
+      markCompressedHistory(
+        restored,
+        this.historySnapshotBoundary.prefixLength,
+      );
+    }
+    this.config.getLlmClient()!.setHistory(restored);
     this.clearActiveTodoPlanRevision();
     // Restoring history discards the timeline the active-todo reminder
     // described: clear the chain head so the next turn starts fresh instead
@@ -6026,9 +6069,8 @@ export class Session implements SessionContext {
       return undefined;
     }
 
-    // Classify from a bounded, shallow tail — this accept/reject pre-check does
-    // not need to structuredClone the whole history. The authoritative
-    // re-detection inside the fired prompt() reads full history for the strip.
+    // Limit meaningful history while retaining trailing notifications for replay.
+    // The authoritative re-detection inside prompt() uses full history to strip.
     const chat = this.#getCurrentChat();
     // A trailing restorable ask_user_question is awaiting its restore
     // prompt, not an interruption to close: `interrupted_turn` would answer
@@ -6050,7 +6092,8 @@ export class Session implements SessionContext {
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
       apiHistory: fullHistory
         ? chat.getHistory()
-        : (chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+        : (chat.getHistoryForRecovery?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+          chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
           chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT)),
       historyGaps: runtimeGaps?.length
         ? runtimeGaps
@@ -13798,6 +13841,7 @@ export class Session implements SessionContext {
           LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
           message,
           toolLoopState,
+          { loopDetail: { loopReason: LoopReason.PROVIDER_DUPLICATE_ID } },
         );
       } else {
         debugLogger.warn(message);

@@ -4306,15 +4306,25 @@ const SETTINGS_SCHEMA = {
     description: 'Settings to enable experimental features.',
     showInDialog: false,
     properties: {
-      mods: {
+      generatedUi: {
         type: 'boolean',
-        label: 'Claude-compatible Mod commands',
+        label: 'Generated UI',
         category: 'Experimental',
         requiresRestart: true,
         default: false,
         description:
-          'Run the experimental JavaScript and TypeScript Mod command subset from enabled extensions in trusted headless sessions.',
-        showInDialog: false,
+          'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
+        showInDialog: true,
+      },
+      mods: {
+        type: 'boolean',
+        label: 'Mods (Experimental)',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.',
+        showInDialog: true,
       },
       liveVoice: {
         type: 'object',

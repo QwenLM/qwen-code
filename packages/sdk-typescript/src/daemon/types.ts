@@ -1438,8 +1438,16 @@ export function parseDaemonBackgroundTurn(
   return value as DaemonBackgroundTurn;
 }
 
+/** Effective built-in Generated UI state of the owning runtime session. */
+export interface DaemonGeneratedUiStatus {
+  version: 1;
+  enabled: boolean;
+  reason?: string;
+}
+
 /** Returned from `POST /session`. */
 export interface DaemonSession {
+  generatedUi?: DaemonGeneratedUiStatus;
   startupConfigApplied?: SessionStartupConfigApplied;
   sessionId: string;
   /** Immutable runtime ownership root used for daemon routing. */
@@ -3574,6 +3582,28 @@ export interface DaemonSessionTasksStatus {
   sessionId: string;
   now: number;
   tasks: DaemonSessionTaskStatus[];
+}
+
+/**
+ * On-demand detail for one shell task. `memoryBytes` is the resident memory
+ * of the shell's process tree (shared pages counted once per process);
+ * `outputTail` is the last few KB of the captured stdout/stderr.
+ */
+export interface DaemonSessionShellTaskRuntime {
+  memoryBytes?: number;
+  outputBytes?: number;
+  outputModifiedAt?: number;
+  outputTail?: string;
+  outputTailTruncated?: boolean;
+  outputError?: string;
+}
+
+export interface DaemonSessionTaskRuntimeStatus {
+  v: 1;
+  sessionId: string;
+  taskId: string;
+  /** Null when the task is unknown/evicted or is not a shell task. */
+  runtime: DaemonSessionShellTaskRuntime | null;
 }
 
 export interface DaemonSessionAgentsStatus {
