@@ -567,8 +567,10 @@
                                  fork 10328 s, Verify 183 minutes. The FG11d
                                  close-queued cell adds 134 s (2x its measured
                                  67.2 s): healthy 9862 s, fork 10462 s, Verify
-                                 185 minutes. -->
-                            <forkedProcessTimeoutInSeconds>10462</forkedProcessTimeoutInSeconds>
+                                 185 minutes. The FG11d close-in-flight refusal
+                                 cell adds 9 s (2x its measured 4.5 s): healthy
+                                 9871 s, fork 10471 s, Verify 185 minutes. -->
+                            <forkedProcessTimeoutInSeconds>10471</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

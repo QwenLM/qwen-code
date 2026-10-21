@@ -2,8 +2,8 @@
 
 [English](2026-10-19-automation-lifecycle-fault-gates.md) | [简体中文](2026-10-19-automation-lifecycle-fault-gates.zh-CN.md)
 
-状态：`disable-span`、按 run 的取消格、`retire-at-intent` 与「关闭后跳过」格已实现并实跑绿；
-排在 held turn 之后的排队输入与取消矩阵其余部分已定界但未实现。
+状态：`disable-span`、按 run 的取消格、`retire-at-intent`、「关闭后跳过」格与
+「turn 在飞时拒绝关闭」格已实现并实跑绿；取消矩阵其余部分已定界但未实现。
 
 Issue：#14446，FG11 tracker。`d` 行记载按 run 取消已由 #14526 实现，并声明
 retire、disable、close 与 round 级取消矩阵并未因该合并而结清。
@@ -37,11 +37,11 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
 
 ## 第 1 片：retire、disable、close
 
-| 格子                 | 构造                                                                                    | 预期                                                                                                                 |
-| -------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `retire-at-intent`   | occurrence 已提交、Harness 尚未准入 `fire_run` 时 retire（relay 扣住操作）              | occurrence 结算为 `skipped`/`definition_retired` 且 attempts 为 0；不提交 run、不起模型 Turn，claim 绝不为 `unknown` |
-| `disable-span`       | 以禁用状态创建定义，跨两个到期 slot 后再 enable                                         | 禁止期内不产生 `fired` occurrence 与 run；重新 enable 后第一个 slot 恰好 fire 一次                                   |
-| `close-queued-input` | 关闭一个挂着存活定义的 Session，并启用 Workspace 生命周期（持久 broker、0700 状态目录） | 关闭完成，其后的 slot 记 `skipped`/`session_not_active`，且不起模型 Turn；排在 held turn 之后的排队输入不在本格覆盖  |
+| 格子                 | 构造                                                                                    | 预期                                                                                                                                                 |
+| -------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `retire-at-intent`   | occurrence 已提交、Harness 尚未准入 `fire_run` 时 retire（relay 扣住操作）              | occurrence 结算为 `skipped`/`definition_retired` 且 attempts 为 0；不提交 run、不起模型 Turn，claim 绝不为 `unknown`                                 |
+| `disable-span`       | 以禁用状态创建定义，跨两个到期 slot 后再 enable                                         | 禁止期内不产生 `fired` occurrence 与 run；重新 enable 后第一个 slot 恰好 fire 一次                                                                   |
+| `close-queued-input` | 关闭一个挂着存活定义的 Session，并启用 Workspace 生命周期（持久 broker、0700 状态目录） | 关闭完成，其后的 slot 记 `skipped`/`session_not_active`，且不起模型 Turn；turn 在飞时的关闭请求被 `409 turn_active` 拒绝，因此关闭永远到不了排队输入 |
 
 ## 第 2 片：取消矩阵
 
@@ -78,7 +78,8 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
   故障。让该检查通过的装配有四件：`durable-local-process`、owner-private 0700 的 broker
   状态目录、`verified-workspace-recovery-enabled`，以及存储 guard 的注册——第三件才让
   注册在 guard 不自启用的宿主上生效。四者齐备后关闭会完成，下一个 slot 记
-  `skipped`/`session_not_active`；排在 held turn 之后的排队输入留给后续格子。
+  `skipped`/`session_not_active`。turn 在飞时的关闭请求被 `409 turn_active` 拒绝，
+  这正是排队输入那一支的边界：队列的命运由 turn 决定，从不由关闭决定。
 - task cancel 需要投影的任务 id，而不是 run 记录 id：传 `arun_…` 会得到
   `task_not_found`，而 `GET /v1/agents/sessions/{id}/tasks` 返回的 id 会被
   接受。把 wake turn 一直扣在模型上时，取消会赢：task 与 run 都在一秒内结算为
