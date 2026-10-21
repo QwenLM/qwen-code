@@ -1041,6 +1041,11 @@ class ManagedSessionStoreHttpClient {
           error instanceof ManagedSessionStoreHttpError &&
           ((error.status === 409 &&
             (error.remoteCode === 'workspace_lifecycle_admission_closed' ||
+              // An ordinary write that reaches the store after a lifecycle
+              // claim was admitted is refused before anything is written.
+              // The same refusal is rollbackable under the claim below, so
+              // whether the claim was set yet must not decide the outcome.
+              error.remoteCode === 'workspace_lifecycle_claim_fenced' ||
               // The verdict/mint gate's refusal is a rollbackable
               // non-commit: the corrected retry must reach the backend
               // without the authority latching a write failure behind it.
@@ -1869,7 +1874,12 @@ class ManagedSessionStoreHttpClient {
           this.renewingAuthority?.claimGeneration
       )
         return this.renewPromise;
-      return this.renewPromise.then(() => this.renewWriter());
+      // That renewal answers for the authority it was sent under. An
+      // ordinary renewal that reaches the store after a lifecycle claim was
+      // admitted is fenced, and the fence says nothing about the claim now
+      // asking, so renew again under it either way.
+      const renewAgain = () => this.renewWriter();
+      return this.renewPromise.then(renewAgain, renewAgain);
     }
     const grant = this.requireGrant();
     this.renewingAuthority = this.lifecycleAuthority
