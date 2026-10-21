@@ -15,6 +15,8 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
+import type { InputPromptProps } from './input-prompt.js';
+import type { TextareaRenderable } from '@opentui/core';
 import { createInteractiveModSession } from '../../services/interactive-mod-session.js';
 import {
   ModSession,
@@ -32,7 +34,12 @@ const mocks = vi.hoisted(() => {
       render: vi.fn(),
       unmount: vi.fn(),
     },
+    liveOptions: null as unknown,
     runtime: {
+      dualOutputBridge: {
+        isConnected: true,
+        finalizeAssistantMessage: vi.fn(),
+      },
       writeRuntimeSidecar: vi.fn(async () => {}),
       startPressureMonitor: vi.fn(),
       shutdown: vi.fn(async () => {}),
@@ -50,16 +57,27 @@ const mocks = vi.hoisted(() => {
       confirmationDetails?: { onConfirm: () => Promise<void> };
     }>,
     streaming: false,
+    items: [] as Array<{
+      kind: 'user';
+      id: string;
+      text: string;
+      sentToModel?: boolean;
+    }>,
     interrupt: vi.fn(),
     keyboard: [] as Array<
       (key: { name: string; ctrl: boolean; eventType?: string }) => void
     >,
     appProps: null as {
       renderMain?: () => unknown;
+      onToggleVim?: () => Promise<boolean>;
+      vimMode?: string;
+      vim?: InputPromptProps['vim'];
+      userMessages?: readonly string[];
       composerHandle?: {
         current: {
           getText: () => string;
           setText: (text: string) => void;
+          submitDraft?: (text: string) => Promise<void>;
         } | null;
       };
     } | null,
@@ -142,26 +160,29 @@ vi.mock('./transcript-view.js', () => ({
   OpenTuiTranscriptView: () => null,
 }));
 vi.mock('./live-turn.js', () => ({
-  useOpenTuiLiveTurn: () => ({
-    items: [],
-    streaming: mocks.state.streaming,
-    streamingCharsRef: { current: 0 },
-    isReceivingContent: false,
-    waitingCalls: mocks.state.waitingCalls,
-    messageQueue: [],
-    popQueue: () => null,
-    submit: () => {},
-    interrupt: mocks.state.interrupt,
-    resetTranscript: (events: OpenTuiStreamEvent[]) => {
-      mocks.state.replayOrder.push('reset');
-      mocks.state.transcript = [...events];
-    },
-    applyEvent: (event: OpenTuiStreamEvent) => {
-      mocks.state.replayOrder.push(event.type);
-      mocks.state.transcript.push(event);
-    },
-    settleWaitingCall: () => {},
-  }),
+  useOpenTuiLiveTurn: (options: unknown) => {
+    mocks.state.liveOptions = options;
+    return {
+      items: mocks.state.items,
+      streaming: mocks.state.streaming,
+      streamingCharsRef: { current: 0 },
+      isReceivingContent: false,
+      waitingCalls: mocks.state.waitingCalls,
+      messageQueue: [],
+      popQueue: () => null,
+      submit: () => {},
+      interrupt: mocks.state.interrupt,
+      resetTranscript: (events: OpenTuiStreamEvent[]) => {
+        mocks.state.replayOrder.push('reset');
+        mocks.state.transcript = [...events];
+      },
+      applyEvent: (event: OpenTuiStreamEvent) => {
+        mocks.state.replayOrder.push(event.type);
+        mocks.state.transcript.push(event);
+      },
+      settleWaitingCall: () => {},
+    };
+  },
 }));
 vi.mock('../handleAutoUpdate.js', () => ({
   setUpdateHandler: () => ({ cleanup: () => {}, flush: () => {} }),
@@ -229,12 +250,15 @@ function buildConfig(authType: 'qwen-oauth' | 'none' = 'qwen-oauth'): Config {
   } as unknown as Config;
 }
 
+const setSetting = vi.fn();
 const settings = {
+  setValue: setSetting,
   merged: { ui: { hideWindowTitle: true } },
 } as unknown as LoadedSettings;
 
 describe('startOpenTuiUI fallback contract', () => {
   beforeEach(() => {
+    setSetting.mockClear();
     mocks.state.sidecarRejects = false;
     mocks.state.cleanups = [];
     mocks.state.stderrLines = [];
@@ -242,8 +266,10 @@ describe('startOpenTuiUI fallback contract', () => {
     mocks.state.warmupRejects = false;
     mocks.state.waitingCalls = [];
     mocks.state.streaming = false;
+    mocks.state.items = [];
     mocks.state.interrupt.mockClear();
     mocks.state.appProps = null;
+    mocks.state.liveOptions = null;
     mocks.state.keyboard = [];
     vi.mocked(exitSession).mockClear();
     mocks.state.resumeEvents = null;
@@ -253,20 +279,27 @@ describe('startOpenTuiUI fallback contract', () => {
     mocks.state.root.unmount.mockClear();
     mocks.state.root.render.mockClear();
     mocks.state.runtime.shutdown.mockClear();
+    mocks.state.runtime.dualOutputBridge.finalizeAssistantMessage.mockClear();
   });
 
   // root.render is mocked, so the tree is never executed; the boot-computed
   // initialDialog is read straight off the captured SessionStatsProvider
-  // element (children = the OpenTuiEntryApp element).
+  // element through the real VimModeProvider.
   function renderedInitialDialog(): unknown {
     const calls = mocks.state.root.render.mock.calls;
     const provider = calls[calls.length - 1]?.[0] as
-      | { props?: { children?: { props?: Record<string, unknown> } } }
+      | {
+          props?: {
+            children?: {
+              props?: { children?: { props?: Record<string, unknown> } };
+            };
+          };
+        }
       | undefined;
-    return provider?.props?.children?.props?.['initialDialog'];
+    return provider?.props?.children?.props?.children?.props?.['initialDialog'];
   }
 
-  async function withEntryApp(check: () => void) {
+  async function withEntryApp(check: () => void | Promise<void>) {
     const write = vi
       .spyOn(process.stdout, 'write')
       .mockImplementation(() => true);
@@ -284,12 +317,78 @@ describe('startOpenTuiUI fallback contract', () => {
           mocks.state.root.render.mock.calls.at(-1)![0] as ReactElement,
         );
       });
-      check();
+      await check();
     } finally {
       view?.unmount();
       write.mockRestore();
     }
   }
+
+  it('wires /vim to the real provider, persistence and footer mode', async () => {
+    await withEntryApp(async () => {
+      expect(mocks.state.appProps?.vimMode).toBeUndefined();
+      await act(async () => {
+        expect(await mocks.state.appProps!.onToggleVim!()).toBe(true);
+      });
+      expect(setSetting).toHaveBeenCalledWith('User', 'general.vimMode', true);
+      expect(mocks.state.appProps?.vimMode).toBe('NORMAL');
+      const submitDraft = vi.fn(async () => {});
+      mocks.state.appProps!.composerHandle!.current = {
+        getText: () => 'owned draft',
+        setText: () => {},
+        submitDraft,
+      };
+      mocks.state.appProps!.vim!.editor.current = {
+        plainText: 'owned draft',
+      } as TextareaRenderable;
+      await act(async () => {
+        expect(
+          mocks.state.appProps!.vim!.handleInput({
+            name: 'return',
+            sequence: '\r',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: false,
+          }),
+        ).toBe(true);
+      });
+      expect(submitDraft).toHaveBeenCalledExactlyOnceWith('owned draft');
+
+      await act(async () => {
+        expect(await mocks.state.appProps!.onToggleVim!()).toBe(false);
+      });
+      expect(mocks.state.appProps?.vimMode).toBeUndefined();
+    });
+  });
+
+  it('passes the runtime bridge to the actual rendered live hook', async () => {
+    await withEntryApp(() => {
+      expect(mocks.state.liveOptions).toMatchObject({
+        dualOutput: mocks.state.runtime.dualOutputBridge,
+      });
+    });
+  });
+
+  it('flushes the assistant synchronously before renderer unmount and writer shutdown', async () => {
+    await startOpenTuiUI(
+      buildConfig(),
+      settings,
+      [],
+      '/tmp/project',
+      {} as InitializationResult,
+    );
+    await mocks.state.cleanups[0]();
+    const finalize =
+      mocks.state.runtime.dualOutputBridge.finalizeAssistantMessage;
+    expect(finalize).toHaveBeenCalledOnce();
+    expect(finalize.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.state.root.unmount.mock.invocationCallOrder[0],
+    );
+    expect(mocks.state.root.unmount.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.state.runtime.shutdown.mock.invocationCallOrder[0],
+    );
+  });
 
   it('reads live composer text for Ctrl+D and only arms exit after it becomes empty', async () => {
     await withEntryApp(() => {
@@ -341,6 +440,19 @@ describe('startOpenTuiUI fallback contract', () => {
       });
     },
   );
+
+  it('feeds only real live prompt texts to the shell history owner', async () => {
+    mocks.state.items = [
+      { kind: 'user', id: '1', text: 'B' },
+      { kind: 'user', id: '2', text: 'A' },
+      { kind: 'user', id: '3', text: 'steer', sentToModel: false },
+      { kind: 'user', id: '4', text: 'B' },
+      { kind: 'user', id: '5', text: ' ' },
+    ];
+    await withEntryApp(() => {
+      expect(mocks.state.appProps?.userMessages).toEqual(['B', 'A', 'B']);
+    });
+  });
 
   it('returns false when the renderer cannot be created', async () => {
     vi.mocked(createCliRenderer).mockRejectedValueOnce(

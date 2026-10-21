@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useReducer, useEffect, useRef } from 'react';
+import { useCallback, useState, useEffect, useRef } from 'react';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { Key } from './useKeypress.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
@@ -337,25 +337,41 @@ function findCharInLineReverse(
 
 // ── Hook ──
 
-export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
+export type VimBuffer = Pick<
+  TextBuffer,
+  | 'text'
+  | 'lines'
+  | 'cursor'
+  | 'replaceRange'
+  | 'undo'
+  | 'handleInput'
+  | Extract<keyof TextBuffer, `vim${string}`>
+>;
+
+export function useVim(buffer: VimBuffer, onSubmit?: (value: string) => void) {
   const { vimEnabled, vimMode } = useVimModeState();
   const { setVimMode } = useVimModeActions();
-  const [state, dispatch] = useReducer(vimReducer, initialVimState);
+  const [state, setState] = useState(initialVimState);
   const bufferRef = useRef(buffer);
-  const stateRef = useRef(state);
+  const stateRef = useRef(initialVimState);
   bufferRef.current = buffer;
-  stateRef.current = state;
+
+  const dispatch = useCallback((action: VimAction) => {
+    // A terminal read can dispatch several keys before React renders again.
+    stateRef.current = vimReducer(stateRef.current, action);
+    setState(stateRef.current);
+  }, []);
 
   useEffect(() => {
     dispatch({ type: 'SET_MODE', mode: vimMode });
-  }, [vimMode]);
+  }, [vimMode, dispatch]);
 
   const updateMode = useCallback(
     (mode: VimMode) => {
       setVimMode(mode);
       dispatch({ type: 'SET_MODE', mode });
     },
-    [setVimMode],
+    [setVimMode, dispatch],
   );
 
   const getCurrentCount = useCallback(
@@ -388,7 +404,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       dispatch({ type: 'SET_YANK_REGISTER', text, linewise });
       writeClipboard(text);
     },
-    [],
+    [dispatch],
   );
 
   // ── Execute command (for dot-repeat) ──
@@ -695,7 +711,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       }
       return true;
     },
-    [buffer, updateMode, yankRange],
+    [buffer, updateMode, yankRange, dispatch],
   );
 
   // ── Word boundary helpers (for yank) ──
@@ -877,7 +893,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
 
   const handleCharRead = useCallback(
     (char: string) => {
-      const readType = state.pendingCharRead;
+      const readType = stateRef.current.pendingCharRead;
       if (!readType) return false;
 
       dispatch({ type: 'SET_PENDING_CHAR_READ', value: null });
@@ -918,7 +934,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           return false;
       }
     },
-    [state.pendingCharRead, buffer, dispatch, executeFind],
+    [buffer, dispatch, executeFind],
   );
 
   // ── Handle INSERT mode ──
@@ -960,7 +976,6 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       ) {
         if (buffer.text.trim() && onSubmit) {
           const submittedValue = buffer.text;
-          buffer.setText('');
           onSubmit(submittedValue);
           return true;
         }
@@ -1839,7 +1854,6 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             ) {
               if (buffer.text.trim() && onSubmit) {
                 const submittedValue = buffer.text;
-                buffer.setText('');
                 onSubmit(submittedValue);
               }
               dispatch({ type: 'CLEAR_COUNT' });

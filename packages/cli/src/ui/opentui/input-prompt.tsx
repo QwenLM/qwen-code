@@ -37,8 +37,10 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
+  type RefObject,
 } from 'react';
 import {
   useKeyboard,
@@ -64,6 +66,9 @@ import { copyFile, mkdir, stat, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { classifyPastedImagePaths } from '../utils/pasted-image-paths.js';
 import { editTextInExternalEditor } from '../utils/external-editor.js';
+import type { Key } from '../hooks/useKeypress.js';
+import { useShellHistory } from '../hooks/useShellHistory.js';
+import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
 import {
   allowEditorTypeInSandbox,
   isValidEditorType,
@@ -75,12 +80,18 @@ import type {
 } from './input-submission.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
-import { normalizeDescription, type Suggestion } from '../utils/suggestions.js';
+import {
+  MAX_SUGGESTION_LABEL_WIDTH,
+  normalizeDescription,
+  prepareSuggestionLabel,
+  type Suggestion,
+} from '../utils/suggestions.js';
 import {
   clipToWidth,
   cpLen,
   getCachedStringWidth,
   sanitizeTerminalLine,
+  sanitizeTerminalText,
   toCodePoints,
   truncateToWidth,
 } from '../utils/textUtils.js';
@@ -91,6 +102,7 @@ import { useAtCompletion } from '../hooks/useAtCompletion.js';
 import { categoryLabel } from '../components/SuggestionsDisplay.js';
 import { t } from '../../i18n/index.js';
 import { InputHistory } from './input-history.js';
+import { Command, matchesCommand, toOriginalKey } from './key-map.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
 import {
   CompletionMode,
@@ -108,8 +120,6 @@ import {
   expandPendingPastePlaceholders,
   filterByCategory,
   freePastePlaceholderId,
-  historyDownDecision,
-  historyUpDecision,
   isLargePaste,
   isPerfectMatchForTarget,
   nextCategory,
@@ -222,6 +232,11 @@ export interface InputPromptProps {
   ) => boolean | Promise<boolean>;
   onNotice?: (text: string) => void;
   preferredEditor?: string;
+  vim?: {
+    editor: RefObject<TextareaRenderable | null>;
+    handleInput: (key: Key) => boolean;
+    enabled: boolean;
+  };
   /** Submitted prompts (chronological) feeding history navigation. */
   userMessages: readonly string[];
   config?: Config;
@@ -303,6 +318,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   const focusRef = useRef(focus);
   focusRef.current = focus;
   const editorRef = useRef<TextareaRenderable | null>(null);
+  const vimModeEnabled = props.vim?.enabled ?? false;
   const userMessagesRef = useRef(userMessages);
   userMessagesRef.current = userMessages;
   // Read through a ref inside refreshCompletion so recency updates never
@@ -320,6 +336,32 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   }
 
   const [textVersion, setTextVersion] = useState(0);
+  const shellHistory = useShellHistory(
+    config?.getProjectRoot?.() ?? process.cwd(),
+  );
+  const { addCommandToHistory } = shellHistory;
+  const {
+    value: searchActive,
+    ref: searchActiveRef,
+    setValue: setSearchActive,
+  } = useBatchSafeState(false);
+  const searchSnapshot = useRef({ text: '', offset: 0 });
+  const [expandedSearchIndex, setExpandedSearchIndex] = useState(-1);
+  const commandHistory = useMemo(
+    () => [...userMessages].reverse(),
+    [userMessages],
+  );
+  const setSearchText = useCallback((text: string) => {
+    editorRef.current?.setText(text);
+    editorRef.current?.gotoBufferEnd();
+    setTextVersion((v) => v + 1);
+  }, []);
+  const search = useReverseSearchCompletion(
+    { text: editorRef.current?.plainText ?? '', setText: setSearchText },
+    shellModeActive ? shellHistory.history : commandHistory,
+    searchActive,
+  );
+  const { resetCompletionState: resetSearchCompletion } = search;
   // Raw producer output. `suggestions` below is this list filtered to the
   // active `@` category tab, so navigation, acceptance and the visible window
   // all index the same rows the user sees (ink useCompletion).
@@ -331,18 +373,23 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     ref: activeCategoryRef,
     setValue: setActiveCategory,
   } = useBatchSafeState<CompletionCategory>('all');
-  const categoryTabs = atCategoryTabs(rawSuggestions);
+  const categoryTabs = searchActive ? [] : atCategoryTabs(rawSuggestions);
   // Derived rather than corrected in an effect: a tab that a newer result set
   // no longer contains reads as 'all' for this render, which is ink's fallback.
   const atCategory = categoryTabs.includes(activeCategory)
     ? activeCategory
     : 'all';
-  const suggestions = filterByCategory(rawSuggestions, atCategory);
+  const suggestions = searchActive
+    ? search.suggestions
+    : filterByCategory(rawSuggestions, atCategory);
   const {
-    cursor: activeIndex,
+    cursor: completionIndex,
     cursorRef: activeIndexRef,
     setCursor: setActiveIndex,
   } = useBatchSafeCursor();
+  const activeIndex = searchActive
+    ? search.activeSuggestionIndex
+    : completionIndex;
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [escapeArmed, setEscapeArmed] = useState(false);
   const draftRef = useRef<Draft>(newDraft());
@@ -416,9 +463,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   // Shell mode overrides the approval chrome (ink InputPrompt order: `!` wins
   // over the approval-mode prefix). The label itself lives in the footer, as
   // ink's ShellModeIndicator does.
-  const chrome = shellModeActive
-    ? { prefix: '!', color: C.symbol }
-    : promptChrome(approvalMode);
+  const chrome = searchActive
+    ? { prefix: '(r:)', color: C.accent }
+    : shellModeActive
+      ? { prefix: '!', color: C.symbol }
+      : promptChrome(approvalMode);
   const borderColor = focus
     ? (chrome.color ?? C.borderFocused)
     : C.borderDefault;
@@ -487,6 +536,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
   // ── completion recomputation on every buffer/cursor change ──────────────
   const refreshCompletion = useCallback(() => {
+    if (searchActiveRef.current) return;
     const el = editorRef.current;
     if (!el) return;
     const text = el.plainText;
@@ -564,7 +614,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       setActiveIndex(0);
       setLoadingSuggestions(false);
     }
-  }, [config, currentCompletionTarget, setActiveCategory, setActiveIndex]);
+  }, [
+    config,
+    currentCompletionTarget,
+    setActiveCategory,
+    setActiveIndex,
+    searchActiveRef,
+  ]);
 
   useEffect(() => {
     const el = editorRef.current;
@@ -602,6 +658,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   }, []);
 
   const clearDraft = useCallback(() => {
+    setSearchActive(false);
+    resetSearchCompletion();
     draftRef.current.valid = false;
     draftRef.current = newDraft();
     editorRef.current?.clear();
@@ -611,7 +669,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     setSelectedAttachment(-1);
     showAttachments();
     setTextVersion((v) => v + 1);
-  }, [showAttachments, setSelectedAttachment]);
+  }, [
+    showAttachments,
+    setSelectedAttachment,
+    setSearchActive,
+    resetSearchCompletion,
+  ]);
 
   const sessionId = config?.getSessionId?.();
   const sessionRef = useRef(sessionId);
@@ -697,20 +760,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     });
   }, [onInterrupt, onPopQueue, restoreSubmission]);
 
-  useEffect(() => {
-    if (!props.composerHandle) return;
-    props.composerHandle.current = {
-      getText: () => editorRef.current?.plainText ?? '',
-      setText: (text) => {
-        editorRef.current?.setText(text);
-      },
-      cancelTurn,
-    };
-    return () => {
-      if (props.composerHandle) props.composerHandle.current = null;
-    };
-  }, [props.composerHandle, cancelTurn]);
-
   const submitDraft = useCallback(
     async (raw: string, deferUntilIdle = false) => {
       const el = editorRef.current;
@@ -733,6 +782,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       setSelectedAttachment(-1);
       showAttachments();
       historyRef.current?.reset();
+      setSearchActive(false);
+      resetSearchCompletion();
       historyRestoredTextRef.current = null;
       setRawSuggestions([]);
       setLoadingSuggestions(false);
@@ -751,6 +802,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
             .join('\n\n'),
           deferUntilIdle,
         };
+        if (shellModeActive && submission.imagePaths?.length === 0) {
+          addCommandToHistory(submission.text);
+        }
         const accepted = await onSubmit(
           submission.text,
           submission.imagePaths?.length ? submission.imagePaths : undefined,
@@ -774,8 +828,27 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       setSelectedAttachment,
       dismissFollowup,
       onPromptSuggestionDismiss,
+      shellModeActive,
+      addCommandToHistory,
+      setSearchActive,
+      resetSearchCompletion,
     ],
   );
+
+  useEffect(() => {
+    if (!props.composerHandle) return;
+    props.composerHandle.current = {
+      getText: () => editorRef.current?.plainText ?? '',
+      setText: (text) => {
+        editorRef.current?.setText(text);
+      },
+      cancelTurn,
+      submitDraft,
+    };
+    return () => {
+      if (props.composerHandle) props.composerHandle.current = null;
+    };
+  }, [props.composerHandle, cancelTurn, submitDraft]);
 
   const acceptSuggestion = useCallback(
     (index: number, viaEnter: boolean): void => {
@@ -932,7 +1005,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   //    placeholder-aware backspace for collapsed large pastes ──────────────
   useLayoutEffect(() => {
     const onRawInput = (sequence: string): boolean => {
-      if (!focus) return false;
+      if (!focus || vimModeEnabled) return false;
       if (isDeleteWordBackwardSequence(sequence)) {
         const el = editorRef.current;
         if (!el) return false;
@@ -990,7 +1063,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     };
     renderer.addInputHandler(onRawInput);
     return () => renderer.removeInputHandler(onRawInput);
-  }, [renderer, focus, deleteSelectedAttachment]);
+  }, [renderer, focus, deleteSelectedAttachment, vimModeEnabled]);
 
   // ── large-paste collapsing: bracketed pastes over the thresholds fold
   //    into a `[Pasted Content N chars]` placeholder (ink useBracketedPaste
@@ -1120,6 +1193,122 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     }
 
     if (!el) return;
+    // The visible category tabs own the bare arrows while they are up, exactly
+    // as in ink — modifiers pinned false so Alt+arrow word movement and any
+    // Ctrl+arrow terminal binding still reach the buffer.
+    if (
+      suggestions.length > 0 &&
+      categoryTabs.length > 2 &&
+      (key.name === 'left' || key.name === 'right') &&
+      !key.shift &&
+      !key.ctrl &&
+      !key.meta
+    ) {
+      key.preventDefault();
+      // From the raw state, not the derived tab: when a newer result set dropped
+      // the active category, ink's step finds no index and lands on 'all'.
+      setActiveCategory(
+        nextCategory(
+          categoryTabs,
+          activeCategoryRef.current,
+          key.name === 'right' ? 1 : -1,
+        ),
+      );
+      setActiveIndex(0);
+      return;
+    }
+
+    const beforeVim = el.plainText;
+    if (props.vim?.handleInput(toOriginalKey(key))) {
+      if (el.plainText !== beforeVim) restoredProvenanceRef.current = null;
+      key.preventDefault();
+      setTextVersion((v) => v + 1);
+      return;
+    }
+    if (key.name === 'r' && key.ctrl) {
+      key.preventDefault();
+      if (!searchActiveRef.current || shellModeActive) {
+        searchSnapshot.current = {
+          text: el.plainText,
+          offset: el.cursorOffset,
+        };
+      }
+      if (!searchActiveRef.current) {
+        setSearchActive(true);
+        setSelectedAttachment(-1);
+        setExpandedSearchIndex(-1);
+        completionModeRef.current = CompletionMode.IDLE;
+        slashSearchSeqRef.current++;
+        setAtQuery(null);
+        setRawSuggestions([]);
+        setLoadingSuggestions(false);
+      }
+      return;
+    }
+    if (searchActiveRef.current) {
+      const item = search.suggestions[search.activeSuggestionIndex];
+      if (key.name === 'escape') {
+        key.preventDefault();
+        setSearchActive(false);
+        search.resetCompletionState();
+        el.setText(searchSnapshot.current.text);
+        el.cursorOffset = searchSnapshot.current.offset;
+        dismissedUntilChangeRef.current = el.plainText;
+        setTextVersion((v) => v + 1);
+        return;
+      }
+      if (
+        matchesCommand(Command.NAVIGATION_UP, key) ||
+        matchesCommand(Command.NAVIGATION_DOWN, key)
+      ) {
+        key.preventDefault();
+        if (matchesCommand(Command.NAVIGATION_UP, key)) search.navigateUp();
+        else search.navigateDown();
+        setExpandedSearchIndex(-1);
+        return;
+      }
+      if (
+        (matchesCommand(Command.COLLAPSE_SUGGESTION, key) ||
+          matchesCommand(Command.EXPAND_SUGGESTION, key)) &&
+        item &&
+        item.value.length >= MAX_SUGGESTION_LABEL_WIDTH
+      ) {
+        key.preventDefault();
+        setExpandedSearchIndex(
+          matchesCommand(Command.EXPAND_SUGGESTION, key)
+            ? search.activeSuggestionIndex
+            : -1,
+        );
+        return;
+      }
+      const enter = matchesCommand(Command.SUBMIT_REVERSE_SEARCH, key);
+      if (
+        (matchesCommand(Command.ACCEPT_SUGGESTION_REVERSE_SEARCH, key) &&
+          item) ||
+        enter
+      ) {
+        key.preventDefault();
+        const value = item?.value ?? el.plainText;
+        if (item) restoredProvenanceRef.current = null;
+        setSearchActive(false);
+        search.resetCompletionState();
+        if (enter) void submitDraft(value);
+        else {
+          el.setText(value);
+          el.gotoBufferEnd();
+          historyRestoredTextRef.current = value;
+          setTextVersion((v) => v + 1);
+        }
+        return;
+      }
+      if (
+        matchesCommand(Command.HISTORY_UP, key) ||
+        matchesCommand(Command.HISTORY_DOWN, key)
+      ) {
+        key.preventDefault();
+        return;
+      }
+    }
     if (key.ctrl && key.name === 'x') {
       setSelectedAttachment(-1);
       key.preventDefault();
@@ -1161,6 +1350,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       key.name === 'up' &&
       !key.ctrl &&
       !key.shift &&
+      !searchActiveRef.current &&
       el.scrollY + el.visualCursor.visualRow === 0 &&
       draftRef.current.attachments.length > 0
     ) {
@@ -1208,7 +1398,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       // earlier prefix's highlighted row into the live buffer — `/quit` typed
       // mid-turn came out as `/model quit` and never quit. ink resolves the
       // same race in its InputPrompt; this is the OpenTUI half.
-      const showing = suggestions.length > 0;
+      const showing = !searchActiveRef.current && suggestions.length > 0;
       const liveTarget = currentCompletionTarget();
       const isPerfectMatch =
         liveTarget !== null &&
@@ -1381,32 +1571,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     // recalling would drop prompt context into a shell command line.
     const historyNavActive = !shellModeActive;
 
-    const showing = suggestions.length > 0;
-
-    // The visible category tabs own the bare arrows while they are up, exactly
-    // as in ink — modifiers pinned false so Alt+arrow word movement and any
-    // Ctrl+arrow terminal binding still reach the buffer.
-    if (
-      showing &&
-      categoryTabs.length > 2 &&
-      (key.name === 'left' || key.name === 'right') &&
-      !key.shift &&
-      !key.ctrl &&
-      !key.meta
-    ) {
-      key.preventDefault();
-      // From the raw state, not the derived tab: when a newer result set dropped
-      // the active category, ink's step finds no index and lands on 'all'.
-      setActiveCategory(
-        nextCategory(
-          categoryTabs,
-          activeCategoryRef.current,
-          key.name === 'right' ? 1 : -1,
-        ),
-      );
-      setActiveIndex(0);
-      return;
-    }
+    const showing = !searchActiveRef.current && suggestions.length > 0;
 
     if (showing && (navigationUp || navigationDown)) {
       key.preventDefault();
@@ -1478,6 +1643,27 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       return;
     }
 
+    if (
+      shellModeActive &&
+      (key.name === 'up' || key.name === 'down') &&
+      !key.ctrl &&
+      !key.shift
+    ) {
+      key.preventDefault();
+      const recalled =
+        key.name === 'up'
+          ? shellHistory.getPreviousCommand()
+          : shellHistory.getNextCommand();
+      if (recalled !== null) {
+        el.setText(recalled);
+        el.gotoBufferEnd();
+        restoredProvenanceRef.current = null;
+        historyRestoredTextRef.current = recalled;
+        setTextVersion((v) => v + 1);
+      }
+      return;
+    }
+
     // Enter with the dropdown open is owned by the force-captured Enter
     // branch above (accept-unless-perfect-match); there is no separate path.
 
@@ -1494,53 +1680,41 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       }
     }
 
-    if (historyNavActive && navigationUp) {
-      const cursor = el.logicalCursor;
-      const decision = historyUpDecision(
-        historyRef.current!,
+    if (historyNavActive && (navigationUp || navigationDown)) {
+      key.preventDefault();
+      const row = el.scrollY + el.visualCursor.visualRow;
+      const lastRow = Math.max(0, el.editorView.getTotalVirtualLineCount() - 1);
+      if (navigationUp && row > 0) {
+        el.moveCursorUp();
+        return;
+      }
+      if (navigationDown && row < lastRow) {
+        el.moveCursorDown();
+        return;
+      }
+      if (navigationUp && el.cursorOffset > 0) {
+        el.gotoBufferHome();
+        return;
+      }
+      const end = codePointIndexToDisplayOffset(
         el.plainText,
-        el.lineCount,
-        cursor.row,
-        displayColToCodePointIndex(
-          el.plainText.split('\n')[cursor.row] ?? '',
-          cursor.col,
-        ),
+        cpLen(el.plainText),
       );
-      if (decision.kind === 'passthrough') return; // caret moves inside text
-      key.preventDefault();
-      if (decision.kind === 'snap-edge') {
-        el.setCursor(0, 0);
+      if (navigationDown && el.cursorOffset < end) {
+        el.gotoBufferEnd();
         return;
       }
-      historyRestoredTextRef.current = decision.text;
-      el.setText(decision.text);
-      el.setCursor(0, 0);
-      setTextVersion((v) => v + 1);
-      return;
-    }
-
-    if (historyNavActive && navigationDown) {
-      const cursor = el.logicalCursor;
-      const lastLine = el.plainText.split('\n').pop() ?? '';
-      const decision = historyDownDecision(
-        historyRef.current!,
-        el.lineCount,
-        cursor.row,
-        displayColToCodePointIndex(
-          el.plainText.split('\n')[cursor.row] ?? '',
-          cursor.col,
-        ),
-        cpLen(lastLine),
-      );
-      if (decision.kind === 'passthrough') return;
-      key.preventDefault();
-      if (decision.kind === 'snap-edge') {
-        el.gotoLineEnd();
-        return;
+      const recalled = navigationUp
+        ? historyRef.current!.navigateUp(el.plainText)
+        : historyRef.current!.navigateDown();
+      if (recalled !== null) {
+        historyRestoredTextRef.current = recalled;
+        restoredProvenanceRef.current = null;
+        el.setText(recalled);
+        if (navigationUp) el.gotoBufferHome();
+        else el.gotoBufferEnd();
+        setTextVersion((v) => v + 1);
       }
-      historyRestoredTextRef.current = decision.text;
-      el.setText(decision.text);
-      setTextVersion((v) => v + 1);
       return;
     }
   });
@@ -1575,8 +1749,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     suggestions,
     activeIndex,
   );
-  const showDropdown =
-    loadingSuggestions || (suggestions.length > 0 && visible.length > 0);
+  const showDropdown = searchActive
+    ? search.showSuggestions
+    : loadingSuggestions || (suggestions.length > 0 && visible.length > 0);
   useEffect(() => {
     onSuggestionsVisibilityChange?.(showDropdown);
   }, [showDropdown, onSuggestionsVisibilityChange]);
@@ -1649,12 +1824,18 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         <textarea
           ref={(el) => {
             editorRef.current = el as TextareaRenderable | null;
+            if (props.vim) props.vim.editor.current = editorRef.current;
           }}
           focused={focus}
           flexGrow={1}
           minHeight={1}
           maxHeight={8}
-          placeholder={availableSuggestion ?? placeholder}
+          placeholder={
+            availableSuggestion ??
+            (vimModeEnabled
+              ? '  ' + t("Press 'i' for INSERT mode and 'Esc' for NORMAL mode.")
+              : placeholder)
+          }
           placeholderColor={C.dim}
           textColor={C.text}
           cursorColor={C.accent}
@@ -1706,6 +1887,42 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
             const originalIndex = startIndex + index;
             const isActive = originalIndex === activeIndex;
             const color = isActive ? C.accent : C.dim;
+            if (searchActive) {
+              const label = suggestion.label ?? suggestion.value;
+              const expanded = expandedSearchIndex === originalIndex;
+              const { before, match, after } = prepareSuggestionLabel(
+                label,
+                suggestion.matchedIndex,
+                editorRef.current?.plainText ?? '',
+                expanded,
+              );
+              return (
+                <box
+                  key={`${suggestion.value}-${originalIndex}`}
+                  flexDirection="row"
+                >
+                  <box width={2} flexShrink={0}>
+                    <text fg={color}>{isActive ? '> ' : '  '}</text>
+                  </box>
+                  <box flexShrink={1}>
+                    <text fg={color} wrapMode="char">
+                      {sanitizeTerminalText(before)}
+                      {match ? (
+                        <span fg={C.hover} bg={C.text}>
+                          {sanitizeTerminalText(match)}
+                        </span>
+                      ) : null}
+                      {sanitizeTerminalText(after)}
+                    </text>
+                  </box>
+                  {isActive && label.length >= MAX_SUGGESTION_LABEL_WIDTH && (
+                    <box width={3} flexShrink={0}>
+                      <text fg={C.dim}>{expanded ? ' ← ' : ' → '}</text>
+                    </box>
+                  )}
+                </box>
+              );
+            }
             // The row's one-physical-row charge covers the label too: like
             // the hint and badge, its bytes come from extensions/servers.
             const label = sanitizeTerminalLine(

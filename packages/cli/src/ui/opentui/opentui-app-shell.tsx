@@ -48,6 +48,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
+import type { VimMode } from '../contexts/VimModeContext.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
@@ -80,6 +81,8 @@ import type {
   OpenTuiCancelSettled,
   OpenTuiComposerHandle,
 } from './input-submission.js';
+import { realUserPromptTexts } from '../utils/historyUtils.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
@@ -99,7 +102,7 @@ import { isExitInProgress } from './exit-lifecycle.js';
 import { injectCapturedInput } from './early-input.js';
 import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
-import { OpenTuiInputPrompt } from './input-prompt.js';
+import { OpenTuiInputPrompt, type InputPromptProps } from './input-prompt.js';
 import { OpenTuiBanner } from './opentui-header.js';
 import { OpenTuiFooter, OpenTuiLoadingIndicator } from './opentui-footer.js';
 import { OpenTuiQueuedMessageDisplay } from './queued-message.js';
@@ -115,6 +118,8 @@ import {
   getDialogMaxHeight,
   STATIC_EXTRA_HEIGHT,
 } from '../utils/layoutUtils.js';
+
+const debugLogger = createDebugLogger('OPEN_TUI_APP');
 
 export interface OpenTuiAppProps {
   config: Config;
@@ -170,6 +175,7 @@ export interface OpenTuiAppProps {
   onStartNewSession?: (sessionId: string) => void;
   /** Vim-mode toggle owner (VimModeProvider in the entry layer). */
   onToggleVim?: () => Promise<boolean>;
+  vimMode?: VimMode;
   /**
    * Reserved slot for the update-notification banner (parity gap G-3). Holds
    * the same shape as ink's `updateInfo.message`; the update-check wiring
@@ -186,6 +192,8 @@ export interface OpenTuiAppProps {
   // --- Batch 6: live-turn + confirmation wiring ---------------------------
   /** A live model turn is in flight (composer Esc interrupts, footer spins). */
   streaming?: boolean;
+  /** Current live prompts; the shell combines persisted input history. */
+  userMessages?: readonly string[];
   /** Live output-character count behind the indicator's token estimate. */
   streamingCharsRef?: RefObject<number>;
   /** False while waiting on the API (↑), true once content arrives (↓). */
@@ -206,6 +214,7 @@ export interface OpenTuiAppProps {
   onToolCallSettled?: (callId: string) => void;
   /** U-10 parity: the entry logs/echoes render crashes (error boundary). */
   onRenderError?: (error: Error) => void;
+  vim?: InputPromptProps['vim'];
   /** Entry-owned composer buffer handle (early-input injection). */
   composerHandle?: {
     current: OpenTuiComposerHandle | null;
@@ -608,7 +617,13 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         : StreamingState.Idle,
   };
   const statusLine = useStatusLineState(
-    { settings, config, state: statusLineState, terminalWidth },
+    {
+      settings,
+      config,
+      state: statusLineState,
+      terminalWidth,
+      vimMode: props.vimMode,
+    },
     isNarrowWidth(terminalWidth),
   );
 
@@ -1046,15 +1061,26 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     config,
   ]);
 
-  const userMessages = useMemo(
-    () =>
-      host
-        .getHistory()
-        .filter((item) => item.type === 'user')
-        .map((item) => item.text ?? ''),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [host, host.getVersion()],
-  );
+  const hostHistory = host.getHistory();
+  const sessionId = config.getSessionId();
+  const [pastMessages, setPastMessages] = useState<readonly string[]>([]);
+  useEffect(() => {
+    let current = true;
+    void (logger?.getPreviousUserMessages() ?? Promise.resolve([])).then(
+      (past) => {
+        if (current) setPastMessages(past);
+      },
+      (error: unknown) =>
+        debugLogger.debug('Could not load input history', error),
+    );
+    return () => {
+      current = false;
+    };
+  }, [logger, sessionId, hostHistory]);
+  const userMessages = useMemo(() => {
+    const typed = props.userMessages ?? realUserPromptTexts(hostHistory);
+    return [...new Set([...typed].reverse().concat(pastMessages))].reverse();
+  }, [props.userMessages, hostHistory, pastMessages]);
 
   // ink's Composer drops the phrase (not the row) when this setting is off.
   const showLoadingPhrases =
@@ -1220,6 +1246,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 queueLength={queueLength}
                 onPopQueue={popQueue}
                 composerHandle={props.composerHandle}
+                vim={props.vim}
                 promptSuggestion={promptSuggestion}
                 onPromptSuggestionDismiss={onPromptSuggestionDismiss}
                 onPromptSuggestionAbort={onPromptSuggestionAbort}
@@ -1252,6 +1279,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               queueLength={queueLength}
               shellModeActive={shellModeActive}
               exitHint={exitHint}
+              vimMode={props.vimMode}
             />
           ) : null}
         </box>

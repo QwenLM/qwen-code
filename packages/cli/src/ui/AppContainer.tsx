@@ -3762,7 +3762,14 @@ export const AppContainer = (props: AppContainerProps) => {
     remountStaticHistory();
   }, [historyManager, remountStaticHistory]);
 
-  const { handleInput: vimHandleInput } = useVim(buffer, handleFinalSubmit);
+  const handleVimSubmit = useCallback(
+    (value: string) => {
+      buffer.setText('');
+      handleFinalSubmit(value);
+    },
+    [buffer, handleFinalSubmit],
+  );
+  const { handleInput: vimHandleInput } = useVim(buffer, handleVimSubmit);
 
   /**
    * Determines if the input prompt should be active and accept user input.

@@ -7,13 +7,16 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import { execFileSync } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
 import { renderHook, act } from '@testing-library/react';
 import type React from 'react';
 import { useVim } from './vim.js';
 import type { Key } from './useKeypress.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
-import { textBufferReducer } from '../components/shared/text-buffer.js';
+import {
+  textBufferReducer,
+  useTextBuffer,
+} from '../components/shared/text-buffer.js';
 
 // Prevent real system clipboard commands (clip, pbpaste, xclip, etc.) from
 // spawning during tests — they hang or fail in headless CI environments.
@@ -220,6 +223,79 @@ describe('useVim hook', () => {
     mockVimContext.vimMode = 'NORMAL';
     mockVimContext.toggleVimEnabled.mockClear();
     mockVimContext.setVimMode.mockClear();
+  });
+
+  describe('keys delivered before the next render', () => {
+    const renderBuffer = (initialText: string) =>
+      renderHook(() => {
+        const buffer = useTextBuffer({
+          initialText,
+          initialCursorOffset: 0,
+          viewport: { width: 80, height: 12 },
+          isValidPath: () => false,
+        });
+        return { buffer, vim: useVim(buffer, mockHandleFinalSubmit) };
+      });
+
+    it.each([
+      { keys: '2dw', seed: 'one two three', text: 'three', col: 0 },
+      { keys: '2dw.', seed: 'one two three four five', text: 'five', col: 0 },
+      { keys: 'fx;', seed: 'a x b x c', text: 'a x b x c', col: 6 },
+      { keys: 'iabc\u001b', seed: 'ZZ', text: 'abcZZ', col: 2 },
+    ])('$keys has the same result in one batch and paced input', (scenario) => {
+      for (const batched of [false, true]) {
+        const { result, unmount } = renderBuffer(scenario.seed);
+        const keys = [...scenario.keys].map((sequence) =>
+          makeKey(sequence, sequence === '\u001b' ? 'escape' : ''),
+        );
+        const send = (key: Key) =>
+          expect(result.current.vim.handleInput(key)).toBe(true);
+        if (batched) act(() => keys.forEach(send));
+        else for (const key of keys) act(() => send(key));
+
+        expect(result.current.buffer.text).toBe(scenario.text);
+        expect(result.current.buffer.cursor).toEqual([0, scenario.col]);
+        expect(result.current.vim.mode).toBe('NORMAL');
+        expect(mockHandleFinalSubmit).not.toHaveBeenCalled();
+        expect(execFile).not.toHaveBeenCalled();
+        unmount();
+      }
+    });
+
+    it.each(['r', 'f', 'F', 't', 'T'])(
+      '%s keeps Enter inside the pending character read until Escape',
+      (command) => {
+        const { result } = renderBuffer('one two three');
+        const handleInput = result.current.vim.handleInput;
+        act(() => {
+          expect(handleInput(makeKey(command))).toBe(true);
+          expect(handleInput(makeKey('\r', 'return'))).toBe(true);
+          expect(mockHandleFinalSubmit).not.toHaveBeenCalled();
+          expect(result.current.buffer.text).toBe('one two three');
+          expect(handleInput(TEST_SEQUENCES.ESCAPE)).toBe(true);
+          expect(handleInput(makeKey('\r', 'return'))).toBe(true);
+        });
+        expect(mockHandleFinalSubmit).toHaveBeenCalledExactlyOnceWith(
+          'one two three',
+        );
+        expect(result.current.buffer.text).toBe('one two three');
+      },
+    );
+
+    it('honors an external mode change before the next input batch', () => {
+      const { result, rerender } = renderBuffer('ZZ');
+      mockVimContext.vimMode = 'INSERT';
+      rerender();
+      act(() => {
+        result.current.vim.handleInput(makeKey('a'));
+        result.current.vim.handleInput(TEST_SEQUENCES.ESCAPE);
+        result.current.vim.handleInput(makeKey('x'));
+      });
+      expect(result.current.buffer.text).toBe('ZZ');
+      expect(result.current.buffer.cursor).toEqual([0, 0]);
+      expect(result.current.vim.mode).toBe('NORMAL');
+      expect(mockHandleFinalSubmit).not.toHaveBeenCalled();
+    });
   });
 
   describe('Mode switching', () => {
@@ -2364,7 +2440,7 @@ describe('useVim hook', () => {
         act(() => result.current.handleInput(makeKey('\r', 'return')));
 
         expect(mockHandleFinalSubmit).toHaveBeenCalledWith('hello world');
-        expect(buffer.setText).toHaveBeenCalledWith('');
+        expect(buffer.setText).not.toHaveBeenCalled();
       });
 
       it('should not submit empty text', () => {
