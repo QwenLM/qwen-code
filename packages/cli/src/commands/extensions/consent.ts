@@ -57,7 +57,7 @@ export async function requestChoicePluginNonInteractive(
   if (!process.stdin.isTTY) {
     throw new Error(
       t(
-        'Selecting a plugin from a marketplace needs an interactive terminal (stdin is not a TTY).',
+        'Selecting a plugin from a marketplace needs an interactive terminal (stdin is not a TTY). Specify the plugin name in the source to install non-interactively.',
       ),
     );
   }

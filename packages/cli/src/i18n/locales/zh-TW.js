@@ -989,6 +989,8 @@ export default {
   'No plugins available in this marketplace.': '此市場中沒有可用的插件。',
   'Select a plugin to install from marketplace "{{name}}":':
     '從市場 "{{name}}" 中選擇要安裝的插件：',
+  'Selecting a plugin from a marketplace needs an interactive terminal (stdin is not a TTY). Specify the plugin name in the source to install non-interactively.':
+    '從市場選擇外掛需要互動式終端（stdin 不是 TTY）。請在來源中指定外掛名稱以進行非互動安裝。',
   'Plugin selection cancelled.': '插件選擇已取消。',
   'Select a plugin from "{{name}}"': '從 "{{name}}" 中選擇插件',
   'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':
