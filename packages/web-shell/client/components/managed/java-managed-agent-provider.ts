@@ -501,6 +501,8 @@ export function createJavaManagedAgentProvider(
                   page.capabilities?.workspaceCreation === true,
                 canSelectDirectory:
                   page.capabilities?.workspaceDirectorySelection === true,
+                canImportLocalDirectory:
+                  page.capabilities?.localDirectoryImport === true,
                 supportsApprovalModeSelection:
                   page.capabilities?.approvalModeSelection === true,
               };
