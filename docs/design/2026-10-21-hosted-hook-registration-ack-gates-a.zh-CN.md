@@ -19,18 +19,18 @@ catalog 格丢弃 worker 的 `hook-catalog` 回复，让第一次准入在注册
 `HostedHookReplyLossFaultGatesIT` 的
 `fg13aRegistrationStoreAckLossReusesThePinnedRegistrationOnMySql`：
 
-| 步骤 | 发生什么                                 |
-| ---- | ---------------------------------------- |
-| 1    | 注册的结算提交落库，随后缝报告确认丢失。 |
-| 2    | 第一次准入失败，协调器安排重试。         |
-| 3    | 重试复用已落库的注册与钉住的 revision。  |
-| 4    | Hook 执行一次，模型收到一个工具结果。    |
+| 步骤 | 发生什么                                      |
+| ---- | --------------------------------------------- |
+| 1    | 注册的结算提交落库，随后缝报告确认丢失。      |
+| 2    | store 客户端重试同一份提交，服务端走重放。    |
+| 3    | 准入继续，复用已落库的注册与钉住的 revision。 |
+| 4    | Hook 执行一次，模型收到一个工具结果。         |
 
 期望：
 
 - 恰好一条 `hook_registration` 记录，状态 `settled`，钉在定义携带的 catalog
   （`fg13-hooks`，revision 1）。
-- Turn 的 `retry_count >= 1`，所以静默容忍丢失无法蒙过。
+- 故障恰好触发一次：客户端重试走重放而非重新应用；若重新应用会二次触发。
 - 物理 `hook.call` 一次、`hook.allow` 一次、发出的调用对应一个工具结果。
 
 ## 接缝

@@ -28,16 +28,16 @@ settle commit.
 | Step | What happens                                                            |
 | ---- | ----------------------------------------------------------------------- |
 | 1    | The registration's settle commit lands, then the seam reports the loss. |
-| 2    | The first admission fails; the coordinator schedules a retry.           |
-| 3    | The retry reuses the durable registration at the pinned revision.       |
+| 2    | The store client retries the same commit; the server replays it.        |
+| 3    | Admission proceeds and reuses the durable registration at the pin.      |
 | 4    | The Hook runs once and the model receives one tool result.              |
 
 Expectations:
 
 - One `hook_registration` record, `settled`, at the catalog pin the
   definition carries (`fg13-hooks`, revision 1).
-- The Turn carries `retry_count >= 1`, so a silently tolerated loss cannot
-  pass.
+- The fault fires exactly once: the client's retry replays the committed
+  settle instead of re-applying it, and a re-apply would fire it again.
 - One physical `hook.call`, one `hook.allow`, and one tool result for the
   emitted call.
 

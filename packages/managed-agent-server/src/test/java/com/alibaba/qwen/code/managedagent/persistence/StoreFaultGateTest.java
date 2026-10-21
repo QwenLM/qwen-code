@@ -106,6 +106,10 @@ class StoreFaultGateTest {
                 StoreFaultGate.Phase.HOOK_REGISTRATION_SETTLED, null);
         StoreFaultGate.INSTANCE.inspect(
                 REGISTRATION_EVENT, registration("admitted"));
+        // `inspect` skips matching while ack mode is armed, so the phase
+        // predicate is only exercised through `afterApply`.
+        StoreFaultGate.INSTANCE.afterApply(
+                REGISTRATION_EVENT, registration("admitted"));
         assertThat(StoreFaultGate.INSTANCE.attempts()).isZero();
     }
 

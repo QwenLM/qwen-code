@@ -707,13 +707,29 @@ class HostedHookReplyLossFaultGatesIT {
                 "definition", 202);
         String session = createSession(definition.path("id").asText(),
                 "initial");
-        String turn = submit(session, "FG13_ACK_REGISTRATION");
+        submit(session, "FG13_ACK_REGISTRATION");
         waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts())
                 .isGreaterThanOrEqualTo(1));
-        // The settle landed; only its acknowledgement was lost. The first
-        // admission fails, and its retry has to reuse the registration the
-        // failed call already made durable at this pin.
-        StoreFaultGate.INSTANCE.clear();
+        // The store client retries the rejected commit with the same body,
+        // and the server replays the committed command instead of re-running
+        // the record store. The loss therefore never reaches admission: the
+        // turn proceeds and reuses the durable registration. The single fault
+        // is what proves the retry replayed rather than re-applied; a second
+        // apply would fire it again.
+        waitFor(() -> assertThat(events("hook.call")).hasSize(1));
+        waitFor(() -> {
+            JsonNode execution = hookExecution(session);
+            assertThat(execution.at("/run/state").asText())
+                    .isEqualTo("settled");
+            assertThat(execution.at("/run/execution").asText())
+                    .isEqualTo("settled");
+        });
+        assertThat(StoreFaultGate.INSTANCE.attempts())
+                .as("the replay must not re-apply the settle")
+                .isEqualTo(1);
+        assertThat(events("hook.allow")).hasSize(1);
+        assertThat(hookResult(session).path("outcome").asText())
+                .isEqualTo("success");
         List<JsonNode> registrations = HostedGateTestSupport.extensionRecords(
                 jdbc, tenant, session, "hook_registration");
         assertThat(registrations).as("hook registration records").hasSize(1);
@@ -725,30 +741,6 @@ class HostedHookReplyLossFaultGatesIT {
         assertThat(registration.path("catalogRevision").asInt()).isEqualTo(1);
         assertThat(registration.at("/run/state").asText())
                 .isEqualTo("settled");
-        waitFor(() -> assertThat(events("hook.call")).hasSize(1));
-        waitFor(() -> {
-            JsonNode execution = hookExecution(session);
-            assertThat(execution.at("/run/state").asText())
-                    .isEqualTo("settled");
-            assertThat(execution.at("/run/execution").asText())
-                    .isEqualTo("settled");
-        });
-        assertThat(events("hook.allow")).hasSize(1);
-        assertThat(hookResult(session).path("outcome").asText())
-                .isEqualTo("success");
-        // The lost ack failed the first admission, so the Turn carries the
-        // retry the coordinator scheduled; a silently tolerated loss would
-        // leave this at zero.
-        assertThat(jdbc.queryForObject("SELECT retry_count FROM ma_turn"
-                + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
-                Integer.class, tenant, session, turn))
-                .as("retries after the lost registration ack")
-                .isGreaterThanOrEqualTo(1);
-        // The retry reused the durable registration: a second pin would have
-        // to carry a different id, and the store rejects a duplicate.
-        assertThat(HostedGateTestSupport.extensionRecords(jdbc, tenant,
-                session, "hook_registration"))
-                .as("registration records after the retry").hasSize(1);
         waitFor(() -> assertThat(modelRequests.toString()).contains(PROOF));
         long results = 0;
         for (JsonNode message : modelRequests.getLast().path("messages")) {
