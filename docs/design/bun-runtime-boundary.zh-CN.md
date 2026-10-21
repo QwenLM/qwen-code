@@ -35,21 +35,36 @@
 
 ### JS interpreter 身份（如何运行任意 JS 子进程）
 
-| 位置                                                                   | 用途                                                                                             | 本变更是否接入 `getJsInterpreterCommand`    |
-| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------- |
-| `packages/core/src/code-mode/host-client.ts`（`hostCommand`）          | code-mode host 子进程（`host.js` / 内置 `codeModeHost.js`；dev 为 `--import tsx host.ts`）       | 是                                          |
-| `packages/core/src/sandbox/file-worker-client.ts`                      | sandbox file-worker 子进程（`sandboxAsset('file-worker')`）                                      | 是                                          |
-| `packages/core/src/hooks/hookRunner.ts`（幸存 hook 监督进程）          | `spawn(--input-type=commonjs --eval SUPERVISOR …)`，detached                                     | 是                                          |
-| `packages/core/src/hooks/hook-command-cgroup.ts`（`launch`）           | cgroup v2 launcher 子进程（`--input-type=commonjs --eval LAUNCHER …`），在 hook 的受托单元内运行 | 暂未（S3）—— 仅 Linux（cgroup v2 平台守卫） |
-| `packages/core/src/sandbox/bwrap-execution.ts`（`executeBwrap`）       | 将解释器（`realpathSync(process.execPath)`）纳入 bubblewrap allowlist；relay 在其下启动 JS relay | 暂未（S3）—— 仅 Linux（bubblewrap）         |
-| `packages/core/src/sandbox/landlock-execution.ts`（`executeLandlock`） | 将解释器纳入 landlock allowlist；relay 在其下启动 JS relay                                       | 暂未（S3）—— 仅 Linux（landlock LSM）       |
-| `packages/core/src/utils/getPty.ts`（`loadPty`）                       | PTY 门控的 Bun 检测（当前 Bun 下 PTY 禁用 —— **S2 用真实后端替换此分支**）                       | 检测走 `isBunRuntime()`                     |
-| `packages/cli/src/config/mem0-settings.ts`（`bundledMem0Server`）      | 内置 mem0 MCP 子进程；身份判断 `server.command !== process.execPath`                             | 暂未；须与其身份判断一起迁移（S3）          |
-| `packages/core/src/agents/arena/ArenaManager.ts`                       | （另）worker 侧 in-process 运行时                                                                | launcher 形态，见上表                       |
-| `packages/cli/src/serve/pem-certificate-blocks.ts`                     | 辅助子进程 spawn                                                                                 | 暂未（S3 清扫）                             |
-| `packages/cli/src/commands/review/test-efficacy.ts`                    | 经 `process.execPath` 启动 vitest（开发工具路径）                                                | 有意不接入；保持宿主工具身份                |
+| 位置                                                                   | 用途                                                                                       | 本变更是否接入 `getJsInterpreterCommand`        |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------- |
+| `packages/core/src/code-mode/host-client.ts`（`hostCommand`）          | code-mode host 子进程（`host.js` / 内置 `codeModeHost.js`；dev 为 `--import tsx host.ts`） | 是                                              |
+| `packages/core/src/sandbox/file-worker-client.ts`                      | sandbox file-worker 子进程（`sandboxAsset('file-worker')`）                                | 是                                              |
+| `packages/core/src/hooks/hookRunner.ts`（幸存 hook 监督进程）          | `spawn(--input-type=commonjs --eval SUPERVISOR …)`，detached                               | 是                                              |
+| `packages/core/src/hooks/hook-command-cgroup.ts`（`launch`）           | hook 与 managed child run 的 cgroup launcher；payload 与 reaper 不变                       | 是（R3）；Linux 原生验证待执行                  |
+| `packages/core/src/sandbox/bwrap-execution.ts`（`executeBwrap`）       | JS relay 与 protected root 使用同一解析出的解释器                                          | 是（R3）；Linux 原生验证待执行                  |
+| `packages/core/src/sandbox/landlock-execution.ts`（`executeLandlock`） | JS relay 与 protected root 使用同一解析出的解释器                                          | 是（R3）；Linux 原生验证待执行                  |
+| `packages/core/src/utils/getPty.ts`（`loadPty`）                       | PTY 门控的 Bun 检测（当前 Bun 下 PTY 禁用 —— **S2 用真实后端替换此分支**）                 | 检测走 `isBunRuntime()`                         |
+| `packages/cli/src/config/mem0-settings.ts`（`bundledMem0Server`）      | 内置 Mem0 MCP 子进程与 bundled hook 身份使用同一解释器                                     | 是，同步迁移（R3）；产物验证待执行              |
+| `packages/core/src/agents/arena/ArenaManager.ts`                       | （另）worker 侧 in-process 运行时                                                          | launcher 形态，见上表                           |
+| `packages/cli/src/serve/pem-certificate-blocks.ts`                     | channel worker 的证书加载 oracle                                                           | 有意不接入；与 worker 保持同一 process.execPath |
+| `packages/cli/src/commands/sandbox.ts`                                 | 沙箱诊断 JS 使用解析出的解释器                                                             | 是（R3）；Linux 原生验证待执行                  |
+| `packages/cli/src/serve/run-qwen-serve.ts`                             | channel worker 的 TLS 信任探针                                                             | 有意不接入；与 worker 保持同一 process.execPath |
+| `packages/cli/src/commands/review/test-efficacy.ts`                    | 经 `process.execPath` 启动 vitest（开发工具路径）                                          | 有意不接入；保持宿主工具身份                    |
 
-标注"暂未"的行由 **S3 迁移清扫**（V8/GC/TLS/env 兼容阶段）负责，该表即其检查清单。cgroup/bwrap/landlock 三行是**仅 Linux** 机制（macOS/Windows 上有平台守卫或不生效），其迁移须对照平台矩阵中的 Linux target 验证；mem0 与 pem 两行适用于所有平台。
+R3 整合 [#14134 的 c807de17](https://github.com/QwenLM/qwen-code/pull/14134)
+中剩余解释器工作，以及
+[#14187 的 d14b2ad1](https://github.com/QwenLM/qwen-code/pull/14187) 中对应回归覆盖。
+沙箱诊断、Mem0 spawn/身份、cgroup launcher、bwrap/landlock relay/protected root
+成对接入现有 helper。cgroup 保留 hook 与 managed-child-run 两类消费者及
+`reapOnParentExit`。这些源码变更和保留的测试尚未在整合候选上验证；Linux 原生
+cgroup/bwrap/landlock 仍为 NOT_RUN。
+
+明确不接收 #14134 提议的三处替换。review Vitest 保留调用它的宿主解释器，容器分支
+继续使用镜像的 `node`。PEM oracle 和 TLS 信任探针保留 `process.execPath`，与
+实际 channel-worker launcher 一致。只为探针选择 manifest 解释器可能判断与
+worker 不同的 CA/TLS 实现。本次不改变 daemon 运行时或 npm 的 Node 身份。
+[R3 分发设计](2026-10-21-opentui-npm-distribution.zh-CN.md) 记录本批范围与验收计划；
+其余 S3/S4 项仍待完成。
 
 ### 更新 / 安装身份（必须保持宿主 Node）
 
@@ -63,7 +78,8 @@
 
 ### 固定父提交的完整字面调用点复核
 
-上表是按概念分组的历史清单，不是穷尽列表。本表补齐固定父提交
+上方概念表记录当前边界；下表保留历史快照，不是当前 helper 消费者的穷尽列表。
+下表补齐固定父提交
 `8b4a0a25ea2bc570a1a6070e05182f29501a1b7f` 上 `packages/**/src/**`
 的所有可执行 `process.execPath` 字面读取：34 文件、48 处。行号固定于该父提交；
 同文件不同用途逐一列出。扫描排除注释、`*.test.*`、`*.spec.*`、`__tests__`、
@@ -134,12 +150,12 @@ S1 已接入选择器的三处是 `core/src/code-mode/host-client.ts`、`core/sr
   1. 唯一可信位置是 **standalone 包根**：调用方 bundle 目录（`resolveBundleDir`）的父目录，必须同时存在 `manifest.json` 与 standalone 入口标记 `lib/cli-entry.js`。**不做向上遍历** —— 无关祖先清单（例如 npm 宿主工程的构建 manifest）永远不会被读取，npm、源码与 SDK 布局因此始终使用 `process.execPath`。
   2. 在该可信包根内，所有声明先校验后使用：`runtime` 必须恰为 `'bun'` 或 `'node'`；解释器 —— `interpreter` 字段相对包根解析（绝对路径原样采用，不强制限制在包根内），否则取标准位置 `bun/bin/bun` / `node/bin/node` —— 必须是已存在的普通文件。POSIX 还要求执行权限；Windows 只检查普通文件存在，不验证 PE 格式或实际可启动性，默认路径为 `bun/bun.exe` / `node/node.exe`。
   3. 任何无效或缺失的声明 —— 非对象清单、未知 `runtime`、非字符串 `interpreter`、二进制缺失、目录、POSIX 不可执行文件、入口标记缺失 —— 一律回退 `process.execPath`（运行当前进程的解释器：宿主 Node、内置 Node，或 standalone Bun 形态的私有内置 Bun）。解析绝不猜测其他二进制，也绝不抛出异常。
-- `runtime` 是当前没有生产读点的元数据：三处已迁移调用方仅消费 `command`。按运行时区分的消费逻辑（包括未来 S3 对该字段的任何用途）尚未在此实现。
+- `runtime` 是当前没有生产读点的元数据：已迁移调用方仅消费 `command`。按运行时区分的消费逻辑（包括未来 S3 对该字段的任何用途）尚未在此实现。
 - 结果按进程记忆：首次调用方的 URL 决定解析结果，后续调用方 URL 被忽略；当前生产调用方共享一个安装根。`resetJsInterpreterCacheForTests()` 清除缓存。
-- 沙箱 file-worker 选择此解释器，但 bwrap/landlock 的 allowlist 仍暂存 `realpathSync(process.execPath)`。这项衔接仍是尚未实现的 S3 迁移；本 PR 不证明解析出的解释器与暂存二进制不同时的布局已受支持。
+- 沙箱 file-worker、bwrap/landlock relay 启动和 protected root 现在使用同一解析出的解释器。R3 整合保留使用不同私有路径的测试；Linux 原生执行仍未验证。
 - 支持范围：**基于解释器的 Node/Bun 分发**。拒绝声明时返回 `process.execPath`，它在编译形态下会是应用二进制。本 PR 不支持编译应用，也没有提供编译制品生产路径。未来该形态必须显式打包解释器并独立验证失败行为后才能采用；当前回退不保证在编译形态下得到可用解释器。
 
-迁移规则：任何新增的、以子进程方式运行 JS 文件或 `-e` 片段的代码必须走 `getJsInterpreterCommand`；再唤起应用的位置走 `QWEN_CODE_CLI` / 入口回退。
+迁移规则：任意 JS worker 使用 `getJsInterpreterCommand`；上文明确列出的宿主工具和 worker-runtime 探针保留宿主身份。再唤起应用的位置使用 `QWEN_CODE_CLI` / 入口回退。
 
 ## 跨运行时测试覆盖
 
@@ -163,7 +179,6 @@ Windows 跳过可捕获 SIGTERM 用例；缺少 Bun 二进制时跳过 Bun 腿�
 ## 遗留问题
 
 - 未来编译形态下 `ArenaManager` / managed-worker 重启：编译包必须发布 launcher（`QWEN_CODE_CLI`），上列同解释器回退位置需要 launcher 形态的迁移。已列入 S4 跟踪。
-- `mem0-settings.ts` 的身份判断与 `command === process.execPath` 耦合；S3 中与其 spawn 位置一起迁移，避免身份与 launcher 漂移。
 
 ## Standalone 更新集成（R1）
 
@@ -186,6 +201,12 @@ user 和环境中的 registry/auth 配置，绝不隐式加载项目 `.npmrc`。
 HOME。跨 registry origin 重定向会移除鉴权头。原生 fetch 没有实现全部
 npm 传输选项；Node 继续通过 npm 处理，Bun 企业代理/CA 仍需独立验收。
 
+registry 与鉴权配置的键和值都展开环境变量。环境字段先去除首尾空白，再展开；
+仅含空白的凭据会覆盖低优先级的同名键，不恢复其 token。鉴权依次匹配带末尾
+斜杠、不带末尾斜杠的路径及裸 host，优先最长匹配，不越界到兄弟路径或其他
+host。配置读取错误除文件不存在外仍明确拒绝；与 npm 不同，配置路径指向
+目录时不会静默忽略。显式空 prefix 保留 npm 的 cwd 相对语义，不选择新的回退。
+
 已安装 manifest 决定 Node 或 Bun OpenTUI preview 归档类型。现有对象
 缺少 runtime 时沿用旧 Node 解释；未知 runtime 和无效 manifest 结构在
 网络请求或分配临时目录之前拒绝。JSON 损坏或非对象错误会指出 manifest
@@ -198,7 +219,7 @@ npm 传输选项；Node 继续通过 npm 处理，Bun 企业代理/CA 仍需独�
 已安装身份；期间已安装的更新版本会被保留。激活继续使用现有原子替换与回滚
 机制。
 
-smoke 探测通过 `--version` 实际加载随包 `cli.js`；Bun 还用 `--help`
+smoke 探测通过 `--version` 实际加载随包 `cli.js`；两种运行时还用 `--help`
 运行生产启动器，绕过仅读元数据的版本快路。所有探测共享私有空工作目录，
 防止项目或归档中的 Bun preload 执行。传入的环境副本移除 Node/Bun 启动选项、环境 CLI 版本及重启覆盖项，
 保留父进程环境和普通变量。`finally` 尝试清理；清理失败保留原始 smoke
@@ -212,7 +233,9 @@ manifest 验证、身份变化、版本不匹配、smoke 隔离、激活及回�
 指定 Node 24.19.0 与 Bun 1.3.14。两个宿主分别测试两种 payload 解释器，
 使用证书验证开启的本地 HTTPS。真实安装布局夹具调用实际安装检测与查询
 入口：Bun 访问 HTTPS registry，Node 委托 npm 执行器。即便启动器元数据
-返回请求版本，CLI 文件缺失或语法损坏仍会拒绝更新。单测拥有独立的 HOME
+返回请求版本，CLI 文件缺失或语法损坏仍会拒绝更新。启动器损坏也必须在替换
+当前安装及回滚备份之前拒绝。这些探测不覆盖启动器普通命令的子进程启动路径。
+单测拥有独立的 HOME
 和生成 wrapper 的目录。CI 模式获取固定工具，验证公布的校验值和
 integrity，并在现有脚本测试之前执行。
 

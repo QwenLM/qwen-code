@@ -4,12 +4,17 @@
 
 ## 状态与问题
 
-本方案实现于 2026-10-21，基于 R1
+原 npm 交付实现于 2026-10-21，基于 R1
 `d41362f40f3e5dbbce192dc5f610a28dad088fb4`。macOS arm64 构建、typecheck、
 五种真实 npm 安装布局及 20 项产品场景通过。独立验收通过五项生命周期和
 两项 managed-update 场景，实际观察到原 Node 执行 smoke。更新夹具使用自有克隆，
 其版本人为设为 0.0.0，目标为未修改的候选 0.25.3 tarball；这不代表两个正式
 发布版本之间的升级验收。
+
+当前整合纳入修复后的 R1
+`356890b743e142f4226cb86de3bd8c9b29a92baf` 与下述解释器工作。新候选的构建、
+定向测试和受影响产物均为 NOT_RUN；上面的原验收结果不代表新源码或 Linux 沙箱
+机制已经通过。
 
 剩余模式/protocol、IPC/exit-44、只读安装、missing-grammar 与平台验收门禁仍需
 明确完成。这是显式选择 OpenTUI 的兼容交付，不能视为所有 TUI 会话迁移到 Bun 已完成。
@@ -38,9 +43,19 @@ linux-x64（glibc）上显式启用 OpenTUI。Node 继续承担 npm launcher 与
 Windows、musl、整个 CLI 的 sandbox 镜像和外部 Node 专用宿主不进入新 handoff。
 既有 standalone 运行时选择与更新行为保留。
 
-其余直接使用 `process.execPath` 的消费者已有独立审计。应用重入与任意 JavaScript
-worker 沿用既有 launcher/interpreter 契约。本次仅修正 TUI handoff 后必须保留原
-Node 解释器的关联 npm 消费者，不全面重写所有审计到的调用点。
+直接 `process.execPath` 审计还识别出
+[#14134 的 c807de17](https://github.com/QwenLM/qwen-code/pull/14134) 与
+[#14187 的 d14b2ad1](https://github.com/QwenLM/qwen-code/pull/14187) 中有界的剩余工作，
+统一纳入现有 R3 交付。沙箱诊断、Mem0 MCP spawn 与 bundled hook 身份、cgroup
+launcher，以及 bwrap/landlock relay/protected root 成对复用
+`getJsInterpreterCommand`。保留原 payload、环境、reaper 与沙箱权限，并完整保留
+四个相关回归文件。helper 在 npm/source/SDK 布局仍回退到调用者解释器。
+
+三处原提议明确保留为例外：review Vitest 保留宿主解释器（容器中为镜像的 `node`）；
+PEM loader oracle 与 TLS 信任探针保留 `process.execPath`，匹配实际 channel worker。
+不能单独改变认证某个 worker 的探针运行时。
+[运行时清单](bun-runtime-boundary.zh-CN.md) 同时记录迁移消费者和这些例外。
+应用重启、默认运行时、protocol host 与 npm 的原 Node 身份不变。
 
 ## 模式与运行时选择
 
@@ -185,6 +200,9 @@ screen reader、sandbox、Windows/musl 与 PTY 依赖。
    screen reader、standalone、Windows 与 musl 排除项有明确回归覆盖和平台执行限制。
 8. 保留 npm 发布执行权限，记录 tarball hash、解包大小、optional runtime 安装大小、
    Node/Bun 版本与精确 commit。
+9. 使用不同的私有解释器路径验证整合调用点，覆盖成对的 Mem0 身份拒绝、literal
+   payload 参数与 protected root 重叠拒绝。真实 Linux cgroup membership/reaping
+   和 bwrap/landlock 执行仍是独立门禁，mock 断言不能关闭它们。
 
 执行前不标记 PASS。平台内容检查不替代对应平台 native 测试，本交付不关闭总体
 运行时迁移或 Ink 一致性总议题。

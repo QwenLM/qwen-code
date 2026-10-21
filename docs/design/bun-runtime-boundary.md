@@ -48,26 +48,40 @@ or compatibility.
 
 ### JS interpreter identity (how to run an arbitrary JS child)
 
-| Site                                                                  | Use                                                                                                                             | Wired to `getJsInterpreterCommand` in this change           |
-| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| `packages/core/src/code-mode/host-client.ts` (`hostCommand`)          | code-mode host child (`host.js` / bundled `codeModeHost.js`; dev: `--import tsx host.ts`)                                       | yes                                                         |
-| `packages/core/src/sandbox/file-worker-client.ts`                     | sandbox file-worker child (`sandboxAsset('file-worker')`)                                                                       | yes                                                         |
-| `packages/core/src/hooks/hookRunner.ts` (surviving-hook supervisor)   | `spawn(--input-type=commonjs --eval SUPERVISOR …)`, detached                                                                    | yes                                                         |
-| `packages/core/src/hooks/hook-command-cgroup.ts` (`launch`)           | cgroup-v2 launcher child (`--input-type=commonjs --eval LAUNCHER …`) running the hook under its delegated unit                  | not yet (S3) — Linux only (cgroup v2 platform guard)        |
-| `packages/core/src/sandbox/bwrap-execution.ts` (`executeBwrap`)       | stages the interpreter (`realpathSync(process.execPath)`) into the bubblewrap allowlist; the relay spawns the JS relay under it | not yet (S3) — Linux only (bubblewrap)                      |
-| `packages/core/src/sandbox/landlock-execution.ts` (`executeLandlock`) | stages the interpreter into the landlock allowlist; the relay spawns the JS relay under it                                      | not yet (S3) — Linux only (landlock LSM)                    |
-| `packages/core/src/utils/getPty.ts` (`loadPty`)                       | Bun detection for the PTY gate (PTY disabled under Bun today — **S2 replaces this branch with a real backend**)                 | detection via `isBunRuntime()`                              |
-| `packages/cli/src/config/mem0-settings.ts` (`bundledMem0Server`)      | bundled mem0 MCP child; identity check `server.command !== process.execPath`                                                    | not yet; must migrate with its identity check together (S3) |
-| `packages/core/src/agents/arena/ArenaManager.ts`                      | (also) worker-side in-process runtime                                                                                           | launcher-shaped, see above                                  |
-| `packages/cli/src/serve/pem-certificate-blocks.ts`                    | helper child spawn                                                                                                              | not yet (S3 sweep)                                          |
-| `packages/cli/src/commands/review/test-efficacy.ts`                   | spawns vitest via `process.execPath` (dev-tooling path)                                                                         | intentionally not; host-tool identity                       |
+| Site                                                                  | Use                                                                                                             | Wired to `getJsInterpreterCommand` in this change      |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `packages/core/src/code-mode/host-client.ts` (`hostCommand`)          | code-mode host child (`host.js` / bundled `codeModeHost.js`; dev: `--import tsx host.ts`)                       | yes                                                    |
+| `packages/core/src/sandbox/file-worker-client.ts`                     | sandbox file-worker child (`sandboxAsset('file-worker')`)                                                       | yes                                                    |
+| `packages/core/src/hooks/hookRunner.ts` (surviving-hook supervisor)   | `spawn(--input-type=commonjs --eval SUPERVISOR …)`, detached                                                    | yes                                                    |
+| `packages/core/src/hooks/hook-command-cgroup.ts` (`launch`)           | cgroup launcher for hooks and managed child runs; payload and reaper unchanged                                  | yes (R3); native Linux validation pending              |
+| `packages/core/src/sandbox/bwrap-execution.ts` (`executeBwrap`)       | JS relay and protected root use the resolved interpreter                                                        | yes (R3); native Linux validation pending              |
+| `packages/core/src/sandbox/landlock-execution.ts` (`executeLandlock`) | JS relay and protected root use the resolved interpreter                                                        | yes (R3); native Linux validation pending              |
+| `packages/core/src/utils/getPty.ts` (`loadPty`)                       | Bun detection for the PTY gate (PTY disabled under Bun today — **S2 replaces this branch with a real backend**) | detection via `isBunRuntime()`                         |
+| `packages/cli/src/config/mem0-settings.ts` (`bundledMem0Server`)      | bundled Mem0 MCP child and bundled-hook identity use the same interpreter                                       | yes, together (R3); artifact validation pending        |
+| `packages/core/src/agents/arena/ArenaManager.ts`                      | (also) worker-side in-process runtime                                                                           | launcher-shaped, see above                             |
+| `packages/cli/src/serve/pem-certificate-blocks.ts`                    | certificate-loader oracle for channel workers                                                                   | intentionally not; same process.execPath as the worker |
+| `packages/cli/src/commands/sandbox.ts`                                | sandbox diagnostic JS uses the resolved interpreter                                                             | yes (R3); native Linux validation pending              |
+| `packages/cli/src/serve/run-qwen-serve.ts`                            | TLS trust probe for channel workers                                                                             | intentionally not; same process.execPath as the worker |
+| `packages/cli/src/commands/review/test-efficacy.ts`                   | spawns vitest via `process.execPath` (dev-tooling path)                                                         | intentionally not; host-tool identity                  |
 
-Rows marked `not yet` are owned by the **S3 migration sweep** (V8/GC/TLS/env
-compatibility stage), which uses this table as its checklist. The
-cgroup/bwrap/landlock rows are **Linux-only** mechanisms (platform-guarded or
-inert on macOS/Windows), so their migration is validated against the Linux
-targets of the platform matrix; the mem0 and pem rows apply on every
-platform.
+R3 consolidates the remaining interpreter work from
+[#14134 at c807de17](https://github.com/QwenLM/qwen-code/pull/14134)
+and its regression coverage from
+[#14187 at d14b2ad1](https://github.com/QwenLM/qwen-code/pull/14187).
+It migrates the sandbox diagnostic, Mem0 spawn/identity, cgroup launcher, and
+bwrap/landlock relay/protected-root pairs through the existing helper. cgroup
+retains both hook and managed-child-run consumers and `reapOnParentExit`.
+These source changes and their retained tests have not yet been validated on
+the consolidated candidate; native Linux cgroup/bwrap/landlock remain NOT_RUN.
+
+Three proposed swaps are deliberately not taken from #14134. Review Vitest
+keeps its invoking host interpreter; its container branch still uses the
+image's `node`. The PEM oracle and TLS trust probe keep `process.execPath`,
+matching the actual channel-worker launcher. Selecting a manifest interpreter
+only for those probes could judge a different CA/TLS implementation than the
+worker uses. This changes neither the daemon runtime nor npm's Node identity.
+The [R3 distribution design](2026-10-21-opentui-npm-distribution.md) records the
+bounded delivery and acceptance plan; remaining S3/S4 entries stay pending.
 
 ### Update / install identity (must stay host-Node)
 
@@ -81,7 +95,8 @@ platform.
 
 ### Complete literal call-site audit at the fixed parent
 
-The tables above are a historical conceptual grouping, not an exhaustive list.
+The conceptual tables above track the current boundaries. The table below is a
+historical snapshot, not an exhaustive list of current helper consumers.
 This table accounts for every executable literal `process.execPath` read in
 `packages/**/src/**` at parent
 `8b4a0a25ea2bc570a1a6070e05182f29501a1b7f`: 34 files, 48 occurrences.
@@ -186,16 +201,15 @@ source installs do not have.
      `process.execPath`, the interpreter running this process (host Node,
      bundled Node, or the private bundled Bun). The resolution never
      guesses at a different binary and never throws.
-- `runtime` is metadata with no current production read site: the three
-  migrated callers consume only `command`. Runtime-specific consumers,
+- `runtime` is metadata with no current production read site: migrated callers
+  consume only `command`. Runtime-specific consumers,
   including any future S3 use of this field, are not implemented here.
 - Result memoized per process: the first caller's URL determines resolution;
   later caller URLs are ignored. Current production callers share one
   installation root. `resetJsInterpreterCacheForTests()` clears the cache.
-- The sandbox file-worker selects this interpreter, but bwrap/landlock still
-  stage `realpathSync(process.execPath)` in their allowlists. That coupling
-  remains an unimplemented S3 migration; this PR does not establish support
-  for layouts where the resolved interpreter differs from the staged binary.
+- The sandbox file-worker, bwrap/landlock relay launch, and protected roots now
+  use the same resolved interpreter. The R3 consolidation retains tests with a
+  different private path; native Linux execution remains unverified.
 - Supported scope: **interpreter-based Node/Bun distributions**. Rejection
   returns `process.execPath`, which would be the application binary in a
   compiled build. This PR does not support compiled applications or provide
@@ -203,9 +217,9 @@ source installs do not have.
   packaging and separately verified failure behavior before adoption; the
   present fallback does not guarantee a usable interpreter in that flavor.
 
-Migration rule: any new code that spawns a JS file or `-e` snippet as a child
-goes through `getJsInterpreterCommand`; sites that re-invoke the app go
-through `QWEN_CODE_CLI` / the entry fallback.
+Migration rule: arbitrary-JS workers use `getJsInterpreterCommand`; the
+explicit host-tool and worker-runtime probes above preserve their host identity.
+Sites that re-invoke the app use `QWEN_CODE_CLI` / the entry fallback.
 
 ## Cross-runtime test coverage
 
@@ -241,9 +255,6 @@ process and artifact evidence.
   the launcher must be published by the compiled package (`QWEN_CODE_CLI`),
   and the same-interpreter fallback sites above need a launcher-shaped
   migration. Tracked for S4.
-- `mem0-settings.ts` identity check couples `command === process.execPath`;
-  migrate it together with its spawn site in S3 so the identity cannot drift
-  from the launcher.
 
 ## Standalone update integration (R1)
 
@@ -268,6 +279,15 @@ an absolute home. Authorization is removed across registry redirect origins.
 Native fetch does not implement every npm transport option; Node continues to use
 npm for those options, and Bun corporate proxy/CA acceptance remains separate.
 
+Registry and authentication keys as well as values expand environment variables.
+Environment fields are trimmed before expansion; a whitespace-only credential
+overrides the same lower-priority key without restoring its token. Authentication
+walks both slash-terminated and slashless paths, then the bare host, preferring
+the longest match and never crossing to a sibling path or different host.
+Unreadable configuration other than a missing file deliberately fails closed;
+unlike npm, a directory-valued config path is not silently ignored. An explicit
+empty prefix keeps npm's cwd-relative meaning; it does not select a new fallback.
+
 Installed manifests select the archive flavor: Node or the Bun OpenTUI preview.
 Missing runtime in an existing object retains the legacy Node interpretation;
 unknown runtimes and malformed manifest shapes fail before network or allocation.
@@ -283,8 +303,8 @@ identity and CLI version before replacement. Prepared activation rechecks the
 installed identity; an intervening newer installation is preserved. Activation
 uses the existing atomic replacement and rollback mechanisms.
 
-Smoke probes load the actual bundled `cli.js` with `--version`; Bun additionally
-runs the production launcher with `--help` to bypass its metadata-only version
+Smoke probes load the actual bundled `cli.js` with `--version`; both runtimes
+also run the production launcher with `--help` to bypass its metadata-only version
 fast path. All probes share a private empty working directory, preventing project
 or archive Bun preloads. Their copied environment removes Node/Bun startup options,
 ambient CLI version and relaunch overrides, preserving the parent environment
@@ -301,7 +321,10 @@ select Node 24.19.0 and Bun 1.3.14; both hosts exercise both payload interpreter
 with verified local HTTPS. A shipped-layout fixture uses the real installation
 detector and query entry point: Bun reaches the HTTPS registry, while Node
 delegates to the npm executor. Missing or invalid bundled CLI files are rejected
-even when launcher metadata reports the requested version. Unit fixtures own
+even when launcher metadata reports the requested version. A broken launcher is
+also rejected before replacing either the live install or its rollback backup.
+These probes do not exercise the launcher's ordinary-command child-spawn path.
+Unit fixtures own
 their home and generated wrapper directories. The CI mode provisions these pinned tools, verifies
 published checksums/integrity and runs before the existing script tests.
 

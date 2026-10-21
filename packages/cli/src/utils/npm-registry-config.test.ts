@@ -157,6 +157,22 @@ describe('global npm registry configuration', () => {
     vi.stubEnv('npm_config_registry', 'https://env.test/');
     expect(lookup().registry.href).toBe('https://env.test/');
   });
+  it.each(['userconfig', 'globalconfig'])(
+    'trims the environment %s path before reading it',
+    (key) => {
+      const filename = path.join(root, 'custom.npmrc');
+      fs.writeFileSync(filename, 'registry=https://custom.test/');
+      vi.stubEnv(`npm_config_${key}`, ` ${filename} `);
+      expect(lookup().registry.href).toBe('https://custom.test/');
+    },
+  );
+  it('trims environment authentication without restoring an overridden token', () => {
+    user('registry=https://registry.test/\n//registry.test/:_authToken=user');
+    vi.stubEnv('npm_config_//registry.test/:_authToken', ' synthetic-env ');
+    expect(lookup().authorization).toBe('Bearer synthetic-env');
+    vi.stubEnv('npm_config_//registry.test/:_authToken', ' ');
+    expect(lookup().authorization).toBeUndefined();
+  });
   it('uses prefix to locate global configuration', () => {
     vi.stubEnv('npm_config_globalconfig', undefined);
     const prefix = path.join(root, 'prefix');
@@ -179,6 +195,46 @@ describe('global npm registry configuration', () => {
     );
     expect(lookup().authorization).toBe('Bearer token#with;characters');
   });
+  it.each(['npmrc', 'environment'])(
+    'expands the registry scope, authentication key and value in %s',
+    (source) => {
+      vi.stubEnv('REGISTRY_HOST', 'registry.test');
+      vi.stubEnv('scope', 'qwen-code');
+      vi.stubEnv('LOCAL_REGISTRY_TOKEN', 'synthetic-template');
+      user('registry=https://default.test/');
+      const values = [
+        ['@${scope}:registry', 'https://${REGISTRY_HOST}/'],
+        ['//${REGISTRY_HOST}/:_authToken', '${LOCAL_REGISTRY_TOKEN}'],
+      ];
+      if (source === 'npmrc') {
+        user(values.map(([key, value]) => `${key}=${value}`).join('\n'));
+      } else {
+        for (const [key, value] of values) {
+          vi.stubEnv(`npm_config_${key}`, value);
+        }
+      }
+      expect(lookup()).toEqual({
+        registry: new URL('https://registry.test/'),
+        authorization: 'Bearer synthetic-template',
+      });
+    },
+  );
+  it.each([
+    ['//registry.test', 'bare-host'],
+    ['//registry.test/private', 'path'],
+    ['//registry.test/private/', 'path-with-slash'],
+  ])('finds authentication at %s for a child registry', (key, token) => {
+    user(
+      `registry=https://registry.test/private/child/\n${key}:_authToken=${token}`,
+    );
+    expect(lookup().authorization).toBe(`Bearer ${token}`);
+  });
+  it('selects the longest auth path before parent and bare-host tokens', () => {
+    user(
+      'registry=https://registry.test/private/child/\n//registry.test:_authToken=host\n//registry.test/:_authToken=root\n//registry.test/private:_authToken=path\n//registry.test/private/:_authToken=path-slash',
+    );
+    expect(lookup().authorization).toBe('Bearer path-slash');
+  });
   it.each([
     ['_auth=dXNlcjpwYXNz', 'Basic dXNlcjpwYXNz'],
     [
@@ -194,7 +250,7 @@ describe('global npm registry configuration', () => {
   );
   it('never sends credentials for a different registry host or sibling path', () => {
     user(
-      'registry=https://registry.test/other/\n//registry.test/private/:_authToken=dummy\n//other.test/:_authToken=dummy',
+      'registry=https://registry.test/other/\n//registry.test/private/:_authToken=dummy\n//registry.test/oth:_authToken=dummy\n//other.test:_authToken=dummy',
     );
     expect(lookup().authorization).toBeUndefined();
   });
@@ -240,6 +296,15 @@ describe('global npm registry configuration', () => {
     vi.stubEnv('npm_config_userconfig', '~/.npmrc');
     expect(lookup).toThrow('without an absolute home directory');
   });
+  it.each(['', ' '])(
+    'fails closed when an explicitly empty config path resolves to a directory (%j)',
+    (value) => {
+      user(`globalconfig=${value}`);
+      vi.stubEnv('npm_config_globalconfig', undefined);
+      vi.spyOn(process, 'cwd').mockReturnValue(root);
+      expect(lookup).toThrow('Unable to read npm registry configuration');
+    },
+  );
   it('redacts malformed credential errors before constructing a request', () => {
     user(
       'registry=https://registry.test/\n//registry.test/:_authToken="dummy-secret\\ninvalid"',

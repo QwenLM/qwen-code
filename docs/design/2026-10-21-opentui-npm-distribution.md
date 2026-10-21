@@ -4,13 +4,18 @@
 
 ## Status and problem
 
-Implemented on 2026-10-21, based on R1
+The original npm delivery was implemented on 2026-10-21, based on R1
 `d41362f40f3e5dbbce192dc5f610a28dad088fb4`. macOS arm64 build, typecheck,
 five real npm installation layouts, and 20 product cases pass. Independent
 verification passes five lifecycle cases and two managed-update cases, including
 observed original-Node smoke execution. The update fixture uses an owned clone
 with synthetic version 0.0.0 and the unchanged candidate 0.25.3 tarball; it does
 not establish an upgrade between two published releases.
+
+The current consolidation incorporates repaired R1
+`356890b743e142f4226cb86de3bd8c9b29a92baf` and the interpreter work described
+below. Its build, focused tests and affected artifacts are NOT_RUN; the original
+results above do not validate this new source or Linux sandbox mechanisms.
 
 The remaining mode/protocol, IPC/exit-44, read-only installation, missing-grammar
 and platform acceptance gates remain explicit. This is an opt-in compatibility
@@ -44,11 +49,22 @@ to the package manager. Do not switch the default renderer or runtime. Windows,
 musl, whole-CLI sandbox images, and Node-only external hosts remain outside the
 new handoff. Existing standalone runtime selection and updates remain intact.
 
-The remaining direct `process.execPath` consumers were audited separately.
-Application reinvocations and arbitrary-JavaScript workers retain their existing
-launcher/interpreter contracts. This change only corrects the coupled npm
-consumers that must retain the original Node interpreter after a TUI handoff.
-It does not rewrite all audited call sites.
+The direct `process.execPath` audit also identifies a bounded remainder from
+[#14134 at c807de17](https://github.com/QwenLM/qwen-code/pull/14134) and
+[#14187 at d14b2ad1](https://github.com/QwenLM/qwen-code/pull/14187), consolidated
+in this existing R3 delivery. The sandbox diagnostic, Mem0 MCP spawn and bundled
+hook identity, cgroup launcher, and bwrap/landlock relay and protected-root pairs
+reuse `getJsInterpreterCommand`. Keep the original payload, environment,
+reaper and sandbox permissions; retain all four associated regression files.
+The helper still falls back to the invoking interpreter for npm/source/SDK.
+
+Three proposed swaps remain explicit exceptions: review Vitest retains its
+host interpreter (and image `node` in the container); the PEM loader oracle and
+TLS trust probe retain `process.execPath` to match the actual channel worker.
+Do not change a probe's runtime independently of the worker it certifies.
+The [runtime inventory](bun-runtime-boundary.md) records both the migrated
+consumers and these exceptions. Application relaunches, default runtimes,
+protocol hosts, and npm's original Node identity are unchanged.
 
 ## Mode and runtime selection
 
@@ -233,6 +249,10 @@ temporary HOME, QWEN_HOME, npm prefix/cache, and shell configuration paths.
    explicit regression coverage and honest platform execution limits.
 8. Preserve npm publication executable bits and record tarball hash, unpacked
    size, installed optional-runtime size, Node/Bun versions, and exact commit.
+9. Validate the consolidated interpreter sites with a distinct private path,
+   paired Mem0 identity rejection, literal payload arguments and protected-root
+   overlap refusal. Real Linux cgroup membership/reaping and bwrap/landlock
+   execution remain separate gates; mock assertions cannot close them.
 
 No result is marked passed before execution. Platform content checks do not
 substitute for native platform tests, and this delivery does not close the
