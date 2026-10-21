@@ -177,6 +177,8 @@ import {
   ChatEditor,
   type ComposerToolbarAction,
 } from './components/ChatEditor';
+import { QuoteToComposerContext } from './components/messages/quoteToComposerContext';
+import { buildQuoteReferenceTag } from './utils/quoteReference';
 import {
   mapRestoredInputAnnotationsAfterTextChange,
   type ComposerSubmitCommit,
@@ -8583,6 +8585,13 @@ export function App({
   const editorRef = useRef<EditorHandle | null>(null);
   const restoreConversationSearchFocus = useCallback(() => {
     editorRef.current?.focus();
+  }, []);
+  const handleQuoteSelection = useCallback((text: string) => {
+    const tag = buildQuoteReferenceTag(text);
+    const editor = editorRef.current;
+    if (!tag || !editor) return;
+    editor.focus();
+    editor.addTags([tag], { placement: 'inline', position: 'end' });
   }, []);
   const notifiedComposerReadyRef = useRef<EditorHandle | null>(null);
   const [canScrollMessageListToBottom, setCanScrollMessageListToBottom] =
@@ -22973,6 +22982,9 @@ export function App({
                   }
                 >
                   <WebShellCustomizationProvider value={mainChatCustomization}>
+                    <QuoteToComposerContext.Provider
+                      value={handleQuoteSelection}
+                    >
                       <TodoContextsProvider
                         timeline={todoTimeline}
                         details={todoDetails}
@@ -24035,6 +24047,7 @@ export function App({
                         </div>
                       )}
                     </div>
+                    </QuoteToComposerContext.Provider>
                   </WebShellCustomizationProvider>
                 </div>
               </div>
