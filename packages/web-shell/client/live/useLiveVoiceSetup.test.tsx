@@ -84,7 +84,7 @@ describe('useLiveVoiceSetup', () => {
       );
       expect(mocks.client.liveSetupStatus).toHaveBeenCalledOnce();
       await act(async () => availability.check(true));
-      expect(container.textContent).toBe('无法连接 daemon。');
+      expect(container.textContent).toBe('无法连接服务。');
       await act(async () => {
         window.dispatchEvent(new Event('focus'));
         await setup.refresh();

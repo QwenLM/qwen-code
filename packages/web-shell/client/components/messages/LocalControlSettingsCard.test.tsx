@@ -136,7 +136,7 @@ it.each(['GET', 'POST'] as const)(
         await act(async () => container.querySelector('button')?.click());
       }
       expect(container.querySelector('[role="alert"]')?.textContent).toBe(
-        '无法连接 daemon。',
+        '无法连接服务。',
       );
     } finally {
       await act(async () => root.unmount());
