@@ -155,7 +155,8 @@ public final class ApiModels {
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean modelChange,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean approvalModeChange,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean durableOperations,
-            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments) {
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -278,6 +279,14 @@ public final class ApiModels {
     }
 
     public record WebShellSessionRequest(@NotBlank String sessionId) {
+    }
+
+    public record WebShellRenameRequest(@Size(max = 128) String requestId,
+            @NotBlank @Size(max = 128) String sessionId,
+            @NotNull String idempotencyKey, String title) {
+    }
+
+    public record WebShellRenameResult(String sessionId, String title, boolean replayed) {
     }
 
     public record WebShellSkill(String name, String description) { }

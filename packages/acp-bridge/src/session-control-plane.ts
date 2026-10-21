@@ -13502,6 +13502,23 @@ export function createSessionControlPlane(
       return warnings.length > 0 ? { ...result, warnings } : result;
     },
 
+    async removeSessionArtifactForWorkspaceOwner(sessionId, artifactId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      if (
+        isReservedStandaloneSessionSourceType(entry.sourceType) &&
+        entry.managedConversationBinding?.released !== true
+      ) {
+        throw standaloneWorkingDirectoryMissingError();
+      }
+      await entry.prepareArtifactWorkspace?.();
+      const result = await entry.artifacts.remove(artifactId, {
+        workspaceOwner: true,
+      });
+      publishArtifactChanges(entry, result.changes, undefined);
+      return result;
+    },
+
     async removeSessionArtifact(sessionId, artifactId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);

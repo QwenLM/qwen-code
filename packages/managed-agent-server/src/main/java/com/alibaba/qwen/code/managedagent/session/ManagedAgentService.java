@@ -1198,6 +1198,7 @@ public class ManagedAgentService {
         Map<String, WebShellModelSelection> modelSelections = store.findModelSelections(tenantId, boundIds);
         Map<String, WebShellModelContext> modelContexts = store.findModelContexts(tenantId, boundIds);
         boolean modelSelectionSupported = !store.modelOptions().isEmpty() && harness.supportsModelSelection();
+        boolean renameSupported = harness.isAvailable() && harness.supportsFencedTitles();
         Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
         // Cwd admission has no Turn execution-profile restriction. One role
         // grant read covers the workspaces of both shapes; the executable
@@ -1239,7 +1240,7 @@ public class ManagedAgentService {
                         maySubmitWorkspaceTurn(session, grants, executable),
                         mayChangeCwd(session, grants, executable),
                         modelContexts.get(session.sessionId()),
-                        modelSelections.get(session.sessionId()), modelSelectionSupported,
+                        modelSelections.get(session.sessionId()), modelSelectionSupported, renameSupported,
                         approvalSelections.get(session.sessionId()), approvalSupported
                                 && (session.agentDefinitionDigest() == null || definitionApprovalSupported)
                                 && approvalOwners.contains(session.sessionId())))
@@ -1267,7 +1268,8 @@ public class ManagedAgentService {
             TurnSummary latestTurn, EventRecord environmentEvent,
             boolean retention, boolean maySubmit, boolean mayChangeCwd,
             WebShellModelContext modelContext, WebShellModelSelection modelSelection,
-            boolean modelSelectionSupported, WebShellApprovalSelection approvalSelection, boolean approvalSupported) {
+            boolean modelSelectionSupported, boolean renameSupported,
+            WebShellApprovalSelection approvalSelection, boolean approvalSupported) {
         boolean visible = session.deletedAt() == null;
         boolean close = visible && supportsClose(session);
         boolean keep = visible && retention;
@@ -1298,7 +1300,9 @@ public class ManagedAgentService {
                         visible && modelSelectionSupported && mayChangeCwd,
                         visible && approvalSupported && mayChangeCwd && !Boolean.FALSE.equals(foregroundShell(session)),
                         javaDurableAdmission == null ? null : visible,
-                        visible && maySubmit && harness.supportsInputAttachments()),
+                        visible && maySubmit && harness.supportsInputAttachments(),
+                        visible && "ACTIVE".equals(session.status()) && renameSupported
+                                && (session.workspace() == null || maySubmit)),
                 session.workspace() != null || session.agentDefinitionDigest() != null
                         ? approvalSelection == null ? session.approvalMode() : approvalSelection.mode() : null,
                 modelContext, modelSelection, approvalSelection == null ? null : approvalSelection.revision(),

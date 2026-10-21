@@ -4008,6 +4008,43 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('lets the workspace owner remove a client artifact without impersonating its client', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    try {
+      const created = await bridge.addSessionArtifact(
+        session.sessionId,
+        { title: 'Client output', url: 'https://example.com/output' },
+        { clientId: session.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+      await expect(
+        bridge.removeSessionArtifact(session.sessionId, artifactId),
+      ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
+      await expect(
+        bridge.removeSessionArtifactForWorkspaceOwner(
+          session.sessionId,
+          artifactId,
+        ),
+      ).resolves.toMatchObject({
+        changes: [{ action: 'removed', artifactId }],
+      });
+      await expect(
+        bridge.getSessionArtifacts(session.sessionId),
+      ).resolves.toMatchObject({ artifacts: [] });
+      await expect(
+        bridge.removeSessionArtifactForWorkspaceOwner(
+          session.sessionId,
+          artifactId,
+        ),
+      ).resolves.toMatchObject({ changes: [] });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('rejects invalid client artifact records instead of dropping them', async () => {
     const bridge = makeBridge({
       channelFactory: async () => makeChannel().channel,

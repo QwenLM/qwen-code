@@ -1417,6 +1417,7 @@ export interface ConfigParameters {
    */
   agentCollaborationEnabled?: boolean;
   workflowsEnabled?: boolean;
+  workflowKeywordTriggerEnabled?: boolean;
   /** Enable the opt-in ACP/Web Shell Session Workflow gate. */
   sessionWorkflowEnabled?: boolean;
   /** Consent gate for the propose_goal tool; see ProposeGoalTool. */
@@ -3184,6 +3185,7 @@ export class Config {
    * lazily on first use, never persisted. */
   private omniMediaResourceRegistry?: MediaResourceRegistry;
   private workflowsEnabled: boolean | undefined;
+  private workflowKeywordTriggerEnabled: boolean;
   private readonly sessionWorkflowEnabled: boolean;
   private sessionWorkflowEnabledProvider?: () => boolean;
   private sessionWorkflowPlanRevision?: SessionWorkflowPlanRevision;
@@ -3624,6 +3626,8 @@ export class Config {
     this.omniStorageMaxTotalBytes = params.omniStorageMaxTotalBytes;
     this.omniMemory = params.omniMemory;
     this.workflowsEnabled = params.workflowsEnabled;
+    this.workflowKeywordTriggerEnabled =
+      params.workflowKeywordTriggerEnabled ?? true;
     this.sessionWorkflowEnabled = params.sessionWorkflowEnabled ?? false;
     this.modelProposedGoals = params.modelProposedGoals ?? 'alwaysAsk';
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
@@ -10632,6 +10636,14 @@ export class Config {
 
   setWorkflowsEnabled(enabled: boolean | undefined): void {
     this.workflowsEnabled = enabled;
+  }
+
+  getWorkflowKeywordTriggerEnabled(): boolean {
+    return this.workflowKeywordTriggerEnabled;
+  }
+
+  setWorkflowKeywordTriggerEnabled(enabled: boolean): void {
+    this.workflowKeywordTriggerEnabled = enabled;
   }
 
   async enableReviewWorkflow(): Promise<void> {

@@ -160,6 +160,24 @@ export function createJavaManagedAgentProvider(
     },
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    async renameSession(sessionId, displayName, command) {
+      const result = await client.renameSession(
+        {
+          sessionId,
+          title: displayName,
+          idempotencyKey: command.idempotencyKey,
+        },
+        command.signal,
+      );
+      if (
+        result.sessionId !== sessionId ||
+        typeof result.title !== 'string' ||
+        !result.title.trim()
+      ) {
+        throw new Error('Managed Agent rename response is invalid');
+      }
+      return { displayName: result.title };
+    },
     skills: {
       list: (sessionId, request) =>
         client.getSessionSkills(sessionId, request.signal),
@@ -714,6 +732,7 @@ function toSessionSummary(
     runtimeReady: runtimeState === 'ready',
     runtimeState,
     capabilities: {
+      ...(session.capabilities?.rename === true ? { canRename: true } : {}),
       ...(session.capabilities?.tasks === true ? { tasks: true } : {}),
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
       canSend:
