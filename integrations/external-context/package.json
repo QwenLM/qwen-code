@@ -31,7 +31,7 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "undici": "^7.28.0",
+    "undici": "^7.29.1",
     "zod": "^3.25.0"
   },
   "devDependencies": {
