@@ -64,6 +64,8 @@ public interface AgentStateStore {
      */
     String RUNTIME_RECOVERY_BLOCKED = "hosted_runtime_recovery_blocked";
 
+    String HARNESS_RECOVERY_BLOCKED = "hosted_harness_recovery_blocked";
+
     // The annotation must sit on the default itself: the delegating body runs
     // on the target instance, so without it the self-call bypasses the proxy.
     @org.springframework.transaction.annotation.Transactional

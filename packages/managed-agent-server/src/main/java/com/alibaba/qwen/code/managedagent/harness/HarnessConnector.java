@@ -319,6 +319,10 @@ public interface HarnessConnector extends AutoCloseable {
 
         SourceEvent next();
 
+        default boolean recoveryBlocked(long afterEventId) {
+            return false;
+        }
+
         @Override
         void close();
     }

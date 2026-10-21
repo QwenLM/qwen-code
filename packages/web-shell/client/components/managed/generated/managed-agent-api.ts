@@ -958,6 +958,7 @@ export interface components {
             turnId: string;
             /** Format: uuid */
             sessionId: string;
+            /** @description recovery_blocked with hosted_harness_recovery_blocked means the Harness stopped without a safely settled Turn. The input remains active internally, automatic dispatch is parked, and explicit cancellation remains available. */
             status: string;
             /** Format: int64 */
             submittedAt: number;

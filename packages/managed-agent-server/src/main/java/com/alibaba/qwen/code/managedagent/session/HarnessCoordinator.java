@@ -440,6 +440,10 @@ public class HarnessCoordinator {
             AtomicBoolean recoveryPath) {
         SessionRecord session = store.requireSession(claimed.tenantId(),
                 claimed.sessionId());
+        if (!"CANCELLING".equals(claimed.status())
+                && AgentStateStore.HARNESS_RECOVERY_BLOCKED.equals(claimed.errorCode())) {
+            return false;
+        }
         // A bound Session re-attaches through the takeover load: failures
         // here wait on the prior generation's lease, a wait bounded by that
         // lease itself rather than by the pre-admission retry budget.
@@ -858,10 +862,33 @@ public class HarnessCoordinator {
         List<HarnessEvent> batch = new ArrayList<>();
         int batchBytes = 0;
         long flushAt = 0;
+        long statusAt = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        long lastEventId = turn.harnessLastEventId() == null ? 0 : turn.harnessLastEventId();
         boolean flushFirstVisibleText = true;
         try {
             while (true) {
-                StreamItem item = take(incoming, batch, flushAt);
+                if (System.nanoTime() >= statusAt) {
+                    flush(turn, stream.eventEpoch(), batch, leaseLost);
+                    batchBytes = 0;
+                    flushAt = 0;
+                    if (incoming.isEmpty() && stream.recoveryBlocked(lastEventId)
+                            && incoming.isEmpty()) {
+                        requireLease(leaseLost);
+                        boolean parked = store.markTurnRecoveryBlocked(turn.tenantId(),
+                                turn.sessionId(), turn.turnId(), owner,
+                                AgentStateStore.HARNESS_RECOVERY_BLOCKED,
+                                "The Hosted Harness stopped with recovery blocked;"
+                                        + " reconcile its saved execution before continuing.");
+                        if (!parked) {
+                            LOG.warn("Managed Harness recovery-blocked mark lost to a lease CAS"
+                                            + " tenant={} session={} turn={}",
+                                    turn.tenantId(), turn.sessionId(), turn.turnId());
+                        }
+                        return parked;
+                    }
+                    statusAt = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+                }
+                StreamItem item = take(incoming, batch, flushAt, statusAt);
                 if (item == null) {
                     flush(turn, stream.eventEpoch(), batch, leaseLost);
                     batchBytes = 0;
@@ -879,6 +906,9 @@ public class HarnessCoordinator {
                 }
                 SourceEvent source = item.event();
                 requireLease(leaseLost);
+                if (source.id() != null) {
+                    lastEventId = Math.max(lastEventId, source.id());
+                }
                 if (source.id() == null
                         || source.promptId() != null
                         && !turn.promptId().equals(source.promptId())) {
@@ -973,12 +1003,10 @@ public class HarnessCoordinator {
     }
 
     private StreamItem take(BlockingQueue<StreamItem> incoming,
-            List<HarnessEvent> batch, long flushAt) {
+            List<HarnessEvent> batch, long flushAt, long statusAt) {
         try {
-            if (batch.isEmpty()) {
-                return incoming.take();
-            }
-            long remaining = Math.max(1, flushAt - System.nanoTime());
+            long deadline = batch.isEmpty() ? statusAt : Math.min(flushAt, statusAt);
+            long remaining = Math.max(1, deadline - System.nanoTime());
             return incoming.poll(remaining, TimeUnit.NANOSECONDS);
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();

@@ -1430,8 +1430,9 @@ class ManagedAgentServerIntegrationTest {
     // #14387: the recovery-blocked mark is durable on the still-active
     // row — the status the claim saw stands, no retry counter moves, the
     // lease releases — and a stale owner never re-marks.
-    @Test
-    void marksATurnRecoveryBlockedWithoutSettlingIt() {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"hosted_workflow_recovery_blocked", "hosted_harness_recovery_blocked"})
+    void marksATurnRecoveryBlockedWithoutSettlingIt(String recoveryCode) throws Exception {
         pauseRecoveryScanning();
         String tenant = "tenant-turn-blocked-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
@@ -1448,14 +1449,14 @@ class ManagedAgentServerIntegrationTest {
 
         assertThat(store.markTurnRecoveryBlocked(tenant,
                 session.sessionId(), turn.turnId(), owner,
-                "hosted_workflow_recovery_blocked",
+                recoveryCode,
                 "the Harness generation was lost")).isTrue();
 
         assertThat(store.findTurn(tenant, session.sessionId(),
                 turn.turnId())).get().satisfies(record -> {
                     assertThat(record.status()).isEqualTo(claimed.status());
                     assertThat(record.errorCode()).isEqualTo(
-                            "hosted_workflow_recovery_blocked");
+                            recoveryCode);
                     assertThat(record.errorMessage()).isEqualTo(
                             "the Harness generation was lost");
                     assertThat(record.dispatchOwner()).isNull();
@@ -1465,8 +1466,18 @@ class ManagedAgentServerIntegrationTest {
                 });
         assertThat(store.markTurnRecoveryBlocked(tenant,
                 session.sessionId(), turn.turnId(), owner,
-                "hosted_workflow_recovery_blocked",
+                recoveryCode,
                 "the Harness generation was lost")).isFalse();
+
+        if ("hosted_harness_recovery_blocked".equals(recoveryCode)) {
+            mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
+                    .header(TenantContextFilter.HEADER, tenant)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"sessionId\":\"" + session.sessionId() + "\"}"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.activeTurn.status").value("recovery_blocked"))
+                    .andExpect(jsonPath("$.activeTurn.errorCode").value(recoveryCode));
+        }
 
         // The parked Turn leaves the dispatch sweep entirely — no
         // claim-refuse-release spin — until a cancel: settling the Turn
@@ -1484,6 +1495,15 @@ class ManagedAgentServerIntegrationTest {
         assertThat(store.findTurn(tenant, session.sessionId(),
                 turn.turnId()).get().status()).isEqualTo("CANCELLING");
 
+        if ("hosted_harness_recovery_blocked".equals(recoveryCode)) {
+            assertThat(store.claimTurn(tenant, session.sessionId(), turn.turnId(),
+                    "cancel-owner", Duration.ofMinutes(1))).isPresent();
+            assertThat(store.markTurnRecoveryBlocked(tenant, session.sessionId(),
+                    turn.turnId(), "cancel-owner", recoveryCode, "late status probe")).isFalse();
+            assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()).orElseThrow()
+                    .dispatchOwner()).isEqualTo("cancel-owner");
+        }
+
         // The mark is lease-fenced: an owner whose lease already expired
         // parks nothing — the CAS misses and the row stays unmarked.
         Admission session2 = store.insertSessionCommand(tenant,
@@ -1498,7 +1518,7 @@ class ManagedAgentServerIntegrationTest {
                 turn2.turnId(), owner, Duration.ofMillis(-1))).isPresent();
         assertThat(store.markTurnRecoveryBlocked(tenant,
                 session2.sessionId(), turn2.turnId(), owner,
-                "hosted_workflow_recovery_blocked",
+                recoveryCode,
                 "the Harness generation was lost")).isFalse();
         assertThat(store.findTurn(tenant, session2.sessionId(),
                 turn2.turnId()).get().errorCode()).isNull();

@@ -2852,7 +2852,7 @@ class QwenHostedHarnessConnectorTest {
                     ReflectionTestUtils.setField(connector, "client", alive);
                     return ref;
                 });
-        return new Object[] {connector, dead, alive};
+        return new Object[] {connector, dead, alive, ref};
     }
 
     @Test
@@ -2907,6 +2907,37 @@ class QwenHostedHarnessConnectorTest {
         connector.stream("tenant-a", SESSION_ID, 0L, "epoch");
 
         verify(alive).streamEvents(any());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,true,false,true", "true,true,false,false", "false,false,false,false", "false,true,true,false"})
+    void streamRecoveryStatusUsesTheSameInactiveAttachment(boolean active,
+            boolean blocked, boolean pendingTranscript, boolean expected) {
+        Object[] fixture = refetchFixture();
+        QwenHostedHarnessConnector connector = (QwenHostedHarnessConnector) fixture[0];
+        HostedHarnessClient client = (HostedHarnessClient) fixture[2];
+        when(client.streamEvents(any())).thenReturn(mock(HarnessEventStream.class));
+        var status = mock(com.alibaba.qwen.code.daemon.HarnessSessionStatus.class);
+        when(status.hasActivePrompt()).thenReturn(active);
+        when(status.getRaw()).thenReturn(Map.of("recoveryBlocked", blocked));
+        when(client.getStatus(any())).thenReturn(status);
+        var page = mock(com.alibaba.qwen.code.daemon.HarnessTranscriptPage.class);
+        when(page.getEvents()).thenReturn(pendingTranscript
+                ? List.<Object>of(Map.of("type", "turn_complete")) : List.of());
+        when(client.getTranscript(any())).thenReturn(page);
+        try (var stream = connector.stream("tenant-a", SESSION_ID, 0L, "epoch")) {
+            assertThat(stream.recoveryBlocked(42L)).isEqualTo(expected);
+        }
+        verify(client).getStatus((HarnessSessionRef) fixture[3]);
+        if (!active && blocked) {
+            var query = org.mockito.ArgumentCaptor.forClass(com.alibaba.qwen.code.daemon.GetHarnessTranscript.class);
+            verify(client).getTranscript(query.capture());
+            assertThat(ReflectionTestUtils.getField(query.getValue(), "session")).isSameAs(fixture[3]);
+            assertThat(ReflectionTestUtils.getField(query.getValue(), "cursor")).isEqualTo("42");
+            assertThat(ReflectionTestUtils.getField(query.getValue(), "limit")).isEqualTo(1);
+        } else {
+            verify(client, never()).getTranscript(any());
+        }
     }
 
     @Test

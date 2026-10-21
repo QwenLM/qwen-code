@@ -5181,7 +5181,7 @@ public class ManagedAgentStore implements AgentStateStore {
         // tick forever. A cancel still scans it: settling the Turn
         // cancelled is the cancel's own act, not a re-dispatch.
         return jdbc.query(
-                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "')) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
+                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "', '" + AgentStateStore.HARNESS_RECOVERY_BLOCKED + "')) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id"),
@@ -5260,9 +5260,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until >= ?"
                         + " AND status IN ('ACCEPTED', 'RUNNING',"
-                        + " 'CANCELLING')",
+                        + " 'CANCELLING') AND (? <> ? OR status <> 'CANCELLING')",
                 errorCode, errorMessage, now, tenantId, sessionId, turnId,
-                owner, now) == 1;
+                owner, now, errorCode, AgentStateStore.HARNESS_RECOVERY_BLOCKED) == 1;
     }
 
     @Override

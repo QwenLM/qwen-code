@@ -783,6 +783,7 @@ function toSessionSummary(
   session: JavaAgentSession,
 ): ManagedAgentSessionSummary {
   const turnStatus = session.activeTurn?.status.toLowerCase();
+  const recoveryBlocked = turnStatus === 'recovery_blocked';
   const runtimeState = toRuntimeState(session.environment?.state);
   const phase = toPhase(turnStatus, runtimeState);
   const active =
@@ -859,6 +860,7 @@ function toSessionSummary(
         sessionActive &&
         !active &&
         !session.contextCompressionOperationId &&
+        !recoveryBlocked &&
         session.recovery?.nextTurnAllowed !== false &&
         (!session.workspace ||
           (workspaceTurns && session.capabilities?.foregroundShell !== false)),
@@ -867,7 +869,7 @@ function toSessionSummary(
       // server refuses anyone else.
       canCancel:
         sessionActive &&
-        active &&
+        (active || recoveryBlocked) &&
         turnStatus !== 'cancelling' &&
         session.recovery?.actions.cancel !== false,
       ...(session.capabilities?.durableOperations === true

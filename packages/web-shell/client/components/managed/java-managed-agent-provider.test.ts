@@ -126,6 +126,32 @@ describe('createJavaManagedAgentProvider', () => {
     ).toBeUndefined();
   });
 
+  it('keeps a recovery-blocked Turn cancellable without admitting another prompt', async () => {
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          sessionId: 's1',
+          title: 'Blocked',
+          status: 'active',
+          createdAt: 1,
+          updatedAt: 2,
+          activeTurn: {
+            turnId: 't1',
+            status: 'recovery_blocked',
+            submittedAt: 1,
+            errorCode: 'hosted_harness_recovery_blocked',
+          },
+        }),
+      ),
+    });
+    const summary = await provider.getSession('s1', { clientId: 'client' });
+    expect(summary.phase).toBe('failed');
+    expect(summary.capabilities.canSend).toBe(false);
+    expect(summary.capabilities.canCancel).toBe(true);
+    expect(summary.failure?.code).toBe('hosted_harness_recovery_blocked');
+  });
+
   it.each([true, false, undefined])(
     'uses the advertised rename capability %s independently of a running Turn',
     async (rename) => {

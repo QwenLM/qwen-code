@@ -54,6 +54,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -1322,19 +1323,22 @@ class HarnessCoordinatorTest {
     // Once refused, the durable mark ends every later re-claim before any
     // attach: the scan stays a cheap claim-skip-release until the child
     // Session's close settles the Turn.
-    @Test
-    void aMarkedWorkflowTurnEndsItsDriveBeforeAnyAttach() {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+            AgentStateStore.WORKFLOW_RECOVERY_BLOCKED, AgentStateStore.HARNESS_RECOVERY_BLOCKED})
+    void aMarkedTurnEndsItsDriveBeforeAnyAttach(String errorCode) {
         AgentStateStore store = mock(AgentStateStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         when(runtimeWarmer.isEnabled()).thenReturn(false);
         TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
                 "prompt",
-                List.of(Map.of("type", "workflow_launch", "script",
-                        "return 1;")),
+                List.of(AgentStateStore.WORKFLOW_RECOVERY_BLOCKED.equals(errorCode)
+                        ? Map.of("type", "workflow_launch", "script", "return 1;")
+                        : Map.of("type", "text", "text", "recover")),
                 "sha256:" + "a".repeat(64), "RUNNING", true, "epoch-old", 1L,
                 "previous-owner", Long.MAX_VALUE, 0, 0, 0, null,
-                AgentStateStore.WORKFLOW_RECOVERY_BLOCKED,
+                errorCode,
                 "The Harness generation running this workflow was lost.",
                 1, 1, null, 1);
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
@@ -3433,6 +3437,84 @@ class HarnessCoordinatorTest {
                     .contains("will retry")
                     .contains("failure=HostedHarnessStreamIdleException");
         });
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"idle", "controls", "terminal"})
+    void anInactiveRecoveryBlockedStreamParksWithoutSettlingOrReplaying(String mode) throws Exception {
+        AgentStateStore store = boundCancellingStore();
+        TurnRecord running = turn("tenant", "session", "turn", "prompt", "epoch", 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class))).thenReturn(Optional.of(running));
+        when(store.findTurn("tenant", "session", "turn")).thenReturn(Optional.of(running));
+        when(store.renewTurn(anyString(), anyString(), anyString(), anyString(), any(Duration.class)))
+                .thenReturn(true);
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"), anyString(), eq("boot")))
+                .thenReturn(true);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.recoverManagedRuntime("tenant", "session", false)).thenReturn(new Attachment("boot"));
+        SourceStream stream = mock(SourceStream.class);
+        when(stream.eventEpoch()).thenReturn("epoch");
+        CountDownLatch closed = new CountDownLatch(1);
+        CountDownLatch emitTerminal = new CountDownLatch(1);
+        CountDownLatch terminalQueued = new CountDownLatch(1);
+        var sequence = new java.util.concurrent.atomic.AtomicLong(1);
+        when(stream.next()).thenAnswer(ignored -> {
+            if ("controls".equals(mode) && !closed.await(2, TimeUnit.SECONDS)) {
+                return new SourceEvent(sequence.incrementAndGet(), "managed_journal_event",
+                        Map.of(), null, Map.of());
+            }
+            if ("terminal".equals(mode)) {
+                if (sequence.getAndIncrement() == 1) {
+                    emitTerminal.await();
+                    return new SourceEvent(2L, "turn_complete", Map.of("stopReason", "end_turn"),
+                            "prompt", Map.of());
+                }
+                terminalQueued.countDown();
+            }
+            closed.await();
+            return null;
+        });
+        when(stream.recoveryBlocked(anyLong())).thenAnswer(ignored -> {
+            if ("terminal".equals(mode)) {
+                emitTerminal.countDown();
+                assertThat(terminalQueued.await(5, TimeUnit.SECONDS)).isTrue();
+            }
+            return true;
+        });
+        doAnswer(ignored -> {
+            closed.countDown();
+            return null;
+        }).when(stream).close();
+        when(harness.stream("tenant", "session", 1, "epoch")).thenReturn(stream);
+        when(store.markTurnRecoveryBlocked(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString())).thenReturn(true);
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class), executor,
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+            if ("terminal".equals(mode)) {
+                verify(store, timeout(20_000)).recordHarnessEvents(eq("tenant"), eq("session"),
+                        eq("turn"), anyString(), eq("epoch"), anyList());
+                verify(store, never()).markTurnRecoveryBlocked(anyString(), anyString(), anyString(),
+                        anyString(), anyString(), anyString());
+            } else {
+                verify(store, timeout(20_000)).markTurnRecoveryBlocked(eq("tenant"), eq("session"),
+                        eq("turn"), anyString(), eq(AgentStateStore.HARNESS_RECOVERY_BLOCKED), anyString());
+            }
+        } finally {
+            coordinator.close();
+            executor.shutdownNow();
+        }
+        verify(stream).close();
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString());
+        verify(harness, never()).cancel(anyString(), anyString());
+        verify(harness, never()).submit(anyString(), anyString(), anyString(), any(), anyString());
+        verify(harness, never()).continueManagedRuntime(anyString(), anyString(), anyString(), anyString(), anyString());
     }
 
     private static void verifyWorkspaceCancellationIsTargeted(HarnessConnector harness) {

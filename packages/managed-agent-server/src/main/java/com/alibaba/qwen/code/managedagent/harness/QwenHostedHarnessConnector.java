@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.daemon.CreateHarnessSession;
 import com.alibaba.qwen.code.daemon.DaemonApprovalMode;
 import com.alibaba.qwen.code.daemon.DaemonEvent;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.GetHarnessTranscript;
 import com.alibaba.qwen.code.daemon.HarnessEventStream;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
@@ -719,6 +720,20 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 return event == null ? null : new SourceEvent(event.getId(),
                         event.getType(), event.getData(),
                         event.getPromptId(), event.getMetadata());
+            }
+
+            @Override
+            public boolean recoveryBlocked(long afterEventId) {
+                var status = client().getStatus(ref);
+                Object blocked = status.getRaw().get("recoveryBlocked");
+                if (blocked != null && !(blocked instanceof Boolean)) {
+                    throw new IllegalStateException(
+                            "Hosted Harness recoveryBlocked is not a boolean");
+                }
+                return !status.hasActivePrompt() && Boolean.TRUE.equals(blocked)
+                        && client().getTranscript(GetHarnessTranscript.builder()
+                                .session(ref).cursor(Long.toString(afterEventId)).limit(1).build())
+                                .getEvents().isEmpty();
             }
 
             @Override

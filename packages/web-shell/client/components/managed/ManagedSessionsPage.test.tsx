@@ -1740,29 +1740,32 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
-  it('uses the standard composer stop action with Managed cancel authority', async () => {
-    mocks.client.getSession.mockImplementation(async () =>
-      summary('s1', {
-        phase: 'agent_running',
-        capabilities: { canSend: false, canCancel: true },
-      }),
-    );
-    await render('s1', 'en', provider, null);
-    const stop = [...container.querySelectorAll('button')].find(
-      (button) => button.textContent === 'Stop managed task',
-    );
-    expect(stop?.disabled).toBe(false);
-    await act(async () => {
-      stop!.click();
-      await flush();
-    });
-    expect(mocks.client.cancel).toHaveBeenCalledWith(
-      's1',
-      'p1',
-      expect.objectContaining({ idempotencyKey: expect.any(String) }),
-    );
-    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
-  });
+  it.each(['agent_running', 'failed'] as const)(
+    'uses the standard composer stop action with Managed cancel authority in phase %s',
+    async (phase) => {
+      mocks.client.getSession.mockImplementation(async () =>
+        summary('s1', {
+          phase,
+          capabilities: { canSend: false, canCancel: true },
+        }),
+      );
+      await render('s1', 'en', provider, null);
+      const stop = [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Stop managed task',
+      );
+      expect(stop?.disabled).toBe(false);
+      await act(async () => {
+        stop!.click();
+        await flush();
+      });
+      expect(mocks.client.cancel).toHaveBeenCalledWith(
+        's1',
+        'p1',
+        expect.objectContaining({ idempotencyKey: expect.any(String) }),
+      );
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    },
+  );
 
   it('handles Escape only for the visible Managed conversation after composition and other controls', async () => {
     mocks.client.getSession.mockImplementation(async () =>
