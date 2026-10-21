@@ -14,6 +14,10 @@ import java.util.function.Function;
  * of the MCP or Hook record state machine. The wrapper calls it from inside
  * the Session store's commit transaction, before the record is applied, so the
  * whole commit rolls back exactly as a store failure would.
+ *
+ * <p>FG13a adds the acknowledgement-loss mode: the same phase is matched from
+ * the faulting store's after-commit callback, so the commit lands and only the
+ * caller's receipt is lost.
  */
 public final class StoreFaultGate {
     public enum Phase {
@@ -27,6 +31,7 @@ public final class StoreFaultGate {
 
     private volatile Phase phase;
     private volatile String target;
+    private volatile boolean loseAck;
     private final AtomicInteger attempts = new AtomicInteger();
 
     private StoreFaultGate() {
@@ -35,20 +40,50 @@ public final class StoreFaultGate {
     public void arm(Phase next, String recordId) {
         attempts.set(0);
         target = recordId;
+        loseAck = false;
         phase = next;
+    }
+
+    /**
+     * FG13a: land the commit first and only then report the failure, so the
+     * caller sees a lost acknowledgement over a durable record.
+     */
+    public void armAck(Phase next, String recordId) {
+        arm(next, recordId);
+        loseAck = true;
     }
 
     public void clear() {
         phase = null;
         target = null;
+        loseAck = false;
     }
 
     public int attempts() {
         return attempts.get();
     }
 
+    /** FG13a: the fault is owed to the transaction's after-commit callback. */
+    boolean ackArmed() {
+        return loseAck && phase != null;
+    }
+
     void inspect(byte[] recordBytes,
             Function<String, StoredResource> resources) {
+        if (!loseAck) {
+            fault(recordBytes, resources, "Store fault injected: ");
+        }
+    }
+
+    void afterApply(byte[] recordBytes,
+            Function<String, StoredResource> resources) {
+        if (loseAck) {
+            fault(recordBytes, resources, "Store ack lost: ");
+        }
+    }
+
+    private void fault(byte[] recordBytes,
+            Function<String, StoredResource> resources, String message) {
         Phase expected = phase;
         if (expected == null) {
             return;
@@ -78,8 +113,7 @@ public final class StoreFaultGate {
                 continue;
             }
             attempts.incrementAndGet();
-            throw new IllegalStateException(
-                    "Store fault injected: " + expected);
+            throw new IllegalStateException(message + expected);
         }
     }
 
