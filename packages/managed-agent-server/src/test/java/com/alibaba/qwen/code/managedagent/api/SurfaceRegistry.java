@@ -342,6 +342,10 @@ public enum SurfaceRegistry {
             Surface.WEBSHELL, RuleClass.OWNER,
             EnumSet.of(Capability.SESSION_APPROVAL_CHANGE)),
     // ManagedSessionStoreController: internal writer routes.
+    INTERNAL_APPROVAL_QUERY(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/approval:query",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_APPROVAL_QUERY)),
     INTERNAL_EXECUTION_AUTHORIZE(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}"
                     + "/execution:authorize",
@@ -611,6 +615,7 @@ public enum SurfaceRegistry {
         AUTOMATION_RETIRE,
         AUTOMATION_RUN,
         AUTOMATION_RUN_LIST,
+        STORE_APPROVAL_QUERY,
         STORE_EXECUTION_AUTHORIZE,
         STORE_LIFECYCLE_AUTHORIZE,
         STORE_WRITER_ACQUIRE,

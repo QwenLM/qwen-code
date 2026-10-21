@@ -348,6 +348,42 @@ describe('useManagedApprovalChange', () => {
     expect(provider.approvalChange!.submit).not.toHaveBeenCalled();
   });
 
+  it.each(['agent_running', 'tool_running', 'waiting_runtime'] as const)(
+    'changes the execution policy during %s only with live support and keeps Plan idle-only',
+    async (phase) => {
+      vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+        ...options,
+        liveSupported: true,
+        planModeSupported: true,
+      });
+      await render({ ...summary, phase });
+      await act(async () => {
+        await current.submit('default', true);
+      });
+      expect(provider.approvalChange!.submit).not.toHaveBeenCalled();
+      await act(async () => {
+        await current.submit('yolo');
+      });
+      expect(provider.approvalChange!.submit).toHaveBeenCalledWith(
+        's1',
+        { approvalMode: 'yolo', expectedRevision: 0 },
+        expect.objectContaining({ clientId: 'client' }),
+      );
+    },
+  );
+
+  it('refuses a new live selection while the Turn is cancelling', async () => {
+    vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+      ...options,
+      liveSupported: true,
+    });
+    await render({ ...summary, phase: 'cancelling' });
+    await act(async () => {
+      await current.submit('yolo');
+    });
+    expect(provider.approvalChange!.submit).not.toHaveBeenCalled();
+  });
+
   it('does not fetch or submit while hidden and can confirm a frozen receipt after capability withdrawal', async () => {
     await render(summary, false);
     expect(provider.approvalChange!.queryOptions).not.toHaveBeenCalled();
