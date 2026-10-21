@@ -435,21 +435,77 @@ describe('executeUserShell', () => {
       summary: 'cancelled',
       glyph: '-',
       cancellationPrefix: 'Command was cancelled.\n',
+      exitCode: null,
+      signal: null,
+      statusPrefix: '',
     },
-    { aborted: false, summary: 'error', glyph: 'x', cancellationPrefix: '' },
+    {
+      aborted: false,
+      summary: 'error',
+      glyph: 'x',
+      cancellationPrefix: '',
+      exitCode: null,
+      signal: null,
+      statusPrefix: '',
+    },
+    {
+      aborted: false,
+      summary: 'error',
+      glyph: 'x',
+      cancellationPrefix: '',
+      exitCode: 1,
+      signal: null,
+      statusPrefix: 'Exit code: 1.\n',
+    },
+    {
+      aborted: true,
+      summary: 'cancelled',
+      glyph: '-',
+      cancellationPrefix: 'Command was cancelled.\n',
+      exitCode: 0,
+      signal: null,
+      statusPrefix: 'Exit code: 0.\n',
+    },
+    {
+      aborted: true,
+      summary: 'cancelled',
+      glyph: '-',
+      cancellationPrefix: 'Command was cancelled.\n',
+      exitCode: 17,
+      signal: 15,
+      statusPrefix: 'Command terminated by signal: 15.\n',
+    },
+    {
+      aborted: false,
+      summary: 'error',
+      glyph: 'x',
+      cancellationPrefix: '',
+      exitCode: null,
+      signal: 15,
+      statusPrefix: 'Command terminated by signal: 15.\n',
+    },
   ])(
-    'preserves cleanup diagnostics with aborted=$aborted as $summary',
-    async ({ aborted, summary, glyph, cancellationPrefix }) => {
+    'preserves cleanup diagnostics with aborted=$aborted, exit=$exitCode, signal=$signal as $summary',
+    async ({
+      aborted,
+      summary,
+      glyph,
+      cancellationPrefix,
+      exitCode,
+      signal,
+      statusPrefix,
+    }) => {
       const cleanupDiagnostic = 'Process group 4242 did not stop after SIGKILL';
       const output = 'partial command output';
-      const finalOutput = `${cancellationPrefix}${cleanupDiagnostic}\n${output}`;
+      const finalOutput = `${cancellationPrefix}${statusPrefix}${cleanupDiagnostic}\n${output}`;
       const { events, done, resolveResult, abort } = setup();
       if (aborted) abort();
       resolveResult(
         makeResult({
           aborted,
           error: new Error(cleanupDiagnostic),
-          exitCode: null,
+          exitCode,
+          signal,
           output,
         }),
       );

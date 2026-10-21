@@ -53,6 +53,8 @@ const MAX_BUFFERED_OUTPUT_BYTES_CEILING = 256 * 1024 * 1024;
  * after exit while bounding the grandchild case.
  */
 const POST_EXIT_STREAM_DRAIN_MS = 1000;
+// Native PTY exit/output draining has its own budget, independent of TERM grace.
+const PTY_OUTPUT_DRAIN_MS = 200;
 // Live PTY rendering only needs a short scrollback for interactive tailing.
 // The full transcript is preserved separately in raw output and final replay.
 const MAX_LIVE_TERMINAL_SCROLLBACK_LINES = 200;
@@ -2477,7 +2479,7 @@ export class ShellExecutionService {
             if (posixGroup?.completion) await posixGroup.completion;
             const flushChain = () => processingChain.then(() => {});
             const deadline = new Promise<void>((res) =>
-              setTimeout(res, SIGKILL_TIMEOUT_MS),
+              setTimeout(res, PTY_OUTPUT_DRAIN_MS),
             );
             const drain = () =>
               new Promise<void>((res) => setImmediate(res)).then(flushChain);

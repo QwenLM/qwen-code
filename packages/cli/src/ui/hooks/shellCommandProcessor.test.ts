@@ -571,15 +571,64 @@ describe('useShellCommandProcessor', () => {
       aborted: true,
       status: ToolCallStatus.Canceled,
       cancellationPrefix: 'Command was cancelled.\n',
+      exitCode: null,
+      signal: null,
+      statusPrefix: '',
     },
-    { aborted: false, status: ToolCallStatus.Error, cancellationPrefix: '' },
+    {
+      aborted: false,
+      status: ToolCallStatus.Error,
+      cancellationPrefix: '',
+      exitCode: null,
+      signal: null,
+      statusPrefix: '',
+    },
+    {
+      aborted: false,
+      status: ToolCallStatus.Error,
+      cancellationPrefix: '',
+      exitCode: 1,
+      signal: null,
+      statusPrefix: 'Exit code: 1.\n',
+    },
+    {
+      aborted: true,
+      status: ToolCallStatus.Canceled,
+      cancellationPrefix: 'Command was cancelled.\n',
+      exitCode: 0,
+      signal: null,
+      statusPrefix: 'Exit code: 0.\n',
+    },
+    {
+      aborted: true,
+      status: ToolCallStatus.Canceled,
+      cancellationPrefix: 'Command was cancelled.\n',
+      exitCode: 17,
+      signal: 15,
+      statusPrefix: 'Command terminated by signal: 15.\n',
+    },
+    {
+      aborted: false,
+      status: ToolCallStatus.Error,
+      cancellationPrefix: '',
+      exitCode: null,
+      signal: 15,
+      statusPrefix: 'Command terminated by signal: 15.\n',
+    },
   ])(
-    'preserves cleanup diagnostics with aborted=$aborted as $status',
-    async ({ aborted, status, cancellationPrefix }) => {
+    'preserves cleanup diagnostics with aborted=$aborted, exit=$exitCode, signal=$signal as $status',
+    async ({
+      aborted,
+      status,
+      cancellationPrefix,
+      exitCode,
+      signal,
+      statusPrefix,
+    }) => {
       const cleanupDiagnostic =
         'Process group 12345 did not stop after SIGKILL';
       const output = 'partial command output';
-      const finalOutput = `${cancellationPrefix}${cleanupDiagnostic}\n${output}`;
+      const finalOutput = `${cancellationPrefix}${statusPrefix}${cleanupDiagnostic}\n${output}`;
       const { result } = renderProcessorHook();
       const abortController = new AbortController();
 
@@ -594,7 +643,8 @@ describe('useShellCommandProcessor', () => {
           createMockServiceResult({
             aborted,
             error: new Error(cleanupDiagnostic),
-            exitCode: null,
+            exitCode,
+            signal,
             output,
           }),
         );
