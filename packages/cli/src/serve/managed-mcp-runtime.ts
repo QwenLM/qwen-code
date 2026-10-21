@@ -361,6 +361,36 @@ export class ManagedMcpRuntime {
     this.admissionSealed = true;
   }
 
+  publishedDefinitions(
+    tenantId: string,
+    workspaceId: string,
+  ): ReadonlyArray<{
+    serverId: string;
+    serverRevision: number;
+    definitionDigest: string;
+    transport: ManagedMcpDefinition['transport'];
+  }> {
+    if (
+      tenantId !== this.workspace.tenantId ||
+      workspaceId !== this.workspace.workspaceId
+    )
+      throw new ManagedMcpError('managed_mcp_scope_conflict');
+    if (this.closing || this.admissionSealed)
+      throw new ManagedMcpError('managed_mcp_closed');
+    return this.definitions.servers
+      .filter(
+        (server) =>
+          server.tenantId === this.workspace.tenantId &&
+          server.workspaceId === this.workspace.workspaceId,
+      )
+      .map(({ serverId, serverRevision, definitionDigest, transport }) => ({
+        serverId,
+        serverRevision,
+        definitionDigest,
+        transport,
+      }));
+  }
+
   getDrainInspection(): {
     pendingStarts: number;
     pendingInvocations: number;

@@ -1692,3 +1692,41 @@ describe('Managed MCP Runtime', () => {
     },
   );
 });
+
+it('lists only published pins for its boot Workspace without connecting or exposing recipes', () => {
+  const definition = stdioDefinition();
+  const instance = runtime([
+    definition,
+    { ...definition, tenantId: 'other-tenant', serverId: 'private-tenant' },
+    {
+      ...definition,
+      workspaceId: 'other-workspace',
+      serverId: 'private-workspace',
+    },
+  ]);
+  const published = instance.publishedDefinitions(
+    sessionKey.tenantId,
+    sessionKey.workspaceId,
+  );
+  expect(published).toEqual([
+    {
+      serverId: definition.serverId,
+      serverRevision: definition.serverRevision,
+      definitionDigest: definition.definitionDigest,
+      transport: 'stdio',
+    },
+  ]);
+  expect(JSON.stringify(published)).not.toContain('runtime-only-secret');
+  expect(instance.getDrainInspection()).toEqual({
+    pendingStarts: 0,
+    pendingInvocations: 0,
+    hasActivity: false,
+  });
+  expect(() =>
+    instance.publishedDefinitions('other-tenant', sessionKey.workspaceId),
+  ).toThrow('managed_mcp_scope_conflict');
+  instance.sealAdmission();
+  expect(() =>
+    instance.publishedDefinitions(sessionKey.tenantId, sessionKey.workspaceId),
+  ).toThrow('managed_mcp_closed');
+});

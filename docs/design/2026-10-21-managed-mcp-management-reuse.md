@@ -10,7 +10,7 @@ Daemon MCP management configures its ACP process, not the selected Managed Runti
 
 Managed pins private MCP recipes through an immutable AgentDefinition and the `hosted-workspace-mcp/1` profile. That profile provides Read/Write/Edit and MCP, but no Shell, backups/undo or Plan. Generic local Workspace-isolated workers already support persistent MCP connections; the dedicated CSI resident file-only contract is separate. Reusing a visual manager alone does not connect ordinary files/Shell Sessions to MCP.
 
-The user selected ordinary Managed files/Shell plus MCP as the first delivery. Allow optional MCP pins on the ordinary public shell/1 profile, which already includes Read/Write/Edit and Shell, while preserving approvals, backups and lifecycle. The files-only/1 and shell/2 profiles keep rejecting pins because their lifecycle contracts differ. Keep legacy MCP Sessions compatible. Configuration-management UI, publication and resource/prompt UI/expansion are subsequent work; this delivery does not claim those features.
+The user selected ordinary Managed files/Shell plus MCP as the first delivery. Allow optional MCP pins on the ordinary public shell/1 profile, which already includes Read/Write/Edit and Shell, while preserving approvals, backups and lifecycle. The files-only/1 and shell/2 profiles keep rejecting pins because their lifecycle contracts differ. Keep legacy MCP Sessions compatible. The same PR also adds Session management of published MCP definitions and reuses daemon display components, specified in [Session MCP management](2026-10-22-managed-session-mcp-management.md). Executable-recipe authoring and resource/prompt expansion remain separate.
 
 ## Admission and immutable configuration
 

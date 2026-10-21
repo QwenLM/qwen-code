@@ -306,6 +306,45 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
+  it('opens MCP management for the exact current Session and closes it on a Session switch', async () => {
+    const query = vi.fn().mockImplementation(async (id: string) => ({
+      sessionId: id,
+      revision: 0,
+      supported: true,
+      availableServers: [],
+      servers: [],
+    }));
+    provider = {
+      ...provider,
+      mcpManagement: { query, submit: vi.fn(), operation: vi.fn() },
+    };
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        workspace: { workspaceId: `workspace-${id}`, cwdRelative: '.' },
+      }),
+    );
+    await render('s1');
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((button) => button.textContent === 'Manage MCP')!
+        .click(),
+    );
+    expect(document.querySelector('[data-managed-mcp-manager]')).not.toBeNull();
+    expect(query).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    await render('s2');
+    expect(document.querySelector('[data-managed-mcp-manager]')).toBeNull();
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((button) => button.textContent === 'Manage MCP')!
+        .click(),
+    );
+    expect(query).toHaveBeenLastCalledWith('s2', expect.anything());
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+  });
+
   it('uses the shared rename dialog and synchronizes the confirmed title without submitting the composer', async () => {
     let resolve!: (value: { displayName: string }) => void;
     const renameSession = vi.fn().mockImplementation(

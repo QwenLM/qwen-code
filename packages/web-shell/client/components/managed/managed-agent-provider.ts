@@ -1,4 +1,8 @@
 import type { components } from './generated/managed-agent-api';
+import type {
+  ManagedMcpManagementCommand,
+  ManagedMcpManagementSnapshot,
+} from './managed-mcp-management-types';
 import type { ManagedToolResultReader } from './managed-tool-result-types';
 
 export type ManagedAgentSessionPhase =
@@ -252,6 +256,24 @@ export interface ManagedAgentProvider {
       sessionId: string,
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedSessionMcp>;
+  };
+  readonly mcpManagement?: {
+    /** Explicit tenant/actor namespace for pending commands saved in this tab. */
+    readonly storageScope?: string;
+    query(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedMcpManagementSnapshot>;
+    submit(
+      sessionId: string,
+      command: ManagedMcpManagementCommand,
+      options: ManagedAgentCommandOptions & { requestId: string },
+    ): Promise<ManagedMcpManagementSnapshot>;
+    operation(
+      sessionId: string,
+      operationId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedMcpManagementSnapshot>;
   };
   /** Present when the provider can serve Hosted permission Actions. */
   readonly actions?: {

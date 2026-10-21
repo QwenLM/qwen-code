@@ -1595,6 +1595,20 @@ export class LocalManagedSessionAuthority {
         }
       }
       const previous = this.domainRecords.get(request.domain);
+      if (request.domain === 'config_install') {
+        const commandBody = request.content['command'];
+        if (
+          request.content['kind'] !== 'hosted-mcp-settings' ||
+          !commandBody ||
+          typeof commandBody !== 'object' ||
+          !('expectedRevision' in commandBody) ||
+          commandBody.expectedRevision !== (previous?.revision ?? 0)
+        ) {
+          throw new ManagedSessionConflictError(
+            'MCP settings revision conflicts.',
+          );
+        }
+      }
       let content = request.content;
       const incomingTitleRevision = content['managedRenameRevision'];
       if (

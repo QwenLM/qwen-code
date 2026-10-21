@@ -50,6 +50,20 @@ public interface HarnessConnector extends AutoCloseable {
 
     default boolean supportsSessionSkills() { return false; }
 
+    default boolean supportsMcpManagement() { return false; }
+
+    default Map<String, Object> mcpManagement(String tenantId, String sessionId) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
+    default Map<String, Object> manageMcp(String tenantId, String sessionId, Map<String, Object> command) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
+    default Map<String, Object> mcpManagementOperation(String tenantId, String sessionId, String operationId) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
     default boolean isWorkspaceFilesAvailable() {
         return false;
     }

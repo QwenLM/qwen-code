@@ -57,6 +57,11 @@ import {
   WORKSPACE_REGISTRATION_MESSAGES_ZH,
 } from './components/managed/managed-workspace-messages.js';
 
+import {
+  MANAGED_MCP_MESSAGES_EN,
+  MANAGED_MCP_MESSAGES_ZH,
+} from './components/managed/managed-mcp-messages.js';
+
 export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
 
 export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
@@ -4501,6 +4506,7 @@ const EN: Messages = {
   ...SETTINGS_MESSAGES_EN,
   ...MANAGED_TASK_MESSAGES_EN,
   ...WORKSPACE_REGISTRATION_MESSAGES_EN,
+  ...MANAGED_MCP_MESSAGES_EN,
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
@@ -8664,6 +8670,7 @@ const ZH: Messages = {
   ...SETTINGS_MESSAGES_ZH,
   ...MANAGED_TASK_MESSAGES_ZH,
   ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
+  ...MANAGED_MCP_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,

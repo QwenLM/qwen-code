@@ -215,11 +215,28 @@ public final class HostedHarnessClient implements AutoCloseable {
     }
 
     public HarnessSessionRef loadSession(LoadHarnessSession request) {
+        return loadSession(request, false);
+    }
+
+    public HarnessSessionRef loadMcpManagementSession(LoadHarnessSession request) {
+        return loadSession(request, true);
+    }
+
+    private HarnessSessionRef loadSession(LoadHarnessSession request, boolean mcpManagementOnly) {
         if (request == null) {
             throw new IllegalArgumentException("request must not be null");
         }
         ensureOpen();
         String path = sessionPath(request.getHarnessSessionId()) + "/load";
+        Map<String, Object> body = request.toJson();
+        if (mcpManagementOnly) {
+            if (request.isRuntimeRecoveryLoad() || body.containsKey("cancellationTakeover")
+                    || body.containsKey("lifecycleAuthority") || body.containsKey("stopMessages")) {
+                throw new IllegalArgumentException("MCP management attachment cannot recover Runtime work");
+            }
+            body = new LinkedHashMap<>(body);
+            body.put("mcpManagementOnly", true);
+        }
         // Only a takeover load may settle parked executions and need the
         // longer ceiling; a plain attach stays on the steady-state one
         // (it also runs under ConcurrentHashMap bin locks in the connector).
@@ -227,7 +244,7 @@ public final class HostedHarnessClient implements AutoCloseable {
                 ? loadTimeout : requestTimeout;
         HttpSupport.Response response;
         try {
-            response = sendMutation(path, request.toJson(),
+            response = sendMutation(path, body,
                     request.getHarnessSessionId(), null,
                     "POST /session/:id/load", timeout);
         } catch (MutationOutcomeUnknownException error) {
@@ -678,6 +695,51 @@ public final class HostedHarnessClient implements AutoCloseable {
                 operation);
         return parseManagedRuntimeAdmission(response, stablePromptId,
                 operation, "continuation");
+    }
+
+    public Map<String, Object> mcpManagement(HarnessSessionRef session) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "GET /session/:id/mcp/management";
+        HttpSupport.Response response = sendRead(sessionPath(ref.getHarnessSessionId()) + "/mcp/management", ref, operation);
+        DaemonClient.requireStatus(response, 200, operation);
+        Map<String, Object> result = JsonSupport.parseObject(response.getBody(), operation);
+        if (!ref.getHarnessSessionId().equals(result.get("sessionId"))) {
+            throw new DaemonProtocolException("Hosted MCP management names a different Session");
+        }
+        return result;
+    }
+
+    public Map<String, Object> manageMcp(HarnessSessionRef session, Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/mcp/management";
+        HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/mcp/management",
+                body, ref.getHarnessSessionId(), ref.getHarnessClientId(), operation);
+        try {
+            DaemonClient.requireStatus(response, 202, operation);
+            Map<String, Object> result = JsonSupport.parseObject(response.getBody(), operation);
+            if (!ref.getHarnessSessionId().equals(result.get("sessionId"))
+                    || !body.get("operationId").equals(JsonSupport.requiredObject(result, "operation", operation).get("operationId"))) {
+                throw new DaemonProtocolException("Hosted MCP management names a different operation");
+            }
+            return result;
+        } catch (DaemonProtocolException error) {
+            throw new MutationOutcomeUnknownException(operation, error);
+        }
+    }
+
+    public Map<String, Object> mcpManagementOperation(HarnessSessionRef session, String operationId) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String id = requireUuid(operationId, "operationId");
+        String operation = "GET /session/:id/mcp/management/operations/:operationId";
+        HttpSupport.Response response = sendRead(sessionPath(ref.getHarnessSessionId())
+                + "/mcp/management/operations/" + id, ref, operation);
+        DaemonClient.requireStatus(response, 200, operation);
+        Map<String, Object> result = JsonSupport.parseObject(response.getBody(), operation);
+        if (!ref.getHarnessSessionId().equals(result.get("sessionId"))
+                || !id.equals(JsonSupport.requiredObject(result, "operation", operation).get("operationId"))) {
+            throw new DaemonProtocolException("Hosted MCP management names a different operation");
+        }
+        return result;
     }
 
     public Map<String, Object> compressContext(HarnessSessionRef session, Map<String, Object> body) {

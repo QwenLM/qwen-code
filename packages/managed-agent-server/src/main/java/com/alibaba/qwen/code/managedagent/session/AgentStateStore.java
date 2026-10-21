@@ -678,6 +678,14 @@ public interface AgentStateStore {
 
     default boolean hasMcpServers(SessionRecord session) { return false; }
 
+    default SessionRecord requireMcpManagement(String tenantId, String actorId, String sessionId, String operationId) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
+    default void requireMcpSettingsCommit(String tenantId, String workspaceId, String sessionId) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
     default Set<String> findApprovalOwners(String tenantId, String actorId,
             List<String> sessionIds) { return Set.of(); }
 

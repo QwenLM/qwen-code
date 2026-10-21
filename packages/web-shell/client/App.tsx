@@ -474,6 +474,7 @@ import {
 } from './components/messages/StatusMessage';
 import type { SerializedMcpStatusMessage } from './components/messages/McpStatusMessage';
 import { McpManagerPage } from './components/mcp/McpManagerPage';
+import { ManagedMcpManagerPage } from './components/managed/ManagedMcpManagerPage';
 import { BtwMessage } from './components/messages/BtwMessage';
 import {
   createAndAttachSessionForPrompt,
@@ -22564,6 +22565,13 @@ export function App({
                         onClose={closePanel}
                         initialFocusRef={panelHeadingRef}
                       />
+                    ) : activePanel === 'mcp' && managedMode && managedAgentProvider ? (
+                      <ManagedMcpManagerPage
+                        provider={managedAgentProvider}
+                        sessionId={managedSessionId}
+                        workspaceId={managedWorkspaceId ?? undefined}
+                        onClose={closePanel}
+                      />
                     ) : activePanel === 'mcp' && mcpDialogMessage ? (
                       <McpManagerPage
                         message={mcpDialogMessage}
@@ -22607,6 +22615,11 @@ export function App({
                         skillsWorkspaceCwd={skillsSourceCwd}
                         onSkillsWorkspaceChange={selectSkillsWorkspace}
                         managedSkills={managedAgentProvider?.kind === 'java'}
+                        managedMcp={managedMode && managedAgentProvider ? {
+                          provider: managedAgentProvider,
+                          sessionId: managedSessionId,
+                          workspaceId: managedWorkspaceId ?? undefined,
+                        } : undefined}
                       />
                     ) : activePanel === 'channels' ? (
                       <ChannelsManagerPage

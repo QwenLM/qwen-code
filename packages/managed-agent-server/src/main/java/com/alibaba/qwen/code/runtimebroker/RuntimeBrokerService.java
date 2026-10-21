@@ -928,6 +928,68 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return warm(harnessSessionId, null);
     }
 
+    public CompletionStage<List<Map<String, Object>>> mcpDefinitions(String harnessSessionId, String runtimeSessionId) {
+        requireOpen();
+        String harnessId = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        return resolveScope(harnessId, true, null).thenCompose(scope -> {
+            bindingRepository.requireHarnessAdmission(scope, harnessId, null);
+            RuntimeSessionRecord owner = runtimeSessionId == null ? null
+                    : sessionRepository.findHistorical(scope.getTenantId(), harnessId,
+                            BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"));
+            if (runtimeSessionId != null && owner == null) {
+                throw conflict("managed_mcp_owner_unavailable", "The original MCP owner is unavailable.");
+            }
+            if (owner == null) {
+                var active = sessionRepository.findActiveByHarnessSession(scope.getTenantId(), harnessId, null, 2);
+                if (active.size() > 1) {
+                    throw conflict("managed_mcp_owner_unavailable", "The original MCP owner is ambiguous.");
+                }
+                owner = active.isEmpty() ? null : active.getFirst();
+            }
+            CompletionStage<RuntimeBindingRecord> selected;
+            if (owner != null) {
+                RuntimeBindingRecord original = bindingRepository.findById(owner.getBindingId());
+                if (!owner.getSession().getHarnessSessionId().equals(harnessId)
+                        || !owner.getSession().getScope().equals(scope) || owner.getState() != RuntimeSessionRecord.State.READY
+                        || original == null || original.getGeneration() != owner.getRuntimeGeneration()
+                        || original.getState() != RuntimeBindingRecord.State.READY || original.isDrainRequested()
+                        || !original.getRequest().getScope().equals(scope)) {
+                    throw conflict("managed_mcp_owner_unavailable", "The original MCP Runtime is unavailable.");
+                }
+                selected = matchingLiveBinding(original) == null
+                        ? recoverBinding(original.getBindingId(), original.getGeneration(), true)
+                        : CompletableFuture.completedFuture(original);
+                selected = selected.thenApply(record -> {
+                    if (!record.sameIdentity(original) || record.getGeneration() != original.getGeneration()) {
+                        throw conflict("managed_mcp_owner_unavailable", "The original MCP Runtime changed.");
+                    }
+                    return record;
+                });
+            } else {
+                RuntimeProvisionRequest request = provisionRequest(scope, harnessId);
+                RuntimeBindingRecord existing = bindingRepository.findOrCreate(request);
+                if (existing.getState() != RuntimeBindingRecord.State.READY
+                        && existing.getState() != RuntimeBindingRecord.State.PROVISIONING) {
+                    throw conflict("managed_mcp_owner_unavailable", "The selected MCP Runtime is unavailable.");
+                }
+                selected = ensureBinding(request).thenApply(BindingContext::record);
+            }
+            return selected.thenCompose(record -> {
+                RuntimeBindingRecord current = bindingRepository.findById(record.getBindingId());
+                if (current == null || !current.sameIdentity(record) || current.getGeneration() != record.getGeneration()
+                        || current.getState() != RuntimeBindingRecord.State.READY || current.isDrainRequested()) {
+                    throw conflict("managed_mcp_owner_unavailable", "The selected MCP Runtime changed.");
+                }
+                requireLiveBinding(current);
+                if (!provisioner.isUsable(current.getLease())) {
+                    throw unavailable("managed_mcp_owner_unavailable", "The selected MCP Runtime is not alive.");
+                }
+                bindingRepository.requireHarnessAdmission(current.getRequest(), scope, harnessId, null);
+                return transport.mcpDefinitions(current);
+            });
+        });
+    }
+
     public CompletionStage<RuntimeBindingRecord> warm(String harnessSessionId, RuntimeLifecycleAuthority authority) {
         requireOpen();
         String harnessId = BrokerValues.requirePathSafe(

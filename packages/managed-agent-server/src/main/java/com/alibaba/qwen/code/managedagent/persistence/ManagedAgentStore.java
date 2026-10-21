@@ -1077,9 +1077,95 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     public boolean hasMcpServers(SessionRecord session) {
-        return session.agentDefinitionDigest() != null && !WorkspaceToolProfiles.READ.equals(session.toolProfile())
-                && !AgentDefinitionExtensions.mcpServers(
-                        definitions.pinnedContent(session).get("mcp_servers"), session.toolProfile()).isEmpty();
+        if (WorkspaceToolProfiles.READ.equals(session.toolProfile())) {
+            return false;
+        }
+        boolean pinned = session.agentDefinitionDigest() != null && !AgentDefinitionExtensions.mcpServers(
+                definitions.pinnedContent(session).get("mcp_servers"), session.toolProfile()).isEmpty();
+        return ManagedMcpSettings.find(jdbc, session.tenantId(), session.sessionId()) != null || pinned;
+    }
+
+    @Override
+    @Transactional
+    public SessionRecord requireMcpManagement(String tenantId, String actorId, String sessionId, String operationId) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        if (session.workspace() == null || "DELETED".equals(session.status())) {
+            throw new ManagedAgentException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
+        }
+        WorkspaceAccess access = workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId());
+        if (!access.canRead()) {
+            throw new ManagedAgentException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
+        }
+        if (!access.atLeast(WorkspaceAccess.OPERATOR)) {
+            throw new ManagedAgentException(HttpStatus.FORBIDDEN, "session_operation_forbidden",
+                    "Only a Workspace operator may manage MCP servers.");
+        }
+        if (!WorkspaceToolProfiles.SHELL.equals(session.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(session.toolProfile())
+                || !workspaceFilesEnabled || !workspaceShellEnabled && WorkspaceToolProfiles.SHELL.equals(session.toolProfile())
+                || isSshWorkspace(session.workspace()) || residentWorkspaces.find(session.workspace()) != null
+                || findChildLineage(tenantId, sessionId) != null) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "MCP management is unavailable.");
+        }
+        requireSessionStatus(session.status(), "ACTIVE");
+        requireCwdChangeRegistryFacts(session);
+        WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+        boolean replay = operationId != null && !jdbc.queryForList("SELECT 1 FROM ma_session_journal_tx"
+                + " WHERE tenant_id=? AND session_id=? AND command_id=? AND operation='manageMcp' LIMIT 1",
+                tenantId, sessionId, operationId).isEmpty();
+        if (operationId != null && !replay) {
+            requireMcpManagementIdle(session);
+        }
+        return session;
+    }
+
+    @Override
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.MANDATORY)
+    public void requireMcpSettingsCommit(String tenantId, String workspaceId, String sessionId) {
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        if (session.workspace() == null || !workspaceId.equals(session.workspace().getWorkspaceId())
+                || !WorkspaceToolProfiles.SHELL.equals(session.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(session.toolProfile())
+                || findChildLineage(tenantId, sessionId) != null) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "MCP management is unavailable.");
+        }
+        requireSessionStatus(session.status(), "ACTIVE");
+        requireMcpManagementIdle(session);
+    }
+
+    private void requireMcpManagementIdle(SessionRecord session) {
+        String tenantId = session.tenantId();
+        String sessionId = session.sessionId();
+        // The journal may already have a consistent-read snapshot; these reads must observe the
+        // Plan/Turn admission that won the same Session row before this settings commit.
+        if (Boolean.TRUE.equals(jdbc.queryForObject("SELECT plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE",
+                Boolean.class, tenantId, sessionId))) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "Disable Plan mode before managing MCP servers.");
+        }
+        if (!jdbc.queryForList("SELECT turn_id FROM ma_turn WHERE tenant_id=? AND session_id=?"
+                + " AND status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') LIMIT 1 FOR UPDATE", tenantId, sessionId).isEmpty()) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn or approval.");
+        }
+        long now = lifecycleDatabaseTime();
+        for (String options : jdbc.queryForList("SELECT options_json FROM ma_session_record WHERE session_scope_key=?"
+                + " AND record_kind='ACTION' AND state='requested' AND tenant_id=? AND session_id=? FOR UPDATE",
+                String.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId)) {
+            Object expiresAt = readMap(options).get("expiresAt");
+            if (expiresAt instanceof Number expiration && now < expiration.longValue()) {
+                throw new ManagedAgentException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn or approval.");
+            }
+        }
+        if (!jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE scope_key=? AND target_key=?"
+                + " AND operation_kind IN " + SESSION_OPERATION_KINDS
+                + " AND (state IN ('PENDING', 'RUNNING', 'UNKNOWN') OR state='RECOVERY_BLOCKED' AND operation_kind <> 'TASK_CANCEL')"
+                + " LIMIT 1 FOR UPDATE", ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionOperationTarget(sessionId)).isEmpty()
+                || !jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE operation_kind='RENAME'"
+                        + " AND target_key=? AND tenant_id=? AND session_id=? AND state IN ('PENDING', 'RUNNING') LIMIT 1 FOR UPDATE",
+                        renameTarget(tenantId, sessionId), tenantId, sessionId).isEmpty()
+                || !jdbc.queryForList("SELECT receipt_key FROM ma_request_receipt WHERE namespace='SESSION_COMMAND'"
+                        + " AND tenant_key=? AND tenant_id=? AND session_id=? AND state='PENDING' LIMIT 1 FOR UPDATE",
+                        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenantId), tenantId, sessionId).isEmpty()) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "session_context_busy", "The Session has an active operation.");
+        }
     }
 
     private ManagedAgentDefinitionStore.DefinitionRevision resolveDefinitionRevision(

@@ -517,6 +517,10 @@ public class ManagedExtensionRecordStore {
             // only ones with a parseable domain — a line without a textual
             // domain must not skip into the journal the reader refuses.
             requireDomainCommitted(payload, domain, body != null);
+            if (ManagedMcpSettings.DOMAIN.equals(domain)) {
+                projectMcpSettings(tenantId, workspaceId, sessionId, payload, resources,
+                        firstSequence + index, occurredAt);
+            }
             if (body != null) {
                 require(applied == 0, "A transaction carries at most one"
                         + " Stage H record.");
@@ -657,6 +661,48 @@ public class ManagedExtensionRecordStore {
                 + " " + ManagedSchemaTime.SQL_NOW + ")", scope, key, sequence,
                 ManagedSchemaKeys.key(scope, resource.resourceId()), tenantId, workspaceId,
                 sessionId, resource.resourceId());
+    }
+
+    private void projectMcpSettings(String tenantId, String workspaceId, String sessionId, JsonNode payload,
+            Function<String, StoredResource> resources, long sequence, long occurredAt) {
+        require(sessions != null, "MCP management admission is unavailable");
+        sessions.requireMcpSettingsCommit(tenantId, workspaceId, sessionId);
+        JsonNode ref = payload.get("recordRef");
+        StoredResource resource = resources.apply(ref.get("resourceId").textValue());
+        requireReference(resource, ref);
+        JsonNode settings = readBody(resource);
+        try {
+            ManagedMcpSettings.require(settings);
+        } catch (InvalidRecordException error) {
+            throw rejected(error.getMessage());
+        }
+        require(settings.get("operationId").equals(payload.get("operationId")), "MCP command identity conflicts");
+        JsonNode previous = ManagedMcpSettings.find(jdbc, tenantId, sessionId);
+        long revision = settings.get("revision").longValue();
+        require(revision == (previous == null ? 1 : previous.get("revision").longValue() + 1), "MCP settings revision conflicts");
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String key = ManagedExtensionProjection.recordKey(sessionId, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID);
+        if (previous == null) {
+            jdbc.update("INSERT INTO ma_session_record (record_kind, session_scope_key, record_key, tenant_id, workspace_id,"
+                            + " session_id, domain, record_id, revision, record_resource_id, gmt_create, settled_at, first_sequence)"
+                            + " VALUES ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", scope, key, tenantId, workspaceId,
+                    sessionId, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID, revision, resource.resourceId(),
+                    occurredAt, occurredAt, sequence);
+        } else {
+            JsonNode predecessor = settings.get("previousRecordRef");
+            String previousResource = jdbc.queryForObject("SELECT record_resource_id FROM ma_session_record"
+                    + " WHERE session_scope_key=? AND record_key=?", String.class, scope, key);
+            require(previousResource.equals(predecessor.path("resourceId").asText()), "MCP settings predecessor conflicts");
+            requireReference(resources.apply(previousResource), predecessor);
+            jdbc.update("UPDATE ma_session_record SET revision=?, record_resource_id=?, settled_at=?"
+                    + " WHERE session_scope_key=? AND record_key=? AND revision=?",
+                    revision, resource.resourceId(), occurredAt, scope, key, revision - 1);
+        }
+        jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key=? AND owner_kind='SESSION_RECORD' AND owner_key=?", scope, key);
+        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key,"
+                        + " tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, "
+                        + ManagedSchemaTime.SQL_NOW + ")", scope, key, revision,
+                ManagedSchemaKeys.key(scope, resource.resourceId()), tenantId, workspaceId, sessionId, resource.resourceId());
     }
 
     /**

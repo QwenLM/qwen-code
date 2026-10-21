@@ -1057,7 +1057,13 @@ class ManagedSessionStoreHttpClient {
               error.remoteCode ===
                 'context_compression_authorization_revoked' ||
               (descriptor.operation === 'contextCompression' &&
-                error.remoteCode === 'workspace_unavailable'))) ||
+                error.remoteCode === 'workspace_unavailable') ||
+              (descriptor.operation === 'manageMcp' &&
+                [
+                  'unsupported_feature',
+                  'turn_active',
+                  'session_context_busy',
+                ].includes(error.remoteCode)))) ||
             (this.lifecycleAuthority &&
               (error.status === 403 ||
                 (error.status === 409 &&

@@ -10,7 +10,7 @@ daemon 的 MCP 管理配置其 ACP 进程，并非选定的 Managed Runtime。�
 
 Managed 通过不可变 AgentDefinition 和 `hosted-workspace-mcp/1` profile 固定私有 MCP recipe。该 profile 提供 Read/Write/Edit 和 MCP，但没有 Shell、备份/撤销或 Plan。通用本机 Workspace 隔离 worker 已支持保持 MCP 连接；专用 CSI 常驻文件 profile 是另一份契约。仅复用页面不能让普通文件/Shell 会话使用 MCP。
 
-用户选择优先交付普通 Managed 文件/Shell 与 MCP 组合。在普通公开 shell/1 profile 上允许可选 MCP pins；它本身已有 Read/Write/Edit 和 Shell。保留审批、备份与生命周期，兼容旧 MCP 会话。文件专用 files/1 与 shell/2 的生命周期不同，继续拒绝 pins。配置管理 UI、发布及资源/prompt UI/展开属于后续工作，本轮不声称完成这些功能。
+用户选择优先交付普通 Managed 文件/Shell 与 MCP 组合。在普通公开 shell/1 profile 上允许可选 MCP pins；它本身已有 Read/Write/Edit 和 Shell。保留审批、备份与生命周期，兼容旧 MCP 会话。文件专用 files/1 与 shell/2 的生命周期不同，继续拒绝 pins。同一 PR 还增加会话对已发布 MCP 定义的管理，并复用 daemon 展示组件，详见[会话 MCP 管理](2026-10-22-managed-session-mcp-management.zh-CN.md)。可执行 recipe 编写和资源/prompt 展开仍单独交付。
 
 ## 准入与不可变配置
 
