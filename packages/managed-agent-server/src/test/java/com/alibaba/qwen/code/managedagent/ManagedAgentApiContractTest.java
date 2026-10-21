@@ -230,6 +230,10 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellListRequest")),
                     entry(WebShellSessionRequest.class,
                             List.of("WebShellSessionRequest")),
+                    entry(ApiModels.WebShellRenameRequest.class,
+                            List.of("WebShellRenameRequest")),
+                    entry(ApiModels.WebShellRenameResult.class,
+                            List.of("WebShellRenameResult")),
                     entry(WebShellTranscriptRequest.class,
                             List.of("WebShellTranscriptRequest")),
                     entry(WebShellStreamRequest.class,
@@ -881,6 +885,23 @@ class ManagedAgentApiContractTest {
                  "agentId":"qwen-code","title":"web",
                  "metadata":{"clientId":"contract"},"input":[]}
                 """)).get("sessionId").asText();
+        String renameBody = """
+                {"requestId":"contract-rename","sessionId":"%s",
+                 "idempotencyKey":"contract-web-rename","title":"renamed web"}
+                """.formatted(webSessionId);
+        JsonNode renamed = json(exchange(drift, "webShellRenameSession", 200,
+                post(WEB_SHELL + "/sessions/rename").header(TENANT, tenant), renameBody));
+        assertThat(renamed.path("sessionId").asText()).isEqualTo(webSessionId);
+        assertThat(renamed.path("title").asText()).isEqualTo("renamed web");
+        assertThat(renamed.path("replayed").asBoolean()).isFalse();
+        JsonNode renameReplay = json(exchange(drift, "webShellRenameSession", 200,
+                post(WEB_SHELL + "/sessions/rename").header(TENANT, tenant), renameBody));
+        assertThat(renameReplay.path("replayed").asBoolean()).isTrue();
+        exchange(drift, "webShellRenameSession", 400,
+                post(WEB_SHELL + "/sessions/rename").header(TENANT, tenant),
+                renameBody.replace("renamed web", " "));
+        exchange(drift, "webShellRenameSession", 404,
+                post(WEB_SHELL + "/sessions/rename").header(TENANT, otherTenant), renameBody);
         // The widened metadata contract: a body with keys beyond clientId
         // is both served (202) and schema-valid. exchange() validates
         // sub-300 request bodies, so re-tightening WebShellMetadata to
@@ -2712,7 +2733,7 @@ class ManagedAgentApiContractTest {
                         .isEqualTo(session.get("last_event_id").asLong());
                 JsonNode webCapabilities = json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false}
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true}
                                 """);
                 if (javaDurableAdmission != null) {
                     ((com.fasterxml.jackson.databind.node.ObjectNode) webCapabilities)

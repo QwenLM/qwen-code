@@ -1073,7 +1073,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description:
-          'When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.',
+          'When true, human submissions containing `workflow` or `ultracode` no longer softly steer the current turn toward the Workflow tool. Applies across terminal, IDE, Web and explicitly human-origin SDK messages when workflows are enabled. Plain headless prompts and automated messages do not trigger this reminder.',
         showInDialog: true,
       },
       showStatusInTitle: {
@@ -4306,6 +4306,16 @@ const SETTINGS_SCHEMA = {
     description: 'Settings to enable experimental features.',
     showInDialog: false,
     properties: {
+      generatedUi: {
+        type: 'boolean',
+        label: 'Generated UI',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
+        showInDialog: true,
+      },
       mods: {
         type: 'boolean',
         label: 'Mods (Experimental)',
