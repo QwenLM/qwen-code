@@ -102,7 +102,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 1. 用 `gh` 解析 PR。PR 已关闭或已合并、head 仓库已被删除、或 head 是默认分支时拒绝。
 2. 动手之前先检查推送权限。同仓库 PR 要求仓库的 `viewerPermission` 为 `WRITE`、`MAINTAIN` 或 `ADMIN`。fork PR 要求当前用户就是 fork 的所有者，或者既有写权限又有 `maintainerCanModify`。否则拒绝并说明原因。
 3. 要求本地恰好有一个 remote 和 base 仓库匹配（使用 `review match-remote` 背后的匹配逻辑）。
-4. 确定推送目标。优先使用唯一一个和 head 仓库匹配的本地 remote；没有的话，按 `gh config get git_protocol` 给出的协议使用 head 仓库的 URL。把结果记到状态文件里。
+4. 确定推送目标。优先使用唯一一个和 head 仓库匹配、并且确实推送到它的本地 remote（匹配器只读 fetch URL；`pushurl` 指向别的仓库的 remote 不算）；没有的话，按 `gh config get git_protocol` 给出的协议使用 head 仓库的 URL。把结果记到状态文件里。
 5. 状态文件就是锁。它记录会话 id（`QWEN_CODE_SESSION_ID`）；由另一个会话写下的状态文件直接导致拒绝，绝不抢占。
 6. 把 `refs/pull/<n>/head` fetch 到本地分支 `qwen-autofix/pr-<n>`，并在它上面创建 worktree。`prepare` 从不丢弃之前的工作：残留的 worktree，或可能含有超出记录 head 的提交的残留分支，都会导致拒绝，并提示先运行 `cleanup`。
 7. 在拥有这次监视的会话里重新运行 `prepare`，且 worktree 还在时，直接报告现有状态并带上 `resumed: true`，不再调用其他任何东西。如果 worktree 已被删除（包括用 `rm -rf` 删除，`git worktree prune` 会清掉它的登记），就重新创建它，并保留已记录的 `pushedShas`、`handledCommentIds` 和 `postedCommentIds`。状态文件属于另一个仓库的同号 PR 时直接拒绝。
@@ -177,10 +177,10 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 `snapshot --gate` 是定时任务闸门背后的那条命令。它不需要 worktree，也不需要状态文件：首次运行用 `--repo` 指定 PR（或由已准备好的状态提供），它自己的游标 `.qwen/tmp/autofix-pr-<n>-gate.json` 记录已经报告过的内容。它输出同样的 JSON，但只包含自上次运行以来的迁移，没有迁移时什么都不输出，因此会话只会为迁移被唤醒：
 
-- 失败的检查按（检查，head）报告一次。游标只保留仍然存在的失败，所以重跑后再次失败的检查会再次报告，新的 head 从头开始。
+- 失败的检查按（检查，head，attempt）报告一次：游标键带上 job URL，所以重跑后再次失败的检查会再次报告，即使没有任何一次轮询看到它处于运行中。游标只保留仍然存在的失败，新的 head 从头开始。
 - 进行中的检查从不报告；不会出现 `ci_pending`。
 - 冲突按 head 报告一次；`mergeable` 清除标记，`UNKNOWN` 保留标记。
-- 评论、review 和 thread 评论按 node id 各报告一次，沿用第 8 节的信任规则。当前用户自己的评论永远不是事件。只有不可信评论时作为提醒报告（`wait`）。
+- 评论、review 和 thread 评论按 node id 各报告一次，沿用第 8 节的信任规则。当前用户自己的评论永远不是事件。只有不可信评论时作为提醒报告（`wait`）。查询结果里仍然出现的已报告 id 全部保留在游标里，不论多少；只有已经离开页面的 id 才有上限，所以内容相同的轮询是安静的。
 - head 与上次运行不同时记为 `head_moved_externally`（`resync`）；首次运行只记录 head，不报告。
 - 合并或关闭报告一次（`stop`）；之后探针保持安静，重新打开的 PR 会再次被监视。
 - 首次运行报告所有尚未处理的事项：失败的检查、冲突，以及没人处理过的评论。

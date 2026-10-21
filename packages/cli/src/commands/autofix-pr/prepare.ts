@@ -22,7 +22,12 @@ import {
   setGhHost,
 } from '../review/lib/gh.js';
 import { git, gitOpt, refExists } from '../review/lib/git.js';
-import { matchRemotes } from '../review/lib/remote-match.js';
+import {
+  hostsEquivalent,
+  matchRemotes,
+  normalizeSegment,
+  parseRemoteUrl,
+} from '../review/lib/remote-match.js';
 import { redirectedAncestor } from '../review/lib/worktree.js';
 import {
   assertOwnedBySession,
@@ -107,6 +112,56 @@ function onlyRemote(
   return matched.length === 1 ? matched[0] : null;
 }
 
+/**
+ * Where pushes to the head repository go: the one local remote that fetches
+ * from it, when that remote also pushes to it, else the repository's URL.
+ * `matchRemotes` reads the fetch side only, and a remote may carry its own
+ * `pushurl`; the remote qualifies when its push URLs are its fetch URLs or
+ * every one of them names the head repository itself.
+ */
+function pushTargetFor(
+  remoteV: string,
+  host: string,
+  owner: string,
+  repo: string,
+): string {
+  const remote = onlyRemote(remoteV, owner, repo, host);
+  if (remote !== null && remotePushesTo(remote, host, owner, repo)) {
+    return remote;
+  }
+  return pushUrl(
+    host,
+    owner,
+    repo,
+    gh('config', 'get', 'git_protocol', '-h', host),
+  );
+}
+
+function remotePushesTo(
+  remote: string,
+  host: string,
+  owner: string,
+  repo: string,
+): boolean {
+  const fetchUrls = gitOpt('remote', 'get-url', '--all', remote);
+  const pushUrls = gitOpt('remote', 'get-url', '--push', '--all', remote);
+  if (fetchUrls === null || pushUrls === null) return false;
+  if (pushUrls.trim() === fetchUrls.trim()) return true;
+  return pushUrls
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+    .every((url) => {
+      const identity = parseRemoteUrl(url);
+      return (
+        identity !== null &&
+        hostsEquivalent(identity.host, host) &&
+        identity.owner === normalizeSegment(owner) &&
+        identity.repo === normalizeSegment(repo)
+      );
+    });
+}
+
 function report(state: AutofixPrState, extra: Record<string, unknown>): void {
   writeStdoutLine(
     JSON.stringify({
@@ -186,14 +241,7 @@ export function runPrepare(args: PrepareArgs): void {
       `no single git remote here serves ${host}/${args.repo}; autofix needs a clone of the PR's repository.`,
     );
   }
-  const pushTarget =
-    onlyRemote(remoteV, headOwner, headName, host) ??
-    pushUrl(
-      host,
-      headOwner,
-      headName,
-      gh('config', 'get', 'git_protocol', '-h', host),
-    );
+  const pushTarget = pushTargetFor(remoteV, host, headOwner, headName);
 
   // Never discard what an earlier watch left: only `cleanup` knows when that
   // is safe. The one exception is a branch whose worktree was removed and

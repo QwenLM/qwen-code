@@ -27,7 +27,8 @@ vi.mock('../review/lib/gh.js', async (importOriginal) => ({
   ensureAuthenticated: () => {},
 }));
 
-vi.mock('../review/lib/remote-match.js', () => ({
+vi.mock('../review/lib/remote-match.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../review/lib/remote-match.js')>()),
   matchRemotes: (_remoteV: string, { owner }: { owner: string }) => ({
     matched: mocks.matched(owner),
   }),
@@ -236,6 +237,38 @@ describe('runPrepare (real git)', () => {
     expect(lastReport()).toMatchObject({
       pushTarget: 'git@github.com:contributor/r.git',
     });
+  });
+
+  it('pushes to the head repository URL when the matched remote pushes elsewhere', () => {
+    // The fetch side matches the head repository; the push side does not.
+    run(
+      clone,
+      'remote',
+      'set-url',
+      '--push',
+      'origin',
+      'https://github.com/elsewhere/r.git',
+    );
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({
+      pushTarget: 'https://github.com/o/r.git',
+    });
+    expect(readState(autofixPrPaths(clone, 7).statePath)?.pushTarget).toBe(
+      'https://github.com/o/r.git',
+    );
+  });
+
+  it('keeps the remote whose push URL is another spelling of the head repository', () => {
+    run(
+      clone,
+      'remote',
+      'set-url',
+      '--push',
+      'origin',
+      'git@github.com:O/R.git',
+    );
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({ pushTarget: 'origin' });
   });
 
   it('counts local commits the PR does not have', () => {

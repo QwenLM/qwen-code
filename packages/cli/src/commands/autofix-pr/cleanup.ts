@@ -37,34 +37,37 @@ export function unsavedWork(
     const status = gitOpt('-C', paths.worktreePath, 'status', '--porcelain');
     if (status === null) return `git cannot read ${paths.worktreePath}`;
     if (status !== '') return 'it has uncommitted changes';
-  } else if (!refExists(`refs/heads/${paths.branch}`)) {
-    return null;
   }
-  const where = hasWorktree ? paths.worktreePath : `branch ${paths.branch}`;
+  const hasBranch = refExists(`refs/heads/${paths.branch}`);
+  if (!hasWorktree && !hasBranch) return null;
   if (lastKnownHeadSha === null) {
+    const where = hasWorktree ? paths.worktreePath : `branch ${paths.branch}`;
     return `${where} may hold commits and no PR head is recorded to compare it with`;
   }
-  const ahead = hasWorktree
-    ? gitOpt(
-        '-C',
-        paths.worktreePath,
-        'rev-list',
-        '--count',
-        'HEAD',
-        '--not',
-        lastKnownHeadSha,
-      )
-    : gitOpt(
-        'rev-list',
-        '--count',
-        `refs/heads/${paths.branch}`,
-        '--not',
-        lastKnownHeadSha,
-      );
-  if (ahead === null) return `git cannot compare ${where} with the PR head`;
-  return ahead === '0'
-    ? null
-    : `${where} has ${ahead} commit(s) the PR does not have`;
+  // Cleanup removes the checkout and the branch, so each one that exists is
+  // compared with the PR head: a worktree parked on an older commit says
+  // nothing about the branch it was cut from.
+  const compared: Array<[string, string[]]> = [];
+  if (hasWorktree) {
+    compared.push([
+      paths.worktreePath,
+      ['-C', paths.worktreePath, 'rev-list', '--count', 'HEAD'],
+    ]);
+  }
+  if (hasBranch) {
+    compared.push([
+      `branch ${paths.branch}`,
+      ['rev-list', '--count', `refs/heads/${paths.branch}`],
+    ]);
+  }
+  for (const [where, args] of compared) {
+    const ahead = gitOpt(...args, '--not', lastKnownHeadSha);
+    if (ahead === null) return `git cannot compare ${where} with the PR head`;
+    if (ahead !== '0') {
+      return `${where} has ${ahead} commit(s) the PR does not have`;
+    }
+  }
+  return null;
 }
 
 export function runCleanup(prNumber: number, force: boolean): void {

@@ -68,13 +68,24 @@ function pr(overrides: Partial<PrData> = {}, contexts: Contexts = []): PrData {
   };
 }
 
-function failed(name: string): Contexts[number] {
+function failed(name: string, job = name): Contexts[number] {
   return {
     __typename: 'CheckRun',
     name,
     status: 'COMPLETED',
     conclusion: 'FAILURE',
-    detailsUrl: `https://github.com/o/r/actions/runs/123/job/${name}`,
+    detailsUrl: `https://github.com/o/r/actions/runs/123/job/${job}`,
+  };
+}
+
+function thread(id: string, comments: Array<ReturnType<typeof comment>>) {
+  return {
+    id,
+    isResolved: false,
+    isOutdated: false,
+    path: 'src/a.ts',
+    line: 3,
+    comments: { pageInfo: { hasNextPage: false }, nodes: comments },
   };
 }
 
@@ -123,7 +134,9 @@ describe('buildGateSnapshot', () => {
       action: 'fix',
       events: [{ type: 'ci_failed', check: 'Test', runId: 123 }],
     });
-    expect(first.cursor.reportedChecks).toEqual([`Test@${HEAD}`]);
+    expect(first.cursor.reportedChecks).toEqual([
+      `Test@${HEAD}@https://github.com/o/r/actions/runs/123/job/Test`,
+    ]);
 
     // Still failing on the same head: quiet.
     const second = buildGateSnapshot(pr({}, [failed('Test')]), first.cursor);
@@ -159,6 +172,62 @@ describe('buildGateSnapshot', () => {
       events: [{ type: 'head_moved_externally', sha: NEXT_HEAD }],
     });
     expect(moved.cursor.headSha).toBe(NEXT_HEAD);
+  });
+
+  it('reports a re-run that failed again between two polls', () => {
+    // No poll saw the re-run in progress: the attempt's job URL tells the
+    // failures apart.
+    const first = buildGateSnapshot(pr({}, [failed('Test', '100')]), cursor());
+    expect(first.snapshot?.events).toEqual([
+      expect.objectContaining({ type: 'ci_failed', check: 'Test' }),
+    ]);
+    const again = buildGateSnapshot(
+      pr({}, [failed('Test', '200')]),
+      first.cursor,
+    );
+    expect(again.snapshot?.events).toEqual([
+      expect.objectContaining({
+        type: 'ci_failed',
+        check: 'Test',
+        url: 'https://github.com/o/r/actions/runs/123/job/200',
+      }),
+    ]);
+    expect(again.cursor.reportedChecks).toEqual([
+      `Test@${HEAD}@https://github.com/o/r/actions/runs/123/job/200`,
+    ]);
+    expect(
+      buildGateSnapshot(pr({}, [failed('Test', '200')]), again.cursor).snapshot,
+    ).toBeNull();
+  });
+
+  it('keeps every reported id the query still returns, and bounds only the rest', () => {
+    // 21 unresolved threads of 100 reportable comments: more ids than the
+    // off-page bound, all still on the page on the next identical poll.
+    const nodes = Array.from({ length: 21 }, (_, t) =>
+      thread(
+        `T${t}`,
+        Array.from({ length: 100 }, (_, c) =>
+          comment(`T${t}C${c}`, 'alice', 'MEMBER'),
+        ),
+      ),
+    );
+    const data = pr({
+      reviewThreads: { pageInfo: { hasNextPage: false }, nodes },
+    });
+    const first = buildGateSnapshot(data, cursor());
+    expect(first.snapshot?.events).toHaveLength(21);
+    expect(first.cursor.reportedCommentIds).toHaveLength(2100);
+    const second = buildGateSnapshot(data, first.cursor);
+    expect(second.snapshot).toBeNull();
+    expect(second.cursor.reportedCommentIds).toHaveLength(2100);
+
+    // Ids that left the page keep only their newest 2000.
+    const stale = cursor({
+      reportedCommentIds: Array.from({ length: 2500 }, (_, i) => `old${i}`),
+    });
+    const third = buildGateSnapshot(data, stale);
+    expect(third.cursor.reportedCommentIds).toHaveLength(2000 + 2100);
+    expect(third.cursor.reportedCommentIds[0]).toBe('old500');
   });
 
   it('does not report a head move on the first run', () => {

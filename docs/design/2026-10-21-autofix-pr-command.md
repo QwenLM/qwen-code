@@ -147,8 +147,10 @@ worktree included:
 3. Require exactly one local remote that matches the base repository (the
    matcher behind `review match-remote`).
 4. Resolve the push target. Prefer the one local remote that matches the head
-   repository; otherwise use the head repository URL in the protocol from
-   `gh config get git_protocol`. Record it in the state file.
+   repository and pushes to it (the matcher reads fetch URLs; a remote whose
+   `pushurl` names another repository does not count); otherwise use the head
+   repository URL in the protocol from `gh config get git_protocol`. Record it
+   in the state file.
 5. The state file is the lock. It records the session id
    (`QWEN_CODE_SESSION_ID`); a state file written by another session is a
    refusal, never a takeover.
@@ -264,15 +266,18 @@ prepared state supplies it), and its own cursor,
 It prints the same JSON, but only the transitions since the previous run, and
 prints nothing when there are none, so the session is woken only for them:
 
-- A failed check is reported once per (check, head). The cursor keeps only
-  the failures still present, so a check that is re-run and fails again is
-  reported again, and a new head starts over.
+- A failed check is reported once per (check, head, attempt): the cursor key
+  carries the job URL, so a re-run that fails again is reported again even
+  when no poll saw it in progress. The cursor keeps only the failures still
+  present, and a new head starts over.
 - Pending checks are never reported; `ci_pending` does not appear.
 - A conflict is reported once per head; `mergeable` clears the mark,
   `UNKNOWN` keeps it.
 - Comments, reviews and thread comments are reported once each, by node id,
   with the trust rules of Section 8. The viewer's own comments are never
-  events. An untrusted comment alone is reported as a notice (`wait`).
+  events. An untrusted comment alone is reported as a notice (`wait`). The
+  cursor keeps every reported id the query still returns, however many, and
+  bounds only the ids that left the page, so an identical poll is quiet.
 - A head that differs from the previous run's is `head_moved_externally`
   (`resync`); the first run records the head without reporting it.
 - A merge or close is reported once (`stop`); afterwards the probe is quiet,

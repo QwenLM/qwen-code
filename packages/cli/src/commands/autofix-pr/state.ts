@@ -52,9 +52,11 @@ export interface AutofixPrGateCursor {
   prAuthor: string;
   /** Head SHA seen by the previous run; a different one is `head_moved`. */
   headSha: string | null;
-  /** GraphQL node ids of comments and reviews already reported, newest last. */
+  /** GraphQL node ids of comments and reviews already reported, newest last.
+   * Ids the query still returns are always kept; the rest are bounded. */
   reportedCommentIds: string[];
-  /** `<check>@<headSha>` of failures already reported on the current head. */
+  /** `<check>@<headSha>@<url>` of failures already reported on the current
+   * head; the URL names the attempt, so a re-run that fails again is new. */
   reportedChecks: string[];
   /** Head SHA whose merge conflict was reported; null while mergeable. */
   conflictSha: string | null;

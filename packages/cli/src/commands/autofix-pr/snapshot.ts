@@ -253,7 +253,9 @@ const FAILED_CONCLUSIONS = new Set(['FAILURE', 'TIMED_OUT', 'STARTUP_FAILURE']);
 const FAILED_STATUSES = new Set(['FAILURE', 'ERROR']);
 const PENDING_STATUSES = new Set(['PENDING', 'EXPECTED']);
 /** Comment ids a gate cursor remembers; older ones can no longer be new. */
-const MAX_REPORTED_COMMENT_IDS = 2000;
+/** Reported comment ids the query no longer returns are bounded to this
+ * many; ids still on the page are always kept (see `buildGateSnapshot`). */
+const MAX_OFF_PAGE_COMMENT_IDS = 2000;
 
 /**
  * Bots count only for reviews and review threads: their PR conversation
@@ -400,6 +402,17 @@ function commentEvents(
   return { events, ids, truncated };
 }
 
+/** The id of every comment, review and thread comment the query returned. */
+function queriedCommentIds(pr: PrData): Set<string> {
+  const ids = new Set<string>();
+  for (const thread of pr.reviewThreads.nodes) {
+    for (const node of thread.comments.nodes) ids.add(node.id);
+  }
+  for (const node of pr.reviews.nodes) ids.add(node.id);
+  for (const node of pr.comments.nodes) ids.add(node.id);
+  return ids;
+}
+
 function isActionable(event: SnapshotEvent): boolean {
   return (
     event.type === 'conflict' ||
@@ -511,14 +524,16 @@ export function buildGateSnapshot(
     next.conflictSha = null;
   }
 
-  // A failure is reported once per (check, head). The cursor keeps only the
-  // failures still present, so one that is re-run and fails again is new.
+  // A failure is reported once per (check, head, attempt): the key carries
+  // the job URL, which a re-run changes, so a re-run that fails again
+  // between two polls is still new. The cursor keeps only the failures still
+  // present, so a check that goes green and fails later is new as well.
   const checks = checkEvents(pr);
   const reportedChecks = new Set(next.reportedChecks);
   next.reportedChecks = [];
   for (const event of checks.events) {
     if (event.type !== 'ci_failed') continue;
-    const key = `${event.check}@${pr.headRefOid}`;
+    const key = `${event.check}@${pr.headRefOid}@${event.url ?? ''}`;
     next.reportedChecks.push(key);
     if (!reportedChecks.has(key)) events.push(event);
   }
@@ -532,9 +547,22 @@ export function buildGateSnapshot(
   const comments = commentEvents(pr, cursor.prAuthor, isNew);
   events.push(...comments.events);
   truncated.push(...comments.truncated);
-  next.reportedCommentIds = [...next.reportedCommentIds, ...comments.ids].slice(
-    -MAX_REPORTED_COMMENT_IDS,
-  );
+  // Every reported id the query still returns stays in the cursor, however
+  // many: one evicted while its comment is still on the page would be
+  // reported again on the next poll, turning a quiet PR into a recurring
+  // wakeup. Only ids that left the page — deleted, or past the last-100
+  // windows — are bounded, newest kept.
+  const onPage = queriedCommentIds(pr);
+  const kept: string[] = [];
+  const gone: string[] = [];
+  for (const id of next.reportedCommentIds) {
+    (onPage.has(id) ? kept : gone).push(id);
+  }
+  next.reportedCommentIds = [
+    ...gone.slice(-MAX_OFF_PAGE_COMMENT_IDS),
+    ...kept,
+    ...comments.ids,
+  ];
 
   if (events.length === 0) return { snapshot: null, cursor: next };
   const action = moved ? 'resync' : events.some(isActionable) ? 'fix' : 'wait';

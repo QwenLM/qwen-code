@@ -123,6 +123,22 @@ describe('runCleanup (real git)', () => {
     });
   });
 
+  it('keeps a branch with unpushed commits while its worktree sits on an older commit', () => {
+    // The worktree's HEAD is not the branch: inspecting an older commit must
+    // not unlock the branch that cleanup would delete along with it.
+    run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'fix');
+    run(paths.worktreePath, 'switch', '-q', '--detach', headSha);
+    runCleanup(7, false);
+    expect(existsSync(paths.worktreePath)).toBe(true);
+    expect(branchExists()).toBe(true);
+    expect(lastReport()).toMatchObject({
+      removed: false,
+      reason: expect.stringMatching(
+        /branch qwen-autofix\/pr-7 has 1 commit\(s\) the PR does not have/,
+      ),
+    });
+  });
+
   it('discards unpushed work with --force', () => {
     run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'fix');
     runCleanup(7, true);
