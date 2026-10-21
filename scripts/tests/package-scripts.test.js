@@ -51,27 +51,32 @@ const heapCap = (value) => value?.match(/--max-old-space-size=(\d+)/)?.[1];
 
 /**
  * Writes a throwaway package shaped like the generated CLI for the
- * vendored-ripgrep packing cases: `vendor/ripgrep/<platform>/rg` (or `rg.exe`
- * for a `-win32` platform) at the given mode, and the manifest entry that makes
- * a packer pick the tree up.
+ * vendored-binary packing cases: `vendor/ripgrep/<platform>/rg` (or `rg.exe`
+ * for a `-win32` platform) at the given modes, the manifest entry that makes
+ * a packer pick the tree up, and optionally
+ * `vendor/landlock-run/<platform>/qwen-landlock-run` binaries.
  */
-function writeVendoredRipgrepFixture(directory, platforms) {
+function writeVendoredBinaryFixture(directory, platforms, landlock = {}) {
   writeFileSync(
     path.join(directory, 'package.json'),
     JSON.stringify({
-      name: 'vendored-ripgrep-fixture',
+      name: 'vendored-binary-fixture',
       version: '1.0.0',
       files: ['vendor'],
     }),
   );
+  const binaries = [];
   for (const [platform, mode] of Object.entries(platforms)) {
-    const binary = path.join(
-      directory,
-      'vendor',
-      'ripgrep',
-      platform,
-      platform.endsWith('-win32') ? 'rg.exe' : 'rg',
-    );
+    binaries.push([
+      `vendor/ripgrep/${platform}/${platform.endsWith('-win32') ? 'rg.exe' : 'rg'}`,
+      mode,
+    ]);
+  }
+  for (const [platform, mode] of Object.entries(landlock)) {
+    binaries.push([`vendor/landlock-run/${platform}/qwen-landlock-run`, mode]);
+  }
+  for (const [relative, mode] of binaries) {
+    const binary = path.join(directory, relative);
     mkdirSync(path.dirname(binary), { recursive: true });
     writeFileSync(binary, '#!/bin/sh\n');
     chmodSync(binary, mode);
@@ -1852,20 +1857,25 @@ describe('package scripts', () => {
   });
 
   it.skipIf(!arePermissionBitsEnforced())(
-    'npm pack keeps the exec bit on every vendored ripgrep in the CLI tarball',
+    'npm pack keeps the exec bit on every spawned vendored binary in the CLI tarball',
     () => {
       // The archive is where the bit is lost (#12668), so assert on its
       // recorded modes rather than on the staged tree. A `-win32` directory
       // ships a 0644 `rg.exe` by design and the gate excludes it structurally.
       const fixture = mkdtempSync(path.join(tmpdir(), 'cli-rg-exec-bit-'));
       try {
-        writeVendoredRipgrepFixture(fixture, {
-          'x64-linux': 0o755,
-          'arm64-darwin': 0o755,
-          'x64-win32': 0o644,
-        });
+        writeVendoredBinaryFixture(
+          fixture,
+          {
+            'x64-linux': 0o755,
+            'arm64-darwin': 0o755,
+            'x64-win32': 0o644,
+          },
+          { 'x64-linux': 0o755 },
+        );
         const { entries } = checkReleaseTarballExecBits(fixture);
         expect(entries.map(([name]) => name)).toEqual([
+          'package/vendor/landlock-run/x64-linux/qwen-landlock-run',
           'package/vendor/ripgrep/arm64-darwin/rg',
           'package/vendor/ripgrep/x64-linux/rg',
         ]);
@@ -1879,24 +1889,50 @@ describe('package scripts', () => {
   );
 
   it.skipIf(!arePermissionBitsEnforced())(
-    'release tarball gate rejects a vendored ripgrep without an exec bit',
+    'release tarball gate rejects a spawned vendored binary without an exec bit',
     () => {
       const fixture = mkdtempSync(path.join(tmpdir(), 'cli-rg-gate-'));
       try {
-        writeVendoredRipgrepFixture(fixture, { 'x64-linux': 0o644 });
+        writeVendoredBinaryFixture(
+          fixture,
+          { 'x64-linux': 0o755 },
+          { 'x64-linux': 0o644 },
+        );
         expect(() => checkReleaseTarballExecBits(fixture)).toThrow(
-          /package\/vendor\/ripgrep\/x64-linux\/rg: 0644 lacks an exec bit/,
+          /package\/vendor\/landlock-run\/x64-linux\/qwen-landlock-run: 0644 lacks an exec bit/,
         );
 
-        // A package whose vendor/ripgrep holds no unix platform must not pass
+        // A platform directory whose binary was dropped during staging must
+        // fail, not silently shrink the expected set.
+        const shrunk = mkdtempSync(path.join(tmpdir(), 'cli-rg-missing-'));
+        try {
+          writeVendoredBinaryFixture(
+            shrunk,
+            { 'arm64-linux': 0o755 },
+            { 'x64-linux': 0o755 },
+          );
+          mkdirSync(path.join(shrunk, 'vendor', 'ripgrep', 'x64-linux'), {
+            recursive: true,
+          });
+          expect(() => checkReleaseTarballExecBits(shrunk)).toThrow(
+            /package\/vendor\/ripgrep\/x64-linux\/rg: missing from the packed tarball/,
+          );
+        } finally {
+          rmSync(shrunk, { force: true, recursive: true });
+        }
+
+        // A package whose vendor trees ship no spawned binary must not pass
         // vacuously: the gate refuses before it ever packs.
         const empty = mkdtempSync(path.join(tmpdir(), 'cli-rg-none-'));
         try {
           mkdirSync(path.join(empty, 'vendor', 'ripgrep'), {
             recursive: true,
           });
+          mkdirSync(path.join(empty, 'vendor', 'landlock-run'), {
+            recursive: true,
+          });
           expect(() => checkReleaseTarballExecBits(empty)).toThrow(
-            /no unix vendored ripgrep under/,
+            /no spawned vendored executables under/,
           );
         } finally {
           rmSync(empty, { force: true, recursive: true });
