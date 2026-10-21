@@ -164,3 +164,68 @@ Windows 跳过可捕获 SIGTERM 用例；缺少 Bun 二进制时跳过 Bun 腿�
 
 - 未来编译形态下 `ArenaManager` / managed-worker 重启：编译包必须发布 launcher（`QWEN_CODE_CLI`），上列同解释器回退位置需要 launcher 形态的迁移。已列入 S4 跟踪。
 - `mem0-settings.ts` 的身份判断与 `command === process.execPath` 耦合；S3 中与其 spawn 位置一起迁移，避免身份与 launcher 漂移。
+
+## Standalone 更新集成（R1）
+
+本批整合 chiga0 的更新工作：
+[#14134](https://github.com/QwenLM/qwen-code/pull/14134)、
+[#14139](https://github.com/QwenLM/qwen-code/pull/14139)、
+[#14142](https://github.com/QwenLM/qwen-code/pull/14142)、
+[#14187](https://github.com/QwenLM/qwen-code/pull/14187) 与
+[#14210](https://github.com/QwenLM/qwen-code/pull/14210)，来源截止
+`ce67edaba5631e9deaee418296346370dba4c116`。无关的解释器调用点修改
+留在独立迁移中，上述完整调用点清单保持不变。
+
+### 更新契约
+
+Node standalone 保留随包 npm 的传输行为，包括 npm 的 registry、代理、
+CA 与鉴权处理。只有 Bun standalone 使用原生 fetch 查询 dist-tags，
+因此不需要外部 Node/npm。此路径按全局 npm 的优先级读取 builtin、global、
+user 和环境中的 registry/auth 配置，绝不隐式加载项目 `.npmrc`。HOME
+为空或相对路径时跳过默认用户配置；仍支持显式配置路径。波浪号路径要求绝对
+HOME。跨 registry origin 重定向会移除鉴权头。原生 fetch 没有实现全部
+npm 传输选项；Node 继续通过 npm 处理，Bun 企业代理/CA 仍需独立验收。
+
+registry 与鉴权配置的键和值都展开环境变量。环境字段先去除首尾空白，再展开；
+仅含空白的凭据会覆盖低优先级的同名键，不恢复其 token。鉴权依次匹配带末尾
+斜杠、不带末尾斜杠的路径及裸 host，优先最长匹配，不越界到兄弟路径或其他
+host。配置读取错误除文件不存在外仍明确拒绝；与 npm 不同，配置路径指向
+目录时不会静默忽略。显式空 prefix 保留 npm 的 cwd 相对语义，不选择新的回退。
+
+已安装 manifest 决定 Node 或 Bun OpenTUI preview 归档类型。现有对象
+缺少 runtime 时沿用旧 Node 解释；未知 runtime 和无效 manifest 结构在
+网络请求或分配临时目录之前拒绝。JSON 损坏或非对象错误会指出 manifest
+路径，并提示恢复这份安装对应的已知正常 manifest，或把相同 runtime
+类型安装到新目录。验证恢复前保留现有安装和备份。单独删除 manifest 不能
+修复问题：为了保护内容，已经存在但没有 manifest 的目录会被明确拒绝。
+
+下载的 manifest 必须显式匹配包名、target、runtime 和请求版本。直接与
+预下载更新都在替换前验证真实解释器身份和 CLI 版本。预下载激活时重新检查
+已安装身份；期间已安装的更新版本会被保留。激活继续使用现有原子替换与回滚
+机制。
+
+smoke 探测通过 `--version` 实际加载随包 `cli.js`；两种运行时还用 `--help`
+运行生产启动器，绕过仅读元数据的版本快路。所有探测共享私有空工作目录，
+防止项目或归档中的 Bun preload 执行。传入的环境副本移除 Node/Bun 启动选项、环境 CLI 版本及重启覆盖项，
+保留父进程环境和普通变量。`finally` 尝试清理；清理失败保留原始 smoke
+结果，并提示临时目录可能仍然存在。
+
+### 回归证据与限制
+
+CLI 单测覆盖 registry 选择、Node 传输保持、空 HOME 信任边界、归档与
+manifest 验证、身份变化、版本不匹配、smoke 隔离、激活及回滚。构建后
+运行 `npm run test:standalone:runtimes`；`PINNED_NODE` 和 `PINNED_BUN`
+指定 Node 24.19.0 与 Bun 1.3.14。两个宿主分别测试两种 payload 解释器，
+使用证书验证开启的本地 HTTPS。真实安装布局夹具调用实际安装检测与查询
+入口：Bun 访问 HTTPS registry，Node 委托 npm 执行器。即便启动器元数据
+返回请求版本，CLI 文件缺失或语法损坏仍会拒绝更新。启动器损坏也必须在替换
+当前安装及回滚备份之前拒绝。这些探测不覆盖启动器普通命令的子进程启动路径。
+单测拥有独立的 HOME
+和生成 wrapper 的目录。CI 模式获取固定工具，验证公布的校验值和
+integrity，并在现有脚本测试之前执行。
+
+合成未签名归档覆盖 checksum，不代表生产签名验收。POSIX runner 不覆盖
+Windows，本地成功也不代表五种发布 target 都通过。Bun 可能无法观察内建
+模块绑定；零分配结论要求正向对照成功，目录清理则始终检查。探测耗时属于
+诊断，不证明历史首次运行超时已解决。宣布迁移验收前，必须分别记录精确候选
+的构建、类型检查、定向测试、真实运行时、已发布签名制品和各支持平台结果。

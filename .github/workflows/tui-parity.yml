@@ -3,8 +3,14 @@ name: 'tui-parity'
 on:
   pull_request:
     paths:
-      - 'packages/cli/**'
+      - 'packages/**'
       - 'scripts/tui-parity/**'
+      - 'scripts/build*'
+      - 'integration-tests/**'
+      - 'esbuild.config.js'
+      - '.github/workflows/tui-parity.yml'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
   workflow_dispatch:
 
 jobs:
@@ -55,10 +61,57 @@ jobs:
           QWEN_SKIP_PREPARE: '1'
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+      - name: 'Isolate TUI fixture settings'
+        run: |-
+          set -euo pipefail
+          umask 077
+          fixture_root="$(mktemp -d "${RUNNER_TEMP}/qwen-tui-parity.XXXXXX")"
+          mkdir "$fixture_root/home" "$fixture_root/runtime"
+          printf '{"$version":4}\n' > "$fixture_root/system.json"
+          printf '{"$version":4}\n' > "$fixture_root/defaults.json"
+          {
+            echo "COREPACK_HOME=${COREPACK_HOME:-${XDG_CACHE_HOME:-${LOCALAPPDATA:-$HOME/.cache}}/node/corepack}"
+            echo "QWEN_TUI_FIXTURE_ROOT=$fixture_root"
+            echo "HOME=$fixture_root/home"
+            echo "QWEN_HOME=$fixture_root/home"
+            echo "QWEN_RUNTIME_DIR=$fixture_root/runtime"
+            echo "QWEN_CODE_SYSTEM_SETTINGS_PATH=$fixture_root/system.json"
+            echo "QWEN_CODE_SYSTEM_DEFAULTS_PATH=$fixture_root/defaults.json"
+          } >> "$GITHUB_ENV"
       - name: 'Build cli'
         run: 'npm run build'
       - name: 'Component parity snapshots (ink vs opentui)'
         run: 'bash scripts/tui-parity/component-parity.sh'
+      - name: 'Bundle the product for runtime and renderer comparison'
+        run: 'npm run bundle'
+      - name: 'Three-leg product acceptance (Node+Ink, Bun+Ink, Bun+OpenTUI)'
+        env:
+          QWEN_SANDBOX: 'false'
+          QWEN_TUI_ACCEPTANCE_OUT: '${{ runner.temp }}/tui-migration-${{ github.run_id }}-${{ github.run_attempt }}'
+        run: |-
+          set -euo pipefail
+          QWEN_HOME="$(mktemp -d "${RUNNER_TEMP}/tui-migration-home.XXXXXX")"
+          export QWEN_HOME
+          trap 'rm -rf "$QWEN_HOME"' EXIT
+          cd integration-tests
+          npx vitest run renderer-matrix.test.ts interactive/interactive-session-viewport.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false
+          failed=0
+          for leg in node:ink bun:ink bun:opentui; do
+            export QWEN_E2E_RUNTIME="${leg%%:*}"
+            export QWEN_E2E_RENDERER="${leg#*:}"
+            npx vitest run interactive/tui-migration.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false || failed=1
+          done
+          exit "$failed"
+      - name: 'Upload product acceptance evidence'
+        if: '${{ always() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'tui-migration-${{ github.event.pull_request.head.sha || github.sha }}-attempt-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/tui-migration-${{ github.run_id }}-${{ github.run_attempt }}/'
+          if-no-files-found: 'warn'
+      - name: 'Remove TUI fixture settings'
+        if: "${{ always() && env.QWEN_TUI_FIXTURE_ROOT != '' }}"
+        run: 'rm -rf -- "$QWEN_TUI_FIXTURE_ROOT"'
 
   noflicker:
     name: 'OpenTUI no-flicker gate'

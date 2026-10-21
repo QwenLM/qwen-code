@@ -46,6 +46,9 @@ import {
   hostedPublicPlanActive,
 } from './hosted-plan-mode.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
+import { DEFAULT_TOOL_OUTPUT_BATCH_BUDGET } from '@qwen-code/qwen-code-core/config/config.js';
+import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { enforceFunctionResponseBudget } from '@qwen-code/qwen-code-core/tools/tool-response-finalizer.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import {
   convertToFunctionResponse,
@@ -1753,6 +1756,7 @@ export class HostedWorkspaceToolTurn {
   /** H4e-b3: the member's command funnel to its parent, beside its messages. */
   private readonly commands?: HostedSessionCommandSession;
   private readonly skills?: HostedSkillCatalog;
+  private toolOutputBudget = DEFAULT_TOOL_OUTPUT_BATCH_BUDGET;
   /** b3b: whether this Session's run carries a member preamble (once read). */
   private memberPreamble?: boolean;
   /** b3b: the member board vocabulary declared, refreshed per declarations. */
@@ -1776,7 +1780,10 @@ export class HostedWorkspaceToolTurn {
       type: 'assistant' | 'tool_result',
       parts: Part[],
       model: string,
-      identity?: { uuid: string; timestamp: string },
+      identity?: Pick<
+        ChatRecord,
+        'uuid' | 'timestamp' | 'clientInitiatedSkills'
+      >,
     ) => Promise<string>,
     private readonly messageFitsInline: (
       type: 'assistant' | 'tool_result',
@@ -2988,6 +2995,10 @@ export class HostedWorkspaceToolTurn {
     this.promptHookRunner = runner;
   }
 
+  setToolOutputBudget(budget: number): void {
+    this.toolOutputBudget = budget;
+  }
+
   setModelRound(round: number): void {
     this.logicalRound = round;
   }
@@ -3279,7 +3290,8 @@ export class HostedWorkspaceToolTurn {
           call.name === 'skill' &&
           this.skills !== undefined;
         if (
-          !declarations.some((tool) => tool.name === call.name) ||
+          (!declarations.some((tool) => tool.name === call.name) &&
+            !(skill && call.isClientInitiated)) ||
           ids.has(call.callId) ||
           // Refuse a call whose arguments arrived unterminated even when the
           // output token limit was not what cut them: this profile commits to a
@@ -3359,7 +3371,10 @@ export class HostedWorkspaceToolTurn {
         } else if (skill) {
           validationError = source.some((other) => other.name !== 'skill')
             ? HOSTED_SKILL_BATCH_REFUSAL
-            : this.skills!.validationError(call.args);
+            : this.skills!.validationError(
+                call.args,
+                call.isClientInitiated ? 'user' : 'model',
+              );
           input = { ...call.args };
         } else if (isShell) {
           const args = call.args;
@@ -3945,6 +3960,15 @@ export class HostedWorkspaceToolTurn {
       });
     };
     let requests = restored?.requests ?? prepareRequests(calls);
+    const skillOrigin = calls.every(
+      (call) => call.name === 'skill' && call.isClientInitiated,
+    )
+      ? {
+          uuid: randomUUID(),
+          timestamp: new Date().toISOString(),
+          clientInitiatedSkills: true as const,
+        }
+      : undefined;
     if (!this.messageFitsInline('assistant', parts, model))
       throw new Error(
         'Hosted assistant record exceeds the inline Session Store limit.',
@@ -3984,7 +4008,7 @@ export class HostedWorkspaceToolTurn {
         );
       this.uncertain = true;
       try {
-        await this.commit('assistant', parts, model);
+        await this.commit('assistant', parts, model, skillOrigin);
         await this.commit('tool_result', responses, model);
         this.uncertain = false;
         return responses;
@@ -4107,7 +4131,7 @@ export class HostedWorkspaceToolTurn {
       if (!this.hooks) await startPublisher(requests);
       messageId =
         restored?.saved.plan.batchId ??
-        (await this.commit('assistant', parts, model));
+        (await this.commit('assistant', parts, model, skillOrigin));
       this.nativeBatch = {
         messageId,
         model,
@@ -4664,12 +4688,29 @@ export class HostedWorkspaceToolTurn {
               ]
             : [],
       );
+      const skillBatch = requests.every((request) => request.skill)
+        ? enforceFunctionResponseBudget(
+            requests.map((request, index) => ({
+              callId: request.call.callId,
+              toolName: request.call.name,
+              responseParts:
+                refusal(index) ??
+                convertToFunctionResponse(
+                  request.call.name,
+                  request.call.callId,
+                  [{ text: this.skills!.response(request.call.args) }],
+                ),
+            })),
+            this.toolOutputBudget,
+          )
+        : undefined;
       executing = true;
       for (const [index, request] of requests.entries()) {
         const refused = refusal(index);
         if (refused) {
-          await this.commit('tool_result', refused, model);
-          responses.push(...refused);
+          const response = skillBatch?.[index].responseParts ?? refused;
+          await this.commit('tool_result', response, model);
+          responses.push(...response);
           continue;
         }
         if (request.agent) {
@@ -4719,15 +4760,7 @@ export class HostedWorkspaceToolTurn {
           continue;
         }
         if (request.skill) {
-          const converted = convertToFunctionResponse(
-            request.call.name,
-            request.call.callId,
-            [{ text: this.skills!.response(request.call.args) }],
-          );
-          if (!this.messageFitsInline('tool_result', converted, model))
-            throw new Error(
-              'Hosted Skill result exceeds the inline Session Store limit.',
-            );
+          const converted = skillBatch![index].responseParts;
           await this.commit('tool_result', converted, model);
           responses.push(...converted);
           continue;
