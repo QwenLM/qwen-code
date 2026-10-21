@@ -393,6 +393,10 @@ OAuth tokens are automatically:
 Use the `/mcp` dialog within Qwen Code to inspect MCP servers and manage
 authentication interactively.
 
+In OpenTUI, **Reconnect** reports whether discovery reached a connected server.
+If it did not, the result includes the current connection status and the most
+recently recorded connection error, when available.
+
 ### Tool filtering (allow/deny tools per server)
 
 Use `includeTools` / `excludeTools` to restrict tools exposed by a server (from Qwen Code’s perspective).
