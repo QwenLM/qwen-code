@@ -75,7 +75,7 @@ class StoreFaultGateTest {
     }
 
     @Test
-    void ackModeLandsTheCommitBeforeReportingTheFailure() {
+    void ackModeSkipsThePreCommitHookAndThrowsInAfterApply() {
         StoreFaultGate.INSTANCE.armAck(
                 StoreFaultGate.Phase.HOOK_SETTLED, null);
         StoreFaultGate.INSTANCE.inspect(EVENT, record("pre", "settled"));
