@@ -1,4 +1,4 @@
-# workflow child_run relay 故障门禁 FG10b、FG10c、FG10e、FG10f
+# workflow child_run relay 故障门禁 FG10b–FG10f
 
 [English](2026-10-17-workflow-relay-fault-gates.md) | [简体中文](2026-10-17-workflow-relay-fault-gates.zh-CN.md)
 
@@ -9,10 +9,11 @@ Issue #14165 是 #12380 Stage F 的 FG10 轮（伞形 issue #14054）：为 #138
 #14390 落地，见 [a+d 设计](2026-10-16-workflow-fault-gates-ad.zh-CN.md)。FG10d
 （进程崩溃）在那里被延后，并带出了它抓到的生产问题 #14387：Harness 被杀后，恢复
 流程会重新驱动一个未结算的 workflow Turn。它的修复 #14461 让协调器对已绑定、且
-不在取消中的 workflow Turn 保持未结算，不再重新驱动。本设计覆盖剩下的四个字母：
-**FG10b（应答丢失）、FG10c（存储故障）、FG10e（取消）和 FG10f（通知与输出投递）。**
+不在取消中的 workflow Turn 保持未结算，不再重新驱动。本设计覆盖剩下的五个字母：
+**FG10b（应答丢失）、FG10c（存储故障）、FG10e（取消）和 FG10f（通知与输出投递）**，
+以及在 #14461 合入后作为第 3 片加入的 **FG10d（进程崩溃）**（见下文）。
 
-a+d 设计说这四个"大体与 kind 无关"。但它们并不能白拿：每一个都落在记录的
+a+d 设计说前四个"大体与 kind 无关"。但它们并不能白拿：每一个都落在记录的
 **relay 驱动的结算**上，也就是从启动到父 Session 收到通知的整条流程。FG10a 由
 driver 持有父 Session，走不到这里：它的父 attach 和 relay 的操作冲突，而由协调器
 持有父 Session 的方案需要 workspace 执行，macOS 本地跑不了。在 Linux 上，协调器
@@ -25,7 +26,7 @@ driver 持有父 Session，走不到这里：它的父 attach 和 relay 的操�
 4. 结果 revision 让记录结算；
 5. 通知以 `<task-notification>` 输入的形式落到 lead 上，lead 的唤醒 Turn 读取它。
 
-这四个字母钉住的，是这条流程在故障下的 workflow 专属承诺：
+FG10b、c、e、f 钉住的，是这条流程在故障下的 workflow 专属承诺：
 
 - **每次启动至多一个 workflow 实例**：一个子 Session、脚本只执行一次、每次调用
   只派发一次 `agent()`，无论流程中哪一个应答丢失（FG10b）；
@@ -36,7 +37,13 @@ driver 持有父 Session，走不到这里：它的父 attach 和 relay 的操�
   （FG10e）；
 - 通知**至多投递一次**，workflow 中途被切断的流续传时不缺失、不重复（FG10f）。
 
-本设计**不改任何生产代码**。
+FG10d（进程崩溃）在 #14461 合入后作为第 3 片加入。它放在这里，而不是 a+d 设计里由
+driver 持有 parent 的那个类，原因同上：kill 之后它要钉住的东西（记录的阻断结算、
+ledger 以及 lead 收到的通知）都在 relay 驱动的流程里。在这条流程下，Harness 死在
+其上的运行**绝不会被重新执行，也绝不会被当作结果已被观察到而结算**（FG10d）。
+
+第 1、2 片**不改任何生产代码**。第 3 片修复了它的门禁发现的两个缺陷，以及评审发现的
+第三个（见 FG10d 的"随门禁修复的问题"）。
 
 ## 现状
 
@@ -93,9 +100,10 @@ driver 持有父 Session，走不到这里：它的父 attach 和 relay 的操�
 
 ## 范围决策
 
-1. **四个字母，两片。** 第 1 片 = **FG10b + FG10f**：应答的丢失与延迟，以及流的
+1. **五个字母，三片。** 第 1 片 = **FG10b + FG10f**：应答的丢失与延迟，以及流的
    连续性，不重启。第 2 片 = **FG10c + FG10e**：带冷重启的存储拒绝，以及取消。
-   FG10d 留给 #14387。每片各自一个 PR，并在 #14165 上标记其字母已交付。
+   第 3 片 = **FG10d**：在 #14387 的修复（#14461）合入之后，Harness 在运行中的
+   workflow Turn 下被 kill。每片各自一个 PR，并在 #14165 上标记其字母已交付。
 2. **在 FG9 夹具上新建一个类。** 这些字母放在 `HostedWorkflowRelayFaultGatesIT`
    里：纯 Java、协调器持有的 lead、in-JVM Spring、打包的 Harness、脚本化模型，
    选择子为 `-Dqwen.fg10b.case` … `-Dqwen.fg10f.case`，证据放在
@@ -112,8 +120,8 @@ driver 持有父 Session，走不到这里：它的父 attach 和 relay 的操�
 3. **重启只发生在子 Turn 结算之后。** 跨越运行中 workflow Turn 的冷重启属于 FG10d
    的地盘：它的恢复行为正是 #14387 发现、#14461 改变的（Turn 保持未结算，不再被
    重新驱动），由 FG10d 门禁来钉住。所以 FG10c 只拒绝子 Turn 完成之后的提交，即
-   结果 revision 和通知，它的重启也只重载 lead。本轮没有任何一处会在运行中的
-   workflow Turn 上布防 kill 或重启，那是 FG10d 的事。
+   结果 revision 和通知，它的重启也只重载 lead。第 1、2 片没有任何一处会在运行中的
+   workflow Turn 上布防 kill 或重启，那是第 3 片 FG10d 的事。
 4. **钉住结果，不钉错误码。** 和 FG9 一样，门禁断言的是记录、journal 和模型看到了
    什么，并用各自的见证给每次故障归因：丢弃计数、点火计数、被扣住的请求。中间的
    错误码只记进机制说明，不做断言，所以修正一个误标（#14419 那类）永远不会让门禁
@@ -121,9 +129,8 @@ driver 持有父 Session，走不到这里：它的父 attach 和 relay 的操�
 5. **#13339 纪律。** 只新增类；每个用例在断言期望之前先证明其故障确实点火；JDBC
    变更都限定在用例 tenant 内；任何拒绝写入或重启的布防之前，lead 自己的 Turn
    都已结束（FG9 第 3 片的教训）。
-6. **可关闭性。** 第 2 片之后，#14165 上只剩 FG10d，它阻塞在 #14387 上。跟踪
-   issue 是继续为它开着，还是把它交给 #14387，由跟踪 issue 的负责人决定，在第 2 片
-   落地时记到 #14165 上。
+6. **可关闭性。** 第 2 片之后，#14165 上只剩 FG10d，阻塞在 #14387 上。第 3 片之后
+   FG10 的每个字母都已交付；是否关闭跟踪 issue 由其负责人决定。
 
 ## 门禁总账
 
@@ -250,6 +257,64 @@ store 客户端在一次提交调用内部重驱的丢弃，根本到不了 rela
 - #14456（第 1 片评审期间合入）改了 `TaskCancelCoordinator` 对停放行的对账；这些用例
   驱动的在线取消路径在它之上全绿。
 
+### FG10d —— 进程崩溃（第 3 片，已交付）
+
+在 lead 自己的 Turn 结算之后、运行处于 **attached** 状态时（记录读到
+`running_attached`），SIGKILL 打包 Harness，并在同一端口上冷启动一个新的。两个窗口：
+
+- 运行的 `agent()` 请求被扣在模型处。它被中止（keepalive 写入失败，即 FG10e 的
+  见证），说明 kill 把在飞的子 agent 一并带走了；
+- 运行的工作已经做完（回答已在子 journal 里），子 Turn 的结算提交在 store 处被吞掉、
+  从不转发，所以 kill 落在这次提交离开网络之前。这种吞掉是 a+d 设计中
+  "观察到结算即 kill"的确定性形式。
+
+| 用例                                         | 注入                                                                                                            | 期望                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kill-mid-workflow-subagents-in-flight`      | 在运行的 `agent()` 请求被扣住时 SIGKILL Harness；冷启动一个新的                                                 | kill 中止了被扣住的请求。没有 Harness 运行期间，没有任何东西结算这个 Turn。重启之后 Turn 保持 `RUNNING`，带 `hosted_workflow_recovery_blocked` 标记，从未结算；重启后的 Harness 对子 Session 的加载回答 `hosted_turn_recovery_required`。记录结算为 `recovery_blocked` / `outcome_unknown` / `runtime_lost`，没有停止原因、没有结果，其 `definitionDigest` 仍是脚本的 sha256。绝不重新执行：一次 `agent()` 派发，子 journal 里没有回答，也没有任何 Turn 结果读作 `completed`。`CHILD_RESULT` 行读到 `unknown/pending/pending`，流程的 ledger 行为 `unknown`。lead 收到一条 `<status>blocked</status>` 通知，其结果行说明运行被恢复阻断（结果未知），由一次唤醒轮读取 |
+| `kill-after-last-subagent-before-settlement` | 让子 agent 作答，在 store 处吞掉子 Turn 的 `settleTurn` 提交；Harness 等待这次提交时 SIGKILL 它；冷启动一个新的 | 吞掉被见证一次，被吞的命令从未被转发。运行的回答在子 journal 里恰好一次，并保持如此。`kill-mid-workflow-subagents-in-flight` 的其余每条期望都成立：已经完成的工作不会被当作已观察到的结果                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+
+落地时记录的机制说明：
+
+- coordinator 对子 Turn 的在飞驱动随 Harness 一起失败，按退避重试（1、2、4、8 s）。
+  针对冷 Harness 的第一次驱动走恢复路径（Session 已绑定）。重启后的 Harness 的
+  takeover 加载先撞上已死的 writer（`managed_session_writer_conflict`），随后以
+  `hosted_turn_recovery_required` / `takeover_unrecovered` 拒绝，coordinator 的
+  takeover 拒绝分支把 Turn 停放为阻断。relay 在下一次扫描时结算记录，两个窗口下都在
+  重启后约 20 s。这个原因是机制事实，不是期望（决策 4）；门禁断言的是拒绝本身和标记。
+- 拒绝之前，takeover 先把子 journal 里的 Turn 关闭为中断（`cancelled` /
+  `harness_interruption`，一个 journal 事实），而托管的 Turn 行保持 `RUNNING` 并带
+  标记。这次提交是一个新命令，绝不是被吞掉的那个。
+- 被阻断的后台子运行要给 parent 一条通知（`settleRecoveryBlocked` 随记录一起提交它，
+  并踢醒空闲的 lead），所以 FG10d 期望恰好一条通知、一次唤醒，而不是没有。
+- 重启之后 relay 是这条流程唯一的写入者：lead 本身空闲，按需重载。
+
+**随门禁修复的问题。** 最初几次运行时，门禁在两个生产缺陷上变红。两者都在 #14461
+新增的诚实结算路径里，第 3 片修复了它们：
+
+1. **close debt 改写了流程的归类。** 本夹具的 host 无法关闭 Workspace Session，所以
+   每个结算分支都会保留一笔 close debt。`ChildResultRelayStore.advance(close_debt)`
+   不管该分支证明了什么，都把流程写成 `done`、把 `CHILD_RESULT` 行写成 `delivered`。
+   于是凡是 close 不能立即受理的地方，恢复阻断分支（#14461）和 relay 放弃链路想要的
+   `unknown`，都读成了一个已投递的结果。现在 debt 以流程自己的归类停放
+   （`retainCloseDebt`），与已关闭分支的 `classify` 完全一致。单测钉住了两种归类
+   （`ChildResultRelayStoreTest`），以及阻断分支传入的是 `unknown`
+   （`ChildResultRelayTest`）。
+2. **阻断通知描述的是运行中的 revision。** `settleRecoveryBlocked` 用它所替换的记录
+   生成 parent 的通知，所以在 `<status>blocked</status>` 之下，结果行写着
+   "Workflow child run running (unknown)."。现在它用自己提交的阻断 revision 生成，
+   由 `hosted-child-agent-session.test.ts` 里的一条单测钉住。
+
+评审发现了第三个，修复 1 扩大了它的范围：
+
+3. **`unknown` 的子启动永久扣住父 Session 的资源回收。**
+   `SessionResourceCollectionCollector` 在 `CHILD_SESSION_START` 流程不是 `done` 或
+   `orphaned` 时扣住已退役父 Session 的资源。但 `unknown` 同样是终态：relay 的发现查询
+   和 claim 都排除它，也没有任何代码会再改写它。所以凡是 close 能立即受理的地方，
+   `unknown` 流程都会无释放口地扣住回收，而修复 1 又把这个扣住带到了没有 close 能力的
+   host 上。现在 collector 把 `unknown` 当作终态。欠下的 close 走它自己的
+   `CHILD_SESSION_CLOSE` 行，不读父 Session 的任何资源，所以和以前一样也不扣住回收。
+   `SessionResourceCollectionCollectorTest` 对三种归类钉住了扣住与释放。
+
 ## 夹具设计
 
 **形态。** `HostedWorkflowRelayFaultGatesIT` 是 FG9 类的夹具，按一个父 Session 加
@@ -276,6 +341,12 @@ FG10f 运行时把 Harness 请求超时设为 3 s，这样超过它被扣住的�
 **拒绝与重启**（第 2 片）沿用 FG9b 的 `refuse`/`dropRefusals`、点火表，以及带
 writer generation 见证的 `restartHarness`，只在子 Turn 结算之后使用。
 
+**kill**（第 3 片）复用 `killHarness`，即 `restartHarness` 的 kill 那一半。store proxy
+新增 `SWALLOW` 处置：从不转发，被释放后回 503。proxy 在它唯一的 dispatcher 线程上
+执行每个 handler，所以一次吞掉（和扣住一样）在等待期间会让所有 store 流量停滞。
+因此 FG10d 一确认 kill 就释放它，赶在冷 Harness 需要 store 之前；这时的 503 只会打到
+一个已关闭的连接上。
+
 **CI。** 类名把它放进 `hosted-harness-mysql` 车道（`Hosted*IT`；
 `check-failsafe-reports.js hosted` 强制它必须跑过），已有的 `hosted-workflow-gates`
 profile 用于本地运行。每片重新推导共享 fork 预算时，都要把自己实测的开销与期间
@@ -296,6 +367,12 @@ profile 用于本地运行。每片重新推导共享 fork 预算时，都要把
 之后 main 的配额上：3545 + 198 ≈ 3743 s。一个 600 s 上限加上它需要至少 4343 s 的 fork，
 于是 fork 4155→4353 s。Verify 步骤 85→90 分钟（余量 447 s；85 分钟只剩 147 s），job 上限
 330→335，以保持在各 step 上限之和（320）加未设上限的准备步骤之上。
+
+第 3 片在本地三次运行中重新测得五字母类健康时长 246.1–246.8 s（FG10d 约 65 s，其余
+字母不变），按同样的 2× 预算约 494 s，比第 2 片的 363 s 多 131 s。叠加到第 2 片之后
+main 的配额上：3743 + 131 = 3874 s。一个 600 s 上限加上它，需要至少 4474 s 的 fork，
+于是 fork 4353→4484 s。Verify 步骤的 90 分钟仍能包住 fork 加其 600 s（余量 316 s），
+所以 Verify 步骤和 job 上限（#14467 把 failover 用例挪进独立 job 之后为 185）保持不变。
 
 ## 变异检查
 
@@ -343,6 +420,33 @@ profile 用于本地运行。每片重新推导共享 fork 预算时，都要把
 11. FG10e —— 已结算的任务仍然提供并受理取消（把 `completed` 加进可取消状态）：
     `cancel-after-settlement` 红；取消被以 202 受理，而不是 409 `task_action_unavailable`。
 
+第 3 片，每个只对其用例运行（`-Dqwen.fg10d.case`）；Harness 侧的变异原地修补
+打包 bundle 的 chunk 并逐字节还原，其余修补 Java 源码：
+
+12. FG10d —— coordinator 不再识别 workflow Turn（`isWorkflowLaunchTurn` 恒为
+    false），#14461 的每个拒绝分支都失效：`kill-mid-workflow-subagents-in-flight`
+    红在标记上。takeover 的拒绝让这次驱动停留在通用重试路径上（到用例放弃时已重试
+    五次），Turn 从未被停放，记录也从未结算。
+13. FG10d —— relay 忽略 Turn 行上的恢复阻断标记：
+    `kill-mid-workflow-subagents-in-flight` 红；Turn 被停放并带标记，但记录停在
+    `running`。
+14. FG10d —— close debt 把每条流程都写成 `done`（撤掉第 3 片的 relay 修复）：
+    `kill-after-last-subagent-before-settlement` 红在 ledger 上，其 `CHILD_RESULT`
+    行读到 `delivered/pending/pending`。
+15. FG10d —— 阻断通知用它所替换的运行中 revision 生成（撤掉第 3 片的 Harness 修复）：
+    `kill-after-last-subagent-before-settlement` 红在通知上，其结果行写着
+    "Workflow child run running (unknown)."。
+
+两处修复的单测在撤掉对应修复后都会变红：relay 一侧是
+`ChildResultRelayStoreTest.retainsACloseDebtUnderTheWalksOwnClassification`，以及
+`ChildResultRelayTest` 里的 `aBlockedRunWithoutCloseRetainsTheDebtUnderUnknown`、
+`aGiveUpWithoutCloseSupportRetainsItsCloseDebt`（放弃分支改传 `done` 时变红）和
+`aHostWithoutCloseSettlesAndRetainsTheCloseDebt`；Harness 一侧是
+`hosted-child-agent-session.test.ts` 里的
+`tells a background child's parent the run is blocked, not running`；collector 一侧是
+`SessionResourceCollectionCollectorTest.aChildStartHoldsCollectionOnlyUntilTheRelayClassifiesIt`
+（其 `unknown` 用例）。
+
 ## 验证与验收
 
 - 新类在本地 MySQL 8.4 上全绿，每片连续三次全类运行，每个用例的故障都有见证；按
@@ -351,6 +455,7 @@ profile 用于本地运行。每片重新推导共享 fork 预算时，都要把
 - 模块 `mvn verify`（surefire、Checkstyle、SpotBugs）以及 workflow/pom 元测试，在
   叠加后的预算下全绿。
 - 本设计随第 1 片以中英文落地；每片都在 #14165 上记录其字母。
+- 第 3 片的三处修复连同各自的单测一起交付，每条单测都在撤掉对应修复后被证明会变红。
 
 ## 开放问题
 

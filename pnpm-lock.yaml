@@ -24,7 +24,7 @@ overrides:
   '@agentclientprotocol/sdk>zod': 3.25.76
   openapi-typescript>supports-color: 7.2.0
 
-pnpmfileChecksum: sha256-trtCLLPhwoztokHtnTnRXoHkd6XsOy/7b+XeIrWUvEE=
+pnpmfileChecksum: sha256-kM8+keBiS7IPtr0EFrsWpw7AG3oIBDtPmZfAnOLx5ww=
 
 importers:
 
@@ -283,6 +283,48 @@ importers:
         specifier: ^3.25.0
         version: 3.25.76
 
+  integrations/generated-ui:
+    devDependencies:
+      '@jitl/quickjs-singlefile-browser-release-sync':
+        specifier: 0.32.0
+        version: 0.32.0
+      '@jitl/quickjs-singlefile-mjs-release-sync':
+        specifier: 0.32.0
+        version: 0.32.0
+      '@modelcontextprotocol/ext-apps':
+        specifier: ^1.7.5
+        version: 1.7.5(@modelcontextprotocol/sdk@1.30.0(supports-color@7.2.0)(zod@3.25.76))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(zod@3.25.76)
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.30.0
+        version: 1.30.0(supports-color@7.2.0)(zod@3.25.76)
+      '@noble/hashes':
+        specifier: 1.8.0
+        version: 1.8.0
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      dompurify:
+        specifier: 3.4.14
+        version: 3.4.14
+      esbuild:
+        specifier: ^0.25.0
+        version: 0.25.12
+      jsdom:
+        specifier: ^26.1.0
+        version: 26.1.0(supports-color@7.2.0)
+      quickjs-emscripten-core:
+        specifier: 0.32.0
+        version: 0.32.0
+      typescript:
+        specifier: 5.8.3
+        version: 5.8.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@22.20.1)(jiti@2.7.0)(jsdom@26.1.0(supports-color@7.2.0))(lightningcss@1.32.0)(msw@2.10.4(@types/node@22.20.1)(typescript@5.8.3))(supports-color@7.2.0)(tsx@4.20.3)(yaml@2.9.0)
+      zod:
+        specifier: ^3.25.0
+        version: 3.25.76
+
   integrations/test-failure-explorer:
     devDependencies:
       '@modelcontextprotocol/ext-apps':
@@ -387,7 +429,19 @@ importers:
       '@agentclientprotocol/sdk':
         specifier: ^0.14.1
         version: 0.14.1(zod@3.25.76)
+      remark-gfm:
+        specifier: ^4.0.0
+        version: 4.0.1(supports-color@7.2.0)
+      remark-parse:
+        specifier: ^11.0.0
+        version: 11.0.0(supports-color@7.2.0)
+      unified:
+        specifier: ^11.0.0
+        version: 11.0.5
     devDependencies:
+      '@types/mdast':
+        specifier: ^4.0.4
+        version: 4.0.4
       typescript:
         specifier: 5.8.3
         version: 5.8.3
@@ -553,6 +607,9 @@ importers:
       '@wecom/aibot-node-sdk':
         specifier: ^1.0.7
         version: 1.0.7(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0)
+      saxes:
+        specifier: 6.0.0
+        version: 6.0.0
     devDependencies:
       typescript:
         specifier: 5.8.3
@@ -1557,6 +1614,9 @@ importers:
       codemirror:
         specifier: ^6.0.0
         version: 6.0.2
+      docx-preview:
+        specifier: 0.4.1
+        version: 0.4.1
       echarts:
         specifier: ^6.0.0
         version: 6.1.0
@@ -2897,6 +2957,9 @@ packages:
 
   '@jitl/quickjs-ffi-types@0.32.0':
     resolution: {integrity: sha512-v9T+GQpmk43VDJ7d72sf0Nexhk+ArvtUihW27dy7lqAl0zBObFKtSBBIm5RBjwIhE8VwsPPm9PNuvPvNqLWUEg==}
+
+  '@jitl/quickjs-singlefile-browser-release-sync@0.32.0':
+    resolution: {integrity: sha512-Hfdl7rh8dzxNWFRiYAYNbhn0RMF1/tO6SMH2mUW0aTibqwaAtqPRbi4WkwaIDlhNz8Z4dksJi1Zjl1R54Jsc/Q==}
 
   '@jitl/quickjs-singlefile-mjs-release-sync@0.32.0':
     resolution: {integrity: sha512-h9g2Dri6WxKNjX6a1+sFAafOVxj1n5YIA1GAzMoSdIqK1M8cG07tz3GxKVC3Gbdutz14uQ3oc3Q2lll8otInhA==}
@@ -6491,6 +6554,9 @@ packages:
   doctrine@3.0.0:
     resolution: {integrity: sha512-yS+Q5i3hBf7GBkd4KG8a7eBNNWNGLTaEwwYWUijIYM7zrlYDM0BFXHjjPWlWZ1Rg7UaddZeIDmi9jF3HmqiQ2w==}
     engines: {node: '>=6.0.0'}
+
+  docx-preview@0.4.1:
+    resolution: {integrity: sha512-Dv4g+LeE0swHpPvNC0lAT0YsR5Zq5pAxw7d3vHQ8EChBLgIrqqe9VPL5nVt2HBJap8bEZbXUI0TJob7kBeNU9w==}
 
   dom-accessibility-api@0.5.16:
     resolution: {integrity: sha512-X7BJ2yElsnOJ30pZF4uIIDfBEVgF4XEBxL9Bxhy6dnrm5hkzqmsWHGTiHqRiITNhMyFLyAiWndIJP7Z1NTteDg==}
@@ -12068,6 +12134,10 @@ snapshots:
 
   '@jitl/quickjs-ffi-types@0.32.0': {}
 
+  '@jitl/quickjs-singlefile-browser-release-sync@0.32.0':
+    dependencies:
+      '@jitl/quickjs-ffi-types': 0.32.0
+
   '@jitl/quickjs-singlefile-mjs-release-sync@0.32.0':
     dependencies:
       '@jitl/quickjs-ffi-types': 0.32.0
@@ -16134,6 +16204,10 @@ snapshots:
   doctrine@3.0.0:
     dependencies:
       esutils: 2.0.3
+
+  docx-preview@0.4.1:
+    dependencies:
+      jszip: 3.10.2
 
   dom-accessibility-api@0.5.16: {}
 

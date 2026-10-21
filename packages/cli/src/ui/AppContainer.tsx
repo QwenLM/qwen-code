@@ -1544,10 +1544,13 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   const preferredEditor = usePreferredEditor();
-  const restoredSubmissionRef = useRef<Pick<
-    QueuedUserSubmission,
-    'modelText' | 'submittedPrompt'
-  > | null>(null);
+  const restoredSubmissionRef = useRef<
+    | (Pick<QueuedUserSubmission, 'modelText' | 'submittedPrompt'> & {
+        /** Model-bound prompt, when it differs from what the buffer holds. */
+        modelSubmission?: string;
+      })
+    | null
+  >(null);
   const submittedPromptProvenanceUnavailableRef = useRef(false);
   const setBufferTextRef = useRef<
     ReturnType<typeof useTextBuffer>['setText'] | null
@@ -3138,8 +3141,9 @@ export const AppContainer = (props: AppContainerProps) => {
       const provenanceEnabled =
         !vimEnabled && submittedPromptCandidate !== undefined;
       const trimmedSubmittedPrompt = submittedPromptCandidate?.trim();
-      const submittedPrompt =
-        submittedPromptProvenanceUnavailable || !provenanceEnabled
+      let submittedPrompt = submittedPromptProvenanceUnavailable
+        ? undefined
+        : !provenanceEnabled
           ? undefined
           : restoredSubmission === null
             ? trimmedSubmittedPrompt || undefined
@@ -3161,6 +3165,14 @@ export const AppContainer = (props: AppContainerProps) => {
       // The user's raw text, captured before any `<system-reminder>` prefix is
       // prepended below (so keyword detection sees only what the user typed).
       const userPromptText = submittedValue;
+      // A cancelled turn comes back to the composer as the user's own text;
+      // re-send the model-bound copy so its consumed notice is not lost.
+      if (
+        restoredSubmission !== null &&
+        restoredSubmission.modelSubmission !== undefined
+      ) {
+        submittedValue = restoredSubmission.modelSubmission;
+      }
       // Quit must bypass reminders and the message queue so it can stop an
       // active stream without consuming one-shot session state.
       if (
@@ -3297,6 +3309,11 @@ export const AppContainer = (props: AppContainerProps) => {
           );
           submittedValue = sizePrefix + submittedValue;
         }
+      }
+      // The one-shot notices above are model-only context; whenever one was
+      // added, the composer-side text is the display projection (#11553).
+      if (submittedPrompt === undefined && submittedValue !== userPromptText) {
+        submittedPrompt = userPromptText;
       }
       if (options?.deferUntilIdle) {
         addMessage(submittedValue, true, submittedPrompt, shellModeActive);
@@ -3532,13 +3549,19 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       const popped = popAllMessages();
       if (popped) {
-        restoredSubmissionRef.current = popped;
+        // Same contract as the auto-restore path below: the buffer holds the
+        // user's own text, and the model-bound copy rides along so an
+        // unchanged resubmit keeps the one-shot notice (#11553).
+        const restoredText = popped.submittedPrompt ?? popped.modelText;
+        restoredSubmissionRef.current = {
+          modelText: restoredText,
+          submittedPrompt: popped.submittedPrompt,
+          modelSubmission: popped.modelText,
+        };
         submittedPromptProvenanceUnavailableRef.current = false;
         const currentText = buffer.text;
         buffer.setText(
-          currentText
-            ? `${popped.modelText}\n${currentText}`
-            : popped.modelText,
+          currentText ? `${restoredText}\n${currentText}` : restoredText,
         );
       }
 
@@ -3604,6 +3627,9 @@ export const AppContainer = (props: AppContainerProps) => {
           ...(cancelledTurnUserItem.submittedPrompt === undefined
             ? {}
             : { submittedPrompt: cancelledTurnUserItem.submittedPrompt }),
+          ...(cancelledTurnUserItem.modelText === undefined
+            ? {}
+            : { modelSubmission: cancelledTurnUserItem.modelText }),
         };
         submittedPromptProvenanceUnavailableRef.current = false;
         buffer.setText(cancelledTurnUserItem.text);

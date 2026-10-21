@@ -4,6 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  attachToolOutputProvenance,
+  getToolOutputProvenance,
+  measureToolOutput,
+  type ToolOutputProvenance,
+} from '../tools/tool-output-size.js';
+import { logToolResultSize } from '../telemetry/loggers.js';
+import { ToolResultSizeEvent } from '../telemetry/types.js';
 import { createHash } from 'node:crypto';
 
 // DISCLAIMER: This is a copied version of https://github.com/googleapis/js-genai/blob/main/src/chats.ts with the intention of working around a key bug
@@ -76,7 +84,11 @@ import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { appendAutoMemoryContext } from '../memory/request-context.js';
-import { completedToolCallBoundary } from './turn-interruption.js';
+import {
+  completedToolCallBoundary,
+  recoveryHistoryBoundary,
+  effectiveHistoryEnd,
+} from './turn-interruption.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { StructuredError } from './turn.js';
 import {
@@ -136,6 +148,7 @@ import {
 } from '../utils/request-payload-error.js';
 import {
   getStartupContextLength,
+  markCompressedHistory,
   isSystemReminderContent,
 } from './environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
@@ -160,7 +173,10 @@ import {
 } from './tool-call-preparation.js';
 import { InvalidStreamError } from './invalid-stream-error.js';
 import type { GoalTurnPermit } from '../goals/goal-protocol.js';
-import { markApiHistoryPrompt } from '../services/session-api-history.js';
+import {
+  markApiHistoryPrompt,
+  cloneApiHistory,
+} from '../services/session-api-history.js';
 import { isAgentEnvelopeContent } from '../agents/session-agents/envelope.js';
 
 export { InvalidStreamError };
@@ -600,6 +616,7 @@ export interface LlmPreparedRequest {
     config: Omit<GenerateContentConfig, 'abortSignal' | 'httpOptions'>;
   };
   history: Content[];
+  contextPrefixLength?: number;
   completedToolCallIds: string[];
   routeSelector: string;
   providerPin: string;
@@ -2292,6 +2309,8 @@ export class LlmChat {
    */
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountIsEstimated = false;
+  /** Provenances already reported at dispatch, so a retry is not recounted. */
+  private readonly injectedToolResults = new WeakSet<ToolOutputProvenance>();
 
   /**
    * Per-chat output-token count from the previous model response. The
@@ -2417,12 +2436,22 @@ export class LlmChat {
     return [...this.completedToolCallIds];
   }
 
-  getHistoryForRecovery(): Content[] {
-    const boundary = completedToolCallBoundary(
+  getHistoryForRecovery(count?: number): Content[] {
+    const boundary = recoveryHistoryBoundary(
       this.history,
       this.completedToolCallIds,
     );
-    return this.history.slice(boundary).map(copyContentContainer);
+    const countAnchor =
+      count === undefined
+        ? this.history.length
+        : effectiveHistoryEnd(this.history);
+    const start =
+      count === undefined
+        ? boundary
+        : Math.max(boundary, countAnchor - Math.max(0, count));
+    // count limits meaningful history, not the notification/agent suffix.
+    // Keep the full suffix: retry may pop it, so truncation would lose replay.
+    return this.history.slice(start).map(copyContentContainer);
   }
 
   /**
@@ -2479,7 +2508,25 @@ export class LlmChat {
     private readonly telemetryService?: UiTelemetryService,
   ) {
     validateHistory(history);
+    markCompressedHistory(history);
     this.redactApprovedPlansFromLoadedHistory();
+    this.markToolResultsInjected(this.history);
+  }
+
+  /**
+   * Marks every provenance in `contents` as already reported, so the next
+   * dispatch does not re-emit its `tool_result_injected` event. Callers hand
+   * this only parts another chat already reported — loaded/restored history
+   * and the speculation-accept replay. Results parked through `addHistory`
+   * for a later turn have NOT been submitted yet and must stay unmarked, or
+   * their one owed injection event is suppressed permanently.
+   */
+  markToolResultsInjected(contents: readonly Content[]): void {
+    for (const content of contents)
+      for (const part of content.parts ?? []) {
+        const provenance = getToolOutputProvenance(part);
+        if (provenance) this.injectedToolResults.add(provenance);
+      }
   }
 
   enableManualPlanExitNotices(): void {
@@ -2867,6 +2914,7 @@ export class LlmChat {
           compressedHistory: options?.pendingUserMessage
             ? [...newHistory, options.pendingUserMessage]
             : newHistory,
+          summaryPrefixLength: newHistory.length,
           completedToolCallIds: this.completedToolCallIds,
         });
       }
@@ -3231,10 +3279,9 @@ export class LlmChat {
             )
         )
           throw new LlmRequestPreparationError('Saved model route changed.');
-        this.setHistory(
-          structuredClone(saved.history),
-          saved.completedToolCallIds,
-        );
+        const history = cloneApiHistory(saved.history);
+        markCompressedHistory(history, saved.contextPrefixLength);
+        this.setHistory(history, saved.completedToolCallIds);
         this.generationConfig = structuredClone(saved.request.config);
         requestContents = structuredClone(saved.request.contents);
         currentUserContent = this.history.at(-1);
@@ -3254,6 +3301,22 @@ export class LlmChat {
         // gap where `lastPromptTokenCount === 0` and the gate would otherwise
         // see only the stale prior-turn count (0).
         let userContent = createUserContent(params.message);
+        // Restored responses have no original-size provenance. Never infer it from a preview.
+        userContent = {
+          ...userContent,
+          parts: userContent.parts?.map((part) =>
+            part.functionResponse && !getToolOutputProvenance(part)
+              ? attachToolOutputProvenance([part], {
+                  callId: part.functionResponse.id ?? '',
+                  toolName: part.functionResponse.name ?? '',
+                  promptId: prompt_id,
+                  toolType: part.functionResponse.name?.startsWith('mcp__')
+                    ? 'mcp'
+                    : 'native',
+                })[0]
+              : part,
+          ),
+        };
         const toolOutputBudget = this.config.getToolOutputBatchBudget?.();
         if (
           toolOutputBudget !== undefined &&
@@ -3488,6 +3551,7 @@ export class LlmChat {
           this.chatRecordingService?.recordChatCompression({
             info: compressionInfo,
             compressedHistory: [...this.getHistoryShallow(), userContent],
+            summaryPrefixLength: this.getHistoryShallow().length,
             completedToolCallIds: this.completedToolCallIds,
           });
         }
@@ -5437,6 +5501,9 @@ export class LlmChat {
         const prepared: LlmPreparedRequest = {
           request: { model, contents: requestContents, config },
           history: this.history,
+          contextPrefixLength: getStartupContextLength(this.history, {
+            includeCompressed: true,
+          }),
           completedToolCallIds: [...this.completedToolCallIds],
           routeSelector: `${actualConfig?.authType ?? ''}:${model}`,
           providerPin: llmPreparedProviderPin(actualConfig),
@@ -5458,7 +5525,48 @@ export class LlmChat {
       }
     }
     params.config?.abortSignal?.throwIfAborted();
-    const apiCall = () => generator.generateContentStream(request, prompt_id);
+    const apiCall = () => {
+      params.config?.abortSignal?.throwIfAborted();
+      const groups = new Map<ToolOutputProvenance, Part[]>();
+      for (const content of requestContents)
+        for (const part of content.parts ?? []) {
+          const provenance = getToolOutputProvenance(part);
+          if (!provenance || this.injectedToolResults.has(provenance)) continue;
+          const parts = groups.get(provenance) ?? [];
+          parts.push(part);
+          groups.set(provenance, parts);
+        }
+      for (const [provenance, parts] of groups) {
+        // Observation only: mark first so a measurement or logging throw
+        // neither fails the model request nor re-emits on the retry.
+        this.injectedToolResults.add(provenance);
+        try {
+          const injected = measureToolOutput(parts, this.config);
+          logToolResultSize(
+            this.config,
+            new ToolResultSizeEvent(
+              provenance.toolName,
+              provenance.toolType,
+              'injection',
+              provenance.rawSize?.chars,
+              injected.chars,
+              provenance.rawSize?.estimatedTokens,
+              injected.estimatedTokens,
+              provenance.truncated,
+              Number.isFinite(provenance.budget)
+                ? provenance.budget
+                : undefined,
+              provenance.budgetSource,
+              provenance.callId,
+              provenance.promptId || prompt_id,
+            ),
+          );
+        } catch {
+          /* Telemetry is observational. */
+        }
+      }
+      return generator.generateContentStream(request, prompt_id);
+    };
     const cgConfig = this.config.getContentGeneratorConfig();
     const authType = overrides?.retryAuthType ?? cgConfig?.authType;
     const extraRetryErrorCodes =
@@ -5606,7 +5714,7 @@ export class LlmChat {
       : this.history;
     // Deep copy the history to avoid mutating the history outside of the
     // chat session.
-    return structuredClone(history);
+    return cloneApiHistory(history);
   }
 
   /**
@@ -5618,7 +5726,7 @@ export class LlmChat {
     const history = curated
       ? extractCuratedHistory(this.history)
       : this.history;
-    return structuredClone(history.slice(-count));
+    return cloneApiHistory(history.slice(-count));
   }
 
   /**
@@ -5634,8 +5742,14 @@ export class LlmChat {
   }
 
   getHistoryForForkWindow(): Content[] {
-    const history = this.history.slice(getStartupContextLength(this.history));
-    return extractCuratedHistory(history).map(copyContentContainer);
+    const startup = getStartupContextLength(this.history);
+    const prefix = getStartupContextLength(this.history, {
+      includeCompressed: true,
+    });
+    return [
+      ...this.history.slice(startup, prefix),
+      ...extractCuratedHistory(this.history.slice(prefix)),
+    ].map(copyContentContainer);
   }
 
   /**
@@ -5957,7 +6071,9 @@ export class LlmChat {
     history: Content[],
     completedToolCallIds?: readonly string[],
   ): void {
+    markCompressedHistory(history);
     this.history = history;
+    this.markToolResultsInjected(this.history);
     this.setCompletedToolCallIds(completedToolCallIds);
     // History replacement (compression, /clear, --resume reload) wipes
     // the index basis the partial-push marker was captured against. The
@@ -5984,6 +6100,7 @@ export class LlmChat {
   truncateHistory(keepCount: number): void {
     const prevLen = this.history.length;
     this.history = this.history.slice(0, keepCount);
+    markCompressedHistory(this.history);
     this.setCompletedToolCallIds(this.completedToolCallIds);
     // Truncation can drop the entry the partial-push marker points at,
     // or leave it valid but shift the meaning of nearby indices. Reset
@@ -6025,7 +6142,7 @@ export class LlmChat {
    */
   stripOrphanedUserEntriesFromHistory(): Content[] {
     const strippedEntries: Content[] = [];
-    const boundary = completedToolCallBoundary(
+    const boundary = recoveryHistoryBoundary(
       this.history,
       this.completedToolCallIds,
     );

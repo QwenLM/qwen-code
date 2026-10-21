@@ -187,6 +187,20 @@ export class JavaManagedAgentClient {
     return this.post('/workspaces/create', request, signal);
   }
 
+  queryWorkspaceFiles(
+    request: Schemas['WebShellWorkspaceFileQueryRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceFilePage']> {
+    return this.post('/workspaces/files/query', request, signal);
+  }
+
+  readWorkspaceFile(
+    request: Schemas['WebShellWorkspaceFileReadRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceFileSnapshot']> {
+    return this.post('/workspaces/files/read', request, signal);
+  }
+
   workspaceDirectories(
     request: Schemas['WebShellWorkspaceDirectoryQueryRequest'],
     signal?: AbortSignal,
@@ -317,6 +331,22 @@ export class JavaManagedAgentClient {
     );
   }
 
+  getSessionSkills(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellSessionSkills']>(
+      '/session-skills/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  getSessionMcp(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['PublicMcpCatalog']>(
+      '/session-mcp/query',
+      { sessionId },
+      signal,
+    );
+  }
+
   changeModel(
     request: Schemas['WebShellChangeModelRequest'],
     signal?: AbortSignal,
@@ -324,6 +354,14 @@ export class JavaManagedAgentClient {
     return this.post<Schemas['WebShellModelChangeResult']>(
       '/session-models/change',
       request,
+      signal,
+    );
+  }
+
+  getToolDetails(sessionId: string, itemId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellToolDetails']>(
+      '/tool-details/get',
+      { sessionId, itemId },
       signal,
     );
   }

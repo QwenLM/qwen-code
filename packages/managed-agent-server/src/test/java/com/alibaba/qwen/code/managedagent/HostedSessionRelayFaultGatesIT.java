@@ -6,10 +6,10 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,6 +33,7 @@ import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -681,9 +682,10 @@ class HostedSessionRelayFaultGatesIT {
     // --------------------------------------------------- case: FG9b-1
 
     /** alice's outbound commit is refused at the store: nothing of the
-     * command exists anywhere, her Session latches its writes, and only a
-     * cold load answers the parked call — from the journal, as not sent,
-     * never by minting the command afresh. */
+     * command exists anywhere, her Session keeps the append unsettled
+     * instead of latching its writes (#14570), and only a cold load
+     * answers the parked call — from the journal, as not sent, never by
+     * minting the command afresh. */
     private void outboundCommitRefused() throws Exception {
         String name = "outbound-commit-refused";
         carolMode.set("WAIT");
@@ -697,9 +699,9 @@ class HostedSessionRelayFaultGatesIT {
         openSend();
         awaitRefusals(name);
         awaitHarnessLog(mark, "is recovery blocked: "
-                + "ManagedSessionWritesStoppedError");
+                + "ManagedSessionAppendUnsettledError");
         String turn = onlyTurn(alice);
-        // Latched, not answered: no entry, no ledger row, no answer, and
+        // Unsettled, not answered: no entry, no ledger row, no answer, and
         // the Turn stays open rather than settling over its call.
         assertThat(commandsOf(alice, "session_command")).isEmpty();
         assertThat(deliveryRows()).isZero();
@@ -719,7 +721,7 @@ class HostedSessionRelayFaultGatesIT {
         assertThat(commandsOf(lead, "session_command")).isEmpty();
         assertThat(msgcRows(lead)).isEmpty();
         assertThat(commandsOf(bob, "session_message")).isEmpty();
-        assertThat(fired(name)).isEqualTo(STORE_ATTEMPTS);
+        assertThat(fired(name)).isGreaterThanOrEqualTo(STORE_ATTEMPTS);
         settleAndCheckDelivered(lead);
     }
 
@@ -763,7 +765,7 @@ class HostedSessionRelayFaultGatesIT {
                 .isEqualTo(1);
         assertThat(sendAnswers(alice)).containsExactly(
                 "Message sent to bob.\n- bob: sent.");
-        assertThat(fired(name)).isEqualTo(STORE_ATTEMPTS);
+        assertThat(fired(name)).isGreaterThanOrEqualTo(STORE_ATTEMPTS);
         settleAndCheckDelivered(lead);
         assertThat(commandsOf(bob, "session_message")).hasSize(1);
     }
@@ -816,7 +818,7 @@ class HostedSessionRelayFaultGatesIT {
         assertThat(journalCommits(lead, "commitSessionCommandReceipt"))
                 .as("the retry re-executed into the stored receipt")
                 .isEqualTo(1);
-        assertThat(fired(name)).isEqualTo(STORE_ATTEMPTS);
+        assertThat(fired(name)).isGreaterThanOrEqualTo(STORE_ATTEMPTS);
         settleAndCheckDelivered(lead);
         assertThat(commandsOf(bob, "session_message")).hasSize(1);
     }
@@ -1712,12 +1714,15 @@ class HostedSessionRelayFaultGatesIT {
     }
 
     /** Every attempt of the store client's bounded retry met the
-     * refusal; past it the Session latches its writes and sends no more. */
+     * refusal; past it the Session keeps the append unsettled and sends
+     * no more until the refusal drops (#14570). A settle that fires
+     * before the drop retries the same commit, so only the lower bound
+     * is exact. */
     private void awaitRefusals(String name) {
         waiting().atMost(Duration.ofSeconds(90))
                 .pollInterval(Duration.ofMillis(250)).untilAsserted(() -> {
                     assertNoModelFailure();
-                    assertThat(fired(name)).isEqualTo(STORE_ATTEMPTS);
+                    assertThat(fired(name)).isGreaterThanOrEqualTo(STORE_ATTEMPTS);
                 });
     }
 
@@ -2374,7 +2379,7 @@ class HostedSessionRelayFaultGatesIT {
     }
 
     private static ConditionFactory waiting() {
-        return await().failFast("The case's @Timeout interrupted it",
-                () -> Thread.currentThread().isInterrupted());
+        return await().ignoreExceptionsInstanceOf(CannotAcquireLockException.class)
+                .failFast("The case's @Timeout interrupted it", () -> Thread.currentThread().isInterrupted());
     }
 }

@@ -1369,6 +1369,7 @@ describe('DaemonSessionProvider', () => {
         block.kind === 'user' && block.text === 'Exact optimistic prompt',
     );
     expect(optimistic).toBeDefined();
+    expect(optimistic?.promptId).toBe('prompt-1');
     expect(navigation?.provisionalTurns).toMatchObject([
       { promptId: 'prompt-1', blockId: optimistic!.id },
     ]);
@@ -16432,6 +16433,80 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it('keeps a refreshed model catalog when an older same-session load settles', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+    const catalog = (modelId: string): DaemonSessionContextStatus => ({
+      v: 1,
+      sessionId: 'session-a',
+      workspaceCwd: '/mock-workspace',
+      state: {
+        models: { currentModelId: modelId, availableModels: [{ modelId }] },
+      },
+    });
+    const initial = createMockSession({
+      sessionId: 'session-a',
+      context: vi.fn(async () => catalog('catalog-a0')),
+    });
+    sdkMocks.sessions.push(initial);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    expect(connection?.models?.map((m) => m.id)).toEqual(['catalog-a0']);
+    const goal = createDeferred<GoalStateResponse>();
+    const subscribed = createDeferred<void>();
+    const context = vi
+      .fn()
+      .mockResolvedValueOnce(catalog('catalog-a'))
+      .mockResolvedValue(catalog('catalog-b'));
+    const replacement = createMockSession({
+      sessionId: 'session-a',
+      context,
+      goal: vi.fn(() => goal.promise),
+      events: createPendingEvents(subscribed),
+    });
+    replacement.client = initial.client;
+    sdkMocks.MockDaemonSessionClient.load.mockResolvedValueOnce(replacement);
+    const originalWorkspace = sdkMocks.workspaceByCwd.getMockImplementation()!;
+    const reloadModelProviders = vi.fn(async () => ({
+      status: 'applied' as const,
+    }));
+    sdkMocks.workspaceByCwd.mockImplementation((cwd) => ({
+      ...originalWorkspace(cwd),
+      reloadModelProviders,
+      workspaceProviders: sdkMocks.workspaceProviders,
+    }));
+    let reload: Promise<void> | undefined;
+    act(() => {
+      reload = requireActions(actions).reloadSession(
+        new AbortController().signal,
+      );
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(context).toHaveBeenCalledOnce();
+    await act(async () => {
+      await requireActions(actions).refreshModels();
+    });
+    expect(connection?.models?.map((m) => m.id)).toEqual(['catalog-b']);
+    await act(async () => {
+      goal.resolve({ snapshot: { v: 2, goal: null, activity: 'idle' } });
+      await reload;
+      await subscribed.promise;
+      await flushPromises();
+    });
+    expect(connection?.models?.map((m) => m.id)).toEqual(['catalog-b']);
+    expect(connection?.currentModel).toBe('catalog-a0');
+  });
+
   it('keeps the current transcript when a same-session reload is aborted', async () => {
     vi.stubGlobal(
       'fetch',
@@ -22512,7 +22587,7 @@ describe('DaemonSessionProvider', () => {
       expect(
         store?.getSnapshot().blocks.find((block) => block.kind === 'user')
           ?.promptId,
-      ).toBeUndefined();
+      ).toBe('live');
       await act(async () => {
         go.resolve();
         await flushPromises();

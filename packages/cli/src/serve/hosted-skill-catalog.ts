@@ -125,6 +125,18 @@ export class HostedSkillCatalog {
     return `The following published skills are available. Use the skill tool to load their instructions when relevant.\n${renderAvailableSkillsBlock([...this.skills])}`;
   }
 
+  invocations(prompt: string): string[] {
+    const names = new Set<string>();
+    let remaining = prompt;
+    for (;;) {
+      const match = /^\s*\/([^\s/]+)(?=\s|$)/u.exec(remaining);
+      if (!match || !this.skills.some((skill) => skill.name === match[1]))
+        return [...names];
+      names.add(match[1]);
+      remaining = remaining.slice(match[0].length);
+    }
+  }
+
   declaration(): FunctionDeclaration | undefined {
     if (!this.skills.length) return undefined;
     return {

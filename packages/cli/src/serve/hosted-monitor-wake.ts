@@ -26,6 +26,8 @@ import { pendingSessionInputs } from './hosted-wake-intake.js';
 export interface HostedMonitorWakeTurn {
   readonly turnId: string;
   readonly text: string;
+  /** Original notification consumed by a successful crash continuation. */
+  readonly notificationTurnId?: string;
   /**
    * The committed input's source (`monitor`, H6's `automation`, H5's
    * `channel`, or H4b's `child_agent`): an automation run settles from
@@ -107,6 +109,12 @@ export class HostedMonitorWakeScheduler {
   private closed = false;
   private pendingKick = false;
   private retry: ReturnType<typeof setTimeout> | undefined;
+  /** Callers of {@link exclusive} waiting for the pass in flight. */
+  private readonly waiting: Array<(granted: boolean) => void> = [];
+  /** Counts every hold of the pump: a pass, or exclusive work. */
+  private holds = 0;
+  /** The hold in flight when a waiter's wait last ran out. */
+  private outlasted = -1;
 
   constructor(
     private readonly deps: HostedMonitorWakeDeps,
@@ -131,6 +139,7 @@ export class HostedMonitorWakeScheduler {
       return;
     }
     this.inFlight = true;
+    this.holds += 1;
     void this.pump()
       .catch((cause: unknown) => {
         this.deps.failed(cause);
@@ -142,13 +151,52 @@ export class HostedMonitorWakeScheduler {
           this.armRetry();
         }
       })
-      .finally(() => {
-        this.inFlight = false;
-        if (this.pendingKick && !this.closed) {
-          this.pendingKick = false;
-          this.kick();
-        }
+      .finally(() => this.release());
+  }
+
+  /**
+   * Runs `work` while no pass is in flight and none can start. A caller
+   * that settles the inputs a pass reads (the reconcile route's crash
+   * repair) would otherwise finish inside one of the pass's awaits, and
+   * the pass would act on an input already consumed (#14538). A pass in
+   * flight hands over to the first waiter when it returns, before any
+   * remembered kick starts another; one that outlasts `waitMs` (a live
+   * turn, a slow Store or Broker call) keeps the pump, and `work` never
+   * runs. Kicks that land meanwhile are remembered for the pass after it.
+   * Once a waiter's wait runs out, the hold in flight at that moment is not
+   * waited for again: a stalled pass costs its callers one wait, not one
+   * each. Closing the pump lets its waiters go without their work, and a
+   * closed pump's pass in flight is waited for by nobody: its Session is
+   * going away. With no pass in flight none can start, so the work still
+   * runs.
+   */
+  async exclusive(work: () => Promise<void>, waitMs: number): Promise<void> {
+    if (this.inFlight) {
+      if (this.closed || this.outlasted === this.holds) return;
+      const granted = await new Promise<boolean>((resolve) => {
+        const take = (granted: boolean) => {
+          clearTimeout(timer);
+          resolve(granted);
+        };
+        const timer = setTimeout(() => {
+          const at = this.waiting.indexOf(take);
+          if (at !== -1) this.waiting.splice(at, 1);
+          this.outlasted = this.holds;
+          resolve(false);
+        }, waitMs);
+        timer.unref();
+        this.waiting.push(take);
       });
+      if (!granted) return;
+    } else {
+      this.inFlight = true;
+      this.holds += 1;
+    }
+    try {
+      await work();
+    } finally {
+      this.release();
+    }
   }
 
   /**
@@ -159,6 +207,7 @@ export class HostedMonitorWakeScheduler {
     this.closed = true;
     if (this.retry !== undefined) clearTimeout(this.retry);
     this.retry = undefined;
+    for (const take of this.waiting.splice(0)) take(false);
   }
 
   private async pump(): Promise<void> {
@@ -243,7 +292,28 @@ export class HostedMonitorWakeScheduler {
           `Monitor wake turn ${next.turnId} did not consume its input.`,
         );
       }
-      if (again === undefined) return;
+      if (again === undefined) {
+        // A pass that ended blocked over an input its read no longer
+        // returns (a stopped Session's message turn) owes the same
+        // reminder, or only an unrelated kick retries that settle.
+        if (this.deps.state() === 'blocked') this.armRetry();
+        return;
+      }
+    }
+  }
+
+  /** The pass or exclusive caller in flight is done: hand over, or idle. */
+  private release(): void {
+    const next = this.waiting.shift();
+    if (next !== undefined) {
+      this.holds += 1;
+      next(true);
+      return;
+    }
+    this.inFlight = false;
+    if (this.pendingKick && !this.closed) {
+      this.pendingKick = false;
+      this.kick();
     }
   }
 

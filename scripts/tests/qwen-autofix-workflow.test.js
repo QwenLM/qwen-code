@@ -1320,6 +1320,14 @@ describe('qwen-autofix workflow', () => {
           'The self-hosted runner lost communication with the server',
       }),
     ).toEqual({ reran: true, continued: true });
+    // A per-host test lock starving past its budget (#14550) is capacity
+    // contention on the shared pool, not the PR's change: no test ran.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'sdk-java host lock not acquired within 40 minutes',
+      }),
+    ).toEqual({ reran: true, continued: true });
     // A REAL failure (no infra signature in the annotation) → never rerun; the
     // agent/human handles it. This is the gate that stops masking real bugs.
     expect(

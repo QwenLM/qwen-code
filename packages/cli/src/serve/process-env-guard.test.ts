@@ -122,6 +122,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/daemon-discovery.ts',
+    {
+      reason:
+        'Embedded callers may omit the daemon-level environment argument.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/debug-mode.ts',
     {
       reason: 'Serve debug logging is process-scoped.',

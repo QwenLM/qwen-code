@@ -5,7 +5,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -402,7 +402,7 @@ class HostedConcurrentTurnBurstMySqlIT {
             DataSource source = new DriverManagerDataSource(mysqlUrl(),
                     System.getProperty("mysql.user", "root"),
                     System.getProperty("mysql.password", ""));
-            raw = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+            raw = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
             raw.setQueryTimeout(5);
             thread = new Thread(this::sampleLoop, "issue13333-lock-monitor");
             thread.setDaemon(true);

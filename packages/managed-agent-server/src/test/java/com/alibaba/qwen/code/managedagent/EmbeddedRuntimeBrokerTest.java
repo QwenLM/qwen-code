@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.InMemoryToolExecutionRepository;
@@ -40,9 +40,9 @@ class EmbeddedRuntimeBrokerTest {
         // slow-but-healthy runtime is cut mid-wait and never converges.
         long stepCallTimeoutMillis = EmbeddedRuntimeBroker.LEASE.toMillis() * 2;
         assertThat(stepCallTimeoutMillis)
-                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner.READY_TIMEOUT.toMillis());
+                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner.READY_TIMEOUT.toMillis());
         assertThat(stepCallTimeoutMillis)
-                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport.REQUEST_TIMEOUT.toMillis());
+                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport.REQUEST_TIMEOUT.toMillis());
     }
 
     private static final String SESSION_ID =
@@ -551,7 +551,7 @@ class EmbeddedRuntimeBrokerTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("need Git");
         properties.getRuntimeBroker().setChildWorkspaceGit("git");
-        var probe = new com.alibaba.qwen.code.managedagent.service.ChildWorktreeGit("git",
+        var probe = new com.alibaba.qwen.code.managedagent.workspace.ChildWorktreeGit("git",
                 java.time.Duration.ofSeconds(30));
         try {
             probe.requireSupportedVersion();
@@ -599,7 +599,7 @@ class EmbeddedRuntimeBrokerTest {
                 new InMemoryRuntimeBindingRepository(),
                 new InMemoryRuntimeSessionRepository(),
                 new InMemoryToolExecutionRepository(),
-                mock(com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore.class));
+                mock(com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore.class));
     }
 
     private static ManagedAgentProperties properties() throws Exception {

@@ -33,9 +33,11 @@ export function projectJavaAgentItem(
     return [
       projectedItemEvent(item, item.firstSequence, 'accepted', {
         itemId: item.itemId,
-        prompt: item.content
-          .filter((part) => part.type === 'input_text')
-          .map((part) => ({ type: 'text', text: part.text })),
+        prompt: Array.isArray(item.attributes?.['inputAttachments'])
+          ? item.attributes['inputAttachments']
+          : item.content
+              .filter((part) => part.type === 'input_text')
+              .map((part) => ({ type: 'text', text: part.text })),
       }),
     ];
   }

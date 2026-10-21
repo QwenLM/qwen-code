@@ -1029,6 +1029,40 @@ export function sendBridgeError(
         });
         return;
       }
+      if (kind === 'session_history_context_unavailable') {
+        res.status(503).json({ error: errorMessage(err), code: kind });
+        return;
+      }
+      if (kind === 'message_deletion_context_unavailable') {
+        res.status(503).json({
+          error: errorMessage(err),
+          code: kind,
+          persisted: true,
+          deletedGroupIds: (data as { deletedGroupIds?: unknown })
+            .deletedGroupIds,
+          deletedPromptIds: (data as { deletedPromptIds?: unknown })
+            .deletedPromptIds,
+        });
+        return;
+      }
+      if (
+        kind === 'message_groups_conflict' ||
+        kind === 'message_history_invalid' ||
+        kind === 'invalid_message_groups' ||
+        kind === 'session_message_deletion_unsupported'
+      ) {
+        res
+          .status(
+            kind === 'message_groups_conflict' ||
+              kind === 'message_history_invalid'
+              ? 409
+              : kind === 'invalid_message_groups'
+                ? 400
+                : 422,
+          )
+          .json({ error: errorMessage(err), code: kind });
+        return;
+      }
       if (kind === 'session_busy') {
         res.set('Retry-After', '5');
         res.status(409).json({
