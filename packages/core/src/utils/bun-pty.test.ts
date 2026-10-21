@@ -797,7 +797,14 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
     expect(exits).toBe(0);
   }, 20_000);
 
-  it('delivers the reaped exit and skips the signal volley when a limit trips after the native exit', async () => {
+  it('delivers the reaped exit and skips the signal volley when a limit trips after the native exit', async (ctx) => {
+    // Linux-only witness: macOS ends the master side as soon as the session
+    // leader exits (a plain-pty probe reads EOF ~70 ms later even with a
+    // HUP-ignoring grandchild), so the pump closes the fd before this write
+    // and there is no drain window to trip a limit in — the write is a no-op
+    // and the real exit is still delivered. The same guard is pinned on every
+    // platform by bun-pty-failure-order.test.ts with a mocked native exit.
+    if (process.platform !== 'linux') ctx.skip();
     // A grandchild holding the slave parks the observed exit inside the
     // drain window (the HUP trap keeps it alive past the session leader's
     // exit — Linux SIGHUPs the foreground group when the leader dies). A
