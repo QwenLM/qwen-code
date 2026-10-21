@@ -183,7 +183,11 @@ gates in `use-llm-stream.test.tsx`; barrier and mid-turn drains in
 ## Acceptance criteria
 
 - With `agents.crossSessionMidTurn` off (default), boundary behavior is
-  byte-for-byte the pre-feature behavior: envelopes wait for Idle.
+  byte-for-byte the pre-feature behavior: envelopes wait for Idle. One
+  ungated idle-path change applies regardless of the setting:
+  `popNextSubmission`'s user batch stops at the first waiting peer
+  envelope, where the pre-feature filter skipped envelopes and let later
+  user text batch past them.
 - On, an accepted `"now"` envelope can reach the model at a tool-round
   boundary, once per boundary, ≤3 per five-minute window — a budget of `0`
   keeps it off entirely (the drain is null) — after the receiver's queued
