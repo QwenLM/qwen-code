@@ -139,6 +139,7 @@ function eventType(
       return 'action_updated';
     case 'session.context.changed':
     case 'session.approval.changed':
+    case 'session.updated':
       return 'context_changed';
     default:
       return undefined;

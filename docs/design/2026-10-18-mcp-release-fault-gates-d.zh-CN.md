@@ -81,3 +81,26 @@ JDK 21 实测（加入应答 hold 之后）：六格整类在 MySQL 8.0.46 上 3
 预算：该格在八格整类运行（94.5 s，JDK 21、MySQL 8.4.6、Linux aarch64）中实测 9.1 s，按 2× 计入共享 healthy 18 s（9871 → 9889 s），因此 `hosted-harness-mysql` fork 移到 10489 s，185 分钟的 Verify step 仍能包住（fork 加包裹共 11089 s）；job 上限保持 288。`hosted-mcp-gates` 的 1200 s profile 与 artifact 根 `target/fg12-cases/fg12d/` 不变。
 
 未覆盖：configuration 的派发前取消（configuration 只在关闭期间由 `reconcileEffects()` 取消）与 MCP 工具调用（工具调用走普通工具生命周期，不经 `mcp_operation`）。
+
+## 后续格：跨 Spring 重启的 R1-1
+
+#14880 第 3 项，也是 #14447 FG12d 行里的 R1-1 那一格：在一次 lifecycle v2 关闭中，drain 回执提交之后，owner 释放在到达 Broker 之前被拒；随后通过重启 Spring 替换 Broker。#13109 的真实栈轮次记录过：此后 detach 每次都回答 503、storage holder 一直保留，因为重启后的 Broker 以 `runtime_reconciliation_required` 拒绝释放。
+
+**记录在案的阻塞点在 rig，而不在守卫。** 上文"问题与范围"和 FG12c 决策 2 记录说：整仓 Spring 重启会重新登记 storage，而 `WorkspaceStorageGuard` 在 holder 仍被占用时拒绝登记。生产环境启动时从不重新登记：`register` 是运维步骤（`WorkspaceStorageRegistrationMain`），登记记录在 `ma_storage_owner` 中，挂载根来自配置。这次拒绝来自 IT 自己的 `startSpring()`，它每次启动都会登记 storage 并插入 Workspace 行。改为只种一次，就能在不改产品代码的前提下做到重启。
+
+**R1-1 在 `main` 上已不再复现。** 被替换后的 Broker 没有该 Session 的本地上下文，所以 Harness 的重试会走到 `releasedSession`。此时 Session 行仍为 READY，binding 仍为 READY 且 generation 相同，lifecycle v2 关闭也已把 Harness 标为 draining。#13673 在这条路径上加的分支（`RuntimeBrokerService` 中 managed-context 的 `releaseSavedSession` 分支）会直接释放已保存的 Session。因此 #13109 评审建议的重试（先 acquire 再 release）对这条路径已无必要。
+
+| Case                              | 注入                                                                                                                                 | 期望                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `owner-release-refused-restarted` | `prepare_resources` 之后，代理在转发前以 503 拒绝 owner 释放（`POST …/tool-sessions/{id}:release`）；随后重启 Spring 及其内嵌 Broker | 被拒的 `settle_resources` 回答 503 `workspace_lifecycle_resources_unsettled`，此时记录为 `drained`、holder 仍占用、binding 与 Runtime Session 为 READY；重启不改变其中任何一项。之后有界重试 `settle_resources` 成功；重启后代理恰好只看到一次调用，即 owner 释放，回答 200，没有 acquire，也没有任何 MCP 控制。holder 清空，记录为 `released`，Runtime Session 为 RELEASED；`mcp-release`、`mcp.start`、`mcp.exit` 各一次。 |
+
+决策：
+
+1. **在 JVM 内重启，而不是杀掉 JVM。** Broker 的 `close()` 只取消内存中的工作、不写库，durable local provisioner 关闭时也不会终止 worker，所以重启后的 Broker 看到的库状态和存活 worker，与被杀掉的 Broker 留下的完全相同。这正是 R1-1 所需的状态；单独起一个控制面 JVM 只会多一个夹具，不会改变这一点。
+2. **只容忍写者租约，其他一律不容忍。** 本格的 Session 写者租约为 3 s，而 Spring 停机约 3 s，所以在 Harness 重新拿到租约之前，第一次重试可能回答 `workspace_lifecycle_resources_unsettled`（写者未激活）。那次尝试不会向 Broker 发送任何请求。循环只接受这个错误码和 `hosted_turn_active`，重启后的线上断言是精确的。
+
+变异见证：关掉 #13673 的分支（`if (false && record.isActive() && …isManagedContext() …)`）后，该格变红：每次重试都会转发 owner 释放，重启后的 Broker 回答 503，holder 一直被占用，正是 #13109 记录的 R1-1 症状。共 3 次运行，全部在恢复断言处变红；恢复后的对照为绿。
+
+预算：该格在九格整类运行（103.4–103.8 s，两次，JDK 21、MySQL 8.4.6、Linux aarch64）中实测 11.4–11.9 s，单独连续运行 5 次均通过。按 2× 计入共享 healthy 24 s（10050 → 10074 s），因此 `hosted-harness-mysql` fork 移到 10674 s，188 分钟的 Verify step 仍能包住（fork 加包裹共 11274 s，余量 6 s）；job 上限保持 291。下一个加入该 fork 的格必须同时提高 Verify step 与 job 上限。
+
+未覆盖：在 owner 释放过程中杀掉 Broker（请求已到达 Broker，但它在应答前死亡）、`drained` 之前的 Spring 重启（FG12c 拆出的 Spring 格；同样的"只种一次"改动可以解开它们）、以及跨主机恢复。
