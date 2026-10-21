@@ -21,6 +21,7 @@ const state = vi.hoisted(() => ({
   openAutoMemoryFolder: vi.fn(),
   settings: [] as unknown[],
   setValue: vi.fn(),
+  reload: vi.fn(),
   features: [] as string[],
   localDaemon: false,
 }));
@@ -43,6 +44,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
     useSettings: () => ({
       settings: state.settings,
       setValue: state.setValue,
+      reload: state.reload,
     }),
     useConnection: () => ({
       capabilities: { features: state.features },
@@ -77,7 +79,10 @@ const USER_ENTRY = {
 };
 
 function listing(
-  entries: Array<typeof PROJECT_ENTRY> = [PROJECT_ENTRY, USER_ENTRY],
+  entries: Array<typeof PROJECT_ENTRY | typeof USER_ENTRY> = [
+    PROJECT_ENTRY,
+    USER_ENTRY,
+  ],
 ) {
   return {
     v: 1,
@@ -145,6 +150,14 @@ function switches(): HTMLButtonElement[] {
   ) as HTMLButtonElement[];
 }
 
+function switchByLabel(label: string): HTMLButtonElement {
+  const match = switches().find(
+    (item) => item.getAttribute('aria-label') === label,
+  );
+  if (!match) throw new Error(`switch not found: ${label}`);
+  return match;
+}
+
 function entryButton(label: string): HTMLButtonElement {
   const match = Array.from(container.querySelectorAll('button')).find((item) =>
     item.textContent?.includes(label),
@@ -170,6 +183,7 @@ beforeEach(() => {
   state.readAutoMemoryFile.mockReset();
   state.openAutoMemoryFolder.mockReset().mockResolvedValue(undefined);
   state.setValue.mockReset().mockResolvedValue(undefined);
+  state.reload.mockReset().mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -306,7 +320,7 @@ describe('AutoMemoryPanel', () => {
   it('writes a toggle change to the user scope', async () => {
     await mount();
 
-    act(() => switches()[0].click());
+    act(() => switchByLabel('Auto-memory').click());
     await flush();
 
     expect(state.setValue).toHaveBeenCalledWith(
@@ -314,6 +328,44 @@ describe('AutoMemoryPanel', () => {
       'memory.enableManagedAutoMemory',
       false,
     );
+    expect(state.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes a toggle change to the workspace scope when a workspace value defines it', async () => {
+    // A workspace-scope value wins in the merged effective value, so the
+    // write must target the scope that currently defines the value.
+    state.settings = [
+      {
+        key: 'memory.enableManagedAutoMemory',
+        type: 'boolean',
+        label: 'Auto-memory',
+        category: 'memory',
+        requiresRestart: false,
+        default: false,
+        values: { effective: false, workspace: false },
+      },
+      {
+        key: 'memory.enableManagedAutoDream',
+        type: 'boolean',
+        label: 'Auto-dream',
+        category: 'memory',
+        requiresRestart: false,
+        default: false,
+        values: { effective: false },
+      },
+    ];
+
+    await mount();
+
+    act(() => switchByLabel('Auto-memory').click());
+    await flush();
+
+    expect(state.setValue).toHaveBeenCalledWith(
+      'workspace',
+      'memory.enableManagedAutoMemory',
+      true,
+    );
+    expect(state.reload).toHaveBeenCalledTimes(1);
   });
 
   it('reports a failed toggle as an error notice', async () => {
@@ -326,12 +378,92 @@ describe('AutoMemoryPanel', () => {
 
     expect(container.textContent).toContain('Set setting failed: 500');
     expect(onMessage).toHaveBeenCalledWith('Set setting failed: 500', 'error');
+    const liveRegion = container.querySelector('[role="status"]');
+    expect(liveRegion?.textContent).toContain('Set setting failed: 500');
+  });
+
+  it('tracks in-flight toggles per switch, not globally', async () => {
+    let resolveFirst: (value: void) => void = () => {};
+    let resolveSecond: (value: void) => void = () => {};
+    state.setValue.mockImplementation((_scope: string, key: string) =>
+      key === 'memory.enableManagedAutoMemory'
+        ? new Promise<void>((resolve) => {
+            resolveFirst = resolve;
+          })
+        : new Promise<void>((resolve) => {
+            resolveSecond = resolve;
+          }),
+    );
+
+    await mount();
+    const autoMemorySwitch = switchByLabel('Auto-memory');
+    const autoDreamSwitch = switchByLabel('Auto-dream');
+
+    act(() => autoMemorySwitch.click());
+    await flush();
+    expect(autoMemorySwitch.disabled).toBe(true);
+    // The in-flight write must not disable the other switch.
+    expect(autoDreamSwitch.disabled).toBe(false);
+
+    act(() => autoDreamSwitch.click());
+    await flush();
+    expect(state.setValue).toHaveBeenCalledTimes(2);
+    expect(autoMemorySwitch.disabled).toBe(true);
+    expect(autoDreamSwitch.disabled).toBe(true);
+
+    await act(async () => {
+      resolveFirst(undefined);
+      resolveSecond(undefined);
+    });
+    await flush();
+    expect(autoMemorySwitch.disabled).toBe(false);
+    expect(autoDreamSwitch.disabled).toBe(false);
+  });
+
+  it('disables a switch only when its own setting is missing from the descriptors', async () => {
+    state.settings = [
+      {
+        key: 'memory.enableManagedAutoMemory',
+        type: 'boolean',
+        label: 'Auto-memory',
+        category: 'memory',
+        requiresRestart: false,
+        default: false,
+        values: { effective: true },
+      },
+    ];
+
+    await mount();
+
+    expect(switchByLabel('Auto-memory').disabled).toBe(false);
+    expect(switchByLabel('Auto-dream').disabled).toBe(true);
+  });
+
+  it('surfaces per-root scan errors from the status', async () => {
+    state.status = {
+      ...listing([USER_ENTRY]),
+      errors: [
+        {
+          scope: 'project',
+          errorKind: 'readdir_failed',
+          error: 'EACCES: permission denied, scandir /workspace/.qwen/memory',
+        },
+      ],
+    };
+    state.entries = [USER_ENTRY];
+
+    await mount();
+
+    expect(container.textContent).toContain(
+      'EACCES: permission denied, scandir /workspace/.qwen/memory',
+    );
   });
 
   it('hides the folder button unless the daemon is local with the feature', async () => {
     await mount();
     expect(openFolderButtons()).toHaveLength(0);
 
+    // A local daemon without the feature tag.
     state.localDaemon = true;
     act(() =>
       root.render(
@@ -343,7 +475,20 @@ describe('AutoMemoryPanel', () => {
     await flush();
     expect(openFolderButtons()).toHaveLength(0);
 
+    // The feature tag on a non-local daemon is not an open affordance.
     state.features = ['workspace_local_open'];
+    state.localDaemon = false;
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <AutoMemoryPanel />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+    expect(openFolderButtons()).toHaveLength(0);
+
+    state.localDaemon = true;
     act(() =>
       root.render(
         <I18nProvider language="en">

@@ -5,9 +5,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act } from 'react';
+import { act, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -17,8 +17,15 @@ const actions = vi.hoisted(() => ({
   openAutoMemoryFolder: vi.fn(),
 }));
 
+const signals = vi.hoisted(() => ({
+  current: undefined as { memoryVersion?: number } | undefined,
+}));
+
 vi.mock('../DaemonWorkspaceProvider.js', () => ({
   useDaemonWorkspaceActions: () => actions,
+}));
+vi.mock('../../session/DaemonSessionProvider.js', () => ({
+  useDaemonWorkspaceEventSignals: () => signals.current,
 }));
 
 const { useDaemonAutoMemory } = await import('./useDaemonAutoMemory.js');
@@ -54,10 +61,13 @@ function listing(entries: Array<typeof PROJECT_ENTRY>) {
   };
 }
 
-function mountProbe() {
+function mountProbe(options?: { autoLoad?: boolean }) {
   let hook: ReturnType<typeof useDaemonAutoMemory> | undefined;
+  let bump: () => void = () => {};
   function Probe() {
-    hook = useDaemonAutoMemory();
+    const [, setTick] = useState(0);
+    bump = () => setTick((tick) => tick + 1);
+    hook = useDaemonAutoMemory(options?.autoLoad ? { autoLoad: true } : {});
     return null;
   }
   const container = document.createElement('div');
@@ -67,9 +77,15 @@ function mountProbe() {
     get value() {
       return hook!;
     },
+    rerender: () => act(() => bump()),
     unmount: () => act(() => root.unmount()),
   };
 }
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  signals.current = undefined;
+});
 
 describe('useDaemonAutoMemory', () => {
   it('exposes an empty listing before the status has loaded', () => {
@@ -124,6 +140,25 @@ describe('useDaemonAutoMemory', () => {
       'project',
       '/workspace',
     );
+    probe.unmount();
+  });
+
+  it('reloads when the memoryVersion workspace signal changes', async () => {
+    actions.loadAutoMemoryStatus.mockResolvedValue(listing([PROJECT_ENTRY]));
+    signals.current = { memoryVersion: 1 };
+
+    const probe = mountProbe({ autoLoad: true });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(actions.loadAutoMemoryStatus).toHaveBeenCalledTimes(1);
+
+    signals.current = { memoryVersion: 2 };
+    probe.rerender();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(actions.loadAutoMemoryStatus).toHaveBeenCalledTimes(2);
     probe.unmount();
   });
 });

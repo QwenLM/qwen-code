@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  useConnection,
   useMemory,
   type DaemonContextFileScope,
   type DaemonWorkspaceMemoryFile,
@@ -48,6 +49,12 @@ export function MemoryMessage({
   onMessage,
 }: MemoryMessageProps) {
   const { t } = useI18n();
+  const connection = useConnection();
+  // Daemons that predate the auto-memory routes must not get the tab:
+  // the routes 404, so the tag gates the affordance.
+  const autoMemoryAvailable =
+    connection.capabilities?.features?.includes('workspace_auto_memory') ??
+    false;
   const { files, status, loading, error, readMemoryFile, reload, writeMemory } =
     useMemory({
       autoLoad: true,
@@ -258,18 +265,20 @@ export function MemoryMessage({
             </button>
           );
         })}
-        <button
-          key="auto"
-          type="button"
-          className={`${styles.memoryCard} ${
-            selectedTab === 'auto' ? styles.memoryCardActive : ''
-          }`}
-          onClick={() => setSelectedTab('auto')}
-        >
-          <span className={styles.memoryTitle}>
-            {t('memory.autoMemoryTab')}
-          </span>
-        </button>
+        {autoMemoryAvailable && (
+          <button
+            key="auto"
+            type="button"
+            className={`${styles.memoryCard} ${
+              selectedTab === 'auto' ? styles.memoryCardActive : ''
+            }`}
+            onClick={() => setSelectedTab('auto')}
+          >
+            <span className={styles.memoryTitle}>
+              {t('memory.autoMemoryTab')}
+            </span>
+          </button>
+        )}
       </nav>
 
       <section className={styles.detail}>

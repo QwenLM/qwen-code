@@ -2988,6 +2988,7 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
+    runtime: primaryRuntime,
   });
   mountWorkspaceQualifiedMemoryRoutes(app, {
     workspaceRegistry,

@@ -19,6 +19,7 @@ import {
 import { safeBody } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import { resolveTrustedRuntime } from '../workspace-route-runtime.js';
+import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
 
 type LocalOpenTarget = 'folder' | 'terminal' | 'auto-memory';
 type AutoMemoryOpenScope = 'project' | 'user';
@@ -65,10 +66,15 @@ export function registerWorkspaceLocalOpenRoutes(
         // client-supplied beyond the route params.
         let targetPath = runtime.workspaceCwd;
         if (target === 'auto-memory') {
-          targetPath =
+          // Resolve the roots under THIS runtime's session storage scope:
+          // each workspace may pin its own runtimeOutputDir, and the
+          // daemon's ambient Storage scope is the primary's, not this
+          // workspace's.
+          targetPath = runWithWorkspaceRuntimeStorage(runtime, () =>
             autoMemoryScope === 'user'
               ? getUserAutoMemoryRoot()
-              : getAutoMemoryRoot(runtime.workspaceCwd);
+              : getAutoMemoryRoot(runtime.workspaceCwd),
+          );
           let dirStat;
           try {
             dirStat = await fs.stat(targetPath);
@@ -81,7 +87,16 @@ export function registerWorkspaceLocalOpenRoutes(
               });
               return;
             }
-            throw err;
+            // An existing-but-unstat'able root (EACCES and friends) is a
+            // daemon-side fault, not a client error; answer it directly
+            // instead of shadowing the local-open failure codes below.
+            res.status(500).json({
+              error: 'Auto-memory directory is not accessible',
+              code: 'auto_memory_dir_stat_failed',
+              scope: autoMemoryScope,
+              errno: (err as { code?: string }).code,
+            });
+            return;
           }
           if (!dirStat.isDirectory()) {
             res.status(400).json({

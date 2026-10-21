@@ -26,19 +26,31 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 
 const WS_CWD = '/workspace/primary';
 
+type LocalOpenTestRuntime = Pick<
+  WorkspaceRuntime,
+  | 'workspaceId'
+  | 'workspaceCwd'
+  | 'sessionRuntimeBaseDir'
+  | 'primary'
+  | 'trusted'
+>;
+
 function makeRuntime(
-  overrides: Partial<WorkspaceRuntime> = {},
-): WorkspaceRuntime {
+  overrides: Partial<LocalOpenTestRuntime> = {},
+): LocalOpenTestRuntime {
   return {
     workspaceId: 'primary-id',
     workspaceCwd: WS_CWD,
+    sessionRuntimeBaseDir: path.join(os.tmpdir(), 'qwen-local-open-runtime'),
     primary: true,
     trusted: true,
     ...overrides,
-  } as WorkspaceRuntime;
+  };
 }
 
-function createMockRegistry(runtimes: WorkspaceRuntime[]): WorkspaceRegistry {
+function createMockRegistry(
+  runtimes: LocalOpenTestRuntime[],
+): WorkspaceRegistry {
   const entries = runtimes.map(
     (runtime) =>
       ({
@@ -59,7 +71,7 @@ function createMockRegistry(runtimes: WorkspaceRuntime[]): WorkspaceRegistry {
 
 function createApp(
   deps: {
-    runtimes?: WorkspaceRuntime[];
+    runtimes?: LocalOpenTestRuntime[];
     mutate?: (opts?: { strict?: boolean }) => RequestHandler;
     openPathLocally?: (path: string) => Promise<void>;
     openTerminalLocally?: (path: string) => Promise<void>;
@@ -354,5 +366,63 @@ describe('POST /workspaces/:workspace/open (auto-memory target)', () => {
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('auto_memory_dir_not_directory');
     expect(openPathLocally).not.toHaveBeenCalled();
+  });
+
+  it('answers 500 stat_failed when the root cannot be stat-ed', async () => {
+    const stat = vi.spyOn(fs, 'stat').mockRejectedValueOnce(
+      Object.assign(new Error('EACCES: permission denied, stat'), {
+        code: 'EACCES',
+      }),
+    );
+
+    const openPathLocally = vi.fn().mockResolvedValue(undefined);
+    const app = createApp({
+      runtimes: [makeRuntime({ workspaceCwd: cwd })],
+      openPathLocally,
+    });
+
+    const res = await request(app)
+      .post('/workspaces/primary-id/open')
+      .send({ target: 'auto-memory' });
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('auto_memory_dir_stat_failed');
+    expect(res.body.scope).toBe('project');
+    expect(res.body.errno).toBe('EACCES');
+    expect(openPathLocally).not.toHaveBeenCalled();
+    stat.mockRestore();
+  });
+
+  it('resolves the user root under the runtime session base dir, not the ambient one', async () => {
+    // The memory-base env must stay unset: it pre-empts the runtime
+    // storage context and would mask the very resolution under test.
+    delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    clearAutoMemoryRootCache();
+    const runtimeBase = path.join(tmp, 'runtime-base');
+    const runtimeMemories = path.join(runtimeBase, 'memories');
+    await fs.mkdir(runtimeMemories, { recursive: true });
+    const openPathLocally = vi.fn().mockResolvedValue(undefined);
+    const app = createApp({
+      runtimes: [
+        makeRuntime({
+          workspaceCwd: cwd,
+          sessionRuntimeBaseDir: runtimeBase,
+        }),
+      ],
+      openPathLocally,
+    });
+
+    const res = await request(app)
+      .post('/workspaces/primary-id/open')
+      .send({ target: 'auto-memory', autoMemoryScope: 'user' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      kind: 'workspace-local-open',
+      opened: true,
+      target: 'auto-memory',
+      scope: 'user',
+    });
+    expect(openPathLocally).toHaveBeenCalledWith(runtimeMemories);
   });
 });
