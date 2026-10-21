@@ -116,6 +116,14 @@ class HostedMcpRestartFaultGatesIT {
             ownerReleaseRefuseArmed =
                     new java.util.concurrent.atomic.AtomicBoolean();
     private boolean springSeeded;
+    // A killed Harness cannot release its writer lease, so a replacement
+    // waits it out: cases that kill the Harness keep a short lease. A
+    // lifecycle case that keeps its Harness uses a longer one, because the
+    // store fences ordinary renewals once a v2 close is admitted and a 3 s
+    // lease can lapse before the close's first claimed renewal (#15011).
+    private static final long KILLED_WRITER_LEASE_MS = 3_000;
+    private static final long LIFECYCLE_WRITER_LEASE_MS = 30_000;
+    private long writerLeaseMs = KILLED_WRITER_LEASE_MS;
     private volatile String acquireHoldSession;
     private volatile String acquireHoldOperation;
     private volatile CountDownLatch acquireHold;
@@ -782,6 +790,7 @@ class HostedMcpRestartFaultGatesIT {
     @Timeout(600)
     void firstReleaseRefusedBeforeForwardingResumesUnderTheSameId()
             throws Exception {
+        writerLeaseMs = LIFECYCLE_WRITER_LEASE_MS;
         SessionRef session = createSession();
         baseline(session);
         JsonNode configuration = configuration(session.id());
@@ -959,6 +968,7 @@ class HostedMcpRestartFaultGatesIT {
     @Timeout(600)
     void ownerReleaseRefusedThenSpringRestartReleasesTheHolderOnMySql()
             throws Exception {
+        writerLeaseMs = LIFECYCLE_WRITER_LEASE_MS;
         SessionRef session = createSession();
         baseline(session);
         jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id ="
@@ -999,9 +1009,10 @@ class HostedMcpRestartFaultGatesIT {
                 .isEqualTo(runtimeBefore);
         assertThat(storageHolders(session)).isEqualTo(1);
 
-        // The Harness's Session writer lease may lapse while Spring is down;
-        // the lifecycle route answers unsettled until the writer is active
-        // again, and that attempt sends nothing to the Broker.
+        // The first attempt after the restart can still find the Harness's
+        // Session writer inactive; the lifecycle route answers unsettled
+        // until it is active again, and that attempt sends nothing to the
+        // Broker.
         HttpResponse<String> settled = null;
         for (int attempt = 0; attempt < 30 && settled == null; attempt++) {
             HttpResponse<String> response = rawLifecycle(session, closeId,
@@ -1377,9 +1388,7 @@ class HostedMcpRestartFaultGatesIT {
         store.put("tenantId", tenant);
         store.put("workspaceId", "workspace");
         store.put("writerId", bootId);
-        // A killed Harness cannot release its writer lease, so the
-        // replacement waits out a short lease rather than the 60 s default.
-        store.put("leaseDurationMs", 3_000);
+        store.put("leaseDurationMs", writerLeaseMs);
         return store;
     }
 

@@ -104,3 +104,7 @@ JDK 21 实测（加入应答 hold 之后）：六格整类在 MySQL 8.0.46 上 3
 预算：该格在九格整类运行（103.4–103.8 s，两次，JDK 21、MySQL 8.4.6、Linux aarch64）中实测 11.4–11.9 s，单独连续运行 5 次均通过。按 2× 计入共享 healthy 24 s（10050 → 10074 s），因此 `hosted-harness-mysql` fork 移到 10674 s，188 分钟的 Verify step 仍能包住（fork 加包裹共 11274 s，余量 6 s）；job 上限保持 291。下一个加入该 fork 的格必须同时提高 Verify step 与 job 上限。
 
 未覆盖：在 owner 释放过程中杀掉 Broker（请求已到达 Broker，但它在应答前死亡）、`drained` 之前的 Spring 重启（FG12c 拆出的 Spring 格；同样的"只种一次"改动可以解开它们）、以及跨主机恢复。
+
+## lifecycle 格的写者租约
+
+v2 关闭被准入之后，store 会 fence 普通写者续租，而 Harness 要等第一个 lifecycle 阶段到达时才会带 claim 续租（#15011）。该类的写者租约为 3 s，客户端每 1.5 s 续一次，因此一次被 fence 的续租可能让租约在关闭的第一次带 claim 续租之前就失效，`effects` 阶段随之以 "The Managed Session writer grant is stale or unavailable." 失败，约占关闭前置的 4%。因此两个保留 Harness 的 lifecycle 格（`firstReleaseRefusedBeforeForwardingResumesUnderTheSameId` 与 R1-1 Spring 重启格）使用 30 s 写者租约。会杀 Harness 的用例保留 3 s，因为替换的 Harness 必须等被杀写者的租约过期。生产环境中的这个窗口本身在 #15011 跟踪。
