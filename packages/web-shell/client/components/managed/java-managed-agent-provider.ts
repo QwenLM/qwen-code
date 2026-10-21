@@ -109,6 +109,7 @@ export function createJavaManagedAgentProvider(
       input?: import('./managed-agent-provider').ManagedInputBlock[];
       approvalMode?: ManagedApprovalMode;
       planMode?: boolean;
+      skills?: import('./managed-agent-provider').ManagedSessionSkill[];
     },
     command: ManagedAgentCommandOptions,
   ) {
@@ -117,6 +118,12 @@ export function createJavaManagedAgentProvider(
         requestId: managedRequestId(),
         idempotencyKey: command.idempotencyKey,
         agentId: request.agentId,
+        ...(request.skills?.length ? { skills: request.skills } : {}),
+        // Without a title the Session list and header fall back to a UUID
+        // prefix, unlike the standard shell's prompt-derived title.
+        ...(request.text === undefined
+          ? {}
+          : { title: titleFor(request.text) }),
         ...(request.approvalMode === undefined
           ? {}
           : { approvalMode: request.approvalMode }),
@@ -156,6 +163,10 @@ export function createJavaManagedAgentProvider(
     skills: {
       list: (sessionId, request) =>
         client.getSessionSkills(sessionId, request.signal),
+    },
+    mcp: {
+      list: (sessionId, request) =>
+        client.getSessionMcp(sessionId, request.signal),
     },
     tasks: {
       list: (sessionId, request) =>
@@ -235,6 +246,9 @@ export function createJavaManagedAgentProvider(
                 approvalRevision: result.approvalRevision,
                 availableApprovalModes: result.availableApprovalModes,
                 supported: result.supported,
+                ...(result.liveSupported === true
+                  ? { liveSupported: true }
+                  : {}),
                 ...(typeof result.planMode === 'boolean'
                   ? { planMode: result.planMode }
                   : {}),
@@ -494,6 +508,8 @@ export function createJavaManagedAgentProvider(
                   page.capabilities?.workspaceCreation === true,
                 canSelectDirectory:
                   page.capabilities?.workspaceDirectorySelection === true,
+                canImportLocalDirectory:
+                  page.capabilities?.localDirectoryImport === true,
                 supportsApprovalModeSelection:
                   page.capabilities?.approvalModeSelection === true,
               };
@@ -511,11 +527,25 @@ export function createJavaManagedAgentProvider(
             getSessionOptions: (agentId, request) =>
               client.getSessionOptions(agentId, request.signal),
             createEmpty: (
-              { agentId, workspaceId, cwdRelative, approvalMode, planMode },
+              {
+                agentId,
+                workspaceId,
+                cwdRelative,
+                approvalMode,
+                planMode,
+                skills,
+              },
               command,
             ) =>
               createWorkspaceSession(
-                { agentId, workspaceId, cwdRelative, approvalMode, planMode },
+                {
+                  agentId,
+                  workspaceId,
+                  cwdRelative,
+                  approvalMode,
+                  planMode,
+                  skills,
+                },
                 command,
               ),
             createSession: createWorkspaceSession,
@@ -842,7 +872,10 @@ function titleFor(text: string): string {
     .replace(/[\x00-\x1f\x7f]/g, ' ')
     .trim()
     .replace(/\s+/g, ' ');
-  return title.length <= 80 ? title : `${title.slice(0, 77)}...`;
+  // Slice by code point: a code-unit cut can leave a lone high surrogate, which
+  // no store column keeps, so the server would persist it as '?'.
+  const units = Array.from(title);
+  return units.length <= 80 ? title : `${units.slice(0, 77).join('')}...`;
 }
 
 function requireTaskCancelOperation(

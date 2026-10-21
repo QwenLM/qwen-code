@@ -73,11 +73,63 @@ lines.on('line', async (line) => {
         resources: [
           { uri: 'ext://proof', name: 'proof' },
           { uri: 'ext://hold', name: 'hold' },
+          { uri: 'ext://big', name: 'big' },
+          { uri: 'ext://notify', name: 'notify' },
+          { uri: 'ext://late', name: 'late' },
         ],
       };
       break;
     case 'resources/read': {
       const uri = request.params.uri;
+      if (uri === 'ext://big') {
+        record('mcp.effect', { kind: 'resource_read', value: uri });
+        result = {
+          contents: [
+            {
+              uri,
+              mimeType: 'text/plain',
+              text: 'x'.repeat(61 * 1024),
+            },
+          ],
+        };
+        break;
+      }
+      if (uri === 'ext://late') {
+        // The first answer is deliberately unparseable: the Runtime records
+        // outcome_unknown while the request stays in its pending map. The
+        // second answer, same id, then settles the original exactly once.
+        record('mcp.effect', { kind: 'resource_read', value: uri });
+        respond(request.id, { contents: 'not-an-array' });
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        respond(request.id, {
+          contents: [
+            { uri, mimeType: 'text/plain', text: `EXT_RESOURCE_${revision}` },
+          ],
+        });
+        return;
+      }
+      if (uri === 'ext://notify') {
+        // The catalog change is announced while the read is still open: the
+        // delivery gate needs the notification and the in-flight call in the
+        // same connection window.
+        record('mcp.effect', { kind: 'resource_read', value: uri });
+        process.stdout.write(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'notifications/tools/list_changed',
+          }) + '\n',
+        );
+        result = {
+          contents: [
+            {
+              uri,
+              mimeType: 'text/plain',
+              text: `EXT_RESOURCE_${revision}`,
+            },
+          ],
+        };
+        break;
+      }
       if (uri === 'ext://hold') {
         record('mcp.hold', { value: uri });
         await waitForRelease(`${evidence}.release`);

@@ -108,6 +108,7 @@ import {
   workspaceRegistrationId,
   WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
+import { readDaemonDiscoveries } from './daemon-discovery.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
 import {
   ENSURE_KEEP_ALIVE_MS,
@@ -9334,6 +9335,16 @@ describe('runQwenServe runtime startup failures', () => {
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
       expect(primaryRuntime?.env.workflowsEnabledBySettings).toBe(true);
 
+      vi.mocked(settingsRuntime.reloadEnvironment).mockClear();
+      await workspace!.reloadModelProviders({
+        route: 'POST /workspaces/:workspace/models/reload',
+        workspaceCwd: tmpDir,
+      });
+      expect.soft(settingsRuntime.reloadEnvironment).not.toHaveBeenCalled();
+      expect.soft(primaryRuntime?.env.workflowsEnabledBySettings).toBe(true);
+      expect.soft(process.env['QWEN_TEST_RELOAD_LEAK']).toBeUndefined();
+      expect.soft(process.env['QWEN_TEST_REMOVED_FROM_DOTENV']).toBe('stale');
+
       await workspace!.reload({
         route: 'POST /workspace/reload',
         workspaceCwd: tmpDir,
@@ -9562,11 +9573,11 @@ describe('runQwenServe runtime startup failures', () => {
 
       failReloadRead = true;
       await expect(
-        workspace!.reloadModelProviders({
-          route: 'POST /workspace/auth/provider',
+        workspace!.reload({
+          route: 'POST /workspace/reload',
           workspaceCwd: tmpDir,
         }),
-      ).resolves.toEqual({ status: 'failed' });
+      ).resolves.toMatchObject({ runtimeEnvironmentApplied: false });
       expect(reloadEnvironment).toHaveBeenCalledTimes(2);
       expect(reloadEnvironment).toHaveBeenLastCalledWith(
         expect.any(Object),
@@ -9943,6 +9954,22 @@ describe('runQwenServe runtime startup failures', () => {
         'Restored workspace',
       ]);
       expect(restoredRemovable).toEqual([false, false, true]);
+      // `qwen daemon restart` replays only the explicit startup workspaces;
+      // the restored registration stays a removable registration.
+      expect(
+        readDaemonDiscoveries().entries.find(
+          (entry) => entry.record.primaryWorkspace === canonicalPrimary,
+        )?.record,
+      ).toMatchObject({
+        workspaces: [
+          canonicalPrimary,
+          canonicalExplicitSecondary,
+          canonicalRestoredSecondary,
+        ],
+        startupWorkspaces: [canonicalPrimary, canonicalExplicitSecondary],
+        web: false,
+        requireAuth: false,
+      });
       expect(restoredRegistrationIds).toEqual([
         [],
         [workspaceRegistrationId(canonicalExplicitSecondary)],

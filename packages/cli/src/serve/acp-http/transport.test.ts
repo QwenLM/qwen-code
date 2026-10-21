@@ -14,6 +14,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import WebSocket from 'ws';
 import type {
+  BridgeSession,
   BridgeSessionSummary,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -220,6 +221,8 @@ class FakeBridge {
   resumeRequests: string[] = [];
   replaySnapshot: SessionReplaySnapshot | undefined;
   loadState: Record<string, unknown> = { replayed: true };
+  generatedUi: BridgeSession['generatedUi'];
+  branchGeneratedUi: BridgeSession['generatedUi'];
   loadPartial: true | undefined;
   loadReplayError: string | undefined;
   branchRequests: Array<{
@@ -243,6 +246,7 @@ class FakeBridge {
       workspaceCwd: TEST_WORKSPACE,
       attached: this.spawnAttached,
       clientId: this.spawnClientId,
+      ...(this.generatedUi ? { generatedUi: this.generatedUi } : {}),
     };
   }
   async killSession(sessionId: string) {
@@ -268,6 +272,7 @@ class FakeBridge {
       attached: this.loadAttached,
       clientId: 'client-load',
       state: this.loadState,
+      ...(this.generatedUi ? { generatedUi: this.generatedUi } : {}),
       ...(this.loadPartial ? { partial: this.loadPartial } : {}),
       ...(this.loadReplayError ? { replayError: this.loadReplayError } : {}),
     };
@@ -290,6 +295,9 @@ class FakeBridge {
       workspaceCwd: TEST_WORKSPACE,
       attached: this.branchAttached,
       clientId: 'client-branch',
+      ...(this.branchGeneratedUi
+        ? { generatedUi: this.branchGeneratedUi }
+        : {}),
       state: this.loadState,
       displayName: req.name ?? 'Branch',
       forkedFrom: { sessionId, displayName: sessionId },
@@ -308,6 +316,7 @@ class FakeBridge {
       attached: true,
       clientId: 'client-resume',
       state: { resumed: true },
+      ...(this.generatedUi ? { generatedUi: this.generatedUi } : {}),
     };
   }
 
@@ -581,6 +590,14 @@ class FakeBridge {
   ) {
     this.lastSessionTasksOptions = opts;
     return { sessionId, tasks: [] };
+  }
+  async getSessionTaskRuntime(sessionId: string, taskId: string) {
+    return {
+      v: 1 as const,
+      sessionId,
+      taskId,
+      runtime: { outputTail: 'ready' },
+    };
   }
   async getSessionAgentsStatus(sessionId: string) {
     return { sessionId, tasks: [] };
@@ -1604,6 +1621,119 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       'mode',
     ]);
   });
+
+  it.each([
+    ['session/new', true],
+    ['session/new', false],
+    ['session/load', true],
+    ['session/load', false],
+    ['session/resume', true],
+    ['session/resume', false],
+  ] as const)(
+    '%s forwards owning-session Generated UI enabled=%s in both wire shapes',
+    async (method, enabled) => {
+      bridge.generatedUi = {
+        version: 1,
+        enabled,
+        ...(enabled ? {} : { reason: 'setting-disabled' }),
+      };
+      bridge.loadState = {};
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const frames = takeFrames(stream, 1);
+      const forgedStatus = { version: 1, enabled: !enabled };
+      const ack = await post(connId, {
+        jsonrpc: '2.0',
+        id: 72,
+        method,
+        params: {
+          ...(method === 'session/new'
+            ? { cwd: TEST_WORKSPACE }
+            : { sessionId: 'loaded-1' }),
+          generatedUi: forgedStatus,
+          _meta: { generatedUi: forgedStatus },
+        },
+      });
+      expect(ack.status).toBe(202);
+      const [reply] = (await frames) as Array<{
+        result: Record<string, unknown>;
+      }>;
+      expect(reply.result['generatedUi']).toEqual(bridge.generatedUi);
+      expect(reply.result['_meta']).toMatchObject({
+        generatedUi: bridge.generatedUi,
+      });
+    },
+  );
+
+  it.each(['session/new', 'session/load', 'session/resume'])(
+    '%s does not grant Generated UI from client or restored-state metadata',
+    async (method) => {
+      const forgedStatus = { version: 1, enabled: true };
+      bridge.loadState = {
+        generatedUi: forgedStatus,
+        _meta: { generatedUi: forgedStatus, other: { value: 1 } },
+      };
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const frames = takeFrames(stream, 1);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 73,
+        method,
+        params: {
+          ...(method === 'session/new'
+            ? { cwd: TEST_WORKSPACE }
+            : { sessionId: 'loaded-1' }),
+          generatedUi: forgedStatus,
+          _meta: { generatedUi: forgedStatus },
+        },
+      });
+      const [reply] = (await frames) as Array<{
+        result: Record<string, unknown>;
+      }>;
+      expect(reply.result).not.toHaveProperty('generatedUi');
+      expect(reply.result).not.toHaveProperty('_meta.generatedUi');
+      if (method === 'session/load') {
+        expect(reply.result['_meta']).toEqual({ other: { value: 1 } });
+      }
+    },
+  );
+
+  it.each([true, false, undefined])(
+    'session/fork returns the new owner Generated UI enabled=%s without inheriting the parent',
+    async (enabled) => {
+      bridge.generatedUi = { version: 1, enabled: enabled !== true };
+      bridge.branchGeneratedUi =
+        enabled === undefined ? undefined : { version: 1, enabled };
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const frames = takeFrames(stream, 2);
+      await newSession(connId);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 74,
+        method: 'session/fork',
+        params: {
+          sessionId: 'sess-1',
+          generatedUi: bridge.generatedUi,
+          _meta: { generatedUi: bridge.generatedUi },
+        },
+      });
+      const [, reply] = (await frames) as Array<{
+        result: Record<string, unknown>;
+      }>;
+      expect(reply.result['sessionId']).toBe('branch-1');
+      if (enabled === undefined) {
+        expect(reply.result).not.toHaveProperty('generatedUi');
+        expect(reply.result).not.toHaveProperty('_meta.generatedUi');
+      } else {
+        expect(reply.result['generatedUi']).toEqual(bridge.branchGeneratedUi);
+        expect(reply.result['_meta']).toMatchObject({
+          generatedUi: bridge.branchGeneratedUi,
+        });
+      }
+    },
+  );
 
   it('does not grant session ownership until the reply is delivered', async () => {
     const connId = await initialize();
@@ -4380,9 +4510,15 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   it('session/load reports partial replay status under qwen _meta', async () => {
+    bridge.generatedUi = { version: 1, enabled: true };
     bridge.loadState = {
       replayed: true,
-      _meta: { qwen: { existing: 'kept' }, other: { value: 1 } },
+      generatedUi: { version: 1, enabled: false },
+      _meta: {
+        generatedUi: { version: 1, enabled: false },
+        qwen: { existing: 'kept' },
+        other: { value: 1 },
+      },
     };
     bridge.loadPartial = true;
     bridge.loadReplayError = 'replay boom';
@@ -4400,6 +4536,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       id: number;
       result: {
         replayed: boolean;
+        generatedUi?: BridgeSession['generatedUi'];
         partial?: boolean;
         replayError?: string;
         _meta?: {
@@ -4417,7 +4554,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.id).toBe(20);
     expect(frame.result).not.toHaveProperty('partial');
     expect(frame.result).not.toHaveProperty('replayError');
+    expect(frame.result.generatedUi).toEqual(bridge.generatedUi);
     expect(frame.result._meta).toEqual({
+      generatedUi: bridge.generatedUi,
       qwen: {
         existing: 'kept',
         sessionLoadReplay: {
@@ -9280,6 +9419,55 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         includeWorkflows: true,
       });
     });
+
+    it.each([
+      { sessionId: 'sess-1', taskId: 'bg_1', owned: true, valid: true },
+      { sessionId: 'sess-1', taskId: '', owned: true, valid: false },
+      { sessionId: 'sess-1', taskId: 123, owned: true, valid: false },
+      {
+        sessionId: 'other-session',
+        taskId: 'bg_1',
+        owned: false,
+        valid: false,
+      },
+    ])(
+      '_qwen/session/task_runtime validates ownership and task id: $sessionId / $taskId',
+      async ({ sessionId, taskId, owned, valid }) => {
+        const read = vi.spyOn(bridge, 'getSessionTaskRuntime');
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 99,
+          method: 'session/new',
+          params: {},
+        });
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 58,
+          method: '_qwen/session/task_runtime',
+          params: { sessionId, taskId },
+        });
+        const frames = await takeFrames(await streamRes, 2);
+        if (valid) {
+          expect(frames[1]).toMatchObject({
+            result: { sessionId, taskId, runtime: { outputTail: 'ready' } },
+          });
+          expect(read).toHaveBeenCalledWith(sessionId, taskId);
+        } else {
+          expect(frames[1]).toMatchObject({
+            error: {
+              code: -32602,
+              message: expect.stringContaining(owned ? 'taskId' : 'not owned'),
+            },
+          });
+          expect(read).not.toHaveBeenCalled();
+        }
+        read.mockRestore();
+      },
+    );
 
     it('_qwen/session/tasks/cancel forwards the task and trusted client context', async () => {
       const connId = await initialize();

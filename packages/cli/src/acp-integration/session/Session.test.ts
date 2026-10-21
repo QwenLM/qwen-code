@@ -21,6 +21,11 @@ import {
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
+import {
+  getStartupContextLength,
+  markCompressedHistory,
+} from '@qwen-code/qwen-code-core/core/environmentContext.js';
+import { detectTurnInterruption } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import type { DaemonToolLoopState } from './Session.js';
 import type {
@@ -53,7 +58,10 @@ import {
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
-import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import {
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
+} from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
 import {
@@ -550,6 +558,8 @@ describe('Session', () => {
     | undefined;
   let unsubscribeApprovalModeChange: ReturnType<typeof vi.fn>;
   let mockChatRecordingService: {
+    supportsMessageGroupDeletion: ReturnType<typeof vi.fn>;
+    deleteMessageGroups: ReturnType<typeof vi.fn>;
     readActiveTranscriptChain: ReturnType<typeof vi.fn>;
     recordTurnAttempt: ReturnType<typeof vi.fn>;
     recordTurnResult: ReturnType<typeof vi.fn>;
@@ -942,6 +952,8 @@ describe('Session', () => {
     unsubscribeApprovalModeChange = vi.fn();
 
     mockChatRecordingService = {
+      supportsMessageGroupDeletion: vi.fn().mockReturnValue(true),
+      deleteMessageGroups: vi.fn(),
       readActiveTranscriptChain: vi.fn().mockResolvedValue([] as ChatRecord[]),
       recordTurnAttempt: vi.fn().mockResolvedValue(undefined),
       recordTurnResult: vi.fn(),
@@ -1145,6 +1157,7 @@ describe('Session', () => {
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
       getWorkflowRunRegistry: vi.fn().mockReturnValue(mockWorkflowRunRegistry),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
+      getFileReadCache: vi.fn().mockReturnValue({ clear: vi.fn() }),
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
       isSkillEnabled: vi.fn(
         (skill: { name: string }) =>
@@ -6635,6 +6648,22 @@ describe('Session', () => {
   });
 
   describe('continueLastTurn', () => {
+    it('uses classifiable recovery history before the bounded pre-check', async () => {
+      const getHistoryForRecovery = vi.fn(() => [
+        { role: 'model', parts: [{ text: 'Done.' }] },
+      ]);
+      Object.assign(mockChat, { getHistoryForRecovery });
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'restored context' }] },
+      ]);
+
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'clean',
+        canContinue: false,
+      });
+      expect(getHistoryForRecovery).toHaveBeenCalledWith(50);
+    });
+
     it.each(['user', 'unknown', 'interrupted'] as const)(
       'checks raw transcript cancellation before admission (%s)',
       async (reason) => {
@@ -8850,6 +8879,224 @@ describe('Session', () => {
     });
   });
 
+  describe('deleteMessageGroups', () => {
+    it('keeps the summary and surviving prompt identities while removing selected raw turns and snapshots', async () => {
+      const summary: Content = {
+        role: 'user',
+        parts: [{ text: 'Existing summary' }],
+      };
+      const deleted: Content = { role: 'user', parts: [{ text: 'delete me' }] };
+      const kept: Content = { role: 'user', parts: [{ text: 'keep me' }] };
+      markApiHistoryPrompt(deleted, 'internal-1');
+      markApiHistoryPrompt(kept, 'internal-2');
+      const history = [
+        summary,
+        { role: 'model', parts: [{ text: 'ack' }] },
+        deleted,
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'tool', name: 'read_file', args: {} } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'tool',
+                name: 'read_file',
+                response: { output: 'old contents' },
+              },
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'deleted reply' }] },
+        kept,
+        { role: 'model', parts: [{ text: 'kept reply' }] },
+      ];
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.deleteMessageGroups.mockResolvedValue({
+        deletedGroupIds: ['group-1'],
+        deletedPromptIds: ['daemon-1'],
+        removedApiPromptIds: ['internal-1'],
+      });
+      mockFileHistoryService.getSnapshots.mockReturnValue([
+        { promptId: 'internal-1' },
+        { promptId: 'internal-2' },
+      ]);
+      mockChatRecordingService.readActiveTranscriptChain.mockResolvedValue([
+        {
+          type: 'system',
+          subtype: 'chat_compression',
+          uuid: 'compression',
+          parentUuid: null,
+          systemPayload: {
+            compressedHistory: [summary, history[1], kept, history[7]],
+            promptIds: [null, null, 'internal-2', null],
+          },
+        },
+      ]);
+      await session.deleteMessageGroups({
+        snapshot: 'snapshot',
+        groupIds: ['group-1'],
+      });
+      expect(mockLlmClient.setHistory).toHaveBeenCalledWith([
+        summary,
+        history[1],
+        kept,
+        history[7],
+      ]);
+      const installed = vi.mocked(mockChat.setHistory).mock.calls.at(-1)![0];
+      expect(installed[0]).toEqual(summary);
+      expect(getApiHistoryPromptId(installed[2])).toBe('internal-2');
+      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith([
+        { promptId: 'internal-2' },
+      ]);
+      expect(mockFileHistoryService.rewind).not.toHaveBeenCalled();
+      expect(mockLlmClient.tryCompressChat).not.toHaveBeenCalled();
+      expect(session.isTurnIdle()).toBe(true);
+    });
+
+    it('can remove the only turn and keeps a fully compressed deletion context unchanged', async () => {
+      const user: Content = { role: 'user', parts: [{ text: 'only turn' }] };
+      markApiHistoryPrompt(user, 'only');
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
+        user,
+        { role: 'model', parts: [{ text: 'reply' }] },
+      ]);
+      mockChatRecordingService.deleteMessageGroups.mockResolvedValue({
+        deletedGroupIds: ['only'],
+        deletedPromptIds: ['daemon-only'],
+        removedApiPromptIds: ['only'],
+      });
+      await session.deleteMessageGroups({ snapshot: 'v1', groupIds: ['only'] });
+      expect(mockLlmClient.setHistory).toHaveBeenLastCalledWith([]);
+      const summary = [
+        { role: 'user', parts: [{ text: 'summary containing only' }] },
+      ];
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(summary);
+      mockChatRecordingService.readActiveTranscriptChain.mockResolvedValue([
+        {
+          type: 'system',
+          subtype: 'chat_compression',
+          uuid: 'compression',
+          parentUuid: null,
+          systemPayload: { compressedHistory: summary, promptIds: [null] },
+        },
+      ]);
+      await session.deleteMessageGroups({ snapshot: 'v2', groupIds: ['only'] });
+      expect(mockLlmClient.setHistory).toHaveBeenLastCalledWith(summary);
+    });
+
+    it('does not change memory or snapshots when persistence fails', async () => {
+      mockChatRecordingService.deleteMessageGroups.mockRejectedValue(
+        new Error('disk failure'),
+      );
+      await expect(
+        session.deleteMessageGroups({
+          snapshot: 'snapshot',
+          groupIds: ['group'],
+        }),
+      ).rejects.toThrow('disk failure');
+      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(
+        mockFileHistoryService.restoreFromSnapshots,
+      ).not.toHaveBeenCalled();
+      expect(session.isTurnIdle()).toBe(true);
+    });
+
+    it('holds admission closed if context installation fails after durable deletion', async () => {
+      mockChatRecordingService.deleteMessageGroups.mockResolvedValue({
+        deletedGroupIds: ['group'],
+        deletedPromptIds: ['prompt'],
+        removedApiPromptIds: [],
+      });
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([]);
+      vi.mocked(mockChat.setHistory).mockImplementationOnce(() => {
+        throw new Error('context failed');
+      });
+      await expect(
+        session.deleteMessageGroups({ snapshot: 'v1', groupIds: ['group'] }),
+      ).rejects.toMatchObject({
+        data: {
+          errorKind: 'message_deletion_context_unavailable',
+          deletedGroupIds: ['group'],
+        },
+      });
+      expect(session.isTurnIdle()).toBe(true);
+      await expect(session.assertCanStartTurn()).rejects.toMatchObject({
+        data: {
+          errorKind: 'session_history_context_unavailable',
+        },
+      });
+      await expect(
+        session.deleteMessageGroups({ snapshot: 'v2', groupIds: ['other'] }),
+      ).rejects.toMatchObject({
+        data: { errorKind: 'session_history_context_unavailable' },
+      });
+      expect(
+        mockChatRecordingService.deleteMessageGroups,
+      ).toHaveBeenCalledTimes(1);
+      await session.waitForActiveTurnsToSettle();
+      await session.recoverMessageDeletionContext();
+      await expect(session.assertCanStartTurn()).resolves.toBeUndefined();
+    });
+
+    it('retains background notifications without spending retries until deleted context recovers', async () => {
+      vi.useFakeTimers();
+      try {
+        mockChatRecordingService.deleteMessageGroups.mockResolvedValue({
+          deletedGroupIds: ['group'],
+          deletedPromptIds: ['prompt'],
+          removedApiPromptIds: [],
+        });
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue([]);
+        vi.mocked(mockChat.setHistory).mockImplementationOnce(() => {
+          throw new Error('context failed');
+        });
+        await expect(
+          session.deleteMessageGroups({ snapshot: 'v1', groupIds: ['group'] }),
+        ).rejects.toThrow('reopened');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(async () => createEmptyStream());
+        await session.enqueueBackgroundNotification({
+          displayText: 'Worker completed.',
+          modelText: '<task-notification />',
+          taskId: 'queued-after-delete',
+          status: 'completed',
+          kind: 'agent',
+        });
+        await vi.advanceTimersByTimeAsync(8_000);
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(
+          (session as unknown as { notificationAdmissionDeferred: boolean })
+            .notificationAdmissionDeferred,
+        ).toBe(false);
+        await session.recoverMessageDeletionContext();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('rejects an active history mutation before touching storage', async () => {
+      const release = session.beginHistoryMutation();
+      await expect(
+        session.deleteMessageGroups({
+          snapshot: 'snapshot',
+          groupIds: ['group'],
+        }),
+      ).rejects.toThrow('busy');
+      expect(
+        mockChatRecordingService.deleteMessageGroups,
+      ).not.toHaveBeenCalled();
+      release();
+    });
+  });
+
   describe('rewindToTurn', () => {
     it('clears the active-todo chain so a rewound turn starts fresh', async () => {
       // A registered reminder would otherwise make the post-rewind turn
@@ -9350,6 +9597,73 @@ describe('Session', () => {
       );
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
+
+    it.each([false, true])(
+      'preserves compressed context boundaries across edit rollback JSON (startup: %s)',
+      (startup) => {
+        const history: Content[] = [
+          ...(startup
+            ? [
+                {
+                  role: 'user',
+                  parts: [
+                    { text: '<system-reminder>\nStartup\n</system-reminder>' },
+                  ],
+                },
+              ]
+            : []),
+          {
+            role: 'user',
+            parts: [{ text: 'Summary. Resume the prior task...' }],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'Got it. Thanks for the additional context!' }],
+          },
+        ];
+        markCompressedHistory(history);
+        const input: Content = {
+          role: 'user',
+          parts: [
+            {
+              text: 'Recently accessed file (full current content embedded):\n\n## /tmp/a.ts\n\n```\nconst a = 1;\n```',
+            },
+          ],
+        };
+        history.push(input);
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+        const snapshot = session.captureHistorySnapshot();
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue(
+          history.slice(0, -1),
+        );
+        expect(session.getRewindableUserTurnCount()).toBe(0);
+        session.restoreHistory(JSON.parse(JSON.stringify(snapshot)));
+        const restored = vi.mocked(mockChat.setHistory).mock.calls.at(-1)![0];
+        expect(detectTurnInterruption(restored)).toEqual({
+          kind: 'interrupted_prompt',
+          parts: input.parts,
+        });
+        expect(JSON.stringify(restored)).toBe(JSON.stringify(snapshot));
+
+        const older: Content[] = JSON.parse(JSON.stringify(history));
+        older[older.length - 1] = {
+          role: 'user',
+          parts: [{ text: 'Real input.' }],
+        };
+        // A later capture detects the attachment shape as a longer prefix.
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue(
+          JSON.parse(JSON.stringify(history)),
+        );
+        session.captureHistorySnapshot();
+        session.restoreHistory(older);
+        expect(
+          getStartupContextLength(
+            vi.mocked(mockChat.setHistory).mock.calls.at(-1)![0],
+            { includeCompressed: true },
+          ),
+        ).toBe(startup ? 3 : 2);
+      },
+    );
 
     it('restores a captured history snapshot', () => {
       const history: Content[] = [
@@ -12223,35 +12537,66 @@ describe('Session', () => {
         expect(payload.resultTruncated).toBeUndefined();
       });
 
-      it('caps resultText at TURN_RESULT_TEXT_MAX_CHARS and flags truncation', async () => {
-        const longText = 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS + 100);
-        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
-          createStreamWithChunks([
-            {
-              type: core.StreamEventType.CHUNK,
-              value: {
-                candidates: [{ content: { parts: [{ text: longText }] } }],
+      it.each([
+        {
+          name: 'BMP overflow',
+          text: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS + 100),
+          expected: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS),
+          truncated: true,
+        },
+        {
+          name: 'surrogate pair crossing the cap',
+          text: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 1) + '🙂y',
+          expected: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 1),
+          truncated: true,
+        },
+        {
+          name: 'surrogate pair ending at the cap',
+          text: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂',
+          expected: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂',
+          truncated: false,
+        },
+        {
+          name: 'complete surrogate pair before overflow',
+          text: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂y',
+          expected: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂',
+          truncated: true,
+        },
+      ])(
+        'caps recorded turn text at TURN_RESULT_TEXT_MAX_CHARS ($name)',
+        async ({ text, expected, truncated }) => {
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text }] } }],
+                },
               },
+            ]),
+          );
+
+          await session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text }],
             },
-          ]),
-        );
+            trustedContext,
+          );
 
-        await session.prompt(
-          {
-            sessionId: 'test-session-id',
-            prompt: [{ type: 'text', text: 'long' }],
-          },
-          trustedContext,
-        );
-
-        const payload =
-          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
-        expect(payload.resultText).toHaveLength(
-          core.TURN_RESULT_TEXT_MAX_CHARS,
-        );
-        expect(payload.resultTruncated).toBe(true);
-        expect(payload.resultCode).toBe('RESULT_TEXT_TRUNCATED');
-      });
+          const payload =
+            mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+          expect(payload.promptText).toBe(expected);
+          expect(payload.promptTextTruncated).toBe(
+            truncated ? true : undefined,
+          );
+          expect(payload.resultText).toBe(expected);
+          expect(payload.resultTruncated).toBe(truncated ? true : undefined);
+          expect(payload.resultCode).toBe(
+            truncated ? 'RESULT_TEXT_TRUNCATED' : undefined,
+          );
+        },
+      );
 
       it('keeps the same surface contract when many chunks exceed the cap', async () => {
         const chunk = 'a'.repeat(
@@ -19727,6 +20072,7 @@ describe('Session', () => {
             code: 'LOOP_DETECTED',
             errorKind: 'loop_detected',
             loopType: core.LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+            loopReason: core.LoopReason.PROVIDER_DUPLICATE_ID,
           },
         });
 
@@ -20389,6 +20735,12 @@ describe('Session', () => {
             code: 'LOOP_DETECTED',
             errorKind: 'loop_detected',
             loopType: core.LoopType.TURN_TOOL_CALL_CAP,
+            // The 102nd call reuses the first id and is deduplicated, so the
+            // 101 remaining calls count before the explicit cap of 100 skips
+            // the batch.
+            loopReason: core.LoopReason.EXPLICIT_CAP,
+            toolCallCount: 101,
+            toolCallLimit: 100,
           },
         });
 
@@ -20735,6 +21087,10 @@ describe('Session', () => {
             'Stopping ACP turn after the same tool call repeated 6 times.',
           ),
         );
+        expect(toolLoopState).toMatchObject({
+          loopType: core.LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          loopDetail: { loopReason: core.LoopReason.REPEATED_CALL },
+        });
       });
 
       it('accumulates repeat counts across responses against the same loop state', async () => {
@@ -28733,6 +29089,7 @@ describe('Session', () => {
           mockConfig,
           expect.objectContaining({
             loop_type: core.LoopType.TURN_TOOL_CALL_CAP,
+            loop_reason: core.LoopReason.EXPLICIT_CAP,
           }),
           {},
         );
@@ -51285,6 +51642,9 @@ describe('Session', () => {
       expect(toolLoopState.loopType).toBe(
         core.LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
       );
+      expect(toolLoopState.loopDetail).toEqual({
+        loopReason: core.LoopReason.PROVIDER_DUPLICATE_ID,
+      });
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledTimes(
         3,
       );

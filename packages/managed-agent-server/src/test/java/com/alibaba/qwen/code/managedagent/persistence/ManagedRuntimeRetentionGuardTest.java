@@ -158,7 +158,7 @@ class ManagedRuntimeRetentionGuardTest {
         child();
         projection();
         jdbc.update("UPDATE ma_session_record SET task_state = 'cancelled', settled_at = 2");
-        var binding = mock(RuntimeBindingRecord.class);
+        var binding = binding("binding", 4);
         when(binding.getRequest()).thenReturn(request("child"));
         try (var connection = source.getConnection()) {
             assertThat(guard.bindingReferenced(connection, binding)).isFalse();
@@ -179,7 +179,7 @@ class ManagedRuntimeRetentionGuardTest {
 
     @Test
     void childLineageIsReadOnTheSweepConnection() throws Exception {
-        var binding = mock(RuntimeBindingRecord.class);
+        var binding = binding("binding", 4);
         when(binding.getRequest()).thenReturn(request("child"));
         try (var connection = source.getConnection()) {
             connection.setAutoCommit(false);

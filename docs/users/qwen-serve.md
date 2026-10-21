@@ -124,13 +124,22 @@ The `limits.maxPendingPromptsPerSession` field advertises the active per-session
 `qwen serve` publishes a local discovery record for each live listener, so a second terminal does not have to parse stdout or search `ps`:
 
 ```bash
+qwen daemon start --port 4170      # detached; waits for the discovery record
 qwen daemon status                 # ports, PIDs, workspaces, and health
 qwen daemon status --json          # one JSON object per daemon
+qwen daemon status --detail        # version, uptime, sessions, and issues
 qwen daemon logs --port 4170 -f    # follow the recorded log file
 qwen daemon stop --port 4170       # SIGTERM the recorded process
+qwen daemon restart --port 4170    # stop, then start with the recorded settings
 ```
 
 Records live under the runtime directory (`$QWEN_RUNTIME_DIR`, `$QWEN_HOME`, or `~/.qwen`) in `daemon/daemon-<port>.json`. They are `0600` on POSIX and never contain the bearer token. A record left by a crashed daemon is reported as `stale`; `status --prune` or `stop` removes it. `stop` sends `SIGTERM` only after the listener answers `/health` or its PID is still alive; `--force` adds `SIGKILL` after the graceful timeout. When more than one daemon is registered, pass `--port`; `stop` also accepts `--all`.
+
+`status --detail` asks the daemon for its own status: version, uptime, active sessions, and issue count. It sends `QWEN_SERVER_TOKEN` only when the record says the daemon uses a bearer and the recorded process is alive, addressable, and started when the record says it did; a record whose recorded PID namespace this process cannot address is never sent the bearer. Without a token, a daemon that requires a bearer reports that authentication is required.
+
+`qwen daemon start` spawns `qwen serve` detached, waits for its discovery record, and prints the bound URL, PID, log path, and stop command. It drops the launching session's identifiers and private capability bindings so the child is a fresh daemon, keeps the operator's model/auth environment, and passes `--no-token-qr` so the startup log cannot contain a token. Workspaces are canonicalized, relative runtime directories are pinned to the launching directory before spawn, and Windows drive-relative roots are resolved against the launching drive. A non-loopback bind requires `QWEN_SERVER_TOKEN`; use `qwen serve` directly if you want an ephemeral token. The startup log is `0600` and is removed after a successful start. `--wait` waits until the runtime is serving (no `daemon_runtime_starting` issue and not `error`); a timeout keeps the startup log and exits non-zero.
+
+`qwen daemon restart` stops one registered daemon through `daemon stop` and starts it again through `daemon start --wait` on its recorded port and hostname, with its recorded startup workspaces, Web Shell mode, and `--require-auth` setting; `--web`/`--no-web` and `--require-auth`/`--no-require-auth` override the record. Persisted workspace registrations are restored by the new daemon itself, not replayed as `--workspace`. Every other `qwen serve` option (for example `--profile`, `--channel`, `--allow-origin`, or rate limits) resets to its default, so relaunch a daemon configured with those through `qwen serve`. Before stopping anything, restart refuses an HTTPS daemon, a startup workspace that no longer exists, a run from inside a shell the daemon hosts (such as its Web Shell terminal), and a bearer daemon without `--token` or `QWEN_SERVER_TOKEN`; a running bearer daemon must accept the token, so restart never rotates the credential. A token kept only in a workspace `.env` or settings file is not read by `qwen daemon`. `--force` is forwarded to `daemon stop` only when you pass it. If the recorded port is taken, the daemon starts on the next free port and restart exits non-zero.
 
 ### Workspace registration capacity
 

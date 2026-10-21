@@ -62,6 +62,10 @@ function createHarness(trusted = true, runtimeLive = false) {
     .fn()
     .mockResolvedValue(runtimeStatus);
   const getSkillsConfigStatus = vi.fn().mockResolvedValue(configStatus);
+  const getSkillsSnapshot = vi.fn(async (workspaceCwd: string) => ({
+    workspaceCwd,
+    skills: [{ name: 'enabled', description: 'Test', body: 'BODY' }],
+  }));
   const invalidateSkillsConfigStatus = vi.fn();
   const invalidateWorkspaceSkillsStatus = vi.fn();
   const installWorkspaceSkill = vi.fn().mockResolvedValue({
@@ -151,6 +155,7 @@ function createHarness(trusted = true, runtimeLive = false) {
     safeBody: (req: Request) => req.body as Record<string, unknown>,
     sendBridgeError,
     getSkillsConfigStatus,
+    getSkillsSnapshot,
     invalidateSkillsConfigStatus,
   };
   registerWorkspaceSkillsRoutes(app, {
@@ -177,6 +182,7 @@ function createHarness(trusted = true, runtimeLive = false) {
     getWorkspaceSkillsConfigStatus,
     getWorkspaceSkillsRuntimeStatus,
     getSkillsConfigStatus,
+    getSkillsSnapshot,
     invalidateSkillsConfigStatus,
     installWorkspaceSkill,
     deleteWorkspaceSkill,
@@ -186,6 +192,41 @@ function createHarness(trusted = true, runtimeLive = false) {
 }
 
 describe('workspace Skill management routes', () => {
+  it('exports only the explicitly selected trusted source and rejects missing or untrusted sources', async () => {
+    const h = createHarness();
+    const response = await request(h.app)
+      .get('/workspaces/workspace-1/config/skills/snapshot')
+      .expect(200);
+    expect(response.body).toMatchObject({
+      workspaceCwd: '/workspace',
+      skills: [{ body: 'BODY' }],
+    });
+    expect(response.headers['cache-control']).toBe('no-store');
+    await request(h.app)
+      .get('/workspaces/missing/config/skills/snapshot')
+      .expect(400);
+    expect(h.getSkillsSnapshot).toHaveBeenCalledTimes(1);
+    const untrusted = createHarness(false);
+    await request(untrusted.app)
+      .get('/workspaces/workspace-1/config/skills/snapshot')
+      .expect(403);
+    expect(untrusted.getSkillsSnapshot).not.toHaveBeenCalled();
+    h.getSkillsSnapshot.mockImplementation(async (cwd) => {
+      h.workspaceRegistry
+        .getManagedEntryByWorkspaceId('workspace-1')!
+        .current!.guard.close();
+      return {
+        workspaceCwd: cwd,
+        skills: [{ name: 'enabled', description: 'Test', body: 'BODY' }],
+      };
+    });
+    const stale = await request(h.app).get(
+      '/workspaces/workspace-1/config/skills/snapshot',
+    );
+    expect(stale.status).toBeGreaterThanOrEqual(400);
+    expect(stale.text).not.toContain('BODY');
+  });
+
   it('refreshes only the selected secondary runtime and rejects primary-owned IDs', async () => {
     const h = createHarness();
     const secondaryRefresh = vi.fn().mockResolvedValue({

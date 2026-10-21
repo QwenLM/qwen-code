@@ -105,6 +105,8 @@ export interface DaemonMessageAuthor {
  * cross-cutting field is declared once rather than on each role.
  */
 export interface DaemonMessageMeta {
+  sourceRecordIds?: string[];
+  localCommandId?: string;
   backgroundTurn?: DaemonBackgroundTurn;
   /**
    * Admitted prompt this message belongs to, copied from the daemon-stamped
