@@ -305,8 +305,8 @@ public class ManagedActionStore {
                             && continuation.path("calls").get(0).path("actionId").asText().equals(id));
                     jdbc.update("UPDATE ma_session SET plan_enabled=FALSE, approval_revision=approval_revision+1,"
                                     + " version=version+1, gmt_modified=? WHERE tenant_id=? AND session_id=? AND plan_enabled=TRUE"
-                                    + " AND approval_revision=(SELECT approval_revision FROM ma_turn WHERE tenant_id=?"
-                                    + " AND session_id=? AND prompt_id=? AND plan_enabled=TRUE)",
+                                    + " AND EXISTS (SELECT 1 FROM ma_turn WHERE tenant_id=? AND session_id=?"
+                                    + " AND prompt_id=? AND plan_enabled=TRUE AND status IN ('ACCEPTED','RUNNING'))",
                             event.path("occurredAt").asLong(), tenantId, sessionId, tenantId, sessionId,
                             options.path("turnId").asText());
                 }
