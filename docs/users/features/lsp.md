@@ -41,6 +41,7 @@ You need to have the language server for your programming language installed:
 | Rust                  | rust-analyzer              | [Installation guide](https://rust-analyzer.github.io/manual.html#installation) |
 | C/C++                 | clangd                     | Install LLVM/clangd via your package manager                                   |
 | Java                  | jdtls                      | Install JDTLS and a JDK                                                        |
+| C#                    | roslyn-language-server     | `dotnet tool install --global roslyn-language-server --prerelease` (.NET 10+)  |
 
 ## Configuration
 
@@ -102,6 +103,30 @@ Example:
   "java": {
     "command": "jdtls",
     "args": ["-configuration", ".jdtls-config", "-data", ".jdtls-workspace"]
+  }
+}
+```
+
+### C# (Roslyn) configuration
+
+Dependencies:
+
+- .NET 10 runtime or later (`dotnet --version`).
+- The `roslyn-language-server` global tool:
+  `dotnet tool install --global roslyn-language-server --prerelease`. See the
+  [Roslyn language server README](https://github.com/dotnet/roslyn/blob/main/src/LanguageServer/roslyn-language-server/README.md)
+  for current prerequisites and options.
+
+Example:
+
+```json
+{
+  "csharp": {
+    "command": "roslyn-language-server",
+    "args": ["--stdio", "--autoLoadProjects"],
+    "extensionToLanguage": {
+      ".cs": "csharp"
+    }
   }
 }
 ```
@@ -367,10 +392,10 @@ You can override trust requirements for specific servers in their configuration:
 
 ### Debugging
 
-LSP does not have a separate debug flag. Use Qwen Code's normal debug mode together with the LSP feature flag:
+LSP does not have a separate debug flag. Enable LSP through the setting (or the flag), then turn on Qwen Code's normal debug mode:
 
 ```bash
-qwen --experimental-lsp --debug
+qwen --debug
 ```
 
 Debug logs are written to the session debug log directory. To check LSP-related entries:
@@ -461,16 +486,17 @@ Extensions can provide LSP server configurations through the `lspServers` field 
 
 Use the `tools.lspEnabled` setting (user, system or system-defaults scope) or the `--experimental-lsp` flag. `QWEN_CODE_ENABLE_LSP=1` and `QWEN_CODE_DISABLE_LSP=1` override both (disable wins); workspace-scoped values are ignored.
 
-```bash
-qwen --experimental-lsp
+```jsonc
+// ~/.qwen/settings.json (user scope)
+{ "tools": { "lspEnabled": true } }
 ```
 
 ### Q: How do I know which language servers are running?
 
-Start Qwen Code with LSP and debug mode enabled:
+Start Qwen Code with LSP enabled (setting or flag) and debug mode on:
 
 ```bash
-qwen --experimental-lsp --debug
+qwen --debug
 ```
 
 Then run `/status` for a short summary, `/lsp` for per-server status, or inspect the debug log:
