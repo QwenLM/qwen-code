@@ -568,8 +568,12 @@
                                  cell adds 134 s (2x its measured 67.2 s):
                                  healthy 9712 s, fork 10312 s, Verify 182
                                  minutes with margin above the 10912-second
+                                 fork-plus-wrap sum. The FG11d close-in-flight
+                                 refusal cell adds 9 s (2x its measured 4.5 s):
+                                 healthy 9721 s, fork 10321 s, Verify 183
+                                 minutes with margin above the 10921-second
                                  fork-plus-wrap sum. -->
-                            <forkedProcessTimeoutInSeconds>10312</forkedProcessTimeoutInSeconds>
+                            <forkedProcessTimeoutInSeconds>10321</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
