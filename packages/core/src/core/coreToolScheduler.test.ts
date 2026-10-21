@@ -2015,6 +2015,94 @@ describe('CoreToolScheduler', () => {
     expect(third.response.error?.message).toContain('RETRY LOOP DETECTED');
   });
 
+  it('gives bridge refusals their own counter and directive (#13073)', async () => {
+    // A refusal (the bridge could not resolve the envelope) and the target's
+    // own argument-schema failure are different causes: the refusal's
+    // remedy is "call the tool directly", so it must not share the
+    // validation counter nor carry the schema-recheck directive.
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: toolMap(
+          new MockTool({ name: ToolNames.TOOL_CALL }),
+          new MockTool({ name: 'visibleToolA' }),
+        ),
+      });
+
+    const first = await completeBridgeCall(
+      scheduler,
+      onAllToolCallsComplete,
+      'ref-1',
+      'visibleToolA',
+      'p-ref',
+    );
+    const second = await completeBridgeCall(
+      scheduler,
+      onAllToolCallsComplete,
+      'ref-2',
+      'visibleToolA',
+      'p-ref',
+    );
+    const third = await completeBridgeCall(
+      scheduler,
+      onAllToolCallsComplete,
+      'ref-3',
+      'visibleToolA',
+      'p-ref',
+    );
+
+    for (const completed of [first, second]) {
+      expectStatus(completed, 'error');
+      expect(completed.response.error?.message).not.toContain(
+        'RETRY LOOP DETECTED',
+      );
+    }
+    expectStatus(third, 'error');
+    expect(third.response.error?.message).toContain('RETRY LOOP DETECTED');
+    expect(third.response.error?.message).toContain(
+      'call the target tool directly',
+    );
+  });
+
+  it("keeps an ambiguity refusal out of a registered tool's counter (#13073)", async () => {
+    // The registry holds `foo` and `Foo`; an envelope naming `FOO` is
+    // ambiguous by case. That refusal names neither tool's schema, so it
+    // must not share the real `foo` tool's validation counter.
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: toolMap(
+          new MockTool({ name: ToolNames.TOOL_CALL }),
+          new MockTool({ name: 'foo' }),
+          new MockTool({ name: 'Foo' }),
+        ),
+      });
+
+    const refusal = await completeBridgeCall(
+      scheduler,
+      onAllToolCallsComplete,
+      'amb-1',
+      'FOO',
+      'p-amb',
+    );
+    expectStatus(refusal, 'error');
+    expect(refusal.response.error?.message).toContain('matches more than one');
+
+    // Two direct failures of the real `foo` tool: its own counter reaches 2
+    // and stays there — the refusal must not have pre-tripped it.
+    for (const id of ['foo-1', 'foo-2']) {
+      const completed = await completeBridgeCall(
+        scheduler,
+        onAllToolCallsComplete,
+        id,
+        'foo',
+        'p-foo',
+      );
+      expectStatus(completed, 'error');
+      expect(completed.response.error?.message).not.toContain(
+        'RETRY LOOP DETECTED',
+      );
+    }
+  });
+
   it('names the target when a bridged call fails its own validation (#12889)', async () => {
     const { completed, deferred } = await runBridgeCall('bridge-invalid-args', {
       params: URL_REQUIRED_PARAMS,
@@ -14358,8 +14446,12 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     expect(msg).not.toContain(truncationGuidance);
     expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
 
+    // Turn 3: the third validation failure of the same cause reaches the
+    // threshold. The cause-matched guidance (this call's truncation note)
+    // is KEPT alongside the stop directive — replacing it there would blame
+    // the tool's schema for a provider-side truncation (#13073).
     msg = await send(invalid('c3', true));
-    expect(msg).not.toContain(truncationGuidance);
+    expect(msg).toContain(truncationGuidance);
     expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
   });
 
@@ -14376,6 +14468,34 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     // Cause-class accumulation deliberately spans distinct wordings, so the
     // directive must not still claim the failures share "the same error".
     expect(fired).not.toContain('with the same error');
+  });
+
+  it('counts an alias-mixed direct-call loop toward one counter (#13073)', async () => {
+    // `search_file_content` is a legacy alias of `grep_search`; the scheduler
+    // resolves both through canonicalToolName, so the retry counter must key
+    // on the canonical name or the loop never reaches the threshold.
+    const send = createRetryScheduler([
+      createStrictTool(
+        'grep_search',
+        'GrepSearch',
+        'A grep-ish tool requiring a string value param.',
+      ),
+    ]);
+
+    for (let i = 1; i <= 6; i++) {
+      const msg = await send(
+        makeRequest(
+          `alias-${i}`,
+          i % 2 === 0 ? 'grep_search' : 'search_file_content',
+          { value: {} },
+        ),
+      );
+      // Both spellings land in one counter, so the third failure trips the
+      // threshold. Under the raw-name keying the two spellings kept separate
+      // buckets and the directive did not fire until the fifth call.
+      if (i < 3) expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+      else expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+    }
   });
 
   it('should reset retry counter when a different tool is called', async () => {
