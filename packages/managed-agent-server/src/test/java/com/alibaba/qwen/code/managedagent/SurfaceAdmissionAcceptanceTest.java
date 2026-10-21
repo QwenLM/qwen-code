@@ -1562,7 +1562,9 @@ class SurfaceAdmissionAcceptanceTest {
                             + "\",\"sessionId\":\"" + session
                             + "\",\"input\":[{\"type\":\"text\","
                             + "\"text\":\"probe\"}]}";
-            case SESSION_RENAME -> "{\"title\":\"probe\"}";
+            case SESSION_RENAME -> publicSurface ? "{\"title\":\"probe\"}"
+                    : "{\"sessionId\":\"" + session + "\",\"title\":\"probe\","
+                            + "\"idempotencyKey\":\"" + nextKey() + "\"}";
             case SESSION_CWD_CHANGE -> publicSurface
                     ? "{\"cwd_relative\":\"probe\","
                             + "\"expected_context_revision\":1}"
