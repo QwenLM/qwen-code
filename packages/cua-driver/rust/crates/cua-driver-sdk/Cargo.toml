@@ -36,9 +36,6 @@ platform-linux = { path = "../platform-linux" }
 
 [features]
 default = []
-portal-input = ["platform-linux/portal-input"]
-portal-capture = ["platform-linux/portal-capture"]
-portal-libei = ["portal-input", "portal-capture"]
 
 [dev-dependencies]
 tempfile = "3"

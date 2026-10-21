@@ -175,6 +175,8 @@ async function createMockConfig(
     cwd: process.cwd(),
     // Avoid writing any chat recording records from tests (e.g. via tool-call telemetry).
     chatRecording: false,
+    // The loop tests below pin the stop points; one test switches to `warn`.
+    loopProtection: 'stop',
   });
   await config.initialize();
   await config.refreshAuth(AuthType.USE_GEMINI);
@@ -1666,6 +1668,46 @@ describe('subagent.ts', () => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
         expect(inv.execute).toHaveBeenCalledTimes(4);
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+        // The 3rd identical call's results carry the loop-protection
+        // reminder, after the tool response (#14828).
+        expect(sentParts(3).at(-1)?.text).toContain(
+          '`list_directory` has been called 3 times in a row',
+        );
+        expect(sentParts(3)[0].functionResponse).toBeDefined();
+        expect(
+          [1, 2, 4].some((n) =>
+            sentParts(n).some((part) => part.text?.includes('in a row')),
+          ),
+        ).toBe(false);
+      });
+
+      it('reminds without stopping consecutive identical tool calls under warn', async () => {
+        const missingPath = '/workspace/project/missing-directory';
+        const { config, inv, toolConfig } = await setupReadTool(
+          decl('list_directory', 'Lists a directory'),
+          invocation(
+            { path: missingPath },
+            'List directory',
+            toolResult('Error: ENOENT', 'Directory not found'),
+          ),
+          'List Directory',
+          'List directory contents',
+        );
+        vi.spyOn(config, 'getLoopProtection').mockReturnValue('warn');
+        respond(
+          ...rounds(6, 'list_directory', { path: missingPath }, 'call'),
+          'stop',
+        );
+        const scope = await runAgent(config, { tools: toolConfig });
+
+        expect(inv.execute).toHaveBeenCalledTimes(6);
+        expect(scope.getTerminateMode()).not.toBe(
+          AgentTerminateMode.LOOP_DETECTED,
+        );
+        const reminders = [0, 1, 2, 3, 4, 5, 6].filter((n) =>
+          sentParts(n).some((part) => part.text?.includes('in a row')),
+        );
+        expect(reminders).toEqual([3]);
       });
 
       it('keeps polling task_list while the task board changes (issue #9450)', async () => {
@@ -2115,6 +2157,31 @@ describe('subagent.ts', () => {
         expect(scope.getLastError()).toContain('x'.repeat(200));
         expect(scope.getLastError()).toContain('ECONNRESET');
         expect(scope.getLastError()).toContain('socket hang up');
+      });
+
+      it('keeps the folded cause when the cause text is ANSI-dense (#13717)', async () => {
+        // The bound is spent on the cleaned copy of `message`, but the folded
+        // `cause` was handed to `getErrorMessage` raw. A cause made mostly of
+        // escape bytes then spent that same 1 000-RAW-character cap on them,
+        // the 997-character slice landed mid-sequence, and the reason the
+        // parent needs to read was evicted long before the outer 500-char
+        // bound ever applied: a 9-character message retained a 34-char stub.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('short msg'), {
+            cause: Object.assign(
+              new Error('\u001b[31m'.repeat(200) + 'socket hang up'),
+              { code: 'ECONNRESET' },
+            ),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'short msg');
+        const retained = scope.getLastError()!;
+        expect(retained).toContain('ECONNRESET');
+        expect(retained).toContain('socket hang up');
+        expect(retained).not.toContain('\u001b');
+        expect(retained.length).toBeLessThanOrEqual(501);
       });
 
       it('keeps the folded cause when the message cleans to nothing (#13597)', async () => {

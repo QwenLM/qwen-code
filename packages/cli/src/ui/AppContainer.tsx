@@ -64,8 +64,6 @@ import {
   PromptSuggestionEvent,
   logSpeculation,
   SpeculationEvent,
-  logWorkflowKeyword,
-  WorkflowKeywordEvent,
   resolveWorkflowSizeGuidelineSetting,
   type WorkflowSizeGuidelineSetting,
   startSpeculation,
@@ -156,6 +154,7 @@ import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
+import { getInteractiveModSession } from '../services/interactive-mod-session.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
 import {
   computeApiTruncationIndex,
@@ -163,6 +162,7 @@ import {
   isRealUserTurn,
 } from './utils/historyMapping.js';
 import { waitForGoalRuntime } from './utils/goal-runtime.js';
+import { sanitizeTerminalLine } from './utils/textUtils.js';
 import {
   useVimModeState,
   useVimModeActions,
@@ -193,7 +193,14 @@ import {
   isContextFilesAnnouncement,
   isSlashCommand,
 } from './utils/commandUtils.js';
-import { buildWorkflowKeywordPrefix } from './utils/workflow-keyword.js';
+import {
+  resolveWorkflowIntent,
+  type HumanPromptInput,
+} from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import {
+  expandPendingPastePlaceholders,
+  restorePasteDraft,
+} from './utils/paste-placeholders.js';
 import { buildWorkflowSizeGuidelineChangePrefix } from './utils/workflow-size-notice.js';
 import { parseSlashCommand } from './commands/commands.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
@@ -573,6 +580,12 @@ export function useQueuedSubmissionDrain({
         undefined,
         {
           userAdmission: { turnKey: submission.turnKey },
+          displayText: submission.displayText,
+          humanInput: submission.humanInput,
+          ...(submission.hasUnknownInput ? { hasUnknownInput: true } : {}),
+          ...(submission.pasteExpansions?.size
+            ? { pasteExpansions: submission.pasteExpansions }
+            : {}),
           ...(submission.submittedPrompt === undefined
             ? {}
             : { submittedPrompt: submission.submittedPrompt }),
@@ -592,6 +605,22 @@ export function useQueuedSubmissionDrain({
               submission.submittedPrompt,
               true,
               submission.shellMode,
+              ...(submission.displayText !== undefined ||
+              submission.humanInput !== undefined ||
+              submission.pasteExpansions?.size
+                ? ([
+                    {
+                      displayText: submission.displayText,
+                      humanInput: submission.humanInput,
+                      ...(submission.hasUnknownInput
+                        ? { hasUnknownInput: true }
+                        : {}),
+                      ...(submission.pasteExpansions?.size
+                        ? { pasteExpansions: submission.pasteExpansions }
+                        : {}),
+                    },
+                  ] as const)
+                : ([] as const)),
             );
             markAdmissionFailed();
           },
@@ -844,6 +873,14 @@ export const AppContainer = (props: AppContainerProps) => {
     [props.extensionRefreshState],
   );
   const historyManager = useHistory();
+  const addHistoryItem = historyManager.addItem;
+  useEffect(
+    () =>
+      getInteractiveModSession(config)?.subscribe((text) => {
+        addHistoryItem({ type: MessageType.INFO, text }, Date.now());
+      }),
+    [config, addHistoryItem],
+  );
   // `useHistory()` returns a fresh memoized object whenever `history` changes,
   // so depending on `historyManager` directly inside event-handler callbacks
   // would rebuild them on every message. Mirror history into a ref so
@@ -1025,10 +1062,11 @@ export const AppContainer = (props: AppContainerProps) => {
     worktreeSession?.worktreePath ?? config.getTargetDir(),
   );
   const [showWorktreeExitDialog, setShowWorktreeExitDialog] = useState(false);
-  // P7-trigger: true while the current turn was steered toward the Workflow
-  // tool by the `workflow` keyword (drives the Footer indicator). Set in
-  // `handleFinalSubmit`, cleared when the turn returns to idle (effect below).
-  const [workflowKeywordActive, setWorkflowKeywordActive] = useState(false);
+  useEffect(() => {
+    config.setWorkflowKeywordTriggerEnabled?.(
+      settings.merged.ui?.disableWorkflowKeywordTrigger !== true,
+    );
+  }, [config, settings.merged.ui?.disableWorkflowKeywordTrigger]);
   /**
    * One-shot worktree restore reminder for the TUI path. Set during
    * `--resume` when the persisted sidecar names a live worktree, then
@@ -1134,8 +1172,6 @@ export const AppContainer = (props: AppContainerProps) => {
   // Initialize config (runs once on mount)
   useEffect(() => {
     (async () => {
-      // Note: the program will not work if this fails so let errors be
-      // handled by the global catch.
       profileCheckpoint('config_initialize_start');
       await config.initialize();
       // Bound the goal-runtime gate: under session-writer lease contention
@@ -1232,7 +1268,15 @@ export const AppContainer = (props: AppContainerProps) => {
             config.getSessionId(),
           ),
         );
+      }
 
+      // Restore the transcript before Mod diagnostics, without making input
+      // or Mod startup wait for asynchronous session recovery.
+      void getInteractiveModSession(config)
+        ?.initialize()
+        .catch(() => {});
+
+      if (resumedSessionData) {
         const recovered = await config.loadPausedBackgroundAgents(
           config.getSessionId(),
         );
@@ -1319,7 +1363,17 @@ export const AppContainer = (props: AppContainerProps) => {
           Date.now(),
         );
       }
-    })();
+    })().catch((error: unknown) => {
+      getInteractiveModSession(config)?.failStartup(error);
+      debugLogger.error('Failed to initialize session:', error);
+      historyManager.addItem(
+        {
+          type: MessageType.ERROR,
+          text: `Failed to initialize session: ${sanitizeTerminalLine(getErrorMessage(error)).slice(0, 2000)}`,
+        },
+        Date.now(),
+      );
+    });
 
     // Register SessionEnd cleanup for process exit
     registerCleanup(async () => {
@@ -1518,17 +1572,33 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   const preferredEditor = usePreferredEditor();
-  const restoredSubmissionRef = useRef<Pick<
-    QueuedUserSubmission,
-    'modelText' | 'submittedPrompt'
-  > | null>(null);
+  const restoredSubmissionRef = useRef<
+    | (Pick<
+        QueuedUserSubmission,
+        | 'modelText'
+        | 'submittedPrompt'
+        | 'displayText'
+        | 'humanInput'
+        | 'hasUnknownInput'
+        | 'pasteExpansions'
+      > & {
+        /** Model-bound prompt, when it differs from what the buffer holds. */
+        modelSubmission?: string;
+      })
+    | null
+  >(null);
+  const [pendingPastes, setPendingPastes] = useState<Map<string, string>>(
+    new Map(),
+  );
   const submittedPromptProvenanceUnavailableRef = useRef(false);
+  const humanInputProvenanceUnavailableRef = useRef(false);
   const setBufferTextRef = useRef<
     ReturnType<typeof useTextBuffer>['setText'] | null
   >(null);
   const invalidateSubmittedPromptProvenance = useCallback(() => {
     restoredSubmissionRef.current = null;
     submittedPromptProvenanceUnavailableRef.current = true;
+    humanInputProvenanceUnavailableRef.current = true;
   }, []);
   const handleBufferChange = useCallback((text: string) => {
     if (text.length === 0) {
@@ -1540,12 +1610,16 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       restoredSubmissionRef.current = null;
       submittedPromptProvenanceUnavailableRef.current = false;
+      humanInputProvenanceUnavailableRef.current = false;
       return;
     }
     if (
       restoredSubmissionRef.current !== null &&
       restoredSubmissionRef.current.modelText !== text
     ) {
+      humanInputProvenanceUnavailableRef.current =
+        restoredSubmissionRef.current.hasUnknownInput === true ||
+        restoredSubmissionRef.current.humanInput === undefined;
       restoredSubmissionRef.current = null;
       submittedPromptProvenanceUnavailableRef.current = true;
     }
@@ -1573,6 +1647,7 @@ export const AppContainer = (props: AppContainerProps) => {
     restorePromptStash(promptStashTargetDir, buffer.text, (text) => {
       restoredSubmissionRef.current = null;
       submittedPromptProvenanceUnavailableRef.current = true;
+      humanInputProvenanceUnavailableRef.current = true;
       buffer.setText(text);
     });
   }, [buffer, promptStashTargetDir]);
@@ -1620,6 +1695,13 @@ export const AppContainer = (props: AppContainerProps) => {
         isInteractiveTerminal(),
       ),
   );
+
+  useEffect(() => {
+    getInteractiveModSession(config)?.setPresentation({
+      isFullscreen: useTerminalBuffer,
+      columns: terminalWidth,
+    });
+  }, [config, useTerminalBuffer, terminalWidth]);
 
   // The VP post-shrink clear window (terminal-resize-reflow) wipes one-shot
   // <Static> content from the viewport just like the wake path; pair it with
@@ -1867,7 +1949,6 @@ export const AppContainer = (props: AppContainerProps) => {
     };
   }, [config]);
 
-  const addHistoryItem = historyManager.addItem;
   useEffect(() => {
     if (typeof config.onChatRecordingFailure !== 'function') return;
     return config.onChatRecordingFailure(() => {
@@ -1943,11 +2024,11 @@ export const AppContainer = (props: AppContainerProps) => {
 
   useLayoutEffect(() => {
     if (vimEnabled && buffer.text.length > 0) {
-      // Vim registers outlive buffer clears, so provenance cannot be recovered
-      // by pasting register contents and then disabling Vim.
-      invalidateSubmittedPromptProvenance();
+      // Vim edits cannot preserve Hook provenance. Register pastes separately
+      // invalidate human origin at the mutation site.
+      submittedPromptProvenanceUnavailableRef.current = true;
     }
-  }, [buffer.text, invalidateSubmittedPromptProvenance, vimEnabled]);
+  }, [buffer.text, vimEnabled]);
 
   const {
     isSubagentCreateDialogOpen,
@@ -2475,6 +2556,7 @@ export const AppContainer = (props: AppContainerProps) => {
     pendingToolCalls,
     streamingResponseLengthRef,
     isReceivingContent,
+    workflowKeywordActive,
   } = useLlmStream(
     config.getLlmClient(),
     historyManager.history,
@@ -2512,9 +2594,6 @@ export const AppContainer = (props: AppContainerProps) => {
   useEffect(() => {
     if (streamingState === StreamingState.Idle) {
       updateHandlerRef.current?.flush();
-      // P7-trigger: a steered turn has finished — drop the `workflow active`
-      // indicator until the next keyword prompt re-arms it.
-      setWorkflowKeywordActive(false);
     }
   }, [streamingState]);
 
@@ -2672,10 +2751,35 @@ export const AppContainer = (props: AppContainerProps) => {
     }
     const submission = popAllMessages();
     if (submission === null) return null;
-    restoredSubmissionRef.current = submission;
+    const hasUnknownInput =
+      submission.hasUnknownInput ||
+      (buffer.text.length > 0 && humanInputProvenanceUnavailableRef.current);
+    const draft = restorePasteDraft(
+      submission.displayText ?? submission.modelText,
+      submission.pasteExpansions ?? new Map(),
+      pendingPastes,
+    );
+    const text = draft.text;
+    setPendingPastes(draft.pasteExpansions);
+    restoredSubmissionRef.current = {
+      ...submission,
+      ...(hasUnknownInput ? { hasUnknownInput: true } : {}),
+      modelText: text,
+      ...(text === submission.modelText
+        ? {}
+        : { modelSubmission: submission.modelText }),
+    };
     submittedPromptProvenanceUnavailableRef.current = false;
-    return submission.modelText;
-  }, [popAllMessages, releaseQueuedGoalReservations, removeGoalTurns]);
+    humanInputProvenanceUnavailableRef.current =
+      hasUnknownInput === true || submission.humanInput === undefined;
+    return text;
+  }, [
+    popAllMessages,
+    releaseQueuedGoalReservations,
+    removeGoalTurns,
+    pendingPastes,
+    buffer.text,
+  ]);
 
   useEffect(() => {
     const host: GoalTurnHost = {
@@ -3089,33 +3193,68 @@ export const AppContainer = (props: AppContainerProps) => {
       options?: {
         deferUntilIdle?: boolean;
         submittedPrompt?: string;
+        displayText?: string;
+        humanInput?: HumanPromptInput;
+        pasteExpansions?: ReadonlyMap<string, string>;
       },
     ) => {
       const consumesComposerState = options !== undefined;
+      const pasteExpansions = consumesComposerState
+        ? (options?.pasteExpansions ?? pendingPastes)
+        : undefined;
       const restoredSubmission = consumesComposerState
         ? restoredSubmissionRef.current
         : null;
       const submittedPromptProvenanceUnavailable =
         consumesComposerState &&
         submittedPromptProvenanceUnavailableRef.current;
+      const humanInputProvenanceUnavailable =
+        consumesComposerState && humanInputProvenanceUnavailableRef.current;
       if (consumesComposerState) {
         restoredSubmissionRef.current = null;
         submittedPromptProvenanceUnavailableRef.current = false;
+        humanInputProvenanceUnavailableRef.current = false;
+        setPendingPastes(new Map());
       }
+      const displayText = options?.displayText;
+      const unchangedRestoredSubmission =
+        restoredSubmission !== null &&
+        restoredSubmission.modelText === (displayText ?? submittedValue);
+      let humanInput = shellModeActive
+        ? undefined
+        : unchangedRestoredSubmission
+          ? restoredSubmission.humanInput
+          : humanInputProvenanceUnavailable ||
+              (restoredSubmission !== null &&
+                (restoredSubmission.hasUnknownInput ||
+                  restoredSubmission.humanInput === undefined))
+            ? undefined
+            : options?.humanInput;
+      const hasUnknownInput = unchangedRestoredSubmission
+        ? restoredSubmission.hasUnknownInput
+        : undefined;
       const submittedPromptCandidate = options?.submittedPrompt;
       const provenanceEnabled =
         !vimEnabled && submittedPromptCandidate !== undefined;
       const trimmedSubmittedPrompt = submittedPromptCandidate?.trim();
-      const submittedPrompt =
-        submittedPromptProvenanceUnavailable || !provenanceEnabled
+      let submittedPrompt = submittedPromptProvenanceUnavailable
+        ? undefined
+        : !provenanceEnabled
           ? undefined
           : restoredSubmission === null
             ? trimmedSubmittedPrompt || undefined
-            : restoredSubmission.modelText === submittedValue
+            : unchangedRestoredSubmission
               ? restoredSubmission.submittedPrompt
               : undefined;
       if (restoredSubmission !== null || submittedPromptProvenanceUnavailable) {
         setBufferText('', { clearUndoHistory: true });
+      }
+
+      if (pasteExpansions?.size && options?.pasteExpansions === undefined) {
+        submittedValue = expandPendingPastePlaceholders(
+          submittedValue,
+          pasteExpansions,
+        );
       }
 
       // Route to active in-process agent if viewing a sub-agent tab.
@@ -3126,9 +3265,31 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
       }
-      // The user's raw text, captured before any `<system-reminder>` prefix is
-      // prepended below (so keyword detection sees only what the user typed).
       const userPromptText = submittedValue;
+      if (isSlashCommand(userPromptText) || isBtwCommand(userPromptText)) {
+        humanInput = undefined;
+      }
+      const submissionMetadata =
+        displayText !== undefined ||
+        humanInput !== undefined ||
+        pasteExpansions?.size
+          ? ([
+              {
+                displayText,
+                humanInput,
+                ...(hasUnknownInput ? { hasUnknownInput: true } : {}),
+                ...(pasteExpansions?.size ? { pasteExpansions } : {}),
+              },
+            ] as const)
+          : ([] as const);
+      // A cancelled turn comes back to the composer as the user's own text;
+      // re-send the model-bound copy so its consumed notice is not lost.
+      if (
+        unchangedRestoredSubmission &&
+        restoredSubmission.modelSubmission !== undefined
+      ) {
+        submittedValue = restoredSubmission.modelSubmission;
+      }
       // Quit must bypass reminders and the message queue so it can stop an
       // active stream without consuming one-shot session state.
       if (
@@ -3210,35 +3371,6 @@ export const AppContainer = (props: AppContainerProps) => {
           `<system-reminder>\n${worktreeNotice}\n</system-reminder>\n\n` +
           submittedValue;
       }
-      // P7-trigger: when the user's prompt mentions `workflow`, softly steer
-      // this turn toward the Workflow tool (same one-shot reminder mechanism
-      // as the worktree notice). Detect on the user's original text — `notice`
-      // above only adds system text, never the keyword. Gated on the feature
-      // flag + the opt-out setting; skipped for slash commands. The model
-      // keeps discretion, so a casual mention can't force a tool call.
-      const workflowTriggerEnabled =
-        config.isWorkflowsEnabled() &&
-        !settings.merged.ui?.disableWorkflowKeywordTrigger;
-      if (
-        workflowTriggerEnabled &&
-        !isSlashCommand(userPromptText) &&
-        // Skip `?btw`/`/btw` side-questions: prefixing a system-reminder would
-        // break the BTW routing check below (which tests `submittedValue`),
-        // queuing the side question as a normal prompt instead.
-        !isBtwCommand(userPromptText)
-      ) {
-        // A `null` result means no reminder for this submission: the keyword
-        // is absent, the Workflow tool is not in this session, or this is a
-        // shell-mode command, which goes to bash rather than to the model.
-        const prefix = buildWorkflowKeywordPrefix(config, userPromptText, {
-          shellMode: shellModeActive,
-        });
-        if (prefix) {
-          setWorkflowKeywordActive(true);
-          logWorkflowKeyword(config, new WorkflowKeywordEvent());
-          submittedValue = prefix + submittedValue;
-        }
-      }
       // The Workflow tool description states the size guideline it was built
       // with. When the user changes the setting mid-session, say so on the next
       // prompt the model reads, and move the runtime thresholds with it.
@@ -3266,8 +3398,19 @@ export const AppContainer = (props: AppContainerProps) => {
           submittedValue = sizePrefix + submittedValue;
         }
       }
+      // The one-shot notices above are model-only context; whenever one was
+      // added, the composer-side text is the display projection (#11553).
+      if (submittedPrompt === undefined && submittedValue !== userPromptText) {
+        submittedPrompt = userPromptText;
+      }
       if (options?.deferUntilIdle) {
-        addMessage(submittedValue, true, submittedPrompt, shellModeActive);
+        addMessage(
+          submittedValue,
+          true,
+          submittedPrompt,
+          shellModeActive,
+          ...submissionMetadata,
+        );
         return;
       }
       if (
@@ -3286,12 +3429,22 @@ export const AppContainer = (props: AppContainerProps) => {
         void Promise.resolve(
           submitQuery(submittedValue, SendMessageType.UserQuery, undefined, {
             ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
+            displayText,
+            ...(pasteExpansions?.size ? { pasteExpansions } : {}),
             onAdmissionFailed: () => {
               addMessage(
                 submittedValue,
                 true,
                 submittedPrompt,
                 shellModeActive,
+                ...(displayText === undefined && !pasteExpansions?.size
+                  ? ([] as const)
+                  : ([
+                      {
+                        displayText,
+                        ...(pasteExpansions?.size ? { pasteExpansions } : {}),
+                      },
+                    ] as const)),
               );
             },
           }),
@@ -3303,10 +3456,15 @@ export const AppContainer = (props: AppContainerProps) => {
 
       // Check if speculation has results for this submission
       const spec = speculationRef.current;
+      const needsWorkflowIntent =
+        spec.status === 'completed' &&
+        spec.suggestion === submittedValue &&
+        resolveWorkflowIntent(config, humanInput) !== null;
       if (
         spec.status !== 'idle' &&
         spec.suggestion === submittedValue &&
-        spec.status === 'completed'
+        spec.status === 'completed' &&
+        !needsWorkflowIntent
       ) {
         // Accept completed speculation: inject messages and apply files
         acceptSpeculation(spec, llmClient)
@@ -3390,14 +3548,20 @@ export const AppContainer = (props: AppContainerProps) => {
           })
           .catch(() => {
             // Fallback: submit normally
-            addMessage(submittedValue, false, submittedPrompt, shellModeActive);
+            addMessage(
+              submittedValue,
+              false,
+              submittedPrompt,
+              shellModeActive,
+              ...submissionMetadata,
+            );
           });
         speculationRef.current = IDLE_SPECULATION;
         return;
       }
 
-      // Abort any running speculation since we're submitting something different
-      if (spec.status === 'running') {
+      // Automatic speculation never received the current human intent.
+      if (spec.status === 'running' || needsWorkflowIntent) {
         abortSpeculation(spec).catch(() => {});
         speculationRef.current = IDLE_SPECULATION;
       }
@@ -3408,19 +3572,24 @@ export const AppContainer = (props: AppContainerProps) => {
         isSlashCommand(submittedValue)
       ) {
         void Promise.resolve(
-          submitQuery(
-            submittedValue,
-            SendMessageType.UserQuery,
-            undefined,
-            submittedPrompt === undefined ? undefined : { submittedPrompt },
-          ),
+          submitQuery(submittedValue, SendMessageType.UserQuery, undefined, {
+            submittedPrompt,
+            displayText,
+            ...(pasteExpansions?.size ? { pasteExpansions } : {}),
+          }),
         ).catch((error) => {
           debugLogger.warn('Failed to admit slash command', error);
         });
         return;
       }
 
-      addMessage(submittedValue, false, submittedPrompt, shellModeActive);
+      addMessage(
+        submittedValue,
+        false,
+        submittedPrompt,
+        shellModeActive,
+        ...submissionMetadata,
+      );
     },
     [
       addMessage,
@@ -3433,11 +3602,11 @@ export const AppContainer = (props: AppContainerProps) => {
       config,
       llmClient,
       historyManager,
-      settings.merged.ui?.disableWorkflowKeywordTrigger,
       settings.merged.tools?.workflowSizeGuideline,
       setBufferText,
       shellModeActive,
       vimEnabled,
+      pendingPastes,
     ],
   );
 
@@ -3500,13 +3669,36 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       const popped = popAllMessages();
       if (popped) {
-        restoredSubmissionRef.current = popped;
+        const hasUnknownInput =
+          popped.hasUnknownInput ||
+          (!draftWasEmpty && humanInputProvenanceUnavailableRef.current);
+        // Same contract as the auto-restore path below: the buffer holds the
+        // user's own text, and the model-bound copy rides along so an
+        // unchanged resubmit keeps the one-shot notice (#11553).
+        const draft = restorePasteDraft(
+          popped.displayText ?? popped.submittedPrompt ?? popped.modelText,
+          popped.pasteExpansions ?? new Map(),
+          pendingPastes,
+        );
+        const restoredText = draft.text;
+        setPendingPastes(draft.pasteExpansions);
+        restoredSubmissionRef.current = {
+          modelText: restoredText,
+          submittedPrompt: popped.submittedPrompt,
+          displayText: popped.displayText,
+          humanInput: popped.humanInput,
+          ...(hasUnknownInput ? { hasUnknownInput: true } : {}),
+          ...(popped.pasteExpansions?.size
+            ? { pasteExpansions: popped.pasteExpansions }
+            : {}),
+          modelSubmission: popped.modelText,
+        };
         submittedPromptProvenanceUnavailableRef.current = false;
+        humanInputProvenanceUnavailableRef.current =
+          hasUnknownInput === true || popped.humanInput === undefined;
         const currentText = buffer.text;
         buffer.setText(
-          currentText
-            ? `${popped.modelText}\n${currentText}`
-            : popped.modelText,
+          currentText ? `${restoredText}\n${currentText}` : restoredText,
         );
       }
 
@@ -3567,14 +3759,34 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
       const restoreCancelledPrompt = () => {
+        const draft = restorePasteDraft(
+          cancelledTurnUserItem.text,
+          cancelledTurnUserItem.pasteExpansions ?? new Map(),
+          pendingPastes,
+        );
+        setPendingPastes(draft.pasteExpansions);
         restoredSubmissionRef.current = {
-          modelText: cancelledTurnUserItem.text,
+          modelText: draft.text,
+          displayText: draft.text,
+          ...(cancelledTurnUserItem.pasteExpansions?.size
+            ? { pasteExpansions: cancelledTurnUserItem.pasteExpansions }
+            : {}),
+          humanInput: cancelledTurnUserItem.humanInput,
+          ...(cancelledTurnUserItem.hasUnknownInput
+            ? { hasUnknownInput: true }
+            : {}),
           ...(cancelledTurnUserItem.submittedPrompt === undefined
             ? {}
             : { submittedPrompt: cancelledTurnUserItem.submittedPrompt }),
+          ...(cancelledTurnUserItem.modelText === undefined
+            ? {}
+            : { modelSubmission: cancelledTurnUserItem.modelText }),
         };
         submittedPromptProvenanceUnavailableRef.current = false;
-        buffer.setText(cancelledTurnUserItem.text);
+        humanInputProvenanceUnavailableRef.current =
+          cancelledTurnUserItem.hasUnknownInput === true ||
+          cancelledTurnUserItem.humanInput === undefined;
+        buffer.setText(draft.text);
       };
 
       if (pendingHistoryItems.some((item) => item.type === 'tool_group')) {
@@ -3682,6 +3894,7 @@ export const AppContainer = (props: AppContainerProps) => {
     },
     [
       buffer,
+      pendingPastes,
       popAllMessages,
       releaseQueuedGoalReservations,
       removeGoalTurns,
@@ -3704,7 +3917,43 @@ export const AppContainer = (props: AppContainerProps) => {
     remountStaticHistory();
   }, [historyManager, remountStaticHistory]);
 
-  const { handleInput: vimHandleInput } = useVim(buffer, handleFinalSubmit);
+  const submitVimPrompt = useCallback(
+    (text: string) => {
+      handleFinalSubmit(text, {
+        displayText: text,
+        humanInput: {
+          text: expandPendingPastePlaceholders(text, pendingPastes),
+        },
+      });
+    },
+    [handleFinalSubmit, pendingPastes],
+  );
+  // Vim's Enter bypasses the composer, so route it through the submit path
+  // the composer registers: large-paste expansion, the submit epoch and the
+  // stash cleanup all live there.
+  const promptSubmitRef = useRef<((value: string) => void) | null>(null);
+  const registerPromptSubmit = useCallback(
+    (handler: ((value: string) => void) | null) => {
+      promptSubmitRef.current = handler;
+    },
+    [],
+  );
+  const handleVimSubmit = useCallback(
+    (value: string) => {
+      const submit = promptSubmitRef.current;
+      if (submit) {
+        submit(value);
+        return;
+      }
+      submitVimPrompt(value);
+    },
+    [submitVimPrompt],
+  );
+  const { handleInput: vimHandleInput } = useVim(
+    buffer,
+    handleVimSubmit,
+    invalidateSubmittedPromptProvenance,
+  );
 
   /**
    * Determines if the input prompt should be active and accept user input.
@@ -3832,18 +4081,30 @@ export const AppContainer = (props: AppContainerProps) => {
       const ac = new AbortController();
       suggestionAbortRef.current = ac;
 
-      // Only clone the tail — full structuredClone of a large resumed session
-      // causes transient heap peaks that trigger OOM (#4624).
-      const conversationHistory = llmClient.getHistoryTail(40, true);
-      generatePromptSuggestion(config, conversationHistory, ac.signal, {
-        // On by default: the schema declares `default: true`, but
-        // `mergeSettings` doesn't apply schema defaults, so an unset value is
-        // `undefined` and a `=== true` gate left the cache-aware fork as dead
-        // code unless the flag was explicitly set (#9230). Only an explicit
-        // `false` opts out of cache sharing. This flag does not inherit the
-        // follow-up suggestion runtime gate.
-        enableCacheSharing: settings.merged.ui?.enableCacheSharing !== false,
-      })
+      const generate = async () => {
+        const mods = getInteractiveModSession(config);
+        if (mods) await mods.ready;
+        ac.signal.throwIfAborted();
+        // Only clone the tail — full structuredClone of a large resumed session
+        // causes transient heap peaks that trigger OOM (#4624).
+        const conversationHistory = llmClient.getHistoryTail(40, true);
+        return generatePromptSuggestion(
+          config,
+          conversationHistory,
+          ac.signal,
+          {
+            // On by default: the schema declares `default: true`, but
+            // `mergeSettings` doesn't apply schema defaults, so an unset value is
+            // `undefined` and a `=== true` gate left the cache-aware fork as dead
+            // code unless the flag was explicitly set (#9230). Only an explicit
+            // `false` opts out of cache sharing. This flag does not inherit the
+            // follow-up suggestion runtime gate.
+            enableCacheSharing:
+              settings.merged.ui?.enableCacheSharing !== false,
+          },
+        );
+      };
+      void generate()
         .then((result) => {
           if (ac.signal.aborted) return;
           if (result.suggestion) {
@@ -4400,6 +4661,7 @@ export const AppContainer = (props: AppContainerProps) => {
           if (userItem.type === 'user' && userItem.text) {
             restoredSubmissionRef.current = null;
             submittedPromptProvenanceUnavailableRef.current = true;
+            humanInputProvenanceUnavailableRef.current = true;
             buffer.setText(userItem.text);
           }
 
@@ -5156,6 +5418,7 @@ export const AppContainer = (props: AppContainerProps) => {
       shellModeActive,
       userMessages,
       buffer,
+      pendingPastes,
       inputWidth,
       suggestionsWidth,
       isInputActive,
@@ -5305,6 +5568,7 @@ export const AppContainer = (props: AppContainerProps) => {
       shellModeActive,
       userMessages,
       buffer,
+      pendingPastes,
       inputWidth,
       suggestionsWidth,
       isInputActive,
@@ -5441,9 +5705,11 @@ export const AppContainer = (props: AppContainerProps) => {
       onTabConsumerChange: setHasTabConsumer,
       refreshStatic,
       handleFinalSubmit,
+      registerPromptSubmit,
       handleRetryLastPrompt: retryLastPrompt,
       handleClearScreen,
       popAllQueuedMessages,
+      setPendingPastes,
       invalidateSubmittedPromptProvenance,
       // Welcome back dialog
       handleWelcomeBackSelection,
@@ -5533,6 +5799,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEscapePromptChange,
       refreshStatic,
       handleFinalSubmit,
+      registerPromptSubmit,
       retryLastPrompt,
       handleClearScreen,
       popAllQueuedMessages,

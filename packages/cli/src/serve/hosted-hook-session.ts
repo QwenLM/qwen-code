@@ -78,6 +78,14 @@ export type HostedPromptHookRunner = (
   signal: AbortSignal,
 ) => Promise<HookExecutionResult>;
 
+/**
+ * Marks the PreToolUse and PermissionRequest plans of a tool call whose
+ * PermissionRequest ran on the input PreToolUse left. An untagged plan
+ * belongs to the earlier order, which ran PermissionRequest first.
+ */
+export const HOSTED_TOOL_INPUT_ORDER = 'pre-permission/2';
+export type HostedToolInputOrder = typeof HOSTED_TOOL_INPUT_ORDER;
+
 interface HookPlan {
   readonly registrationId: string;
   readonly input: HookInput;
@@ -85,6 +93,7 @@ interface HookPlan {
   readonly sequential: boolean;
   readonly messagesRef?: ManagedSessionDurableRef;
   readonly refusedInputDigest?: string;
+  readonly toolInputOrder?: HostedToolInputOrder;
 }
 
 function exceedsHookResourceLimit(value: unknown): boolean {
@@ -143,7 +152,7 @@ function semanticInput(value: object): Record<string, unknown> {
   return JSON.parse(JSON.stringify(fields)) as Record<string, unknown>;
 }
 
-function semanticInputDigest(value: object): string {
+export function semanticInputDigest(value: object): string {
   return createHash('sha256')
     .update(
       JSON.stringify(semanticInput(value), (_key, item: unknown) =>
@@ -157,6 +166,36 @@ function semanticInputDigest(value: object): string {
       ),
     )
     .digest('hex');
+}
+
+export function recordedToolHookFields(
+  plan: { input: Record<string, unknown>; refusedInputDigest?: string },
+  fields: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const modes = plan.refusedInputDigest
+    ? ['default', 'auto-edit', 'yolo']
+    : [plan.input['permission_mode']];
+  for (const mode of modes) {
+    if (
+      typeof mode !== 'string' ||
+      !['default', 'auto-edit', 'yolo'].includes(mode)
+    )
+      continue;
+    const candidate = { ...fields, permission_mode: mode };
+    if (
+      (plan.refusedInputDigest ?? semanticInputDigest(plan.input)) ===
+      semanticInputDigest(candidate)
+    )
+      return candidate;
+  }
+  return undefined;
+}
+
+/** Whether a saved plan was made for these event fields. */
+function plannedFor(plan: HookPlan, fields: object): boolean {
+  return plan.refusedInputDigest
+    ? plan.refusedInputDigest === semanticInputDigest(fields)
+    : isDeepStrictEqual(semanticInput(plan.input), semanticInput(fields));
 }
 
 function cancelledResult(): ManagedHookResult {
@@ -275,6 +314,7 @@ export class HostedHookSession {
     string,
     {
       input: Record<string, unknown>;
+      toolInputOrder?: HostedToolInputOrder;
       result: Promise<HookOutput | undefined>;
     }
   >();
@@ -297,14 +337,20 @@ export class HostedHookSession {
     private readonly session: ManagedSession,
     private readonly initialPin: ManagedHookCatalogPin,
     broker?: HostedWorkspaceBroker,
+    private readonly lifecycleV2: () => boolean = () => false,
   ) {
     this.ownsBroker = broker === undefined;
+    const previous = lifecycleV2()
+      ? session.authority.extensionRecordsInDomain('hook_execution').at(-1)
+      : undefined;
     this.broker =
       broker ??
       new HostedWorkspaceBroker(
         options,
         this.key,
-        `hooks-activation-${digest([session.activation.activationId, session.activation.epoch])}`,
+        previous
+          ? parseHookExecution(previous.record).runtimeSessionId
+          : `hooks-activation-${digest([session.activation.activationId, session.activation.epoch])}`,
       );
   }
 
@@ -350,9 +396,37 @@ export class HostedHookSession {
     // released once.
     this.acquiring ??= (async () => {
       try {
-        await this.releaseEarlierOwners(false);
-        await this.broker.warm();
-        await this.broker.acquire();
+        if (!this.lifecycleV2()) await this.releaseEarlierOwners(false);
+        if (this.lifecycleV2()) {
+          const pins = this.session.authority
+            .extensionRecordsInDomain('hook_execution')
+            .filter(
+              (entry) =>
+                parseHookExecution(entry.record).runtimeSessionId ===
+                this.broker.runtimeSessionId,
+            )
+            .flatMap((entry) => (entry.run.runtime ? [entry.run.runtime] : []));
+          const runtime = this.broker.runtime;
+          const expected =
+            pins[0] ??
+            (runtime && {
+              runtimeBindingId: runtime.bindingId,
+              generation: runtime.generation,
+            });
+          if (
+            !expected ||
+            pins.some(
+              (pin) =>
+                pin.runtimeBindingId !== expected.runtimeBindingId ||
+                pin.generation !== expected.generation,
+            )
+          )
+            throw new HostedHookRecoveryRequiredError();
+          await this.broker.acquire(expected);
+        } else {
+          await this.broker.warm();
+          await this.broker.acquire();
+        }
         if (!this.broker.runtime) throw new HostedHookRecoveryRequiredError();
         this.acquired = true;
       } finally {
@@ -493,10 +567,47 @@ export class HostedHookSession {
   }
 
   /**
-   * Whether this Session's Hook catalog holds an eligible command Hook on a
-   * tool-result event. Such a Hook acquires the Session-owned mount when its
-   * results complete — possibly after child-agent admission — so a child
-   * must not be admitted while one exists.
+   * The recovery-blocked turn's handback of this Session-scoped mount
+   * (#13800), under the claim of the acquire that holds it now. Only Hook
+   * work proven settled or never dispatched lets it go — the Broker cannot
+   * see a Hook run — and the next acquire claims the mount again. The
+   * owner's lease stays booked, so close() still runs the full release.
+   */
+  mountHandback(): (() => Promise<void>) | undefined {
+    const claim = this.broker.mountClaim();
+    if (!this.ownsBroker || claim === undefined) return undefined;
+    return async () => {
+      if (this.mountWorkUnproven())
+        throw new Error('Hook work on the Workspace mount is unproven.');
+      await this.broker.releaseMount(claim);
+      if (this.broker.mountClaim() === claim) this.acquired = false;
+    };
+  }
+
+  /** Whether a Hook run on this owner's mount may still be running. */
+  mountWorkUnproven(): boolean {
+    return (
+      this.acquiring !== undefined ||
+      this.pending.size > 0 ||
+      this.occurrences.size > 0 ||
+      this.executions().some(
+        (record) =>
+          record.runtimeSessionId === this.broker.runtimeSessionId &&
+          record.hookId !== '__plan__' &&
+          !record.resultRef &&
+          record.run.execution !== 'not_started_proven' &&
+          record.run.execution !== 'intent',
+      )
+    );
+  }
+
+  /**
+   * Whether this Session's Hook catalog holds an eligible non-prompt Hook
+   * on a tool-result event. Any such Hook acquires the Session-owned mount
+   * when its results complete — possibly after child-agent admission — so a
+   * child must not be admitted while one exists. Command, http and function
+   * Hooks all dispatch through the broker (`executionBroker`), so all three
+   * hold the mount; only prompt Hooks run in-process and never take it.
    *
    * Scans the catalog without the `matcher` predicate dispatch applies, and
    * that breadth is the intent. A foreground child cannot share a batch with
@@ -524,7 +635,7 @@ export class HostedHookSession {
     return (
       this.catalog?.hooks.some(
         (hook) =>
-          hook.config.type === HookType.Command &&
+          hook.config.type !== HookType.Prompt &&
           this.isHookEligible(hook, usedOnce, null) &&
           (hook.eventName === HookEventName.PostToolUse ||
             hook.eventName === HookEventName.PostToolUseFailure ||
@@ -766,29 +877,48 @@ export class HostedHookSession {
       });
   }
 
+  /**
+   * `earlier` holds the fields an earlier release built for the same
+   * occurrence. A saved plan made for them is resumed as saved; a new
+   * occurrence is always planned for `fields`. `toolInputOrder` is saved
+   * on a new plan, and a saved or running occurrence must carry the same.
+   */
   async fire(
     event: HookEventName,
     occurrenceId: string,
     fields: Record<string, unknown>,
     signal: AbortSignal,
     prompt?: HostedPromptHookRunner,
+    earlier?: Record<string, unknown>,
+    toolInputOrder?: HostedToolInputOrder,
   ): Promise<HookOutput | undefined> {
     const key = hostedHookOccurrenceId(event, occurrenceId);
     const input = semanticInput(fields);
     const running = this.occurrences.get(key);
     if (running) {
-      if (!isDeepStrictEqual(running.input, input))
+      if (
+        !isDeepStrictEqual(running.input, input) ||
+        running.toolInputOrder !== toolInputOrder
+      )
         throw new HostedHookInputConflictError();
       return running.result;
     }
     const promise = this.occurrenceQueue.then(() =>
-      this.fireOccurrence(event, key, fields, signal, prompt),
+      this.fireOccurrence(
+        event,
+        key,
+        fields,
+        signal,
+        prompt,
+        earlier,
+        toolInputOrder,
+      ),
     );
     this.occurrenceQueue = promise.then(
       () => undefined,
       () => undefined,
     );
-    this.occurrences.set(key, { input, result: promise });
+    this.occurrences.set(key, { input, toolInputOrder, result: promise });
     try {
       return await promise;
     } finally {
@@ -802,6 +932,8 @@ export class HostedHookSession {
     fields: Record<string, unknown>,
     signal: AbortSignal,
     prompt?: HostedPromptHookRunner,
+    earlier?: Record<string, unknown>,
+    toolInputOrder?: HostedToolInputOrder,
   ): Promise<HookOutput | undefined> {
     await this.ensureReady(signal);
     const previous = this.session.authority.extensionRecord(
@@ -814,9 +946,9 @@ export class HostedHookSession {
       marker = parseHookExecution(previous.record);
       plan = await this.read<HookPlan>(marker.planRef);
       if (
-        plan.refusedInputDigest
-          ? plan.refusedInputDigest !== semanticInputDigest(fields)
-          : !isDeepStrictEqual(semanticInput(plan.input), semanticInput(fields))
+        (!plannedFor(plan, fields) &&
+          !(earlier && plannedFor(plan, earlier))) ||
+        plan.toolInputOrder !== toolInputOrder
       )
         throw new HostedHookInputConflictError();
       if (marker.run.execution === 'not_started_proven')
@@ -907,6 +1039,7 @@ export class HostedHookSession {
         input,
         hooks,
         sequential: hooks.some((hook) => hook.sequential),
+        ...(toolInputOrder ? { toolInputOrder } : {}),
       };
       let messagesLimitExceeded = false;
       if (
@@ -951,6 +1084,7 @@ export class HostedHookSession {
           },
           hooks: [],
           sequential: false,
+          ...(toolInputOrder ? { toolInputOrder } : {}),
         };
       }
       const planRef = await this.publish('managed-hook-plan', plan);

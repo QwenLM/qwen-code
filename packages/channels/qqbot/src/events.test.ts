@@ -153,7 +153,11 @@ import type {
   GroupMsgToggleEvent,
 } from './types.js';
 import { Intent } from './types.js';
-import { QQ_IMAGE_MAX_BYTES } from './media.js';
+import {
+  QQ_FILE_MAX_BYTES,
+  QQ_IMAGE_MAX_BYTES,
+  QQ_VOICE_MAX_BYTES,
+} from './media.js';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -2317,6 +2321,14 @@ describe('extractBotOpenId', () => {
 describe('inbound media', () => {
   const IMAGE_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=image';
   const VIDEO_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=video';
+  const FILE_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=file';
+  const VOICE_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=voice';
+  const VOICE_WAV_URL =
+    'https://multimedia.nt.qq.com.cn/download?fileid=voice-wav';
+
+  const DOCX_BYTES = Buffer.from('PK\u0003\u0004docx bytes');
+  const SILK_BYTES = Buffer.from('SILK voice bytes');
+  const WAV_BYTES = Buffer.from('RIFF....WAVEfmt ');
 
   function imageAttachment(filename = 'photo.png') {
     return { url: IMAGE_URL, content_type: 'image/jpeg', filename };
@@ -2324,6 +2336,18 @@ describe('inbound media', () => {
 
   function videoAttachment(filename = 'clip.mp4') {
     return { url: VIDEO_URL, content_type: 'video/mp4', filename };
+  }
+
+  function fileAttachment(filename = 'report.docx') {
+    return { url: FILE_URL, content_type: 'file', filename };
+  }
+
+  function voiceAttachment(voiceWavUrl?: string) {
+    return {
+      url: VOICE_URL,
+      content_type: 'voice',
+      ...(voiceWavUrl ? { voice_wav_url: voiceWavUrl } : {}),
+    };
   }
 
   function lastEnvelope(): Envelope {
@@ -2470,6 +2494,351 @@ describe('inbound media', () => {
     expect(stats.mode & 0o777).toBe(0o600);
   });
 
+  it('downloads a file attachment and keeps the caption', async () => {
+    stubFetchBytes(DOCX_BYTES, 'file');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '请审阅这个文件',
+        attachments: [fileAttachment()],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('[atMention=true] [Alice]: 请审阅这个文件');
+    expect(env.syntheticText).toBeUndefined();
+    const attachments = env.attachments ?? [];
+    // A file is delivered once, by path — never as an inline image entry.
+    expect(attachments).toHaveLength(1);
+    const attachment = attachments[0];
+    // ChannelBase renders this entry into the prompt as
+    // `User sent a file "report.docx". It has been saved to: <path>`
+    // (ChannelBase.ts:7060), which is the line the agent actually sees.
+    expect(attachment?.type).toBe('file');
+    expect(attachment?.data).toBeUndefined();
+    expect(attachment?.mimeType).toBe('application/octet-stream');
+    expect(attachment?.fileName).toBe('report.docx');
+    expect(attachment?.filePath).toContain(join(suiteTmpDir, 'channel-files'));
+    expect(attachment?.filePath?.endsWith('report.docx')).toBe(true);
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(DOCX_BYTES);
+    const stats = await stat(attachment!.filePath!);
+    expect(stats.mode & 0o777).toBe(0o600);
+  });
+
+  it('runs a turn for a file-only C2C message with the (file) placeholder', async () => {
+    stubFetchBytes(DOCX_BYTES, 'file');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [fileAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(file)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.attachments).toHaveLength(1);
+    expect(env.attachments?.[0]?.type).toBe('file');
+    expect(env.attachments?.[0]?.filePath).toBeDefined();
+  });
+
+  it('runs a turn for a file-only group @ message with the (file) placeholder', async () => {
+    stubFetchBytes(DOCX_BYTES, 'file');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT>',
+        attachments: [fileAttachment()],
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true, scope: 'single' },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(file)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.attachments).toHaveLength(1);
+    expect(env.attachments?.[0]?.type).toBe('file');
+    expect(env.attachments?.[0]?.filePath).toBeDefined();
+  });
+
+  it('skips an over-limit file with one stderr line', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(DOCX_BYTES, {
+            headers: { 'content-length': String(QQ_FILE_MAX_BYTES + 1) },
+          }),
+      ),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [fileAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(User sent media but download failed)');
+    expect(env.attachments).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('[QQ:test-bot] skipping file attachment:'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('keeps a file that is over the image cap under the file cap', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // 8 MB + 1 is over the image cap and under the file cap, so the download
+    // only succeeds when the file kind routes to QQ_FILE_MAX_BYTES.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(DOCX_BYTES, {
+            headers: {
+              'content-type': 'file',
+              'content-length': String(QQ_IMAGE_MAX_BYTES + 1),
+            },
+          }),
+      ),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [fileAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    const attachment = env.attachments?.[0];
+    expect(attachment?.type).toBe('file');
+    expect(attachment?.fileName).toBe('report.docx');
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(DOCX_BYTES);
+    expect(
+      stderr.mock.calls.some(([line]) =>
+        String(line).includes('skipping file attachment'),
+      ),
+    ).toBe(false);
+    stderr.mockRestore();
+  });
+
+  it('preserves the sender extension for a file and falls back to .bin', async () => {
+    stubFetchBytes(DOCX_BYTES, 'file');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [
+          fileAttachment('../report.docx'),
+          fileAttachment('README'),
+          fileAttachment('notes.<script>'),
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    expect(lastEnvelope().attachments?.map((a) => a.fileName)).toEqual([
+      'report.docx',
+      'README.bin',
+      'notes.bin',
+    ]);
+  });
+
+  it('prefers the converted WAV URL for a voice attachment', async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(WAV_BYTES, { headers: { 'content-type': 'audio/wav' } }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [voiceAttachment(VOICE_WAV_URL)],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(voice)');
+    expect(env.syntheticText).toBe(true);
+    // The WAV URL is fetched, not the original SILK one.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(VOICE_WAV_URL);
+    const attachments = env.attachments ?? [];
+    // A voice message is delivered once, by path — never as an inline entry.
+    expect(attachments).toHaveLength(1);
+    const attachment = attachments[0];
+    expect(attachment?.type).toBe('audio');
+    expect(attachment?.mimeType).toBe('audio/wav');
+    // QQ sends no filename, so the stem falls back to `qq_voice`.
+    expect(attachment?.fileName).toBe('qq_voice.wav');
+    expect(attachment?.data).toBeUndefined();
+    expect(attachment?.filePath).toContain(join(suiteTmpDir, 'channel-files'));
+    expect(attachment?.filePath?.endsWith('qq_voice.wav')).toBe(true);
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(WAV_BYTES);
+    const stats = await stat(attachment!.filePath!);
+    expect(stats.mode & 0o777).toBe(0o600);
+  });
+
+  it('falls back to the original URL for a voice attachment without a WAV', async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(SILK_BYTES, { headers: { 'content-type': 'voice' } }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [voiceAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(voice)');
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(VOICE_URL);
+    const attachment = env.attachments?.[0];
+    expect(attachment?.type).toBe('audio');
+    expect(attachment?.mimeType).toBe('audio/silk');
+    expect(attachment?.fileName).toBe('qq_voice.silk');
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(SILK_BYTES);
+  });
+
+  it('runs a turn for a voice-only C2C message with the (voice) placeholder', async () => {
+    stubFetchBytes(SILK_BYTES, 'voice');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [voiceAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(voice)');
+    expect(env.syntheticText).toBe(true);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    expect(env.attachments).toHaveLength(1);
+    expect(env.attachments?.[0]?.type).toBe('audio');
+    expect(env.attachments?.[0]?.filePath).toBeDefined();
+  });
+
+  it('runs a turn for a voice-only group @ message with the (voice) placeholder', async () => {
+    stubFetchBytes(SILK_BYTES, 'voice');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT>',
+        attachments: [voiceAttachment()],
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true, scope: 'single' },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(voice)');
+    expect(env.syntheticText).toBe(true);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    expect(env.attachments).toHaveLength(1);
+    expect(env.attachments?.[0]?.type).toBe('audio');
+    expect(env.attachments?.[0]?.filePath).toBeDefined();
+  });
+
+  it('skips an over-limit voice attachment with one stderr line', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(SILK_BYTES, {
+            headers: { 'content-length': String(QQ_VOICE_MAX_BYTES + 1) },
+          }),
+      ),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [voiceAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(User sent media but download failed)');
+    expect(env.attachments).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('[QQ:test-bot] skipping voice attachment:'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('keeps a voice message over the image cap under the voice cap', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // 8 MB + 1 is over the image cap and under the voice cap, so the download
+    // only succeeds when the voice kind routes to QQ_VOICE_MAX_BYTES.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(SILK_BYTES, {
+            headers: {
+              'content-type': 'voice',
+              'content-length': String(QQ_IMAGE_MAX_BYTES + 1),
+            },
+          }),
+      ),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [voiceAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    const attachment = env.attachments?.[0];
+    expect(attachment?.type).toBe('audio');
+    expect(attachment?.fileName).toBe('qq_voice.silk');
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(SILK_BYTES);
+    expect(
+      stderr.mock.calls.some(([line]) =>
+        String(line).includes('skipping voice attachment'),
+      ),
+    ).toBe(false);
+    stderr.mockRestore();
+  });
+
   it('ignores unsupported attachments and keeps the text', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
@@ -2480,8 +2849,7 @@ describe('inbound media', () => {
       makeC2CEvent({
         content: 'hello',
         attachments: [
-          { url: IMAGE_URL, content_type: 'voice' },
-          { url: IMAGE_URL, content_type: 'file' },
+          { url: IMAGE_URL, content_type: 'application/octet-stream' },
         ],
       }),
     );
@@ -2500,7 +2868,9 @@ describe('inbound media', () => {
     pvt['handleC2C'](
       makeC2CEvent({
         content: '   ',
-        attachments: [{ url: IMAGE_URL, content_type: 'voice' }],
+        attachments: [
+          { url: IMAGE_URL, content_type: 'application/octet-stream' },
+        ],
       }),
     );
 

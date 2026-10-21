@@ -91,7 +91,7 @@ H4b 交付该流水线的 child-agent 部分:
 
 - `packages/core/src/managed-runtime/`:`managed-session-records.ts`(kind 闸门与断言)、`managed-session-authority.ts`(按 kind 选择性准入与反向 acceptance 检查)、新增 `managed-child-operations.ts`(六个操作记录体——launch/attach/dispatch/settle/fail/cancel 与 acceptance——以及 launch envelope 编码与幂等命令构建)、`managed-extension-projection.ts`(不动——`child_agent` 任务映射已存在;测试钉住),外加与 H4a 套件对应的并置测试。
 - `packages/core/src/tools/` 或 `packages/cli/src/serve/hosted-workspace-tool-turn.ts` 的工具轮接线:managed `agent` 工具准入(kind 闸门 + profile)、挂起结算等待者与重启重推导;在 `hosted-child-run-session.ts` 旁新增 `hosted-child-agent-session.ts` 动词漏斗(admit/dispatchStarted/attach/settle/settleFailed/requestStop 与 acceptance 动作及 delivery 推进——深等短路、`${id}:${rev}` 命令 id、`trusted_entry`、单条串行写链,完全照 H3 的漏斗纪律);通知写入对照 `hosted-monitor-notification.ts`;wake 调度复用 embedded scheduler 与 `pendingSessionInputs`;consumption 提交随 wake 轮/工具轮 settle 路径;重开 verifier 的 `domain.committed` 白名单纳入 `child_acceptance`(H3 已纳入 `child_run`),关闭时 pending input 结算覆盖 child 通知。
-- `packages/sdk-java/managed-agent-server`:`V54__managed_child_lineage_relay.sql`(lineage 列、`qwen_managed_child_result_relay`、扫描索引)、session 实体/创建路径的 lineage 字段、`ManagedAgentService` 的 `createChildSession`、`ChildResultRelay` worker、`SessionLifecycleCoordinator.settle` 的级联步骤、`ManagedExtensionRecordStore` 的反向 acceptance 检查、面向 `qwen serve` 的嵌入式 session-command 表面上的 child 操作端点,以及与 TypeScript 对应的 store/契约测试。
+- `packages/managed-agent-server`:`V54__managed_child_lineage_relay.sql`(lineage 列、`qwen_managed_child_result_relay`、扫描索引)、session 实体/创建路径的 lineage 字段、`ManagedAgentService` 的 `createChildSession`、`ChildResultRelay` worker、`SessionLifecycleCoordinator.settle` 的级联步骤、`ManagedExtensionRecordStore` 的反向 acceptance 检查、面向 `qwen serve` 的嵌入式 session-command 表面上的 child 操作端点,以及与 TypeScript 对应的 store/契约测试。
 - 反向 acceptance 闸由双语言的 authority 与 store 测试钉住(它是 authority 提交规则,非记录体文法属性——共享 fixture 不覆盖);authority 操作套件沿用 `managed-session-authority.child-agent.test.ts` 形制。
 - 双语设计文档;`.qwen/e2e-tests/` 下的 E2E 计划。
 
@@ -141,11 +141,28 @@ H4b 交付该流水线的 child-agent 部分:
 
 1. **G3 的重置标记只是证据中性,永不构成反证。** 应答丢失后 `withdrawSubmissionAttempted` 的 Turn 呈 `CANCELLED`、既无派发标记也无 epoch——与真实 pre-admission 失败字段形态完全相同——而历史 binding 仍在,所以 `FAILED|CANCELLED && !dispatched()` 这一终态形态凭自身仍不能证明 never-started。intent 调和现按证据排序:尚有未了局面的 Turn(存活、既未派发也非 pre-admission 终态)一律有界延迟;派发对或历史 binding 行以同一身份重放 dispatch 修复;只有两者皆缺且落在 pre-admission 终态失败上,才结算指名的 never-started 配对。终态身份永远不把一次重置升格为证据。
 
+## 冷控制面的 child 挂接（#13838）
+
+child-result relay 与生命周期/任务取消动词写入已有 child-run 记录，
+不准入新的父方输入。connector 缓存为空、但 Session 已记录此前的 Harness
+挂接时，先以被动恢复重新加载原 Session，再发送 child 操作。不设置
+`driveRuntimeRecovery` 或取消接管；停泊的父 Turn 继续归其 coordinator。
+
+复用现有被动加载路径，保留 Workspace/profile 授权、审批模式确认、固定的
+AgentDefinition 与 generation 校验。先解析挂接再读取当前 client，后续
+child 操作复用已确认的挂接。加载被拒绝或操作结果不明时，继续走已有 relay
+调和；不编造成功或 child 终态来掩盖失败。
+
+connector 回归台架模拟控制面重启后驻留 Harness 拒绝普通冷加载，要求对
+同一 Session 进行被动且不驱动恢复的加载，随后 child 操作成功且不重复加载。
+这是受控 connector 证据；物理重启与持久 relay 结算仍需独立的隔离 Hosted
+故障验收。
+
 ## 后续工作
 
 | 切片   | 范围                                                                                                                                                                                                                                                                                                                                                                 |
 | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| H4c    | 已完成:`workflow` 记录体 kind(禁用)、child launch 预算([设计](2026-10-09-managed-workflow-child-kind.zh-CN.md))。Workflow 工具准入:后续切片。                                                                                                                                                                                                                        |
+| H4c    | 已完成：`workflow` 记录体 kind 与 child launch 预算([设计](2026-10-09-managed-workflow-child-kind.zh-CN.md));workflow kind 由 workflow 运行时启用([设计](2026-10-10-managed-workflow-child-runtime.zh-CN.md))。                                                                                                                                                      |
 | H4d    | 已完成:`session_message` 记录体与 `continueChildRun` 规则([契约](2026-10-09-managed-session-messages.zh-CN.md)),以及 managed `send_message`、消息 relay、`continueChildRun` 的第一个诚实生产者、以新链复活已完成 child([运行时](2026-10-10-managed-session-message-runtime.zh-CN.md)),其决策 8 修订了本设计的完成判据。                                              |
 | H4e    | 部分完成:记录契约([H4e-a](2026-10-10-managed-agent-teams.zh-CN.md))与启用 `team_state`、`team_task` 的 lead 侧运行时([H4e-b1](2026-10-10-managed-agent-team-lead-runtime.zh-CN.md))。mailbox 中继、plan 决议、成员关停与 legacy 导入:H4e-b2 与 H4e-b3。[H4e-b3 设计](2026-10-11-managed-agent-team-member-commands.zh-CN.md)把旧团队导入排除在 H4e 之外(其决策 12)。 |
 | H4f    | 已为 `child_agent` 任务完成([设计](2026-10-10-managed-task-cancel.zh-CN.md)):公开任务取消路由,结清 #12847 A6/A7 与 B12;`unknown` delivery 的运维故事(开放问题 1)。                                                                                                                                                                                                   |

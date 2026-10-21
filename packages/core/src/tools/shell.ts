@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { measureToolOutput } from './tool-output-size.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -3191,6 +3192,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       0,
     );
 
+    // A capture-bound discard leaves llmContent a retained prefix, so the
+    // pre-reduction size is unrecoverable: declare it unknown, not the bound.
+    const rawOutputSize =
+      rawCapture || result.outputCaptureLimitExceeded
+        ? null
+        : measureToolOutput(llmContent);
+
     // Raw capture owns full output; result.output is only a bounded preview.
     // Otherwise truncate large output and save full content to a temp file.
     if (!rawCapture && typeof llmContent === 'string') {
@@ -3226,6 +3234,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // cap can't undercut the effective Shell char budget — many short lines
         // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
         {
+          layer: 'producer',
+          source: this.config.isTruncateToolOutputThresholdExplicit?.()
+            ? 'explicit'
+            : 'per_tool',
           threshold: bodyBudgetChars,
           previewChars: Math.min(4000, bodyBudgetChars),
           keep: 'both',
@@ -3283,9 +3295,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // hint to error.message too so the advisory survives whichever
     // branch the scheduler takes.
     //
-    // Note on reach: `ShellExecutionResult.error` is reserved for
-    // SPAWN / setup failures (per the field's doc comment in
-    // shellExecutionService.ts); non-zero exits leave it null. Real
+    // Note on reach: `ShellExecutionResult.error` includes PTY resource
+    // failures as well as SPAWN / setup failures; non-zero exits leave it
+    // null. Resource failures retain the bounded output body below. Real
     // spawn failures (ENOENT, permission denied) typically resolve in
     // <1s, so the elapsed >= threshold + spawn-error combination is
     // rare. The preservation is here for the slow-spawn edge cases
@@ -3298,6 +3310,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // SIEM alerting, hook-side error parsers) have an unambiguous
     // boundary they can split on rather than getting ~400 chars of
     // advisory text mixed inline with the original error body.
+    const isPtyResourceFailure =
+      isNodeError(result.error) && result.error.code === 'QWEN_PTY_WRITE_LIMIT';
     const executionError = timeoutSummary
       ? {
           error: {
@@ -3308,9 +3322,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
       : result.error
         ? {
             error: {
-              message:
-                result.error.message +
-                (longRunHint ? `\n\n---\n${longRunHint}` : ''),
+              message: isPtyResourceFailure
+                ? typeof llmContent === 'string'
+                  ? llmContent
+                  : returnDisplayMessage
+                : result.error.message +
+                  (longRunHint ? `\n\n---\n${longRunHint}` : ''),
               type: ToolErrorType.SHELL_EXECUTE_ERROR,
             },
           }
@@ -3330,6 +3347,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     return {
       llmContent,
+      rawOutputSize,
+      // `rawCapture` alone may still carry the complete output in its bounded
+      // preview; only a capture-bound discard means the body was cut.
+      ...(result.outputCaptureLimitExceeded
+        ? { truncatedByProducer: true }
+        : {}),
       returnDisplay: {
         type: 'shell_result',
         version: 1,

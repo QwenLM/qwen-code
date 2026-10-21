@@ -115,6 +115,14 @@ function task(overrides: Partial<WorkflowTask> = {}): WorkflowTask {
 }
 
 describe('toSnapshot', () => {
+  it('preserves the originating chat when a workflow is stored in project history', () => {
+    const source = { ...task(), parentSessionId: 'original-chat' };
+    expect(toSnapshot(source)).toMatchObject({
+      parentSessionId: 'original-chat',
+    });
+    expect(toSnapshot(task())).not.toHaveProperty('parentSessionId');
+  });
+
   it.each(['running', 'pausing', 'paused'] as const)(
     'rejects an active %s workflow',
     (status) => {
@@ -301,11 +309,16 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
   }
 
   it('round-trips a snapshot through disk', async () => {
-    await write({ runId: 'wf_rt', toolUseId: 'workflow-call-1' });
+    await write({
+      runId: 'wf_rt',
+      toolUseId: 'workflow-call-1',
+      parentSessionId: 'original-chat',
+    });
     const snapshots = await list();
     expect(snapshots).toHaveLength(1);
     expect(snapshots[0].runId).toBe('wf_rt');
     expect(snapshots[0].toolUseId).toBe('workflow-call-1');
+    expect(snapshots[0].parentSessionId).toBe('original-chat');
     expect(snapshots[0].perPhaseTokens).toEqual([
       ['Plan', 200],
       [null, 50],
@@ -539,6 +552,14 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
       expect(await read('wf_badpreview')).toBeUndefined();
     },
   );
+
+  it('rejects a malformed parent session identity instead of selecting another chat', async () => {
+    await write({ runId: 'wf_badowner' });
+    await editSnapshot('wf_badowner', (parsed) => {
+      parsed['parentSessionId'] = 123;
+    });
+    expect(await list()).toHaveLength(0);
+  });
 
   it('discards a snapshot whose size warning is malformed', async () => {
     await write({ runId: 'wf_badsize' });

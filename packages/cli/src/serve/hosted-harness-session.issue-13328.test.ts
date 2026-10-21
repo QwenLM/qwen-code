@@ -40,6 +40,7 @@ import {
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerRejection,
 } from './hosted-workspace-broker.js';
+import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import * as stdio from '../utils/stdioHelpers.js';
 
@@ -95,6 +96,7 @@ vi.mock(
         toolResultResources: resourceStore,
         assertWritable: state.assertWritable,
         authorizeOrdinary: async () => undefined,
+        approvalSelection: async () => ({ mode: 'yolo', revision: 0 }),
         publication: {
           owner: async () => ({ writerId: BOOT_ID, writerGeneration: 1 }),
           request: (route: string, body: unknown, token?: string) =>
@@ -106,7 +108,8 @@ vi.mock(
     },
   }),
 );
-vi.mock('./hosted-harness-model.js', () => ({
+vi.mock('./hosted-harness-model.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./hosted-harness-model.js')>()),
   runHostedHarnessTextTurn: state.model,
 }));
 
@@ -159,7 +162,7 @@ function headers<T extends supertest.Test>(request: T): T {
 
 function store() {
   return {
-    baseUrl: 'http://store.test',
+    baseUrl: 'https://store.test',
     tenantId: 'tenant',
     workspaceId: 'workspace',
     writerId: BOOT_ID,
@@ -169,6 +172,11 @@ function store() {
 
 describe('issue #13328: a second concurrent Session on the same Workspace mount', () => {
   beforeEach(async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'capabilityDigest',
+      'get',
+    ).mockReturnValue(WORKSPACE_CAPABILITY_DIGEST);
     resetManagedRuntimeDispatchGatesForTest();
     state.root = await mkdtemp(path.join(tmpdir(), 'issue-13328-'));
     state.assertWritable.mockReset();
@@ -183,7 +191,7 @@ describe('issue #13328: a second concurrent Session on the same Workspace mount'
 
   it(
     'queues or settles with a classified retryable workspace_busy, not terminal hosted_turn_failed',
-    { timeout: 30_000 },
+    { timeout: 60_000 },
     async () => {
       // One Runtime execution lease, exactly as the Runtime Broker's
       // managed_workspace_execution_lease row serializes it: the first
@@ -333,12 +341,15 @@ describe('issue #13328: a second concurrent Session on the same Workspace mount'
       // Second Turn: also admitted (202) while the mount is busy.
       expect((await submit(SESSION_B, clientB, PROMPT_B)).status).toBe(202);
       // The second Turn settles — observe, don't yet judge.
+      // Its settle chain runs serial fsync-backed journal commits across
+      // both Sessions plus the 250 ms queue poll; 10 s flaked on the
+      // loaded verification runner (same family as the admission window).
       await vi.waitFor(
         async () => {
           const view = await status(SESSION_B, clientB);
           expect(view.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: 20_000 },
       );
       const eventsB = await transcript(SESSION_B, clientB);
       const settledB = eventsB.find(

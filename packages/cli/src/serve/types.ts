@@ -364,6 +364,8 @@ export interface ServeOptions {
   managedRuntimeBrokerToken?: string;
   /** Deployment-generated digest for the Hosted Harness private contract. */
   hostedHarnessCapabilityDigest?: string;
+  /** Trusted startup URL for the operator-only original CSI attachment. */
+  hostedCsiSessionStoreUrl?: string;
   /**
    * Per-SSE-connection idle deadline.
    */
@@ -452,6 +454,7 @@ export interface ServeOptions {
 export interface HostedHarnessCapabilities {
   readonly features?: readonly string[];
   readonly lifecycleProtocolVersion?: 1;
+  readonly lifecycleV2Profiles?: readonly string[];
   readonly titleProtocolVersion?: 1;
   readonly protocolVersions: {
     readonly current: 1;
@@ -610,7 +613,7 @@ export interface ServeAuthProviderCatalog {
   workspaceCwd: string;
   providers: ServeAuthProviderDescriptor[];
   groups: Array<{
-    id: 'alibaba' | 'third-party' | 'custom';
+    id: 'qwencloud' | 'alibaba' | 'third-party' | 'custom';
     label: string;
     description: string;
     providerIds: string[];

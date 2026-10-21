@@ -6,7 +6,7 @@ Run the packaged CLI, real worker, Runtime Broker, Spring store and maintenance 
 
 ```sh
 mvn --batch-mode --no-transfer-progress \
-  -f packages/sdk-java/managed-agent-server/pom.xml \
+  -f packages/managed-agent-server/pom.xml \
   '-Dtest=HostedWorkspaceToolTurnIT#operatorRecoveryReleasesOnlyTheOriginalQuiescentShellOnMySql' \
   -Dnode.executable="$(command -v node)" \
   -Dqwen.cli.entry="$PWD/dist/cli.js" \
@@ -26,6 +26,8 @@ The test observes three independent Workspaces:
 Recovery invokes the real maintenance entry point in separate JVMs: inspect the original binding and generation, prepare the exact held lease, stop the fixture's workers and potential writers, and submit a private quiescence statement. Completion is retried with the same evidence file. SQL must show the original lease removed and binding retired; a new Session must actually write a file in the recovered Workspace. The original marker must remain a single `x`, and recovery itself must not call the model again.
 
 Success includes `HOSTED_OPERATOR_RECOVERY_OK` and identity-bearing `OPERATOR_RECOVERY` records. Retain the Surefire report and process output when a check fails. This does not certify arbitrary escaped processes, external restart sources, cross-host recovery, or completion of the original uncertain turn. The operator statement remains the trust boundary described in the [recovery procedure](../../../docs/users/hosted-workspace-recovery.md).
+
+SDK Java CI runs this scenario in the Hosted MySQL job. Its MariaDB job excludes `Hosted*IT`, so a green MariaDB job does not establish regression coverage for this scenario. The MySQL and MariaDB results below are local acceptance runs; repeat the command above against MariaDB to verify it there.
 
 ## Recorded acceptance — 2026-10-09
 
@@ -54,5 +56,7 @@ In both runs, the detached case recorded `escapedWriterLive=true` after the orig
 2026-10-09 的生产基线为 `669b2f0f91b0c787f7d8a26971c7c34210b935e1`，未修改的 CLI bundle SHA256 为 `11db529ca76a62e3b19c95269da45583ffb6b820b5e9619ae38bb973661c5c2d`。两次运行都使用独立本地虚拟机中的 Ubuntu 24.04 arm64、Linux 6.8.0-146-generic、Java 21.0.12.1 和 Node 22.23.3。MySQL 8.4.11：1 项测试、0 failures、0 errors、0 skipped，21.17 秒；MariaDB 11.4.13：1 项测试、0 failures、0 errors、0 skipped，23.84 秒。两次均输出 `HOSTED_OPERATOR_RECOVERY_OK`。
 
 两次脱离进程场景均在原 worker 被杀后记录 `escapedWriterLive=true`，holder 仍保持封锁。两个恢复均完成并产生新 binding，两个替代 Session 实际写入 `available`，原标记始终为 `x`；运维重试与不重放断言也通过。此次选择 legacy saved-result Shell profile。`W1_PHYSICAL_GUARD=false`，不能据此证明 W1 挂载/备份隔离或 H3 background/Monitor publication、重启和 drain 行为。
+
+SDK Java CI 通过 Hosted MySQL job 运行这个场景。MariaDB job 排除了 `Hosted*IT`，因此该 job 通过不代表本场景具备 MariaDB 回归覆盖。上述 MySQL 与 MariaDB 结果均来自本地验收；要验证 MariaDB，请使用相应数据库配置重跑上方命令。
 
 </details>

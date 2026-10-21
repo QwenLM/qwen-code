@@ -18,7 +18,21 @@ afterEach(async () => {
 const advance = (ms: number) =>
   act(async () => vi.advanceTimersByTimeAsync(ms));
 
-async function mount({ shadowPortal = false, withDetails = true } = {}) {
+async function mount({
+  shadowPortal = false,
+  withDetails = true,
+  readOnly = false,
+  known,
+  tokenCount = 60_000,
+  contextWindow = 100_000,
+}: {
+  shadowPortal?: boolean;
+  withDetails?: boolean;
+  readOnly?: boolean;
+  known?: boolean;
+  tokenCount?: number;
+  contextWindow?: number;
+} = {}) {
   vi.useFakeTimers();
   const host = document.createElement('div');
   const portal = document.createElement('div');
@@ -55,13 +69,19 @@ async function mount({ shadowPortal = false, withDetails = true } = {}) {
             <WebShellPortalRootContext.Provider value={portal}>
               <ContextUsagePopover
                 key={sessionId}
-                tokenCount={60_000}
-                contextWindow={100_000}
-                controls={controls}
+                tokenCount={tokenCount}
+                contextWindow={contextWindow}
+                known={known}
+                controls={readOnly ? undefined : controls}
                 onOpenDetails={withDetails ? details : undefined}
-                showSnapshotHint
+                showSnapshotHint={!readOnly}
               >
-                <Button ref={triggerRef} onClick={snapshot}>
+                <Button
+                  ref={triggerRef}
+                  onClick={
+                    readOnly ? (event) => event.stopPropagation() : snapshot
+                  }
+                >
                   Context ring
                 </Button>
               </ContextUsagePopover>
@@ -123,6 +143,49 @@ function key(node: Element, value: string, shiftKey = false) {
 }
 
 describe('ContextUsagePopover', () => {
+  it('opens and closes an explicitly observed read-only popup on touch inside the portal', async () => {
+    const h = await mount({
+      readOnly: true,
+      withDetails: false,
+      known: true,
+      tokenCount: 0,
+      contextWindow: 1000,
+      shadowPortal: true,
+    });
+    pointer(h.trigger, 'pointerdown', null, 'touch');
+    await act(async () => h.trigger.click());
+    expect(h.card).not.toBeNull();
+    expect(h.portal.contains(h.card)).toBe(true);
+    expect(h.card!.textContent).toContain('0.0%');
+    expect(h.card!.querySelector('dl')?.textContent).toContain('1,000 tokens');
+    expect(h.card!.querySelectorAll('button')).toHaveLength(0);
+    await act(async () => h.trigger.click());
+    expect(h.card).toBeNull();
+    expect(h.details).not.toHaveBeenCalled();
+    expect(h.compress).not.toHaveBeenCalled();
+    expect(h.snapshot).not.toHaveBeenCalled();
+    expect(h.ancestorClick).not.toHaveBeenCalled();
+  });
+
+  it('shows honest unknown state with keyboard focus and drops it on Session change', async () => {
+    const h = await mount({
+      readOnly: true,
+      withDetails: false,
+      known: false,
+      tokenCount: 0,
+      contextWindow: 0,
+    });
+    await act(async () => h.trigger.focus());
+    expect(h.card?.textContent).toContain('has not been observed');
+    expect(h.card!.querySelector('dl')).toBeNull();
+    key(h.card!, 'Escape');
+    expect(h.card).toBeNull();
+    pointer(h.trigger, 'pointermove');
+    await h.switchSession();
+    await advance(350);
+    expect(h.card).toBeNull();
+  });
+
   it('keeps an interactive hover open across the gap without stealing draft focus or issuing actions', async () => {
     const h = await mount();
     expect(h.triggerRef.current).toBe(h.host.querySelector('button'));
