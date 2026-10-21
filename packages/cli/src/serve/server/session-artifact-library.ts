@@ -31,7 +31,8 @@ export async function readWorkspaceArtifactLibrary(
   if (isLive(runtime, sessionId))
     return runtime.bridge.getSessionArtifacts(sessionId);
   const service = createWorkspaceRuntimeSessionService(runtime);
-  const location = await service.getSessionLocation(sessionId);
+  const location = await service.getMaintainableSessionLocation(sessionId);
+  if (!location) throw new SessionNotFoundError(sessionId);
   if (location === 'conflict') throw new SessionConflictError(sessionId);
   const snapshot = await service.readSessionArtifactSnapshot(sessionId);
   if (!snapshot) throw new SessionNotFoundError(sessionId);
@@ -39,7 +40,6 @@ export async function readWorkspaceArtifactLibrary(
     sessionId,
     workspaceCwd: runtime.workspaceCwd,
     runtimeBaseDir: runtime.sessionRuntimeBaseDir,
-    maxArtifacts: 500,
   }).readPersistedLibrary(snapshot);
 }
 
@@ -57,7 +57,7 @@ export async function removeWorkspaceLibraryArtifact(
     );
   }
   const service = createWorkspaceRuntimeSessionService(runtime);
-  const location = await service.getSessionLocation(sessionId);
+  const location = await service.getMaintainableSessionLocation(sessionId);
   if (!location) throw new SessionNotFoundError(sessionId);
   if (location === 'conflict') throw new SessionConflictError(sessionId);
   const options = {
@@ -72,7 +72,7 @@ export async function removeWorkspaceLibraryArtifact(
         })
       : await service.acquireSessionMaintenanceLease(sessionId, options);
   try {
-    const found = await service.removeSessionArtifactForLibrary(
+    const removed = await service.removeSessionArtifactForLibrary(
       sessionId,
       artifactId,
       {
@@ -80,11 +80,13 @@ export async function removeWorkspaceLibraryArtifact(
         assertCanMutate,
       },
     );
-    if (!found) throw new SessionNotFoundError(sessionId);
+    if (removed === undefined) throw new SessionNotFoundError(sessionId);
     return {
       v: 1,
       sessionId,
-      changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
+      changes: removed
+        ? [{ action: 'removed', artifactId, reason: 'explicit' }]
+        : [],
     };
   } finally {
     await lease.release();

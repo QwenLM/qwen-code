@@ -748,6 +748,11 @@ export class SessionArtifactStore {
     const warnings = [...snapshot.warnings];
     for (const artifact of snapshot.artifacts) {
       if (this.dropLegacyLocalPublished(artifact)) continue;
+      if (artifact.retention === 'pinned') {
+        warnings.push(
+          `pinned artifact ${artifact.id} downgraded to restorable; runtime does not support pinned retention`,
+        );
+      }
       try {
         const normalized = await this.normalizeInput(
           {
@@ -776,6 +781,10 @@ export class SessionArtifactStore {
             updatedAt: artifact.updatedAt,
             persistedAt: artifact.persistedAt,
             restoreState: 'restored',
+            persistenceWarning:
+              normalized.status !== 'available'
+                ? 'metadata_only_restore'
+                : undefined,
           }),
         );
       } catch {

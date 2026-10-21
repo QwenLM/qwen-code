@@ -7301,17 +7301,42 @@ export function registerSessionRoutes(
         return;
       }
       try {
+        const runtime = await resolveQualifiedSessionRuntime(
+          req,
+          res,
+          route,
+          [sessionId],
+          'any',
+        );
+        if (!runtime) return;
+        const assertOpen = captureRuntimeGenerationAssertion(runtime);
         const run = async () => {
-          const runtime = await resolveQualifiedSessionRuntime(
-            req,
-            res,
-            route,
-            [sessionId],
-            'any',
-          );
-          if (!runtime) return undefined;
-          const assertOpen = captureRuntimeGenerationAssertion(runtime);
           assertOpen?.();
+          const liveOwner =
+            workspaceRegistry.resolveLiveSessionOwner(sessionId);
+          if (liveOwner.kind === 'unavailable') {
+            sendWorkspaceRuntimeUnavailable(res);
+            return undefined;
+          }
+          if (liveOwner.kind === 'ambiguous') {
+            sendAmbiguousSessionOwner(
+              res,
+              route,
+              sessionId,
+              liveOwner.runtimes,
+            );
+            return undefined;
+          }
+          if (liveOwner.kind === 'found' && liveOwner.runtime !== runtime) {
+            sendSessionWorkspaceConflict(
+              res,
+              route,
+              sessionId,
+              runtime,
+              liveOwner.runtime,
+            );
+            return undefined;
+          }
           const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
             operation === 'read'
               ? readWorkspaceArtifactLibrary(runtime, sessionId)
@@ -7325,10 +7350,11 @@ export function registerSessionRoutes(
           assertOpen?.();
           return result;
         };
-        const result =
+        const result = await runOwnerRuntimeActivity(runtime, () =>
           operation === 'read'
-            ? await archiveCoordinator.runSharedMany([sessionId], run)
-            : await archiveCoordinator.runExclusiveMany([sessionId], run);
+            ? archiveCoordinator.runSharedMany([sessionId], run)
+            : archiveCoordinator.runExclusiveMany([sessionId], run),
+        );
         if (result)
           res.status(200).set('Cache-Control', 'no-store').json(result);
       } catch (error) {

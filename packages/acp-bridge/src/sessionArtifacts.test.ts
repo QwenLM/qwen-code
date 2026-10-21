@@ -71,11 +71,48 @@ describe('SessionArtifactStore', () => {
       id: persisted.id,
       workspacePath: 'report.md',
       restoreState: 'restored',
+      retention: 'restorable',
+      createdAt: persisted.createdAt,
+      updatedAt: persisted.updatedAt,
+      persistedAt: persisted.persistedAt,
     });
+    expect(result.artifacts[0]).not.toHaveProperty('persistenceWarning');
     expect(result.artifacts[0]).not.toHaveProperty('clientId');
     expect(await fs.readdir(workspace)).toEqual(before);
     expect((await store.list()).artifacts).toEqual([]);
   });
+
+  it.each(['missing', 'changed'] as const)(
+    'marks a persisted %s file as metadata-only',
+    async (status) => {
+      const store = new SessionArtifactStore({
+        sessionId: 'library',
+        workspaceCwd: workspace,
+      });
+      const artifact = {
+        ...persistedWorkspaceFile('library', 'report.md'),
+        status,
+        retention: 'pinned' as const,
+      };
+      const result = await store.readPersistedLibrary({
+        v: 2,
+        sessionId: 'library',
+        sequence: 1,
+        artifacts: [artifact],
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      });
+      expect(result.artifacts[0]).toMatchObject({
+        retention: 'restorable',
+        status,
+        persistenceWarning: 'metadata_only_restore',
+      });
+      expect(result.warnings).toEqual([
+        expect.stringContaining('downgraded to restorable'),
+      ]);
+    },
+  );
 
   it('keeps client ownership checks while accepting explicit workspace owner deletion', async () => {
     const sessionId = 'library-owner';

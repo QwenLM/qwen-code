@@ -30,3 +30,11 @@ DAC 需要实例内统一产物专区，覆盖运行中、未加载及已归档�
 旧 daemon 不声明此能力，客户端必须显示升级状态，不能静默只返回 live 产物。超大或损坏 transcript 显示明确的部分失败。managed execution 登记写入不属于 legacy 持久化权限。
 
 既有 session loader 对从未记录对话轮次、仅由 API 登记产物的会话，可能在恢复后丢失运行中产物视图；未修改的全局 CLI 已复现。新管理接口支持这类记录的冷读取和持久化删除，但本次不替换原有空对话加载链路。对需求中“对话生成产物”的恢复验收，通过正常 ChatRecordingService API 录入已完成轮次。此协议暂无待确认的产品决策。
+
+## 归属与失败语义
+
+两条路由在分派前解析全局 live 归属，拒绝归属歧义、不可用或由其他 runtime 持有的会话。内部 runtime 的活动屏障包围 shared/read 或 exclusive/remove 归档屏障。冷投影保留时间戳，对旧 pinned retention 降级并告警，使用 metadata-only 恢复状态，不误报持久化不可用。live 上限保持 200，冷读取不裁剪登记。
+
+单产物兼容告警随部分读取返回，并允许移除已知登记；无法识别的版本、被截断的 journal 及过期序号告警拒绝写入。不完整记录或对话链返回 `session_transcript_corrupt`，并发物理变更仍使用 writer conflict 错误。空记录或其他工作目录的记录视为不存在；其他存储身份错误视为冲突。managed 写入拒绝消息明确描述产物操作。
+
+冷会话无操作移除不返回虚假的 changes。tombstone 成功后，以 best-effort 方式释放未再使用的受管网页快照引用，并保留 workspace 文件。改名父节点跳过旁路记录，即使大型产物快照将对话尾部挤出首次读取窗口也不截断历史。live 持久化失败保留现有 HTTP 200 warning 结果，调用方必须检查结果后再从视图移除条目。

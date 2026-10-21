@@ -30,3 +30,11 @@ Test live/cold/archived reads, removal surviving reload, unchanged archive/histo
 Older daemons do not advertise the feature; clients must show an upgrade state rather than silently returning only live artifacts. Very large or corrupt transcripts are explicit partial failures. Managed execution registration mutation is outside the legacy persistence authority.
 
 The existing session loader can lose the live artifact view for an API-only session that has never recorded a conversation turn; this was reproduced with the unmodified global CLI. The library's cold reads and deletion persistence support these journals, but this change does not replace the existing empty-conversation loader. Restore acceptance for conversation-generated artifacts uses a completed turn recorded through the normal ChatRecordingService API. There are no remaining product decisions for this protocol.
+
+## Ownership and failure semantics
+
+Both routes resolve global live ownership before dispatch and reject ambiguous, unavailable or different-runtime owners. Internal runtime activity fencing surrounds the shared/read or exclusive/remove archive barrier. Cold projection preserves timestamps, downgrades legacy pinned retention with a warning, and reports metadata-only restoration without claiming persistence is unavailable. The live limit remains 200; cold reads do not evict registrations.
+
+Per-artifact compatibility warnings accompany partial reads and permit deleting a known registration; unrecognized versions, truncated journals and stale sequence warnings refuse mutation. Incomplete records or conversation chains use `session_transcript_corrupt`, while concurrent physical changes keep the writer-conflict code. Empty or foreign-workspace journals are not found; other storage identity failures are conflicts. Managed mutation refusal names the artifact operation.
+
+Cold no-op removal returns no changes. Successful tombstones release unreferenced managed web-preview snapshot references on a best-effort basis and preserve workspace files. Rename parents skip side records, including when a large artifact snapshot pushes the conversation tail out of the first read window. Live persistence failures retain the existing HTTP 200 warning result, which callers must inspect before removing an item from their view.

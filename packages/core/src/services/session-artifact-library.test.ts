@@ -8,7 +8,14 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { SessionService } from './sessionService.js';
+import {
+  SessionArtifactLibraryError,
+  SessionStorageEntryError,
+  SessionService,
+} from './sessionService.js';
+import { SessionTranscriptTooLargeError } from './session-transcript-reader.js';
+import { saveArtifactSnapshot } from '../tools/artifact/artifact-snapshots.js';
+import { fileURLToPath } from 'node:url';
 import { Storage } from '../config/storage.js';
 import {
   stableSessionArtifactId,
@@ -147,10 +154,12 @@ describe('persisted artifact library', () => {
           .map((record) => record.uuid),
       ).toEqual(['user-1', 'assistant-1']);
       const after = await fs.readFile(file, 'utf8');
-      await service.removeSessionArtifactForLibrary(id, artifactId, {
-        assertStorageUnchanged: async () => {},
-        assertCanMutate: () => {},
-      });
+      await expect(
+        service.removeSessionArtifactForLibrary(id, artifactId, {
+          assertStorageUnchanged: async () => {},
+          assertCanMutate: () => {},
+        }),
+      ).resolves.toBe(false);
       expect(await fs.readFile(file, 'utf8')).toBe(after);
     },
   );
@@ -344,14 +353,18 @@ describe('persisted artifact library', () => {
               parentUuid: 'assistant-1',
             }) + '\n',
       );
-      await expect(service.readSessionArtifactSnapshot(id)).rejects.toThrow();
+      await expect(service.readSessionArtifactSnapshot(id)).rejects.toThrow(
+        SessionArtifactLibraryError,
+      );
     },
   );
 
   it('rejects an oversized transcript before reading its body', async () => {
     await seed();
     await fs.truncate(file, 64 * 1024 * 1024 + 1);
-    await expect(service.readSessionArtifactSnapshot(id)).rejects.toThrow();
+    await expect(service.readSessionArtifactSnapshot(id)).rejects.toThrow(
+      SessionTranscriptTooLargeError,
+    );
   });
 
   it('refuses legacy mutation of a managed-owned transcript', async () => {
@@ -412,5 +425,301 @@ describe('persisted artifact library', () => {
     expect(
       await service.readSessionArtifactSnapshot('../outside'),
     ).toBeUndefined();
+  });
+  it.each([false, true])(
+    'preserves history after cold deletion and rename with a large side tail (%s)',
+    async (largeTail) => {
+      await seed();
+      await service.removeSessionArtifactForLibrary(id, artifactId, {
+        assertStorageUnchanged: async () => {},
+        assertCanMutate: () => {},
+      });
+      if (largeTail) {
+        await fs.appendFile(
+          file,
+          JSON.stringify({
+            sessionId: id,
+            cwd,
+            uuid: 'sources',
+            parentUuid: 'assistant-1',
+            timestamp: stamp,
+            version: '0.25.3',
+            type: 'system',
+            subtype: 'session_sources_snapshot',
+            systemPayload: { padding: 'x'.repeat(100_000) },
+          }) + '\n',
+        );
+      }
+      expect(await service.renameSession(id, 'Renamed')).toBe(true);
+      expect(await service.readSessionArtifactSnapshot(id)).toMatchObject({
+        artifacts: [],
+        tombstonedIds: [artifactId],
+      });
+      const loaded = await service.loadSession(id);
+      expect(loaded?.historyGaps ?? []).toEqual([]);
+      expect(
+        loaded?.conversation.messages
+          .filter(
+            (record) => record.type === 'user' || record.type === 'assistant',
+          )
+          .map((record) => record.uuid),
+      ).toEqual(['user-1', 'assistant-1']);
+      expect(loaded?.artifactSnapshot?.tombstonedIds).toContain(artifactId);
+    },
+  );
+
+  it('selects only the requested artifact after a snapshot and skips an unknown artifact kind', async () => {
+    await seed();
+    const original = (await service.readSessionArtifactSnapshot(id))!
+      .artifacts[0];
+    const second = {
+      ...original,
+      id: stableSessionArtifactId(id, 'workspace:second.md'),
+      workspacePath: 'second.md',
+    };
+    const future = {
+      ...original,
+      id: stableSessionArtifactId(id, 'workspace:future.md'),
+      workspacePath: 'future.md',
+      kind: 'future-kind',
+    };
+    await fs.appendFile(
+      file,
+      JSON.stringify({
+        sessionId: id,
+        cwd,
+        uuid: 'snapshot',
+        parentUuid: 'assistant-1',
+        timestamp: stamp,
+        version: '0.25.3',
+        type: 'system',
+        subtype: 'session_artifact_snapshot',
+        systemPayload: {
+          v: 2,
+          sessionId: id,
+          sequence: 50,
+          recordedAt: stamp,
+          artifacts: [original, second, future],
+          tombstonedIds: [],
+          stickyEphemeralIds: [],
+        },
+      }) + '\n',
+    );
+    const before = await service.readSessionArtifactSnapshot(id);
+    expect(before?.artifacts.map((artifact) => artifact.id)).toEqual([
+      artifactId,
+      second.id,
+    ]);
+    expect(before?.warnings).toEqual([
+      `skipped malformed artifact ${future.id}`,
+    ]);
+    expect(
+      await service.removeSessionArtifactForLibrary(id, second.id, {
+        assertStorageUnchanged: async () => {},
+        assertCanMutate: () => {},
+      }),
+    ).toBe(true);
+    const after = await service.readSessionArtifactSnapshot(id);
+    expect(after?.sequence).toBe(51);
+    expect(after?.artifacts.map((artifact) => artifact.id)).toEqual([
+      artifactId,
+    ]);
+    expect(after?.tombstonedIds).toEqual([second.id]);
+  });
+
+  it('reports partial reads but refuses mutations with a stale journal sequence', async () => {
+    await seed();
+    const original = (await service.readSessionArtifactSnapshot(id))!
+      .artifacts[0];
+    const base = {
+      sessionId: id,
+      cwd,
+      parentUuid: 'assistant-1',
+      timestamp: stamp,
+      version: '0.25.3',
+      type: 'system',
+    };
+    await fs.appendFile(
+      file,
+      [
+        {
+          ...base,
+          uuid: 'snapshot',
+          subtype: 'session_artifact_snapshot',
+          systemPayload: {
+            v: 2,
+            sessionId: id,
+            sequence: 50,
+            recordedAt: stamp,
+            artifacts: [original],
+          },
+        },
+        {
+          ...base,
+          uuid: 'stale',
+          subtype: 'session_artifact_event',
+          systemPayload: {
+            v: 2,
+            sessionId: id,
+            sequence: 49,
+            recordedAt: stamp,
+            changes: [],
+          },
+        },
+      ]
+        .map((record) => JSON.stringify(record))
+        .join('\n') + '\n',
+    );
+    expect((await service.readSessionArtifactSnapshot(id))?.warnings).toEqual([
+      expect.stringContaining('skipped stale event sequence'),
+    ]);
+    const before = await fs.readFile(file, 'utf8');
+    await expect(
+      service.removeSessionArtifactForLibrary(id, artifactId, {
+        assertStorageUnchanged: async () => {},
+        assertCanMutate: () => {},
+      }),
+    ).rejects.toMatchObject({ code: 'session_transcript_corrupt' });
+    expect(await fs.readFile(file, 'utf8')).toBe(before);
+  });
+
+  it('returns an empty library for a conversation with no registrations', async () => {
+    await seed();
+    const lines = (await fs.readFile(file, 'utf8')).trim().split('\n');
+    await fs.writeFile(file, [lines[0], lines[2]].join('\n') + '\n');
+    expect(await service.readSessionArtifactSnapshot(id)).toMatchObject({
+      sequence: 0,
+      artifacts: [],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+    const before = await fs.readFile(file, 'utf8');
+    expect(
+      await service.removeSessionArtifactForLibrary(id, artifactId, {
+        assertStorageUnchanged: async () => {},
+        assertCanMutate: () => {},
+      }),
+    ).toBe(false);
+    expect(await fs.readFile(file, 'utf8')).toBe(before);
+  });
+
+  it('rechecks runtime authority after the asynchronous storage guard', async () => {
+    await seed();
+    const before = await fs.readFile(file, 'utf8');
+    let mutable = true;
+    await expect(
+      service.removeSessionArtifactForLibrary(id, artifactId, {
+        assertStorageUnchanged: async () => {
+          await Promise.resolve();
+          mutable = false;
+        },
+        assertCanMutate: () => {
+          if (!mutable) throw new Error('runtime drained');
+        },
+      }),
+    ).rejects.toThrow('runtime drained');
+    expect(await fs.readFile(file, 'utf8')).toBe(before);
+  });
+
+  it('returns not found for an empty journal', async () => {
+    await seed();
+    await fs.writeFile(file, '');
+    expect(await service.readSessionArtifactSnapshot(id)).toBeUndefined();
+    expect(
+      await service.removeSessionArtifactForLibrary(id, artifactId, {
+        assertStorageUnchanged: async () => {},
+        assertCanMutate: () => {},
+      }),
+    ).toBeUndefined();
+  });
+
+  it('rejects foreign ownership even when a transcript exists at the expected path', async () => {
+    await seed();
+    const other = path.join(temp, 'other');
+    await fs.mkdir(other);
+    const dir = path.join(new Storage(other, runtime).getProjectDir(), 'chats');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.copyFile(file, path.join(dir, `${id}.jsonl`));
+    await expect(
+      new SessionService(other, {
+        runtimeBaseDir: runtime,
+      }).readSessionArtifactSnapshot(id),
+    ).rejects.toThrow(SessionStorageEntryError);
+  });
+
+  it('refuses traversal even when an escaped transcript exists', async () => {
+    await seed();
+    const escaped = (await fs.readFile(file, 'utf8')).replaceAll(
+      id,
+      '../outside',
+    );
+    await fs.writeFile(
+      path.resolve(path.dirname(file), '../outside.jsonl'),
+      escaped,
+    );
+    expect(
+      await service.readSessionArtifactSnapshot('../outside'),
+    ).toBeUndefined();
+  });
+
+  it('releases a removed web-preview snapshot reference without deleting workspace files', async () => {
+    await seed();
+    const report = path.join(cwd, 'report.md');
+    await fs.writeFile(report, 'Keep workspace output');
+    const capture = await saveArtifactSnapshot(
+      '<html>Capture</html>',
+      'Capture',
+      'https://example.com',
+      id,
+      runtime,
+    );
+    const snapshotId = stableSessionArtifactId(id, `url:${capture.url}`);
+    const artifact = {
+      ...capture,
+      id: snapshotId,
+      toolName: 'artifact',
+      source: 'tool',
+      status: 'available',
+      retention: 'restorable',
+      clientRetained: false,
+      createdAt: stamp,
+      updatedAt: stamp,
+    };
+    await fs.appendFile(
+      file,
+      JSON.stringify({
+        sessionId: id,
+        cwd,
+        uuid: 'capture',
+        parentUuid: 'assistant-1',
+        timestamp: stamp,
+        version: '0.25.3',
+        type: 'system',
+        subtype: 'session_artifact_event',
+        systemPayload: {
+          v: 2,
+          sessionId: id,
+          sequence: 2,
+          recordedAt: stamp,
+          changes: [{ action: 'created', artifactId: snapshotId, artifact }],
+        },
+      }) + '\n',
+    );
+    const captured = fileURLToPath(capture.url!);
+    expect(await fs.readFile(captured, 'utf8')).toBe('<html>Capture</html>');
+    expect(
+      await service.removeSessionArtifactForLibrary(id, snapshotId, {
+        assertStorageUnchanged: async () => {},
+        assertCanMutate: () => {},
+      }),
+    ).toBe(true);
+    await expect(fs.stat(captured)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await fs.readFile(report, 'utf8')).toBe('Keep workspace output');
+    expect(
+      (await service.readSessionArtifactSnapshot(id))?.artifacts.map(
+        (item) => item.id,
+      ),
+    ).toEqual([artifactId]);
   });
 });
