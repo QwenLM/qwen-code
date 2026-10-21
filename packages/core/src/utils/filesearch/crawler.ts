@@ -25,6 +25,10 @@ export interface CrawlOptions {
   ignore: Ignore;
   // Whether gitignore filtering should be respected by git/rg paths.
   useGitignore?: boolean;
+  // Whether the bundled ripgrep may be used (tools.useBuiltinRipgrep). Callers
+  // without a config inherit the default, which is what the setting's own
+  // default resolves to.
+  useBuiltinRipgrep?: boolean;
   // Caching options.
   cache: boolean;
   cacheTtl: number;
@@ -1322,7 +1326,11 @@ async function crawlWithRipgrep(
   // Not a bare `rg`: that only reaches the bundled binary when an install
   // happens to put it on PATH, so a machine without system ripgrep degraded
   // to the fdir walk although the package carried a working one (#14537).
-  const rgCommand = await resolveRipgrepCommand();
+  // The resolver takes the configured selection so this path agrees with the
+  // grep tool when `tools.useBuiltinRipgrep` is false.
+  const rgCommand = await resolveRipgrepCommand(
+    options.useBuiltinRipgrep ?? true,
+  );
   if (!rgCommand) {
     return { success: false, files: [] };
   }

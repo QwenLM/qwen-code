@@ -870,6 +870,26 @@ describe('crawler', () => {
       );
     });
 
+    it('passes tools.useBuiltinRipgrep through to the resolver (#14952 review)', async () => {
+      tmpDir = await createTmpDir({ 'plain.js': '' });
+      const seen: Array<boolean | undefined> = [];
+      vi.mocked(resolveRipgrepCommand).mockImplementation(
+        async (useBuiltin?: boolean) => {
+          seen.push(useBuiltin);
+          return 'rg';
+        },
+      );
+      __setCommandRunnerForTests(async (command) =>
+        command === 'rg' ? { success: true, lines: ['plain.js'] } : fail(),
+      );
+
+      await crawlTmp(rules(tmpDir), { useBuiltinRipgrep: false });
+
+      // The crawler is the @ picker's engine, so it must obey the same switch
+      // as the grep tool rather than always preferring the bundled binary.
+      expect(seen).toContain(false);
+    });
+
     it('should respect maxDepth on git ls-files path', async () => {
       tmpDir = await createTmpDir({
         root: ['top.js'],

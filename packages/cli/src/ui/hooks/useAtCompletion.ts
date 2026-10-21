@@ -374,6 +374,9 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
           // Use enableFuzzySearch with !== false to default to true when undefined.
           enableFuzzySearch:
             config?.getFileFilteringEnableFuzzySearch() !== false,
+          // The @ picker resolves ripgrep like the grep tool does, so
+          // tools.useBuiltinRipgrep governs both.
+          useBuiltinRipgrep: config?.getUseBuiltinRipgrep?.() ?? true,
         });
         await searcher.initialize();
         // Guard against the effect being cleaned up (unmount / cwd change)
