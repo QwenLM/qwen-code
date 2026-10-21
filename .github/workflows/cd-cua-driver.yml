@@ -20,8 +20,8 @@ name: 'CD: Qwen CUA Driver'
 #   Linux  : cua-driver-rs-<v>-linux-{x86_64,arm64}.tar.gz + *-binary.tar.gz
 #   Windows: cua-driver-rs-<v>-windows-{x86_64,arm64}.zip + *-binary.zip
 #   npm    : @qwen-code/cua-sdk downloads and verifies the matching *-binary
-#            archive above. @qwen-code/node-repl-mcp is independently
-#            versioned and ships from the same verified workflow.
+#            archive above. SDK, browser SDK and Node REPL share one version
+#            and ship from the same verified workflow.
 on:
   push:
     tags: ['cua-driver-rs-v*']
@@ -30,7 +30,7 @@ on:
       version:
         description: 'Version to release (without v prefix)'
         required: true
-        default: '0.20.11'
+        default: '0.26.0'
       notarize:
         description:
           'Codesign + notarize the macOS artifacts (false to skip during
@@ -40,18 +40,11 @@ on:
         default: true
       dry_run:
         description:
-          'Build release assets and clean-install both npm packages without
+          'Build release assets and clean-install all three npm packages without
           creating a GitHub Release, npm version, or tag.'
         required: false
         type: 'boolean'
         default: true
-      node_repl_only:
-        description:
-          'Only verify/publish @qwen-code/node-repl-mcp; do not build or release
-          cua-driver assets.'
-        required: false
-        type: 'boolean'
-        default: false
 permissions:
   contents: 'write'
 jobs:
@@ -109,8 +102,6 @@ jobs:
           # shellcheck disable=SC2016
           README_PS1_VERSION=$(sed -nE 's/^\$env:CUA_DRIVER_RS_VERSION = "([^"]+)"$/\1/p' packages/cua-driver/README.md)
           README_EXPECTED_VERSION=$(sed -nE 's/^Expected: qwen-cua-driver ([0-9A-Za-z.-]+)\.$/\1/p' packages/cua-driver/README.md)
-          SKILL_SDK_VERSION=$(sed -nE 's/^npm install --no-save --package-lock=false @qwen-code\/cua-sdk@([^ ]+)$/\1/p' packages/core/src/skills/bundled/computer-use/SKILL.md | sort -u)
-          USER_GUIDE_SDK_VERSION=$(sed -nE 's/^npm install --no-save --package-lock=false @qwen-code\/cua-sdk@([^ ]+)$/\1/p' docs/users/features/computer-use.md)
           for PAIR in \
             "shell installer:$INSTALL_SH_VERSION" \
             "PowerShell installer:$INSTALL_PS1_VERSION" \
@@ -119,9 +110,7 @@ jobs:
             "driver skill:$DRIVER_SKILL_VERSION" \
             "README shell command:$README_SH_VERSION" \
             "README PowerShell command:$README_PS1_VERSION" \
-            "README expected output:$README_EXPECTED_VERSION" \
-            "Computer Use skill SDK:$SKILL_SDK_VERSION" \
-            "Computer Use user guide SDK:$USER_GUIDE_SDK_VERSION"; do
+            "README expected output:$README_EXPECTED_VERSION"; do
             LABEL=${PAIR%%:*}
             VALUE=${PAIR#*:}
             if [[ "$VALUE" != "$VERSION" ]]; then
@@ -140,26 +129,26 @@ jobs:
             echo "::error::Invalid Node REPL package version $NODE_REPL_VERSION"
             exit 1
           fi
-          SKILL_NODE_REPL_VERSION=$(sed -nE 's/^qwen mcp add --scope user node-repl npx -y @qwen-code\/node-repl-mcp@([^ ]+)$/\1/p' packages/core/src/skills/bundled/computer-use/SKILL.md)
-          USER_GUIDE_NODE_REPL_VERSION=$(sed -nE 's/^qwen mcp add --scope user node-repl npx -y @qwen-code\/node-repl-mcp@([^ ]+)$/\1/p' docs/users/features/computer-use.md)
-          BROWSER_USE_SKILL_NODE_REPL_VERSION=$(sed -nE 's/^qwen mcp add --scope user node-repl npx -y @qwen-code\/node-repl-mcp@([^ ]+)$/\1/p' packages/core/src/skills/bundled/browser-use/SKILL.md)
-          for PAIR in \
-            "Computer Use skill Node REPL:$SKILL_NODE_REPL_VERSION" \
-            "Computer Use user guide Node REPL:$USER_GUIDE_NODE_REPL_VERSION" \
-            "Browser Use skill Node REPL:$BROWSER_USE_SKILL_NODE_REPL_VERSION"; do
-            LABEL=${PAIR%%:*}
-            VALUE=${PAIR#*:}
-            if [[ "$VALUE" != "$NODE_REPL_VERSION" ]]; then
-              echo "::error::$LABEL version $VALUE does not match Node REPL version $NODE_REPL_VERSION"
+          BROWSER_VERSION=$(node -p "require('./packages/browser-use/package.json').version")
+          SDK_BROWSER_VERSION=$(node -p "require('./packages/cua-driver/typescript/package.json').dependencies['@qwen-code/browser-use']")
+          NODE_SDK_VERSION=$(node -p "require('./packages/node-repl/package.json').dependencies['@qwen-code/cua-sdk']")
+          for VALUE in "$NODE_REPL_VERSION" "$BROWSER_VERSION" "$SDK_BROWSER_VERSION" "$NODE_SDK_VERSION"; do
+            if [[ "$VALUE" != "$VERSION" ]]; then
+              echo "::error::SDK, browser SDK, Node REPL and native release must use the same version $VERSION; found $VALUE"
               exit 1
             fi
           done
+          USER_GUIDE_NODE_REPL_VERSION=$(sed -nE 's/^qwen mcp add --scope user node-repl npx -y @qwen-code\/node-repl-mcp@([^ ]+)$/\1/p' docs/users/features/computer-use.md)
+          if [[ "$USER_GUIDE_NODE_REPL_VERSION" != "$NODE_REPL_VERSION" ]]; then
+            echo "::error::Computer Use user guide Node REPL version $USER_GUIDE_NODE_REPL_VERSION does not match Node REPL version $NODE_REPL_VERSION"
+            exit 1
+          fi
 
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" != "true" && "$GITHUB_REF" != "refs/heads/main" ]]; then
             echo "::error::A production dispatch must run from protected main"
             exit 1
           fi
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" != "true" && "${{ inputs.node_repl_only }}" != "true" && "${{ inputs.notarize }}" != "true" ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" != "true" && "${{ inputs.notarize }}" != "true" ]]; then
             echo "::error::A production dispatch must enable macOS codesigning and notarization"
             exit 1
           fi
@@ -173,25 +162,17 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "node_repl_version=$NODE_REPL_VERSION" >> "$GITHUB_OUTPUT"
       - uses: 'dtolnay/rust-toolchain@1.97.1'
-        if:
-          "github.event_name != 'workflow_dispatch' || inputs.node_repl_only ==
-          false"
       - name: 'Test model payload filtering'
-        if:
-          "github.event_name != 'workflow_dispatch' || inputs.node_repl_only ==
-          false"
         working-directory: 'packages/cua-driver/rust'
         run: 'cargo test -p cua-driver-core --locked model_payload'
 
   # ── Linux (x86_64 + arm64) ───────────────────────────────────────────────
   # Built inside debian:11 (glibc 2.31) so binaries run on Debian 11+,
   # Ubuntu 20.04+, RHEL/Rocky 8+. arm64 builds natively on a hosted ARM
-  # runner to avoid hand-wiring a cross linker for the X11/Wayland C deps.
+  # runner to avoid hand-wiring a cross linker for the X11 C deps.
   build-linux:
     name: 'linux-${{ matrix.arch }}'
     needs: ['validate-version']
-    if: "github.event_name != 'workflow_dispatch' || inputs.node_repl_only ==
-      false"
     runs-on: '${{ matrix.runner }}'
     strategy:
       fail-fast: false
@@ -219,14 +200,11 @@ jobs:
           apt-get -o Acquire::Retries=3 update
           apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
             git ca-certificates curl build-essential pkg-config \
-            libx11-dev libxi-dev libxtst-dev libxext-dev libwayland-dev \
-            libxkbcommon-dev
+            libx11-dev libxi-dev libxtst-dev libxext-dev
       - uses: 'actions/checkout@v4'
       - uses: 'actions/setup-node@v4'
         with:
           node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: 'packages/cua-driver/typescript/package-lock.json'
       - name: 'Determine version'
         id: 'version'
         shell: 'bash'
@@ -253,11 +231,11 @@ jobs:
             cua-driver-linux-${{ matrix.arch }}-
       - name: 'Build (release)'
         working-directory: 'packages/cua-driver/rust'
-        run: 'cargo build -p cua-driver -p cursor-theme-cli -p cua-driver-sdk --release --locked --features cua-driver/portal-input --target ${{ matrix.target }}'
+        run: 'cargo build -p cua-driver -p cursor-theme-cli -p cua-driver-sdk --release --locked --target ${{ matrix.target }}'
       - name: 'Build Electron-compatible Node runtime'
         working-directory: 'packages/cua-driver'
         run: |
-          npm --prefix typescript ci --ignore-scripts
+          corepack pnpm -C ../.. install --frozen-lockfile --ignore-scripts --prefer-offline
           node scripts/build-node-runtime.mjs \
             --target "${{ matrix.target }}" \
             --output "rust/target/${{ matrix.target }}/release/cua_driver_node_runtime.node"
@@ -273,12 +251,11 @@ jobs:
           cp "target/${TARGET}/release/libcua_driver_sdk.so" "release/${STAGE}/"
           cp "target/${TARGET}/release/cua_driver_node_runtime.node" "release/${STAGE}/"
           cp include/cua_driver_abi.h "release/${STAGE}/"
-          cp -R ../wayland-helper "release/${STAGE}/wayland-helper"
           cp ../../../LICENSE "release/${STAGE}/LICENSE"
           (cd release && tar -czf "${STAGE}.tar.gz" "${STAGE}")
           tar -czf "release/${STAGE}-binary.tar.gz" -C "release/${STAGE}" \
             qwen-cua-driver cua-cursor-theme libcua_driver_sdk.so \
-            cua_driver_node_runtime.node cua_driver_abi.h wayland-helper
+            cua_driver_node_runtime.node cua_driver_abi.h
           ls -lh "release/${STAGE}.tar.gz" "release/${STAGE}-binary.tar.gz"
       - uses: 'actions/upload-artifact@v4'
         with:
@@ -290,8 +267,6 @@ jobs:
   build-windows:
     name: 'windows-${{ matrix.arch }}'
     needs: ['validate-version']
-    if: "github.event_name != 'workflow_dispatch' || inputs.node_repl_only ==
-      false"
     runs-on: 'windows-latest'
     strategy:
       fail-fast: false
@@ -306,8 +281,6 @@ jobs:
       - uses: 'actions/setup-node@v4'
         with:
           node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: 'packages/cua-driver/typescript/package-lock.json'
       - name: 'Determine version'
         id: 'version'
         shell: 'bash'
@@ -344,7 +317,7 @@ jobs:
         working-directory: 'packages/cua-driver'
         shell: 'bash'
         run: |
-          npm --prefix typescript ci --ignore-scripts
+          corepack pnpm -C ../.. install --frozen-lockfile --ignore-scripts --prefer-offline
           node scripts/build-node-runtime.mjs \
             --target "${{ matrix.target }}" \
             --output "rust/target/${{ matrix.target }}/release/cua_driver_node_runtime.node"
@@ -387,8 +360,6 @@ jobs:
   build-macos:
     name: 'macos-universal'
     needs: ['validate-version']
-    if: "github.event_name != 'workflow_dispatch' || inputs.node_repl_only ==
-      false"
     runs-on: 'macos-26'
     env:
       # Sign+notarize on tag push (real release); on manual dispatch honor the
@@ -399,8 +370,6 @@ jobs:
       - uses: 'actions/setup-node@v4'
         with:
           node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: 'packages/cua-driver/typescript/package-lock.json'
       - name: 'Determine version'
         id: 'version'
         shell: 'bash'
@@ -436,7 +405,7 @@ jobs:
       - name: 'Build Electron-compatible Node runtimes'
         working-directory: 'packages/cua-driver'
         run: |
-          npm --prefix typescript ci --ignore-scripts
+          corepack pnpm -C ../.. install --frozen-lockfile --ignore-scripts --prefer-offline
           node scripts/build-node-runtime.mjs \
             --target aarch64-apple-darwin \
             --output rust/target/aarch64-apple-darwin/release/cua_driver_node_runtime.node
@@ -624,7 +593,13 @@ jobs:
 
   verify-sdk-package:
     name: '@qwen-code/cua-sdk package dry-run'
-    needs: ['validate-version', 'build-linux', 'verify-release-artifacts']
+    needs:
+      [
+        'validate-version',
+        'build-linux',
+        'verify-release-artifacts',
+        'verify-browser-package',
+      ]
     runs-on: 'ubuntu-latest'
     permissions:
       contents: 'read'
@@ -633,8 +608,6 @@ jobs:
       - uses: 'actions/setup-node@v4'
         with:
           node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: 'packages/cua-driver/typescript/package-lock.json'
           registry-url: 'https://registry.npmjs.org'
           scope: '@qwen-code'
       - name: 'Install npm 11'
@@ -664,9 +637,14 @@ jobs:
           (cd "$RELEASE_DIR" && sha256sum "$(basename "$ARCHIVE")" > checksums.txt)
           echo "directory=$NATIVE_DIR" >> "$GITHUB_OUTPUT"
           echo "release_directory=$RELEASE_DIR" >> "$GITHUB_OUTPUT"
-      - name: 'Install SDK dependencies'
-        working-directory: 'packages/cua-driver/typescript'
-        run: 'npm ci --ignore-scripts --no-audit --no-fund'
+      - name: 'Install SDK workspace dependencies'
+        run: |
+          corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline
+          npm run build --workspace @qwen-code/browser-use
+      - uses: 'actions/download-artifact@v4'
+        with:
+          name: 'browser-use-npm-${{ needs.validate-version.outputs.version }}'
+          path: '${{ runner.temp }}/browser-use-package'
       - name: 'Test SDK and native loader'
         working-directory: 'packages/cua-driver/typescript'
         env:
@@ -678,6 +656,7 @@ jobs:
           QWEN_CUA_SDK_NATIVE_DIR: '${{ steps.native.outputs.directory }}'
         run: |
           node packages/cua-driver/scripts/verify-cua-sdk-package.mjs \
+            --browser-tarball "${RUNNER_TEMP}/browser-use-package/qwen-code-browser-use-${{ needs.validate-version.outputs.version }}.tgz" \
             --native-dir "${QWEN_CUA_SDK_NATIVE_DIR}" \
             --release-dir "${{ steps.native.outputs.release_directory }}" \
             --output-dir "${RUNNER_TEMP}/cua-sdk-package"
@@ -688,9 +667,39 @@ jobs:
           if-no-files-found: 'error'
           retention-days: 7
 
+  verify-browser-package:
+    name: '@qwen-code/browser-use package dry-run'
+    needs: ['validate-version']
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+    steps:
+      - uses: 'actions/checkout@v4'
+      - uses: 'actions/setup-node@v4'
+        with:
+          node-version: '22'
+      - name: 'Install workspace dependencies'
+        run: 'corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline'
+      - name: 'Test and pack existing browser SDK'
+        run: |
+          npm run test --workspace @qwen-code/browser-use
+          node packages/browser-use/scripts/verify-package.mjs --output-dir "${RUNNER_TEMP}/browser-use-package"
+      - uses: 'actions/upload-artifact@v4'
+        with:
+          name: 'browser-use-npm-${{ needs.validate-version.outputs.version }}'
+          path: '${{ runner.temp }}/browser-use-package/*.tgz'
+          if-no-files-found: 'error'
+          retention-days: 7
+
   verify-node-repl-package:
     name: '@qwen-code/node-repl-mcp package dry-run'
-    needs: ['validate-version']
+    needs:
+      [
+        'validate-version',
+        'verify-sdk-package',
+        'verify-browser-package',
+        'build-linux',
+      ]
     runs-on: 'ubuntu-latest'
     permissions:
       contents: 'read'
@@ -705,6 +714,24 @@ jobs:
         run: 'npm install --global npm@11.19.0'
       - name: 'Install workspace dependencies'
         run: 'corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only'
+      - uses: 'actions/download-artifact@v4'
+        with:
+          name: 'cua-sdk-npm-${{ needs.validate-version.outputs.version }}'
+          path: '${{ runner.temp }}/cua-sdk-package'
+      - uses: 'actions/download-artifact@v4'
+        with:
+          name: 'browser-use-npm-${{ needs.validate-version.outputs.version }}'
+          path: '${{ runner.temp }}/browser-use-package'
+      - uses: 'actions/download-artifact@v4'
+        with:
+          name: 'cua-driver-rs-linux-x86_64'
+          path: '${{ runner.temp }}/cua-driver-linux'
+      - name: 'Prepare matching native payload and SDK declarations'
+        run: |
+          mkdir -p "${RUNNER_TEMP}/native"
+          tar -xzf "${RUNNER_TEMP}/cua-driver-linux/cua-driver-rs-${{ needs.validate-version.outputs.version }}-linux-x86_64-binary.tar.gz" -C "${RUNNER_TEMP}/native"
+          npm run build --workspace @qwen-code/browser-use
+          npm run build --workspace @qwen-code/cua-sdk
       - name: 'Test standalone Node REPL package'
         working-directory: 'packages/node-repl'
         run: |
@@ -715,8 +742,12 @@ jobs:
           npm run smoke:mcp
           npm run smoke:lifecycle
       - name: 'Pack, publish-dry-run, and clean-install Node REPL tarball'
+        env:
+          QWEN_CUA_SDK_NATIVE_DIR: '${{ runner.temp }}/native'
         run: |
           node packages/node-repl/scripts/verify-package.mjs \
+            --sdk-tarball "${RUNNER_TEMP}/cua-sdk-package/qwen-code-cua-sdk-${{ needs.validate-version.outputs.version }}.tgz" \
+            --browser-tarball "${RUNNER_TEMP}/browser-use-package/qwen-code-browser-use-${{ needs.validate-version.outputs.version }}.tgz" \
             --output-dir "${RUNNER_TEMP}/node-repl-package"
       - uses: 'actions/upload-artifact@v4'
         with:
@@ -736,6 +767,7 @@ jobs:
         'build-macos',
         'verify-release-artifacts',
         'verify-sdk-package',
+        'verify-browser-package',
         'verify-node-repl-package',
       ]
     runs-on: 'ubuntu-latest'
@@ -743,8 +775,7 @@ jobs:
       version: '${{ steps.version.outputs.version }}'
     if:
       "startsWith(github.ref, 'refs/tags/cua-driver-rs-v') || (github.event_name
-      == 'workflow_dispatch' && inputs.dry_run == false &&
-      inputs.node_repl_only == false)"
+      == 'workflow_dispatch' && inputs.dry_run == false)"
     steps:
       - uses: 'actions/checkout@v4'
       - uses: 'actions/download-artifact@v4'
@@ -845,7 +876,7 @@ jobs:
               on the target machine before UIAccess activation
             - **Node.js**: the same workflow publishes `@qwen-code/cua-sdk`
               after a clean install against these release assets and publishes
-              the independently versioned `@qwen-code/node-repl-mcp` package
+              the same-version browser SDK and `@qwen-code/node-repl-mcp` package
               after its MCP protocol smoke tests
 
             Enable relative coordinates: `CUA_DRIVER_RS_COORDINATE_SPACE=1`
@@ -856,11 +887,11 @@ jobs:
 
   publish-sdk:
     name: 'Publish @qwen-code/cua-sdk'
-    needs: ['validate-version', 'verify-sdk-package', 'release']
+    needs:
+      ['validate-version', 'verify-sdk-package', 'release', 'publish-browser']
     if:
       "startsWith(github.ref, 'refs/tags/cua-driver-rs-v') || (github.event_name
-      == 'workflow_dispatch' && inputs.dry_run == false &&
-      inputs.node_repl_only == false)"
+      == 'workflow_dispatch' && inputs.dry_run == false)"
     runs-on: 'ubuntu-latest'
     environment:
       name: 'production-release'
@@ -917,13 +948,17 @@ jobs:
               if (!Array.isArray(listing.tools) || listing.tools.length === 0) {
                 throw new Error("native SDK returned no tools");
               }
-              const revisionSupported = await computer.supportsObservationRevision();
-              if (typeof revisionSupported !== "boolean") {
-                throw new Error("ComputerUse capability probe returned an invalid result");
+              let safeRefusal = false;
+              try {
+                await computer.appCall("click", { scope: "desktop", x: 1, y: 1 });
+              } catch (error) {
+                if (error.code !== "screenshot_required" || error.sent !== false) throw error;
+                safeRefusal = true;
               }
+              if (!safeRefusal || listing.tools.length !== 19) throw new Error("Computer Use session/manifest contract mismatch");
               console.log(JSON.stringify({
                 toolCount: listing.tools.length,
-                revisionSupported,
+                safeRefusal,
               }));
             } finally {
               await computer.close();
@@ -972,15 +1007,81 @@ jobs:
           echo '::error::Published npm version did not become visible'
           exit 1
 
+  publish-browser:
+    name: 'Publish @qwen-code/browser-use'
+    needs: ['validate-version', 'verify-browser-package', 'release']
+    if: "startsWith(github.ref, 'refs/tags/cua-driver-rs-v') || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)"
+    runs-on: 'ubuntu-latest'
+    environment:
+      name: 'production-release'
+      url: 'https://www.npmjs.com/package/@qwen-code/browser-use/v/${{
+        needs.validate-version.outputs.version }}'
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+    steps:
+      - uses: 'actions/setup-node@v4'
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@qwen-code'
+      - name: 'Install npm 11'
+        run: 'npm install --global npm@11.19.0'
+      - uses: 'actions/download-artifact@v4'
+        with:
+          name: 'browser-use-npm-${{
+            needs.validate-version.outputs.version }}'
+          path: '${{ runner.temp }}/browser-use-package'
+      - name: 'Publish immutable Browser SDK tarball'
+        env:
+          VERSION: '${{ needs.validate-version.outputs.version }}'
+        run: |
+          set -euo pipefail
+          TARBALL=$(find "${RUNNER_TEMP}/browser-use-package" -type f -name '*.tgz' -print -quit)
+          if [[ -z "$TARBALL" ]]; then
+            echo '::error::Packed @qwen-code/browser-use tarball is missing'
+            exit 1
+          fi
+          LOCAL_INTEGRITY="sha512-$(openssl dgst -sha512 -binary "$TARBALL" | openssl base64 -A)"
+          REMOTE_INTEGRITY=$(npm view "@qwen-code/browser-use@${VERSION}" dist.integrity 2>/dev/null || true)
+          if [[ -n "$REMOTE_INTEGRITY" ]]; then
+            if [[ "$REMOTE_INTEGRITY" != "$LOCAL_INTEGRITY" ]]; then
+              echo "::error::@qwen-code/browser-use@${VERSION} already exists with different integrity"
+              exit 1
+            fi
+            echo "@qwen-code/browser-use@${VERSION} already contains this exact tarball"
+            exit 0
+          fi
+          NPM_TAG=latest
+          [[ "$VERSION" == *-* ]] && NPM_TAG=next
+          npm publish "$TARBALL" --provenance --access public --tag "$NPM_TAG"
+      - name: 'Verify npm registry integrity'
+        env:
+          VERSION: '${{ needs.validate-version.outputs.version }}'
+        run: |
+          set -euo pipefail
+          TARBALL=$(find "${RUNNER_TEMP}/browser-use-package" -type f -name '*.tgz' -print -quit)
+          LOCAL_INTEGRITY="sha512-$(openssl dgst -sha512 -binary "$TARBALL" | openssl base64 -A)"
+          for attempt in {1..20}; do
+            REMOTE_INTEGRITY=$(npm view "@qwen-code/browser-use@${VERSION}" dist.integrity 2>/dev/null || true)
+            if [[ "$REMOTE_INTEGRITY" == "$LOCAL_INTEGRITY" ]]; then
+              echo "Verified npm registry integrity on attempt $attempt"
+              exit 0
+            fi
+            if [[ -n "$REMOTE_INTEGRITY" ]]; then
+              echo '::error::Published npm artifact integrity does not match the verified tarball'
+              exit 1
+            fi
+            sleep 10
+          done
+          echo '::error::Published npm version did not become visible'
+          exit 1
+
   publish-node-repl:
     name: 'Publish @qwen-code/node-repl-mcp'
-    needs: ['validate-version', 'verify-node-repl-package', 'release']
-    if: "always() && needs.validate-version.result == 'success' &&
-      needs.verify-node-repl-package.result == 'success' &&
-      (needs.release.result == 'success' || (github.event_name ==
-      'workflow_dispatch' && inputs.node_repl_only == true)) &&
-      (startsWith(github.ref, 'refs/tags/cua-driver-rs-v') ||
-      (github.event_name == 'workflow_dispatch' && inputs.dry_run == false))"
+    needs:
+      ['validate-version', 'verify-node-repl-package', 'release', 'publish-sdk']
+    if: "startsWith(github.ref, 'refs/tags/cua-driver-rs-v') || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)"
     runs-on: 'ubuntu-latest'
     environment:
       name: 'production-release'
