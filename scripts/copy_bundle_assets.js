@@ -39,7 +39,6 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { glob } from 'glob';
 import fs from 'node:fs';
-import { copyBrowserUseAssets } from './copy-browser-use-assets.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const defaultRoot = join(__dirname, '..');
@@ -553,11 +552,9 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
       skipEntry: (entry, sourcePath) =>
         isBundledSkillTestFile(entry) ||
         entry === 'DESIGN.md' ||
-        sourcePath === join(bundledSkillsDir, 'browser-use', 'runtime'),
+        sourcePath === join(bundledSkillsDir, 'browser-use') ||
+        sourcePath === join(bundledSkillsDir, 'computer-use'),
     });
-    if (existsSync(join(bundledSkillsDir, 'browser-use', 'SKILL.md'))) {
-      copyBrowserUseAssets(root, join(destBundledDir, 'browser-use'));
-    }
     console.log('Copied bundled skills to dist/bundled/');
   } else {
     console.warn(

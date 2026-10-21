@@ -17,6 +17,7 @@ import {
 import { ChatEditor } from '../ChatEditor';
 import { WelcomeHeader } from '../WelcomeHeader';
 import { ChatContextHeader } from '../ChatContextHeader';
+import { SessionRenameDialog } from '../dialogs/SessionRenameDialog';
 import type {
   EditorHandle,
   ComposerSubmitCommit,
@@ -36,6 +37,7 @@ import {
 import { useManagedFileReferences } from './use-managed-file-references';
 import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
 import { useManagedSession } from './use-managed-session';
+import { useManagedSessionRename } from './use-managed-session-rename';
 import { useManagedActions } from './use-managed-actions';
 import { useManagedCwdChange } from './use-managed-cwd-change';
 import { useManagedModelChange } from './use-managed-model-change';
@@ -252,6 +254,26 @@ function ManagedSessionsContent({
   const [nextCursor, setNextCursor] = useState<string>();
   const [listLoading, setListLoading] = useState(false);
   const [listRevision, setListRevision] = useState(0);
+  const rename = useManagedSessionRename(
+    provider,
+    clientId,
+    sessionId,
+    detail.summary,
+    interactive,
+    (displayName) => {
+      if (!sessionId) return;
+      detail.applyTitle(sessionId, displayName);
+      listLifetime.current?.abort();
+      setSessions((current) =>
+        current.map((session) =>
+          session.sessionId === sessionId
+            ? { ...session, title: displayName }
+            : session,
+        ),
+      );
+      setListRevision((current) => current + 1);
+    },
+  );
   const [error, setError] = useState<string>();
   const [discarded, setDiscarded] = useState(false);
   const [text, setText] = useState('');
@@ -783,7 +805,7 @@ function ManagedSessionsContent({
           >
             <span className="min-w-0">
               <span className="block truncate">
-                {session.title || session.sessionId}
+                {current.title || session.sessionId}
               </span>
               <span className="block text-xs text-muted-foreground">
                 {t(`managed.phase.${current.phase}`)}
@@ -823,6 +845,16 @@ function ManagedSessionsContent({
       <p role="status" className="sr-only">
         {discarded ? t('managed.discarded') : ''}
       </p>
+      {rename.editor && (
+        <SessionRenameDialog
+          value={rename.editor.value}
+          busy={rename.editor.busy}
+          error={rename.editor.error}
+          onChange={rename.setValue}
+          onSubmit={(displayName) => void rename.submit(displayName)}
+          onClose={rename.close}
+        />
+      )}
       {!home && (
         <div className="flex items-center justify-between gap-2">
           <Button
@@ -908,9 +940,18 @@ function ManagedSessionsContent({
             <div className="shrink-0">
               <ChatContextHeader
                 content={
-                  summary.title === summary.sessionId
-                    ? summary.sessionId.slice(0, 8)
-                    : summary.title
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="truncate" onDoubleClick={rename.open}>
+                      {summary.title === summary.sessionId
+                        ? summary.sessionId.slice(0, 8)
+                        : summary.title}
+                    </span>
+                    {rename.supported && (
+                      <Button variant="ghost" size="sm" onClick={rename.open}>
+                        {t('sidebar.rename')}
+                      </Button>
+                    )}
+                  </span>
                 }
                 workspaceName={summary.workspace?.workspaceId}
                 workspacePath={summary.workspaceCwd}
@@ -942,7 +983,17 @@ function ManagedSessionsContent({
           )}
           {summary && !home && (
             <div className="flex flex-wrap items-center gap-2 text-sm">
-              <span className="font-medium">{summary.title}</span>
+              <span
+                className="max-w-full break-words font-medium"
+                onDoubleClick={rename.open}
+              >
+                {summary.title}
+              </span>
+              {rename.supported && (
+                <Button variant="outline" size="sm" onClick={rename.open}>
+                  {t('sidebar.rename')}
+                </Button>
+              )}
               {provider.tasks &&
                 (summary.capabilities.tasks === true ||
                   taskCancel.pendingTaskIds.length > 0) && (

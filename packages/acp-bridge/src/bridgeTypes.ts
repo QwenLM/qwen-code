@@ -2379,6 +2379,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): Promise<SessionArtifactMutationResult>;
 
   /**
+   * Only for management routes with strict mutation and workspace ownership
+   * checks; clients cannot grant themselves this authority.
+   */
+  removeSessionArtifactForWorkspaceOwner(
+    sessionId: string,
+    artifactId: string,
+  ): Promise<SessionArtifactMutationResult>;
+
+  /**
    * Remove an artifact from the session. Missing artifact ids are idempotent
    * no-ops; unknown session ids still throw `SessionNotFoundError`.
    */
