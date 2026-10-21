@@ -268,6 +268,8 @@ const EN: Messages = {
   'managed.approvalChange.reload': 'Reload policies',
   'managed.approvalChange.nextTurn':
     'Approval policy changes apply to the next turn.',
+  'managed.approvalChange.live':
+    'Approval policy changes apply to subsequent tool calls in this turn.',
   'managed.approvalChange.changing': 'Changing approval policy…',
   'managed.approvalChange.unconfirmed':
     'Approval change is not confirmed. Continue confirming the original request.',
@@ -4670,6 +4672,7 @@ const ZH: Messages = {
   'managed.approvalChange.optionsError': '加载审批策略失败。',
   'managed.approvalChange.reload': '重新加载策略',
   'managed.approvalChange.nextTurn': '审批策略变更从下一轮生效。',
+  'managed.approvalChange.live': '审批策略变更对当前轮后续工具调用生效。',
   'managed.approvalChange.changing': '正在切换审批策略…',
   'managed.approvalChange.unconfirmed':
     '审批策略切换尚未确认，请继续确认原请求。',
