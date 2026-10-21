@@ -1225,6 +1225,10 @@ class HostedAutomationFaultGatesIT {
                 .containsExactly(inserted, third, second, first);
         assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("Automation ID: " + id))
                 .as("one model Turn per run").hasSize(4);
+        // The runs settle one after another, so the journal holds one settle
+        // per run, in that order, and nothing more.
+        assertThat(commands(session, "settleRun")).as("each run settled once")
+                .containsExactly(first + ":3", second + ":3", third + ":3", inserted + ":3");
         request("DELETE", "/v1/agent-automations/" + id, null, "fg11e-list-retire", 202);
         assertNoModelFailure();
     }
