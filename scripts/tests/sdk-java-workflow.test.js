@@ -1119,17 +1119,27 @@ describe('SDK Java install-transient retry', () => {
     ]);
   });
 
+  // `npm run build:packages` is a different command that does not produce
+  // dist/cli.js, so match the whole command line rather than a substring.
+  const buildsExplicitly = (steps) =>
+    steps.some((s) =>
+      s.run?.split('\n').some((line) => line.trim() === 'npm run build'),
+    );
+
   it.each(installs)(
     '%s skips prepare only where an explicit build step follows',
     (jobName, installStep) => {
-      const buildsExplicitly = parse(workflow).jobs[jobName].steps.some((s) =>
-        s.run?.includes('npm run build'),
-      );
       expect(installStep.env?.QWEN_SKIP_PREPARE !== undefined, jobName).toBe(
-        buildsExplicitly,
+        buildsExplicitly(parse(workflow).jobs[jobName].steps),
       );
     },
   );
+
+  it('does not count a package-only build as the explicit build', () => {
+    expect(buildsExplicitly([{ run: 'npm run build:packages' }])).toBe(false);
+    expect(buildsExplicitly([{ run: 'npm run build' }])).toBe(true);
+    expect(buildsExplicitly([{ run: 'set -e\nnpm run build\n' }])).toBe(true);
+  });
 
   it('counts the daemon E2E install warning toward the #11726 threshold', () => {
     // daemon-e2e no longer runs prepare, so an absorbed failure here is always
