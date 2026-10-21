@@ -35,21 +35,21 @@
 
 ### JS interpreter 身份（如何运行任意 JS 子进程）
 
-| 位置                                                                   | 用途                                                                                       | 本变更是否接入 `getJsInterpreterCommand`        |
-| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------- |
-| `packages/core/src/code-mode/host-client.ts`（`hostCommand`）          | code-mode host 子进程（`host.js` / 内置 `codeModeHost.js`；dev 为 `--import tsx host.ts`） | 是                                              |
-| `packages/core/src/sandbox/file-worker-client.ts`                      | sandbox file-worker 子进程（`sandboxAsset('file-worker')`）                                | 是                                              |
-| `packages/core/src/hooks/hookRunner.ts`（幸存 hook 监督进程）          | `spawn(--input-type=commonjs --eval SUPERVISOR …)`，detached                               | 是                                              |
-| `packages/core/src/hooks/hook-command-cgroup.ts`（`launch`）           | hook 与 managed child run 的 cgroup launcher；payload 与 reaper 不变                       | 是（R3）；Linux 原生验证待执行                  |
-| `packages/core/src/sandbox/bwrap-execution.ts`（`executeBwrap`）       | JS relay 与 protected root 使用同一解析出的解释器                                          | 是（R3）；Linux 原生验证待执行                  |
-| `packages/core/src/sandbox/landlock-execution.ts`（`executeLandlock`） | JS relay 与 protected root 使用同一解析出的解释器                                          | 是（R3）；Linux 原生验证待执行                  |
-| `packages/core/src/utils/getPty.ts`（`loadPty`）                       | PTY 门控的 Bun 检测（当前 Bun 下 PTY 禁用 —— **S2 用真实后端替换此分支**）                 | 检测走 `isBunRuntime()`                         |
-| `packages/cli/src/config/mem0-settings.ts`（`bundledMem0Server`）      | 内置 Mem0 MCP 子进程与 bundled hook 身份使用同一解释器                                     | 是，同步迁移（R3）；产物验证待执行              |
-| `packages/core/src/agents/arena/ArenaManager.ts`                       | （另）worker 侧 in-process 运行时                                                          | launcher 形态，见上表                           |
-| `packages/cli/src/serve/pem-certificate-blocks.ts`                     | channel worker 的证书加载 oracle                                                           | 有意不接入；与 worker 保持同一 process.execPath |
-| `packages/cli/src/commands/sandbox.ts`                                 | 沙箱诊断 JS 使用解析出的解释器                                                             | 是（R3）；Linux 原生验证待执行                  |
-| `packages/cli/src/serve/run-qwen-serve.ts`                             | channel worker 的 TLS 信任探针                                                             | 有意不接入；与 worker 保持同一 process.execPath |
-| `packages/cli/src/commands/review/test-efficacy.ts`                    | 经 `process.execPath` 启动 vitest（开发工具路径）                                          | 有意不接入；保持宿主工具身份                    |
+| 位置                                                                   | 用途                                                                                                                                                 | 本变更是否接入 `getJsInterpreterCommand`        |
+| ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| `packages/core/src/code-mode/host-client.ts`（`hostCommand`）          | code-mode host 子进程（`host.js` / 内置 `codeModeHost.js`；dev 为 `--import tsx host.ts`）                                                           | 是                                              |
+| `packages/core/src/sandbox/file-worker-client.ts`                      | sandbox file-worker 子进程（`sandboxAsset('file-worker')`）                                                                                          | 是                                              |
+| `packages/core/src/hooks/hookRunner.ts`（幸存 hook 监督进程）          | `spawn(--input-type=commonjs --eval SUPERVISOR …)`，detached                                                                                         | 是                                              |
+| `packages/core/src/hooks/hook-command-cgroup.ts`（`launch`）           | hook 与 managed child run 的 cgroup launcher；payload 与 reaper 不变                                                                                 | 是（R3）；Linux 原生验证待执行                  |
+| `packages/core/src/sandbox/bwrap-execution.ts`（`executeBwrap`）       | JS relay 与 protected root 使用同一解析出的解释器                                                                                                    | 是（R3）；Linux 原生验证待执行                  |
+| `packages/core/src/sandbox/landlock-execution.ts`（`executeLandlock`） | JS relay 与 protected root 使用同一解析出的解释器                                                                                                    | 是（R3）；Linux 原生验证待执行                  |
+| `packages/core/src/utils/getPty.ts`（`loadPty`）                       | PTY 后端选择的 Bun 检测（POSIX 平台 Bun 下 PTY 加载 `qwen-bun-pty` 后端 —— 见 [bun-pty-backend.zh-CN.md](bun-pty-backend.zh-CN.md)；Windows 仍门控） | 检测走 `isBunRuntime()`                         |
+| `packages/cli/src/config/mem0-settings.ts`（`bundledMem0Server`）      | 内置 Mem0 MCP 子进程与 bundled hook 身份使用同一解释器                                                                                               | 是，同步迁移（R3）；产物验证待执行              |
+| `packages/core/src/agents/arena/ArenaManager.ts`                       | （另）worker 侧 in-process 运行时                                                                                                                    | launcher 形态，见上表                           |
+| `packages/cli/src/serve/pem-certificate-blocks.ts`                     | channel worker 的证书加载 oracle                                                                                                                     | 有意不接入；与 worker 保持同一 process.execPath |
+| `packages/cli/src/commands/sandbox.ts`                                 | 沙箱诊断 JS 使用解析出的解释器                                                                                                                       | 是（R3）；Linux 原生验证待执行                  |
+| `packages/cli/src/serve/run-qwen-serve.ts`                             | channel worker 的 TLS 信任探针                                                                                                                       | 有意不接入；与 worker 保持同一 process.execPath |
+| `packages/cli/src/commands/review/test-efficacy.ts`                    | 经 `process.execPath` 启动 vitest（开发工具路径）                                                                                                    | 有意不接入；保持宿主工具身份                    |
 
 R3 整合 [#14134 的 c807de17](https://github.com/QwenLM/qwen-code/pull/14134)
 中剩余解释器工作，以及
@@ -58,7 +58,9 @@ R3 整合 [#14134 的 c807de17](https://github.com/QwenLM/qwen-code/pull/14134)
 成对接入现有 helper。cgroup 保留 hook 与 managed-child-run 两类消费者及
 `reapOnParentExit`。保留的定向测试已在整合候选 `e8192c18` 上通过；其独立验收
 41 个实际产品场景与另列的三个合成协议场景，范围见下方分发设计。
-随后合入 main 的新树为 NOT_RUN；Linux 原生 cgroup/bwrap/landlock 仍未验证。
+历史 `b734a90e` 的 frozen install、完整 build/bundle 与 typecheck 已通过。本次
+main8545558a 整合包含 #14046 已合并的 `2972234e` 和四文件 `92d4b193` 已回收主进程
+guard；新组合树的全部动态验证仍为 NOT_RUN。Linux 原生 cgroup/bwrap/landlock 仍未验证。
 
 明确不接收 #14134 提议的三处替换。review Vitest 保留调用它的宿主解释器，容器分支
 继续使用镜像的 `node`。PEM oracle 和 TLS 信任探针保留 `process.execPath`，与
@@ -169,12 +171,16 @@ Windows 跳过可捕获 SIGTERM 用例；缺少 Bun 二进制时跳过 Bun 腿�
 
 此 fixture 不探测 `process.execve`、原生 PTY 加载、fd-3 状态管道或进程组信号。
 重新启动位置的 `process.execve` 特性检测和 `getPty` 的 Bun 门禁属于源码机制，
-不是本矩阵的实测结果。原生 PTY 与进程树行为需要各自真实进程和制品证据。
+不是本矩阵的实测结果。PTY 行的证据是 S2 自带的 fixture ——
+`packages/core/src/utils/bun-pty.node-bun.test.ts`，它在真实 Bun 运行时下经
+`getPty()` 启动 `qwen-bun-pty` 后端（无 Bun 二进制时跳过）；原生 PTY 与进程树
+行为无论如何都需要各自真实进程和制品证据。
 
 ## 验证计划
 
 - `packages/core/src/utils/runtime-info.test.ts` —— manifest 解析、回退、记忆化。
 - `packages/core/src/utils/runtime-boundary.node-bun.test.ts` —— 上述同一 fixture 覆盖；无 Bun 二进制时 Bun 腿跳过，跳过不代表兼容性通过。
+- `packages/core/src/utils/bun-pty.node-bun.test.ts` —— PTY 行：在真实 Bun 下经 `getPty()` 完成 spawn、输出、resize、kill 及有界保持上限；无 Bun 二进制时跳过。
 - S2/S3 以上述清单表为迁移检查清单；S5 按 MYWO-8 验收协议在真实归档上重跑矩阵。
 
 ## 遗留问题

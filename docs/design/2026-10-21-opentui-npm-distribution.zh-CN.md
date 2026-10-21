@@ -12,9 +12,13 @@
 失败与首次合成准备失败仍保留，未改写为通过。更新夹具使用自有 0.0.0 克隆与未修改的
 候选 0.25.3 tarball，不代表两个正式发布版本之间的升级。
 
-当前正常 merge 纳入 main `65051590d90c3b043b94e65a56e3187f9e4d9f1b`，包含已合并
-R1、Generated UI 资产与发布执行权限保护。新整合源码、安装、构建和产物均为
-NOT_RUN；e819 的结果不代表它们已经通过。新产物必须重新实测 160 MiB 解包体积门禁。
+此前 `b734a90e` 的 frozen install、完整 build/bundle 与 typecheck 已通过，产物验收
+仍待执行。当前正常 merge 纳入 main `8545558a25db342683cb84a6814e591c6fcf6c67`，保留
+R1、Generated UI 资产和发布执行权限保护。main 已通过 squash merge `97567d5d`
+纳入 #14046 已审阅的 `2972234e`。本批另纳入四文件 guard 修复
+`92d4b193266c5b5fc15927570c8e2fe4fabcadf6`：原生主进程退出后不再按数值进程组发送
+信号，仍清理身份核验匹配的后代。新组合树的全部动态验证均为 NOT_RUN；e819 与 b734
+结果仅作历史证据。新产物须重新实测 160 MiB 解包体积门禁。
 
 已观察到的 serve 关闭失败与 strict 交互 `--json-file` 输出缺口仍未关闭。
 Linux 原生 cgroup/bwrap/landlock、其他平台及正式发布版本升级仍未验证。
@@ -28,8 +32,8 @@ OpenTUI 所需的 native/parser 资产。独立的 Bun standalone preview 已包
 相关工作：
 
 - [运行时总议题 #11607](https://github.com/QwenLM/qwen-code/issues/11607)。
-- [Bun PTY #14046](https://github.com/QwenLM/qwen-code/pull/14046)，仍是交互 shell
-  一致性的独立依赖。
+- [Bun PTY #14046](https://github.com/QwenLM/qwen-code/pull/14046)，已合入审阅版本
+  `2972234e`；新组合产物的 shell 一致性仍未验证。
 - [R1 standalone 更新 #14934](https://github.com/QwenLM/qwen-code/pull/14934)。
 - [发布执行权限 #14907](https://github.com/QwenLM/qwen-code/pull/14907)。
 
@@ -162,9 +166,10 @@ ripgrep 与已安装 optional Bun executable，不重新引入 `pnpm pack` 发�
 
 ## 依赖与风险
 
-定位 Bun、渲染 OpenTUI 不依赖 #14046；但宣称 Bun shell 交互与 Ink/Node PTY
-一致前必须解决它。此基底的 Bun PTY 选择仍返回不可用，既有 pipe 回退不能证明交互
-shell 一致性。该 PR 中 Windows Bun PTY 也仍不支持。
+main 现已在 POSIX Bun 下选择 #14046 的 `qwen-bun-pty` 后端，并携带其 standalone
+PTY 资产。本批保留该实现并加入 92d4b193 已回收主进程 guard；源码整合及此前的 pipe
+回退验收都不能证明新安装产物的 shell 路径与 Ink/Node PTY 一致。真实进程与产物门禁
+仍待执行。Windows Bun PTY 仍不支持。
 
 单机可以检查四个平台归档内容，不能证明四平台 native 行为。macOS arm64 执行证据
 必须与 Linux/x64 或 Windows 检查分开记录。保留 Node 26.4 的 Node/OpenTUI 是

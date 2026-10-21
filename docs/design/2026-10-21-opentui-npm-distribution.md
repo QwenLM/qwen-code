@@ -15,11 +15,15 @@ The three earlier actual-case failures and first synthetic preparation failure
 remain recorded rather than relabeled as passes. Update fixtures use owned
 0.0.0 clones and the unchanged candidate 0.25.3 tarball, not two published releases.
 
-The current normal merge incorporates main
-`65051590d90c3b043b94e65a56e3187f9e4d9f1b`, including merged R1, Generated UI
-assets and the release executable-bit protection. This integrated source,
-installation, build and artifact are NOT_RUN; e819 results do not validate them.
-The 160 MiB unpacked-size gate must be measured again on the new artifact.
+The prior `b734a90e` passed frozen installation, full build/bundle and typecheck;
+its artifact acceptance remained pending. The current normal merge incorporates
+main `8545558a25db342683cb84a6814e591c6fcf6c67`, retaining R1, Generated UI assets
+and release executable-bit protection. Main contains #14046's reviewed `2972234e`
+via squash merge `97567d5d`. This batch also incorporates the four-file guard fix
+`92d4b193266c5b5fc15927570c8e2fe4fabcadf6`: after native leader exit, skip numeric
+process-group signalling while retaining identity-checked descendant cleanup.
+All dynamic validation of this combined tree is NOT_RUN; the e819 and b734
+results remain historical. The new artifact must remeasure the 160 MiB gate.
 
 The observed serve shutdown failure and strict interactive `--json-file` output
 gap remain open. Native Linux cgroup/bwrap/landlock, other platforms and official
@@ -36,8 +40,8 @@ a global Bun installation or changing the default renderer.
 Related work:
 
 - [Runtime umbrella #11607](https://github.com/QwenLM/qwen-code/issues/11607).
-- [Bun PTY #14046](https://github.com/QwenLM/qwen-code/pull/14046), still an
-  independent dependency for interactive shell fidelity.
+- [Bun PTY #14046](https://github.com/QwenLM/qwen-code/pull/14046), merged at
+  reviewed `2972234e`; combined-artifact shell fidelity remains unverified.
 - [R1 standalone updates #14934](https://github.com/QwenLM/qwen-code/pull/14934).
 - [Publish executable bits #14907](https://github.com/QwenLM/qwen-code/pull/14907).
 
@@ -208,10 +212,11 @@ ripgrep and the installed optional Bun executable. Do not reintroduce a
 
 ## Dependencies and risks
 
-#14046 is not required to locate Bun or render OpenTUI, but it is required before
-claiming Bun shell interaction has Ink/Node PTY fidelity. At this base Bun PTY
-selection still returns unavailable. Existing pipe fallback is not proof of
-interactive-shell parity. Windows Bun PTY remains unsupported even in that PR.
+Main now selects the #14046 `qwen-bun-pty` backend under Bun on POSIX and carries
+its standalone PTY assets. This batch retains that implementation and adds the
+92d4b193 reaped-leader guard; neither source integration nor earlier pipe-fallback
+acceptance proves the new installed shell path has Ink/Node PTY fidelity. Its
+real-process and artifact gates remain open. Windows Bun PTY remains unsupported.
 
 Four platform archive contents can be checked on one host; native behavior cannot.
 Record macOS arm64 execution separately from Linux/x64 or Windows checks.

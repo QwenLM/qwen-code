@@ -48,21 +48,21 @@ or compatibility.
 
 ### JS interpreter identity (how to run an arbitrary JS child)
 
-| Site                                                                  | Use                                                                                                             | Wired to `getJsInterpreterCommand` in this change      |
-| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| `packages/core/src/code-mode/host-client.ts` (`hostCommand`)          | code-mode host child (`host.js` / bundled `codeModeHost.js`; dev: `--import tsx host.ts`)                       | yes                                                    |
-| `packages/core/src/sandbox/file-worker-client.ts`                     | sandbox file-worker child (`sandboxAsset('file-worker')`)                                                       | yes                                                    |
-| `packages/core/src/hooks/hookRunner.ts` (surviving-hook supervisor)   | `spawn(--input-type=commonjs --eval SUPERVISOR …)`, detached                                                    | yes                                                    |
-| `packages/core/src/hooks/hook-command-cgroup.ts` (`launch`)           | cgroup launcher for hooks and managed child runs; payload and reaper unchanged                                  | yes (R3); native Linux validation pending              |
-| `packages/core/src/sandbox/bwrap-execution.ts` (`executeBwrap`)       | JS relay and protected root use the resolved interpreter                                                        | yes (R3); native Linux validation pending              |
-| `packages/core/src/sandbox/landlock-execution.ts` (`executeLandlock`) | JS relay and protected root use the resolved interpreter                                                        | yes (R3); native Linux validation pending              |
-| `packages/core/src/utils/getPty.ts` (`loadPty`)                       | Bun detection for the PTY gate (PTY disabled under Bun today — **S2 replaces this branch with a real backend**) | detection via `isBunRuntime()`                         |
-| `packages/cli/src/config/mem0-settings.ts` (`bundledMem0Server`)      | bundled Mem0 MCP child and bundled-hook identity use the same interpreter                                       | yes, together (R3); artifact validation pending        |
-| `packages/core/src/agents/arena/ArenaManager.ts`                      | (also) worker-side in-process runtime                                                                           | launcher-shaped, see above                             |
-| `packages/cli/src/serve/pem-certificate-blocks.ts`                    | certificate-loader oracle for channel workers                                                                   | intentionally not; same process.execPath as the worker |
-| `packages/cli/src/commands/sandbox.ts`                                | sandbox diagnostic JS uses the resolved interpreter                                                             | yes (R3); native Linux validation pending              |
-| `packages/cli/src/serve/run-qwen-serve.ts`                            | TLS trust probe for channel workers                                                                             | intentionally not; same process.execPath as the worker |
-| `packages/cli/src/commands/review/test-efficacy.ts`                   | spawns vitest via `process.execPath` (dev-tooling path)                                                         | intentionally not; host-tool identity                  |
+| Site                                                                  | Use                                                                                                                                                                        | Wired to `getJsInterpreterCommand` in this change      |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `packages/core/src/code-mode/host-client.ts` (`hostCommand`)          | code-mode host child (`host.js` / bundled `codeModeHost.js`; dev: `--import tsx host.ts`)                                                                                  | yes                                                    |
+| `packages/core/src/sandbox/file-worker-client.ts`                     | sandbox file-worker child (`sandboxAsset('file-worker')`)                                                                                                                  | yes                                                    |
+| `packages/core/src/hooks/hookRunner.ts` (surviving-hook supervisor)   | `spawn(--input-type=commonjs --eval SUPERVISOR …)`, detached                                                                                                               | yes                                                    |
+| `packages/core/src/hooks/hook-command-cgroup.ts` (`launch`)           | cgroup launcher for hooks and managed child runs; payload and reaper unchanged                                                                                             | yes (R3); native Linux validation pending              |
+| `packages/core/src/sandbox/bwrap-execution.ts` (`executeBwrap`)       | JS relay and protected root use the resolved interpreter                                                                                                                   | yes (R3); native Linux validation pending              |
+| `packages/core/src/sandbox/landlock-execution.ts` (`executeLandlock`) | JS relay and protected root use the resolved interpreter                                                                                                                   | yes (R3); native Linux validation pending              |
+| `packages/core/src/utils/getPty.ts` (`loadPty`)                       | Bun detection for the PTY backend selection (under Bun on POSIX, PTY loads the `qwen-bun-pty` backend — see [bun-pty-backend.md](bun-pty-backend.md); Windows stays gated) | detection via `isBunRuntime()`                         |
+| `packages/cli/src/config/mem0-settings.ts` (`bundledMem0Server`)      | bundled Mem0 MCP child and bundled-hook identity use the same interpreter                                                                                                  | yes, together (R3); artifact validation pending        |
+| `packages/core/src/agents/arena/ArenaManager.ts`                      | (also) worker-side in-process runtime                                                                                                                                      | launcher-shaped, see above                             |
+| `packages/cli/src/serve/pem-certificate-blocks.ts`                    | certificate-loader oracle for channel workers                                                                                                                              | intentionally not; same process.execPath as the worker |
+| `packages/cli/src/commands/sandbox.ts`                                | sandbox diagnostic JS uses the resolved interpreter                                                                                                                        | yes (R3); native Linux validation pending              |
+| `packages/cli/src/serve/run-qwen-serve.ts`                            | TLS trust probe for channel workers                                                                                                                                        | intentionally not; same process.execPath as the worker |
+| `packages/cli/src/commands/review/test-efficacy.ts`                   | spawns vitest via `process.execPath` (dev-tooling path)                                                                                                                    | intentionally not; host-tool identity                  |
 
 R3 consolidates the remaining interpreter work from
 [#14134 at c807de17](https://github.com/QwenLM/qwen-code/pull/14134)
@@ -73,8 +73,11 @@ bwrap/landlock relay/protected-root pairs through the existing helper. cgroup
 retains both hook and managed-child-run consumers and `reapOnParentExit`.
 The retained focused tests passed at consolidated `e8192c18`; its independent
 41 actual product cases and three separate synthetic protocol cases are scoped
-in the distribution design below. The subsequent main integration is NOT_RUN;
-native Linux cgroup/bwrap/landlock remain unverified.
+in the distribution design below. Historical `b734a90e` passed frozen install,
+full build/bundle and typecheck. The current main8545558a integration includes
+#14046's merged `2972234e` and the four-file `92d4b193` reaped-leader guard;
+all combined-tree dynamic validation is NOT_RUN. Native Linux
+cgroup/bwrap/landlock remain unverified.
 
 Three proposed swaps are deliberately not taken from #14134. Review Vitest
 keeps its invoking host interpreter; its container branch still uses the
@@ -238,8 +241,11 @@ and standalone artifacts require separate packaging acceptance.
 This fixture does not probe `process.execve`, native PTY loading, fd-3 status
 pipes or process-group signaling. `process.execve` feature detection at
 relaunch sites and Bun gating in `getPty` are source mechanisms, not results
-from this matrix. Native PTY and process-tree behavior need their own real
-process and artifact evidence.
+from this matrix. The PTY row's evidence is S2's own fixture —
+`packages/core/src/utils/bun-pty.node-bun.test.ts`, which spawns the
+`qwen-bun-pty` backend through `getPty()` under the real Bun runtime (and
+skips when no Bun binary exists); native PTY and process-tree behavior need
+their own real process and artifact evidence either way.
 
 ## Validation plan
 
@@ -248,6 +254,9 @@ process and artifact evidence.
 - `packages/core/src/utils/runtime-boundary.node-bun.test.ts` — the
   same-fixture coverage described above; the Bun leg skips when no Bun
   binary exists. A skipped leg is not a compatibility pass.
+- `packages/core/src/utils/bun-pty.node-bun.test.ts` — the PTY row: spawns,
+  output, resize, kill, and the bounded-hold limits through `getPty()` under
+  real Bun; skips when no Bun binary exists.
 - S2/S3 consume the inventory tables as their migration checklist; S5 reruns
   the matrix on the real archives per the MYWO-8 acceptance protocol.
 
