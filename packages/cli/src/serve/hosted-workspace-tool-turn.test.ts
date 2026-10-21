@@ -56,7 +56,7 @@ import {
   HostedWorkspaceToolTurn,
   HostedToolRecoveryRequiredError,
   HOSTED_WORKSPACE_FILE_TOOLS,
-  HOSTED_WORKSPACE_SHELL_TOOLS,
+  HOSTED_WORKSPACE_SHELL_TOOLS_V3,
   HOSTED_INPUT_PREVIEW_TOOLS,
   HOSTED_MEMBER_PLAN_TOOL,
   HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
@@ -70,6 +70,7 @@ import {
   HOSTED_TOOL_APPROVAL_POLICY,
   HostedApprovalWaiters,
   hostedActionAllowed,
+  hostedApprovalAsks,
   resolveHostedAction,
   type HostedApprovalMode,
   type HostedApprovalSettings,
@@ -1792,6 +1793,185 @@ it('refuses a glob call a /1 profile never advertised', async () => {
   ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
   expect(broker.acquire).not.toHaveBeenCalled();
 });
+
+// #15076: `web_fetch` and `todo_write` ship only with the `/3` profiles.
+function createV3Turn(profile = 'hosted-workspace-files/3') {
+  return new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    { profile },
+  );
+}
+
+it.each([
+  ['hosted-workspace-files/3', ['web_fetch', 'todo_write'], false],
+  ['hosted-workspace-shell/3', ['web_fetch', 'todo_write'], true],
+])(
+  'declares web_fetch and todo_write on %s',
+  async (profile, expected, shell) => {
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      shell
+        ? { resources: session.resources, assertWritable: async () => {} }
+        : undefined,
+      undefined,
+      undefined,
+      { profile },
+    );
+    const declarations = await turn.declarations(new AbortController().signal);
+    const names = declarations.map((tool) => tool.name);
+    for (const name of expected) expect(names).toContain(name);
+    expect(names).toContain('glob');
+    if (!shell) expect(names).not.toContain('run_shell_command');
+  },
+);
+
+it.each([
+  'hosted-workspace-files/1',
+  'hosted-workspace-files/2',
+  'hosted-workspace-shell/2',
+])('never offers web_fetch or todo_write on %s', async (profile) => {
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    profile === 'hosted-workspace-shell/2'
+      ? { resources: session.resources, assertWritable: async () => {} }
+      : undefined,
+    undefined,
+    undefined,
+    { profile },
+  );
+  const names = (await turn.declarations(new AbortController().signal)).map(
+    (tool) => tool.name,
+  );
+  expect(names).not.toContain('web_fetch');
+  expect(names).not.toContain('todo_write');
+});
+
+it.each([
+  ['web_fetch', { url: 'https://example.com', prompt: 'p' }],
+  ['todo_write', { todos: [{ id: 'a', content: 'a', status: 'pending' }] }],
+])('refuses %s on a /2 profile before the Broker', async (name, args) => {
+  turn = createSearchTurn();
+  const call = { ...calls[0], name, args };
+  await expect(
+    turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+// #15076: a malformed fetch or task-list call is refused before the Runtime
+// is acquired, so its correction costs no durable work.
+it.each([
+  {},
+  { url: '', prompt: 'p' },
+  { url: '   ', prompt: 'p' },
+  { url: 'ftp://example.com', prompt: 'p' },
+  { url: 'https://u:p@example.com', prompt: 'p' },
+  { url: 'https://example.com' },
+  { url: 'https://example.com', prompt: '   ' },
+  { url: 'https://example.com', prompt: 'p', format: 'pdf' },
+  { url: `https://example.com/${'a'.repeat(2048)}`, prompt: 'p' },
+  { url: 'https://example.com', prompt: 'p', extra: 1 },
+])(
+  'persists a correctable web_fetch argument error without dispatch: %j',
+  async (args) => {
+    turn = createV3Turn();
+    const call = { ...calls[0], name: 'web_fetch', args };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    const error = responses[0].functionResponse?.response?.['error'];
+    expect(responses[0].functionResponse?.id).toBe(call.callId);
+    expect(error).toContain('web_fetch');
+    expect(error).toContain('retry');
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    await expect(turn.finish()).resolves.toBeUndefined();
+  },
+);
+
+it.each([
+  {},
+  { todos: 'x' },
+  { todos: [{}] },
+  { todos: [{ id: '', content: 'a', status: 'pending' }] },
+  { todos: [{ id: 'a', content: '  ', status: 'pending' }] },
+  { todos: [{ id: 'a', content: 'a', status: 'done' }] },
+  { todos: [{ id: 'a', content: 'a', status: 'pending', blockedBy: 'b' }] },
+  { todos: [{ id: 'a', content: 'a', status: 'pending', extra: 1 }] },
+  {
+    todos: [{ id: 'a'.repeat(501), content: 'a', status: 'pending' }],
+  },
+])(
+  'persists a correctable todo_write argument error without dispatch: %j',
+  async (args) => {
+    turn = createV3Turn();
+    const call = { ...calls[0], name: 'todo_write', args };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    const error = responses[0].functionResponse?.response?.['error'];
+    expect(responses[0].functionResponse?.id).toBe(call.callId);
+    expect(error).toContain('todo_write');
+    expect(error).toContain('retry');
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    await expect(turn.finish()).resolves.toBeUndefined();
+  },
+);
+
+it.each(['web_fetch', 'todo_write'])(
+  'pre-approves %s under default while web_fetch asks',
+  async (name) => {
+    expect(
+      hostedApprovalAsks({ mode: 'default', timeoutMs: 60_000 }, 'todo_write'),
+    ).toBe(false);
+    expect(
+      hostedApprovalAsks(
+        { mode: 'auto-edit', timeoutMs: 60_000 },
+        'todo_write',
+      ),
+    ).toBe(false);
+    expect(
+      hostedApprovalAsks({ mode: 'default', timeoutMs: 60_000 }, 'web_fetch'),
+    ).toBe(true);
+    expect(
+      hostedApprovalAsks({ mode: 'auto-edit', timeoutMs: 60_000 }, 'web_fetch'),
+    ).toBe(true);
+    expect(hostedApprovalAsks({ mode: 'yolo', timeoutMs: 60_000 }, name)).toBe(
+      false,
+    );
+  },
+);
 
 it.each([
   {},
@@ -4531,6 +4711,8 @@ it('admits exactly the declared native tools to the version 2 input preview', ()
     'write_file',
     'edit',
     'run_shell_command',
+    'web_fetch',
+    'todo_write',
     'agent',
     'send_message',
     'team_create',
@@ -4542,7 +4724,7 @@ it('admits exactly the declared native tools to the version 2 input preview', ()
     'team_plan_approval',
   ]);
   const declared = [
-    ...HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name),
+    ...HOSTED_WORKSPACE_SHELL_TOOLS_V3.map((tool) => tool.name),
     HOSTED_AGENT_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_CHILD_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_PARENT_TOOL.name,

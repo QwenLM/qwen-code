@@ -30,6 +30,8 @@ import {
 import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
 import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
+import { WebFetchTool } from '@qwen-code/qwen-code-core/tools/web-fetch.js';
+import { TodoWriteTool } from '@qwen-code/qwen-code-core/tools/todoWrite.js';
 import {
   ShellTool,
   type ShellToolParams,
@@ -509,6 +511,9 @@ export class ManagedRuntimeProviderWorker {
         new WriteFileTool(toolConfig),
         new EditTool(toolConfig),
         ...(context.filesOnly ? [] : [shell]),
+        // #15076: the managed mode keeps a fetch to its one transfer.
+        new WebFetchTool(toolConfig, { managed: true }),
+        new TodoWriteTool(toolConfig),
       ];
       const policyRevision = randomUUID();
       const runtime = new ManagedToolRuntime(
