@@ -249,18 +249,50 @@ describe.skipIf(process.platform === 'win32')(
         resolveManagedLocalRuntime(path.join(directory, 'cli.js')),
       ).rejects.toThrow(`invalid at ${selected}`);
     });
-    it('names the exact home installation required when no runtime is installed', async () => {
+    it('requires local Java before downloading a missing default runtime', async () => {
+      vi.stubEnv('PATH', path.join(directory, 'empty'));
+      const download = vi.fn();
+      vi.stubGlobal('fetch', download);
       await expect(
         resolveManagedLocalRuntime(path.join(directory, 'cli.js')),
-      ).rejects.toThrow(
+      ).rejects.toThrow('requires local Java 21');
+      expect(download).not.toHaveBeenCalled();
+    });
+    it('downloads a missing default runtime and then uses it offline without replacing corrupt cache contents', async () => {
+      const selected = await createJava('local-java');
+      vi.stubEnv('JAVA_HOME', selected.home);
+      const jar = Buffer.from('504b030401020304', 'hex');
+      const digest = createHash('sha256').update(jar).digest('hex');
+      const download = vi.fn(
+        async (url: string) =>
+          new Response(
+            url.endsWith('.sha256')
+              ? `${digest}  qwen-managed-agent-server-0.25.3.jar\n`
+              : jar,
+          ),
+      );
+      vi.stubGlobal('fetch', download);
+      const entry = path.join(directory, 'cli.js');
+      const runtime = await resolveManagedLocalRuntime(entry);
+      expect(runtime.java).toBe(selected.executable);
+      expect(runtime.serverJar).toBe(
         path.join(
           directory,
           'home',
           'managed-runtime',
           '0.25.3',
           `${process.platform}-${process.arch}`,
+          'server.jar',
         ),
       );
+      expect(download).toHaveBeenCalledTimes(2);
+      download.mockRejectedValue(new Error('offline'));
+      expect(await resolveManagedLocalRuntime(entry)).toEqual(runtime);
+      await writeFile(runtime.serverJar, 'corrupt cached server');
+      await expect(resolveManagedLocalRuntime(entry)).rejects.toThrow(
+        'checksum mismatch',
+      );
+      expect(download).toHaveBeenCalledTimes(2);
     });
     it.each([
       { ...process.versions, node: '21.7.3' },

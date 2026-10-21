@@ -18,12 +18,24 @@ authentication and writer credentials" below.
 
 ## Local embedded profile
 
-The managed local distribution starts with `qwen serve --managed --open` and
-includes its matching Java 21 runtime, server JAR and native worker entry.
-It needs no MySQL, Docker or systemd. The ordinary server profile keeps its
+The installed CLI starts local Managed mode with `qwen serve --managed --open`.
+It checks local Java 21, downloads a matching server JAR on first use, and reuses
+the verified versioned cache on subsequent starts. An explicitly preinstalled
+runtime can instead bundle Java 21 for offline use. It needs no MySQL, Docker,
+Maven or systemd. The ordinary server profile keeps its
 existing MySQL defaults. Design:
 [English](../../docs/design/2026-10-20-managed-local-serve.md) |
 [简体中文](../../docs/design/2026-10-20-managed-local-serve.zh-CN.md).
+
+The `central-release` Maven profile attaches sources, Javadoc and GPG signatures
+for the main executable server JAR, without attaching the auxiliary operator
+JARs. Ordinary builds keep the existing attachments and do not activate Central
+publishing. The protected `Release Managed server runtime` workflow sets the
+artifact version from an existing CLI release tag and publishes identical JAR
+bytes to Central, GitHub Release assets and the official OSS mirror. The CLI's
+first-use download uses OSS/GitHub and requires no Maven installation. See the
+[release procedure](../../docs/users/managed-local-serve.md#publish-the-first-use-jar)
+and its [Chinese version](../../docs/users/managed-local-serve.zh-CN.md#发布首次使用的-jar).
 
 The launcher selects the `managed-local` Spring profile and supplies an
 existing canonical, owner-only `QWEN_MANAGED_AGENT_LOCAL_DATA_DIRECTORY`.

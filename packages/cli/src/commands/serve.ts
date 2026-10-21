@@ -330,7 +330,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: false,
         description:
-          'Start the complete local Managed application with embedded storage (requires the Managed local distribution).',
+          'Start the local Managed application with embedded storage; downloads the server on first use and requires Java 21.',
       })
       .option('managed-data-dir', {
         type: 'string',

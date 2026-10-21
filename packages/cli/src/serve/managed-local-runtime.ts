@@ -12,6 +12,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { getCliVersion } from '../utils/version.js';
+import { installManagedLocalRuntime } from './managed-local-download.js';
 
 export interface ManagedLocalRuntime {
   java: string;
@@ -40,7 +41,7 @@ async function resolveSystemJava(): Promise<string> {
     }
   }
   const requirement =
-    'The lite Managed runtime requires local Java 21. Set JAVA_HOME to a Java 21 home or put Java 21 on PATH.';
+    'Managed local serve requires local Java 21. Set JAVA_HOME to a Java 21 home or put Java 21 on PATH.';
   if (!java) {
     throw new Error(
       `${requirement} No executable java found ${javaHome ? 'in JAVA_HOME/bin' : 'on PATH'}.`,
@@ -91,6 +92,7 @@ export async function resolveManagedLocalRuntime(
     target,
   );
   let directory = runtimeDirectory;
+  let systemJava: string | undefined;
   if (directory === undefined) {
     const colocated = path.join(path.dirname(entry), 'managed-runtime');
     try {
@@ -99,6 +101,15 @@ export async function resolveManagedLocalRuntime(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       directory = installed;
+      try {
+        await lstat(installed);
+      } catch (installedError) {
+        if ((installedError as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw installedError;
+        }
+        systemJava = await resolveSystemJava();
+        await installManagedLocalRuntime(version, target, installed);
+      }
     }
   }
   directory = path.resolve(directory);
@@ -145,7 +156,7 @@ export async function resolveManagedLocalRuntime(
     }
     if (!(await stat(serverJar)).isFile()) throw new Error('Not a server JAR');
     if ('javaSource' in manifest && manifest.javaSource === 'system') {
-      java = await resolveSystemJava();
+      java = systemJava ?? (await resolveSystemJava());
     } else {
       await access(java, constants.X_OK);
       const release = await readFile(

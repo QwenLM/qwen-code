@@ -2,12 +2,12 @@
 
 [English](managed-local-serve.md) | [简体中文](managed-local-serve.zh-CN.md)
 
-Managed local uses a persistent embedded H2 database. Install a matching
-managed-runtime archive containing the Java control plane, optionally with
-Java 21, alongside your normal Qwen installation. It reuses the Node executable running Qwen,
+Managed local uses a persistent embedded H2 database. With local Java 21 installed,
+the first Managed launch downloads the matching Java server JAR automatically.
+It reuses the Node executable running Qwen,
 its Hosted Harness, native worker entry and production WebShell. Users do not install
-MySQL, Docker, Maven, or systemd. The bundled runtime includes Java; the
-lightweight edition requires Java 21 already installed on the machine.
+MySQL, Docker, Maven, or systemd. An optional preinstalled bundled runtime includes
+Java; the default download and lightweight edition require local Java 21.
 
 This mode is experimental. The implementation supports native macOS and Linux
 on arm64 and x64. Platform acceptance results are recorded separately; providing
@@ -19,9 +19,26 @@ standalone archive bundles all components.
 ## Start and stop
 
 Use a Qwen version that includes Managed local support. Older releases need a
-CLI upgrade; installing the runtime alone cannot add the launcher. Download a
-matching `qwen-code-managed-runtime-<platform>-<arch>.tar.gz` and its `.sha256`
-file. Verify the checksum, then extract it into Qwen home:
+CLI upgrade; installing the runtime alone cannot add the launcher. Install Java 21
+and set `JAVA_HOME` to its home, or put its executable on PATH, then run:
+
+```sh
+qwen serve --managed --open
+```
+
+Before creating application data or starting services, Qwen checks Java 21 and
+downloads `qwen-managed-agent-server-<cli-version>.jar` plus its checksum from
+the official Aliyun OSS release mirror, with the same GitHub Release as fallback.
+It verifies the checksum and installs a complete runtime atomically under
+`<Qwen home>/managed-runtime/<cli-version>/<platform>-<arch>/`. Later launches
+reuse that cache without networking. Ordinary Qwen commands do not download it.
+Only the service JAR is downloaded; Qwen does not install Java or run Maven.
+If the matching release is unavailable or a download fails, no application data
+or service children are created. Retry later or preinstall a matching runtime.
+
+For offline use or bundled Java, obtain a matching
+`qwen-code-managed-runtime-<platform>-<arch>.tar.gz` and its `.sha256` file from
+your distribution builder. Verify and extract it before starting:
 
 ```sh
 shasum -a 256 -c qwen-code-managed-runtime-darwin-arm64.tar.gz.sha256
@@ -35,7 +52,7 @@ The archive installs under
 the directory for its exact version and platform automatically. The runtime
 does not include another Node, CLI, Harness, worker or WebShell installation.
 
-For a smaller download, choose `qwen-code-managed-runtime-lite-<platform>-<arch>.tar.gz`
+For a smaller offline payload, choose `qwen-code-managed-runtime-lite-<platform>-<arch>.tar.gz`
 and verify/extract it in the same way. It contains only the server JAR and
 manifest. Install one edition in a fresh version/target directory; do not
 overlay lightweight and bundled archives. The lightweight launcher uses
@@ -49,7 +66,7 @@ JAVA_HOME=/absolute/java-21-home qwen serve --managed --open
 ```
 
 On macOS, JAVA_HOME typically ends in `Contents/Home`. Missing or incompatible
-Java produces an installation/configuration error; Qwen does not download it.
+Java produces an installation/configuration error before downloading the JAR; Qwen does not download Java.
 The bundled edition always uses its own Java and does not fall back to the
 machine's Java if its payload is damaged.
 
@@ -181,9 +198,34 @@ CLI directly at a directory containing `manifest.json` and `server.jar`
 It takes precedence over the colocated payload and versioned Qwen-home install.
 An existing colocated payload takes precedence over the Qwen-home install.
 A selected invalid or incomplete payload is never replaced by a different one.
-A missing payload, wrong CLI version, target,
-Java major version or server checksum fails before children start. No Maven
-execution or network runtime download occurs during application startup.
+A missing explicitly selected payload, wrong CLI version, target,
+Java major version or server checksum fails before children start. Only a missing
+default cache triggers JAR installation; existing damaged payloads are not replaced.
+Maven is never run during application startup.
+
+## Publish the first-use JAR
+
+The `Release Managed server runtime` workflow builds from an already published
+CLI release tag, using the SDK and server from that exact source revision. A
+manual run must be dispatched from `main` and defaults to a dry run. It verifies
+the CLI and Java module, builds the `central-release` profile, and retains the
+JAR and checksum as workflow artifacts without changing public repositories.
+
+After verifying the dry run, release operators can run the same tag with
+`dry_run=false` through the protected `production-release` environment. The
+workflow sets the server artifact version to the CLI version, publishes
+`com.alibaba:qwen-managed-agent-server:<cli-version>` to Maven Central with
+sources, Javadoc and signatures, and distributes the same primary JAR plus its
+`.sha256` through that GitHub Release and the existing versioned OSS mirror.
+Auxiliary operator JARs are not attached to the Central publication. Existing
+assets are compared byte-for-byte and never replaced with different content.
+Published CLI release events also run this workflow automatically.
+
+The CLI downloads from OSS/GitHub, not Maven Central. It does not resolve the
+SDK as a separate user dependency: the executable server JAR includes its Java
+dependencies. Runtime assets must exist for the exact CLI release before the
+first-use download succeeds. This PR's local validation does not publish those
+assets or bypass the production release environment.
 
 See the bilingual [design](../design/2026-10-20-managed-local-serve.md) for
 ownership boundaries and validation criteria, and the

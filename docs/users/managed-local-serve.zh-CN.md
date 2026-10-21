@@ -2,10 +2,11 @@
 
 [English](managed-local-serve.md) | [简体中文](managed-local-serve.zh-CN.md)
 
-Managed 本地模式使用持久化嵌入式 H2 数据库。在普通 Qwen 安装之外，另装匹配的
-managed-runtime archive，提供 Java 控制面，可选附带 Java 21。复用运行本地 Qwen 的 Node、
+Managed 本地模式使用持久化嵌入式 H2 数据库。本机安装 Java 21 后，首次 Managed
+启动会自动下载匹配的 Java 服务 JAR。复用运行本地 Qwen 的 Node、
 Hosted Harness、原生 worker 入口和生产 WebShell。用户无需安装 MySQL、Docker、
-Maven 或 systemd。带 Java 的 runtime 无需预装 Java；轻量版要求本机已安装 Java 21。
+Maven 或 systemd。可选的预装完整 runtime 包含 Java；默认下载和轻量版要求本机
+Java 21。
 
 此模式处于实验阶段，实现支持 arm64、x64 的原生 macOS 和 Linux。各平台分别
 记录验收结果；存在打包目标不代表该平台已通过 E2E。Managed runtime archive
@@ -15,8 +16,24 @@ standalone archive 则包含所有组件。
 ## 启动与停止
 
 先使用包含 Managed 本地支持的 Qwen 版本。旧版本需要升级 CLI，仅安装 runtime
-不能补上启动器。下载匹配的 `qwen-code-managed-runtime-<platform>-<arch>.tar.gz`
-及其 `.sha256` 文件，校验后解压到 Qwen home：
+不能补上启动器。安装 Java 21，将 `JAVA_HOME` 指向其 home，或将可执行文件放在
+PATH 上，然后运行：
+
+```sh
+qwen serve --managed --open
+```
+
+创建应用数据或启动服务前，Qwen 检查 Java 21，再从官方阿里云 OSS 发行镜像下载
+`qwen-managed-agent-server-<cli-version>.jar` 及其校验文件，失败时回退相同 GitHub
+Release。校验后将完整 runtime 原子安装到
+`<Qwen home>/managed-runtime/<cli-version>/<platform>-<arch>/`。后续启动直接
+使用缓存，无需联网。普通 Qwen 命令不会触发下载。只下载服务 JAR，不安装 Java，
+也不运行 Maven。匹配版本尚未发布或下载失败时，不创建应用数据或服务子进程。
+可以稍后重试，或预装匹配的 runtime。
+
+需要离线使用或附带 Java 时，向发行构建者取得匹配的
+`qwen-code-managed-runtime-<platform>-<arch>.tar.gz` 及其 `.sha256` 文件，启动前
+校验并解压：
 
 ```sh
 shasum -a 256 -c qwen-code-managed-runtime-darwin-arm64.tar.gz.sha256
@@ -29,7 +46,7 @@ archive 安装在 `<Qwen home>/managed-runtime/<cli-version>/<platform>-<arch>/`
 Qwen 自动查找精确匹配其版本和平台的目录。runtime 不再附带另一份 Node、CLI、
 Harness、worker 或 WebShell 安装。
 
-需要更小的下载时，选择 `qwen-code-managed-runtime-lite-<platform>-<arch>.tar.gz`，
+需要更小的离线 payload 时，选择 `qwen-code-managed-runtime-lite-<platform>-<arch>.tar.gz`，
 按相同方式校验和解压，只包含服务 JAR 和 manifest。请在新的版本/平台目录中
 安装其中一种版本，不要把轻量版和带 Java 版叠加解压。轻量启动器在 JAVA_HOME
 非空时使用 `JAVA_HOME/bin/java`，否则选择 PATH 中第一个可执行的 `java`。要求
@@ -40,8 +57,8 @@ Harness、worker 或 WebShell 安装。
 JAVA_HOME=/absolute/java-21-home qwen serve --managed --open
 ```
 
-macOS 的 JAVA_HOME 通常以 `Contents/Home` 结尾。Java 缺失或版本不兼容时会提示
-安装/配置错误，Qwen 不会自动下载。带 Java 版始终使用自己的 Java，payload
+macOS 的 JAVA_HOME 通常以 `Contents/Home` 结尾。Java 缺失或版本不兼容时，在下载
+JAR 前提示安装/配置错误，Qwen 不会下载 Java。带 Java 版始终使用自己的 Java，payload
 损坏时不会回退本机 Java。
 
 也可使用完整 `qwen-code-managed-local-<platform>-<arch>.tar.gz`，解压后运行
@@ -152,9 +169,27 @@ CLI 版本。完整 standalone 使用 `lib/managed-runtime/` 并输出 `SHA256SU
 `QWEN_MANAGED_LOCAL_RUNTIME_DIR=/absolute/managed-runtime`，让本地 CLI 使用
 直接包含 `manifest.json`、`server.jar`（带 Java 版还有 `jre/`）的目录。它优先于相邻 payload 和
 Qwen home 下的版本化安装。存在相邻 payload 时，它优先于 Qwen home 安装。
-选中的 payload 无效或不完整时不会改用另一份。缺少 payload、CLI 版本、平台、
-Java 主版本或服务校验和不匹配，
-都会在启动子进程前失败。应用启动时不执行 Maven，也不联网下载 runtime。
+选中的 payload 无效或不完整时不会改用另一份。显式选中的 payload 缺失，或 CLI
+版本、平台、Java 主版本、服务校验和不匹配时，都会在启动子进程前失败。仅默认
+缓存缺失会触发 JAR 安装；已有损坏 payload 不会被替换。应用启动时绝不执行 Maven。
+
+## 发布首次使用的 JAR
+
+`Release Managed server runtime` workflow 从已公开的 CLI release tag 构建，使用
+相同源码修订的 SDK 和服务。手动运行必须从 `main` 发起，默认是 dry-run。它验证
+CLI 和 Java 模块，构建 `central-release` profile，并将 JAR 与校验文件保留为
+workflow artifact，不修改公开仓库。
+
+验证 dry-run 后，发行运维可通过受保护的 `production-release` environment，用
+相同 tag 和 `dry_run=false` 运行。workflow 将服务制品版本设为 CLI 版本，向
+Maven Central 发布 `com.alibaba:qwen-managed-agent-server:<cli-version>` 及源码、
+Javadoc 和签名，再将相同主 JAR 及其 `.sha256` 分发到该 GitHub Release 和现有的
+版本化 OSS 镜像。辅助运维 JAR 不附加到 Central 发布。已有产物逐字节比较，绝不
+用不同内容替换。公开的 CLI release 事件也会自动运行该 workflow。
+
+CLI 从 OSS/GitHub 下载，不从 Maven Central 下载，也不要求用户单独解析 SDK：
+可执行服务 JAR 包含其 Java 依赖。精确匹配 CLI release 的 runtime 产物必须已存在，
+首次下载才能成功。本 PR 的本地验证不会发布这些产物，也不会绕过生产发行环境。
 
 所有权边界和验收条件见双语[设计文档](../design/2026-10-20-managed-local-serve.zh-CN.md)，
 面向运维的 MySQL 部署见 [Java 服务参考](../../packages/managed-agent-server/README.md)。

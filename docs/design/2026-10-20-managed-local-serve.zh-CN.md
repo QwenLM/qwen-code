@@ -2,7 +2,7 @@
 
 [English](2026-10-20-managed-local-serve.md) | [简体中文](2026-10-20-managed-local-serve.zh-CN.md)
 
-状态：已实现，macOS arm64 带 Java 和轻量 runtime 均通过普通 npm CLI 验收。日期：2026-10-20。
+状态：本地 serve、首次 JAR 下载与发行集成已实现；生产发布待执行。日期：2026-10-21。
 
 ## 问题与现状
 
@@ -18,8 +18,9 @@ systemd 是可选的运维部署选择。
 ## 目标与范围
 
 Managed 本地模式运行 `qwen serve --managed --open`，无需 MySQL、Docker、
-systemd、预装 Java、Maven 或源码。独立 managed-runtime archive 提供匹配的
-Java 服务 JAR 和 Java 21 runtime，复用本地安装的 Qwen CLI、它的 Node 进程、
+systemd、Maven 或源码。默认首次安装仅下载匹配的服务 JAR，要求本机 Java 21。
+独立安装的 managed-runtime archive 可同时提供匹配的 Java 服务 JAR 和
+Java 21 runtime，复用本地安装的 Qwen CLI、它的 Node 进程、
 Hosted Harness、原生 worker 入口及编译好的 WebShell。可选的完整 standalone
 发行包包含所有组件。轻量 archive 不带 Java，要求本机已安装 Java 21。
 首批目标为 x64、arm64 的原生 Linux 和 macOS；本次不交付
@@ -147,11 +148,43 @@ payload 损坏或不完整会拒绝启动，不尝试其他位置。在创建私
 `lib/managed-runtime/` 布局。两个构建器共用 payload 复制和校验逻辑。独立
 runtime 构建不要求编译好的 CLI 资源或 Node archive，默认将 archive 输出到 CLI
 资源树之外。缺失 payload 的错误会说明
-期望的版本、平台和安装位置。启动时不下载 runtime。发布 archive 或 npm 包仍是
+期望的版本、平台和安装位置。既无选中的 payload、也无版本化缓存时，启动器会先
+验证本机 Java 21，再安装匹配的服务 JAR。离线用户可预装任意一种 archive，或选择
+显式 runtime 目录。发布 archive 或 npm 包仍是
 独立发行操作。
+
+### 首次下载与发布
+
+普通 CLI 包不包含 Java payload。仅 `qwen serve --managed` 会下载缺失的默认
+runtime。版本化发行产物为 `qwen-managed-agent-server-<cli-version>.jar` 及匹配的
+`.sha256` 文件。安装器优先使用现有官方阿里云 OSS 发行前缀，再尝试相同 GitHub
+Release tag。不选择 `latest`，不解析 Maven 依赖，也不下载 Java。两个下载源都必须
+提供精确匹配 CLI 版本的产物。
+
+按版本和平台设置安装锁，在多个进程间串行化下载。安装器将内容流式写入私有的
+临时相邻目录，限制下载时间与大小，校验 JAR SHA-256 和 ZIP 文件头，写入现有的
+`javaSource: system` manifest，再原子重命名到缓存。下载失败或被中断不会发布部分
+runtime，后续调用可以重试。已有显式、相邻或已安装的 payload 仍是权威来源：
+内容无效时拒绝启动，不静默替换或触发下载。缓存启动无需联网。安装发生在创建
+应用凭据、数据或服务子进程之前。
+
+独立的受保护发行 workflow 从已存在的 CLI release tag 构建，检查 package 版本，
+并使用 Java 21 验证 Java SDK 和服务。服务 JAR 沿用 SDK 的 Central 签名发布约定，
+以独立 Maven 坐标 `com.alibaba:qwen-managed-agent-server:<cli-version>` 发布，
+同时提供源码和 Javadoc。辅助运维可执行 JAR 不附加到这次发布。完全相同的主 JAR
+和校验文件附加到 CLI GitHub Release，再复制到现有版本化 OSS 前缀，位于
+standalone archive 允许列表之外。可重现时间戳和校验和比较防止重试时用不同字节
+替换已有版本。dry-run 只构建和验证，不发布。生产凭据与发布操作继续受现有
+`production-release` environment 保护。
+
+Maven Central 用于 Java 制品发布，不作为 CLI 启动下载依赖。按照 [Sonatype 对
+runtime 制品的指导](https://central.sonatype.org/faq/429-operational-dependencies/)，发行下载使用项目自身的 OSS/GitHub 渠道。新 CLI 版本必须先
+发布匹配的 runtime 产物，其 Managed 首次使用流程才能成功；发行产物不可用时，
+错误说明所需版本，并保留离线安装方式。
 
 ## 影响文件
 
+- `packages/cli/src/serve/managed-local-download.ts` 及定向安装测试；`.github/workflows/release-managed-runtime.yml`、`scripts/managed-runtime-release.js` 及发布契约测试。
 - `packages/cli/src/commands/serve.ts`、新的本地 Managed 启动器/前门模块及定向测试。
 - `packages/cli/src/serve/web-shell-static.ts` 及相关测试。
 - `packages/web-shell/client/main.tsx`、Managed 独立启动组件及测试。
@@ -207,6 +240,8 @@ CLI 的生命周期验收。十五项选择检查通过，包括 JAVA_HOME/PATH 
 未修改文件的两项 MySQL 集成断言和六项 Checkstyle 问题阻塞。这些基线失败仍与
 本地验收分别记录，不代表当前 main 分支状态。上述结果属于拆分前试验；当前
 拆分 head 的验证和限制记录在 PR 测试报告中。
+
+首次下载路径使用真实 Java 21 服务与 Hosted Harness，通过十四项 built-bundle 场景：首次安装、离线重启、OSS 转 GitHub 回退、中断下载后重试，以及无效下载和选中 payload 拒绝。测试在精确生产 URL 处拦截 transport，提供本地构建的 JAR；公开生产产物尚未发布或验证。发布 profile 已在本地构建主可执行 JAR、源码与 Javadoc；Central 签名发布及受保护的 GitHub/OSS 上传仍需执行生产发行。
 
 ## 未决问题
 

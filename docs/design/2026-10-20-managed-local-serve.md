@@ -2,8 +2,8 @@
 
 [English](2026-10-20-managed-local-serve.md) | [简体中文](2026-10-20-managed-local-serve.zh-CN.md)
 
-Status: implemented; macOS arm64 bundled and lightweight runtimes accepted with an ordinary npm CLI.
-Date: 2026-10-20.
+Status: local serve, first-use JAR download, and release integration implemented; production publication pending.
+Date: 2026-10-21.
 
 ## Problem and current state
 
@@ -22,8 +22,9 @@ operator deployment choice.
 ## Goals and scope
 
 Managed local runs `qwen serve --managed --open` without MySQL, Docker, systemd,
-a Java installation, Maven, or a source checkout. A separate managed-runtime
-archive supplies the matching Java server JAR and Java 21 runtime. It reuses
+Maven, or a source checkout. The default first-use installer downloads only the
+matching server JAR and requires local Java 21. A separately installed managed-runtime
+archive can supply both the matching Java server JAR and Java 21 runtime. It reuses
 the installed Qwen CLI, its Node process, Hosted Harness, native worker entry,
 and built WebShell assets. An optional complete standalone distribution includes
 all components. A lightweight archive omits Java and requires an installed
@@ -168,7 +169,7 @@ otherwise resolve the first executable `java` on PATH to its canonical path.
 Probe that executable with a bounded Java properties/version command and require
 `java.specification.version=21` before creating application state or service
 children. Missing, unlaunchable or incompatible Java produces an actionable
-error. No installation, download, or search for another Java version occurs.
+error. Java itself is not installed or downloaded, and another Java version is not searched for.
 Bundled delivery still requires its own runtime; a missing or corrupt JRE never
 switches to system Java. The service launches the exact verified executable.
 
@@ -178,7 +179,9 @@ the launcher uses a colocated `managed-runtime` directory when present, then
 the versioned installation under Qwen home when the colocated directory is
 absent. A selected invalid or incomplete payload fails closed without trying
 another location. Compatibility is validated before private state or children
-are created. Older Qwen releases without this launcher require a CLI upgrade;
+are created. When neither a selected payload nor the versioned cache exists,
+the launcher verifies local Java 21 before installing the matching server JAR.
+Older Qwen releases without this launcher require a CLI upgrade;
 installing only the runtime cannot add missing CLI behavior.
 
 The existing complete Managed standalone builder keeps its optional JAR/JRE
@@ -186,10 +189,53 @@ inputs and `lib/managed-runtime/` layout. Both builders use the same payload
 copy/validation logic. A separate runtime build does not require built CLI
 assets or a Node archive. Its archives are written outside the CLI asset tree
 by default. Missing payload errors identify the expected version,
-target and installation path. Startup does not download runtime packages.
-Publishing archives or npm packages remains a separate release operation.
+target and installation path. Offline users can preinstall either archive or
+select an explicit runtime directory. Publishing archives or npm packages remains
+a separate release operation.
+
+### First-use download and publication
+
+Ordinary CLI packages contain no Java payload. Only `qwen serve --managed`
+downloads a missing default runtime. The versioned release asset is
+`qwen-managed-agent-server-<cli-version>.jar` with a matching `.sha256` file.
+The installer tries the existing official Aliyun OSS release prefix first and
+the same GitHub Release tag second. It never selects `latest`, resolves Maven
+dependencies, or downloads Java. Both sources must provide the exact CLI version.
+
+A per-version/target installation lock serializes downloads across processes.
+The installer streams into a private temporary sibling directory with a bounded
+download time and size, validates the JAR SHA-256 and ZIP signature, writes the
+existing `javaSource: system` manifest, and atomically renames the completed
+directory into the cache. A failed or interrupted download cannot publish a
+partial runtime. A later invocation can retry. Existing explicit, colocated,
+or installed payloads remain authoritative: invalid content is refused instead
+of being silently replaced or causing a download. Cached startup requires no
+network access. Installation occurs before application credentials, data, or
+service children are created.
+
+A dedicated protected release workflow builds from an existing CLI release tag,
+checks its package version, and verifies the Java SDK and server using Java 21.
+The server JAR is published as the independent Maven coordinate
+`com.alibaba:qwen-managed-agent-server:<cli-version>` using the SDK's signed
+Central publication conventions, including sources and Javadoc. Auxiliary
+operator executable JARs are not attached to that publication. The exact same
+primary JAR and checksum are attached to the CLI GitHub Release and copied to
+the existing versioned OSS prefix, outside the standalone archive allowlist.
+Reproducible timestamps and checksum comparisons prevent a retry from replacing
+an existing version with different bytes. Dry runs build and verify without
+publishing. Production credentials and publication remain protected by the
+existing `production-release` environment.
+
+Maven Central is a Java artifact publication channel, not the CLI's startup
+download dependency. The distribution follows [Sonatype's guidance for runtime
+artifacts](https://central.sonatype.org/faq/429-operational-dependencies/) by using the project's own OSS/GitHub channels. A new CLI release must
+have matching runtime assets published before its Managed first-use path can
+succeed; release availability failures name the required version and preserve
+the offline installation option.
 
 ## Affected files
+
+- `packages/cli/src/serve/managed-local-download.ts` and focused installation tests; `.github/workflows/release-managed-runtime.yml`, `scripts/managed-runtime-release.js`, and publication contract tests.
 
 - `packages/cli/src/commands/serve.ts` and new managed local launcher/front-door
   modules and focused tests.
@@ -265,6 +311,8 @@ base. Those baseline failures remain recorded separately from local acceptance;
 they do not describe the current main branch. The results above belong to the
 pre-split trial. Current split-head verification and limitations are recorded
 in the PR test report.
+
+The first-use download path passed fourteen built-bundle scenarios with the real Java 21 server and Hosted Harness: initial installation, offline restart, OSS-to-GitHub fallback, interrupted-download retry, and refusal of invalid downloads or selected payloads. Transport was intercepted at the exact production URLs to serve the locally built JAR; public production assets have not been published or validated. The release profile builds the primary executable JAR, sources, and Javadoc locally; signed Central publication and protected GitHub/OSS upload require a production release run.
 
 ## Open questions
 
