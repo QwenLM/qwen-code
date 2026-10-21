@@ -643,7 +643,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('allow-origin', {
         type: 'string',
         array: true,
-        description: 'Cross-origin allowlist for browser clients.',
+        description:
+          'Cross-origin allowlist for browser clients. Accepts `*`, a canonical origin, or a loopback port wildcard like `http://127.0.0.1:*` (requires a bearer token).',
       })
       .option('allow-private-auth-base-url', {
         type: 'boolean',
