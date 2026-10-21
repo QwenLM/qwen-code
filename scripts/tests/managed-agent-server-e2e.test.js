@@ -794,23 +794,42 @@ describe('managed-agent-server e2e runner', () => {
     expect(slice.replace(/\s+/g, ' ')).toMatch(
       /read once at JVM startup|restart it with the override/i,
     );
-    // The by-hand recipe re-anchors Spring to the Prerequisites environment,
-    // which never names the Session Store, and application.yml defaults the
-    // store off — a reader who follows that path wires Spring without a
-    // store descriptor and the Harness answers every attach with
-    // 400 invalid_managed_session_store, so the slice must name the switch.
-    expect(slice).toContain('QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED');
-    // The store switch is read once at JVM startup exactly like the base
-    // URL: exported below the restart cue it never reaches the reader's
-    // JVM, and every attach fails with 400 invalid_managed_session_store
-    // while the recipe reads complete — so the exports must land before the
-    // single restart. The cue is hard-wrapped, so compare on the collapsed
-    // slice; a missing cue fails closed through the -1.
-    const flat = slice.replace(/\s+/g, ' ');
+    // The by-hand recipe re-anchors Spring to the Prerequisites environment.
+    // Without a store descriptor the Harness answers every attach with
+    // 400 invalid_managed_session_store, so the store must come on with the
+    // Harness and find its workspace ID there: application.yml derives the
+    // switch from the Harness, and Prerequisites exports the ID.
     expect(
-      flat.indexOf('QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED'),
-      'the Session Store exports must precede the Spring restart cue',
-    ).toBeLessThan(flat.indexOf('restart it with the override'));
+      read('packages/managed-agent-server/src/main/resources/application.yml'),
+      'the Session Store switch must follow the Harness by default',
+    ).toContain(
+      "enabled: '${QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED:${qwen.managed-agent.harness.enabled:false}}'",
+    );
+    const prerequisites = readme.slice(
+      readme.indexOf('## Prerequisites'),
+      readme.indexOf('## Public Session lifecycle'),
+    );
+    expect(
+      prerequisites,
+      'Prerequisites must export the workspace ID that scopes the store',
+    ).toMatch(/^export QWEN_MANAGED_AGENT_WORKSPACE_ID='[^']+'$/m);
+    // The base URL is read once at JVM startup: exported below the restart
+    // cue it never reaches the reader's JVM, and every Turn fails while the
+    // recipe reads complete. The cue is hard-wrapped, so compare on the
+    // collapsed slice, and require both positions so neither can pass as -1.
+    const flat = slice.replace(/\s+/g, ' ');
+    const cue = flat.indexOf('restart it with the override');
+    const baseUrlExport = flat.indexOf(
+      `QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:${port}'`,
+    );
+    expect(cue, 'the slice must keep the Spring restart cue').toBeGreaterThan(
+      -1,
+    );
+    expect(baseUrlExport).toBeGreaterThan(-1);
+    expect(
+      baseUrlExport,
+      'the Harness base-url export must precede the Spring restart cue',
+    ).toBeLessThan(cue);
   });
 
   it('keeps the review-corrections merge gates behind the CI-gated Hosted proofs', () => {

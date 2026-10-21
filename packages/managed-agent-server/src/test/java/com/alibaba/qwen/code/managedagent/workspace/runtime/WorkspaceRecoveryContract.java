@@ -42,6 +42,55 @@ import static org.assertj.core.api.Assertions.*;
 public final class WorkspaceRecoveryContract {
     private WorkspaceRecoveryContract() { }
 
+    public static void verifySharedExecution(DataSource source, JdbcTemplate jdbc, ManagedAgentStore store,
+            WorkspaceExecutionStore authority) throws Exception {
+        var fixture = new Fixture(source, jdbc, store);
+        var first = fixture.runtime("first");
+        var transaction = new org.springframework.transaction.support.TransactionTemplate(
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
+        var created = transaction.execute(status -> store.insertWorkspaceSessionCommand(fixture.tenant, "actor", "neighbor",
+                "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", ".")));
+        var second = fixture.runtime("second", created.sessionId());
+        var other = new WorkspaceExecutionStore(jdbc, new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
+        var start = new java.util.concurrent.CyclicBarrier(2);
+        try (var pool = Executors.newFixedThreadPool(2)) {
+            var a = pool.submit(() -> {
+                start.await(5, TimeUnit.SECONDS);
+                authority.claim(fixture.session.workspace(), first.session());
+                return true;
+            });
+            var b = pool.submit(() -> {
+                start.await(5, TimeUnit.SECONDS);
+                other.claim(fixture.session.workspace(), second.session());
+                return true;
+            });
+            assertThat(a.get(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(b.get(10, TimeUnit.SECONDS)).isTrue();
+        }
+        assertThat(authority.beginRewind(fixture.session.workspace(), first.session())).isFalse();
+        var children = new com.alibaba.qwen.code.managedagent.persistence.ChildWorkspaceStore(jdbc,
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
+        var admitted = children.admit(fixture.tenant, fixture.session.sessionId(), UUID.randomUUID().toString(),
+                fixture.session.workspace(), System.currentTimeMillis());
+        var maintenance = children.claim(admitted, "maintenance", System.currentTimeMillis(), 60_000);
+        assertThatThrownBy(() -> authority.holdForMaintenance(fixture.session.workspace(), maintenance.childWorkspaceId(), 1))
+                .isInstanceOf(RuntimeBrokerException.class);
+        authority.release(fixture.session.workspace(), first.session());
+        // A locally released lifecycle row does not prove its physical membership ended.
+        fixture.sessions.compareAndSet(second.session(), second.session().withState(RuntimeSessionRecord.State.RELEASED, Instant.now()));
+        assertThatThrownBy(() -> authority.holdForMaintenance(fixture.session.workspace(), maintenance.childWorkspaceId(), 1))
+                .isInstanceOf(RuntimeBrokerException.class);
+        authority.assertHeld(fixture.session.workspace(), second.session());
+        authority.release(fixture.session.workspace(), second.session());
+        String step = authority.holdForMaintenance(fixture.session.workspace(), maintenance.childWorkspaceId(), 1);
+        assertThatThrownBy(() -> other.claim(fixture.session.workspace(), first.session())).isInstanceOf(RuntimeBrokerException.class);
+        authority.releaseMaintenance(fixture.session.workspace(), maintenance.childWorkspaceId(), 1, step);
+        authority.claim(fixture.session.workspace(), first.session());
+        assertThat(authority.beginRewind(fixture.session.workspace(), first.session())).isTrue();
+        authority.endRewind(fixture.session.workspace(), first.session());
+        authority.assertHeld(fixture.session.workspace(), first.session());
+    }
+
     public static void verifyOperatorPrepare(DataSource source, JdbcTemplate jdbc, ManagedAgentStore store,
             WorkspaceExecutionStore authority) throws Exception {
         var fixture = new Fixture(source, jdbc, store);
@@ -290,7 +339,7 @@ public final class WorkspaceRecoveryContract {
         try (var pool = Executors.newSingleThreadExecutor(); var connection = source.getConnection()) {
             connection.setAutoCommit(false);
             try (var lock = connection.prepareStatement("SELECT binding_id FROM ma_runtime_binding WHERE binding_id = ? FOR UPDATE")) {
-                lock.setString(1, original.binding().getBindingId());
+                lock.setBytes(1, original.binding().getBindingId().getBytes(StandardCharsets.UTF_8));
                 try (var rows = lock.executeQuery()) {
                     assertThat(rows.next()).isTrue();
                 }
@@ -304,12 +353,12 @@ public final class WorkspaceRecoveryContract {
             assertThatThrownBy(() -> pending.get(100, TimeUnit.MILLISECONDS)).isInstanceOf(java.util.concurrent.TimeoutException.class);
             try (var lose = connection.prepareStatement("UPDATE ma_runtime_binding SET binding_state = 'LOST',"
                     + " record_version = record_version + 1 WHERE binding_id = ?")) {
-                lose.setString(1, original.binding().getBindingId());
+                lose.setBytes(1, original.binding().getBindingId().getBytes(StandardCharsets.UTF_8));
                 assertThat(lose.executeUpdate()).isEqualTo(1);
             }
             connection.commit();
             assertThatThrownBy(() -> pending.get(5, TimeUnit.SECONDS)).hasCauseInstanceOf(RuntimeBrokerException.class);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE binding_id = ?",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_key IS NOT NULL",
                     Long.class, original.binding().getBindingId())).isZero();
         }
     }
@@ -340,6 +389,10 @@ public final class WorkspaceRecoveryContract {
         }
 
         Runtime runtime(String name) {
+            return runtime(name, session.sessionId());
+        }
+
+        Runtime runtime(String name, String harnessSessionId) {
             var scope = new RuntimeScope(tenant, "workspace", "1", "/original-storage",
                     WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
             var request = new RuntimeProvisionRequest(scope, tenant + name, "local-process", "storage");
@@ -351,7 +404,7 @@ public final class WorkspaceRecoveryContract {
             var binding = bindings.compareAndSet(claim, claim.withAttestation(lease,
                     new RuntimeResourceHandle("local-process", 2, Map.of("test", tenant + name)), Instant.now(), Instant.now()));
             var acquiring = bindings.admitSession(sessions, new RuntimeSessionRecord(
-                    new RuntimeSession(session.sessionId(), tenant + name, "bootstrap", scope), binding.getBindingId(),
+                    new RuntimeSession(harnessSessionId, tenant + name, "bootstrap", scope), binding.getBindingId(),
                     binding.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
             return new Runtime(binding, sessions.compareAndSet(acquiring,
                     acquiring.withState(RuntimeSessionRecord.State.READY, Instant.now())));
