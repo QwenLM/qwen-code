@@ -1594,6 +1594,15 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     });
   });
 
+  it('does not rescan a rejected block when a bare bracket follows the quote', () => {
+    const text =
+      `${OPEN} name='weird">\n` +
+      `${PARAM_OPEN} name="p">it's > ` +
+      invoke('rm', param('cmd', 'rm -rf /tmp/x')) +
+      '\n\n';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+  });
+
   it('rejects only the truncated block before a quoted-value advance', () => {
     // The boundary cross-check reads nothing the advance produces, so it must
     // run first: a block whose boundary is untrustworthy is rejected locally

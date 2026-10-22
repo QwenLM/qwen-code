@@ -615,13 +615,10 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     if (openTagEndOffset !== paramsStart - matchStart) {
       // Only this block's boundary is untrustworthy: a quote run in the name
       // leaves no unquoted `>`, or quote pairs put the flat boundary inside an
-      // attribute. Reject the block and resume past its open tag rather than
-      // costing the turn; resuming at or before `matchStart` would spin the
-      // `/g` scan, so fall back to the match end.
-      TOOL_CALL_PATTERN.lastIndex =
-        openTagEndOffset === -1
-          ? match.index + match[0].length
-          : match.index + openTagEndOffset;
+      // attribute. Reject the block without costing the turn, and resume at
+      // the flat match end: any offset inside the block comes from the same
+      // quote-pairing walk just distrusted and can re-enter its body.
+      TOOL_CALL_PATTERN.lastIndex = match.index + match[0].length;
       continue;
     }
     // A value the block quotes a call in owns the flat close that landed
