@@ -7,6 +7,25 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createShowResult } from '../contracts.js';
+import type { ViewState } from './controller.js';
+
+const presentation = vi.hoisted(() => ({
+  onStatus: undefined as ((state: ViewState) => void) | undefined,
+}));
+vi.mock('./controller.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./controller.js')>();
+  return {
+    ...actual,
+    ViewController: class extends actual.ViewController {
+      constructor(
+        ...args: ConstructorParameters<typeof actual.ViewController>
+      ) {
+        super(...args);
+        presentation.onStatus = args[3];
+      }
+    },
+  };
+});
 
 const bridge = vi.hoisted(() => ({
   events: new Map<string, (value?: unknown) => void>(),
@@ -38,10 +57,21 @@ const input = {
   javascript: '',
 };
 const text = (id: string) => document.getElementById(id)!.textContent;
+const frame = () => document.getElementById('view') as HTMLIFrameElement;
+const stop = () => document.getElementById('stop') as HTMLButtonElement;
+function present(state: Partial<ViewState>) {
+  presentation.onStatus!({
+    phase: 'ready',
+    viewAvailable: true,
+    rejectedEvents: 0,
+    ...state,
+  });
+}
 
 beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
+  presentation.onStatus = undefined;
   bridge.events.clear();
   bridge.connect.mockResolvedValue(undefined);
   bridge.getHostContext.mockReturnValue({});
@@ -103,5 +133,110 @@ describe('generated view result presentation', () => {
     await vi.waitFor(() =>
       expect(text('status')).toContain('cannot run the view'),
     );
+  });
+});
+
+describe('generated view interaction feedback', () => {
+  it('shows an available view while its queued work is still running', () => {
+    present({ phase: 'starting', viewAvailable: false });
+    expect(frame().hidden).toBe(true);
+    expect(frame().getAttribute('aria-busy')).toBe('true');
+    expect(text('status')).toContain('Starting');
+    expect(stop().disabled).toBe(false);
+
+    present({ phase: 'running' });
+    expect(frame().hidden).toBe(false);
+    expect(frame().getAttribute('aria-busy')).toBe('true');
+    expect(text('status')).toBe('Updating the view…');
+
+    present({ phase: 'ready', lastUpdate: 'applied' });
+    expect(frame().getAttribute('aria-busy')).toBe('false');
+    expect(text('status')).toBe('Latest update applied');
+  });
+
+  it('explains unapplied parameters without presenting dirty as applied', () => {
+    present({ phase: 'dirty' });
+    expect(document.getElementById('status')!.dataset['state']).toBe('dirty');
+    expect(text('status')).toContain('Parameters changed');
+    expect(text('status')).not.toContain('applied');
+    expect(frame().hidden).toBe(false);
+    expect(frame().getAttribute('aria-busy')).toBe('false');
+  });
+
+  it.each([
+    ['superseded', 'An older update was skipped. Your newer inputs were kept.'],
+    ['outdated', 'The displayed update may still use earlier parameters.'],
+  ] as const)('shows the %s update notice', (lastUpdate, message) => {
+    present({ phase: 'dirty', lastUpdate });
+    expect(text('notice')).toBe(message);
+    expect(document.getElementById('notice')!.hidden).toBe(false);
+    expect(text('status')).toContain('Parameters changed');
+  });
+
+  it('keeps rejected-interaction feedback when subsequent work becomes ready', () => {
+    present({
+      phase: 'running',
+      lastUpdate: 'superseded',
+      rejectedEvents: 3,
+    });
+    expect(text('notice')).toContain('An older update was skipped');
+    expect(text('notice')).toContain('queue was full');
+
+    present({ phase: 'ready', lastUpdate: 'applied', rejectedEvents: 3 });
+    expect(text('status')).toBe('Latest update applied');
+    expect(text('notice')).toContain('queue was full');
+    expect(text('notice')).toContain('repeat the intended action');
+    expect(text('notice')).not.toContain('An older update was skipped');
+    expect(document.getElementById('notice')!.hidden).toBe(false);
+  });
+
+  it.each(['stopped', 'error'] as const)(
+    'disables Stop and clears old interaction notices on %s',
+    (phase) => {
+      present({
+        phase: 'running',
+        lastUpdate: 'outdated',
+        rejectedEvents: 2,
+      });
+      expect(text('notice')).not.toBe('');
+      present({
+        phase,
+        lastUpdate: 'outdated',
+        rejectedEvents: 2,
+        error: 'The event timed out. Use the summary.',
+      });
+      expect(stop().disabled).toBe(true);
+      expect(text('notice')).toBe('');
+      expect(document.getElementById('notice')!.hidden).toBe(true);
+      expect(frame().getAttribute('aria-busy')).toBe('false');
+      expect(text('status')).toBe(
+        phase === 'stopped'
+          ? 'Stopped. Reopen the card to start a new view.'
+          : 'The event timed out. Use the summary.',
+      );
+    },
+  );
+
+  it('does not rewrite live-region text when the rendered messages are unchanged', () => {
+    const state = {
+      phase: 'running',
+      lastUpdate: 'superseded',
+      rejectedEvents: 1,
+    } as const;
+    present(state);
+    const observer = new MutationObserver(() => {});
+    for (const id of ['status', 'notice']) {
+      const region = document.getElementById(id)!;
+      expect(region.getAttribute('aria-live')).toBe('polite');
+      observer.observe(region, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+    }
+    present(state);
+    present({ ...state, rejectedEvents: 2 });
+    expect(observer.takeRecords()).toHaveLength(0);
+    observer.disconnect();
   });
 });
