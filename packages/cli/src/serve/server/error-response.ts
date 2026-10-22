@@ -23,6 +23,10 @@ import {
 import type { Response } from 'express';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+import {
+  SessionArtifactLibraryError,
+  SessionStorageEntryError,
+} from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   AcpChildCapacityExceededError,
@@ -506,6 +510,20 @@ export function sendBridgeError(
     res
       .status(err.code === 'session_attachment_gone' ? 410 : 400)
       .json({ error: err.message, code: err.code });
+    return;
+  }
+  if (err instanceof SessionArtifactLibraryError) {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    res.status(409).json({ error: err.message, code: err.code });
+    return;
+  }
+  if (err instanceof SessionStorageEntryError) {
+    const foreign = err.reason === 'foreign_project';
+    res.status(foreign ? 404 : 409).json({
+      error: foreign ? 'Session not found.' : err.message,
+      code: foreign ? 'session_not_found' : 'session_storage_conflict',
+      sessionId: err.sessionId,
+    });
     return;
   }
   if (err instanceof SessionWriterError) {

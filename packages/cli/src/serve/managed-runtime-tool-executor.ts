@@ -632,7 +632,7 @@ export class ManagedToolExecutor {
     this.assertLegacySession(sessionId);
     if (
       this.closing ||
-      this.hasActiveToolSession(sessionId) ||
+      this.hasActiveToolSession(sessionId, true) ||
       (operation.action === 'rewind' &&
         this.hooks?.hasHolds(sessionId) === true) ||
       [...this.entries.values()].some(
@@ -644,6 +644,7 @@ export class ManagedToolExecutor {
         'File history requires an idle Runtime Session.',
       );
     this.historyControls.add(sessionId);
+    this.mcp?.setFileHistoryActive(sessionId, true);
     let mutationStarted = false;
     try {
       const tools = await this.toolsFor({
@@ -725,6 +726,7 @@ export class ManagedToolExecutor {
       throw error;
     } finally {
       this.historyControls.delete(sessionId);
+      this.mcp?.setFileHistoryActive(sessionId, false);
     }
   }
 
@@ -1900,10 +1902,15 @@ export class ManagedToolExecutor {
     );
   }
 
-  private hasActiveToolSession(sessionId: string): boolean {
+  private hasActiveToolSession(
+    sessionId: string,
+    fileHistory = false,
+  ): boolean {
     if (this.historyControls.has(sessionId)) return true;
     return (
-      this.mcp?.hasHolds(sessionId) === true ||
+      (fileHistory
+        ? this.mcp?.hasPendingWork(sessionId)
+        : this.mcp?.hasHolds(sessionId)) === true ||
       this.provider?.hasActiveSession(sessionId) === true ||
       this.backgroundRegistry.hasHolds(sessionId) ||
       this.monitorRegistry.hasHolds(sessionId) ||

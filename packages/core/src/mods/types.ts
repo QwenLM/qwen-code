@@ -78,6 +78,7 @@ export type ModRequest =
       presentation?: ModCommandPresentation;
     }
   | { type: 'tool'; input: ModToolCallInput; builtinTool?: string }
+  | { type: 'native'; id: number }
   | { type: 'host-result'; id: number; result?: ModToolResult; error?: string }
   | {
       type: 'tool-check';
@@ -93,6 +94,7 @@ export type ModReply =
   | { type: 'error'; message: string }
   | { type: 'host-call'; id: number; input: ModToolCallInput }
   | { type: 'host-cancel'; ids: number[] }
+  | { type: 'activity'; revision: number; operation?: number }
   | {
       type: 'check-result';
       id: number;
@@ -100,3 +102,6 @@ export type ModReply =
       error?: string;
     }
   | ({ type: 'log'; plugin: string } & ModLog);
+
+export type ModWorkerRequest = ModRequest & { root: number; phase: number };
+export type ModWorkerReply = ModReply & { root: number; phase: number };

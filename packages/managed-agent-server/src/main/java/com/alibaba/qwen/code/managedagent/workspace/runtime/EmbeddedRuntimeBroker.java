@@ -437,6 +437,12 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     }
 
     @Override
+    public CompletionStage<Void> prepareWorkspaceResources(String tenantId, String sessionId,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        return service.prepareHarnessResources(tenantId, sessionId, authority);
+    }
+
+    @Override
     public CompletionStage<Void> recoverStoppedWorkspaceResources(String tenantId, String sessionId,
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         return service.drainHarnessResources(tenantId, sessionId, authority, true);
@@ -603,6 +609,11 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 + " QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY outside every configured Workspace"
                 + " root, or opt out with QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=false"
                 + " and QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false";
+    }
+
+    /** The workspace ID this Broker resolves, which the Session Store shares. */
+    public static String workspaceId(ManagedAgentProperties.RuntimeBroker broker) {
+        return resolveWorkspaceId(broker, resolveWorkspaceCwd(broker));
     }
 
     private static String resolveWorkspaceCwd(

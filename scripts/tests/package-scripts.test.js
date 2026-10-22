@@ -23,8 +23,10 @@ import { describe, expect, it } from 'vitest';
 import { parse, stringify } from 'yaml';
 
 import { hooks as pnpmHooks, workspacePackageNames } from '../../.pnpmfile.mjs';
+import { checkReleaseTarballExecBits } from '../check-release-tarball-exec-bits.mjs';
 import { getPinnedPnpmPackage } from '../pnpm-package.js';
 import { INDEPENDENT_PACKAGES } from '../release-packages.mjs';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
@@ -43,6 +45,43 @@ function readPackageJson() {
 
 function readWorkflow(relativePath) {
   return readFileSync(path.join(root, relativePath), 'utf8');
+}
+
+const heapCap = (value) => value?.match(/--max-old-space-size=(\d+)/)?.[1];
+
+/**
+ * Writes a throwaway package shaped like the generated CLI for the
+ * vendored-binary packing cases: `vendor/ripgrep/<platform>/rg` (or `rg.exe`
+ * for a `-win32` platform) at the given modes, the manifest entry that makes
+ * a packer pick the tree up, and optionally
+ * `vendor/landlock-run/<platform>/qwen-landlock-run` binaries.
+ */
+function writeVendoredBinaryFixture(directory, platforms, landlock = {}) {
+  writeFileSync(
+    path.join(directory, 'package.json'),
+    JSON.stringify({
+      name: 'vendored-binary-fixture',
+      version: '1.0.0',
+      files: ['vendor'],
+    }),
+  );
+  const binaries = [];
+  for (const [platform, mode] of Object.entries(platforms)) {
+    binaries.push([
+      `vendor/ripgrep/${platform}/${platform.endsWith('-win32') ? 'rg.exe' : 'rg'}`,
+      mode,
+    ]);
+  }
+  for (const [platform, mode] of Object.entries(landlock)) {
+    binaries.push([`vendor/landlock-run/${platform}/qwen-landlock-run`, mode]);
+  }
+  for (const [relative, mode] of binaries) {
+    const binary = path.join(directory, relative);
+    mkdirSync(path.dirname(binary), { recursive: true });
+    writeFileSync(binary, '#!/bin/sh\n');
+    chmodSync(binary, mode);
+  }
+  return directory;
 }
 
 const releaseStepScript = readWorkflow('.github/scripts/run-release-step.sh');
@@ -1075,7 +1114,7 @@ describe('package scripts', () => {
 
   it('keeps the root build above the heap ceiling that broke the CLI compile', () => {
     const { build } = readPackageJson().scripts;
-    const cap = build.match(/--max-old-space-size=(\d+)/)?.[1];
+    const cap = heapCap(build);
     expect(cap).toBeDefined();
     // The CLI's TypeScript compile crossed the previous 4 GiB ceiling on the
     // shared pool and failed the Java daemon E2E leg before any test ran
@@ -1083,14 +1122,21 @@ describe('package scripts', () => {
     expect(Number(cap)).toBeGreaterThanOrEqual(6144);
   });
 
-  it('keeps the pnpm prepare build above the same heap ceiling', () => {
+  it('keeps the pnpm prepare build above the heap ceiling and the root build cap', () => {
     const { nodeOptions } = parse(readWorkflow('pnpm-workspace.yaml'));
-    const cap = nodeOptions?.match(/--max-old-space-size=(\d+)/)?.[1];
-    expect(cap).toBeDefined();
+    const pnpmCap = heapCap(nodeOptions);
+    const buildCap = heapCap(readPackageJson().scripts.build);
+    expect(pnpmCap).toBeDefined();
+    expect(buildCap).toBeDefined();
     // The pnpm prepare path compiles the same CLI project that crossed the
     // 4 GiB ceiling in #14823; #14827 raised this cap, so pin it beside the
     // root build script instead of leaving one half of the fix unguarded.
-    expect(Number(cap)).toBeGreaterThanOrEqual(6144);
+    expect(Number(pnpmCap)).toBeGreaterThanOrEqual(6144);
+    // pnpm replaces NODE_OPTIONS for every package script, so this cap — not
+    // the root build script's — governs `tsc --build` on both the explicit
+    // and install-time paths. A raise on the root entry point intended for
+    // that compile must be mirrored here.
+    expect(Number(pnpmCap)).toBeGreaterThanOrEqual(Number(buildCap));
   });
 
   it('selects the CLI dependency closure without selecting the same-named root', () => {
@@ -1779,12 +1825,123 @@ describe('package scripts', () => {
     expect(releaseStepScript).toContain('already published; skipping');
     expect(releaseStepScript).toContain('exit 0');
     expect(releaseStepScript).toContain(
-      'corepack pnpm publish --no-git-checks --provenance "${publish_args[@]}"',
+      'npm publish --provenance "${publish_args[@]}"',
     );
     expect(releaseStepScript).toContain(
       'corepack pnpm -r publish "${publish_args[@]}"',
     );
   });
+
+  it('publishes the generated CLI with a packer that keeps the ripgrep exec bit', () => {
+    // #12668: pnpm's packer writes 0644 for every entry outside `bin`, so a CLI
+    // published with it ships a vendored ripgrep that nobody can spawn. The
+    // generated CLI is the only package carrying vendored binaries and the only
+    // one `publish_package` is called for, so it alone goes back to npm.
+    expect(releaseStepScript).toContain("publish_package 'dist'");
+    expect(releaseStepScript).not.toContain('corepack pnpm publish');
+    expect(releaseStepScript).toContain(
+      'npm publish --provenance "${publish_args[@]}"',
+    );
+
+    // The gate runs in the arm that produces `dist`, before the publish step
+    // consumes it, so no release can publish a tarball it never checked. It
+    // runs from the workflow-pinned scripts: a release ref that predates it
+    // would have no `scripts/check-release-tarball-exec-bits.mjs` of its own.
+    const buildPackageArm = releaseStepScript.slice(
+      releaseStepScript.indexOf('build-package)'),
+      releaseStepScript.indexOf('build-archives)'),
+    );
+    expect(buildPackageArm).toContain(
+      'node .release-workflow/scripts/check-release-tarball-exec-bits.mjs dist',
+    );
+  });
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'npm pack keeps the exec bit on every spawned vendored binary in the CLI tarball',
+    () => {
+      // The archive is where the bit is lost (#12668), so assert on its
+      // recorded modes rather than on the staged tree. A `-win32` directory
+      // ships a 0644 `rg.exe` by design and the gate excludes it structurally.
+      const fixture = mkdtempSync(path.join(tmpdir(), 'cli-rg-exec-bit-'));
+      try {
+        writeVendoredBinaryFixture(
+          fixture,
+          {
+            'x64-linux': 0o755,
+            'arm64-darwin': 0o755,
+            'x64-win32': 0o644,
+          },
+          { 'x64-linux': 0o755 },
+        );
+        const { entries } = checkReleaseTarballExecBits(fixture);
+        expect(entries.map(([name]) => name)).toEqual([
+          'package/vendor/landlock-run/x64-linux/qwen-landlock-run',
+          'package/vendor/ripgrep/arm64-darwin/rg',
+          'package/vendor/ripgrep/x64-linux/rg',
+        ]);
+        for (const [name, mode] of entries) {
+          expect(mode & 0o111, name).toBe(0o111);
+        }
+      } finally {
+        rmSync(fixture, { force: true, recursive: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'release tarball gate rejects a spawned vendored binary without an exec bit',
+    () => {
+      const fixture = mkdtempSync(path.join(tmpdir(), 'cli-rg-gate-'));
+      try {
+        writeVendoredBinaryFixture(
+          fixture,
+          { 'x64-linux': 0o755 },
+          { 'x64-linux': 0o644 },
+        );
+        expect(() => checkReleaseTarballExecBits(fixture)).toThrow(
+          /package\/vendor\/landlock-run\/x64-linux\/qwen-landlock-run: 0644 lacks an exec bit/,
+        );
+
+        // A platform directory whose binary was dropped during staging must
+        // fail, not silently shrink the expected set.
+        const shrunk = mkdtempSync(path.join(tmpdir(), 'cli-rg-missing-'));
+        try {
+          writeVendoredBinaryFixture(
+            shrunk,
+            { 'arm64-linux': 0o755 },
+            { 'x64-linux': 0o755 },
+          );
+          mkdirSync(path.join(shrunk, 'vendor', 'ripgrep', 'x64-linux'), {
+            recursive: true,
+          });
+          expect(() => checkReleaseTarballExecBits(shrunk)).toThrow(
+            /package\/vendor\/ripgrep\/x64-linux\/rg: missing from the packed tarball/,
+          );
+        } finally {
+          rmSync(shrunk, { force: true, recursive: true });
+        }
+
+        // A package whose vendor trees ship no spawned binary must not pass
+        // vacuously: the gate refuses before it ever packs.
+        const empty = mkdtempSync(path.join(tmpdir(), 'cli-rg-none-'));
+        try {
+          mkdirSync(path.join(empty, 'vendor', 'ripgrep'), {
+            recursive: true,
+          });
+          mkdirSync(path.join(empty, 'vendor', 'landlock-run'), {
+            recursive: true,
+          });
+          expect(() => checkReleaseTarballExecBits(empty)).toThrow(
+            /no spawned vendored executables under/,
+          );
+        } finally {
+          rmSync(empty, { force: true, recursive: true });
+        }
+      } finally {
+        rmSync(fixture, { force: true, recursive: true });
+      }
+    },
+  );
 
   it('meets npm trusted publishing requirements', () => {
     for (const [workflowPath, jobName, publishStepName] of [
@@ -1793,6 +1950,11 @@ describe('package scripts', () => {
         '.github/workflows/release-sdk.yml',
         'release-sdk',
         'Publish @qwen-code/sdk',
+      ],
+      [
+        '.github/workflows/cd-cua-driver.yml',
+        'publish-browser',
+        'Publish immutable Browser SDK tarball',
       ],
       [
         '.github/workflows/cd-cua-driver.yml',

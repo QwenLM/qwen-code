@@ -36,9 +36,7 @@ test("release target mapping uses Qwen binary archives", () => {
     nativeTarget("win32", "arm64", "1.2.3").archive,
     "cua-driver-rs-1.2.3-windows-arm64-binary.zip",
   )
-  assert.deepEqual(nativeTarget("win32", "x64", "1.2.3").companions, [
-    "qwen-cua-driver-uia.exe",
-  ])
+  assert.deepEqual(nativeTarget("win32", "x64", "1.2.3").companions, [])
   assert.throws(() => nativeTarget("freebsd", "x64", "1.2.3"))
 })
 
@@ -213,3 +211,18 @@ test("UIAccess worker uses the versioned secure Windows path", () => {
   )
   assert.throws(() => uiAccessWorkerPath("1.2.3", {}), /ProgramFiles/u)
 })
+
+
+test("default Windows native installation needs no UIAccess worker or Program Files", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cua-sdk-windows-ordinary-"));
+  try {
+    const target = nativeTarget("win32", "x64", "1.2.3");
+    writeFileSync(join(directory, target.library), "library fixture");
+    writeFileSync(join(directory, target.runtime), "runtime fixture");
+    const result = await ensureNativePayload({
+      env: { QWEN_CUA_SDK_NATIVE_DIR: directory }, platform: "win32", arch: "x64", version: "1.2.3",
+      fetchImpl: () => { throw new Error("explicit native payload must not download"); },
+    });
+    assert.equal(result, directory);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});

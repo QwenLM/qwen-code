@@ -116,6 +116,7 @@ export interface APIAssistantMessage {
  */
 export interface CLIUserMessage {
   type: 'user';
+  origin?: { kind: 'human' };
   uuid?: string;
   session_id: string;
   message: APIUserMessage;
