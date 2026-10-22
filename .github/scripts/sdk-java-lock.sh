@@ -38,10 +38,11 @@ sdk_java_lock_acquire() {
   if [[ ${class} == 'fast' ]]; then
     rank=0
   fi
-  # 1200 s leaves 4200 s of the 5400 s acquisition budget, enough for four
-  # 925 s holds. At or above the budget promotion would rename a ticket in the
-  # same iteration whose timeout arm deletes it; sdk-java-workflow.test.js
-  # pins the default below both acquisition budgets.
+  # 1200 s sits well inside the 9600 s acquisition budget, which outlasts the
+  # longest measured full-tier MariaDB hold (8685 s). At or above the budget
+  # promotion would rename a ticket in the same iteration whose timeout arm
+  # deletes it; sdk-java-workflow.test.js pins the default below both
+  # acquisition budgets.
   local promote_after="${SDK_JAVA_LOCK_PROMOTE_AFTER:-1200}"
   local lock="${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
   local queue="${lock}.queue"

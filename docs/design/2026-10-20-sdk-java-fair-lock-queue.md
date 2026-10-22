@@ -29,10 +29,11 @@ hold at a time — no constant budget bounds the queue.
   automatically at the step boundary; the pinned infrastructure-signature
   error text (`lock not acquired within`) stays so the rerun classifier in
   `qwen-autofix.yml` is untouched.
+- Goal: a wait budget that outlasts the longest measured sibling hold, with
+  job ceilings that can actually spend it (see "Budget sizing").
 - Non-goal: reducing total occupancy. Sharding the lock by suite, capping
   registrations per host, or adding hosts are orthogonal and can follow;
   fairness makes their remaining work measurable instead of urgent.
-- Non-goal: changing the 5400 s budget or the 150/280-minute job ceilings.
 
 ## Design
 
@@ -79,7 +80,7 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
 - Failing closed is worse than falling back here: `release-sdk-java.yml`
   resumes an existing tag by checking out that immutable commit, which may
   predate the helper. Both sites therefore fall back to the bare
-  `flock --wait 5400 9` lock they replaced when the helper file is absent,
+  `flock --wait 9600 9` lock they replaced when the helper file is absent,
   rather than dying before Maven and wedging the release permanently.
 
 ### Fast-tier priority
@@ -128,17 +129,29 @@ physical lock:
   threshold together, the queue is plain sequence order, and a fast ticket
   arriving afterwards has nothing left to overtake.
 
-The release semantics, the 5400 s budget, and the
-`lock not acquired within` substring the rerun classifiers match are
-unchanged; the timeout line now also names the ticket's class.
+The release semantics and the `lock not acquired within` substring the
+rerun classifiers match are unchanged; the timeout line now also names the
+ticket's class.
 
 Priority does not bound a single hold. The same 2026-10-21 job then waited
 its last 52 minutes as head behind one hold and timed out, and full-tier
-MariaDB holds of 7426 s and 8685 s have been measured on this lock; a hold
-like that exhausts a fast head's 5400 s budget whatever the ticket order.
-Naming the holder (a long ticketed hold, or a process that never took a
-ticket) is the diagnostic in qwen-code#15031, and bounding hold length stays
-with #14566.
+MariaDB holds of 7426 s and 8685 s have been measured on this lock. On
+2026-10-22 (qwen-code#15220) two lanes exhausted the 5400 s budget behind
+such a hold: the fast job waited 11:55-13:25 UTC as ticket 203 while a
+full-tier MySQL job in the same queue timed out one minute earlier. Naming
+the holder (a long ticketed hold, or a process that never took a ticket) is
+the diagnostic in qwen-code#15031, and bounding hold length stays with
+#14566.
+
+### Budget sizing
+
+The acquisition budget is 9600 s at both sites, above the longest measured
+8685 s MariaDB hold, so a job that arrives just behind such a hold can wait
+it out instead of failing. The budgets are not a bound on queue depth: under
+a larger convoy a waiter still fails at the budget. The test job's ceiling
+rises 150 -> 200 minutes (9600 s wait + one 925 s hold + ~11 minutes of
+setup) and the MySQL job's 280 -> 300 minutes (9600 s wait + ~100 minutes of
+locked Maven + the 5-minute write-back backstop + ~30 minutes of setup).
 
 The head keepalive matters more with two classes. Without it, a head blocked
 past 1800 s loses its ticket to another waiter's reaper, and the next ticket
@@ -189,16 +202,18 @@ order this section exists to prevent.
   ordering stubs park `flock --wait` until release, as the kernel does, so a
   head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:
-  `scripts/tests/sdk-java-workflow.test.js` now pins the sourced helper and
-  the `sdk_java_lock_acquire 5400` budget at each acquisition site, and the
-  `.size-baseline` records the workflow's new size.
+  `scripts/tests/sdk-java-workflow.test.js` now pins the sourced helper, the
+  `sdk_java_lock_acquire 9600` budget at each acquisition site, and the
+  ceilings that can spend it; the `.size-baseline` records the workflow's
+  new size.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
 ## Acceptance criteria
 
-- Both lock sites in `sdk-java.yml` acquire through the helper at 5400 s;
-  the test job passes its tier and the MariaDB site defaults to normal.
+- Both lock sites in `sdk-java.yml` acquire through the helper at 9600 s;
+  the test job passes its tier and the MariaDB site defaults to normal. The
+  test job's ceiling is 200 minutes and the MySQL job's is 300.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.

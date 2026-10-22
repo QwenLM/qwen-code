@@ -26,10 +26,11 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 - 目标：其余语义不变。锁仍按 step 边界自动释放；固定的基础设施
   签名错误文案（`lock not acquired within`）保留，`qwen-autofix.yml`
   里的重跑分类器不受影响。
+- 目标：等待预算要长于实测到的最长同类持锁，job 上限也要真的能花掉
+  这段预算（见“预算大小”）。
 - 非目标：降低总占用。按套件分片锁、限制每台宿主机注册数、加机器，
   都是正交工作，可以后续再做；有了公平性，这些工作的剩余价值才
   变得可衡量，而不是紧急。
-- 非目标：修改 5400 秒预算或 150/280 分钟的 job 上限。
 
 ## 设计
 
@@ -69,7 +70,7 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 - 在这里 fail-closed 比回退更糟：`release-sdk-java.yml` 续跑既有
   tag 时会检出那个不可变的 commit，它可能早于本辅助脚本。因此两处
   站点在脚本文件不存在时回退到它们替换掉的裸
-  `flock --wait 5400 9`，而不是在 Maven 之前直接失败并让发布永久
+  `flock --wait 9600 9`，而不是在 Maven 之前直接失败并让发布永久
   卡死。
 
 ### fast 档优先
@@ -110,14 +111,25 @@ FIFO 队列把 waiter 的等待限制在它的排位内，但 fast 档 job 仍�
   持锁长于该窗口时，所有正在等待的 normal 票会一起越过阈值，队列按
   顺序号服务，此后到达的 fast 票已没有可超过的对象。
 
-释放语义、5400 秒预算和重跑分类器匹配的子串 `lock not acquired within`
-都不变；超时行现在额外标出该票的档位。
+释放语义和重跑分类器匹配的子串 `lock not acquired within` 都不变；
+超时行现在额外标出该票的档位。
 
 优先级不能限制单次持锁的时长。同一个 2026-10-21 的 job 随后作为队首在
 一次持锁之后等了最后 52 分钟并超时，而这把锁上已实测到 7426 秒和 8685
-秒的 full 档 MariaDB 持锁；这样一次持锁无论票序如何都会耗尽 fast 队首
-的 5400 秒预算。点名持锁者（一次很长的持票持锁，还是一个从未取票的进程）
-是 qwen-code#15031 的诊断，限制持锁时长仍归 #14566。
+秒的 full 档 MariaDB 持锁。2026-10-22（qwen-code#15220）有两条 lane
+在这样的持锁后面耗尽 5400 秒预算：fast job 以票据 203 从 11:55 等到
+13:25 UTC，而同一队列里的一条 full 档 MySQL job 早一分钟超时。点名持锁者
+（一次很长的持票持锁，还是一个从未取票的进程）是 qwen-code#15031 的
+诊断，限制持锁时长仍归 #14566。
+
+### 预算大小
+
+两处取锁点的等待预算都是 9600 秒，高于实测最长的 8685 秒 MariaDB 持锁，
+因此刚好排在这种持锁后面的 job 可以等到它释放，而不是直接失败。预算不是
+队列深度的上界：更大的车队仍会让 waiter 在预算处失败。test job 的上限从
+150 分钟提高到 200 分钟（9600 秒等待 + 一次 925 秒持锁 + 约 11 分钟 setup），
+MySQL job 的上限从 280 分钟提高到 300 分钟（9600 秒等待 + 约 100 分钟
+持锁的 Maven + 5 分钟写回兜底 + 约 30 分钟 setup）。
 
 有了两个档位之后，队首 keepalive 更加重要。没有它时，阻塞超过 1800
 秒的队首会被其他 waiter 的回收逻辑删掉票据，队列里的下一张票 —— 不论
@@ -161,15 +173,17 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
   会像内核一样让 `flock --wait` 一直阻塞到释放，因此队首不会循环、
   也不会被超过。
 - 工作流的 pin 随机制迁移：`scripts/tests/sdk-java-workflow.test.js`
-  现在 pin 的是 source 该辅助脚本和两处 `sdk_java_lock_acquire 5400`
-  预算，`.size-baseline` 记录工作流的新尺寸。
+  现在 pin 的是 source 该辅助脚本、两处 `sdk_java_lock_acquire 9600`
+  预算，以及能花掉这段预算的 job 上限；`.size-baseline` 记录工作流的
+  新尺寸。
 - 真实宿主机上的浸泡验证就是 CI 本身：合并后第一批池上运行要么
   按票序拿到锁，要么带着可归因的票据号超时。
 
 ## 验收标准
 
-- `sdk-java.yml` 的两处取锁点都以 5400 秒通过该辅助脚本获取；
-  test job 传入自己的 tier，MariaDB 站点默认 normal。
+- `sdk-java.yml` 的两处取锁点都以 9600 秒通过该辅助脚本获取；
+  test job 传入自己的 tier，MariaDB 站点默认 normal。test job 上限为
+  200 分钟，MySQL job 上限为 300 分钟。
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   通过。
