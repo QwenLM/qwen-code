@@ -71,8 +71,8 @@ asserts:
   delivered: `fg11dQueueOneAdmitsASecondFireOnMySql` pins that the second run
   commits and that no prompt for its occurrence appears. The cancel half stays
   open: a task cancel on that queued run is accepted and the run stays
-  `running` (measured), because the queue is settled by the turn, not by the
-  cancel.
+  `running` (measured locally, not gated), because the queue is settled by the
+  turn, not by the cancel.
   What `fg11dSecondFireIsRefusedWhileTheFirstRunsOnMySql` pins is narrower: under
   the default `skip` policy a second fire at one active run is refused
   `409 automation_run_skipped` with `skipped`/`overlap` and no run behind it —

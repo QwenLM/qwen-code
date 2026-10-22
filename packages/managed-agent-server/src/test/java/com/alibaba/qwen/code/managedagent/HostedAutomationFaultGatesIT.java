@@ -1969,7 +1969,8 @@ class HostedAutomationFaultGatesIT {
         assertThat(jdbc.queryForMap("SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
                 + " AND schedule_id = ? AND occurrence_key = ?", tenant, id, "manual:fg11d-queue-second"))
                 .as("the queued occurrence is recorded as fired").containsEntry("outcome", "fired");
-        assertThat(runState(active)).as("the active run is untouched").isNotIn("cancelled", "completed");
+        assertThat(runState(active)).as("the active run is untouched")
+                .isNotIn("cancelled", "completed", "failed");
         heldModel.countDown();
         request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-queue-retire", 202);
     }

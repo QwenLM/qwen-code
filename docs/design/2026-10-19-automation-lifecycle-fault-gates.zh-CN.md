@@ -57,7 +57,7 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
   尝试前取消、且不调用模型地结算」要处理的对象。可达性这一半已交付：
   `fg11dQueueOneAdmitsASecondFireOnMySql` 钉住第二个 run 会提交、且该 occurrence
   从未出现模型调用。取消那一半仍未结清：对该排队 run 发 task cancel 会被接受，
-  而 run 仍为 `running`（实测），因为队列由 turn 结算、不由取消结算。
+  而 run 仍为 `running`（本地实测，未入门禁），因为队列由 turn 结算、不由取消结算。
   `fg11dSecondFireIsRefusedWhileTheFirstRunsOnMySql` 钉的范围更窄：在默认 `skip`
   策略下，一个活跃 run 时的第二次 fire 被 `409 automation_run_skipped` 拒绝，记
   `skipped`/`overlap`，其后不提交 run——钉的是这次拒绝，不是那条准入臂；
