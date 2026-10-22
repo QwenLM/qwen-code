@@ -701,13 +701,19 @@ class HostedMcpRestartFaultGatesIT {
         // A killed Harness cannot release its writer lease. Expiring the
         // leases it held stands in for waiting them out, so the replacement
         // can take over the dead writer at once; scoping the update to that
-        // writer leaves any other Session's lease alone.
+        // writer leaves any other writer's lease alone.
         int expired = jdbc.update("UPDATE ma_session_head SET"
                 + " writer_lease_until = " + ManagedSchemaTime.SQL_NOW
                 + " + -1000 WHERE tenant_id = ? AND writer_id = ? AND"
                 + " writer_lease_until IS NOT NULL", tenant, deadWriter);
         assertThat(expired).as("the dead writer held a lease to expire")
                 .isPositive();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head"
+                + " WHERE tenant_id = ? AND writer_id = ? AND"
+                + " writer_lease_until > " + ManagedSchemaTime.SQL_NOW,
+                Integer.class, tenant, deadWriter))
+                .as("the dead writer's leases have lapsed")
+                .isZero();
     }
 
     private void refuseNextControl(String kind) {

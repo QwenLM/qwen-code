@@ -109,6 +109,6 @@ JDK 21 实测（加入应答 hold 之后）：六格整类在 MySQL 8.0.46 上 3
 
 v2 关闭被准入之后，store 会 fence 普通写者续租，而 Harness 要等第一个 lifecycle 阶段到达时才会带 claim 续租（#15011）。客户端每半个租约续一次，所以在 3 s 租约下，一次被 fence 的续租最多只留给 claim 1.5 s。claim 若晚于此到达，`effects` 会在路由层以 `hosted_lifecycle_recovery_required`（503）失败；store 层的原因是 "The Managed Session writer grant is stale or unavailable."。一个重复执行关闭前置的探针在一台主机上的 75 次前置中观察到 3 次，在另一台主机上的 150 次中为 0 次。在第一次带 claim 的续租之前注入 2.5 s 间隔时，3 s 租约在一轮中 6 次失败 4 次、另一轮 6 次失败 3 次，30 s 租约两轮都没有失败。
 
-因此该类的每个用例都使用 30 s 写者租约，包括 `harnessKillDuringReleaseResumesTheOriginalReleaseOnMySql`：它的关闭前置在 Harness 被杀之前、仍存活时执行。被杀的 Harness 无法释放租约，所以 `killHarness()` 会在数据库中把该写者持有的租约置为过期，并断言确实找到了一条。这代替了等待租约过期，让替换的 Harness 可以立即接管；更新只针对死掉的写者，不会影响其他 Session 的租约。生产环境中的这个窗口本身在 #15011 跟踪。
+因此该类的每个用例都使用 30 s 写者租约，包括 `harnessKillDuringReleaseResumesTheOriginalReleaseOnMySql`：它的关闭前置在 Harness 被杀之前、仍存活时执行。被杀的 Harness 无法释放租约，所以 `killHarness()` 会在数据库中把该写者持有的租约置为过期，并断言确实找到了一条、且其中没有一条仍然有效。这代替了等待租约过期，让替换的 Harness 可以立即接管；更新只针对死掉的写者，不会影响其他写者的租约。生产环境中的这个窗口本身在 #15011 跟踪。
 
-使用全类统一租约后，在 JDK 21、MySQL 8.4.6、Linux aarch64 上复测：整类两次 9/9 通过（104.4 s 与 105.9 s）。R1-1 格耗时 10.8–11.4 s，此前记录为 11.4–11.9 s；其余用例都在原有区间内，因此上文的预算条目仍然成立。如果置过期没有生效，每个杀 Harness 的用例都得等满 30 s 租约，这些耗时排除了这种情况。
+使用全类统一租约后，在 JDK 21、MySQL 8.4.6、Linux aarch64 上复测：整类两次 9/9 通过（104.4 s 与 105.9 s）。R1-1 格耗时 10.8–11.4 s，此前记录为 11.4–11.9 s；其余用例都在原有区间内，因此上文的预算条目仍然成立。这两次运行早于按写者限定的置过期；改为按写者限定后，整类再次 9/9 通过（104.8 s；再加上租约已失效的检查后为 107.8 s），杀 Harness 的用例耗时 11.9–13.4 s。置过期由断言钉住，而不是靠耗时推断：没有它，每个杀 Harness 的用例仍会通过，但要先等满 30 s 租约（评审运行中每个用例约慢 27 s）。
