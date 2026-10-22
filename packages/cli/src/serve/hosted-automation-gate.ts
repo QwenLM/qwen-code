@@ -22,10 +22,7 @@ import {
   HostedWorkspaceBrokerRejection,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
-import {
-  hostedRuntimeSessionId,
-  isRetryableWorkspaceAcquisition,
-} from './hosted-workspace-tool-turn.js';
+import { hostedRuntimeSessionId } from './hosted-workspace-tool-turn.js';
 import { isHostedWorkspaceShellProfile } from './hosted-workspace-profiles.js';
 import {
   MANAGED_AUTOMATION_GATE_TIMEOUT_MS,
@@ -102,7 +99,7 @@ export function createHostedAutomationGateRelease(
         options,
         automationGateCallId(automationRunId, definitionRevision),
       ),
-      { notFoundIsFinal: true },
+      { notFoundIsFinal: true, reconciliationIsFinal: true },
     );
 }
 
@@ -112,6 +109,10 @@ const GATE_OBSERVATION_MS = MANAGED_AUTOMATION_GATE_TIMEOUT_MS + 40_000;
 export function createHostedAutomationGateRunner(
   options: HostedAutomationGateRunnerOptions,
 ): HostedAutomationGateRunner {
+  // Probes an attempt of this process started and no answer has settled
+  // yet: a later attempt that cannot read the probe back may say it is
+  // unknown, never that it could not start.
+  const startedCalls = new Set<string>();
   return async ({ automationRunId, definitionRevision, gate, signal }) => {
     if (!isHostedWorkspaceShellProfile(options.toolProfile())) {
       return {
@@ -162,14 +163,6 @@ export function createHostedAutomationGateRunner(
           try {
             await broker.acquire();
           } catch (cause) {
-            // A Workspace busy with another Session (a turn running in a
-            // resident Workspace) or briefly unavailable admits the probe
-            // later: retry the fire, as a tool turn retries its acquire.
-            if (isRetryableWorkspaceAcquisition(cause)) {
-              throw new HostedAutomationGateHeld(
-                `the Workspace cannot admit the probe yet: ${cause.code}`,
-              );
-            }
             // Only the Broker's own refusal proves nothing was acquired. A
             // lost or unreadable answer may follow a committed acquisition,
             // whose Session would stay a Workspace execution member with
@@ -212,6 +205,7 @@ export function createHostedAutomationGateRunner(
               signal,
               () => {
                 started = true;
+                startedCalls.add(callId);
               },
             );
           } catch (cause) {
@@ -239,19 +233,31 @@ export function createHostedAutomationGateRunner(
       result =
         started || cause instanceof HostedWorkspaceBrokerExecutionUnresolved
           ? { kind: 'unknown', reason: message }
-          : {
-              kind: 'failed',
-              detail: `could not start: ${message}`,
-              stderr: '',
-              durationMs: 0,
-            };
+          : startedCalls.has(callId)
+            ? {
+                kind: 'unknown',
+                reason: `an earlier attempt started the probe, and this one cannot read it back: ${message}`,
+              }
+            : {
+                kind: 'failed',
+                detail: `could not start: ${message}`,
+                stderr: '',
+                durationMs: 0,
+              };
     }
     // A replayed receipt may be all that is left of an attempt that settled
     // the probe and then failed to release, or died before it could: this
-    // attempt inherits that release.
+    // attempt inherits that release. A Broker that restarted may leave a
+    // Session to its cascade, unless this attempt's own acquisition is
+    // unconfirmed: then the Broker is still sorting the Runtime out, and a
+    // later attempt reads the receipt it settles.
     if (mayHold || replayed) {
-      await releaseDerivedSession(broker, { notFoundIsFinal: !unconfirmed });
+      await releaseDerivedSession(broker, {
+        notFoundIsFinal: !unconfirmed,
+        reconciliationIsFinal: !unconfirmed,
+      });
     }
+    startedCalls.delete(callId);
     return result;
   };
 }
@@ -312,7 +318,10 @@ async function settle(
  */
 async function releaseDerivedSession(
   broker: HostedWorkspaceBroker,
-  { notFoundIsFinal }: { notFoundIsFinal: boolean },
+  {
+    notFoundIsFinal,
+    reconciliationIsFinal,
+  }: { notFoundIsFinal: boolean; reconciliationIsFinal: boolean },
 ): Promise<void> {
   try {
     await broker.release();
@@ -330,6 +339,7 @@ async function releaseDerivedSession(
     // cascade owns that Runtime from here. Acquiring it to release it could
     // provision a Runtime nobody asked for.
     if (
+      reconciliationIsFinal &&
       cause instanceof HostedWorkspaceBrokerRejection &&
       cause.status === 503 &&
       cause.code === 'runtime_reconciliation_required'

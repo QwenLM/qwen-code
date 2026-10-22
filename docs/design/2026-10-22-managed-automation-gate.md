@@ -242,13 +242,19 @@ the route wires the real one:
    and answers `503 runtime_reconciliation_required` to its release; as on
    the Harness's close path, the Workspace-level cascade owns that Runtime
    from there, and the attempt answers (acquiring the Session only to
-   release it could provision a Runtime nobody asked for). An attempt that
-   cannot tell how a started probe ended — the Broker no longer holds its
-   Session live after a restart, or a cancel goes unanswered — retries
-   instead: the next attempt acquires, which reconciles the record, and
-   reads the receipt. A Workspace busy with another Session (a turn in a
-   resident Workspace) or briefly unavailable retries the fire too, as a
-   tool turn retries its acquire.
+   release it could provision a Runtime nobody asked for) — unless the
+   attempt's own acquisition is unconfirmed, when the Broker is still
+   sorting the Runtime out and the fire is retried. An attempt that cannot
+   tell how a started probe ended — the Broker no longer holds its Session
+   live after a restart, or a cancel goes unanswered — retries instead: the
+   next attempt acquires, which reconciles the record, and reads the
+   receipt. The Harness remembers which probes it started and has not
+   answered, so a later attempt that still cannot read one back answers
+   `unknown`, never "could not start". A Workspace that refuses the
+   acquisition (`409 workspace_busy` or `workspace_unavailable`, which can
+   last: a maintenance hold, a missing working directory) fails the gate
+   with that reason, visible in `gate_status`, and the next slot tries
+   again.
 4. The Runtime worker runs the worker-internal tool
    `managed_automation_gate` — admitted beside the model tools, never
    declared to a model — which runs the command with the shared
@@ -503,4 +509,7 @@ One PR, stacked on #15069 (it reuses `cron-gate.ts`):
   node are then recorded `missed`. Rows are leased one by one, so working
   them on a bounded pool (or answering a gated fire asynchronously) is the
   natural fix; it changes the scanner's threading and is left to its own
-  change.
+  change. The Harness side has the same shape: a probe runs inside the
+  automation funnel's serial queue, so a slow gate also delays the
+  Session's other automation operations (define, cancel, the settle of a
+  finished automation turn) for its duration.

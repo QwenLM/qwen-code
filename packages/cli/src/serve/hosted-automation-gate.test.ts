@@ -604,21 +604,69 @@ describe('createHostedAutomationGateRunner', () => {
     },
   );
 
-  it('retries a fire whose Workspace cannot admit the probe yet', async () => {
-    // A turn running in a resident Workspace keeps the probe's Session out
-    // for now: a tool turn retries this acquire, and so does the fire.
+  it('answers failed for a Workspace that cannot admit the probe, with the reason', async () => {
+    // Busy or unavailable may last (a maintenance hold, a missing cwd): a
+    // visible failure per slot, not hours of retries the status never shows.
     const { calls, probe } = await rig((path) =>
       path === '/executions:prepare'
         ? rejection(404, 'runtime_session_not_found')
         : rejection(409, 'workspace_busy'),
     );
-    await expect(probe()).rejects.toThrow(
-      'the Workspace cannot admit the probe yet: workspace_busy',
-    );
+    await expect(probe()).resolves.toMatchObject({
+      kind: 'failed',
+      detail: expect.stringContaining('workspace_busy'),
+    });
     expect(calls.map((call) => call.path)).toEqual([
       '/executions:prepare',
       '/tool-sessions:acquire',
     ]);
+  });
+
+  it('keeps retrying while a restarted Broker sorts out an acquisition it did not confirm', async () => {
+    // The probe may have run before the restart; until the Broker can say,
+    // "could not start" would publish a guess.
+    const { probe } = await rig((path) => {
+      if (path === '/executions:prepare')
+        return rejection(404, 'runtime_session_not_found');
+      if (path === '/tool-sessions:acquire')
+        return rejection(503, 'runtime_reconcile_in_progress');
+      return rejection(503, 'runtime_reconciliation_required');
+    });
+    await expect(probe()).rejects.toThrow(/was not released/);
+  });
+
+  it('never says a probe it started could not start, on a later attempt', async () => {
+    // Attempt 1 starts the probe and loses it to a Broker restart; attempt
+    // 2 cannot acquire the Session again. The probe may have run.
+    let attempt = 1;
+    let prepares = 0;
+    const { probe } = await rig((path) => {
+      switch (path) {
+        case '/executions:prepare':
+          prepares++;
+          if (attempt === 1 && prepares === 2)
+            return {
+              body: {
+                ...identity,
+                executionCallId: 'gate-execution',
+                status: { state: 'prepared' },
+              },
+            };
+          return rejection(404, 'runtime_session_not_found');
+        case '/tool-sessions:acquire':
+          return attempt === 1
+            ? { body: acquired }
+            : rejection(409, 'runtime_session_conflict');
+        default:
+          return rejection(503, 'runtime_store_unavailable');
+      }
+    });
+    await expect(probe()).rejects.toBeInstanceOf(HostedAutomationGateHeld);
+    attempt = 2;
+    await expect(probe()).resolves.toMatchObject({
+      kind: 'unknown',
+      reason: expect.stringContaining('an earlier attempt started the probe'),
+    });
   });
 
   it.each([
