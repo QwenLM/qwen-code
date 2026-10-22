@@ -89,6 +89,40 @@ class ManagedSessionStoreIntegrationTest {
     private ManagedSessionStore sessionStore;
 
     @Test
+    void checkpointResourcesUseTheReaderBudgetWhileOrdinaryResourcesStaySmall() throws Exception {
+        for (String kind : List.of("managed-checkpoint", "managed-context", "oversized-checkpoint")) {
+            String session = "checkpoint-budget-" + UUID.randomUUID();
+            String base = "/internal/managed-session-store/v1/sessions/" + session;
+            mvc.perform(post(base + "/writers:acquire")
+                    .header(TenantContextFilter.HEADER, TENANT)
+                    .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content(writerRequest(WRITER_A).toString())).andExpect(status().isOk());
+            int length = ManagedSessionStoreModels.MAX_EVENT_BYTES
+                    + ("oversized-checkpoint".equals(kind) ? 1 : 0);
+            byte[] bytes = new byte[length];
+            Arrays.fill(bytes, (byte) 'x');
+            String records = "{\"subtype\":\"session_execution_engine\"}\n"
+                    + "{\"subtype\":\"managed_session_header_v1\"}\n";
+            ObjectNode request = genesisRequest(records, bytes);
+            ((ObjectNode) request.withArray("resources").get(0)).put("kind",
+                    "managed-context".equals(kind) ? kind : "managed-checkpoint");
+            var result = mvc.perform(post(base + "/transactions:commit")
+                    .header(TenantContextFilter.HEADER, TENANT)
+                    .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                    .contentType(MediaType.APPLICATION_JSON).content(request.toString()));
+            if ("managed-checkpoint".equals(kind)) {
+                result.andExpect(status().isOk());
+                assertThat(sessionStore.readResource(TENANT, WORKSPACE, session,
+                        "resource-context", TOKEN_A).bytes()).isEqualTo(bytes);
+            } else {
+                result.andExpect(status().isNotImplemented())
+                        .andExpect(jsonPath("$.error.code").value("managed_session_oss_disabled"));
+            }
+        }
+    }
+
+    @Test
     void acceptsClientBuiltCensusAfterTheDefinitionIsCommitted(@TempDir Path directory) throws Exception {
         ArrayNode fixtures = objectMapper.createArrayNode();
         for (String mode : List.of("none", "instructions", "skills", "both")) {
