@@ -433,19 +433,19 @@ describe('model configuration manifest', () => {
     [
       'alibabaStandard',
       'qwen3.8-max',
-      ['none', 'low', 'medium', 'xhigh'],
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       'xhigh',
     ],
     [
       'alibabaStandard',
       'qwen3.8-max-0902',
-      ['none', 'low', 'medium', 'xhigh'],
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       'xhigh',
     ],
     [
       'alibabaStandard',
       'qwen3.8-flash',
-      ['none', 'low', 'medium', 'xhigh'],
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       'xhigh',
     ],
     ['alibabaStandard', 'deepseek-v4-pro', ['none', 'high', 'max'], 'high'],
