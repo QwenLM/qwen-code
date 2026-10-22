@@ -8,6 +8,7 @@ import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import shellStyles from '../../App.module.css';
 import { useI18n } from '../../i18n';
+import { useManagedRecoveryText } from './managed-recovery-messages';
 import { ChatEditor } from '../ChatEditor';
 import type { WorkspaceSelectorOption } from '../WorkspaceSelector';
 import { HostLabel } from '../workspaces/HostLabel';
@@ -188,12 +189,14 @@ export function WorkspaceBindingCreator({
   clientId,
   onCreated,
   onAbandoned,
-  workspaceId,
+  workspaceId: explicitWorkspaceId,
   onSelectWorkspace,
   onWorkspaceCreated,
   interactive = true,
   creationSkills,
   onManageSkills,
+  handoff,
+  onOpenHandoffSource,
 }: {
   provider: ManagedAgentProvider;
   workspaceCreationOpen?: boolean;
@@ -211,8 +214,12 @@ export function WorkspaceBindingCreator({
   interactive?: boolean;
   creationSkills?: ManagedCreationSkillsSource;
   onManageSkills?: () => void;
+  handoff?: import('./managed-recovery-handoff').ManagedRecoveryHandoff;
+  onOpenHandoffSource?: () => void;
 }) {
   const { t } = useI18n();
+  const recoveryText = useManagedRecoveryText();
+  const workspaceId = explicitWorkspaceId ?? handoff?.workspaceId;
   const binding = provider.workspaceBinding!;
   const pendingKey = `qwen-managed-workspace-create:${provider.storageKey}`;
   const [pending, setPending] = useState(() => readPending(pendingKey));
@@ -270,12 +277,14 @@ export function WorkspaceBindingCreator({
   const workspaceSelectionBlocked =
     selectingWorkspace ||
     Boolean(workspaceId && handledWorkspaceRequest.current !== workspaceId);
-  const [cwdRelative, setCwdRelative] = useState('.');
+  const [cwdRelative, setCwdRelative] = useState(handoff?.cwdRelative ?? '.');
   const [cwdDraft, setCwdDraft] = useState<string>();
-  const cwdEdited = useRef(false);
+  const cwdEdited = useRef(Boolean(handoff?.cwdRelative));
   const modelPresets = binding.modelPresets ?? [];
   const [agentId, setAgentId] = useState(
-    modelPresets.find((item) => item.agentId === binding.agentId)?.agentId ??
+    modelPresets.find((item) => item.agentId === handoff?.agentId)?.agentId ??
+      (handoff?.agentId === binding.agentId ? binding.agentId : undefined) ??
+      modelPresets.find((item) => item.agentId === binding.agentId)?.agentId ??
       modelPresets[0]?.agentId ??
       binding.agentId,
   );
@@ -1004,6 +1013,20 @@ export function WorkspaceBindingCreator({
   }
 
   const directInput = Boolean(binding.createSession);
+  const handoffApplied = useRef(false);
+  useEffect(() => {
+    if (
+      !handoff ||
+      handoffApplied.current ||
+      !directInput ||
+      busy ||
+      pending ||
+      !editor.current
+    )
+      return;
+    if (!editor.current.getText().trim()) editor.current.setText(handoff.text);
+    handoffApplied.current = true;
+  }, [handoff, directInput, busy, pending]);
   const workspaceCreationSupported = Boolean(
     (canCreateWorkspace || canSelectDirectory || canImportLocalDirectory) &&
       binding.createWorkspace,
@@ -1072,6 +1095,19 @@ export function WorkspaceBindingCreator({
     <div
       className={`${directInput ? shellStyles.appChatEmpty : ''} flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-2`}
     >
+      {handoff && (
+        <div className="space-y-2 rounded-md border p-3 text-sm" role="status">
+          <p>{recoveryText('managed.recovery.handoffNotice')}</p>
+          {handoff.truncated && (
+            <p>{recoveryText('managed.recovery.handoff.truncated')}</p>
+          )}
+          {onOpenHandoffSource && (
+            <Button variant="outline" onClick={onOpenHandoffSource}>
+              {recoveryText('managed.recovery.source')}
+            </Button>
+          )}
+        </div>
+      )}
       {!directInput && (
         <h2 className="text-base font-medium">
           {t('managed.workspaceCreateTitle')}
@@ -1417,7 +1453,11 @@ export function WorkspaceBindingCreator({
             <ChatEditor
               ref={editor}
               commands={skills.commands}
-              composerScopeKey={`managed:${provider.storageKey}:new`}
+              composerScopeKey={
+                handoff
+                  ? `managed:${provider.storageKey}:new:handoff:${handoff.sourceSessionId}`
+                  : `managed:${provider.storageKey}:new`
+              }
               disableLegacyHistoryFallback
               shellModeEnabled={false}
               workspaceFeaturesEnabled={false}
