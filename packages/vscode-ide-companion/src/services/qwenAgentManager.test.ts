@@ -115,6 +115,22 @@ describe('QwenAgentManager input fallbacks', () => {
   });
 });
 
+describe('QwenAgentManager.sendMessage', () => {
+  it('carries the composer declaration independently of expanded blocks', async () => {
+    const manager = new QwenAgentManager();
+    const sendPrompt = vi.fn().mockResolvedValue({});
+    (
+      manager as unknown as { connection: { sendPrompt: typeof sendPrompt } }
+    ).connection = { sendPrompt };
+    const blocks = [{ type: 'text' as const, text: 'attachment ultracode' }];
+    const options = { submittedPrompt: 'inspect the file' };
+
+    await manager.sendMessage(blocks, options);
+
+    expect(sendPrompt).toHaveBeenCalledWith(blocks, options);
+  });
+});
+
 describe('QwenAgentManager.setModelFromUi', () => {
   it('emits the selected model metadata from the available models list', async () => {
     const manager = new QwenAgentManager();

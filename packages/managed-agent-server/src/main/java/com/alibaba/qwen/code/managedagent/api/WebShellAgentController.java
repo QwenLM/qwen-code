@@ -15,6 +15,8 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellListRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellOperationRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellPage;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellRenameRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellRenameResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSession;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionModels;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionModelsRequest;
@@ -33,6 +35,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscriptRequest;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.session.ContextCompressionService;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.session.ManagedEventStreamService;
 import com.alibaba.qwen.code.managedagent.session.ManagedTaskCancelService;
@@ -59,6 +62,12 @@ public class WebShellAgentController {
     private final SessionLifecycleService lifecycle;
     private final ManagedTaskService tasks;
     private final ManagedTaskCancelService taskCancels;
+    private ContextCompressionService compressions;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    void setCompressions(ContextCompressionService compressions) {
+        this.compressions = compressions;
+    }
 
     public WebShellAgentController(ManagedAgentService service,
             ManagedEventStreamService streams,
@@ -123,6 +132,18 @@ public class WebShellAgentController {
                 request.sessionId());
     }
 
+    @PostMapping("/sessions/rename")
+    public ResponseEntity<WebShellRenameResult> rename(TenantContext tenant,
+            @Valid @RequestBody WebShellRenameRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
+        var result = service.renameSession(tenant.tenantId(), tenant.actorId(),
+                request.idempotencyKey(), request.sessionId(), request.title());
+        return ResponseEntity.ok().header("X-Qwen-Idempotent-Replay", Boolean.toString(result.replayed()))
+                .body(new WebShellRenameResult(result.body().id(),
+                        (String) result.body().metadata().get("title"), result.replayed()));
+    }
+
     @PostMapping("/transcript/query")
     public WebShellTranscript transcript(TenantContext tenant,
             @Valid @RequestBody WebShellTranscriptRequest request) {
@@ -141,6 +162,15 @@ public class WebShellAgentController {
         return streams.webShellStream(tenant.tenantId(), tenant.actorId(),
                 request.sessionId(),
                 after);
+    }
+
+    @PostMapping("/sessions/compress")
+    public ResponseEntity<ApiModels.WebShellContextCompressionOperation> compress(TenantContext tenant,
+            @Valid @RequestBody ApiModels.WebShellContextCompressionRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
+        return ResponseEntity.accepted().body(compressions.admitWebShell(tenant.tenantId(),
+                tenant.actorId(), request.sessionId(), request.idempotencyKey(), request.expectedCompactionRevision()));
     }
 
     @PostMapping("/sessions/create")
@@ -169,6 +199,10 @@ public class WebShellAgentController {
                     "unsupported_approval_mode",
                     "Approval mode selection requires a bound Workspace.");
         }
+        if (selection == null && request.skills() != null && !request.skills().isEmpty()) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature",
+                    "Session Skills require a bound Workspace.");
+        }
         // The WebShell handlers forward no metadata at all (null in its
         // slot): whatever the client sends is accepted and ignored, so no
         // clientId-only contract is asserted here and immediately
@@ -180,7 +214,7 @@ public class WebShellAgentController {
                 : service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), request.idempotencyKey(),
                         request.agentId(), null, request.title(), null,
-                        request.input(), selection, request.approvalMode(), request.planMode()));
+                        request.input(), selection, request.approvalMode(), request.planMode(), request.skills()));
         return ResponseEntity.accepted().body(admission);
     }
 

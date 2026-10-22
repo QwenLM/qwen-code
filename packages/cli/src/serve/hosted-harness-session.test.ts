@@ -138,6 +138,7 @@ import {
 } from './hosted-monitor-wake-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedSessionMessageSession } from './hosted-session-message-session.js';
+import { HostedContextCompression } from './hosted-context-compression.js';
 import { HostedTeamSession } from './hosted-team-session.js';
 import { teamMemberPreamble } from './hosted-member-chain.js';
 import { hostedWakeContinuationId } from './hosted-wake-continuation.js';
@@ -1363,6 +1364,33 @@ describe('Hosted Harness no-tool session', () => {
       maxRetries: 5,
       retryDelay: 100,
     });
+  });
+
+  it('refuses legacy teardown during compression even without a client id', async () => {
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const busy = vi
+      .spyOn(HostedContextCompression.prototype, 'busy', 'get')
+      .mockReturnValue(true);
+    try {
+      const closed = await headers(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      );
+      expect(closed.status).toBe(409);
+      expect(closed.body.code).toBe('session_context_busy');
+      const detached = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/detach`),
+      ).set('X-Qwen-Client-Id', created.body.clientId as string);
+      expect(detached.status).toBe(409);
+      expect(detached.body.code).toBe('session_context_busy');
+    } finally {
+      busy.mockRestore();
+    }
   });
 
   it('persists model selection and refuses changed resident and cold prompt replays', async () => {
@@ -17411,15 +17439,18 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId);
-      expect(status.body).toMatchObject({
-        hasActivePrompt: false,
-        recoveryBlocked: true,
-      });
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: true,
+        });
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
     const before = await LocalJsonlManagedSessionJournalStore.read(
       path.join(state.root, `${SESSION_ID}.jsonl`),
       { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
@@ -17559,65 +17590,77 @@ describe('Hosted Harness no-tool session', () => {
       supertest(server).post(`/session/${SESSION_ID}/cancel`),
     )
       .set('X-Qwen-Client-Id', created.body.clientId)
+      .timeout(SETTLE_TIMEOUT_MS)
       .then((response) => response);
-    await vi.waitFor(() => expect(cancelCommitted).toBe(true));
-    finishModel();
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId);
-      expect(status.body).toMatchObject({
-        hasActivePrompt: false,
-        recoveryBlocked: false,
-      });
-    });
-    let nextSignal: AbortSignal | undefined;
+    // A preceding assertion can fail before the request is awaited below.
+    void cancelResponse.catch(() => {});
     let finishNextModel!: () => void;
-    const nextModelGate = new Promise<void>((resolve) => {
-      finishNextModel = resolve;
-    });
-    state.model.mockImplementationOnce(async ({ signal }) => {
-      nextSignal = signal;
-      await nextModelGate;
-      return { text: 'next answer completed', model: 'test-model' };
-    });
-    const nextPrompt = [{ type: 'text', text: 'complete the next answer' }];
-    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
-      .set('X-Qwen-Client-Id', created.body.clientId)
-      .send({
-        prompt: nextPrompt,
-        promptId: randomUUID(),
-        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
-      })
-      .expect(202);
-    await vi.waitFor(() => expect(nextSignal).toBeDefined());
-    releaseCancelAck();
-    const cancelled = await cancelResponse;
-    expect(cancelled.status).toBe(204);
-    expect(nextSignal!.aborted).toBe(false);
-    finishNextModel();
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId);
-      expect(status.body).toMatchObject({
-        hasActivePrompt: false,
-        recoveryBlocked: false,
+    try {
+      await vi.waitFor(() => expect(cancelCommitted).toBe(true), {
+        timeout: SETTLE_TIMEOUT_MS,
       });
-    });
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
-    expect(
-      journal.events.filter((event) => event.kind === 'cancel.requested'),
-    ).toHaveLength(1);
-    expect(
-      journal.events.filter((event) => event.kind === 'turn.settled'),
-    ).toHaveLength(2);
-    await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
-      .set('X-Qwen-Client-Id', created.body.clientId)
-      .expect(204);
+      finishModel();
+      await vi.waitFor(async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      });
+      let nextSignal: AbortSignal | undefined;
+      const nextModelGate = new Promise<void>((resolve) => {
+        finishNextModel = resolve;
+      });
+      state.model.mockImplementationOnce(async ({ signal }) => {
+        nextSignal = signal;
+        await nextModelGate;
+        return { text: 'next answer completed', model: 'test-model' };
+      });
+      const nextPrompt = [{ type: 'text', text: 'complete the next answer' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', created.body.clientId)
+        .send({
+          prompt: nextPrompt,
+          promptId: randomUUID(),
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(() => expect(nextSignal).toBeDefined());
+      releaseCancelAck();
+      const cancelled = await cancelResponse;
+      expect(cancelled.status).toBe(204);
+      expect(nextSignal!.aborted).toBe(false);
+      finishNextModel();
+      await vi.waitFor(async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      });
+      const journal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+      );
+      expect(
+        journal.events.filter((event) => event.kind === 'cancel.requested'),
+      ).toHaveLength(1);
+      expect(
+        journal.events.filter((event) => event.kind === 'turn.settled'),
+      ).toHaveLength(2);
+      await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .set('X-Qwen-Client-Id', created.body.clientId)
+        .expect(204);
+    } finally {
+      finishModel();
+      releaseCancelAck();
+      finishNextModel?.();
+      await cancelResponse.catch(() => {});
+    }
   });
 
   it.each(['expired', 'cancelled'])(
@@ -35771,6 +35814,78 @@ describe('Hosted Harness stored definitions', () => {
     });
   });
 
+  it('pins creation-time Skills for the built-in agent across resident and cold loads', async () => {
+    const server = await app(true);
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
+    const sessionSkillsRef = await resources.publish(
+      'managed-agent-skills',
+      Buffer.from(
+        JSON.stringify([
+          {
+            name: 'added',
+            description: 'Added at creation',
+            body: 'SESSION_CREATION_BODY',
+            base_directory: 'docs',
+          },
+        ]),
+      ),
+    );
+    const request = {
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-files/1',
+      sessionSkillsRef,
+    };
+    await headers(supertest(server).post('/session')).send(request).expect(200);
+    const load = (
+      target: Awaited<ReturnType<typeof app>>,
+      ref?: typeof sessionSkillsRef,
+    ) =>
+      headers(supertest(target).post(`/session/${SESSION_ID}/load`)).send({
+        managedSessionStore: store(),
+        sessionSkillsRef: ref,
+        driveRuntimeRecovery: true,
+      });
+    await load(server).expect(409);
+    await load(server, { ...sessionSkillsRef, digest: 'f'.repeat(64) }).expect(
+      409,
+    );
+    const resident = await load(server, sessionSkillsRef).expect(200);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', resident.body.clientId)
+      .expect(204);
+    const replacement = await app(true);
+    await load(replacement).expect(409);
+    const loaded = await load(replacement, sessionSkillsRef).expect(200);
+    const prompt = [{ type: 'text', text: 'hello' }];
+    await headers(supertest(replacement).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', loaded.body.clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalled());
+    const modelInput = state.model.mock.calls.at(-1)![0] as {
+      agentDefinition?: unknown;
+      skills?: import('./hosted-skill-catalog.js').HostedSkillCatalog;
+    };
+    expect(modelInput.agentDefinition).toBeUndefined();
+    expect(modelInput.skills?.response({ skill: 'added' })).toContain(
+      'SESSION_CREATION_BODY',
+    );
+    expect(modelInput.skills?.declaration()?.name).toBe('skill');
+  });
+
   it('pins stored definitions across resident and cold loads and delivers instructions to the Turn', async () => {
     const server = await app();
     const resources = LocalManagedSessionResourceStore.create({
@@ -36097,7 +36212,7 @@ describe('Hosted Harness stored definitions', () => {
     });
   });
 
-  it('recovers a pure Skill call whose assistant committed before its response', async () => {
+  it('recovers a large manual Skill call whose assistant committed before its response', async () => {
     const server = await app(true);
     const resources = LocalManagedSessionResourceStore.create({
       runtimeBaseDir: state.root,
@@ -36114,7 +36229,8 @@ describe('Hosted Harness stored definitions', () => {
           {
             name: 'published',
             description: 'Instructions',
-            body: 'RECOVERED_ORIGINAL_SKILL',
+            body: 'RECOVERED_ORIGINAL_SKILL' + 'x'.repeat(400 * 1024),
+            model_invocable: false,
           },
         ]),
       ),
@@ -36154,7 +36270,7 @@ describe('Hosted Harness stored definitions', () => {
         name: 'skill',
         callId: 'call-recover-skill',
         args: { skill: 'published' },
-        isClientInitiated: false,
+        isClientInitiated: true,
         prompt_id: PROMPT_ID,
       };
       await input.toolTurn!.execute(
@@ -36209,6 +36325,8 @@ describe('Hosted Harness stored definitions', () => {
       expect(JSON.stringify(recovered)).toContain('RECOVERED_ORIGINAL_SKILL'),
     );
     expect(JSON.stringify(recovered)).not.toContain('never ran');
+    expect(JSON.stringify(recovered)).toContain('Tool output truncated.');
+    expect(JSON.stringify(recovered).length).toBeLessThan(201000);
     await vi.waitFor(async () => {
       const status = await headers(
         supertest(replacement).get(`/session/${SESSION_ID}/status`),

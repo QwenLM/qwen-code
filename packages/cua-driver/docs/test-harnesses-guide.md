@@ -222,26 +222,13 @@ Runner: `scripts/ci/linux/run-rust-e2e.sh`
 | Shared app matrix | `cross_platform_behavior_test.rs` | Electron and Tauri        |
 | Native controls   | `harness_gtk3_test.rs`            | Repo-local GTK3 app       |
 | Capture contract  | `capture_contract_test.rs`        | Linux capture backend     |
-| Desktop scope     | `desktop_scope_linux_test.rs`     | X11/Wayland desktop scope |
+| Desktop scope     | `desktop_scope_linux_test.rs`     | X11 desktop scope |
 
-Linux has separate X11 and Wayland concerns. Nix supplies the reproducible
-build and desktop environment, but the E2E test still needs an actual X11 or
-Wayland session. Linux does not need GIF output; MP4, screenshots, accessibility
-trees, trajectories, and logs are the useful evidence.
-
-Wayland results are compositor-specific. The hosted lane uses Sway to prove
-wlroots protocols. GNOME requires the optional WinRects Shell helper for
-authoritative frame and buffer geometry, observation, capture, and verified
-target activation. A portal/libei grant persists until the user revokes it, so
-subsequent driver processes do not reopen the consent dialog.
-KDE requires a future target-addressable KWin adapter; portal availability by
-itself is not evidence that input can be sent safely to a named window.
-Standard Wayland does not expose the physical pointer position, so canonical
-Wayland rows do not claim the real-cursor preservation oracle. Focus, full
-occlusion, sentinel input isolation, liveness, and fixture-state oracles remain
-mandatory. [Issue #2194](https://github.com/trycua/cua/issues/2194) tracks
-compositor, portal/libei, sentinel, and capture-based ways to add a proven
-cursor observer where the environment supports one.
+Linux requires an authenticated X11 session and its accessibility session bus.
+Xvfb/Openbox can cover capture, AT-SPI and foreground input. Real Xorg is
+required to verify MPX/uinput. A DISPLAY with surrounding Wayland environment
+variables exercises X11 selection only; it does not prove real XWayland.
+Linux evidence includes MP4, screenshots, accessibility trees, trajectories and logs.
 
 ## AX, PX, and Delivery
 
@@ -302,10 +289,7 @@ preflight deliberately sends input to the sentinel and deliberately raises the
 background target. The lane proceeds only if the leaked input and transient
 focus loss are observed, the sentinel is restored, and it once again fully
 occludes the target. Windows, macOS, and X11 require the sentinel's live focus
-journal to report the loss. Wayland uses the compositor-backed native focus
-observer because Electron/Ozone does not reliably emit a DOM `blur` event for
-an external surface focus transition. The sentinel heartbeat and leaked-input
-journal remain mandatory on Wayland. This positive control prevents a broken
+journal to report the loss. This positive control prevents a broken
 guard from making every background row look green.
 
 A focus assertion can prove "no focus steal" while failing to prove that a

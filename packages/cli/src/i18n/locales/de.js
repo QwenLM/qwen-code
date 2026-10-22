@@ -8,6 +8,10 @@
 // Deutsche Übersetzungen für Qwen Code CLI
 
 export default {
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Aktiviert die integrierte Generated UI in unterstützten lokalen Sitzungen. Starten Sie die zugehörige Sitzung neu, um Änderungen anzuwenden.',
+
   // ============================================================================
   // Help / UI Components
   // ============================================================================

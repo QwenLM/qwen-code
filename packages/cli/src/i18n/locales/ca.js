@@ -7,6 +7,10 @@
 // Traduccions en català per al CLI de Qwen Code per Jordi Mas i Hernàndez <jmas@softcatala.org>
 
 export default {
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Activa el Generated UI integrat a les sessions locals compatibles. Reinicieu la sessió corresponent per aplicar els canvis.',
+
   // ============================================================================
   // Ajuda / Components de la interfície
   // ============================================================================

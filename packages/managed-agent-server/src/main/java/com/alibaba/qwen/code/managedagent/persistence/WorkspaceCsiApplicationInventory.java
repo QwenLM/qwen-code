@@ -183,7 +183,8 @@ final class WorkspaceCsiApplicationInventory {
                     "scope_key:CHAR,runtime_session_id:VARBINARY,tenant_id:VARBINARY,workspace_id:VARBINARY,"
                     + "workspace_generation:VARBINARY,canonical_cwd:VARCHAR,capability_digest:VARBINARY,"
                     + "isolation_class:VARCHAR,harness_session_id:VARBINARY,turn_kind:VARCHAR,binding_id:VARBINARY,"
-                    + "runtime_generation:BIGINT,session_state:VARCHAR,record_version:BIGINT,last_active_at:BIGINT"),
+                    + "runtime_generation:BIGINT,session_state:VARCHAR,record_version:BIGINT,last_active_at:BIGINT,"
+                    + "execution_storage_key:CHAR,execution_exclusive:BOOLEAN"),
             declaration("ma_runtime_slot", "request_key",
                     "request_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,workspace_generation:VARBINARY,"
                     + "canonical_cwd:VARCHAR,capability_digest:VARBINARY,isolation_class:VARCHAR,isolation_key:VARBINARY,"
@@ -1568,7 +1569,7 @@ final class WorkspaceCsiApplicationInventory {
                 if (!instructions) {
                     JsonNode skills = publicJson(raw);
                     requireEncoded(skills.isArray());
-                    AgentDefinitionExtensions.skills(PUBLIC_ARTIFACTS.convertValue(skills, Object.class), true);
+                    AgentDefinitionExtensions.sessionSkills(PUBLIC_ARTIFACTS.convertValue(skills, Object.class));
                 }
             } catch (IOException malformed) {
                 throw new IllegalArgumentException("Invalid agent instructions", malformed);
@@ -3078,6 +3079,7 @@ final class WorkspaceCsiApplicationInventory {
                         && Objects.equals(intent.resourceHandleVersion().longValue(), row.number("resource_handle_version"))
                         && Objects.equals(intent.attestationGeneration(), row.number("attestation_generation")));
                 case "ma_runtime_session" -> expect(table, row, scope(row)
+                        && row.cell("execution_storage_key").isNull() && Boolean.FALSE.equals(row.bool("execution_exclusive"))
                         && original.bindingId().equals(row.text("binding_id")) && session.equals(row.text("runtime_session_id"))
                         && session.equals(row.text("harness_session_id")) && "bootstrap".equals(row.text("turn_kind"))
                         && Objects.equals(original.generation(), row.number("runtime_generation"))
