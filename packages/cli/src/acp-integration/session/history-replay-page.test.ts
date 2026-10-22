@@ -696,6 +696,29 @@ describe('history replay page', () => {
     expect(blankReplayedMcpAppHtml(update)).toBeUndefined();
   });
 
+  it('blanks a short App html when an existing fallbackText already outweighs it', () => {
+    const update = {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-app-tiny-with-fallback',
+      status: 'completed',
+      rawOutput: {
+        type: 'mcp_app',
+        html: '<b>chart</b>',
+        fallbackText: 'x'.repeat(300),
+      },
+    } as unknown as SessionUpdate;
+
+    const blanked = blankReplayedMcpAppHtml(update);
+
+    // The guard compares whole frames, so this reclaims the html even though
+    // it is far shorter than the placeholder it would otherwise compete with.
+    expect(blanked).toBeDefined();
+    expect(jsonBytes(blanked)).toBeLessThan(jsonBytes(update));
+    expect(
+      (blanked as unknown as { rawOutput: { html: string } }).rawOutput.html,
+    ).toBe('');
+  });
+
   it('never grows an envelope whose only App html is smaller than the placeholder', () => {
     const tinyUpdate = (callId: string) =>
       ({

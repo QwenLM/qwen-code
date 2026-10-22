@@ -220,10 +220,10 @@ export function blankReplayedMcpAppHtml(
         'MCP App HTML omitted because the restored page exceeds its size limit.',
     },
   };
-  // A document shorter than the placeholder standing in for it cannot
-  // reclaim anything: substituting it would make the frame larger, and the
-  // reclaim loops apply that signed delta to their running total. Report no
-  // App html to lose instead, so callers leave such a frame alone.
+  // Blanking can inject `fallbackText`, so the swapped frame may serialize
+  // larger than the one it replaces; the reclaim loops apply that signed
+  // delta. Compare whole frames, and report no App html to lose when the
+  // swap would not shrink one.
   if (
     Buffer.byteLength(JSON.stringify(blanked), 'utf8') >=
     Buffer.byteLength(JSON.stringify(record), 'utf8')
