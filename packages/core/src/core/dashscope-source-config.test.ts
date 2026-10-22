@@ -9,6 +9,14 @@ import {
   buildDashScopeSourceConfig,
   withDashScopeSourceConfig,
 } from './dashscope-source-config.js';
+import {
+  QWENCLOUD_CHINA_BASE_URL,
+  QWENCLOUD_GLOBAL_BASE_URL,
+} from '../providers/presets/qwencloud-standard.js';
+import {
+  QWENCLOUD_TOKEN_PLAN_CHINA_BASE_URL,
+  QWENCLOUD_TOKEN_PLAN_GLOBAL_BASE_URL,
+} from '../providers/presets/qwencloud-token-plan.js';
 
 const CN_PAYG =
   '{"channel":"qianwenai-inner-agents","source":"model","tags":{"t1":"qwen-code","t2":"payg"}}';
@@ -37,6 +45,15 @@ describe('buildDashScopeSourceConfig', () => {
   });
 
   it.each([
+    [QWENCLOUD_CHINA_BASE_URL, CN_PAYG],
+    [QWENCLOUD_GLOBAL_BASE_URL, INTL_PAYG],
+    [QWENCLOUD_TOKEN_PLAN_CHINA_BASE_URL, CN_TOKEN_PLAN],
+    [QWENCLOUD_TOKEN_PLAN_GLOBAL_BASE_URL, INTL_TOKEN_PLAN],
+  ])('attributes the shipped preset %s', (baseUrl, expected) => {
+    expect(buildDashScopeSourceConfig(baseUrl)).toBe(expected);
+  });
+
+  it.each([
     undefined,
     '',
     'not a url',
@@ -61,10 +78,14 @@ describe('withDashScopeSourceConfig', () => {
     ).toBe(headers);
   });
 
-  it('replaces a user value in any casing with the first-party one', () => {
+  it.each([
+    'x-dashscope-source-config',
+    'X-DashScope-Source-Config',
+    'X-DASHSCOPE-SOURCE-CONFIG',
+  ])('replaces a user value sent as %s with the first-party one', (casing) => {
     expect(
       withDashScopeSourceConfig(
-        { 'User-Agent': 'ua', 'x-dashscope-source-config': 'user' },
+        { 'User-Agent': 'ua', [casing]: 'user' },
         'https://maas.qianwenaiapi.com/compatible-mode/v1',
       ),
     ).toEqual({ 'User-Agent': 'ua', 'X-DashScope-Source-Config': CN_PAYG });
