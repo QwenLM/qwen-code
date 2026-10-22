@@ -59,6 +59,7 @@ import {
 } from './hosted-session-message-session.js';
 import { memberMessageId } from './hosted-member-chain.js';
 import { HostedTeamSession } from './hosted-team-session.js';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 
 // H4e-b3: `session_command` is enabled for real, so this suite drives the
 // funnel with no enablement mock. The member side only needs its own
@@ -852,38 +853,42 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     expect(record.run.delivery?.state).toBe('rejected');
   });
 
-  it('enforces the per-run command budget with budget_exhausted', async () => {
-    const member = await memberSide();
-    const commandId = commandIdOf('call-8');
-    await member.commands.runCommand({
-      commandId,
-      kind: 'board_read',
-      args: TASK_LIST_ARGS,
-      executionCallId: 'prompt-1:call-8',
-      closing: false,
-    });
-    // Mint 256 entries by hand: a direct count of outbound records is the
-    // rule's own evidence, so the suite plants the history instead of
-    // driving 256 funnels calls.
-    for (let index = 0; index < 255; index += 1) {
+  it(
+    'enforces the per-run command budget with budget_exhausted',
+    async () => {
+      const member = await memberSide();
+      const commandId = commandIdOf('call-8');
       await member.commands.runCommand({
-        commandId: `cmd_extra_${index}`,
+        commandId,
         kind: 'board_read',
         args: TASK_LIST_ARGS,
-        executionCallId: `prompt-1:call-extra-${index}`,
+        executionCallId: 'prompt-1:call-8',
         closing: false,
       });
-    }
-    await expect(
-      member.commands.runCommand({
-        commandId: commandIdOf('call-9'),
-        kind: 'board_read',
-        args: TASK_LIST_ARGS,
-        executionCallId: 'prompt-1:call-9',
-        closing: false,
-      }),
-    ).rejects.toThrow(/budget_exhausted/);
-  }, 30_000);
+      // Mint 256 entries by hand: a direct count of outbound records is the
+      // rule's own evidence, so the suite plants the history instead of
+      // driving 256 funnels calls.
+      for (let index = 0; index < 255; index += 1) {
+        await member.commands.runCommand({
+          commandId: `cmd_extra_${index}`,
+          kind: 'board_read',
+          args: TASK_LIST_ARGS,
+          executionCallId: `prompt-1:call-extra-${index}`,
+          closing: false,
+        });
+      }
+      await expect(
+        member.commands.runCommand({
+          commandId: commandIdOf('call-9'),
+          kind: 'board_read',
+          args: TASK_LIST_ARGS,
+          executionCallId: 'prompt-1:call-9',
+          closing: false,
+        }),
+      ).rejects.toThrow(/budget_exhausted/);
+    },
+    isSlowTestHost() ? 120_000 : 30_000,
+  );
 
   it("commits the leader's receipt against an attached run and refetches its reply", async () => {
     const lead = await leadSideSetup();
