@@ -304,15 +304,25 @@ cat "\${RUNNER_TEMP}/pulls.json"
     const destination = jobs.analyze.steps.find(
       (step) => step.id === 'destination',
     );
-    const detect = (liveAttempt, overrides = {}, ghScript) => {
+    const detect = (
+      liveAttempt,
+      overrides = {},
+      ghScript,
+      mainTip = 'tested-head',
+    ) => {
       const tmp = mkdtempSync(join(tmpdir(), 'java-ci-live-'));
       try {
         writeFileSync(
           join(tmp, 'gh'),
           ghScript ??
             `#!/usr/bin/env bash
-printf '%s\\n' "$@" > "\${RUNNER_TEMP}/lookup-args"
-printf '%s\\n' '${liveAttempt}'
+printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/calls.log"
+if [[ "$*" == *commits/main* ]]; then
+  printf '%s\\n' '${mainTip}'
+else
+  printf '%s\\n' "$@" > "\${RUNNER_TEMP}/lookup-args"
+  printf '%s\\n' '${liveAttempt}'
+fi
 `,
         );
         chmodSync(join(tmp, 'gh'), 0o755);
@@ -327,6 +337,9 @@ printf '%s\\n' '${liveAttempt}'
             REPO: 'QwenLM/qwen-code',
             WORKFLOW_RUN_ID: '39237270547',
             RUN_ATTEMPT: '1',
+            EVENT_NAME: '',
+            HEAD_BRANCH: '',
+            HEAD_SHA: '',
             ...overrides,
           },
         });
@@ -336,6 +349,9 @@ printf '%s\\n' '${liveAttempt}'
           stdout: result.stdout,
           args: existsSync(join(tmp, 'lookup-args'))
             ? readFileSync(join(tmp, 'lookup-args'), 'utf8')
+            : '',
+          calls: existsSync(join(tmp, 'calls.log'))
+            ? readFileSync(join(tmp, 'calls.log'), 'utf8')
             : '',
         };
       } finally {
@@ -367,6 +383,97 @@ printf '%s\\n' '${liveAttempt}'
       expect(detect('2', { RUN_ATTEMPT: '2' }).output).toBe(
         'superseded=false\n',
       );
+    });
+    it('skips a push run when main has advanced past its head', () => {
+      // Run 39777472391's push run tested 06e59666, main moved on to
+      // 3d65e23cf62e before this job analyzed it, and that head's own push
+      // run later passed. #15128 had already fixed the host-lock timeout the
+      // old run reported, so the per-commit issue filed for 06e59666 (#15259)
+      // could only ask for a repair main already contained.
+      const resolved = detect(
+        '1',
+        {
+          EVENT_NAME: 'push',
+          HEAD_BRANCH: 'main',
+          HEAD_SHA: '06e59666dfaaaa0aaf78af45bc48b0405a8e7d44',
+        },
+        undefined,
+        '3d65e23cf62e00da033dccb8f60f9cfdd9c1b76e',
+      );
+      expect(resolved.output).toBe('superseded=true\n');
+      expect(resolved.stdout).toContain(
+        'main is now 3d65e23cf62e00da033dccb8f60f9cfdd9c1b76e',
+      );
+      expect(resolved.calls).toContain('commits/main');
+    });
+    it('reports a push run while its head is still the tip of main', () => {
+      const resolved = detect(
+        '1',
+        {
+          EVENT_NAME: 'push',
+          HEAD_BRANCH: 'main',
+          HEAD_SHA: 'tested-head',
+        },
+        undefined,
+        'tested-head',
+      );
+      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.stdout).not.toContain('::warning::');
+      expect(resolved.calls).toContain('commits/main');
+    });
+    it('does not compare a scheduled run with the tip of main', () => {
+      // A schedule runs at its own head and is the only signal macOS and
+      // Windows lanes have; suppressing it because main moved would drop that
+      // lane's report for good.
+      const resolved = detect(
+        '1',
+        {
+          EVENT_NAME: 'schedule',
+          HEAD_BRANCH: 'main',
+          HEAD_SHA: 'old-head',
+        },
+        undefined,
+        'new-head',
+      );
+      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.calls).not.toContain('commits/main');
+    });
+    it('fails open when the tip of main cannot be read', () => {
+      const gh = `#!/usr/bin/env bash
+if [[ "$*" == *commits/main* ]]; then
+  printf '%s' '{"message":"Bad credentials"}'
+  exit 1
+fi
+printf '%s\\n' "$@" > "\${RUNNER_TEMP}/lookup-args"
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        {
+          EVENT_NAME: 'push',
+          HEAD_BRANCH: 'main',
+          HEAD_SHA: 'old-head',
+        },
+        gh,
+      );
+      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.stdout).toContain('Could not read the tip of main');
+    });
+    it('fails open when the event carries no head sha', () => {
+      // The comparison is only meaningful with a head to compare; an empty
+      // operand must not read as a moved tip.
+      const resolved = detect(
+        '1',
+        {
+          EVENT_NAME: 'push',
+          HEAD_BRANCH: 'main',
+          HEAD_SHA: '',
+        },
+        undefined,
+        'new-head',
+      );
+      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.calls).not.toContain('commits/main');
     });
     it('fails open when the live run cannot be read', () => {
       // Reporting on a transient read error is the safe direction: an issue

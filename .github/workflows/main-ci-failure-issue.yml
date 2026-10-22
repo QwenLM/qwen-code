@@ -87,6 +87,9 @@ jobs:
           REPO: '${{ github.repository }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
           RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
+          EVENT_NAME: '${{ github.event.workflow_run.event }}'
+          HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
+          HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
         run: |-
           set -euo pipefail
           superseded=false
@@ -101,6 +104,23 @@ jobs:
             fi
           else
             echo "::warning::Could not read run ${WORKFLOW_RUN_ID}; assuming this attempt-${RUN_ATTEMPT} event is current and reporting."
+          fi
+          # A post-merge push run reports the commit that was main when it
+          # started. When main has since advanced, the newer push run owns the
+          # result: filing here would open a repair issue for a head main has
+          # already replaced, which is how #15259 was filed after #15128 fixed
+          # its host-lock timeout. An unreadable tip keeps the old fail-open
+          # reporting.
+          if [[ "${superseded}" != 'true' && "${EVENT_NAME}" == 'push' &&
+            "${HEAD_BRANCH}" == 'main' && -n "${HEAD_SHA}" ]]; then
+            if tip="$(gh api "repos/${REPO}/commits/main" --jq '.sha')"; then
+              if [[ -n "${tip}" && "${tip}" != "${HEAD_SHA}" ]]; then
+                superseded=true
+                echo "::warning::Run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA}, but main is now ${tip}; the newer push run owns its result."
+              fi
+            else
+              echo "::warning::Could not read the tip of main; reporting this run as though it were still current."
+            fi
           fi
           echo "superseded=${superseded}" >> "${GITHUB_OUTPUT}"
 
