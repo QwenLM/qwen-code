@@ -646,7 +646,16 @@ export function useManagedSession(
               ...current,
               events: mergeManagedEvents(current.events, [event]),
             }));
-            if (event.type === 'context_changed') {
+            if (
+              event.type === 'context_changed' ||
+              (provider.recovery &&
+                [
+                  'completed',
+                  'cancelled',
+                  'failed',
+                  'runtime_released',
+                ].includes(event.type))
+            ) {
               void refreshSummary().catch((error: unknown) =>
                 failed(error, 'session'),
               );

@@ -32,6 +32,9 @@ export function isManagedApprovalMode(
 }
 
 export type ManagedSessionSkill = components['schemas']['SessionCreationSkill'];
+export type ManagedSessionRecovery = components['schemas']['SessionRecovery'];
+export type ManagedTurnCancelOperation =
+  components['schemas']['WebShellCommandOperation'];
 
 export interface ManagedSessionOptions {
   approvalMode: ManagedApprovalMode;
@@ -121,8 +124,10 @@ export interface ManagedAgentSessionSummary {
     contextCompression?: boolean;
     approvalModeChange?: boolean;
     inputAttachments?: boolean;
+    durableOperations?: boolean;
   };
   failure?: { code: string; message: string };
+  recovery?: ManagedSessionRecovery;
 }
 
 export type ManagedAgentSessionEventType =
@@ -241,6 +246,22 @@ export interface ManagedAgentProvider {
   readonly storageKey: string;
   readonly canCancel: boolean;
   readonly acceptsWorkspaceCwd: boolean;
+  readonly recovery?: {
+    query(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionRecovery>;
+    recheck(
+      sessionId: string,
+      turnId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionRecovery>;
+  };
+  queryCancelOperation?(
+    sessionId: string,
+    operationId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedTurnCancelOperation>;
   readonly skills?: {
     list(
       sessionId: string,
@@ -469,8 +490,14 @@ export interface ManagedAgentProvider {
   cancel(
     sessionId: string,
     turnId: string,
-    options: ManagedAgentCommandOptions,
-  ): Promise<void>;
+    options: ManagedAgentCommandOptions & {
+      admissionProfile?: 'harness_confirmed' | 'java_durable';
+    },
+  ): Promise<void | {
+    sessionId: string;
+    turnId: string;
+    operationId?: string;
+  }>;
   subscribeEvents(
     sessionId: string,
     options: ManagedAgentRequestOptions & {
