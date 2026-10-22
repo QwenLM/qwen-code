@@ -618,8 +618,9 @@ class Issue13181QueryBudgetTest {
         assertThat(webShellPage).hasSize(20);
         System.out.println("[issue-13181] listWebShellSessions(20 rows): "
                 + fixture.ledger.summary());
-        // Page + latest turns + environment events; unbound rows read no model metadata.
-        assertThat(fixture.ledger.total()).isEqualTo(3);
+        // Page + latest turns + environment events + lifecycle summary; unbound rows read no model metadata.
+        assertThat(fixture.ledger.total()).isEqualTo(4);
+        assertThat(fixture.ledger.count("row_number() over (partition by o.session_id")).isEqualTo(1);
         // The latest-turn batch read projects only the summary columns.
         assertThat(fixture.ledger.count("turn_record.*")).isZero();
         assertThat(fixture.ledger.count("turn_record.session_id,"
@@ -649,8 +650,8 @@ class Issue13181QueryBudgetTest {
         fixture.ledger.reset();
         assertThat(fixture.service.getWebShellSession(plain, null,
                 plainIds.get(0)).sessionId()).isEqualTo(plainIds.get(0));
-        // Session read + latest turns + environment events, one each.
-        assertThat(fixture.ledger.total()).isEqualTo(3);
+        // Session read + latest turns + environment events + lifecycle summary, one each.
+        assertThat(fixture.ledger.total()).isEqualTo(4);
 
         String bound = "tenant-" + UUID.randomUUID();
         fixture.jdbc.update("INSERT INTO ma_workspace"
@@ -723,9 +724,9 @@ class Issue13181QueryBudgetTest {
         // Page + the latest-turn read + the workspace-close batch; without
         // turns the environment-event read is skipped, and the approval mode
         // rides on the page's own SELECT *. Model selection, context, approval
-        // selection and approval ownership add one bounded query each;
+        // selection, ownership and lifecycle summary add one bounded query each;
         // compression adds three page-wide batches.
-        assertThat(fixture.ledger.total()).isEqualTo(10);
+        assertThat(fixture.ledger.total()).isEqualTo(11);
         assertThat(fixture.ledger.count("coalesce(selected_approval_mode, approval_mode)")).isEqualTo(1);
         assertThat(fixture.ledger.count("coalesce(owner_actor_key, creator_actor_key)")).isEqualTo(1);
         assertThat(fixture.ledger.count("select session_id, model_id, model_revision from ma_session")).isEqualTo(1);
@@ -826,10 +827,11 @@ class Issue13181QueryBudgetTest {
                 + " role rows): " + fixture.ledger.summary());
         // Page + latest turns + the close batch + the grant batch across
         // both workspaces + the execution-facts batch over the
-        // submit-shaped sessions, plus model/context and approval/owner batches:
+        // submit-shaped sessions, plus model/context, approval/owner and lifecycle batches:
         // compression projection, missing-head and operation batches remain
         // constant, not per row.
-        assertThat(fixture.ledger.total()).isEqualTo(12);
+        assertThat(fixture.ledger.total()).isEqualTo(13);
+        assertThat(fixture.ledger.count("row_number() over (partition by o.session_id")).isEqualTo(1);
         assertThat(fixture.ledger.count("coalesce(selected_approval_mode, approval_mode)")).isEqualTo(1);
         assertThat(fixture.ledger.count("coalesce(owner_actor_key, creator_actor_key)")).isEqualTo(1);
         assertThat(fixture.ledger.count("select session_id, model_id, model_revision from ma_session")).isEqualTo(1);
@@ -874,10 +876,11 @@ class Issue13181QueryBudgetTest {
             var page = fixture.service.listWebShellSessions(tenant, "actor", null, 20).data();
             assertThat(page).hasSize(size);
             assertThat(page).allSatisfy(row -> assertThat(JSON.valueToTree(row).path("capabilities").path("cwdChange").asBoolean()).isTrue());
-            assertThat(fixture.ledger.total()).isEqualTo(12);
+            assertThat(fixture.ledger.total()).isEqualTo(13);
             assertThat(fixture.ledger.count("select session_id, revision from ma_session_record")).isEqualTo(1);
             assertThat(fixture.ledger.count("head_kind = 'managed_session'")).isEqualTo(1);
             assertThat(fixture.ledger.count("operation_kind = 'context_compression'")).isEqualTo(1);
+            assertThat(fixture.ledger.count("row_number() over (partition by o.session_id")).isEqualTo(1);
             assertThat(fixture.ledger.count("coalesce(selected_approval_mode, approval_mode)")).isEqualTo(1);
             assertThat(fixture.ledger.count("coalesce(owner_actor_key, creator_actor_key)")).isEqualTo(1);
             assertThat(fixture.ledger.count("select session_id, model_id, model_revision from ma_session")).isEqualTo(1);

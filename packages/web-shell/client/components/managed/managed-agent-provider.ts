@@ -90,6 +90,16 @@ export interface ManagedModelChangeResult {
   replayed: boolean;
 }
 
+export type ManagedLifecycleKind = 'close' | 'archive' | 'delete';
+export type ManagedLifecycleAction =
+  | ManagedLifecycleKind
+  | 'unarchive'
+  | 'close_archive';
+export type ManagedLifecycleOperation =
+  components['schemas']['WebShellCommandOperation'];
+export type ManagedExportPage = components['schemas']['WebShellExportPage'];
+export type ManagedExportItem = components['schemas']['WebShellItem'];
+
 export interface ManagedAgentSessionSummary {
   sessionId: string;
   agentId?: string;
@@ -102,6 +112,9 @@ export interface ManagedAgentSessionSummary {
   modelSelection?: ManagedModelSelection;
   compactionRevision?: number;
   contextCompressionOperationId?: string;
+  lifecycleStatus?: string;
+  lastSequence?: number;
+  lifecycleOperation?: components['schemas']['WebShellLifecycleOperation'];
   activeTurnId?: string;
   title: string;
   workspaceCwd?: string;
@@ -121,6 +134,10 @@ export interface ManagedAgentSessionSummary {
     canSend: boolean;
     canCancel: boolean;
     canRename?: boolean;
+    sessionClose?: boolean;
+    sessionArchive?: boolean;
+    sessionUnarchive?: boolean;
+    sessionDelete?: boolean;
     actions?: boolean;
     tasks?: boolean;
     artifacts?: boolean;
@@ -250,6 +267,26 @@ export interface ManagedAgentPendingAction {
 
 export interface ManagedAgentProvider {
   readonly kind: 'daemon' | 'java';
+  readonly lifecycle?: {
+    submit(
+      kind: ManagedLifecycleKind,
+      sessionId: string,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedLifecycleOperation>;
+    unarchive(
+      sessionId: string,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedAgentSessionSummary>;
+    query(
+      sessionId: string,
+      operationId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedLifecycleOperation>;
+  };
+  exportSnapshot?(
+    sessionId: string,
+    options: ManagedAgentRequestOptions & { cursor?: string },
+  ): Promise<ManagedExportPage>;
   readonly storageKey: string;
   readonly canCancel: boolean;
   readonly acceptsWorkspaceCwd: boolean;
@@ -460,6 +497,7 @@ export interface ManagedAgentProvider {
   listSessions(
     options: ManagedAgentRequestOptions & {
       workspaceCwd?: string;
+      archiveState?: 'unarchived' | 'archived' | 'all';
       limit?: number;
       cursor?: string;
     },
