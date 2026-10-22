@@ -29,6 +29,8 @@ docker build -f packages/managed-agent-server/distribution/kubernetes/Dockerfile
 
 从审核过的配置生成 Envoy ConfigMap，再通过正常部署流程在 Harness namespace 应用填好的设置、RBAC 与池清单：
 
+每份清单只包含一个资源。应用 `harness-pool.yaml` 中的 Deployment 时，同时应用 `harness-service.yaml`、`harness-pdb.yaml` 和 `harness-network-policy.yaml`。Java 发现同时需要 `discovery-rbac.yaml` 与 `discovery-role-binding.yaml`。
+
 ```sh
 kubectl create configmap qwen-harness-envoy --from-file=envoy.yaml=packages/managed-agent-server/distribution/kubernetes/envoy.yaml --dry-run=client -o yaml
 ```

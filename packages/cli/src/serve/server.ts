@@ -2305,13 +2305,14 @@ export function createServeApp(
   );
   app.use(allowOriginCors(originAllowlist));
   if (opts.profile === 'hosted-harness') {
+    const poolEnabled =
+      process.env['QWEN_HOSTED_HARNESS_INSTANCE_ID'] !== undefined;
     app.use((req, res, next) => {
       if (
         req.path === '/health' ||
         req.path === '/capabilities' ||
         req.path === '/session' ||
-        (process.env['QWEN_HOSTED_HARNESS_INSTANCE_ID'] !== undefined &&
-          req.path.startsWith('/internal/hosted-harness/v1/')) ||
+        (poolEnabled && req.path.startsWith('/internal/hosted-harness/v1/')) ||
         req.path.startsWith('/session/')
       )
         next();

@@ -29,6 +29,8 @@ Publish the image through the deployment system and replace `qwen-harness:replac
 
 Create the Envoy ConfigMap from the reviewed configuration, then apply the filled settings, RBAC and pool manifests in the Harness namespace through your normal deployment workflow:
 
+Each manifest contains one resource. Apply the Deployment in `harness-pool.yaml` together with `harness-service.yaml`, `harness-pdb.yaml` and `harness-network-policy.yaml`. Java discovery requires both `discovery-rbac.yaml` and `discovery-role-binding.yaml`.
+
 ```sh
 kubectl create configmap qwen-harness-envoy --from-file=envoy.yaml=packages/managed-agent-server/distribution/kubernetes/envoy.yaml --dry-run=client -o yaml
 ```
