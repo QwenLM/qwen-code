@@ -40,7 +40,8 @@ const rejection = (code: number, reason: string) => ({
   body: { code: reason, message: reason },
 });
 
-type Answer = { code?: number; body: unknown };
+/** `drop` destroys the connection: the request arrived, its answer never does. */
+type Answer = { code?: number; body: unknown } | 'drop';
 type Script = (path: string, body: Record<string, unknown>) => Answer;
 
 let server: Server | undefined;
@@ -68,6 +69,10 @@ async function rig(
     const path = url.pathname.slice(PREFIX.length);
     calls.push({ path, body });
     const answer = script(path, body);
+    if (answer === 'drop') {
+      req.socket.destroy();
+      return;
+    }
     res.writeHead(answer.code ?? 200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(answer.body));
   });
@@ -264,6 +269,50 @@ describe('createHostedAutomationGateRunner', () => {
       '/executions:prepare',
       '/tool-sessions:acquire',
     ]);
+  });
+
+  it.each([
+    ['its answer is lost', 'drop' as const],
+    ['the Broker fails on it', rejection(503, 'runtime_unavailable')],
+  ])(
+    'releases before answering when an acquisition is unconfirmed: %s',
+    async (_what, acquire) => {
+      // The acquisition may have committed before the answer was lost: the
+      // Session would stay a Workspace execution member with nobody left to
+      // release it once the occurrence settles.
+      const { calls, probe } = await rig((path) => {
+        switch (path) {
+          case '/executions:prepare':
+            return rejection(404, 'runtime_session_not_found');
+          case '/tool-sessions:acquire':
+            return acquire;
+          case RELEASE:
+            return { body: { ...identity, released: true } };
+          default:
+            throw new Error(`unexpected ${path}`);
+        }
+      });
+      await expect(probe()).resolves.toMatchObject({ kind: 'failed' });
+      expect(calls.map((call) => call.path)).toEqual([
+        '/executions:prepare',
+        '/tool-sessions:acquire',
+        RELEASE,
+      ]);
+    },
+  );
+
+  it('fails the fire when an unconfirmed acquisition cannot be released', async () => {
+    const { probe } = await rig((path) => {
+      switch (path) {
+        case '/executions:prepare':
+          return rejection(404, 'runtime_session_not_found');
+        case '/tool-sessions:acquire':
+          return 'drop';
+        default:
+          return rejection(503, 'runtime_unavailable');
+      }
+    });
+    await expect(probe()).rejects.toThrow(/Runtime Session was not released/);
   });
 
   it('blocks a Session whose tool profile declares no Shell before asking the Broker', async () => {

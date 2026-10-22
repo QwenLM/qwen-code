@@ -77,7 +77,9 @@ export function createHostedAutomationGateRunner(options: {
       input: { gate },
     });
     const digest = `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`;
-    let acquired = false;
+    // Whether this attempt may hold the derived Runtime Session, so owes its
+    // release: an acquisition, or one whose answer never arrived.
+    let mayHold = false;
     let replayed = false;
     let started = false;
     let result: HostedAutomationGateResult;
@@ -96,8 +98,22 @@ export function createHostedAutomationGateRunner(options: {
         };
       }
       if (prepared?.settled === undefined) {
-        await broker.acquire();
-        acquired = true;
+        try {
+          await broker.acquire();
+        } catch (cause) {
+          // Only the Broker's own refusal proves nothing was acquired. A lost
+          // or unreadable answer may follow a committed acquisition, whose
+          // Session would stay a Workspace execution member with nobody left
+          // to release it.
+          if (
+            !(cause instanceof HostedWorkspaceBrokerRejection) ||
+            cause.status >= 500
+          ) {
+            mayHold = true;
+          }
+          throw cause;
+        }
+        mayHold = true;
         prepared ??= await broker.prepareReplayable(callId, digest);
       } else {
         replayed = true;
@@ -122,7 +138,7 @@ export function createHostedAutomationGateRunner(options: {
     // A replayed receipt may be all that is left of an attempt that settled
     // the probe and then failed to release, or died before it could: this
     // attempt inherits that release.
-    if (acquired || replayed) await releaseDerivedSession(broker);
+    if (mayHold || replayed) await releaseDerivedSession(broker);
     return result;
   };
 }
