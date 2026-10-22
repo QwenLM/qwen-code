@@ -50,6 +50,20 @@ public interface HarnessConnector extends AutoCloseable {
 
     default boolean supportsSessionSkills() { return false; }
 
+    default boolean supportsMcpManagement() { return false; }
+
+    default Map<String, Object> mcpManagement(String tenantId, String sessionId) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
+    default Map<String, Object> manageMcp(String tenantId, String sessionId, Map<String, Object> command) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
+    default Map<String, Object> mcpManagementOperation(String tenantId, String sessionId, String operationId) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
     default boolean isWorkspaceFilesAvailable() {
         return false;
     }
@@ -175,6 +189,12 @@ public interface HarnessConnector extends AutoCloseable {
 
     SourceStream stream(String tenantId, String sessionId, long lastEventId,
             String eventEpoch);
+
+    /** Reads only an existing original attachment; it must never load or take over execution. */
+    default SourceStream observeStream(String tenantId, String sessionId, String bootId,
+            long lastEventId, String eventEpoch) {
+        throw new UnsupportedOperationException("Read-only Harness observation is unavailable");
+    }
 
     default void resolveAction(
             String tenantId,
@@ -318,6 +338,10 @@ public interface HarnessConnector extends AutoCloseable {
         String eventEpoch();
 
         SourceEvent next();
+
+        default boolean recoveryBlocked(long afterEventId) {
+            return false;
+        }
 
         @Override
         void close();

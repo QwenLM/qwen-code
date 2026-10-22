@@ -439,7 +439,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 requestedRevision, true), requestedApprovalMode, approvalSelectionSupported);
         boolean planMode = Boolean.TRUE.equals(requestedPlanMode);
         if (planMode && (!planModeSupported || !approvalSelectionSupported
-                || pin.hooks() || !(WorkspaceToolProfiles.FILES.equals(pin.toolProfile())
+                || pin.hooks() || pin.mcp() || !(WorkspaceToolProfiles.FILES.equals(pin.toolProfile())
                 || WorkspaceToolProfiles.isPublicShell(pin.toolProfile())))) {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "Plan mode is unavailable");
         }
@@ -454,6 +454,9 @@ public class ManagedAgentStore implements AgentStateStore {
         boolean sshWorkspace = isSshWorkspace(workspace.binding());
         if (sshWorkspace) {
             requireSshToolProfile(pin.toolProfile());
+            if (pin.mcp()) {
+                throw workspaceExecutionUnavailable();
+            }
         }
         boolean resident = residentWorkspaces.find(workspace.binding()) != null;
         if (resident) {
@@ -516,7 +519,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         return insertSession(tenantId, "CREATE_SESSION", idempotencyKey, requestDigest,
                 "qwen-code", title, List.of(), null, workspace, actorId,
-                new AgentPin(agentRevision, null, approvalMode, WorkspaceToolProfiles.INTERNAL_TEAM_LEAD, false));
+                new AgentPin(agentRevision, null, approvalMode, WorkspaceToolProfiles.INTERNAL_TEAM_LEAD, false, false));
     }
 
     @Override
@@ -987,7 +990,7 @@ public class ManagedAgentStore implements AgentStateStore {
      * its digest and the approval mode and tool profile compiled from its content (D8c-1).
      */
     private record AgentPin(String revision, String digest,
-            String approvalMode, String toolProfile, boolean hooks) {
+            String approvalMode, String toolProfile, boolean hooks, boolean mcp) {
     }
 
     private boolean isSshWorkspace(ContextBinding binding) {
@@ -1008,7 +1011,7 @@ public class ManagedAgentStore implements AgentStateStore {
         AgentPin pin = resolveAgentPin(tenantId, agentId, null, true);
         return new WebShellSessionOptions(
                 pin.approvalMode(), availableApprovalModes(pin),
-                !pin.hooks() && (WorkspaceToolProfiles.FILES.equals(pin.toolProfile())
+                !pin.hooks() && !pin.mcp() && (WorkspaceToolProfiles.FILES.equals(pin.toolProfile())
                         || WorkspaceToolProfiles.isPublicShell(pin.toolProfile())), false);
     }
 
@@ -1023,6 +1026,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public boolean supportsPlanMode(SessionRecord session) {
         return WorkspaceToolProfiles.supportsApprovalSelection(session)
                 && findChildLineage(session.tenantId(), session.sessionId()) == null
+                && !hasMcpServers(session)
                 && (session.agentDefinitionDigest() == null
                 || !definitions.pinnedContent(session).containsKey("hook_catalog"));
     }
@@ -1037,7 +1041,7 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_approval_mode",
                     "The selected approval mode is not available for this Agent.");
         }
-        return new AgentPin(pin.revision(), pin.digest(), requested, pin.toolProfile(), pin.hooks());
+        return new AgentPin(pin.revision(), pin.digest(), requested, pin.toolProfile(), pin.hooks(), pin.mcp());
     }
 
     // Called only for a new admission; a retry has already replayed and
@@ -1054,7 +1058,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     ? (workspaceShellEnabled ? WorkspaceToolProfiles.SHELL
                             : WorkspaceToolProfiles.FILES)
                     : null;
-            return new AgentPin(agentRevision, null, approvalMode, toolProfile, false);
+            return new AgentPin(agentRevision, null, approvalMode, toolProfile, false, false);
         }
         if (definitions == null) {
             throw ManagedAgentDefinitionStore.notFound();
@@ -1065,9 +1069,104 @@ public class ManagedAgentStore implements AgentStateStore {
                 AgentDefinitionCompiler.compile(revision.definitionJson(),
                         workspaceBound, approvalMode, definitionToolProfiles,
                         definitionModels);
+        Map<String, Object> content = readMap(revision.definitionJson());
         return new AgentPin(Long.toString(revision.revision()),
                 revision.digest(), compiled.approvalMode(),
-                compiled.toolProfile(), readMap(revision.definitionJson()).containsKey("hook_catalog"));
+                compiled.toolProfile(), content.containsKey("hook_catalog"),
+                !AgentDefinitionExtensions.mcpServers(content.get("mcp_servers"), compiled.toolProfile()).isEmpty());
+    }
+
+    @Override
+    public boolean hasMcpServers(SessionRecord session) {
+        if (WorkspaceToolProfiles.READ.equals(session.toolProfile())) {
+            return false;
+        }
+        boolean pinned = session.agentDefinitionDigest() != null && !AgentDefinitionExtensions.mcpServers(
+                definitions.pinnedContent(session).get("mcp_servers"), session.toolProfile()).isEmpty();
+        return ManagedMcpSettings.find(jdbc, session.tenantId(), session.sessionId()) != null || pinned;
+    }
+
+    @Override
+    @Transactional
+    public SessionRecord requireMcpManagement(String tenantId, String actorId, String sessionId, String operationId) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        if (session.workspace() == null || "DELETED".equals(session.status())) {
+            throw new ManagedAgentException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
+        }
+        WorkspaceAccess access = workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId());
+        if (!access.canRead()) {
+            throw new ManagedAgentException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
+        }
+        if (!access.atLeast(WorkspaceAccess.OPERATOR)) {
+            throw new ManagedAgentException(HttpStatus.FORBIDDEN, "session_operation_forbidden",
+                    "Only a Workspace operator may manage MCP servers.");
+        }
+        if (!WorkspaceToolProfiles.SHELL.equals(session.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(session.toolProfile())
+                || !workspaceFilesEnabled || !workspaceShellEnabled && WorkspaceToolProfiles.SHELL.equals(session.toolProfile())
+                || isSshWorkspace(session.workspace()) || residentWorkspaces.find(session.workspace()) != null
+                || findChildLineage(tenantId, sessionId) != null) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "MCP management is unavailable.");
+        }
+        requireSessionStatus(session.status(), "ACTIVE");
+        requireCwdChangeRegistryFacts(session);
+        WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+        boolean replay = operationId != null && !jdbc.queryForList("SELECT 1 FROM ma_session_journal_tx"
+                + " WHERE tenant_id=? AND session_id=? AND command_id=? AND operation='manageMcp' LIMIT 1",
+                tenantId, sessionId, operationId).isEmpty();
+        if (operationId != null && !replay) {
+            requireMcpManagementIdle(session);
+        }
+        return session;
+    }
+
+    @Override
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.MANDATORY)
+    public void requireMcpSettingsCommit(String tenantId, String workspaceId, String sessionId) {
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        if (session.workspace() == null || !workspaceId.equals(session.workspace().getWorkspaceId())
+                || !WorkspaceToolProfiles.SHELL.equals(session.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(session.toolProfile())
+                || findChildLineage(tenantId, sessionId) != null) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "MCP management is unavailable.");
+        }
+        requireSessionStatus(session.status(), "ACTIVE");
+        requireMcpManagementIdle(session);
+    }
+
+    private void requireMcpManagementIdle(SessionRecord session) {
+        String tenantId = session.tenantId();
+        String sessionId = session.sessionId();
+        // The journal may already have a consistent-read snapshot; these reads must observe the
+        // Plan/Turn admission that won the same Session row before this settings commit.
+        if (Boolean.TRUE.equals(jdbc.queryForObject("SELECT plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE",
+                Boolean.class, tenantId, sessionId))) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "Disable Plan mode before managing MCP servers.");
+        }
+        if (!jdbc.queryForList("SELECT turn_id FROM ma_turn WHERE tenant_id=? AND session_id=?"
+                + " AND status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') LIMIT 1 FOR UPDATE", tenantId, sessionId).isEmpty()) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn or approval.");
+        }
+        long now = lifecycleDatabaseTime();
+        for (String options : jdbc.queryForList("SELECT options_json FROM ma_session_record WHERE session_scope_key=?"
+                + " AND record_kind='ACTION' AND state='requested' AND tenant_id=? AND session_id=? FOR UPDATE",
+                String.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId)) {
+            Object expiresAt = readMap(options).get("expiresAt");
+            if (expiresAt instanceof Number expiration && now < expiration.longValue()) {
+                throw new ManagedAgentException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn or approval.");
+            }
+        }
+        if (!jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE scope_key=? AND target_key=?"
+                + " AND operation_kind IN " + SESSION_OPERATION_KINDS
+                + " AND (state IN ('PENDING', 'RUNNING', 'UNKNOWN') OR state='RECOVERY_BLOCKED' AND operation_kind <> 'TASK_CANCEL')"
+                + " LIMIT 1 FOR UPDATE", ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionOperationTarget(sessionId)).isEmpty()
+                || !jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE operation_kind='RENAME'"
+                        + " AND target_key=? AND tenant_id=? AND session_id=? AND state IN ('PENDING', 'RUNNING') LIMIT 1 FOR UPDATE",
+                        renameTarget(tenantId, sessionId), tenantId, sessionId).isEmpty()
+                || !jdbc.queryForList("SELECT receipt_key FROM ma_request_receipt WHERE namespace='SESSION_COMMAND'"
+                        + " AND tenant_key=? AND tenant_id=? AND session_id=? AND state='PENDING' LIMIT 1 FOR UPDATE",
+                        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenantId), tenantId, sessionId).isEmpty()) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "session_context_busy", "The Session has an active operation.");
+        }
     }
 
     private ManagedAgentDefinitionStore.DefinitionRevision resolveDefinitionRevision(
@@ -1240,6 +1339,9 @@ public class ManagedAgentStore implements AgentStateStore {
         if (session.workspace() != null) {
             if (isSshWorkspace(session.workspace())) {
                 requireSshToolProfile(session.toolProfile());
+                if (hasMcpServers(session)) {
+                    throw workspaceExecutionUnavailable();
+                }
             }
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         }
@@ -4334,6 +4436,11 @@ public class ManagedAgentStore implements AgentStateStore {
 
     public SessionPage listSessions(String tenantId, String actorId,
             Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState) {
+        return listSessions(tenantId, actorId, beforeCreatedAt, beforeSessionId, limit, archiveState, "");
+    }
+
+    public SessionPage listSessions(String tenantId, String actorId,
+            Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState, String titleQuery) {
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
         arguments.add(actorId == null ? null
@@ -4343,6 +4450,11 @@ public class ManagedAgentStore implements AgentStateStore {
             case "unarchived" -> " AND ma_session.status <> 'ARCHIVED'";
             default -> "";
         };
+        String titleClause = "";
+        if (!StringUtils.isEmpty(titleQuery)) {
+            titleClause = " AND LOCATE(LOWER(?), LOWER(COALESCE(ma_session.title, ''))) > 0";
+            arguments.add(titleQuery);
+        }
         // Keyset on the immutable gmt_create: gmt_modified moves on every
         // event append, so a row can slide backwards into already-visited
         // pages and silently vanish from a paged listing.
@@ -4368,7 +4480,7 @@ public class ManagedAgentStore implements AgentStateStore {
                             + " ma_session.tenant_id AND wa.workspace_id = ma_session.workspace_id"
                             + " AND wa.actor_id = ? AND wa.role IN ('READER', 'OPERATOR',"
                             + " 'OWNER')))"
-                                + archiveClause + cursorClause
+                                + archiveClause + titleClause + cursorClause
                                 + " ORDER BY ma_session.gmt_create DESC, ma_session.session_id DESC"
                                 + " LIMIT ?",
                         sessionListMapper,
@@ -4764,8 +4876,9 @@ public class ManagedAgentStore implements AgentStateStore {
                 || !live && hasRetainedRuntimeSession(tenantId, sessionId)
                 || !jdbc.queryForList("SELECT 1 FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
                         + " AND (status IN ('RECOVERY_BLOCKED', 'CANCELLING') OR status IN ('ACCEPTED', 'RUNNING')"
-                        + " AND error_code IN (?, ?)) LIMIT 1", tenantId, sessionId,
-                        AgentStateStore.RUNTIME_RECOVERY_BLOCKED, AgentStateStore.WORKFLOW_RECOVERY_BLOCKED).isEmpty()
+                        + " AND error_code IN (?, ?, ?)) LIMIT 1", tenantId, sessionId,
+                        AgentStateStore.RUNTIME_RECOVERY_BLOCKED, AgentStateStore.WORKFLOW_RECOVERY_BLOCKED,
+                        AgentStateStore.HARNESS_RECOVERY_BLOCKED).isEmpty()
                 || !jdbc.queryForList("SELECT 1 FROM ma_session_head WHERE tenant_id = ?"
                         + " AND session_id = ? AND head_kind = 'MANAGED_SESSION' AND"
                         + " (state <> 'ACTIVE' OR recovery_status <> 'READY')", tenantId, sessionId).isEmpty()) {
@@ -5174,12 +5287,9 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     public List<DispatchTarget> findDispatchable(long now, int limit) {
-        // #14387 / D7-2: a Turn marked recovery-blocked (its workflow's
-        // generation was lost, or its parked Runtime execution's acceptance
-        // is still unknown) is parked, never re-dispatched — without the
-        // carve-out the sweep would claim → refuse → release it once per
-        // tick forever. A cancel still scans it: settling the Turn
-        // cancelled is the cancel's own act, not a re-dispatch.
+        // Workflow/Runtime parks have separate settlement paths. A due
+        // Harness park enters only the coordinator's read-only observation
+        // branch; cancellation still uses the normal dispatch lane.
         return jdbc.query(
                 "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "')) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
@@ -5250,19 +5360,20 @@ public class ManagedAgentStore implements AgentStateStore {
             String errorCode, String errorMessage) {
         requireLegacyMutation(tenantId, sessionId);
         long now = clock.millis();
-        // The verdict parks the Turn out of the dispatch sweep, so it is
-        // fenced by the live dispatch lease like every terminal decision:
-        // an owner whose lease already expired holds nothing to park with.
+        Long retryAfter = AgentStateStore.HARNESS_RECOVERY_BLOCKED.equals(errorCode)
+                ? now + 15_000L : null;
+        // A sampled Harness block can lift. Retain the unsettled outcome
+        // and back off its read-only recheck without consuming retry budget.
         return jdbc.update("UPDATE ma_turn SET error_code = ?,"
-                        + " error_message = ?, dispatch_owner = NULL,"
+                        + " error_message = ?, retry_after = ?, dispatch_owner = NULL,"
                         + " dispatch_lease_until = NULL, gmt_modified = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until >= ?"
                         + " AND status IN ('ACCEPTED', 'RUNNING',"
-                        + " 'CANCELLING')",
-                errorCode, errorMessage, now, tenantId, sessionId, turnId,
-                owner, now) == 1;
+                        + " 'CANCELLING') AND (? <> ? OR status <> 'CANCELLING')",
+                errorCode, errorMessage, retryAfter, now, tenantId, sessionId, turnId,
+                owner, now, errorCode, AgentStateStore.HARNESS_RECOVERY_BLOCKED) == 1;
     }
 
     @Override
@@ -6860,11 +6971,9 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     /**
-     * #14387: the lifecycle gate's active-Turn count. A Turn marked
-     * recovery-blocked is parked out of the dispatch sweep and never
-     * drives again — it is evidence of an unwitnessed execution, not live
-     * work, so it does not hold a lifecycle operation open. A CANCELLING
-     * Turn still blocks: its cancel is in flight.
+     * Only a permanently refused workflow leaves this lifecycle gate.
+     * Runtime and Harness parks still await authoritative settlement;
+     * closing them could discard a later result. Cancellation also waits.
      */
     private boolean hasLiveTurn(String tenantId, String sessionId) {
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM"

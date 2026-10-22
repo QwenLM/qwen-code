@@ -1481,7 +1481,7 @@ final class WorkspaceCsiApplicationInventory {
             } else if ("managed-input".equals(kind)) {
                 value = CsiNativeActivationProof.inputBlocks(raw);
             } else if (Set.of("managed-activation-boundary", "managed-activation-install", "managed-admission",
-                    "managed-checkpoint", "managed-definition", "managed-file_history", "managed-hosted-model-route",
+                    "managed-checkpoint", "managed-checkpoint-history", "managed-definition", "managed-file_history", "managed-hosted-model-route",
                     "managed-hosted-model-usage", "managed-root",
                     "managed-tool-definition", "managed-tool-input", "managed-turn-result").contains(kind)) {
                 value = CsiNativeActivationProof.readObject(raw);
