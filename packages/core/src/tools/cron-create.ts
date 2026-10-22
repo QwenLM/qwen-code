@@ -91,8 +91,9 @@ class CronCreateInvocation extends BaseToolInvocation<
    * A gate is a shell command that will run unattended, so its dialog is
    * the exec dialog `Monitor` shows for the same command — the command, its
    * root and `Monitor(...)` rules — so that "always allow" saves a rule that
-   * also lets the scheduler run it after a restart. Without a gate the
-   * generic info dialog stands.
+   * also lets the scheduler run it after a restart. The command shown is the
+   * string the scheduler persists and runs, not Monitor's re-spelled spawn
+   * command. Without a gate the generic info dialog stands.
    */
   override async getConfirmationDetails(
     abortSignal: AbortSignal,
@@ -114,9 +115,8 @@ class CronCreateInvocation extends BaseToolInvocation<
     const details: ToolExecuteConfirmationDetails = {
       type: 'exec',
       title: 'Schedule a gated task',
-      command: normalized.spawnCommand,
-      rootCommand:
-        getCommandRoot(normalized.safetyCommand) ?? normalized.spawnCommand,
+      command: gate,
+      rootCommand: getCommandRoot(normalized.safetyCommand) ?? gate,
       permissionRules,
       warnings: [
         `Runs unattended on this schedule (${humanReadableCron(this.params.cron)}) without further approval; the task prompt runs only when the command prints output.`,
@@ -134,10 +134,15 @@ class CronCreateInvocation extends BaseToolInvocation<
   }
 
   /**
-   * A bare `cron_create` allow rule, saved when this tool could not run
-   * shell commands, must not approve a gate on its own. When no dialog ran
-   * and the mode would have asked, the gate has to pass as a `monitor`
-   * command: a saved `Monitor(...)`/`Bash(...)` rule or the read-only check.
+   * An explicit deny of the gate as a `monitor` command refuses the task in
+   * every mode and over the dialog: the runner checks deny before anything
+   * else at each fire, so such a task could only ever be blocked.
+   *
+   * Otherwise a bare `cron_create` allow rule, saved when this tool could
+   * not run shell commands, must not approve a gate on its own. When no
+   * dialog ran and the mode would have asked, the gate has to pass as a
+   * `monitor` command: a saved `Monitor(...)`/`Bash(...)` rule or the
+   * read-only check.
    *
    * Yolo mode confirms nothing, and the gate runs unattended in yolo mode
    * anyway. Auto mode's safety net is the classifier, which sees the gate in
@@ -146,11 +151,21 @@ class CronCreateInvocation extends BaseToolInvocation<
    * default-mode check.
    */
   private async assertGateApproved(gate: string): Promise<void> {
+    const pm = this.config.getPermissionManager?.();
+    const cwd = this.config.getTargetDir();
+    const decision = await pm?.evaluate({
+      toolName: ToolNames.MONITOR,
+      command: gate,
+      cwd,
+    });
+    if (decision === 'deny') {
+      throw new Error(
+        'The gate command is denied by a permission rule, so the task would be blocked at every fire. Remove that deny rule or choose another command.',
+      );
+    }
     if (this.gateConfirmed) return;
     const mode = this.config.getApprovalMode();
     if (mode === ApprovalMode.YOLO) return;
-    const pm = this.config.getPermissionManager?.();
-    const cwd = this.config.getTargetDir();
     if (mode === ApprovalMode.AUTO) {
       // The same context the permission flow evaluated for this call, so a
       // rule that took the allow fast path there — bare, or scoped to these
@@ -164,11 +179,6 @@ class CronCreateInvocation extends BaseToolInvocation<
       );
       if (toolDecision !== 'allow') return;
     }
-    const decision = await pm?.evaluate({
-      toolName: ToolNames.MONITOR,
-      command: gate,
-      cwd,
-    });
     if (decision === 'allow') return;
     throw new Error(
       `The gate command was not confirmed: a saved ${ToolNames.CRON_CREATE} rule does not cover a shell command that runs unattended. Add a Monitor(...) rule for it, or remove that rule so the command can be confirmed.`,
@@ -412,9 +422,11 @@ export class CronCreateTool extends BaseDeclarativeTool<
         return 'Parameter "gate" must be a non-empty shell command when present.';
       }
       // A backgrounded gate returns at once with nothing on stdout, so every
-      // fire would be quiet.
+      // fire would be quiet. `strippedTrailingAmp` also catches the `&` that
+      // ends a wrapper's script (`bash -c './probe.sh &'`).
       if (
         hasUnsafeMonitorBackgroundOperator(params.gate) ||
+        normalizeMonitorCommand(params.gate).strippedTrailingAmp ||
         /(^|[^&])&\s*$/.test(params.gate.trim())
       ) {
         return 'Parameter "gate" must not background any part of the command with "&".';

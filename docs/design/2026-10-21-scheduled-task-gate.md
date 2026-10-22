@@ -276,10 +276,14 @@ A gate runs a shell command with no model in the loop, so it is approved where
 the command is proposed and checked again where it runs.
 
 - **Proposed by the model (`cron_create` with `gate`).** The tool's default
-  permission is what `Monitor` would return for the gate command: `allow` when
-  the read-only AST check passes, otherwise `ask`. The confirmation is the
-  `exec` dialog with the command, its root, the `Monitor(...)` rules from
-  `extractCommandRules`, and a warning that it runs unattended on the schedule.
+  permission is `ask`, because the scheduled prompt runs with full tool
+  access, so the call reaches the dialog in default mode and the classifier in
+  auto mode. With a gate the confirmation is the `exec` dialog with the
+  command exactly as it is persisted and run, its root, the `Monitor(...)`
+  rules from `extractCommandRules`, and a warning that it runs unattended on
+  the schedule. A gate that backgrounds any part of itself with `&`, including
+  the `&` that ends a wrapper's script (`bash -c './probe.sh &'`), is refused
+  before the dialog: it would return at once with nothing on stdout.
   "Always allow" therefore saves a `Monitor(...)` rule, not a `cron_create`
   rule. The classifier input for auto mode includes the gate. A bare
   `cron_create` allow rule saved before this change does not cover a gate.
@@ -287,7 +291,11 @@ the command is proposed and checked again where it runs.
   around the classifier in auto mode, so nobody has looked at the command;
   the tool then requires a saved `Monitor(...)`/`Bash(...)` rule or the
   read-only check for the gate and refuses the call otherwise. Yolo mode
-  confirms nothing, and the gate runs unattended in yolo mode anyway.
+  confirms nothing, and the gate runs unattended in yolo mode anyway. Before
+  any of this, an explicit deny rule for the gate as a `monitor` command
+  refuses the call in every mode, a confirmed dialog included: the runner
+  checks that deny first at every fire, so the task could only ever be
+  blocked.
 - **Written by the user (Web Shell form, a hand-edited tasks file).** Trusted
   like the permission rules themselves: the file lives under the Qwen home
   next to the settings that hold those rules, and a process that can write it

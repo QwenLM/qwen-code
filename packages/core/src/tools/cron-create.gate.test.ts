@@ -166,6 +166,7 @@ describe('CronCreateTool gate', () => {
     };
 
     it('accepts the gate the classifier saw when no bare rule skipped it', async () => {
+      // `ask` on the monitor lookup: only a deny there would refuse it.
       const evaluate = withRules(rules('default', 'ask'));
       const result = await tool.build(params).execute(signal());
       expect(result.error).toBeUndefined();
@@ -176,9 +177,31 @@ describe('CronCreateTool gate', () => {
           toolParams: expect.objectContaining({ gate: './probe.sh' }),
         }),
       );
-      expect(evaluate).not.toHaveBeenCalledWith(
-        expect.objectContaining({ toolName: 'monitor' }),
+    });
+
+    it('refuses a gate an explicit Monitor deny rule covers, with no cron_create rule', async () => {
+      // A real permission manager: no `cron_create` rule, so the classifier
+      // path would otherwise accept the gate before ever asking about it.
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => undefined,
+        getPermissionsAsk: () => undefined,
+        getPermissionsDeny: () => ['Monitor(./probe.sh)'],
+        getProjectRoot: () => tmpDir,
+        getCwd: () => tmpDir,
+        getApprovalMode: () => 'auto',
+      });
+      pm.initialize();
+      config._scheduler.destroy();
+      config = makeConfig({
+        mode: ApprovalMode.AUTO,
+        evaluate: (ctx) => pm.evaluate(ctx),
+      });
+      tool = new CronCreateTool(config);
+      const result = await tool.build(params).execute(signal());
+      expect(result.error?.message).toContain(
+        'The gate command is denied by a permission rule',
       );
+      expect(config._scheduler.list()).toHaveLength(0);
     });
 
     it('refuses a gate that a bare cron_create allow rule let through unseen', async () => {
@@ -234,6 +257,50 @@ describe('CronCreateTool gate', () => {
     });
   });
 
+  it.each([
+    ['yolo mode', ApprovalMode.YOLO, false],
+    ['the exec dialog', ApprovalMode.DEFAULT, true],
+  ])(
+    'refuses a denied gate over %s, as the runner would block every fire',
+    async (_label, mode, confirm) => {
+      config._scheduler.destroy();
+      config = makeConfig({
+        mode,
+        evaluate: async (ctx) => (ctx.toolName === 'monitor' ? 'deny' : 'ask'),
+      });
+      tool = new CronCreateTool(config);
+      const invocation = tool.build(params);
+      if (confirm) {
+        const details = await invocation.getConfirmationDetails(signal());
+        await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+      }
+      const result = await invocation.execute(signal());
+      expect(result.error?.message).toContain(
+        'The gate command is denied by a permission rule',
+      );
+      expect(config._scheduler.list()).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    "bash -c './probe.sh --gate'",
+    'FOO=1 ./probe.sh',
+    'LD_PRELOAD=/tmp/x.so bash -lc "./probe.sh"',
+    "bash   -c './probe.sh'",
+    '  ./probe.sh  ',
+  ])(
+    'shows in the dialog exactly the gate %j that is persisted and run',
+    async (gate) => {
+      const invocation = tool.build({ ...params, gate });
+      const details = (await invocation.getConfirmationDetails(
+        signal(),
+      )) as ToolExecuteConfirmationDetails;
+      const result = await invocation.execute(signal());
+      expect(result.error).toBeUndefined();
+      expect(details.command).toBe(config._scheduler.list()[0]?.gate);
+    },
+  );
+
   it('rejects a gate with sessionMode "current"', async () => {
     const result = await tool
       .build({ ...params, durable: true, sessionMode: 'current' })
@@ -251,12 +318,15 @@ describe('CronCreateTool gate', () => {
     expect(config._scheduler.list()).toHaveLength(0);
   });
 
-  it.each(['', '   ', 'sleep 5 &', 'sleep 5 & echo done'])(
-    'rejects the gate %j at validation',
-    (gate) => {
-      expect(() => tool.build({ ...params, gate })).toThrow(/gate/);
-    },
-  );
+  it.each([
+    '',
+    '   ',
+    'sleep 5 &',
+    'sleep 5 & echo done',
+    "bash -c './probe.sh &'",
+  ])('rejects the gate %j at validation', (gate) => {
+    expect(() => tool.build({ ...params, gate })).toThrow(/gate/);
+  });
 
   it('forwards the gate to the auto-mode classifier', () => {
     expect(tool.toAutoClassifierInput(params)).toMatchObject({
