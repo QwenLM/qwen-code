@@ -181,7 +181,9 @@ export function createCronGateRunner(config: Config): CronGateRunner {
       };
     }
 
-    const startedAt = Date.now();
+    // Durations run on the monotonic clock: a wall clock stepped back
+    // mid-run would report a negative one.
+    const startedAt = performance.now();
     const timeout = AbortSignal.timeout(CRON_GATE_TIMEOUT_MS);
     const binary = new AbortController();
     const combined = AbortSignal.any([signal, timeout, binary.signal]);
@@ -223,7 +225,7 @@ export function createCronGateRunner(config: Config): CronGateRunner {
       kind: 'failed',
       detail,
       stderr,
-      durationMs: Date.now() - startedAt,
+      durationMs: Math.round(performance.now() - startedAt),
     });
 
     let result: ShellExecutionResult;
@@ -263,10 +265,11 @@ export function createCronGateRunner(config: Config): CronGateRunner {
           : `exited with code ${result.exitCode}`,
       );
     }
-    const durationMs = Date.now() - startedAt;
+    const durationMs = Math.round(performance.now() - startedAt);
     // Judged as delivered: output of escape sequences alone would wake the
-    // session with an empty block.
-    if (sanitizeGateText(stdout).length === 0) {
+    // session with an empty block. A cut output is never quiet: what was
+    // kept may be noise in front of what was cut.
+    if (!truncated && sanitizeGateText(stdout).length === 0) {
       // A part the command put in the background outlived it with its
       // stdout still open: whatever it prints is lost, so "quiet" would
       // skip every fire. Catches what the lexical `&` check misses (`eval`,
@@ -282,18 +285,32 @@ export function createCronGateRunner(config: Config): CronGateRunner {
   };
 }
 
+/** How long a stopped gate's group gets to exit before it is killed. */
+const LEFTOVER_KILL_DELAY_MS = 200;
+
 /**
- * Stops what a gate left running on its stdout: by contract the gate is
- * finished, and every fire would leave one more behind. The group still has
- * a member holding the pipe, so its id has not been reused.
+ * Stops what a gate left running in its process group: by contract the gate
+ * is finished, and every fire would leave one more behind. SIGTERM first, so
+ * a part that holds a lock can release it, then SIGKILL for what is left.
+ * Pids are handed out in sequence, so the group's id is not reused within
+ * that time. A part that moved to its own group or session (`setsid`, GNU
+ * `timeout`) is out of reach, and Windows has no group to signal.
  */
 function stopLeftovers(pgid: number): void {
   if (process.platform === 'win32') return;
   try {
-    process.kill(-pgid, 'SIGKILL');
+    process.kill(-pgid, 'SIGTERM');
   } catch {
-    // Gone already.
+    return; // Gone already.
   }
+  setTimeout(() => {
+    try {
+      process.kill(-pgid, 0);
+      process.kill(-pgid, 'SIGKILL');
+    } catch {
+      // Gone.
+    }
+  }, LEFTOVER_KILL_DELAY_MS).unref();
 }
 
 /**
@@ -302,9 +319,11 @@ function stopLeftovers(pgid: number): void {
  * `<gate-output>` block it is wrapped in or spoof a notification boundary.
  */
 function sanitizeGateText(text: string): string {
-  return stripAnsi(text)
+  // Line by line: an escape sequence left open on one line (an OSC title
+  // with no terminator) must not swallow the lines after it.
+  return text
     .split('\n')
-    .map((line) => sanitizeMonitorLine(line.replace(/\r$/, '')))
+    .map((line) => sanitizeMonitorLine(stripAnsi(line.replace(/\r$/, ''))))
     .join('\n')
     .trim();
 }

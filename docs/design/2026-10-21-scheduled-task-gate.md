@@ -183,9 +183,10 @@ in the existing `buildScheduledTaskRunPrompt` header.
 - "Run now" on a gated task sends a manual-run prompt that asks the model to
   run the gate as an ordinary shell command and then follow the task prompt
   with the output as data only when the command exited 0 and printed
-  something; to say that the gate printed nothing when it exited 0 silently;
-  and to report the failure and stop on a non-zero exit, a timeout or a
-  cancellation — the runner's three outcomes. The usual tool approval
+  something; to say that the gate printed nothing when it exited 0 silently,
+  unless it printed nothing because it put part of itself in the background,
+  which is a failure; and to report the failure and stop on a non-zero exit,
+  a timeout or a cancellation — the runner's outcomes. The usual tool approval
   applies; the scheduler is not involved, as today.
 
 ## 5. Design
@@ -306,8 +307,11 @@ the command is proposed and checked again where it runs.
   `"$(…)"` or `$'…'`), gets past it. The runner backs it up: a gate that
   exits 0 with nothing on stdout while something it started in the
   background still holds its stdout open is `failed`, not `quiet` (the
-  outcome table above), and the gate's process group is stopped, since the
-  gate is over and each fire would leave one more behind. A held stderr
+  outcome table above). Whenever its stdout is held, delivered or not, the
+  gate's process group is stopped (SIGTERM, then SIGKILL 200 ms later),
+  since the gate is over and each fire would leave one more behind; a part
+  that moved to its own process group or session (`setsid`, GNU `timeout`)
+  is out of reach, and on Windows nothing is stopped. A held stderr
   alone is not lost output and changes nothing. Under the bwrap shell
   execution sandbox (a TUI or headless session that enables it; a daemon
   session cannot) the backstop never sees such a part: the sandbox's PID

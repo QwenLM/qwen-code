@@ -143,6 +143,9 @@ describe('createCronGateRunner', () => {
     // `eval './probe.sh &'` or `echo './probe.sh &' | sh` passes the
     // lexical check; the probe's output would be lost at every fire.
     scriptShell({ stdout: '', stdoutHeldAfterExit: true });
+    // The group is signalled through a stub for the whole test: pid 4242 is
+    // the mock's, and a real signal would reach whatever group has that id.
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
     const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
     const result = await createCronGateRunner(
       makeConfig({ mode: ApprovalMode.YOLO }),
@@ -153,11 +156,14 @@ describe('createCronGateRunner', () => {
         'something it started in the background still held its stdout open',
       ),
     });
-    // What it left on its stdout is stopped: each fire would add one more.
+    // What it left in its group is stopped, gently first: each fire would
+    // add one more.
     if (process.platform !== 'win32') {
+      expect(kill).toHaveBeenCalledWith(-4242, 'SIGTERM');
+      expect(kill).not.toHaveBeenCalledWith(-4242, 'SIGKILL');
+      vi.advanceTimersByTime(200);
       expect(kill).toHaveBeenCalledWith(-4242, 'SIGKILL');
     }
-    kill.mockRestore();
     // Output printed in the foreground is still delivered.
     scriptShell({ stdout: 'event: comment\n', stdoutHeldAfterExit: true });
     expect(
@@ -166,6 +172,35 @@ describe('createCronGateRunner', () => {
         { signal: signal(), approvedInProcess: false },
       ),
     ).toMatchObject({ kind: 'output', stdout: 'event: comment\n' });
+    vi.advanceTimersByTime(200);
+    vi.useRealTimers();
+    kill.mockRestore();
+  });
+
+  it('never judges a cut output quiet, and keeps a line an open escape would swallow', async () => {
+    // Noise in front of the cap: what was cut may be the news.
+    scriptShell({
+      stdout: '\x1b[0m'.repeat(CRON_GATE_OUTPUT_CAP_BYTES / 4 + 1) + 'news\n',
+    });
+    expect(
+      await createCronGateRunner(makeConfig({ mode: ApprovalMode.YOLO }))(
+        './probe.sh',
+        { signal: signal(), approvedInProcess: false },
+      ),
+    ).toMatchObject({ kind: 'output', truncated: true });
+    // An OSC title left open must not take the next lines with it.
+    scriptShell({ stdout: '\x1b]0;build\n3 new failing builds\n\x07\n' });
+    const result = await createCronGateRunner(
+      makeConfig({ mode: ApprovalMode.YOLO }),
+    )('./probe.sh', { signal: signal(), approvedInProcess: false });
+    expect(result).toMatchObject({ kind: 'output' });
+    expect(
+      buildGatedFirePrompt(
+        job,
+        result as Extract<typeof result, { kind: 'output' }>,
+        0,
+      ),
+    ).toContain('3 new failing builds');
   });
 
   it('reports a non-zero exit with the stderr it captured', async () => {
