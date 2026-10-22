@@ -47,6 +47,7 @@ import type { SessionPrInfo } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
   backfillWorkspaceSessionPrs,
+  bindSessionPrsFromReviewPrompt,
   parsePrNumberFromWorktree,
   registerSessionPrBackfillRoutes,
 } from './session-pr-backfill.js';
@@ -2515,6 +2516,156 @@ describe('backfillWorkspaceSessionPrs', () => {
       sessionService.getPrSessionPathForArchiveState(SESSION_G, 'active'),
     );
     expect(prs?.[0]).toMatchObject({ number: 43 });
+  });
+
+  it('binds an admitted live /review prompt without a transcript', async () => {
+    // A brand-new turn can bind before its user record reaches disk; the
+    // live path injects the command instead of waiting for the sweep.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(
+      runtime,
+      undefined,
+      undefined,
+      {
+        liveReview: {
+          sessionId: SESSION_A,
+          rawCommand: '/review 77 --comment',
+        },
+      },
+    );
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1, unresolved: 0 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    expect(prs?.[0]).toMatchObject({
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      source: 'review',
+    });
+    // The live path does not run through the sweep route, so it must publish
+    // its own write or the badge waits for unrelated catalog churn.
+    expect(runtime.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('scans only the live session when a /review command arrives', async () => {
+    // The sweep would bind SESSION_B's older command too; a live bind names
+    // its own session and must not spend the whole workspace scan.
+    await seedSession(SESSION_B);
+    await seedReviewedNumbers(SESSION_B, 66, 66);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(66, 'fix/66'), pr(77, 'fix/77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(
+      runtime,
+      undefined,
+      undefined,
+      {
+        liveReview: { sessionId: SESSION_A, rawCommand: '/review 77' },
+      },
+    );
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toMatchObject([{ number: 77 }]);
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('does not bind a live /review naming a local file', async () => {
+    // `/review 001_init.sql` is a file review, not PR 1 — the shared command
+    // grammar must reject it before any platform query.
+    await backfillWorkspaceSessionPrs(runtime, undefined, undefined, {
+      liveReview: { sessionId: SESSION_A, rawCommand: '/review 001_init.sql' },
+    });
+
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('binds a live /review into the archive sidecar', async () => {
+    // A prompt can arrive for a session that was archived mid-life; the live
+    // path must resolve the location and write the archived sidecar.
+    await seedSession(SESSION_A);
+    await archiveSession(SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(79, 'fix/79')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(
+      runtime,
+      undefined,
+      undefined,
+      {
+        liveReview: { sessionId: SESSION_A, rawCommand: '/review 79' },
+      },
+    );
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'archived'),
+      ),
+    ).toMatchObject([{ number: 79 }]);
+  });
+
+  it('binds the URL form of a live /review without a gh page entry', async () => {
+    // The typed URL names the PR and its repo; the page lookup need not know
+    // the number for the form to supply the binding.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(
+      runtime,
+      undefined,
+      undefined,
+      {
+        liveReview: {
+          sessionId: SESSION_A,
+          rawCommand: '/review https://github.com/o/r/pull/43 --comment',
+        },
+      },
+    );
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toMatchObject([{ number: 43, url: 'https://github.com/o/r/pull/43' }]);
+  });
+
+  it('does not bind a live prompt in an untrusted workspace', async () => {
+    // The wrapper is exported for the prompt route; the trust gate must hold
+    // even if a caller forgets to check it.
+    const untrusted = { ...runtime, trusted: false } as WorkspaceRuntime;
+    await bindSessionPrsFromReviewPrompt(untrusted, SESSION_A, '/review 80');
+
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
   });
 
   it('ignores /review mentions outside user text records', async () => {

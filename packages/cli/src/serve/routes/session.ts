@@ -167,6 +167,7 @@ import {
   readWorkspaceArtifactLibrary,
   removeWorkspaceLibraryArtifact,
 } from '../server/session-artifact-library.js';
+import { bindSessionPrsFromReviewPrompt } from './session-pr-backfill.js';
 import { acquireWorktreeOwnershipOp } from '../server/worktree-ownership-op.js';
 import {
   exportSessionTranscript,
@@ -8261,6 +8262,34 @@ export function registerSessionRoutes(
           return;
         }
         res.off('close', onResClose);
+
+        // A `/review <N|url>` prompt binds the PR to this session as soon as
+        // the turn is admitted, instead of waiting for an on-demand backfill
+        // sweep. Off the prompt path: a failed bind never affects the turn.
+        if (runtime.trusted) {
+          // Only the prompt the user typed is a source: take the first text
+          // block. Later blocks can carry @-imported file content whose
+          // line-leading examples would forge a binding.
+          const firstTextBlock: Record<string, unknown> | undefined =
+            prompt.find(
+              (item: unknown) =>
+                (item as Record<string, unknown>)['type'] === 'text',
+            );
+          const promptText =
+            typeof firstTextBlock?.['text'] === 'string'
+              ? (firstTextBlock['text'] as string)
+              : undefined;
+          if (promptText !== undefined) {
+            void bindSessionPrsFromReviewPrompt(
+              runtime,
+              sessionId,
+              promptText,
+              {
+                archiveCoordinator: deps.archiveCoordinator,
+              },
+            ).catch(() => {});
+          }
+        }
 
         promptPromise
           .then(
