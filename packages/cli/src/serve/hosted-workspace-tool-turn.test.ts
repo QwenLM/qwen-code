@@ -1844,7 +1844,7 @@ it.each([
   'hosted-workspace-files/1',
   'hosted-workspace-files/2',
   'hosted-workspace-shell/2',
-])('never offers web_fetch or todo_write on %s', async (profile) => {
+])('never offers todo_write on %s', async (profile) => {
   turn = new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
@@ -1862,12 +1862,10 @@ it.each([
   const names = (await turn.declarations(new AbortController().signal)).map(
     (tool) => tool.name,
   );
-  expect(names).not.toContain('web_fetch');
   expect(names).not.toContain('todo_write');
 });
 
 it.each([
-  ['web_fetch', { url: 'https://example.com', prompt: 'p' }],
   ['todo_write', { todos: [{ id: 'a', content: 'a', status: 'pending' }] }],
 ])('refuses %s on a /2 profile before the Broker', async (name, args) => {
   turn = createSearchTurn();
@@ -1910,6 +1908,8 @@ it.each(['hosted-workspace-files/3', 'hosted-workspace-shell/3'])(
   },
 );
 
+// #15076: a malformed task-list call is refused before the Runtime is
+// acquired, so its correction costs no durable work.
 it.each([
   {},
   { todos: 'x' },
@@ -4727,7 +4727,8 @@ it('admits exactly the declared native tools to the version 3 input preview', ()
   // set is pinned here and each name must still be a declared native tool —
   // the child launch declares through HOSTED_AGENT_TOOL, a session message
   // through its two send_message declarations and the team board through
-  // HOSTED_TEAM_TOOLS, not the shell set.
+  // HOSTED_TEAM_TOOLS, not the shell set. `todo_write` is declared only by the
+  // `/3` profiles, so the declaration list is the `/3` shell set.
   expect(HOSTED_INPUT_PREVIEW_TOOLS).toEqual([
     'read_file',
     'write_file',
