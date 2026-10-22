@@ -215,12 +215,13 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'if: "${{ runner.environment == \'self-hosted\' }}"',
     );
-    // The ticketed queue makes the wake order deterministic, so the pin
-    // is the sourced helper and its wait budget, not a bare flock --wait.
+    // The ticketed queue makes the wake order deterministic and the fast
+    // class puts this tier's ticket ahead of waiting full-tier tickets, so
+    // the pin is the sourced helper, its budget, and the tier argument.
     expect(block).toContain(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
-    expect(block).toContain('sdk_java_lock_acquire 5400');
+    expect(block).toContain('sdk_java_lock_acquire 5400 "${TIER}"');
     // release-sdk-java.yml resumes an existing tag by checking out that
     // immutable commit, which may predate this helper; the guarded bare-lock
     // fallback keeps acquisition independent of the checkout's ref.
@@ -1136,10 +1137,23 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
       '::error::sdk-java host lock not acquired within',
     );
     const seconds = Number(step.run.match(/sdk_java_lock_acquire (\d+)/)?.[1]);
-    // The fast tier owns the same lock and waits behind this job, so one
-    // acquisition budget applies to every lane; run 39229303984 died at the
-    // old 60-minute wait before Maven started.
+    // The fast tier owns the same lock: it overtakes this job only while
+    // this ticket still waits, then waits out its hold, so one acquisition
+    // budget applies to every lane; run 39229303984 died at the old
+    // 60-minute wait before Maven started.
     expect(seconds).toBe(90 * 60);
+    // This site stays in the normal class: a tier argument here would put
+    // full-tier MariaDB holds ahead of fast PR-feedback work.
+    expect(step.run).toContain('sdk_java_lock_acquire 5400\n');
+    // Promotion must fire strictly inside the acquisition budget; at or
+    // above it the rename lands in the iteration whose timeout arm deletes
+    // the ticket, and no test would see the anti-starvation arm go dead.
+    const helper = readFileSync('.github/scripts/sdk-java-lock.sh', 'utf8');
+    const promoteAfter = Number(
+      helper.match(/SDK_JAVA_LOCK_PROMOTE_AFTER:-(\d+)/)?.[1],
+    );
+    expect(promoteAfter).toBeGreaterThan(0);
+    expect(promoteAfter).toBeLessThan(seconds);
     const lockWait = step.run.match(/sdk_java_lock_acquire \d+/)?.[0];
     expect(lockWait).toBeDefined();
     const lockAt = step.run.indexOf(lockWait);

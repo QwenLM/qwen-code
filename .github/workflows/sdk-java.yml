@@ -40,9 +40,13 @@ jobs:
     runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
     # One per-host lock wait plus the locked Maven work it guards. A
     # hold measures 925 s (the sdk-java suite plus the managed-agent H2
-    # suite), so the 5400-second wait covers about 5.8 of them; the
-    # ticketed queue in .github/scripts/sdk-java-lock.sh makes that wait
-    # deterministic instead of a wake-up race against sibling holds.
+    # suite), so the 5400-second wait covers about 5.8 of them. The
+    # ticketed queue in .github/scripts/sdk-java-lock.sh serves the fast
+    # class first: a fast-tier leg waits for the running hold, at most one
+    # parked full-tier head and older fast-class tickets, overtaking only
+    # full-tier tickets younger than SDK_JAVA_LOCK_PROMOTE_AFTER (under a
+    # longer hold the queue is plain sequence order), while a full-tier leg
+    # (the default) keeps its FIFO position among the other rank-1 tickets.
     # The ceiling is that wait plus one hold plus ~11 minutes of uncapped
     # setup and margin: 150. Hosted lanes never take the lock and inherit
     # this ceiling as a bound, not as an expected duration.
@@ -234,11 +238,12 @@ jobs:
           MATRIX_JAVA: '${{ matrix.java }}'
           TIER: '${{ inputs.tier }}'
         run: |-
-          # Ticketed queue, not a bare flock: only the oldest live ticket
-          # retries the lock — see the sourced helper.
+          # Ticketed queue, not a bare flock: only the head ticket — lowest
+          # class, then oldest — retries the lock, and the fast class is
+          # served first — see the sourced helper.
           if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
-            sdk_java_lock_acquire 5400
+            sdk_java_lock_acquire 5400 "${TIER}"
           else
             # release-sdk-java.yml resumes an existing tag by checking out
             # that immutable commit, which may predate this helper. Fall
@@ -685,8 +690,9 @@ jobs:
           # step waited the full 90 minutes after the install step released
           # the lock, so a per-step lock let this job lose its place in the
           # host queue between installing and verifying. The ticketed queue
-          # in sdk-java-lock.sh makes that one wait FIFO instead of a
-          # wake-up race against sibling holds (qwen-code#14743).
+          # in sdk-java-lock.sh orders that one wait (fast PR legs overtake
+          # it until it parks or is promoted) instead of a wake-up race
+          # against sibling holds (qwen-code#14743).
           if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
             sdk_java_lock_acquire 5400
@@ -813,9 +819,10 @@ jobs:
     # registration-settle ack-loss cell adds 150 s, moving the fork to
     # 11133 s and Verify to 196 minutes; the FG11e stream cells add 42 s,
     # moving the fork to 11175 s and Verify to 197 minutes; the FG11d
-    # cancel-retry cell adds 12 s, moving the fork to 11187 s and leaving
-    # Verify at 197 minutes, wrapping fork + 600 s plus margin (11787 s of
-    # fork plus wrap);
+    # cancel-retry cell adds 12 s, moving the fork to 11187 s; the FG11d
+    # second-fire refusal cell adds 25 s, moving the fork to 11212 s,
+    # wrapping fork + 600 s plus margin (11812 s of fork plus wrap, 8 s of
+    # it);
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
@@ -920,7 +927,8 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 11187 s, so the step wraps to fork + 600 s plus margin (197 min).
+        # 11212 s, so the step wraps to fork + 600 s plus margin (197 min,
+        # 8 s left before the step must move).
         timeout-minutes: 197
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
