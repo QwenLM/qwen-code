@@ -183,6 +183,8 @@ vi.mock('./dialogs-arena.js', () => ({
 }));
 vi.mock('./dialogs-memory-status.js', () => ({
   OpenTuiMemoryDialog: mocks.stub('memory'),
+}));
+vi.mock('./dialogs-statusline.js', () => ({
   OpenTuiStatusLineDialog: mocks.stub('statusline'),
 }));
 vi.mock('./dialogs-modes.js', () => ({

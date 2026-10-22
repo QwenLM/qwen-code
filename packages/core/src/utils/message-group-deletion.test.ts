@@ -10,6 +10,7 @@ import type { Content } from '@google/genai';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { SessionFileHistoryAccumulator } from '../services/session-file-history-state.js';
 import { CompressionStatus } from '../core/turn.js';
+import { detectTurnInterruption } from '../core/turn-interruption.js';
 import { buildApiHistoryFromConversation } from '../services/session-api-history.js';
 import { prepareTranscriptRecords } from './transcript-records.js';
 import {
@@ -120,6 +121,65 @@ describe('message group deletion', () => {
     );
     expect(kept).toEqual([anchor]);
     expect(getTranscriptMessageGroups(kept)).toEqual([]);
+  });
+
+  it('remaps directory context identities across a deleted checkpoint turn', () => {
+    const u1 = user('u1', null);
+    const a1 = record('a1', 'u1', 'assistant');
+    const u2 = user('u2', 'a1');
+    const a2 = record('a2', 'u2', 'assistant');
+    const u3 = user('u3', 'a2');
+    const a3 = record('a3', 'u3', 'assistant');
+    const firstContext: Content = {
+      role: 'user',
+      parts: [{ text: 'Directory changed.' }],
+    };
+    const lastContext: Content = {
+      role: 'user',
+      parts: [{ text: 'Directory structure.' }],
+    };
+    const compression = record('compressed', 'a3', 'system', {
+      subtype: 'chat_compression',
+      systemPayload: {
+        info: {
+          compressionStatus: CompressionStatus.COMPRESSED,
+          originalTokenCount: 100,
+          newTokenCount: 50,
+        },
+        compressedHistory: [
+          u1.message!,
+          a1.message!,
+          firstContext,
+          u2.message!,
+          a2.message!,
+          u3.message!,
+          a3.message!,
+          lastContext,
+        ],
+        promptIds: ['api-u1', null, null, 'api-u2', null, 'api-u3', null, null],
+        directoryContextIndices: [2, 7],
+      },
+    });
+    const { records: kept } = deleteTranscriptMessageGroups(
+      [u1, a1, u2, a2, u3, a3, compression],
+      ['u2'],
+      anchor,
+    );
+    expect(
+      kept.find((entry) => entry.uuid === 'compressed')?.systemPayload,
+    ).toMatchObject({ directoryContextIndices: [2, 5] });
+    const restored = buildApiHistoryFromConversation({ messages: kept });
+    expect(JSON.stringify(restored)).toBe(
+      JSON.stringify([
+        u1.message,
+        a1.message,
+        firstContext,
+        u3.message,
+        a3.message,
+        lastContext,
+      ]),
+    );
+    expect(detectTurnInterruption(restored).kind).toBe('none');
   });
 
   it('preserves the summary and prunes raw copies and tools from every compression checkpoint', () => {
