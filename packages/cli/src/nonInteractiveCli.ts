@@ -3097,10 +3097,10 @@ export async function runNonInteractive(
           // is acquired or probed, and missed one-shots are detected —
           // start() below flushes them onto the queue so they execute
           // during this run. The hold-open stays keyed on session-only
-          // jobs alone, so durable jobs never pin the process: once
-          // session jobs and the drain are done, stop() releases the
-          // lock and the run exits; durable jobs persist for a future
-          // owning session.
+          // jobs (plus gates already running), so durable jobs never pin
+          // the process: once session jobs, running gates and the drain
+          // are done, stop() releases the lock and the run exits;
+          // durable jobs persist for a future owning session.
           const scheduler = !config.isCronEnabled()
             ? null
             : config.getCronScheduler();
@@ -3157,7 +3157,16 @@ export async function runNonInteractive(
                   resolve();
                   return;
                 }
-                if (scheduler.sessionSize === 0 && !drainPromise) {
+                // A gate still running is a fire already consumed — durable
+                // ones too (a flushed catch-up is stamped before its gate
+                // decides) — so stopping here would abort it and lose the
+                // slot. Its settlement re-checks through onFire or the
+                // gate-skipped listener.
+                if (
+                  scheduler.sessionSize === 0 &&
+                  !scheduler.hasGatesInFlight() &&
+                  !drainPromise
+                ) {
                   abortController.signal.removeEventListener('abort', onAbort);
                   scheduler.stop();
                   resolve();

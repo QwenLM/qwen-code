@@ -206,6 +206,7 @@ Its exit code and stdout decide the outcome:
 | exit 0, stdout empty after trimming  | `quiet`     | Nothing is queued or recorded in the transcript.                                 |
 | exit 0, stdout non-empty             | `delivered` | The fire is delivered with the output (first 16 KiB; truncation is noted).       |
 | non-zero exit, timeout, cannot start | `failed`    | A notice is delivered for the first failure of a streak; later ones are counted. |
+| binary output                        | `failed`    | The command is stopped; same as any other failure.                               |
 | not allowed to run unattended (5.4)  | `blocked`   | Same as `failed`, with the rule to add.                                          |
 
 A probe therefore keeps its own cursor and prints only transitions: a new
@@ -249,7 +250,11 @@ Sequence for a slot that matches:
    (`setGateSkippedListener`). The headless run re-checks its hold-open
    from it: a one-shot or an expiring recurring job leaves the map before
    its gate runs, and `sessionSize` keeps counting that fire until the gate
-   settles, so a quiet final gate ends the run instead of pinning it.
+   settles, so a quiet final gate ends the run instead of pinning it. The
+   hold-open also waits for any gate still running (`hasGatesInFlight`),
+   durable ones included: durable jobs do not pin a headless run, but a
+   catch-up that `start()` flushes is stamped before its gate decides, so
+   stopping there would abort the gate and lose the slot.
 
 Missed-task carriers never run a gate: their prompt is a notice, not the
 task's command. Catch-up fires, final fires and `forceFireJob` run it, so the
@@ -282,8 +287,9 @@ the command is proposed and checked again where it runs.
   command exactly as it is persisted and run, its root, the `Monitor(...)`
   rules from `extractCommandRules`, and a warning that it runs unattended on
   the schedule. A gate that backgrounds any part of itself with `&`, including
-  the `&` that ends a wrapper's script (`bash -c './probe.sh &'`), is refused
-  before the dialog: it would return at once with nothing on stdout.
+  the `&` that ends a wrapper's script (`bash -c './probe.sh &'`), also behind
+  a prefix (`nohup`, `sudo`, `env`), is refused before the dialog: it would
+  return at once with nothing on stdout.
   "Always allow" therefore saves a `Monitor(...)` rule, not a `cron_create`
   rule. The classifier input for auto mode includes the gate. A bare
   `cron_create` allow rule saved before this change does not cover a gate.
@@ -433,11 +439,12 @@ Unit tests:
   default mode nor in auto mode, where it skips the classifier; durable
   creation carries the gate. `cron-list.test.ts`: gate and status line.
 - The gate runner (`cron-gate.test.ts`): environment, cwd, timeout, output
-  caps, sanitization, the `monitor` permission evaluation per approval mode,
+  caps cut on a character boundary, binary output failing, sanitization, the `monitor` permission evaluation per approval mode,
   a deny rule blocking in yolo and auto mode.
 - `use-llm-stream.test.tsx`: cron fires are never routed to shell mode.
 - `nonInteractiveCli.test.ts`: a headless run exits once the final fire of a
-  gated job settles quietly.
+  gated job settles quietly, and holds open for a durable gated catch-up until
+  its gate delivers.
 - `scheduled-task-run.test.ts`, `scheduled-tasks.test.ts` and
   `ScheduledTasksDialog.test.tsx`: a manual run of a gated task asks the model
   to run the gate first, for `per_run` tasks (daemon route) and persistent

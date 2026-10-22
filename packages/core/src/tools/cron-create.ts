@@ -23,9 +23,9 @@ import { CRON_GATE_TIMEOUT_MS } from '../services/cron-gate.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
+  backgroundsAnyPart,
   buildShellExecWarnings,
   getCommandRoot,
-  hasUnsafeMonitorBackgroundOperator,
   normalizeMonitorCommand,
 } from '../utils/shell-utils.js';
 import { extractCommandRules } from '../utils/shellAstParser.js';
@@ -422,11 +422,10 @@ export class CronCreateTool extends BaseDeclarativeTool<
         return 'Parameter "gate" must be a non-empty shell command when present.';
       }
       // A backgrounded gate returns at once with nothing on stdout, so every
-      // fire would be quiet. `strippedTrailingAmp` also catches the `&` that
-      // ends a wrapper's script (`bash -c './probe.sh &'`).
+      // fire would be quiet. `backgroundsAnyPart` also looks inside a
+      // wrapper's script, behind a prefix too (`nohup bash -c './probe.sh &'`).
       if (
-        hasUnsafeMonitorBackgroundOperator(params.gate) ||
-        normalizeMonitorCommand(params.gate).strippedTrailingAmp ||
+        backgroundsAnyPart(params.gate) ||
         /(^|[^&])&\s*$/.test(params.gate.trim())
       ) {
         return 'Parameter "gate" must not background any part of the command with "&".';

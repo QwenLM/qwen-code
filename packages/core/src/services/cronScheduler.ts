@@ -710,6 +710,16 @@ export class CronScheduler {
   }
 
   /**
+   * Whether any gate is still running, durable jobs included. A started gate
+   * is a fire this process has already consumed — a durable catch-up's stamp
+   * is on disk before its gate decides — so headless mode waits for it even
+   * though durable jobs otherwise never pin the process.
+   */
+  hasGatesInFlight(): boolean {
+    return this.gatesInFlight.size > 0;
+  }
+
+  /**
    * Enables durable cron support. Loads tasks from disk and watches the
    * tasks file in every session — durable tasks are project-level, so
    * cron_list/cron_delete must see them regardless of which session owns

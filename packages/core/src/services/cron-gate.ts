@@ -145,12 +145,19 @@ export function createCronGateRunner(config: Config): CronGateRunner {
 
     const startedAt = Date.now();
     const timeout = AbortSignal.timeout(CRON_GATE_TIMEOUT_MS);
-    const combined = AbortSignal.any([signal, timeout]);
+    const binary = new AbortController();
+    const combined = AbortSignal.any([signal, timeout, binary.signal]);
     let stdout = '';
     let stdoutBytes = 0;
     let truncated = false;
     let stderr = '';
     const onOutput = (event: ShellOutputEvent) => {
+      if (event.type === 'binary_detected') {
+        // No text chunk follows, so the fire would settle quiet with the
+        // output discarded. Stop the command, like Monitor, and report it.
+        binary.abort();
+        return;
+      }
       if (event.type !== 'data' || typeof event.chunk !== 'string') return;
       if (event.stream === 'stderr') {
         // Only the tail is ever shown; keep a little more than that so the
@@ -161,9 +168,12 @@ export function createCronGateRunner(config: Config): CronGateRunner {
       if (truncated) return;
       const bytes = Buffer.byteLength(event.chunk, 'utf8');
       if (stdoutBytes + bytes > CRON_GATE_OUTPUT_CAP_BYTES) {
-        stdout += Buffer.from(event.chunk, 'utf8')
-          .subarray(0, CRON_GATE_OUTPUT_CAP_BYTES - stdoutBytes)
-          .toString('utf8');
+        // Cut on a character boundary: a lead byte kept without the rest of
+        // its sequence would decode to U+FFFD.
+        const chunk = Buffer.from(event.chunk, 'utf8');
+        let end = CRON_GATE_OUTPUT_CAP_BYTES - stdoutBytes;
+        while (end > 0 && (chunk[end]! & 0xc0) === 0x80) end--;
+        stdout += chunk.subarray(0, end).toString('utf8');
         stdoutBytes = CRON_GATE_OUTPUT_CAP_BYTES;
         truncated = true;
         return;
@@ -198,6 +208,7 @@ export function createCronGateRunner(config: Config): CronGateRunner {
       return failed(`could not start: ${getErrorMessage(error)}`);
     }
     if (result.error) return failed(`could not start: ${result.error.message}`);
+    if (binary.signal.aborted) return failed('printed binary output');
     if (timeout.aborted) {
       return failed(`timed out after ${CRON_GATE_TIMEOUT_MS / 1000} s`);
     }

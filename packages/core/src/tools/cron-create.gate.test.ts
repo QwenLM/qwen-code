@@ -288,6 +288,8 @@ describe('CronCreateTool gate', () => {
     'LD_PRELOAD=/tmp/x.so bash -lc "./probe.sh"',
     "bash   -c './probe.sh'",
     '  ./probe.sh  ',
+    "timeout 10 bash -c './probe.sh --gate'",
+    "gh api 'repos/o/r/pulls?state=open&per_page=5'",
   ])(
     'shows in the dialog exactly the gate %j that is persisted and run',
     async (gate) => {
@@ -324,6 +326,11 @@ describe('CronCreateTool gate', () => {
     'sleep 5 &',
     'sleep 5 & echo done',
     "bash -c './probe.sh &'",
+    "nohup bash -c './probe.sh &'",
+    "sudo -u ci bash -c './probe.sh &'",
+    "command bash -c './probe.sh &'",
+    "env FOO=1 bash -c './probe.sh &'",
+    `bash -c "nohup sh -c './probe.sh &'"`,
   ])('rejects the gate %j at validation', (gate) => {
     expect(() => tool.build({ ...params, gate })).toThrow(/gate/);
   });

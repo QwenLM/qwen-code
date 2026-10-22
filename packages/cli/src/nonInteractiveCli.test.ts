@@ -38,6 +38,10 @@ import {
   LoopType,
   getToolCallFingerprint,
   CronScheduler,
+  Storage,
+  readCronTasks,
+  updateCronTasks,
+  withTaskGate,
   AUTONOMOUS_SENTINEL_CRON,
   AUTONOMOUS_SENTINEL_DYNAMIC,
   LOOP_SENTINEL_CRON,
@@ -8928,6 +8932,96 @@ describe('runNonInteractive', () => {
     await run;
     expect(scheduler.sessionSize).toBe(0);
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds open for a durable gated catch-up until its gate delivers', async () => {
+    // Durable jobs never pin the headless run, but start() flushes an
+    // overdue catch-up whose stamp lands before its gate decides: stopping
+    // the scheduler there would abort the gate and lose the slot for good.
+    setupMetricsMock();
+    const tmpDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'headless-gated-catch-up-'),
+    );
+    Storage.setRuntimeBaseDir(tmpDir);
+    const createdAt = Date.now() - 3 * 60 * 60_000;
+    await updateCronTasks(tmpDir, () => [
+      withTaskGate(
+        {
+          id: 'cu1',
+          cron: '0 * * * *',
+          prompt: 'overdue',
+          recurring: true,
+          createdAt,
+          lastFiredAt: createdAt,
+        },
+        './probe.sh',
+      ),
+    ]);
+    let settleGate:
+      | ((result: {
+          kind: 'output';
+          stdout: string;
+          truncated: boolean;
+          durationMs: number;
+        }) => void)
+      | undefined;
+    const scheduler = new CronScheduler(tmpDir, undefined, {
+      runGate: () =>
+        new Promise((resolve) => {
+          settleGate = resolve;
+        }),
+    });
+    try {
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      mockLlmClient.sendMessageStream.mockImplementation(() =>
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'ok' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          },
+        ]),
+      );
+
+      let finished = false;
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'test',
+        'p-cron-gate-catch-up',
+      ).then(() => {
+        finished = true;
+      });
+      await vi.waitFor(() => expect(settleGate).toBeDefined());
+      expect(scheduler.sessionSize).toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(finished).toBe(false);
+
+      settleGate!({
+        kind: 'output',
+        stdout: 'event: comment\n',
+        truncated: false,
+        durationMs: 1,
+      });
+      await run;
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(
+        JSON.stringify(mockLlmClient.sendMessageStream.mock.calls[1]![0]),
+      ).toContain('<gate-output>\\nevent: comment\\n</gate-output>');
+      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+      const [task] = await readCronTasks(tmpDir);
+      expect(task?.runs).toEqual([
+        expect.objectContaining({ kind: 'catch-up', gate: 'delivered' }),
+      ]);
+    } finally {
+      scheduler.destroy();
+      await (scheduler as unknown as { pendingRelease: Promise<unknown> })
+        .pendingRelease;
+      Storage.setRuntimeBaseDir(null);
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
   });
 
   describe('--json-schema structured output', () => {

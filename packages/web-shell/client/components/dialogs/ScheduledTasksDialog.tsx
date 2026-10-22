@@ -101,7 +101,7 @@ function describeRun(run: DaemonScheduledTaskRun, t: TranslateFn): string {
  * Mirrors `buildGatedManualRunPrompt` on the daemon (per-run tasks), which
  * the client cannot import.
  */
-export function gatedManualRunPrompt(gate: string, prompt: string): string {
+function gatedManualRunPrompt(gate: string, prompt: string): string {
   return [
     'Manual run of a gated scheduled task. The scheduler runs its gate command before each scheduled fire; for this manual run, run that command yourself first, as a shell command:',
     gate,

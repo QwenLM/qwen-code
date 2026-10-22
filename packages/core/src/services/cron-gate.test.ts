@@ -176,6 +176,53 @@ describe('createCronGateRunner', () => {
     expect(Buffer.byteLength(result.stdout)).toBe(CRON_GATE_OUTPUT_CAP_BYTES);
   });
 
+  it('cuts stdout on a character boundary', async () => {
+    // The cap falls inside the four bytes of the emoji.
+    scriptShell({ stdout: 'x'.repeat(CRON_GATE_OUTPUT_CAP_BYTES - 1) + '😀' });
+    const result = await createCronGateRunner(
+      makeConfig({ mode: ApprovalMode.YOLO }),
+    )('./probe.sh', { signal: signal(), approvedInProcess: false });
+    expect(result.kind).toBe('output');
+    if (result.kind !== 'output') return;
+    expect(result.truncated).toBe(true);
+    expect(result.stdout).toBe('x'.repeat(CRON_GATE_OUTPUT_CAP_BYTES - 1));
+  });
+
+  it('fails a gate that prints binary output and stops it', async () => {
+    let shellSignal: AbortSignal | undefined;
+    mockRuntimeShell.mockImplementation(
+      async (
+        _config: unknown,
+        _command: string,
+        _cwd: string,
+        onOutput: (event: ShellOutputEvent) => void,
+        abortSignal: AbortSignal,
+      ) => {
+        shellSignal = abortSignal;
+        onOutput({ type: 'binary_detected' });
+        return {
+          pid: 4242,
+          result: Promise.resolve({
+            rawOutput: Buffer.alloc(0),
+            output: '',
+            exitCode: abortSignal.aborted ? null : 0,
+            signal: null,
+            error: null,
+            aborted: abortSignal.aborted,
+          }),
+        };
+      },
+    );
+    const result = await createCronGateRunner(
+      makeConfig({ mode: ApprovalMode.YOLO }),
+    )('./probe.sh', { signal: signal(), approvedInProcess: false });
+    expect(result).toMatchObject({
+      kind: 'failed',
+      detail: 'printed binary output',
+    });
+    expect(shellSignal?.aborted).toBe(true);
+  });
+
   describe('unattended approval', () => {
     const run = (config: Config, approvedInProcess = false) =>
       createCronGateRunner(config)('./probe.sh', {
