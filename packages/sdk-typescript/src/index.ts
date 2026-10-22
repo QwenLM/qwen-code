@@ -171,6 +171,7 @@ export {
   type DaemonPendingPromptsResult,
   type DaemonRemovePendingPromptResult,
   type DaemonRemoveMidTurnMessageResult,
+  type DaemonSendMidTurnMessagesNowResult,
   // Daemon-emitted resync
   // signal for SSE reconnects past the ring eviction boundary.
   type DaemonStateResyncRequiredData,
@@ -274,8 +275,10 @@ export {
   type DaemonSessionSubscribeOptions,
   type DaemonSessionState,
   type DaemonSessionSummary,
+  type DaemonSessionShellTaskRuntime,
   type DaemonSessionSupportedCommandsStatus,
   type DaemonSessionTaskLifecycleStatus,
+  type DaemonSessionTaskRuntimeStatus,
   type DaemonSessionTaskStatus,
   type DaemonSessionTaskWithWorkflowStatus,
   type DaemonSessionTasksStatus,

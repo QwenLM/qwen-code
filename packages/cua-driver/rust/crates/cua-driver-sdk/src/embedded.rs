@@ -435,6 +435,8 @@ impl EmbeddedCuaDriverHost {
                 Stdio::null()
             })
             .kill_on_drop(true);
+        #[cfg(target_os = "windows")]
+        prevent_console_window(&mut command);
         for variable in safe_environment(&self.options.environment) {
             command.env(variable.name, variable.value);
         }
@@ -846,12 +848,14 @@ pub(crate) fn allowed_environment_name(name: &str) -> bool {
                 | "LOCALAPPDATA"
                 | "PROGRAMDATA"
                 | "DISPLAY"
-                | "WAYLAND_DISPLAY"
                 | "XDG_RUNTIME_DIR"
                 | "XDG_SESSION_TYPE"
                 | "DBUS_SESSION_BUS_ADDRESS"
                 | "XAUTHORITY"
                 | "CUA_LOG"
+                | "CUA_DRIVER_RS_TELEMETRY_ENABLED"
+                | "CUA_TELEMETRY_ENABLED"
+                | "CUA_DRIVER_RS_UPDATE_CHECK"
         )
 }
 
@@ -1127,6 +1131,18 @@ async fn terminate_startup_child(child: &mut Child, liveness: &mut ChildStdin) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn prevent_console_window(command: &mut Command) {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetConsoleCP() -> u32;
+    }
+    if unsafe { GetConsoleCP() } == 0 {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1194,10 +1210,35 @@ mod tests {
     #[test]
     fn environment_is_allowlisted_and_driver_controls_are_reserved() {
         assert!(allowed_environment_name("PATH"));
-        assert!(allowed_environment_name("WAYLAND_DISPLAY"));
+        assert!(!allowed_environment_name("WAYLAND_DISPLAY"));
         assert!(!allowed_environment_name("CUA_DRIVER_PERMISSION_MODE"));
         assert!(!allowed_environment_name("LD_PRELOAD"));
         assert!(!allowed_environment_name("NODE_OPTIONS"));
+    }
+
+    #[test]
+    fn embedded_environment_preserves_explicit_telemetry_and_update_preferences() {
+        for name in [
+            "CUA_DRIVER_RS_TELEMETRY_ENABLED",
+            "CUA_TELEMETRY_ENABLED",
+            "CUA_DRIVER_RS_UPDATE_CHECK",
+        ] {
+            let inherited = [(name.to_owned(), "0".to_owned())];
+            let values = merge_safe_environment(inherited.clone(), &[]);
+            assert!(values
+                .iter()
+                .any(|variable| variable.name == name && variable.value == "0"));
+
+            let values = merge_safe_environment(
+                inherited,
+                &[EmbeddedEnvironmentVariable {
+                    name: name.to_owned(),
+                    value: "false".to_owned(),
+                }],
+            );
+            assert_eq!(values.len(), 1);
+            assert_eq!(values[0].value, "false");
+        }
     }
 
     #[test]
@@ -1239,6 +1280,8 @@ mod tests {
     fn interactive_linux_session_environment_is_inherited() {
         let values = merge_safe_environment(
             [
+                ("DISPLAY".into(), ":7".into()),
+                ("XAUTHORITY".into(), "/tmp/cua-test-cookie".into()),
                 ("WAYLAND_DISPLAY".into(), "wayland-7".into()),
                 ("XDG_RUNTIME_DIR".into(), "/run/user/1000".into()),
                 ("XDG_SESSION_TYPE".into(), "wayland".into()),
@@ -1252,7 +1295,8 @@ mod tests {
         );
 
         for (name, value) in [
-            ("WAYLAND_DISPLAY", "wayland-7"),
+            ("DISPLAY", ":7"),
+            ("XAUTHORITY", "/tmp/cua-test-cookie"),
             ("XDG_RUNTIME_DIR", "/run/user/1000"),
             ("XDG_SESSION_TYPE", "wayland"),
             ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
@@ -1263,7 +1307,8 @@ mod tests {
         }
         assert!(!values
             .iter()
-            .any(|variable| variable.name == "AT_SPI_BUS_ADDRESS"));
+            .any(|variable| variable.name == "AT_SPI_BUS_ADDRESS"
+                || variable.name == "WAYLAND_DISPLAY"));
     }
 
     #[test]
@@ -1361,5 +1406,77 @@ mod tests {
 
         assert_eq!(host.state(), EmbeddedDriverHostState::Stopped);
         assert!(!socket_path.exists());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn daemon_console_window_follows_the_host_console() {
+        use std::os::windows::process::CommandExt as _;
+
+        const ROLE: &str = "CUA_DRIVER_SDK_TEST_CONSOLE_ROLE";
+        const HOST_PID: &str = "CUA_DRIVER_SDK_TEST_CONSOLE_HOST_PID";
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetConsoleWindow() -> *mut std::ffi::c_void;
+            fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
+        }
+        let rerun = [
+            "--exact",
+            "embedded::tests::daemon_console_window_follows_the_host_console",
+            "--nocapture",
+        ];
+        let assert_probe_passed = |output: std::process::Output| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        match std::env::var(ROLE).as_deref() {
+            Ok("probe-without-console") => {
+                let window = unsafe { GetConsoleWindow() };
+                assert!(
+                    window.is_null(),
+                    "a console window was opened for the daemon"
+                );
+            }
+            Ok("probe-with-console") => {
+                let host: u32 = std::env::var(HOST_PID).unwrap().parse().unwrap();
+                let mut attached = [0u32; 64];
+                let count = unsafe { GetConsoleProcessList(attached.as_mut_ptr(), 64) } as usize;
+                assert!(
+                    attached[..count.min(64)].contains(&host),
+                    "the daemon left its host's console"
+                );
+            }
+            Ok(host @ ("host-without-console" | "host-with-console")) => {
+                let mut probe = Command::new(std::env::current_exe().unwrap());
+                probe
+                    .args(rerun)
+                    .env(ROLE, host.replace("host-", "probe-"))
+                    .env(HOST_PID, std::process::id().to_string())
+                    .stdin(Stdio::null());
+                prevent_console_window(&mut probe);
+                assert_probe_passed(probe.output().await.unwrap());
+            }
+            _ => {
+                for (host, flags) in [
+                    ("host-without-console", DETACHED_PROCESS),
+                    ("host-with-console", CREATE_NO_WINDOW),
+                ] {
+                    let output = std::process::Command::new(std::env::current_exe().unwrap())
+                        .args(rerun)
+                        .env(ROLE, host)
+                        .creation_flags(flags)
+                        .output()
+                        .unwrap();
+                    assert_probe_passed(output);
+                }
+            }
+        }
     }
 }

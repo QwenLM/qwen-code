@@ -17,6 +17,7 @@ import { HostedMonitorSession } from './hosted-monitor-session.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 import {
   HostedMonitorWakeScheduler,
+  MonitorWakeTransientReadError,
   settlePendingMonitorInputs,
   wakeHasPriorAttempt,
   type HostedMonitorWakeTurn,
@@ -30,6 +31,7 @@ import {
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
+import { LlmRequestPreparationError } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 
 // monitor_run is enabled by the H3 enablement slice; the close-side settle
 // rig commits a notification input ahead of it, like the funnel suite does.
@@ -148,6 +150,111 @@ describe('HostedMonitorWakeScheduler', () => {
     expect(ran).toEqual([]);
     contend = false;
     await poll(() => ran.length === 1);
+    scheduler.close();
+  });
+
+  it('stops on a held turn without a retry or a settle-verify; the next kick re-derives', async () => {
+    const queue: HostedMonitorWakeTurn[] = [{ turnId: 'm:1', text: 'x' }];
+    let reads = 0;
+    let verdict: 'held' | 'settled' = 'held';
+    const scheduler = new HostedMonitorWakeScheduler(
+      {
+        next: async () => {
+          reads += 1;
+          return queue[0];
+        },
+        state: () => 'idle',
+        runTurn: async () => {
+          if (verdict === 'settled') queue.shift();
+          return verdict;
+        },
+        failed: () => {
+          throw new Error('pump must not fail here');
+        },
+      },
+      10,
+    );
+    scheduler.kick();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // A held turn takes no busy retry and no settle-verify: one read, no
+    // second inside the slow window (retryMs × 30 = 300 ms here).
+    expect(reads).toBe(1);
+    expect(queue).toHaveLength(1);
+    // …but the pump observes the wait on its own: the slow retry
+    // re-derives without any outside kick, so a decided Action is seen.
+    await poll(() => reads >= 2);
+    verdict = 'settled';
+    await poll(() => queue.length === 0);
+    scheduler.close();
+  });
+
+  it('retries a transiently faulting envelope read instead of failing the Session', async () => {
+    // One Store flap must not park the resident Session on failed(): the
+    // next read heals, the turn runs, and nothing ever blocks (R8 P1).
+    const queue: HostedMonitorWakeTurn[] = [{ turnId: 'm:1', text: 'x' }];
+    let flapped = false;
+    let failures = 0;
+    const ran: string[] = [];
+    const scheduler = new HostedMonitorWakeScheduler(
+      {
+        next: async () => {
+          if (!flapped) {
+            flapped = true;
+            throw new MonitorWakeTransientReadError('store flap');
+          }
+          return queue[0];
+        },
+        state: () => 'idle',
+        runTurn: async (turn) => {
+          ran.push(turn.turnId);
+          queue.shift();
+          return 'settled';
+        },
+        failed: () => {
+          failures += 1;
+        },
+      },
+      10,
+    );
+    scheduler.kick();
+    await poll(() => ran.length === 1);
+    expect(ran).toEqual(['m:1']);
+    expect(failures).toBe(0);
+    scheduler.close();
+  });
+
+  it('retries a transient settle-verify read instead of latching the Session blocked', async () => {
+    // The verify re-read walks the same durable path as the intake read:
+    // one Store flap there must not hand the resident Session to failed()
+    // after the turn already settled (R10 P2).
+    const queue: HostedMonitorWakeTurn[] = [{ turnId: 'm:1', text: 'x' }];
+    let reads = 0;
+    let failures = 0;
+    const ran: string[] = [];
+    const scheduler = new HostedMonitorWakeScheduler(
+      {
+        next: async () => {
+          reads += 1;
+          if (reads === 2)
+            throw new MonitorWakeTransientReadError('store flap');
+          return queue[0];
+        },
+        state: () => 'idle',
+        runTurn: async (turn) => {
+          ran.push(turn.turnId);
+          queue.shift();
+          return 'settled';
+        },
+        failed: () => {
+          failures += 1;
+        },
+      },
+      10,
+    );
+    scheduler.kick();
+    await poll(() => queue.length === 0);
+    expect(ran).toEqual(['m:1']);
+    expect(failures).toBe(0);
     scheduler.close();
   });
 
@@ -272,6 +379,296 @@ describe('HostedMonitorWakeScheduler', () => {
     scheduler.kick();
     await poll(() => ran.length === 2);
     expect(ran).toEqual(['m:1', 'm:2']);
+    scheduler.close();
+  });
+
+  it('holds the pump for exclusive work, then runs the kick that landed meanwhile', async () => {
+    const queue: HostedMonitorWakeTurn[] = [];
+    const ran: string[] = [];
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => queue[0],
+      state: () => 'idle',
+      runTurn: async (turn) => {
+        ran.push(turn.turnId);
+        queue.shift();
+        return 'settled';
+      },
+      failed: () => {
+        throw new Error('pump must not fail here');
+      },
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const exclusive = scheduler.exclusive(async () => {
+      queue.push({ turnId: 'm:1', text: 'x' });
+      scheduler.kick();
+      await held;
+    }, 1_000);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(ran).toEqual([]);
+    release();
+    await exclusive;
+    await poll(() => ran.length === 1);
+    expect(ran).toEqual(['m:1']);
+    scheduler.close();
+  });
+
+  it('hands a pass in flight over to an exclusive caller before a remembered kick', async () => {
+    let reads = 0;
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => {
+        reads += 1;
+        if (reads === 1) await opened;
+        return undefined;
+      },
+      state: () => 'idle',
+      runTurn: async () => 'settled',
+      failed: () => {
+        throw new Error('pump must not fail here');
+      },
+    });
+    scheduler.kick();
+    await poll(() => reads === 1);
+    let readsAtWork: number | undefined;
+    const exclusive = scheduler.exclusive(async () => {
+      readsAtWork = reads;
+    }, 1_000);
+    // Remembered for after both the pass and the work.
+    scheduler.kick();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(readsAtWork).toBeUndefined();
+    open();
+    await exclusive;
+    expect(readsAtWork).toBe(1);
+    await poll(() => reads === 2);
+    scheduler.close();
+  });
+
+  it('leaves the pump to a pass that outlasts the wait, without running the work', async () => {
+    const queue: HostedMonitorWakeTurn[] = [];
+    const ran: string[] = [];
+    let reads = 0;
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => {
+        reads += 1;
+        if (reads === 1) await opened;
+        return queue[0];
+      },
+      state: () => 'idle',
+      runTurn: async (turn) => {
+        ran.push(turn.turnId);
+        queue.shift();
+        return 'settled';
+      },
+      failed: () => {
+        throw new Error('pump must not fail here');
+      },
+    });
+    scheduler.kick();
+    await poll(() => reads === 1);
+    const work = vi.fn(async () => undefined);
+    await scheduler.exclusive(work, 20);
+    open();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // The expired waiter is gone: the pass idled the pump, so the next
+    // kick runs, and exclusive work starts at once.
+    queue.push({ turnId: 'm:1', text: 'x' });
+    scheduler.kick();
+    await poll(() => ran.length === 1);
+    expect(work).not.toHaveBeenCalled();
+    await scheduler.exclusive(work, 20);
+    expect(work).toHaveBeenCalledTimes(1);
+    scheduler.close();
+  });
+
+  it('releases the pump when exclusive work throws', async () => {
+    const queue: HostedMonitorWakeTurn[] = [];
+    const ran: string[] = [];
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => queue[0],
+      state: () => 'idle',
+      runTurn: async (turn) => {
+        ran.push(turn.turnId);
+        queue.shift();
+        return 'settled';
+      },
+      failed: () => {
+        throw new Error('pump must not fail here');
+      },
+    });
+    await expect(
+      scheduler.exclusive(async () => {
+        throw new Error('settle lost');
+      }, 1_000),
+    ).rejects.toThrow('settle lost');
+    queue.push({ turnId: 'm:1', text: 'x' });
+    scheduler.kick();
+    await poll(() => ran.length === 1);
+    scheduler.close();
+  });
+
+  it('hands the pump to one waiter at a time, first come first served, and holds it for each', async () => {
+    let reads = 0;
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => {
+        reads += 1;
+        if (reads === 1) await opened;
+        return undefined;
+      },
+      state: () => 'idle',
+      runTurn: async () => 'settled',
+      failed: () => {
+        throw new Error('pump must not fail here');
+      },
+    });
+    scheduler.kick();
+    await poll(() => reads === 1);
+    let holders = 0;
+    let mostHolders = 0;
+    let readsDuringWork = 0;
+    const order: string[] = [];
+    const work = (name: string) => async () => {
+      order.push(name);
+      holders += 1;
+      mostHolders = Math.max(mostHolders, holders);
+      // A kick during the handed-over work starts no pass.
+      scheduler.kick();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      readsDuringWork = Math.max(readsDuringWork, reads);
+      holders -= 1;
+    };
+    const both = Promise.all([
+      scheduler.exclusive(work('first'), 1_000),
+      scheduler.exclusive(work('second'), 1_000),
+    ]);
+    open();
+    await both;
+    expect(order).toEqual(['first', 'second']);
+    expect(mostHolders).toBe(1);
+    expect(readsDuringWork).toBe(1);
+    // The kicks the works remembered run once both are done.
+    await poll(() => reads === 2);
+    scheduler.close();
+  });
+
+  it('waits out a stalled hold once, not once per caller', async () => {
+    let reads = 0;
+    const gates: Array<() => void> = [];
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => {
+        reads += 1;
+        await new Promise<void>((resolve) => gates.push(resolve));
+        return undefined;
+      },
+      state: () => 'idle',
+      runTurn: async () => 'settled',
+      failed: () => {
+        throw new Error('pump must not fail here');
+      },
+    });
+    scheduler.kick();
+    await poll(() => reads === 1);
+    const work = vi.fn(async () => undefined);
+    await scheduler.exclusive(work, 20);
+    // The pass has outlasted one full wait: a later caller does not wait
+    // for it again.
+    expect(
+      await Promise.race([
+        scheduler.exclusive(work, 60_000).then(() => 'returned'),
+        new Promise((resolve) => setTimeout(() => resolve('waiting'), 500)),
+      ]),
+    ).toBe('returned');
+    expect(work).not.toHaveBeenCalled();
+    gates[0]();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // A new pass is a new hold, waited for again.
+    scheduler.kick();
+    await poll(() => reads === 2);
+    const handedOver = scheduler.exclusive(work, 60_000);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(work).not.toHaveBeenCalled();
+    gates[1]();
+    await handedOver;
+    expect(work).toHaveBeenCalledTimes(1);
+    scheduler.close();
+  });
+
+  it('lets its waiters go when closed, without their work', async () => {
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => {
+        await opened;
+        return undefined;
+      },
+      state: () => 'idle',
+      runTurn: async () => 'settled',
+      failed: () => {
+        throw new Error('pump must not fail here');
+      },
+    });
+    scheduler.kick();
+    const work = vi.fn(async () => undefined);
+    const waiting = scheduler.exclusive(work, 60_000);
+    scheduler.close();
+    // Let go at the close, long before its wait would expire.
+    await waiting;
+    // Nor does a later caller wait for the pass still in flight.
+    await scheduler.exclusive(work, 60_000);
+    expect(work).not.toHaveBeenCalled();
+    open();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // With that pass over, none can start: the work runs, so a Session
+    // whose close failed after its pump closed keeps its repair.
+    await scheduler.exclusive(work, 60_000);
+    expect(work).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-arms a pass that ends blocked when its settle-verify read finds nothing', async () => {
+    // A stopped Session's message turn: the settle-verify read filters the
+    // input the pass just blocked on.
+    let blocked = false;
+    let visible = true;
+    let recoveries = 0;
+    const scheduler = new HostedMonitorWakeScheduler(
+      {
+        next: async () =>
+          visible ? { turnId: 'msg:1', text: 'x' } : undefined,
+        state: () => (blocked ? 'blocked' : 'idle'),
+        runTurn: async () => {
+          blocked = true;
+          visible = false;
+          return 'recovery';
+        },
+        recoverBlocked: async () => {
+          recoveries += 1;
+          blocked = false;
+        },
+        failed: () => {
+          throw new Error('pump must not fail here');
+        },
+      },
+      10,
+    );
+    scheduler.kick();
+    await poll(() => recoveries === 1);
+    expect(blocked).toBe(false);
     scheduler.close();
   });
 });
@@ -405,8 +802,11 @@ describe('createMonitorWakeRunTurn', () => {
         session: access,
         sessionId,
         cwd: '/workspace',
+        // The completed settle the wake's result contract classifies —
+        // 'settled' now answers only a completed turn's settle shape.
         executeHostedTurn: async (promptId) => {
           ran = promptId;
+          return { systemPayload: { state: 'completed' } };
         },
         busy: () => access.active !== undefined,
         needsRecovery,
@@ -424,6 +824,7 @@ describe('createMonitorWakeRunTurn', () => {
     ['tool', () => new HostedToolRecoveryRequiredError(new Error('parked'))],
     ['mcp', () => new HostedMcpRecoveryRequiredError()],
     ['hook', () => new HostedHookRecoveryRequiredError()],
+    ['model preparation', () => new LlmRequestPreparationError('store lost')],
   ])(
     'leaves a %s recovery-required input unsettled rather than consuming it',
     async (_kind, makeCause) => {
@@ -446,7 +847,7 @@ describe('createMonitorWakeRunTurn', () => {
           needsRecovery,
           writeStderr: () => undefined,
         });
-        expect(await runTurn({ turnId: 'm:1', text: 'wake' })).toBe('settled');
+        expect(await runTurn({ turnId: 'm:1', text: 'wake' })).toBe('recovery');
         // A recovery-required turn parks like a parked prompt: blocked, its
         // input unconsumed, and no error turn_result minted on top of it.
         expect(access.blocked).toBe(true);
@@ -457,6 +858,61 @@ describe('createMonitorWakeRunTurn', () => {
       }
     },
   );
+
+  it('retries when the settle hook itself faults, without latching the Session (F6)', async () => {
+    const { session, lease } = await openWakeSession();
+    try {
+      const access: MonitorWakeTurnSession['session'] = {
+        active: undefined,
+        blocked: false,
+        managed: { sink: session.sink },
+      };
+      await session.sink.write({
+        uuid: 'chin-f6:user',
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: '/workspace',
+        version: 'test',
+        daemonPromptId: 'chin-f6',
+        message: { role: 'user', parts: [{ text: 'channel' }] },
+      } as ChatRecord);
+      const lines: string[] = [];
+      let attempts = 0;
+      const runTurn = createMonitorWakeRunTurn({
+        session: access,
+        sessionId,
+        cwd: '/workspace',
+        executeHostedTurn: async () => {
+          throw new Error('an interrupted turn must not re-drive');
+        },
+        busy: () => access.active !== undefined,
+        needsRecovery,
+        settleInterrupted: async () => {
+          attempts += 1;
+          if (attempts === 1) throw new Error('transport fault');
+          return 'settled';
+        },
+        writeStderr: (line) => {
+          lines.push(line);
+        },
+      });
+      expect(
+        await runTurn({ turnId: 'chin-f6', text: 'x', source: 'channel' }),
+      ).toBe('busy');
+      expect(access.blocked).toBe(false);
+      expect(
+        lines.some((line) => line.includes('could not settle this pass')),
+      ).toBe(true);
+      expect(
+        await runTurn({ turnId: 'chin-f6', text: 'x', source: 'channel' }),
+      ).toBe('settled');
+      expect(attempts).toBe(2);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
 
   it('settles a generic wake failure as an error turn_result and rethrows', async () => {
     const { session, lease } = await openWakeSession();
@@ -497,6 +953,144 @@ describe('createMonitorWakeRunTurn', () => {
       await lease.release().catch(() => undefined);
     }
   });
+
+  it('settles an interrupted channel wake turn instead of blocking the Session', async () => {
+    const { session, lease } = await openWakeSession();
+    try {
+      const access: MonitorWakeTurnSession['session'] = {
+        active: undefined,
+        blocked: false,
+        managed: { sink: session.sink },
+      };
+      await session.sink.write({
+        uuid: 'chin-1:user',
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: '/workspace',
+        version: 'test',
+        daemonPromptId: 'chin-1',
+        message: { role: 'user', parts: [{ text: 'channel' }] },
+      } as ChatRecord);
+      const lines: string[] = [];
+      const runTurn = createMonitorWakeRunTurn({
+        session: access,
+        sessionId,
+        cwd: '/workspace',
+        executeHostedTurn: async () => {
+          throw new Error('an interrupted turn must not re-drive');
+        },
+        busy: () => access.active !== undefined,
+        needsRecovery,
+        settleInterrupted: async () => 'settled',
+        writeStderr: (line) => {
+          lines.push(line);
+        },
+      });
+      expect(
+        await runTurn({ turnId: 'chin-1', text: 'channel', source: 'channel' }),
+      ).toBe('settled');
+      expect(access.blocked).toBe(false);
+      expect(
+        lines.some((line) => line.includes('settled without a reply')),
+      ).toBe(true);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
+
+  it('parks an interrupted turn held by its approval without blocking the Session', async () => {
+    // A durable approval owns the wait; blocking the Session here is what
+    // refused the approval's own resolve route (R4 P1).
+    const { session, lease } = await openWakeSession();
+    try {
+      const access: MonitorWakeTurnSession['session'] = {
+        active: undefined,
+        blocked: false,
+        managed: { sink: session.sink },
+      };
+      await session.sink.write({
+        uuid: 'chin-2:user',
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: '/workspace',
+        version: 'test',
+        daemonPromptId: 'chin-2',
+        message: { role: 'user', parts: [{ text: 'channel' }] },
+      } as ChatRecord);
+      const lines: string[] = [];
+      const runTurn = createMonitorWakeRunTurn({
+        session: access,
+        sessionId,
+        cwd: '/workspace',
+        executeHostedTurn: async () => {
+          throw new Error('a held turn must not re-drive');
+        },
+        busy: () => access.active !== undefined,
+        needsRecovery,
+        settleInterrupted: async () => 'held',
+        writeStderr: (line) => {
+          lines.push(line);
+        },
+      });
+      expect(
+        await runTurn({ turnId: 'chin-2', text: 'channel', source: 'channel' }),
+      ).toBe('held');
+      expect(access.blocked).toBe(false);
+      expect(access.active).toBeUndefined();
+      expect(
+        lines.some((line) => line.includes('keeps its durable wait')),
+      ).toBe(true);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
+
+  it('passes a transiently faulted recovery through as busy without blocking', async () => {
+    // The R6 P1 arm: a one-shot fault ends the attempt but the recovery
+    // proof still stands — busy, never a first-attempt terminal block.
+    const { session, lease } = await openWakeSession();
+    try {
+      const access: MonitorWakeTurnSession['session'] = {
+        active: undefined,
+        blocked: false,
+        managed: { sink: session.sink },
+      };
+      await session.sink.write({
+        uuid: 'chin-3:user',
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: '/workspace',
+        version: 'test',
+        daemonPromptId: 'chin-3',
+        message: { role: 'user', parts: [{ text: 'channel' }] },
+      } as ChatRecord);
+      const runTurn = createMonitorWakeRunTurn({
+        session: access,
+        sessionId,
+        cwd: '/workspace',
+        executeHostedTurn: async () => {
+          throw new Error('a busy recovery must not re-drive');
+        },
+        busy: () => access.active !== undefined,
+        needsRecovery,
+        settleInterrupted: async () => 'busy',
+        writeStderr: () => undefined,
+      });
+      expect(
+        await runTurn({ turnId: 'chin-3', text: 'channel', source: 'channel' }),
+      ).toBe('busy');
+      expect(access.blocked).toBe(false);
+      expect(access.active).toBeUndefined();
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
 });
 
 describe('settlePendingMonitorInputs', () => {
@@ -509,11 +1103,149 @@ describe('settlePendingMonitorInputs', () => {
   const BINDING = { runtimeBindingId: 'binding-1', generation: '1' };
   const temporaryDirectories = new Set<string>();
 
+  async function openRootedSession() {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-hosted-wake-settle-'),
+    );
+    temporaryDirectories.add(root);
+    const runtimeBaseDir = path.join(root, 'runtime');
+    const transcriptPath = path.join(root, 'chats', `${sessionId}.jsonl`);
+    await fs.mkdir(runtimeBaseDir, { recursive: true });
+    await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
+    const lease = await SessionWriterLease.acquire({
+      runtimeBaseDir,
+      sessionId,
+      transcriptPath,
+    });
+    const resourceStore = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir,
+      sessionKey,
+    });
+    const session = await openManagedSession({
+      runtimeBaseDir,
+      sessionId,
+      transcriptPath,
+      sessionKey,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'worker-test',
+      activationLeaseDurationMs: 60_000,
+      lease,
+      resourceStore,
+      create: {
+        definitionRef: await resourceStore.publish(
+          'managed-definition',
+          Buffer.from('{}', 'utf8'),
+        ),
+        rootSnapshotRef: await resourceStore.publish(
+          'managed-root',
+          Buffer.from('{}', 'utf8'),
+        ),
+        createdBy: 'test',
+      },
+    });
+    return { session, lease };
+  }
+
   afterEach(async () => {
     for (const directory of temporaryDirectories) {
       await fs.rm(directory, { recursive: true, force: true });
     }
     temporaryDirectories.clear();
+  });
+
+  it('projects nothing when no notification of the named sources awaits', async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-hosted-wake-settle-'),
+    );
+    temporaryDirectories.add(root);
+    const runtimeBaseDir = path.join(root, 'runtime');
+    const transcriptPath = path.join(root, 'chats', `${sessionId}.jsonl`);
+    await fs.mkdir(runtimeBaseDir, { recursive: true });
+    await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
+    const lease = await SessionWriterLease.acquire({
+      runtimeBaseDir,
+      sessionId,
+      transcriptPath,
+    });
+    try {
+      const resourceStore = LocalManagedSessionResourceStore.create({
+        runtimeBaseDir,
+        sessionKey,
+      });
+      const session = await openManagedSession({
+        runtimeBaseDir,
+        sessionId,
+        transcriptPath,
+        sessionKey,
+        cwd: '/workspace',
+        version: 'test',
+        workerId: 'worker-test',
+        activationLeaseDurationMs: 60_000,
+        lease,
+        resourceStore,
+        create: {
+          definitionRef: await resourceStore.publish(
+            'managed-definition',
+            Buffer.from('{}', 'utf8'),
+          ),
+          rootSnapshotRef: await resourceStore.publish(
+            'managed-root',
+            Buffer.from('{}', 'utf8'),
+          ),
+          createdBy: 'test',
+        },
+      });
+      const authority = session.authority;
+      const store = session.resources;
+      await authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: 'prompt-1',
+          sessionKey,
+          contentDigest: 'a'.repeat(64),
+        },
+        {
+          inputId: 'prompt-1',
+          turnId: 'prompt-1',
+          source: 'hosted-harness',
+          contentRef: await store.publish(
+            'managed-input',
+            Buffer.from('[{"type":"text","text":"hi"}]', 'utf8'),
+          ),
+          admissionRef: await store.publish(
+            'managed-admission',
+            Buffer.from('{}', 'utf8'),
+          ),
+          deadline: null,
+          wakeReason: 'input',
+        },
+      );
+      const projected = vi.spyOn(session.sink, 'project');
+      // Nothing under the named sources: the close pays no projection.
+      expect(
+        await settlePendingMonitorInputs({
+          authority,
+          sink: session.sink,
+          sessionId,
+          cwd: '/workspace',
+        }),
+      ).toBe(0);
+      expect(projected).not.toHaveBeenCalled();
+      // Name the prompt's own source and the settle does read and settle it.
+      expect(
+        await settlePendingMonitorInputs({
+          authority,
+          sink: session.sink,
+          sessionId,
+          cwd: '/workspace',
+          sources: ['hosted-harness'],
+        }),
+      ).toBe(1);
+      expect(projected).toHaveBeenCalled();
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
   });
 
   it('settles pending monitor notifications cancelled and leaves other inputs pending', async () => {
@@ -873,6 +1605,124 @@ describe('settlePendingMonitorInputs', () => {
           authority.eventsInSequenceRange(1, authority.committedSequence),
         ).map((input) => input.turnId),
       ).toEqual(['monitor-1:notify:1']);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
+
+  it('settles a child_agent notification on the same arm', async () => {
+    // R1-34: the child_agent branch of the close settle — the durable
+    // input settles cancelled under its own turn id, not lumped away.
+    const { session, lease } = await openRootedSession();
+    try {
+      const authority = session.authority;
+      const store = session.resources;
+      await authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: 'run-1:accept:notify',
+          sessionKey,
+          contentDigest: 'b'.repeat(64),
+        },
+        {
+          inputId: 'run-1:accept:notify',
+          turnId: 'run-1:accept:notify',
+          source: 'child_agent',
+          contentRef: await store.publish(
+            'managed-input',
+            Buffer.from('{"text":"<task-notification />"}', 'utf8'),
+          ),
+          deadline: null,
+          admissionRef: await store.publish(
+            'managed-admission',
+            Buffer.from('{}', 'utf8'),
+          ),
+          wakeReason: 'input',
+        },
+      );
+      expect(
+        pendingSessionInputs(
+          authority.eventsInSequenceRange(1, authority.committedSequence),
+        ).map((input) => input.turnId),
+      ).toEqual(['run-1:accept:notify']);
+      const settled = await settlePendingMonitorInputs({
+        authority,
+        sink: session.sink,
+        sessionId,
+        cwd: '/workspace',
+      });
+      expect(settled).toBe(1);
+      const settledEvents = authority
+        .readEvents()
+        .filter((event) => event.kind === 'turn.settled');
+      expect(settledEvents).toHaveLength(1);
+      expect(settledEvents[0].payload).toMatchObject({
+        turnId: 'run-1:accept:notify',
+        outcome: 'cancelled',
+        stopReason: 'session_closing',
+      });
+      expect(
+        pendingSessionInputs(
+          authority.eventsInSequenceRange(1, authority.committedSequence),
+        ),
+      ).toHaveLength(0);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
+
+  // #13803 (K2): a workflow child's acceptance notification reads as a
+  // monitor-family source through the default sources list — the close drain
+  // never has to name it.
+  it('pins the fallback: a workflow child notification also settles through the default sources list (production never takes it, the close drain names its own capability list)', async () => {
+    const { session, lease } = await openRootedSession();
+    try {
+      const authority = session.authority;
+      const store = session.resources;
+      await authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: 'run-1:accept:notify',
+          sessionKey,
+          contentDigest: 'b'.repeat(64),
+        },
+        {
+          inputId: 'run-1:accept:notify',
+          turnId: 'run-1:accept:notify',
+          source: 'workflow',
+          contentRef: await store.publish(
+            'managed-input',
+            Buffer.from('{"text":"<task-notification />"}', 'utf8'),
+          ),
+          deadline: null,
+          admissionRef: await store.publish(
+            'managed-admission',
+            Buffer.from('{}', 'utf8'),
+          ),
+          wakeReason: 'input',
+        },
+      );
+      const settled = await settlePendingMonitorInputs({
+        authority,
+        sink: session.sink,
+        sessionId,
+        cwd: '/workspace',
+      });
+      expect(settled).toBe(1);
+      const settledEvents = authority
+        .readEvents()
+        .filter((event) => event.kind === 'turn.settled');
+      expect(settledEvents).toHaveLength(1);
+      expect(settledEvents[0].payload).toMatchObject({
+        turnId: 'run-1:accept:notify',
+        outcome: 'cancelled',
+        stopReason: 'session_closing',
+      });
+      expect(
+        pendingSessionInputs(
+          authority.eventsInSequenceRange(1, authority.committedSequence),
+        ),
+      ).toHaveLength(0);
     } finally {
       await lease.release().catch(() => undefined);
     }

@@ -9,6 +9,8 @@ import type { SessionSourcesSnapshot } from './session-sources.js';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 
 import { type Config } from '../config/config.js';
+import type { ToolLifecycleRecord } from '../telemetry/tool-lifecycle.js';
+import type { RequestLifecycleRecord } from '../telemetry/request-lifecycle.js';
 import {
   backgroundTurnContext,
   type BackgroundNotificationTurn,
@@ -23,7 +25,7 @@ import {
   type SessionExecutionEngine,
   type SessionExecutionEnginePayload,
 } from './session-execution-engine.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
   PartListUnion,
@@ -65,9 +67,30 @@ import {
   SessionWriterLostError,
   SessionWriterUnavailableError,
   type SessionWriterCommitProof,
-  type SessionWriterLease,
+  SessionWriterLease,
 } from './session-writer-lease.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
+import {
+  getApiHistoryPromptId,
+  isApiHistoryDirectoryContext,
+} from '../utils/api-history-metadata.js';
+import { getStartupContextLength } from '../core/environmentContext.js';
+import { computeInitialTurnFromHistory } from './session-turn-state.js';
+import {
+  deleteTranscriptMessageGroups,
+  getTranscriptMessageGroups,
+  messageGroupsSnapshot,
+  MessageGroupDeletionError,
+  parseMessageGroupTranscript,
+  telemetryRecordIdentity,
+  type DeleteMessageGroupsRequest,
+  type DeleteMessageGroupsResult,
+  type MessageGroupsSnapshot,
+} from '../utils/message-group-deletion.js';
+import type {
+  AgentMentionRecordPayload,
+  AgentMessageRecordPayload,
+} from '../agents/session-agents/contract.js';
 import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
@@ -81,8 +104,6 @@ import {
   type BranchPoint,
   type BranchToolCallIdentity,
 } from './branch-points.js';
-import { getApiHistoryPromptId } from './session-api-history.js';
-
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
 /**
@@ -274,7 +295,9 @@ export type ChatRecordProvenance =
   | 'execution_output'
   | 'goal_control'
   | 'goal_runtime'
-  | 'system';
+  | 'system'
+  /** Written on behalf of a workspace agent (session multi-agent). */
+  | 'external_agent';
 
 export type RecordToolResultOptions = {
   subtype?: 'code_mode_tool_result';
@@ -295,6 +318,13 @@ function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
     revision: goalContext.revision,
     turnId: goalContext.turnId,
   };
+}
+
+/** An `agent_mention` / `agent_message` record found by its key. */
+export interface ExternalAgentRecordRef {
+  uuid: string;
+  /** The record's own ISO 8601 timestamp. */
+  timestamp: string;
 }
 
 /**
@@ -389,9 +419,15 @@ export interface ChatRecord {
     | 'code_mode_tool_result'
     | 'realtime_message'
     | 'turn_result'
+    | 'turn_attempt'
     | 'managed_session_header_v1'
     | 'managed_session_event_v1'
-    | 'managed_session_commit_v1';
+    | 'managed_session_commit_v1'
+    // Session multi-agent records (agents/session-agents/contract.ts). Both
+    // are `type: 'user'`: kept in model history, but never a real user
+    // prompt, a turn boundary, a title source, or a cold notification.
+    | 'agent_mention'
+    | 'agent_message';
   /** Explicit source classification used by Goal evidence validation. */
   provenance?: ChatRecordProvenance;
   /** Goal identity and logical turn that owned this model-facing record. */
@@ -451,6 +487,14 @@ export interface ChatRecord {
   usageMetadata?: GenerateContentResponseUsageMetadata;
   /** Model used for this response */
   model?: string;
+  /** Hosted assistant batch synthesized from explicit user Skill invocations. */
+  clientInitiatedSkills?: true;
+  /** Effective session settings when user input reaches the recorder. */
+  executionContext?: {
+    modelId: string;
+    authType?: string;
+    approvalMode: ApprovalMode;
+  };
   /** Context window size of the model used for this response */
   contextWindowSize?: number;
   /**
@@ -490,7 +534,9 @@ export interface ChatRecord {
     | BranchCheckpointRecordPayloadV1
     | GoalStateRecordPayloadV2
     | GoalTurnEndRecordPayload
-    | TurnResultRecordPayload;
+    | TurnResultRecordPayload
+    | AgentMessageRecordPayload
+    | AgentMentionRecordPayload;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
   agentId?: string;
@@ -506,6 +552,12 @@ export interface ChatRecord {
   agentRound?: number;
   /** Source kind for injected external input records. */
   externalInputKind?: 'message' | 'notification';
+  /**
+   * Idempotency key of an `agent_mention` / `agent_message` record the daemon
+   * asked for (`recordExternalAgentRecordStrict`). Persisted so a re-sent
+   * request after a restart finds the record instead of writing a second one.
+   */
+  externalRecordKey?: string;
 
   /**
    * Set on every record of a forked session to record its lineage.
@@ -621,8 +673,13 @@ export interface ChatCompressionRecordPayload {
    * resume reconstruction.
    */
   compressedHistory: Content[];
+  contextPrefixLength?: number;
+  /** Generated summary and restore entries preceding any retained raw input. */
+  summaryPrefixLength?: number;
   /** Prompt identities parallel to compressedHistory. */
   promptIds?: Array<string | null>;
+  /** Internal directory context, without changing the model-facing snapshot. */
+  directoryContextIndices?: number[];
   completedToolCallIds?: string[];
 }
 
@@ -825,7 +882,7 @@ export function sessionModelPayloadsEqual(
  * Stored payload for UI telemetry replay.
  */
 export interface UiTelemetryRecordPayload {
-  uiEvent: UiEvent;
+  uiEvent: UiEvent | RequestLifecycleRecord | ToolLifecycleRecord;
 }
 
 /**
@@ -958,8 +1015,10 @@ export interface TurnResultRecordPayload {
   error?: TurnResultErrorPayload;
   /** Epoch ms the turn started executing (agent clock). */
   startedAt?: number;
-  /** Epoch ms the user-cancel signal was received (agent clock). */
+  /** Epoch ms the cancellation signal was received (agent clock). */
   cancelledAt?: number;
+  /** Explicit user intent; legacy timestamps alone do not establish it. */
+  cancelReason?: 'user';
   /** Epoch ms the turn settled (agent clock). */
   endedAt: number;
   promptText?: string;
@@ -1002,6 +1061,10 @@ export function isTurnResultRecordPayload(
     !optionalString('stopReason', TURN_RESULT_IDENTIFIER_MAX_CHARS) ||
     !optionalTimestamp('startedAt') ||
     !optionalTimestamp('cancelledAt') ||
+    (payload['cancelReason'] !== undefined &&
+      (payload['cancelReason'] !== 'user' ||
+        payload['state'] !== 'cancelled' ||
+        payload['cancelledAt'] === undefined)) ||
     !optionalString('promptText', TURN_RESULT_TEXT_MAX_CHARS) ||
     !optionalBoolean('promptTextTruncated') ||
     !optionalString('resultText', TURN_RESULT_TEXT_MAX_CHARS) ||
@@ -1147,10 +1210,22 @@ export class ChatRecordingService {
   private handoffRequested = false;
   /** Prevents asynchronous metadata writers from becoming checkpoint siblings. */
   private topologyFence: TranscriptTopologyFence | undefined;
+  private readonly deletedTelemetryPromptIds = new Set<string>();
+  private readonly deletedTelemetryCallIds = new Set<string>();
   /** First async JSONL write failure; permanently degrades this recorder. */
   private writeFailure: Error | undefined;
   private integrityFailure: Error | undefined;
   private readonly writerLeaseRequired: boolean;
+  /**
+   * `externalRecordKey` -> record of the active chain, built from the
+   * transcript on first use and extended by every external record written.
+   */
+  private externalRecordIndex: Map<string, ExternalAgentRecordRef> | undefined;
+  private externalRecordIndexLoad:
+    | Promise<Map<string, ExternalAgentRecordRef>>
+    | undefined;
+  /** Bumped whenever recorder state is rebuilt; a stale index load is dropped. */
+  private externalRecordIndexGeneration = 0;
   /** In-memory cache of the current session's custom title (for re-append on exit) */
   private currentCustomTitle: string | undefined;
   /**
@@ -1353,6 +1428,7 @@ export class ChatRecordingService {
   ): void {
     this.lastRecordUuid = sessionData?.lastCompletedUuid ?? null;
     this.lastPersistedRecordUuid = this.lastRecordUuid;
+    this.resetExternalRecordIndex();
     this.currentCustomTitle = undefined;
     this.currentTitleSource = undefined;
     this.currentParentSessionId = undefined;
@@ -1426,6 +1502,7 @@ export class ChatRecordingService {
   private restoreProjectedState(state: ChatRecordingRestoreState): void {
     this.lastRecordUuid = state.lastCompletedUuid;
     this.lastPersistedRecordUuid = state.lastCompletedUuid;
+    this.resetExternalRecordIndex();
     this.activeBranchBaseUuid = state.lastCompletedUuid;
     this.turnParentUuids = [...state.turnParentUuids];
     this.currentCustomTitle = state.customTitle;
@@ -1735,6 +1812,10 @@ export class ChatRecordingService {
     if (this.topologyFence !== fence) return;
     this.topologyFence = undefined;
     for (const intent of fence.buffered) {
+      if (this.isDeletedTelemetry(intent.record)) {
+        intent.resolve?.();
+        continue;
+      }
       // Side artifacts keep updateActiveTail=false, but still move behind the
       // reserved checkpoint so they cannot become siblings of the completed
       // turn and invalidate the active transcript topology.
@@ -1984,6 +2065,129 @@ export class ChatRecordingService {
     if (this.writeFailure) throw this.writeFailure;
   }
 
+  supportsMessageGroupDeletion(): boolean {
+    return (
+      this.state === 'active' &&
+      (this.binding !== undefined || !this.writerLeaseRequired) &&
+      this.managedSink === undefined &&
+      this.writeFailure === undefined
+    );
+  }
+
+  private async ensureMessageGroupDeletionLease(): Promise<SessionWriterLease> {
+    if (this.binding) return this.binding.lease;
+    if (!this.supportsMessageGroupDeletion())
+      throw new MessageGroupDeletionError(
+        'unsupported',
+        'This session storage does not support message deletion',
+      );
+    const sessionId = this.getSessionId();
+    const lease = await SessionWriterLease.acquire({
+      runtimeBaseDir: this.config.storage.getRuntimeBaseDir(),
+      processKind: 'acp',
+      sessionId,
+      transcriptPath: this.ensureConversationFile(),
+      qwenVersion: this.config.getCliVersion(),
+    });
+    this.binding = { sessionId, lease };
+    await lease.assertOwnedAndUnchanged();
+    return lease;
+  }
+
+  async getMessageGroups(): Promise<MessageGroupsSnapshot> {
+    if (!this.supportsMessageGroupDeletion()) {
+      throw new MessageGroupDeletionError(
+        'unsupported',
+        'This session storage does not support message deletion',
+      );
+    }
+    return this.runWithWriteBarrier(async () => {
+      const text = this.binding
+        ? await this.binding.lease.readTranscript()
+        : await fs.promises
+            .readFile(this.ensureConversationFile(), 'utf8')
+            .catch((error: NodeJS.ErrnoException) => {
+              if (error.code === 'ENOENT') return '';
+              throw error;
+            });
+      const records = parseMessageGroupTranscript(text);
+      return {
+        snapshot: messageGroupsSnapshot(records),
+        groups: getTranscriptMessageGroups(records),
+      };
+    });
+  }
+
+  async deleteMessageGroups(
+    request: DeleteMessageGroupsRequest,
+  ): Promise<DeleteMessageGroupsResult> {
+    if (!this.supportsMessageGroupDeletion()) {
+      throw new MessageGroupDeletionError(
+        'unsupported',
+        'This session storage does not support message deletion',
+      );
+    }
+    if (this.topologyFence)
+      throw new Error('Transcript topology transaction already active');
+    const fence: TranscriptTopologyFence = { buffered: [] };
+    this.topologyFence = fence;
+    try {
+      return await this.runWithWriteBarrier(async () => {
+        const lease = await this.ensureMessageGroupDeletionLease();
+        const text = await lease.readTranscript();
+        const original = parseMessageGroupTranscript(text);
+        if (messageGroupsSnapshot(original) !== request.snapshot) {
+          throw new MessageGroupDeletionError(
+            'conflict',
+            'The session history changed; refresh before deleting',
+          );
+        }
+        const { records, result } = deleteTranscriptMessageGroups(
+          original,
+          request.groupIds,
+          {
+            ...this.createBaseRecord('system'),
+            promptId: `${this.getSessionId()}########${computeInitialTurnFromHistory(original, this.getSessionId())}`,
+          },
+        );
+        const updated = `${records.map((record) => JSON.stringify(record)).join('\n')}\n`;
+        await lease.replaceTranscript(
+          updated,
+          createHash('sha256').update(text).digest('hex'),
+        );
+        for (const id of [
+          ...result.removedApiPromptIds,
+          ...result.deletedPromptIds,
+        ]) {
+          this.deletedTelemetryPromptIds.add(id);
+        }
+        const retained = new Set(records.map((record) => record.uuid));
+        for (const record of original) {
+          if (retained.has(record.uuid)) continue;
+          for (const part of record.message?.parts ?? []) {
+            if (part.functionCall?.id)
+              this.deletedTelemetryCallIds.add(part.functionCall.id);
+          }
+        }
+        const active = prepareTranscriptRecords(records)
+          .records as ChatRecord[];
+        this.rebuildTurnBoundaries(active);
+        this.userDisplayTextsForTitle.length = 0;
+        for (const record of active) {
+          if (record.type === 'user' && record.subtype === undefined) {
+            this.trackUserDisplayTextForTitle(
+              (record.systemPayload as UserPromptRecordPayload | undefined)
+                ?.displayText,
+            );
+          }
+        }
+        return result;
+      });
+    } finally {
+      this.releaseTopologyFence(fence);
+    }
+  }
+
   async readActiveTranscriptChain(): Promise<readonly ChatRecord[]> {
     await this.flush();
     if (this.managedSink) {
@@ -2024,9 +2228,10 @@ export class ChatRecordingService {
         return result;
       } catch (error) {
         if (
-          error instanceof SessionWriterLostError ||
-          error instanceof SessionTranscriptChangedError ||
-          error instanceof SessionWriterUnavailableError
+          (this.binding !== undefined || this.writerLeaseRequired) &&
+          (error instanceof SessionWriterLostError ||
+            error instanceof SessionTranscriptChangedError ||
+            error instanceof SessionWriterUnavailableError)
         ) {
           throw this.enterWriteFailure(
             error,
@@ -2271,6 +2476,15 @@ export class ChatRecordingService {
     }
     this.chatsDirEnsured = false;
     this.cachedConversationFile = undefined;
+    this.resetExternalRecordIndex();
+  }
+
+  private getExecutionContext(): NonNullable<ChatRecord['executionContext']> {
+    return {
+      modelId: this.config.getModel(),
+      authType: this.config.getAuthType(),
+      approvalMode: this.config.getApprovalMode(),
+    };
   }
 
   /**
@@ -2295,6 +2509,7 @@ export class ChatRecordingService {
       this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
+        executionContext: this.getExecutionContext(),
         ...(daemonPromptId ? { daemonPromptId } : {}),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
@@ -2357,6 +2572,7 @@ export class ChatRecordingService {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
+        executionContext: this.getExecutionContext(),
         subtype: 'mid_turn_user_message',
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
@@ -2450,6 +2666,143 @@ export class ChatRecordingService {
         backgroundTask,
       ),
     );
+  }
+
+  /**
+   * Durably records a session multi-agent record (`agent_mention` or
+   * `agent_message`) the daemon asked the ACP child to write, and returns
+   * its uuid (the agents' read-cursor anchor) and its own timestamp, so a live
+   * update can carry exactly what replay will.
+   *
+   * Written as `type: 'user'` so the main model reads it as input on its next
+   * turn (resume rebuilds it through `appendApiHistoryRecord`). It never
+   * starts a turn, never feeds the auto title (only subtype-less user records
+   * do), and is never trimmed as a cold notification.
+   *
+   * Idempotent per `recordKey`, durably: the key is persisted on the record
+   * (`externalRecordKey`) and a repeat returns the existing record with
+   * `created: false`, also after a restart (see
+   * {@link findExternalAgentRecord}).
+   *
+   * Managed sessions: `ManagedSessionRecordSink.canCarry` has no mapping for
+   * these subtypes, so `appendRecordStrict` throws
+   * `ManagedSessionRecordRefusedError` before queueing. That refusal is left
+   * in place on purpose and propagates to the caller, which reports the
+   * feature as not supported in managed sessions.
+   * TODO(multi-agent): add a managed mapping if managed sessions need agents.
+   */
+  async recordExternalAgentRecordStrict(
+    input:
+      | {
+          kind: 'agent_mention';
+          modelText: string;
+          payload: AgentMentionRecordPayload;
+          recordKey: string;
+        }
+      | {
+          kind: 'agent_message';
+          modelText: string;
+          payload: AgentMessageRecordPayload;
+          recordKey: string;
+        },
+  ): Promise<ExternalAgentRecordRef & { created: boolean }> {
+    const existing = await this.findExternalAgentRecord(input.recordKey);
+    if (existing) return { ...existing, created: false };
+    const generation = this.externalRecordIndexGeneration;
+    const record: ChatRecord = {
+      ...this.createBaseRecord('user'),
+      subtype: input.kind,
+      provenance:
+        input.kind === 'agent_mention' && input.payload.author === undefined
+          ? 'real_user'
+          : 'external_agent',
+      message: createUserContent([{ text: input.modelText }]),
+      systemPayload: input.payload,
+      externalRecordKey: input.recordKey,
+      ...(input.kind === 'agent_message'
+        ? {
+            agentId: input.payload.author.agentId,
+            agentName: input.payload.author.name,
+            ...(input.payload.author.color
+              ? { agentColor: input.payload.author.color }
+              : {}),
+          }
+        : {}),
+    };
+    // Not part of any background notification turn.
+    delete record.backgroundTurn;
+    await this.appendRecordStrict(record);
+    const ref = { uuid: record.uuid, timestamp: record.timestamp };
+    // A rebuilt index (generation moved) reads this record from disk instead.
+    if (generation === this.externalRecordIndexGeneration) {
+      this.externalRecordIndex?.set(input.recordKey, ref);
+    }
+    return { ...ref, created: true };
+  }
+
+  /**
+   * The external record written for `recordKey` on the active chain, if any.
+   * The first call reads the transcript once (`readActiveTranscriptChain`);
+   * later calls are answered from memory. Throws when that read fails, so a
+   * caller never mistakes an unreadable transcript for a missing record.
+   */
+  async findExternalAgentRecord(
+    recordKey: string,
+  ): Promise<ExternalAgentRecordRef | undefined> {
+    return (await this.loadExternalRecordIndex()).get(recordKey);
+  }
+
+  private loadExternalRecordIndex(): Promise<
+    Map<string, ExternalAgentRecordRef>
+  > {
+    if (this.externalRecordIndex) {
+      return Promise.resolve(this.externalRecordIndex);
+    }
+    if (this.externalRecordIndexLoad) return this.externalRecordIndexLoad;
+    const generation = this.externalRecordIndexGeneration;
+    const load = (async () => {
+      const index = new Map<string, ExternalAgentRecordRef>();
+      // Nothing persisted yet (a fresh session, whose transcript cannot be
+      // loaded at all), or a Managed log, which refuses these records anyway.
+      if (this.lastPersistedRecordUuid !== null && !this.managedSink) {
+        for (const record of await this.readActiveTranscriptChain()) {
+          if (
+            typeof record.externalRecordKey === 'string' &&
+            (record.subtype === 'agent_mention' ||
+              record.subtype === 'agent_message')
+          ) {
+            index.set(record.externalRecordKey, {
+              uuid: record.uuid,
+              timestamp: record.timestamp,
+            });
+          }
+        }
+      }
+      return index;
+    })();
+    this.externalRecordIndexLoad = load;
+    void load.then(
+      (index) => {
+        if (this.externalRecordIndexLoad !== load) return;
+        this.externalRecordIndexLoad = undefined;
+        if (generation === this.externalRecordIndexGeneration) {
+          this.externalRecordIndex = index;
+        }
+      },
+      () => {
+        // Retried on the next call.
+        if (this.externalRecordIndexLoad === load) {
+          this.externalRecordIndexLoad = undefined;
+        }
+      },
+    );
+    return load;
+  }
+
+  private resetExternalRecordIndex(): void {
+    this.externalRecordIndexGeneration += 1;
+    this.externalRecordIndex = undefined;
+    this.externalRecordIndexLoad = undefined;
   }
 
   private recordNotificationLike(
@@ -2898,8 +3251,25 @@ export class ChatRecordingService {
       // Freeze the array so later live-history mutations cannot desynchronize
       // entries from the parallel promptIds array.
       const compressedHistory = [...payload.compressedHistory];
+      const previous = this.activeBranchRecords.findLast(
+        (record) => record.subtype === 'chat_compression',
+      )?.systemPayload as ChatCompressionRecordPayload | undefined;
+      const previousPrefix = previous?.summaryPrefixLength ?? 0;
+      const summaryPrefixLength =
+        payload.summaryPrefixLength ??
+        (previous &&
+        isDeepStrictEqual(
+          compressedHistory.slice(0, previousPrefix),
+          previous.compressedHistory.slice(0, previousPrefix),
+        )
+          ? previousPrefix
+          : 0);
       const promptIds = compressedHistory.map(
         (content) => getApiHistoryPromptId(content) ?? null,
+      );
+      const directoryContextIndices = compressedHistory.flatMap(
+        (content, index) =>
+          isApiHistoryDirectoryContext(content) ? [index] : [],
       );
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
@@ -2908,7 +3278,14 @@ export class ChatRecordingService {
         systemPayload: {
           ...payload,
           compressedHistory,
+          contextPrefixLength: getStartupContextLength(compressedHistory, {
+            includeCompressed: true,
+          }),
+          summaryPrefixLength,
           ...(promptIds.some(Boolean) ? { promptIds } : {}),
+          ...(directoryContextIndices.length
+            ? { directoryContextIndices }
+            : {}),
         },
       };
 
@@ -2921,7 +3298,9 @@ export class ChatRecordingService {
   /**
    * Records a UI telemetry event for replaying metrics on resume.
    */
-  recordUiTelemetryEvent(uiEvent: UiEvent): void {
+  recordUiTelemetryEvent(
+    uiEvent: UiEvent | RequestLifecycleRecord | ToolLifecycleRecord,
+  ): void {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
@@ -2929,11 +3308,20 @@ export class ChatRecordingService {
         subtype: 'ui_telemetry',
         systemPayload: { uiEvent },
       };
-
+      if (this.isDeletedTelemetry(record)) return;
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving ui telemetry record:', error);
     }
+  }
+
+  private isDeletedTelemetry(record: ChatRecord): boolean {
+    const { promptId, callId } = telemetryRecordIdentity(record);
+    return (
+      (promptId !== undefined &&
+        this.deletedTelemetryPromptIds.has(promptId)) ||
+      (callId !== undefined && this.deletedTelemetryCallIds.has(callId))
+    );
   }
 
   /**
@@ -3027,6 +3415,7 @@ export class ChatRecordingService {
    * `lastRecordUuid` to the last record in the chain.
    */
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
+    this.resetExternalRecordIndex();
     this.turnParentUuids = [];
     this.activeBranchRecords = [...messages];
     this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;
@@ -3040,7 +3429,9 @@ export class ChatRecordingService {
         record.subtype !== 'notification' &&
         record.subtype !== 'cron' &&
         record.subtype !== 'mid_turn_user_message' &&
-        record.subtype !== 'realtime_message'
+        record.subtype !== 'realtime_message' &&
+        record.subtype !== 'agent_mention' &&
+        record.subtype !== 'agent_message'
       ) {
         // Reconstructed histories can start mid-chain; the persisted edge is
         // the source of truth, not the previous item in this sliced list.
@@ -3504,12 +3895,36 @@ export class ChatRecordingService {
     await this.appendRecordStrict(record);
   }
 
+  /** A resumed attempt must supersede an old cancellation before model execution. */
+  async recordTurnAttempt(
+    promptId: string | undefined,
+    daemonPromptId: string,
+  ): Promise<void> {
+    if (
+      (promptId !== undefined &&
+        (typeof promptId !== 'string' ||
+          promptId.length === 0 ||
+          promptId.length > TURN_RESULT_IDENTIFIER_MAX_CHARS)) ||
+      typeof daemonPromptId !== 'string' ||
+      daemonPromptId.length === 0 ||
+      daemonPromptId.length > TURN_RESULT_IDENTIFIER_MAX_CHARS
+    ) {
+      throw new TypeError('Invalid turn attempt identity');
+    }
+    await this.appendRecordStrict({
+      ...this.createBaseRecord('system'),
+      subtype: 'turn_attempt',
+      promptId,
+      daemonPromptId,
+    });
+  }
+
   /**
    * Append the settled outcome of a turn. Best-effort by design: a
    * recording failure must never break turn settlement, so this uses the
    * non-strict append path (inactive/failed writers skip silently).
    */
-  recordTurnResult(payload: TurnResultRecordPayload): void {
+  recordTurnResult(payload: TurnResultRecordPayload, promptId?: string): void {
     if (!isTurnResultRecordPayload(payload)) {
       debugLogger.error(
         'Skipping turn result record that violates the bounded contract:',
@@ -3522,6 +3937,11 @@ export class ChatRecordingService {
         ...this.createBaseRecord('system'),
         type: 'system',
         subtype: 'turn_result',
+        ...(typeof promptId === 'string' &&
+        promptId.length > 0 &&
+        promptId.length <= TURN_RESULT_IDENTIFIER_MAX_CHARS
+          ? { promptId }
+          : {}),
         systemPayload: payload,
       };
       this.appendRecord(record);

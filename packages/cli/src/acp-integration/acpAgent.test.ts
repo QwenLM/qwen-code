@@ -1030,6 +1030,16 @@ vi.mock('./service/filesystem.js', () => ({
   AcpFileSystemService: vi.fn(),
 }));
 vi.mock('../config/settings.js', () => ({
+  getOperatorTrustSettings: (settings: LoadedSettings) => {
+    let enabled: boolean | undefined;
+    for (const scope of ['SystemDefaults', 'User', 'System']) {
+      enabled =
+        settings.forScope?.(
+          scope as import('../config/settings.js').SettingScope,
+        )?.settings.security?.folderTrust?.enabled ?? enabled;
+    }
+    return { security: { folderTrust: { enabled } } };
+  },
   SettingScope: { User: 'User', Workspace: 'Workspace' },
   loadSettings: vi.fn(),
   reloadEnvironment: vi.fn(() => ({ updatedKeys: [], removedKeys: [] })),
@@ -1219,6 +1229,8 @@ import {
   WorkflowCheckpointUnwritableError,
   WorkflowJournalUnavailableError,
   type Config,
+  type ContentGeneratorConfig,
+  type ContentGeneratorConfigSources,
   type GoalSnapshotV2,
   type WorkflowSnapshot,
 } from '@qwen-code/qwen-code-core';
@@ -1290,6 +1302,7 @@ import {
   CHANNEL_LIVENESS_VERSION,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
+  MID_TURN_SEND_NOW_METHOD,
   PROMPT_CANCEL_METHOD,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
@@ -2464,7 +2477,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
         getDefaultReasoningConfig: ReturnType<typeof vi.fn>;
-        getRecoveryStatus: ReturnType<typeof vi.fn>;
+        getRecoveryStatusForClient: ReturnType<typeof vi.fn>;
         reloadReasoningSelection: ReturnType<typeof vi.fn>;
         persistReasoningSelection: ReturnType<typeof vi.fn>;
         setSessionReasoningSelection: ReturnType<typeof vi.fn>;
@@ -2475,7 +2488,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         waitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
         cancelMcpAppCalls: ReturnType<typeof vi.fn>;
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
+        cancelPromptAdmission: ReturnType<typeof vi.fn>;
         enqueueBackgroundNotification: ReturnType<typeof vi.fn>;
+        appendExternalRecord: ReturnType<typeof vi.fn>;
         enableLiveScreenContext: ReturnType<typeof vi.fn>;
         buildAvailableCommandsSnapshot: ReturnType<typeof vi.fn>;
         installManagedConversationActivation: ReturnType<typeof vi.fn>;
@@ -2487,6 +2502,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         hasStandaloneRelocationBlockers: ReturnType<typeof vi.fn>;
         dispose: ReturnType<typeof vi.fn>;
         prompt: ReturnType<typeof vi.fn>;
+        sendMidTurnInputNow: ReturnType<typeof vi.fn>;
         releaseTodoStopGuardQueuedPromptWait: ReturnType<typeof vi.fn>;
         refreshWorkflowHistory: ReturnType<typeof vi.fn>;
         deleteWorkflowHistory: ReturnType<typeof vi.fn>;
@@ -2667,6 +2683,63 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await agentPromise;
     },
   );
+
+  it('returns Generated UI state from the actual owning session Config', async () => {
+    const innerConfig = await setupSessionMocks('ui-owner-session');
+    const generatedUi = { version: 1 as const, enabled: true };
+    let effectiveGeneratedUi: {
+      version: 1;
+      enabled: boolean;
+      reason?: string;
+    } = generatedUi;
+    Object.assign(innerConfig, {
+      getBundledGeneratedUiStatus: () => effectiveGeneratedUi,
+      getSessionRuntimeBaseDir: () => Storage.getRuntimeBaseDir(),
+    });
+    Object.assign(mockConfig, {
+      getBundledGeneratedUiStatus: () => ({ version: 1, enabled: false }),
+    });
+    const experimental = { generatedUi: true };
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings({ mcpServers: {}, experimental }),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    try {
+      const created = await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      expect(created).toMatchObject({
+        sessionId: 'ui-owner-session',
+        _meta: { generatedUi },
+      });
+      const context = () =>
+        agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionContext, {
+          sessionId: 'ui-owner-session',
+        });
+      experimental.generatedUi = false;
+      await expect(context()).resolves.toMatchObject({
+        sessionId: 'ui-owner-session',
+        state: { _meta: { generatedUi } },
+      });
+      effectiveGeneratedUi = {
+        version: 1,
+        enabled: false,
+        reason: 'policy-disabled',
+      };
+      await expect(context()).resolves.toMatchObject({
+        sessionId: 'ui-owner-session',
+        state: { _meta: { generatedUi: effectiveGeneratedUi } },
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
 
   it('passes trusted invocation context out of band and strips reserved metadata', async () => {
     await setupSessionMocks('trusted-session');
@@ -4547,6 +4620,101 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each([undefined, '', 'private-parent'])(
+    'H01/H04 preserves provenance and transport binding for %s',
+    async (capability) => {
+      const innerConfig = await setupSessionMocks('ancestor-session');
+      const target = await fs.realpath(process.cwd());
+      const linkRoot = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-ancestor-alias-'),
+      );
+      const alias = path.join(linkRoot, 'alias');
+      await fs.symlink(target, alias, 'junction');
+      innerConfig.getTargetDir = vi.fn().mockReturnValue(alias);
+      const extMethod = vi.fn(
+        async (_method: string, params: Record<string, unknown>) => ({
+          v: 1,
+          trusted: [params['sessionId'] === 'ancestor-session'],
+        }),
+      );
+      const { agent, agentPromise } = await bootAcpAgent(
+        {
+          privateParentCapability: capability,
+        },
+        extMethod,
+      );
+      try {
+        if (capability !== undefined) {
+          await expect(
+            agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+          ).rejects.toThrow('Private ACP parent is not initialized');
+          expect(loadCliConfig).not.toHaveBeenCalled();
+          await agent.initialize({
+            clientCapabilities: {},
+            _meta: {
+              'qwen-code/private-parent-capability': capability,
+            },
+          });
+        }
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: {
+            'qwen-code/private-parent-capability':
+              'client-metadata-is-not-provenance',
+          },
+        });
+        const provider =
+          vi.mocked(loadCliConfig).mock.calls[0]?.[9]
+            ?.workflowAncestorTrustProvider;
+        if (capability === undefined) {
+          expect(provider).toBeTypeOf('function');
+          await expect(
+            provider?.([path.dirname(target)], target),
+          ).resolves.toEqual([true]);
+        } else {
+          expect(provider).toBeTypeOf('function');
+          await expect(
+            provider?.([path.dirname(target)], target),
+          ).resolves.toEqual([true]);
+          expect(extMethod).toHaveBeenCalledWith(
+            'qwen/control/workflow/ancestor-trust',
+            {
+              v: 1,
+              sessionId: 'ancestor-session',
+              canonicalTargetDir: target,
+              ancestorDirs: [path.dirname(target)],
+            },
+          );
+        }
+        const caseAlias = path.join(
+          path.dirname(target),
+          path.basename(target).toUpperCase(),
+        );
+        if ((await fs.realpath(caseAlias).catch(() => undefined)) === target) {
+          innerConfig.getTargetDir.mockReturnValue(caseAlias);
+          await expect(
+            provider?.([path.dirname(target)], target),
+          ).resolves.toEqual([true]);
+        }
+        innerConfig.getSessionId.mockReturnValue('new-recording-session');
+        await expect(
+          provider?.([path.dirname(target)], target),
+        ).resolves.toEqual([true]);
+        if (capability !== undefined) {
+          expect(extMethod).toHaveBeenLastCalledWith(
+            'qwen/control/workflow/ancestor-trust',
+            expect.objectContaining({ sessionId: 'ancestor-session' }),
+          );
+        }
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+        await fs.rm(linkRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('forwards a caller-supplied sessionId from _meta to loadCliConfig', async () => {
     const innerConfig = await setupSessionMocks('meta-session');
     let configLoadSessionContext: string | undefined;
@@ -4676,6 +4844,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         const [settings, , , , , , , , , hostPolicy] =
           vi.mocked(loadCliConfig).mock.calls[0]!;
         expect(hostPolicy?.executionEngine).toBe('managed');
+        expect(hostPolicy?.workflowAncestorTrustProvider).toBeUndefined();
         // Its tools execute in the session's Runtime worker.
         expect(hostPolicy?.managedRuntimeEnvironment).toBe(
           managedRuntimeEnvironment,
@@ -4817,6 +4986,385 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ).rejects.toThrow(
         'A Managed ACP host is available only to a private managed ACP parent.',
       );
+    });
+
+    it('quarantines new Managed sessions until the unproven stop is proven', async () => {
+      await setupSessionMocks('managed-host-quarantine');
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        // The session's Config carries the host's quarantine sink.
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        expect(hostPolicy?.onManagedEngineQuarantine).toBeDefined();
+
+        const reason = new Error('the worker stop could not be proven');
+        hostPolicy!.onManagedEngineQuarantine!(true, reason);
+        // A session already open still closes while the engine is
+        // quarantined: close governs no admission.
+        await agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+          sessionId: 'managed-host-quarantine',
+        });
+        await expect(
+          agent.newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          }),
+        ).rejects.toMatchObject({
+          code: -32024,
+          message: expect.stringContaining('quarantined'),
+          data: { errorKind: 'managed_engine_quarantined' },
+        });
+        // A second reason piles on: admission stays refused.
+        const second = new Error('another ledger survived');
+        hostPolicy!.onManagedEngineQuarantine!(true, second);
+        await expect(
+          agent.newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          }),
+        ).rejects.toMatchObject({
+          code: -32024,
+          data: { errorKind: 'managed_engine_quarantined' },
+        });
+        expect(loadCliConfig).toHaveBeenCalledTimes(1);
+
+        // Proving one stop lifts only its reason; the other still holds.
+        hostPolicy!.onManagedEngineQuarantine!(false, second);
+        await expect(
+          agent.newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          }),
+        ).rejects.toMatchObject({ code: -32024 });
+        // Proving the last one reopens admission.
+        hostPolicy!.onManagedEngineQuarantine!(false, reason);
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        expect(loadCliConfig).toHaveBeenCalledTimes(2);
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+
+    it('refuses with a client-safe quarantine summary, not the sweep paths', async () => {
+      await setupSessionMocks('managed-host-quarantine-summary');
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        // The sweep's own error carries the absolute ledger path and the
+        // live pgids; neither belongs on the daemon's client-visible error.
+        // (A structural stand-in for LedgerSweepUnprovenError: the
+        // acp-integration boundary forbids importing serve/ internals.)
+        hostPolicy!.onManagedEngineQuarantine!(
+          true,
+          Object.assign(
+            new Error(
+              'The Managed Runtime ledger /tmp/x/managed-runtime/a.json names 1 process group(s) that could not be proven stopped: 4123.',
+            ),
+            {
+              workFile: '/tmp/x/managed-runtime/a.json',
+              remaining: [4123],
+            },
+          ),
+        );
+        await expect(
+          agent.newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          }),
+        ).rejects.toMatchObject({
+          code: -32024,
+          message: expect.stringContaining('a.json'),
+          data: { errorKind: 'managed_engine_quarantined' },
+        });
+        const refused = await agent
+          .newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          })
+          .catch((error: unknown) => error);
+        expect((refused as Error).message).toContain('1 process group(s)');
+        expect((refused as Error).message).not.toContain('/tmp/x');
+        expect((refused as Error).message).not.toContain('4123');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+
+    it('quarantines no read: the transcript replay gate carries no admission', async () => {
+      await setupSessionMocks('managed-host-quarantine-transcript');
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        const readPage = vi.fn().mockResolvedValue({
+          sessionId: VALID_SESSION_ID,
+          records: [{ uuid: 'u1' }],
+          hasMore: false,
+          gaps: [],
+          startTime: 'start',
+          lastUpdated: 'end',
+        });
+        vi.mocked(SessionTranscriptReader).mockImplementation(
+          () =>
+            ({
+              readPage,
+            }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+        );
+        hostPolicy!.onManagedEngineQuarantine!(
+          true,
+          new Error('the worker stop could not be proven'),
+        );
+        // The transcript read carries no admission, so the quarantined
+        // engine may not refuse it.
+        const result = await agent.extMethod(
+          SERVE_STATUS_EXT_METHODS.sessionTranscript,
+          { sessionId: VALID_SESSION_ID },
+        );
+        expect(result).toMatchObject({ hasMore: false });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+
+    it('names the count when more than one stop stays unproven', async () => {
+      await setupSessionMocks('managed-host-quarantine-count');
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        hostPolicy!.onManagedEngineQuarantine!(
+          true,
+          Object.assign(new Error('a: stop unproven'), {
+            workFile: '/tmp/x/managed-runtime/a.json',
+            remaining: [4123],
+          }),
+        );
+        hostPolicy!.onManagedEngineQuarantine!(
+          true,
+          Object.assign(new Error('b: stop unproven'), {
+            workFile: '/tmp/x/managed-runtime/b.json',
+            remaining: [4124],
+          }),
+        );
+        await expect(
+          agent.newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          }),
+        ).rejects.toMatchObject({
+          code: -32024,
+          message: expect.stringContaining('1 more reason(s)'),
+          data: { errorKind: 'managed_engine_quarantined' },
+        });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+
+    it('reports a shapeless sweep failure as a failure of the sweep, not of a ledger', async () => {
+      await setupSessionMocks('managed-host-quarantine-shapeless');
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        hostPolicy!.onManagedEngineQuarantine!(
+          true,
+          new Error('a directory of Runtime ledgers could not be listed'),
+        );
+        await expect(
+          agent.newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          }),
+        ).rejects.toMatchObject({
+          code: -32024,
+          message: expect.stringContaining(
+            'a sweep of its Runtime ledgers did not prove the stop',
+          ),
+          data: { errorKind: 'managed_engine_quarantined' },
+        });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+
+    it('summarizes an aggregated quarantine reason, skipping entries it cannot read', async () => {
+      await setupSessionMocks('managed-host-quarantine-summary-aggregate');
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        // The startup sweep aggregates one failure per ledger; an entry
+        // without a `remaining` list — a retired ledger's — is skipped.
+        // The summary names each identified ledger by basename and never
+        // leaks an absolute path or a pgid.
+        hostPolicy!.onManagedEngineQuarantine!(
+          true,
+          new AggregateError(
+            [
+              Object.assign(new Error('unproven a'), {
+                workFile: '/tmp/x/managed-runtime/a.json',
+                remaining: [4123],
+              }),
+              Object.assign(new Error('unproven b'), {
+                workFile: '/tmp/x/managed-runtime/b.json',
+                remaining: [4124, 4125],
+              }),
+              Object.assign(new Error('retired c'), {
+                workFile: '/tmp/x/managed-runtime/c.json',
+              }),
+            ],
+            'The Managed Runtime ledgers could not be fully swept',
+          ),
+        );
+        const refused = await agent
+          .newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          })
+          .catch((error: unknown) => error);
+        expect((refused as Error).message).toContain(
+          'a.json: 1 process group(s)',
+        );
+        expect((refused as Error).message).toContain(
+          'b.json: 2 process group(s)',
+        );
+        expect((refused as Error).message).not.toContain('/tmp/x');
+        expect((refused as Error).message).not.toContain('4123');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+
+    it('keeps the named entries when one ledger in the aggregate is unreadable', async () => {
+      await setupSessionMocks('managed-host-quarantine-summary-mixed');
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        // A transient-unreadable ledger throws with an empty remaining; the
+        // names and counts of every OTHER ledger the same sweep identified
+        // must survive beside the unreadable clause.
+        hostPolicy!.onManagedEngineQuarantine!(
+          true,
+          new AggregateError(
+            [
+              Object.assign(new Error('cannot be read'), {
+                workFile: '/tmp/x/managed-runtime/a.json',
+                remaining: [],
+              }),
+              Object.assign(new Error('unproven b'), {
+                workFile: '/tmp/x/managed-runtime/b.json',
+                remaining: [4124],
+              }),
+            ],
+            'The Managed Runtime ledgers could not be fully swept',
+          ),
+        );
+        const refused = await agent
+          .newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          })
+          .catch((error: unknown) => error);
+        expect((refused as Error).message).toContain(
+          'b.json: 1 process group(s)',
+        );
+        expect((refused as Error).message).toContain(
+          'a ledger it could not read',
+        );
+        expect((refused as Error).message).not.toContain('/tmp/x');
+        expect((refused as Error).message).not.toContain('4124');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+
+    it('names an unreadable ledger by what the client may inspect', async () => {
+      await setupSessionMocks('managed-host-quarantine-summary-unreadable');
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        // Both unreadable shapes — a transient read failure and bytes that
+        // are not a ledger — arrive with an empty remaining list: the
+        // refusal must say the ledger could not be read, never report
+        // 'ghost.json: 0 process group(s)' as if nothing were owed.
+        hostPolicy!.onManagedEngineQuarantine!(
+          true,
+          Object.assign(new Error('cannot be read'), {
+            workFile: '/tmp/x/managed-runtime/ghost.json',
+            remaining: [],
+          }),
+        );
+        const refused = await agent
+          .newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          })
+          .catch((error: unknown) => error);
+        expect((refused as Error).message).toContain(
+          'a ledger it could not read held the unproven stop',
+        );
+        expect((refused as Error).message).not.toContain('/tmp/x');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
     });
   });
 
@@ -5296,6 +5844,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       isWorkflowsEnabled: vi.fn().mockReturnValue(false),
       setWorkflowsEnabled: vi.fn(),
+      setWorkflowKeywordTriggerEnabled: vi.fn(),
       isSafeMode: vi.fn().mockReturnValue(false),
       getBareMode: vi.fn().mockReturnValue(false),
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
@@ -5563,7 +6112,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ) => {
         const sessionMock = {
           sessionId: createdSessionId,
-          getRecoveryStatus: vi.fn().mockReturnValue({
+          getRecoveryStatusForClient: vi.fn().mockReturnValue({
             kind: 'clean',
             canContinue: false,
           }),
@@ -5586,9 +6135,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
           cancelMcpAppCalls: vi.fn(),
           cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+          cancelPromptAdmission: vi.fn(
+            (controller: AbortController, reason: string) =>
+              controller.abort(reason),
+          ),
           enqueueBackgroundNotification: vi
             .fn()
             .mockResolvedValue({ accepted: true }),
+          appendExternalRecord: vi
+            .fn()
+            .mockResolvedValue({ recordId: 'record-1', created: true }),
           enableLiveScreenContext: vi.fn().mockResolvedValue(undefined),
           buildAvailableCommandsSnapshot: vi.fn(() =>
             buildAvailableCommandsSnapshot(createdConfig),
@@ -5606,6 +6162,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             .mockResolvedValue(undefined),
           collectActiveWorkHolds: vi.fn().mockReturnValue([]),
           hasStandaloneRelocationBlockers: vi.fn().mockReturnValue(false),
+          recoverMessageDeletionContext: vi.fn().mockResolvedValue(undefined),
           assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
           dispose: vi.fn(),
           emitGoalStatus: vi.fn(),
@@ -5629,6 +6186,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           setSessionReasoningSelection: vi.fn(),
           getSessionReasoningSelection: vi.fn(),
           hardSuspendTodoStopGuard: vi.fn(),
+          sendMidTurnInputNow: vi.fn(),
           releaseTodoStopGuardQueuedPromptWait: vi.fn().mockReturnValue(true),
           isIdle: vi.fn().mockReturnValue(true),
           isTurnIdle: vi.fn().mockReturnValue(true),
@@ -5643,7 +6201,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     return innerConfig;
   }
 
-  async function bootAcpAgent(options?: Parameters<typeof runAcpAgent>[3]) {
+  async function bootAcpAgent(
+    options?: Parameters<typeof runAcpAgent>[3],
+    extMethod?: (
+      method: string,
+      params: Record<string, unknown>,
+    ) => Promise<Record<string, unknown>>,
+  ) {
     const agentPromise = runAcpAgent(
       mockConfig,
       makeSessionSettings(),
@@ -5651,11 +6215,19 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       options,
     );
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    let connectionReady = false;
     const agent = capturedAgentFactory!({
+      ...(extMethod ? { extMethod } : {}),
       get closed() {
+        if (!connectionReady) {
+          throw new Error(
+            'ACP connection is not initialized during agent construction',
+          );
+        }
         return mockConnectionState.promise;
       },
     }) as AgentLike;
+    connectionReady = true;
     return { agent, agentPromise };
   }
 
@@ -6930,43 +7502,73 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('acknowledges prompt cancellation after the tracked prompt settles', async () => {
+  it('passes a send-now request for queued mid-turn messages to its session', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     await setupSessionMocks(sessionId);
     const { agent, agentPromise } = await bootAcpAgent();
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    let finishPrompt: ((value: unknown) => void) | undefined;
-    lastSessionMock?.prompt.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          finishPrompt = resolve;
-        }),
-    );
-    const prompt = agent.prompt({ sessionId, prompt: [] });
 
-    await vi.waitFor(() => expect(lastSessionMock?.prompt).toHaveBeenCalled());
-    const cancellationSignal = lastSessionMock?.prompt.mock.calls[0]?.[2] as
-      | AbortSignal
-      | undefined;
-
-    let cancellationSettled = false;
-    const cancellation = agent
-      .extMethod(PROMPT_CANCEL_METHOD, { sessionId })
-      .finally(() => {
-        cancellationSettled = true;
-      });
-    await vi.waitFor(() => expect(cancellationSignal?.aborted).toBe(true));
-    expect(cancellationSettled).toBe(false);
-    expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
-    expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
-
-    finishPrompt?.({ stopReason: 'cancelled' });
-    await expect(cancellation).resolves.toEqual({ cancelled: true });
-    await prompt;
+    await expect(
+      agent.extMethod(MID_TURN_SEND_NOW_METHOD, { sessionId }),
+    ).resolves.toEqual({});
+    expect(lastSessionMock?.sendMidTurnInputNow).toHaveBeenCalledTimes(1);
+    await expect(
+      agent.extMethod(MID_TURN_SEND_NOW_METHOD, {
+        sessionId: '22222222-2222-2222-2222-2222-222222222222',
+      }),
+    ).resolves.toEqual({});
+    expect(lastSessionMock?.sendMidTurnInputNow).toHaveBeenCalledTimes(1);
 
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each([
+    [undefined, 'qwen:user-cancel'],
+    [{ 'qwen.cancelReason': 'interrupted' }, 'qwen:prompt-interrupted'],
+  ])(
+    'acknowledges prompt cancellation after the tracked prompt settles with metadata=%s',
+    async (meta, reason) => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      await setupSessionMocks(sessionId);
+      const { agent, agentPromise } = await bootAcpAgent();
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      let finishPrompt: ((value: unknown) => void) | undefined;
+      lastSessionMock?.prompt.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finishPrompt = resolve;
+          }),
+      );
+      const prompt = agent.prompt({ sessionId, prompt: [] });
+
+      await vi.waitFor(() =>
+        expect(lastSessionMock?.prompt).toHaveBeenCalled(),
+      );
+      const cancellationSignal = lastSessionMock?.prompt.mock.calls[0]?.[2] as
+        | AbortSignal
+        | undefined;
+
+      let cancellationSettled = false;
+      const cancellation = agent
+        .extMethod(PROMPT_CANCEL_METHOD, { sessionId, _meta: meta })
+        .finally(() => {
+          cancellationSettled = true;
+        });
+      await vi.waitFor(() => expect(cancellationSignal?.aborted).toBe(true));
+      expect(cancellationSignal?.reason).toBe(reason);
+      expect(cancellationSettled).toBe(false);
+      expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+      expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
+
+      finishPrompt?.({ stopReason: 'cancelled' });
+      await expect(cancellation).resolves.toEqual({ cancelled: true });
+      await prompt;
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('acknowledges cancellation as a no-op when no prompt call is active', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
@@ -7017,6 +7619,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     await agent.cancel({ sessionId: callerSessionId });
     expect(admissionSignal?.aborted).toBe(true);
+    expect(admissionSignal?.reason).toBe('qwen:user-cancel');
 
     releaseAdmission();
     await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
@@ -7748,6 +8351,101 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each(['success', 'failure', 'cancelled', 'partial-failure'])(
+    'invalidates private ancestor replies across a %s cwd transition',
+    async (outcome) => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const root = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-ancestor-cd-')),
+      );
+      const target = path.join(root, 'nested');
+      await fs.mkdir(target);
+      let currentDir = root;
+      const innerConfig = await setupSessionMocks(sessionId);
+      let releaseCd!: () => void;
+      const cdBlocked = new Promise<void>((resolve) => {
+        releaseCd = resolve;
+      });
+      let enteredCd!: () => void;
+      const cdEntered = new Promise<void>((resolve) => {
+        enteredCd = resolve;
+      });
+      Object.assign(innerConfig, {
+        getTargetDir: vi.fn(() => currentDir),
+        isRestrictiveSandbox: vi.fn().mockReturnValue(false),
+        relocateWorkingDirectory: vi.fn(async () => {
+          currentDir = target;
+          enteredCd();
+          await cdBlocked;
+          if (outcome !== 'success') {
+            if (outcome !== 'partial-failure') currentDir = root;
+            throw new Error('cd ' + outcome);
+          }
+          return {};
+        }),
+      });
+      Object.assign(innerConfig.getLlmClient(), {
+        addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
+      });
+      const extMethod = vi.fn().mockResolvedValue({ v: 1, trusted: [true] });
+      const { agent, agentPromise } = await bootAcpAgent(
+        { privateParentCapability: 'private-parent' },
+        extMethod,
+      );
+      try {
+        await agent.initialize({
+          clientCapabilities: {},
+          _meta: { 'qwen-code/private-parent-capability': 'private-parent' },
+        });
+        await agent.newSession({ cwd: root, mcpServers: [] });
+        const provider =
+          vi.mocked(loadCliConfig).mock.calls[0]![9]!
+            .workflowAncestorTrustProvider!;
+        let releaseTrust!: (value: Record<string, unknown>) => void;
+        extMethod.mockReturnValueOnce(
+          new Promise((resolve) => {
+            releaseTrust = resolve;
+          }),
+        );
+        const pending = provider([path.dirname(root)], root);
+        const cd = agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+          sessionId,
+          path: target,
+        });
+        const settledCd = cd.then(
+          () => undefined,
+          () => undefined,
+        );
+        await cdEntered;
+        releaseTrust({ v: 1, trusted: [true] });
+        await expect(pending).resolves.toEqual([false]);
+        extMethod.mockClear();
+        await expect(provider([root], target)).resolves.toEqual([false]);
+        expect(extMethod).not.toHaveBeenCalled();
+        releaseCd();
+        if (outcome === 'success')
+          await expect(cd).resolves.toMatchObject({ newCwd: target });
+        else await expect(cd).rejects.toThrow('cd ' + outcome);
+        await settledCd;
+        if (outcome === 'partial-failure') {
+          extMethod.mockClear();
+          await expect(provider([path.dirname(root)], root)).resolves.toEqual([
+            false,
+          ]);
+          expect(extMethod).not.toHaveBeenCalled();
+        }
+        await expect(
+          provider([path.dirname(currentDir)], currentDir),
+        ).resolves.toEqual([true]);
+      } finally {
+        releaseCd();
+        mockConnectionState.resolve();
+        await agentPromise;
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('rechecks a no-op working-directory change after a concurrent relocation', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
@@ -9567,6 +10265,82 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(
       lastSessionMock?.enqueueBackgroundNotification,
     ).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('lets the trusted daemon bridge write a session agent record', async () => {
+    const sessionId = 'session-A';
+    await setupSessionMocks(sessionId);
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      { privateParentCapability: 'expected-capability' },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const request = {
+      kind: 'agent_message',
+      recordKey: 'run-1:result',
+      modelText: '<agent_message from="claude-B">done</agent_message>',
+      payload: {
+        displayText: 'done',
+        author: { agentId: 'agent-1', name: 'claude-B' },
+        runId: 'run-1',
+        status: 'completed',
+      },
+    };
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionExternalRecord, {
+        sessionId,
+        ...request,
+      }),
+    ).resolves.toEqual({ sessionId, recordId: 'record-1', created: true });
+    expect(lastSessionMock!.appendExternalRecord).toHaveBeenCalledWith(request);
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionExternalRecord, {
+        sessionId,
+        ...request,
+        payload: { ...request.payload, status: 'running' },
+      }),
+    ).rejects.toThrowError(/Invalid agent_message payload.status/);
+    expect(lastSessionMock!.appendExternalRecord).toHaveBeenCalledTimes(1);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects session agent records from an untrusted ACP client', async () => {
+    const sessionId = 'session-A';
+    await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.initialize({ clientCapabilities: {} });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionExternalRecord, {
+        sessionId,
+        kind: 'agent_mention',
+        recordKey: 'forged',
+        modelText: '<agent_mention>forged</agent_mention>',
+        payload: { displayText: 'forged', mentionedAgentIds: [] },
+      }),
+    ).rejects.toThrowError(/trusted private ACP parent/);
+    expect(lastSessionMock?.appendExternalRecord).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -11447,6 +12221,149 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each([
+    ['samplingParams', false],
+    ['extra_body', false],
+    ['extra_body', true],
+  ] as const)(
+    'projects final DeepSeek %s.model capabilities in live workspace status (auxiliary only: %s)',
+    async (source, fastOnly) => {
+      const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+      mockConfig = {
+        ...mockConfig,
+        getTargetDir: vi.fn(() => '/work/status'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'deepseek-v4.1-flash-1017'),
+        getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'deepseek-v4.1-flash-1017',
+            label: 'Flash',
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+          },
+          {
+            id: 'deepseek-v4-pro',
+            label: 'Pro',
+            fastOnly,
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+          },
+        ]),
+        getResolvedModelConfig: vi.fn((_auth: AuthType, id: string) => ({
+          baseUrl,
+          generationConfig:
+            id === 'deepseek-v4.1-flash-1017'
+              ? { [source]: { model: 'deepseek-v4-pro' } }
+              : {},
+          capabilities: {
+            reasoning: {
+              thinking: true,
+              disableField: 'enable_thinking',
+              efforts: [id === 'deepseek-v4-pro' ? 'max' : 'low'],
+              defaultEffort: id === 'deepseek-v4-pro' ? 'max' : 'low',
+            },
+          },
+        })),
+      } as unknown as Config;
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const status = await agent.extMethod(
+          SERVE_STATUS_EXT_METHODS.workspaceProviders,
+          {},
+        );
+        expect(status).toMatchObject({
+          providers: [
+            {
+              models: [
+                {
+                  baseModelId: 'deepseek-v4.1-flash-1017',
+                  configOptions: [
+                    {
+                      currentValue: 'max',
+                      options: [{ value: 'none' }, { value: 'max' }],
+                    },
+                  ],
+                },
+                ...(!fastOnly
+                  ? [
+                      {
+                        baseModelId: 'deepseek-v4-pro',
+                        configOptions: [
+                          {
+                            currentValue: 'max',
+                            options: [{ value: 'none' }, { value: 'max' }],
+                          },
+                        ],
+                      },
+                    ]
+                  : []),
+              ],
+            },
+          ],
+        });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it('projects DeepSeek route defaults in the live workspace provider status', async () => {
+    const endpoints = [
+      'https://api.deepseek.com/v1',
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    ];
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn(() => '/work/status'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getModel: vi.fn(() => 'deepseek-v4-pro'),
+      getCurrentModelRegistryBaseUrl: vi.fn(() => endpoints[0]),
+      getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+      getAllConfiguredModels: vi.fn(() =>
+        endpoints.map((baseUrl) => ({
+          id: 'deepseek-v4-pro',
+          label: baseUrl,
+          authType: AuthType.USE_OPENAI,
+          baseUrl,
+          registryBaseUrl: baseUrl,
+        })),
+      ),
+      getResolvedModelConfig: vi.fn(
+        (_auth: AuthType, _id: string, baseUrl?: string) => ({
+          baseUrl,
+          generationConfig:
+            baseUrl === endpoints[0]
+              ? { reasoning: { effort: 'low' } }
+              : { extra_body: { reasoning: { effort: 'max' } } },
+        }),
+      ),
+    } as unknown as Config;
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      const status = await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.workspaceProviders,
+        {},
+      );
+      expect(status['errors']).toBeUndefined();
+      const models = (
+        status['providers'] as Array<{
+          models: Array<{ modelId: string; configOptions?: unknown[] }>;
+        }>
+      ).flatMap((provider) => provider.models);
+      expect(models).toHaveLength(2);
+      expect(
+        models.every((model) => model.modelId.startsWith('qwen-route:v1:')),
+      ).toBe(true);
+      expect(models[0]?.configOptions).toMatchObject([{ currentValue: 'low' }]);
+      expect(models[1]?.configOptions).toMatchObject([{ currentValue: 'max' }]);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('projects reasoning preview only for stable non-runtime qwen3.8-max', async () => {
     mockConfig = {
       ...mockConfig,
@@ -12464,6 +13381,66 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
+  it.each(['samplingParams', 'extra_body'] as const)(
+    'rejects Low and confirms Max for final DeepSeek %s.model in an ACP session',
+    async (source) => {
+      const sessionId = 'deepseek-static-model';
+      const innerConfig = await setupSessionMocks(sessionId);
+      const generation = innerConfig.getContentGeneratorConfig();
+      Object.assign(generation, {
+        model: 'deepseek-v4.1-flash-1017',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        reasoning: { effort: 'low' },
+        [source]: { model: 'deepseek-v4-pro' },
+      });
+      innerConfig.getModel = vi.fn(() => generation.model);
+      innerConfig.getAuthType = vi.fn(() => AuthType.USE_OPENAI);
+      innerConfig.getReasoningEffort = vi.fn(() =>
+        generation.reasoning ? generation.reasoning.effort : undefined,
+      );
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const response = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+        })) as NewSessionResponse;
+        expect(
+          response.configOptions?.find(
+            (option) => option.id === 'reasoning_effort',
+          ),
+        ).toMatchObject({
+          currentValue: 'high',
+          options: [{ value: 'none' }, { value: 'high' }, { value: 'max' }],
+        });
+        await expect(
+          agent.setSessionConfigOption({
+            sessionId,
+            configId: 'reasoning_effort',
+            value: 'low',
+          }),
+        ).rejects.toThrow('Unknown reasoning effort: low');
+        const selected = (await agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'max',
+        })) as {
+          configOptions: NonNullable<NewSessionResponse['configOptions']>;
+        };
+        expect(
+          selected.configOptions.find(
+            (option) => option.id === 'reasoning_effort',
+          )?.currentValue,
+        ).toBe('max');
+        expect(generation.reasoning).toEqual({ effort: 'max' });
+        expect(generation[source]).toEqual({ model: 'deepseek-v4-pro' });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
   it('exposes and applies the ACP reasoning effort selector', async () => {
     const sessionId = 'reasoning-effort-session';
     const innerConfig = await setupSessionMocks(sessionId);
@@ -12745,6 +13722,78 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('rolls back explicit DeepSeek off provenance when persisting default fails', async () => {
+    const sessionId = 'deepseek-failed-default';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation: ContentGeneratorConfig = {
+      model: 'deepseek-flash',
+      authType: AuthType.USE_OPENAI,
+      baseUrl: 'https://api.deepseek.com/v1',
+      reasoning: false,
+      extra_body: {
+        thinking: { type: 'disabled' },
+        reasoning: { effort: 'max' },
+      },
+    };
+    const before = structuredClone(generation);
+    const rebuildable = { ...generation };
+    const source = {
+      kind: 'settings',
+      settingsPath: 'model.reasoningEffort',
+    } as const;
+    const sources: ContentGeneratorConfigSources = { reasoning: source };
+    const rebuildableSources: ContentGeneratorConfigSources = {
+      reasoning: source,
+    };
+    Object.assign(innerConfig.getModelsConfig(), {
+      getGenerationConfig: () => rebuildable,
+      getGenerationConfigSources: () => rebuildableSources,
+    });
+    innerConfig.getModel = vi.fn(() => generation.model);
+    innerConfig.getAuthType = vi.fn(() => AuthType.USE_OPENAI);
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    Object.assign(innerConfig, {
+      getContentGeneratorConfigSources: vi.fn(() => sources),
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      lastSessionMock!.getDefaultReasoningConfig.mockReturnValue(false);
+      lastSessionMock!.persistReasoningSelection.mockImplementation(() => {
+        throw new Error('settings are read-only');
+      });
+      const request = {
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'default',
+        _meta: { 'qwenCode/persistReasoningSelection': true },
+      };
+      await expect(agent.setSessionConfigOption(request)).rejects.toThrow(
+        'settings are read-only',
+      );
+      expect(generation).toEqual(before);
+      expect(rebuildable.reasoning).toBe(false);
+      expect(sources['reasoning']).toEqual(source);
+      expect(rebuildableSources['reasoning']).toEqual(source);
+      lastSessionMock!.persistReasoningSelection.mockImplementation(
+        () => undefined,
+      );
+      const reset = (await agent.setSessionConfigOption(
+        request,
+      )) as SetSessionConfigOptionResponse;
+      expect(
+        reset.configOptions.find((option) => option.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('none');
+      expect(generation.reasoning).toBe(false);
+      expect(sources['reasoning']).toBeUndefined();
+      expect(rebuildableSources['reasoning']).toBeUndefined();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('reconciles session reasoning after a workspace model-name reload', async () => {
     const cfg = await setupSessionMocks('model-name-reload');
     const settings = makeSessionSettings({
@@ -12790,6 +13839,219 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await agentPromise;
     }
   });
+
+  it.each([
+    'https://api.deepseek.com/v1',
+    'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  ])(
+    'restores persisted DeepSeek effort over a disabled profile after authentication at %s',
+    async (baseUrl) => {
+      const innerConfig = await setupSessionMocks('deepseek-persisted-effort');
+      const generation: ContentGeneratorConfig = {
+        model: 'deepseek-flash',
+        authType: AuthType.USE_OPENAI,
+        baseUrl,
+        reasoning: false,
+      };
+      vi.mocked(loadSettings).mockReturnValue(
+        makeSessionSettings({ model: { reasoningEffort: 'max' } }),
+      );
+      innerConfig.getModel = vi.fn(() => generation.model);
+      innerConfig.getAuthType = vi.fn(() => AuthType.USE_OPENAI);
+      innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+      innerConfig.refreshAuth = vi.fn(async () => {
+        generation.reasoning = false;
+      });
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const session = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+        })) as SetSessionConfigOptionResponse;
+        expect(generation.reasoning).toEqual({ effort: 'max' });
+        expect(
+          session.configOptions.find(
+            (option) => option.id === 'reasoning_effort',
+          )?.currentValue,
+        ).toBe('max');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each([
+    ['https://api.deepseek.com/v1', ['low', 'high', 'max'], false],
+    ['https://api.deepseek.com/v1', ['low', 'high', 'max'], true],
+    [
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      ['high', 'max'],
+      false,
+    ],
+  ] as const)(
+    'projects and changes DeepSeek reasoning on the selected %s route',
+    async (baseUrl, efforts, legacyDeclaration) => {
+      const sessionId = 'deepseek-reasoning-session';
+      const innerConfig = await setupSessionMocks(sessionId);
+      const switchField = baseUrl.includes('dashscope')
+        ? 'enable_thinking'
+        : 'thinking';
+      const generation: ContentGeneratorConfig = {
+        model: 'deepseek-v4-pro',
+        authType: AuthType.USE_OPENAI,
+        baseUrl,
+        extra_body: {
+          [switchField]:
+            switchField === 'thinking' ? { type: 'disabled' } : false,
+          reasoning: { effort: 'max', budget_tokens: 8192 },
+        },
+      };
+      if (legacyDeclaration) {
+        generation.reasoningSnapshot = [
+          {
+            id: generation.model,
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            reasoning: {
+              thinking: true,
+              efforts,
+              defaultEffort: 'high',
+              disableField: 'thinking',
+            },
+          },
+        ];
+      }
+      innerConfig.getModel = vi.fn().mockReturnValue(generation.model);
+      innerConfig.getAuthType = vi.fn().mockReturnValue(AuthType.USE_OPENAI);
+      innerConfig.getCurrentModelRegistryBaseUrl = vi.fn(() => baseUrl);
+      innerConfig.getAllConfiguredModels = vi.fn(() => [
+        {
+          id: generation.model,
+          authType: AuthType.USE_OPENAI,
+          label: 'Official',
+          baseUrl: 'https://api.deepseek.com/v1',
+          registryBaseUrl: 'https://api.deepseek.com/v1',
+        },
+        {
+          id: generation.model,
+          authType: AuthType.USE_OPENAI,
+          label: 'MaaS',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          registryBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        },
+      ]);
+      innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+      innerConfig.getReasoningEffort = vi.fn(() =>
+        generation.reasoning ? generation.reasoning.effort : undefined,
+      );
+
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const session = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+        })) as SetSessionConfigOptionResponse;
+        expect(
+          session.configOptions.find((item) => item.id === 'model')
+            ?.currentValue,
+        ).toMatch(/^qwen-route:v1:/);
+        expect(
+          session.configOptions.find((item) => item.id === 'reasoning_effort'),
+        ).toMatchObject({
+          currentValue: 'none',
+          options: [{ value: 'none' }, ...efforts.map((value) => ({ value }))],
+        });
+        const enabled = (await agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'default',
+        })) as SetSessionConfigOptionResponse;
+        expect(
+          enabled.configOptions.find((item) => item.id === 'reasoning_effort')
+            ?.currentValue,
+        ).toBe('high');
+        expect(generation.extra_body).toEqual({
+          reasoning: { budget_tokens: 8192 },
+        });
+
+        const selected = (await agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'max',
+          _meta: { 'qwenCode/persistReasoningSelection': true },
+        })) as SetSessionConfigOptionResponse;
+        expect(generation.reasoning).toEqual({ effort: 'max' });
+        expect(
+          selected.configOptions.find((item) => item.id === 'reasoning_effort')
+            ?.currentValue,
+        ).toBe('max');
+        expect(lastSessionMock?.persistReasoningSelection).toHaveBeenCalledWith(
+          'max',
+        );
+
+        const disabled = (await agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'none',
+        })) as SetSessionConfigOptionResponse;
+        expect(generation.reasoning).toBe(false);
+        expect(
+          disabled.configOptions.find((item) => item.id === 'reasoning_effort')
+            ?.currentValue,
+        ).toBe('none');
+        Object.assign(lastSessionMock!, {
+          setMode: vi.fn().mockResolvedValue({}),
+        });
+        for (const [override, expected] of [
+          [
+            { reasoning_effort: 'xhigh' },
+            baseUrl.includes('dashscope') ? 'max' : 'high',
+          ],
+          [{ reasoning: { effort: 'max' } }, 'max'],
+        ] as const) {
+          generation.reasoning = { effort: 'low' };
+          generation.extra_body = override;
+          const refreshed = (await agent.setSessionConfigOption({
+            sessionId,
+            configId: 'mode',
+            value: 'default',
+          })) as SetSessionConfigOptionResponse;
+          expect(
+            refreshed.configOptions.find(
+              (item) => item.id === 'reasoning_effort',
+            )?.currentValue,
+          ).toBe(expected);
+        }
+        await agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'high',
+        });
+        expect(generation.extra_body).toEqual({});
+        expect(generation.reasoning).toEqual({ effort: 'high' });
+        await expect(
+          agent.setSessionConfigOption({
+            sessionId,
+            configId: 'reasoning_effort',
+            value: 'medium',
+          }),
+        ).rejects.toThrow('Unknown reasoning effort: medium');
+        if (!efforts.some((effort) => effort === 'low')) {
+          await expect(
+            agent.setSessionConfigOption({
+              sessionId,
+              configId: 'reasoning_effort',
+              value: 'low',
+            }),
+          ).rejects.toThrow('Unknown reasoning effort: low');
+        }
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it('projects qwen3.8-max reasoning controls through one ACP option', async () => {
     const sessionId = 'qwen38-reasoning-session';
@@ -13826,9 +15088,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }) as AgentLike;
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    lastSessionMock!.getRecoveryStatus.mockReturnValue({
+    lastSessionMock!.getRecoveryStatusForClient.mockReturnValue({
       kind: 'interrupted_prompt',
       canContinue: true,
+      cancellationConfirmationId: 'record-uuid',
     });
     const context = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionContext,
@@ -13860,7 +15123,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       v: 1,
       sessionId,
       workspaceCwd: '/tmp',
-      recovery: { kind: 'interrupted_prompt', canContinue: true },
+      recovery: {
+        kind: 'interrupted_prompt',
+        canContinue: true,
+        cancellationConfirmationId: 'record-uuid',
+      },
       state: {
         models: { currentModelId: 'm(api-key)', availableModels: [] },
         modes: {
@@ -14237,6 +15504,70 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           },
         ],
       });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('exposes per-model generation timing in session stats', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const api = { totalRequests: 2, totalErrors: 0, totalLatencyMs: 900 };
+    const tokens = {
+      prompt: 10,
+      candidates: 40,
+      total: 50,
+      cached: 0,
+      thoughts: 0,
+    };
+    vi.mocked(uiTelemetryService.getMetricsForSession).mockReturnValue({
+      models: {
+        'model-a': { api, tokens, bySource: {} },
+        'model-b': { api, tokens, bySource: {} },
+      },
+      statsModels: {
+        'model-a': {
+          api,
+          tokens,
+          generation: {
+            timedRequests: 2,
+            totalTtftMs: 500,
+            totalGenerationDurationMs: 400,
+            totalThroughputOutputTokens: 40,
+            last: {
+              model: 'model-a',
+              ttftMs: 200,
+              generationDurationMs: 0,
+              outputTokens: 0,
+            },
+          },
+        },
+        'model-b': { api, tokens },
+      },
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        byName: {},
+      },
+      files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+    } as never);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    try {
+      const stats = (await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.sessionStats,
+        { sessionId },
+      )) as { models: Record<string, Record<string, unknown>> };
+      expect(stats.models['model-a']['generation']).toEqual({
+        timedRequests: 2,
+        totalTtftMs: 500,
+        totalGenerationDurationMs: 400,
+        totalThroughputOutputTokens: 40,
+      });
+      expect(stats.models['model-b']).not.toHaveProperty('generation');
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
@@ -16331,6 +17662,71 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('reads capped shell-task runtime output from the owning session registry', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const dir = await realFsPromises.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-runtime-detail-'),
+    );
+    const outputFile = path.join(dir, 'task.output');
+    const output = 'x'.repeat(9000) + '\nfinal output';
+    await realFsPromises.writeFile(outputFile, output);
+    const get = vi.fn((id: string) =>
+      id === 'bg_test' ? { status: 'completed', outputFile } : undefined,
+    );
+    Object.assign(innerConfig, {
+      getBackgroundShellRegistry: vi.fn().mockReturnValue({ get }),
+    });
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    try {
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const detail = await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.sessionTaskRuntime,
+        { sessionId, taskId: 'bg_test' },
+      );
+      expect(detail).toMatchObject({
+        v: 1,
+        sessionId,
+        taskId: 'bg_test',
+        runtime: {
+          outputBytes: Buffer.byteLength(output),
+          outputModifiedAt: expect.any(Number),
+          outputTail: expect.stringContaining('final output'),
+          outputTailTruncated: true,
+        },
+      });
+      expect(detail['runtime']).not.toHaveProperty('memoryBytes');
+      await expect(
+        agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTaskRuntime, {
+          sessionId,
+          taskId: 'other',
+        }),
+      ).resolves.toMatchObject({ runtime: null });
+      await expect(
+        agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTaskRuntime, {
+          sessionId,
+          taskId: '',
+        }),
+      ).rejects.toThrow('Invalid or missing sessionId/taskId');
+      expect(get).toHaveBeenCalledWith('bg_test');
+      expect(get).toHaveBeenCalledWith('other');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+      await realFsPromises.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('cancels running shell tasks', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
@@ -16759,7 +18155,71 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('reads a saved workflow definition with its parsed meta', async () => {
+  it.each(['supported-commands', 'run-saved'] as const)(
+    'R1-1 contains failed workflow discovery for %s',
+    async (surface) => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const innerConfig = await setupSessionMocks(sessionId);
+      const buildSessionOwnedBackground = vi.fn();
+      Object.assign(innerConfig, {
+        isWorkflowsEnabled: vi.fn().mockReturnValue(true),
+        getWorkflowRunRegistry: vi.fn().mockReturnValue({ get: vi.fn() }),
+        getToolRegistry: vi.fn().mockReturnValue({
+          getTool: vi.fn().mockReturnValue({ buildSessionOwnedBackground }),
+        }),
+      });
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+        const availableCommands = [
+          { name: 'init', description: 'Initialize', input: null },
+        ];
+        lastSessionMock!.buildAvailableCommandsSnapshot.mockResolvedValue({
+          availableCommands,
+          availableSkills: ['review'],
+        });
+        mockListSavedWorkflows.mockRejectedValueOnce(
+          new Error('workflow directory: EIO fixture'),
+        );
+        if (surface === 'supported-commands') {
+          await expect(
+            agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionSupportedCommands, {
+              sessionId,
+            }),
+          ).resolves.toMatchObject({
+            v: 1,
+            sessionId,
+            availableCommands,
+            availableSkills: ['review'],
+            workflowsEnabled: true,
+            workflowToolFeatures: {
+              runSavedArgs: true,
+              runScript: true,
+              retryHistorical: true,
+            },
+            savedWorkflows: [],
+          });
+        } else {
+          await expect(
+            agent.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction,
+              {
+                sessionId,
+                taskId: 'deploy',
+                action: 'run-saved',
+              },
+            ),
+          ).resolves.toEqual({ changed: false });
+        }
+        expect(buildSessionOwnedBackground).not.toHaveBeenCalled();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it('H05 reads saved workflow source, path and body from one resolution', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
     innerConfig.isWorkflowsEnabled.mockReturnValue(true);
@@ -16773,13 +18233,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       "return await agent('go')",
       '',
     ].join('\n');
-    mockListSavedWorkflows.mockResolvedValueOnce([
-      { name: 'deep-review', source: 'project', scriptPath },
-    ]);
     mockResolveSavedWorkflowScript.mockResolvedValueOnce({
       name: 'deep-review',
       scriptPath,
       script,
+      source: 'project',
     });
 
     const agentPromise = runAcpAgent(
@@ -16822,8 +18280,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'deep-review',
       expect.anything(),
     );
+    expect(mockListSavedWorkflows).not.toHaveBeenCalled();
 
     // Unknown names and disabled Workflow controls both fail closed to null.
+    mockResolveSavedWorkflowScript.mockRejectedValueOnce(new Error('missing'));
     await expect(
       agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionSavedWorkflow, {
         sessionId,
@@ -20013,6 +21473,186 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     );
     expect(otherPm.addPersistentRule).not.toHaveBeenCalled();
     expect(otherPm.removePersistentRule).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects a workspace change with an invalid revision or kind', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+        v: 1,
+        revision: 1.5,
+        kind: 'permissions',
+      }),
+    ).rejects.toThrow('Invalid workspace change');
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+        v: 1,
+        revision: 1,
+        kind: 42,
+      }),
+    ).rejects.toThrow('Invalid workspace change');
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+        v: 1,
+        revision: 1,
+        kind: 'bogus',
+      }),
+    ).rejects.toThrow('Unknown workspace change kind: bogus');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('delivers a user-scope permission change to a worktree session', async () => {
+    let mergedSettings: Record<string, unknown> = {
+      permissions: { allow: [], ask: [], deny: [] },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopesFromDiskAtomically: vi.fn(() => {
+        mergedSettings = {
+          permissions: { allow: [], ask: [], deny: ['Bash(rm -rf:*)'] },
+        };
+        return true;
+      }),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const root = '/work/project';
+    const worktreeRoot = `${root}/.qwen/worktrees/slug-a`;
+    const makeManager = () => ({
+      addPersistentRule: vi.fn(),
+      removePersistentRule: vi.fn(),
+    });
+    const rootManager = makeManager();
+    const worktreeManager = makeManager();
+    const sessions = (agent as unknown as { sessions: Map<string, unknown> })
+      .sessions;
+    const liveSession = (
+      id: string,
+      admissionRoot: string,
+      manager: ReturnType<typeof makeManager>,
+    ) => ({
+      getId: () => id,
+      isIdle: () => true,
+      cancelPendingPrompt: vi.fn(),
+      getConfig: () => ({
+        ...mockConfig,
+        getTargetDir: vi.fn().mockReturnValue(admissionRoot),
+        storage: { getProjectRoot: () => admissionRoot },
+        getPermissionManager: () => manager,
+      }),
+    });
+    sessions.set(
+      'root-session',
+      liveSession('root-session', root, rootManager),
+    );
+    sessions.set(
+      'worktree-session',
+      liveSession('worktree-session', worktreeRoot, worktreeManager),
+    );
+
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+      v: 1,
+      revision: 1,
+      kind: 'permissions',
+      tightening: true,
+      cwd: root,
+      scope: 'user',
+    });
+
+    expect(rootManager.addPersistentRule).toHaveBeenCalledWith(
+      'Bash(rm -rf:*)',
+      'deny',
+    );
+    expect(worktreeManager.addPersistentRule).toHaveBeenCalledWith(
+      'Bash(rm -rf:*)',
+      'deny',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('keeps a workspace-scope permission change out of a worktree session', async () => {
+    let mergedSettings: Record<string, unknown> = {
+      permissions: { allow: [], ask: [], deny: [] },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopesFromDiskAtomically: vi.fn(() => {
+        mergedSettings = {
+          permissions: { allow: [], ask: [], deny: ['Bash(git push:*)'] },
+        };
+        return true;
+      }),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const root = '/work/project';
+    const worktreeRoot = `${root}/.qwen/worktrees/slug-a`;
+    const makeManager = () => ({
+      addPersistentRule: vi.fn(),
+      removePersistentRule: vi.fn(),
+    });
+    const rootManager = makeManager();
+    const worktreeManager = makeManager();
+    const sessions = (agent as unknown as { sessions: Map<string, unknown> })
+      .sessions;
+    const liveSession = (
+      id: string,
+      admissionRoot: string,
+      manager: ReturnType<typeof makeManager>,
+    ) => ({
+      getId: () => id,
+      isIdle: () => true,
+      cancelPendingPrompt: vi.fn(),
+      getConfig: () => ({
+        ...mockConfig,
+        getTargetDir: vi.fn().mockReturnValue(admissionRoot),
+        storage: { getProjectRoot: () => admissionRoot },
+        getPermissionManager: () => manager,
+      }),
+    });
+    sessions.set(
+      'root-session',
+      liveSession('root-session', root, rootManager),
+    );
+    sessions.set(
+      'worktree-session',
+      liveSession('worktree-session', worktreeRoot, worktreeManager),
+    );
+
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+      v: 1,
+      revision: 1,
+      kind: 'permissions',
+      tightening: true,
+      cwd: root,
+      scope: 'workspace',
+    });
+
+    expect(rootManager.addPersistentRule).toHaveBeenCalledWith(
+      'Bash(git push:*)',
+      'deny',
+    );
+    expect(worktreeManager.addPersistentRule).not.toHaveBeenCalled();
+    expect(worktreeManager.removePersistentRule).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -24207,6 +25847,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       // pins that the bootstrap path opts out of MCP discovery (so
       // bootstrap + per-session don't double-spawn N stdio servers).
       skipMcpDiscovery: true,
+      disableBundledGeneratedUi: true,
       // #5626 Phase 2: bootstrap (workspace-level) config binds the reverse
       // tool channel SDK callback so a runtime-added client-hosted MCP server
       // (`workspaceMcpRuntimeAdd` targets THIS manager) round-trips over the WS.
@@ -24337,6 +25978,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       // pins that the bootstrap path opts out of MCP discovery (so
       // bootstrap + per-session don't double-spawn N stdio servers).
       skipMcpDiscovery: true,
+      disableBundledGeneratedUi: true,
       // #5626 Phase 2: bootstrap config binds the reverse-tool-channel SDK
       // callback (see the sibling bootstrap test for rationale).
       sendSdkMcpMessage: expect.any(Function),
@@ -25661,6 +27303,7 @@ describe('QwenAgent sessionIdContext binding', () => {
       setModel?: ReturnType<typeof vi.fn>;
       cancelPendingPrompt?: ReturnType<typeof vi.fn>;
       releaseTodoStopGuardQueuedPromptWait?: ReturnType<typeof vi.fn>;
+      sendMidTurnInputNow?: ReturnType<typeof vi.fn>;
     } = {},
   ) {
     const id = overrides.sessionId ?? sessionId;
@@ -25675,9 +27318,14 @@ describe('QwenAgent sessionIdContext binding', () => {
       setModel: overrides.setModel ?? vi.fn().mockResolvedValue(undefined),
       cancelPendingPrompt:
         overrides.cancelPendingPrompt ?? vi.fn().mockResolvedValue(undefined),
+      cancelPromptAdmission: vi.fn(
+        (controller: AbortController, reason: string) =>
+          controller.abort(reason),
+      ),
       releaseTodoStopGuardQueuedPromptWait:
         overrides.releaseTodoStopGuardQueuedPromptWait ??
         vi.fn().mockReturnValue(true),
+      sendMidTurnInputNow: overrides.sendMidTurnInputNow ?? vi.fn(),
     };
   }
 
@@ -25745,6 +27393,30 @@ describe('QwenAgent sessionIdContext binding', () => {
     });
 
     expect(runSpy).toHaveBeenCalledWith(sessionId, expect.any(Function));
+
+    runSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('binds sessionIdContext for MID_TURN_SEND_NOW_METHOD', async () => {
+    const { agent, agentPromise } = await bootAgent();
+    await agent.initialize({ clientCapabilities: {} });
+    let boundSessionId: string | undefined;
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      sessionId,
+      makeSession({
+        sendMidTurnInputNow: vi.fn(() => {
+          boundSessionId = sessionIdContext.getStore();
+        }),
+      }),
+    );
+    const runSpy = vi.spyOn(sessionIdContext, 'run');
+
+    await agent.extMethod(MID_TURN_SEND_NOW_METHOD, { sessionId });
+
+    expect(runSpy).toHaveBeenCalledWith(sessionId, expect.any(Function));
+    expect(boundSessionId).toBe(sessionId);
 
     runSpy.mockRestore();
     mockConnectionState.resolve();
@@ -26070,13 +27742,19 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
           getConfig: vi.fn().mockReturnValue(innerConfig),
           cancelMcpAppCalls: vi.fn(),
           cancelPendingPrompt: liveCancelPendingPrompt,
+          cancelPromptAdmission: vi.fn(
+            (controller: AbortController, reason: string) =>
+              controller.abort(reason),
+          ),
           beginClose: liveBeginClose,
           beginCloseIfAvailable: liveBeginCloseIfAvailable,
           waitForCloseGateToRelease: liveWaitForCloseGateToRelease,
           waitForActiveTurnsToSettle: liveWaitForActiveTurnsToSettle,
           isIdle: liveIsIdle,
           isTurnIdle: liveIsTurnIdle,
+          recoverMessageDeletionContext: vi.fn().mockResolvedValue(undefined),
           assertCanStartTurn: liveAssertCanStartTurn,
+          assertHistoryContextAvailable: vi.fn(),
           beginHistoryMutation: liveBeginHistoryMutation,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
@@ -26099,6 +27777,29 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     }) as AgentLike;
     return { agent, agentPromise };
   }
+
+  it('refuses a recap before reading unrecovered deleted history', async () => {
+    const innerConfig = makeLiveSessionInnerConfig(makeRecordingService());
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const live = vi.mocked(Session).mock.results.at(-1)!
+        .value as InstanceType<typeof Session>;
+      vi.mocked(live.assertHistoryContextAvailable).mockImplementation(() => {
+        throw new Error('session_history_context_unavailable');
+      });
+      innerConfig.getLlmClient.mockClear();
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionRecap, {
+          sessionId: liveSessionId,
+        }),
+      ).rejects.toThrow('session_history_context_unavailable');
+      expect(innerConfig.getLlmClient).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
 
   it('does not bind an unvalidated dead session id to debug context', async () => {
     const innerConfig = makeLiveSessionInnerConfig(null);
@@ -27386,6 +29087,34 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     await agentPromise;
   });
 
+  it('passes explicit client close intent through the close gate', async () => {
+    const recording = makeRecordingService();
+    const { agent, agentPromise } = await bootAgent(
+      makeLiveSessionInnerConfig(recording),
+    );
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const admission = new AbortController();
+    (
+      agent as unknown as {
+        activePromptCalls: Map<string, Set<{ controller: AbortController }>>;
+      }
+    ).activePromptCalls.set(
+      liveSessionId,
+      new Set([{ controller: admission }]),
+    );
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+        sessionId: liveSessionId,
+        cancelReason: 'user',
+      }),
+    ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
+    expect(liveBeginClose).toHaveBeenCalledWith('user');
+    expect(admission.signal.reason).toBe('qwen:user-cancel');
+    expect(liveCancelPendingPrompt).toHaveBeenCalledOnce();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('does not abort an active generation when the close gate is unavailable', async () => {
     const recording = makeRecordingService();
     const innerConfig = makeLiveSessionInnerConfig(recording);
@@ -27858,6 +29587,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         installManagedConversationActivation: ReturnType<typeof vi.fn>;
         startCronScheduler: ReturnType<typeof vi.fn>;
         enableLiveScreenContext: ReturnType<typeof vi.fn>;
+        recoverMessageDeletionContext: ReturnType<typeof vi.fn>;
         assertCanStartTurn: ReturnType<typeof vi.fn>;
         beginClose: ReturnType<typeof vi.fn>;
         beginCloseIfAvailable: ReturnType<typeof vi.fn>;
@@ -27865,6 +29595,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         waitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
         cancelMcpAppCalls: ReturnType<typeof vi.fn>;
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
+        cancelPromptAdmission: ReturnType<typeof vi.fn>;
         sendUpdate: ReturnType<typeof vi.fn>;
         dispose: ReturnType<typeof vi.fn>;
         shouldHintAskUserQuestionRestore?: ReturnType<typeof vi.fn>;
@@ -28309,6 +30040,11 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
         cancelMcpAppCalls: vi.fn(),
         cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+        cancelPromptAdmission: vi.fn(
+          (controller: AbortController, reason: string) =>
+            controller.abort(reason),
+        ),
+        recoverMessageDeletionContext: vi.fn().mockResolvedValue(undefined),
         assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
         isTurnIdle: vi.fn().mockReturnValue(true),
         sendUpdate: opts.recoveredGoalSendError
@@ -28331,11 +30067,13 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       privateParentCapability ? { privateParentCapability } : undefined,
     );
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
-    const agent = capturedAgentFactory!({
+    const connection = {
+      extMethod: vi.fn(),
       get closed() {
         return mockConnectionState.promise;
       },
-    });
+    };
+    const agent = capturedAgentFactory!(connection);
     if (privateParentCapability) {
       await agent.initialize({
         clientCapabilities: {},
@@ -28344,7 +30082,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         },
       });
     }
-    return { agent, agentPromise };
+    return { agent, agentPromise, extMethod: connection.extMethod };
   }
 
   it.each([
@@ -29236,10 +30974,20 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         persistedSpelling: storageSessionId,
       });
       innerConfig.getSessionId.mockReturnValue(storageSessionId);
-      const { agent, agentPromise } = await spawnAgent();
+      const target = await fs.realpath(process.cwd());
+      innerConfig.getTargetDir.mockReturnValue(target);
+      const { agent, agentPromise, extMethod } = await spawnAgent(
+        'expected-capability',
+      );
+      extMethod.mockImplementation(
+        async (_method: string, params: Record<string, unknown>) => ({
+          v: 1,
+          trusted: [params['sessionId'] === sessionId],
+        }),
+      );
 
       try {
-        const params = { cwd: '/tmp', sessionId, mcpServers: [] };
+        const params = { cwd: target, sessionId, mcpServers: [] };
         if (action === 'load') {
           await agent.loadSession(params);
         } else {
@@ -29250,6 +30998,27 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           | CliArgs
           | undefined;
         expect(argv?.resume).toBe(storageSessionId);
+
+        expect(vi.mocked(Session).mock.calls.at(-1)?.[0]).toBe(sessionId);
+        const provider = vi
+          .mocked(loadCliConfig)
+          .mock.calls.at(-1)?.[9]?.workflowAncestorTrustProvider;
+        await expect(
+          provider?.([path.dirname(target)], target),
+        ).resolves.toEqual([true]);
+        innerConfig.getSessionId.mockReturnValue('new-recording-session');
+        await expect(
+          provider?.([path.dirname(target)], target),
+        ).resolves.toEqual([true]);
+        expect(extMethod).toHaveBeenLastCalledWith(
+          'qwen/control/workflow/ancestor-trust',
+          {
+            v: 1,
+            sessionId,
+            canonicalTargetDir: target,
+            ancestorDirs: [path.dirname(target)],
+          },
+        );
 
         // The in-memory session map key is normalized, so caller-case
         // follow-up operations still reach the adopted session.
@@ -29570,6 +31339,37 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
       mockConnectionState.resolve();
       await agentPromise;
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    'returns the reconstructed Generated UI state on %s',
+    async (action) => {
+      const innerConfig = bindRestoreMocks({ sessionExists: true });
+      const generatedUi = {
+        version: 1 as const,
+        enabled: false,
+        reason: 'setting-disabled' as const,
+      };
+      Object.assign(innerConfig, {
+        getBundledGeneratedUiStatus: () => generatedUi,
+      });
+      const { agent, agentPromise } = await spawnAgent();
+      try {
+        const request = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+        };
+        const response =
+          action === 'load'
+            ? await agent.loadSession(request)
+            : await agent.unstable_resumeSession(request);
+        expect(response).toMatchObject({ _meta: { generatedUi } });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
     },
   );
 
@@ -30090,6 +31890,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       getId: vi.fn().mockReturnValue('persisted-1'),
       shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
       getConfig: vi.fn().mockReturnValue(innerConfig),
+      recoverMessageDeletionContext: vi.fn().mockResolvedValue(undefined),
       assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       beginClose: vi.fn().mockReturnValue(vi.fn()),
       waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
@@ -31005,6 +32806,10 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
       cancelMcpAppCalls: vi.fn(),
       cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      cancelPromptAdmission: vi.fn(
+        (controller: AbortController, reason: string) =>
+          controller.abort(reason),
+      ),
       waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       isTurnIdle: vi.fn().mockReturnValue(true),
       dispose: replacementDispose,
@@ -31778,6 +33583,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
       shutdown: vi.fn().mockResolvedValue(undefined),
+      closeSessionWriter: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
@@ -31823,18 +33629,111 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     stdoutDestroySpy.mockRestore();
   });
 
-  async function getAgent() {
-    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+  async function getAgent(options?: Parameters<typeof runAcpAgent>[3]) {
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      mockSettings,
+      mockArgv,
+      options,
+    );
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
-    const agent = capturedAgentFactory!({
+    const notifications = vi
+      .fn<(method: string, params: Record<string, unknown>) => Promise<void>>()
+      .mockResolvedValue(undefined);
+    const connection = {
       get closed() {
         return mockConnectionState.promise;
       },
-    });
-    return { agent, agentPromise };
+      extNotification: notifications,
+    };
+    const agent = capturedAgentFactory!(connection);
+    return { agent, agentPromise, notifications };
   }
 
-  it('initializes discovery without reloading sessions, then reloads persisted settings', async () => {
+  it.each(['success', 'sync-failure', 'delivery-failure'])(
+    'notifies owning sessions after MCP reload reconciliation: %s',
+    async (outcome) => {
+      const { agent, agentPromise, notifications } = await getAgent();
+      const internals = agent as unknown as {
+        workspaceMcpDiscoveryConfig: Config;
+        workspaceMcpDiscoveryPromise: Promise<void> | undefined;
+        workspaceMcpDiscoveryError: string | undefined;
+        sessions: Map<string, { getId: () => string; getConfig: () => Config }>;
+      };
+      internals.workspaceMcpDiscoveryConfig = mockConfig;
+      let finish!: () => void;
+      const pending = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const reconcile = vi.fn(async () => {
+        await pending;
+        if (outcome === 'sync-failure') throw new Error('discovery failed');
+      });
+      let finishPeer!: () => void;
+      const peerPending = new Promise<void>((resolve) => {
+        finishPeer = resolve;
+      });
+      const ownerConfig = {
+        ...mockConfig,
+        reinitializeMcpServers: reconcile,
+      } as unknown as Config;
+      const peerConfig = {
+        ...mockConfig,
+        reinitializeMcpServers: vi.fn(() => peerPending),
+      } as unknown as Config;
+      for (const [id, config] of [
+        ['owner-a', ownerConfig],
+        ['owner-b', peerConfig],
+      ] as const) {
+        internals.sessions.set(id, {
+          getId: () => id,
+          getConfig: () => config,
+        });
+      }
+      vi.mocked(loadSettings).mockReturnValue({
+        merged: { mcpServers: {}, mcp: { allowed: [] } },
+        forScope: vi.fn().mockReturnValue({ settings: {} }),
+      } as unknown as LoadedSettings);
+      if (outcome === 'delivery-failure') {
+        notifications.mockRejectedValueOnce(new Error('subscriber closed'));
+      }
+      try {
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpReload, {}),
+        ).resolves.toEqual({ accepted: true });
+        await vi.waitFor(() => expect(reconcile).toHaveBeenCalledOnce());
+        expect(notifications).not.toHaveBeenCalled();
+        finish();
+        await vi.waitFor(() =>
+          expect(peerConfig.reinitializeMcpServers).toHaveBeenCalledOnce(),
+        );
+        expect(notifications.mock.calls).toEqual([
+          ['qwen/notify/session/mcp-changed', { sessionId: 'owner-a' }],
+        ]);
+        finishPeer();
+        await internals.workspaceMcpDiscoveryPromise;
+        expect(ownerConfig.setAllowedMcpServers).toHaveBeenCalledWith([]);
+        expect(notifications.mock.calls).toEqual([
+          ['qwen/notify/session/mcp-changed', { sessionId: 'owner-a' }],
+          ['qwen/notify/session/mcp-changed', { sessionId: 'owner-b' }],
+        ]);
+        expect(internals.workspaceMcpDiscoveryError).toBe(
+          outcome === 'sync-failure'
+            ? 'Failed to synchronize MCP settings with live sessions'
+            : undefined,
+        );
+      } finally {
+        finish();
+        finishPeer();
+        await internals.workspaceMcpDiscoveryPromise;
+        internals.sessions.clear();
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  async function verifyDiscoveryProvenance(capability: string | undefined) {
     const mcpServers = {
       filesystem: { command: 'node', args: ['server.js'] },
     };
@@ -31912,7 +33811,17 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       }),
     });
 
-    const { agent, agentPromise } = await getAgent();
+    const { agent, agentPromise } = await getAgent({
+      privateParentCapability: capability,
+    });
+    if (capability !== undefined) {
+      await agent.initialize({
+        clientCapabilities: {},
+        _meta: {
+          'qwen-code/private-parent-capability': capability,
+        },
+      });
+    }
     await expect(
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize, {}),
     ).resolves.toEqual({ accepted: true });
@@ -31923,6 +33832,14 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       ).toHaveBeenCalledWith(discoveryConfig),
     );
     expect(discoveryConfigSessionContext).toBe('workspace-mcp-discovery');
+    const ancestorTrustProvider =
+      vi.mocked(loadCliConfig).mock.calls[0]?.[9]
+        ?.workflowAncestorTrustProvider;
+    if (capability === undefined) {
+      expect(ancestorTrustProvider).toBeTypeOf('function');
+    } else {
+      expect(ancestorTrustProvider).toBeUndefined();
+    }
     expect(mockConfig.reinitializeMcpServers).not.toHaveBeenCalled();
 
     const persistedServer = {
@@ -32023,7 +33940,12 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
-  });
+  }
+
+  it.each([undefined, '', 'private-parent'])(
+    'H01 initializes discovery with captured provenance %s and reloads persisted settings',
+    verifyDiscoveryProvenance,
+  );
 
   it('safe mode: workspaceMcpReload does NOT leak settings.mcpServers/mcp.allowed into an already-running session', async () => {
     // Same bare/safe guard as registerMcpHotReload (config/hot-reload.ts) and
@@ -32750,6 +34672,7 @@ describe('sessionLanguage multi-session propagation', () => {
       getDebugMode: vi.fn().mockReturnValue(false),
       isWorkflowsEnabled: vi.fn().mockReturnValue(false),
       setWorkflowsEnabled: vi.fn(),
+      setWorkflowKeywordTriggerEnabled: vi.fn(),
       ...overrides,
     };
   }
@@ -34845,9 +36768,11 @@ describe('sessionLanguage multi-session propagation', () => {
     // capabilities advertisement said the opposite.
     let mergedSettings: Record<string, unknown> = {
       tools: { workflowsEnabled: true },
+      ui: { disableWorkflowKeywordTrigger: false },
     };
     let reloadedSettings: Record<string, unknown> = {
       tools: { workflowsEnabled: false },
+      ui: { disableWorkflowKeywordTrigger: true },
     };
     const settings = {
       get merged() {
@@ -34951,15 +36876,195 @@ describe('sessionLanguage multi-session propagation', () => {
         .setWorkflowsEnabled,
     ).toHaveBeenLastCalledWith(undefined);
     expect(workflowsEnabled).toBeUndefined();
+    expect(cfg.setWorkflowKeywordTriggerEnabled.mock.calls).toEqual([
+      [false],
+      [true],
+    ]);
 
     mockConnectionState.resolve();
     await agentPromise;
   });
 
+  it.each(['settings', 'all', 'content'] as const)(
+    'keeps workspace skill status paired with its settings after a session loads (%s)',
+    async (reason) => {
+      const skillName = 'workspace-skill';
+      let diskDisabled = false;
+      const workspaceSettings = {
+        merged: { skills: { disabled: [] as string[] } },
+        forScope: vi.fn().mockReturnValue({ settings: {} }),
+        reloadScopeFromDisk: vi.fn(() => {
+          workspaceSettings.merged = {
+            skills: { disabled: diskDisabled ? [skillName] : [] },
+          };
+          return true;
+        }),
+      };
+      const sessionSettings = {
+        getSystemHooks: () => undefined,
+        getUserHooks: () => ({}),
+        getProjectHooks: () => ({}),
+        merged: { skills: { disabled: [skillName] } },
+        forScope: vi.fn().mockReturnValue({
+          settings: { skills: { disabled: [skillName] } },
+        }),
+        reloadScopeFromDisk: vi.fn().mockReturnValue(true),
+      } as unknown as LoadedSettings;
+      const refreshCache = vi.fn().mockResolvedValue(undefined);
+      const bootstrapConfig = makeConfig({
+        getDisabledSkillNames: () =>
+          new Set(workspaceSettings.merged.skills.disabled),
+        isSkillEnabled: () =>
+          !workspaceSettings.merged.skills.disabled.includes(skillName),
+        getExtensions: () => [],
+        getSkillManager: () => ({
+          refreshCache,
+          getCachedSkills: () => [
+            {
+              name: skillName,
+              description: 'Workspace skill',
+              level: 'project',
+              filePath: '/skills/.qwen/skills/workspace-skill/SKILL.md',
+            },
+          ],
+        }),
+      });
+      const sessionConfig = makeConfig({
+        getSessionId: () => 'skill-session',
+      });
+      const reloadSkillSettings = vi.fn();
+      const refreshSkillsFromSettings = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(loadSettings).mockReturnValue(sessionSettings);
+      vi.mocked(loadCliConfig).mockResolvedValue(
+        sessionConfig as unknown as Config,
+      );
+      vi.mocked(Session).mockImplementation(
+        () =>
+          ({
+            getDefaultReasoningConfig: vi.fn(),
+            getId: () => 'skill-session',
+            shouldHintAskUserQuestionRestore: () => false,
+            getConfig: () => sessionConfig,
+            reloadSkillSettings,
+            refreshSkillsFromSettings,
+            sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+            installRewriter: vi.fn(),
+            startCronScheduler: vi.fn(),
+            dispose: vi.fn(),
+          }) as unknown as InstanceType<typeof Session>,
+      );
+      const agentPromise = runAcpAgent(
+        bootstrapConfig as unknown as Config,
+        workspaceSettings as unknown as LoadedSettings,
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      });
+      try {
+        await agent.newSession({ cwd: '/skills', mcpServers: [] });
+        for (const disabled of [true, false, true]) {
+          diskDisabled = disabled;
+          if (reason === 'content') {
+            workspaceSettings.merged.skills.disabled = disabled
+              ? [skillName]
+              : [];
+          }
+          await agent.extMethod(
+            SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+            {
+              reason,
+            },
+          );
+          const status = await agent.extMethod(
+            SERVE_STATUS_EXT_METHODS.workspaceSkills,
+            {},
+          );
+          expect(status).toMatchObject({
+            initialized: true,
+            skills: [
+              expect.objectContaining({
+                name: skillName,
+                status: disabled ? 'disabled' : 'ok',
+              }),
+            ],
+          });
+          const skills = status['skills'] as Array<Record<string, unknown>>;
+          expect(skills[0]).not.toHaveProperty('lockedScope');
+          expect(skills[0]?.['disabledReason']).toBe(
+            disabled ? 'hard' : undefined,
+          );
+        }
+        expect(workspaceSettings.reloadScopeFromDisk).toHaveBeenCalledTimes(
+          reason === 'content' ? 0 : 3,
+        );
+        expect(sessionSettings.reloadScopeFromDisk).not.toHaveBeenCalled();
+        expect(reloadSkillSettings).toHaveBeenCalledTimes(
+          reason === 'content' ? 0 : 3,
+        );
+        expect(refreshCache).toHaveBeenCalledTimes(
+          reason === 'settings' ? 0 : 3,
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each([true, false])(
+    'checks workspace settings reload without sessions (success=%s)',
+    async (success) => {
+      const settings = {
+        merged: {},
+        reloadScopeFromDisk: vi.fn().mockReturnValue(success),
+      } as unknown as LoadedSettings;
+      const agentPromise = runAcpAgent(
+        makeConfig() as unknown as Config,
+        settings,
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      });
+      try {
+        const result = agent.extMethod(
+          SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+          { reason: 'settings' },
+        );
+        if (success) {
+          await expect(result).resolves.toEqual({
+            sessionsRefreshed: 0,
+            sessionsFailed: 0,
+            configsRefreshed: 0,
+            configsFailed: 0,
+            reason: 'settings',
+          });
+        } else {
+          await expect(result).rejects.toThrow(
+            'Failed to reload workspace skill settings',
+          );
+        }
+        expect(settings.reloadScopeFromDisk).toHaveBeenCalledExactlyOnceWith(
+          SettingScope.Workspace,
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
   it('refreshes busy skill sessions and reports per-session failures', async () => {
     const bootstrapSettings = {
       merged: {},
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopeFromDisk: vi.fn().mockReturnValue(true),
       getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
@@ -35038,10 +37143,126 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
+  it('refreshes only selected skill sessions after validating the entire selection', async () => {
+    const selectedId = '550e8400-e29b-41d4-a716-446655440000';
+    const settings = {
+      merged: {},
+      reloadScopeFromDisk: vi.fn().mockReturnValue(true),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    const bootstrapRefresh = vi.fn().mockResolvedValue(undefined);
+    const bootstrapConfig = makeConfig({
+      getSkillManager: vi
+        .fn()
+        .mockReturnValue({ refreshCache: bootstrapRefresh }),
+    });
+    const states = [selectedId, 'omitted'].map((id) => {
+      const refreshCache = vi.fn().mockResolvedValue(undefined);
+      return {
+        id,
+        config: makeConfig({
+          getSessionId: vi.fn().mockReturnValue(id),
+          getSkillManager: vi.fn().mockReturnValue({ refreshCache }),
+        }),
+        refreshCache,
+        reloadSkillSettings: vi.fn(),
+        refreshSkillsFromSettings: vi.fn().mockResolvedValue(undefined),
+      };
+    });
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig)
+      .mockResolvedValueOnce(states[0]!.config as unknown as Config)
+      .mockResolvedValueOnce(states[1]!.config as unknown as Config);
+    vi.mocked(Session).mockImplementation((id) => {
+      const state = states.find((state) => state.id === id)!;
+      return {
+        getDefaultReasoningConfig: vi.fn(),
+        getId: vi.fn().mockReturnValue(id),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
+        getConfig: vi.fn().mockReturnValue(state.config),
+        isIdle: vi.fn().mockReturnValue(false),
+        reloadSkillSettings: state.reloadSkillSettings,
+        refreshSkillsFromSettings: state.refreshSkillsFromSettings,
+        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+        installRewriter: vi.fn(),
+        startCronScheduler: vi.fn(),
+        dispose: vi.fn(),
+      } as unknown as InstanceType<typeof Session>;
+    });
+    const agentPromise = runAcpAgent(
+      bootstrapConfig as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    try {
+      await agent.newSession({ cwd: '/skills', mcpServers: [] });
+      await agent.newSession({ cwd: '/skills', mcpServers: [] });
+      vi.mocked(settings.reloadScopeFromDisk).mockClear();
+      const method = SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh;
+      await expect(
+        agent.extMethod(method, { sessionIds: [] }),
+      ).resolves.toEqual({
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 0,
+        configsFailed: 0,
+        reason: 'all',
+      });
+      for (const sessionIds of [null, 'all', [1], [' ']]) {
+        await expect(agent.extMethod(method, { sessionIds })).rejects.toThrow(
+          'sessionIds must be an array of non-empty strings',
+        );
+      }
+      await expect(
+        agent.extMethod(method, { sessionIds: [selectedId, 'missing'] }),
+      ).rejects.toThrow('Session not found for id: missing');
+      expect(settings.reloadScopeFromDisk).not.toHaveBeenCalled();
+      expect(bootstrapRefresh).not.toHaveBeenCalled();
+      await expect(
+        agent.extMethod(method, {
+          reason: 'all',
+          sessionIds: [selectedId, selectedId.toUpperCase()],
+        }),
+      ).resolves.toEqual({
+        sessionsRefreshed: 1,
+        sessionsFailed: 0,
+        configsRefreshed: 2,
+        configsFailed: 0,
+        reason: 'all',
+      });
+      expect(settings.reloadScopeFromDisk).toHaveBeenCalledExactlyOnceWith(
+        SettingScope.Workspace,
+      );
+      expect(bootstrapRefresh).toHaveBeenCalledOnce();
+      expect(states[0]!.refreshCache).toHaveBeenCalledOnce();
+      expect(states[0]!.reloadSkillSettings).toHaveBeenCalledOnce();
+      expect(
+        states[0]!.refreshSkillsFromSettings,
+      ).toHaveBeenCalledExactlyOnceWith({
+        reloadSettings: false,
+        notifyConfigChanged: false,
+      });
+      expect(states[1]!.refreshCache).not.toHaveBeenCalled();
+      expect(states[1]!.reloadSkillSettings).not.toHaveBeenCalled();
+      expect(states[1]!.refreshSkillsFromSettings).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('refreshes skill content once per config before publishing session updates', async () => {
     const bootstrapSettings = {
       merged: {},
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopeFromDisk: vi.fn().mockReturnValue(true),
       getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
@@ -35184,12 +37405,16 @@ describe('sessionLanguage multi-session propagation', () => {
     const reloadSkillSettings = vi.fn();
     const bootstrapSettings = {
       merged: { mcpServers: {} },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopeFromDisk: vi.fn().mockReturnValue(true),
       getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
-    vi.mocked(loadSettings).mockReturnValue(bootstrapSettings);
+    const sessionSettings = {
+      ...bootstrapSettings,
+      reloadScopeFromDisk: vi.fn().mockReturnValue(true),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(sessionSettings);
     vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
     vi.mocked(Session).mockImplementation(
       () =>
@@ -35243,6 +37468,10 @@ describe('sessionLanguage multi-session propagation', () => {
         throwOnError: true,
       });
       expect(reloadSkillSettings).toHaveBeenCalledOnce();
+      expect(
+        bootstrapSettings.reloadScopeFromDisk,
+      ).toHaveBeenCalledExactlyOnceWith(SettingScope.Workspace);
+      expect(sessionSettings.reloadScopeFromDisk).not.toHaveBeenCalled();
       expect(refreshSkillsFromSettings).toHaveBeenCalledExactlyOnceWith({
         reloadSettings: false,
         notifyConfigChanged: false,

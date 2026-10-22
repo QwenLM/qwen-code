@@ -2,7 +2,7 @@
 
 [English](2026-09-09-a2a-frozen-contract.md) | [简体中文](2026-09-09-a2a-frozen-contract.zh-CN.md)
 
-Status: the frozen contract and polling JSON-RPC transport are implemented; cross-implementation interoperability has not been demonstrated. Updated 2026-09-28.
+Status: the frozen contract and polling JSON-RPC transport are implemented; cross-implementation interoperability has not been demonstrated. Updated 2026-10-06 (tasks moved from threads to chat sessions).
 
 This began as P1 of the [continuation architecture](https://github.com/QwenLM/qwen-code/blob/8ff056f1c7e5842393bc8d0f5b8a6ab1502462b6/docs/design/2026-09-09-agent-service-collaboration.md) and [implementation plan](https://github.com/QwenLM/qwen-code/blob/8ff056f1c7e5842393bc8d0f5b8a6ab1502462b6/docs/plans/2026-09-09-agent-service-collaboration-plan.md). It now records the contract implemented by the core workspace-agent A2A modules and the daemon transport. Code takes precedence when it differs from this document.
 
@@ -28,31 +28,38 @@ Optional, with **none included in the first version**: `sendMessageStream` / `re
 
 ## 3. Entity Mapping (the Central Decision)
 
-**An A2A `Task` maps to one local `Thread`, not a `ThreadRun`.**
+**An A2A `Task` maps to one agent run in a chat session; the A2A `contextId` is that chat session's id.** (The thread model this section used to describe was removed; see [the session multi-agent design](2026-10-05-session-multi-agent.md) §6.)
 
-A Task can enter `INPUT_REQUIRED`, but the first transport accepts new tasks only. Messages carrying `taskId` or `contextId` are refused until thread continuation is implemented explicitly. A run is a single turn and has no corresponding protocol entity. For returned tasks, **A2A `contextId` = `rootThreadId`**: the specification describes a contextual collection of interactions, matching a parent thread together with its child threads. `Message` ↔ `ThreadMessage`.
+- A message without `contextId` makes the daemon create an ordinary chat session for the caller (listed in WebShell as `A2A · <callerId>`, `sourceType: 'default'`, `sourceId: 'a2a:<callerId>'`) and post the message there as `@<granted agent> <text>`. The run that post starts is the task; the task id is the run id.
+- A message with a `contextId` the caller was given for the same agent is posted into that session, so the agent's native session continues and it remembers the earlier turns. Any other `contextId` is refused as unknown. A message carrying `taskId` is refused: a task is one turn, and further input is a new message in the same context.
+- The grant names one agent, so the caller addresses that agent only: every other `@name` in its text is neutralized before posting. The granted agent's own reply can still @-mention other workspace agents, as in any chat session.
+- A message sent while the previous run in that context is still queued joins that run (the orchestrator coalesces queued triggers), so both messages report the same task.
+- The answer artifact is the granted agent's reply (`agent_message` record of that run). The first terminal view is kept in the caller's mapping file, so it outlives the session's trimmed run list and a deleted session.
 
-| Local `ThreadStatus` | A2A `TaskState`             | Explanation |
-| -------------------- | --------------------------- | ----------- |
-| `open`               | `TASK_STATE_SUBMITTED`      |             |
-| `in_progress`        | `TASK_STATE_WORKING`        |             |
-| `blocked`            | `TASK_STATE_INPUT_REQUIRED` |             |
-| `in_review`          | `TASK_STATE_INPUT_REQUIRED` | See below   |
-| `done`               | `TASK_STATE_COMPLETED`      |             |
-| `cancelled`          | `TASK_STATE_CANCELED`       |             |
+| Local run status    | A2A `TaskState`             | Explanation |
+| ------------------- | --------------------------- | ----------- |
+| `queued`            | `TASK_STATE_SUBMITTED`      |             |
+| `running`           | `TASK_STATE_WORKING`        |             |
+| `awaiting_approval` | `TASK_STATE_INPUT_REQUIRED` | See below   |
+| `completed`         | `TASK_STATE_COMPLETED`      |             |
+| `failed`, `offline` | `TASK_STATE_FAILED`         |             |
+| `cancelled`         | `TASK_STATE_CANCELED`       |             |
 
-`toA2ATaskState` is the exhaustive raw status mapping. The external view also considers runs: while any run is live the task is `WORKING`; once no run is live it becomes `COMPLETED`, `FAILED`, or `CANCELED` so a polling caller does not wait forever on a local review state it cannot continue. Adding a `ThreadStatus` without deciding its external representation makes the mapper throw rather than use a default. Tests cover both behaviors.
+`toA2ATaskState` is exhaustive: adding a run status without deciding its external representation makes the mapper throw rather than use a default. A run that finished but whose reply is not yet in the transcript (the record is deferred while a main-model turn runs in the session) stays `WORKING`, so `COMPLETED` is never published before the reply is recorded. A reply with no text (a blank turn, such as a squad leader's `no_action`) completes with no `answer`, which is optional. A run whose reply could not be recorded is `FAILED`.
+
+**Approvals.** An A2A caller cannot answer a tool approval. A run waiting on one is reported as `INPUT_REQUIRED` with `localStatus: 'awaiting_approval'` in the extension metadata and a status message saying so; sending more input does not answer it. The workspace owner answers it in the chat session in WebShell.
 
 ## 4. Unsupported Items
 
 - **Remote usage is not reported with Task/Message.** The A2A 1.0 data model has no usage or token field. Third-party agents therefore **cannot be required** to report usage. Our own numbers use an extension under `Task.metadata`. **Admission must treat missing usage as unknown, not zero**; otherwise a remote agent that declines to report usage would effectively be free to call.
 - **Idempotency is only a `MAY`.** The specification says an agent _may_ deduplicate on `Message.messageId`, but the client generates this unscoped ID. Two callers can supply the same ID. The server therefore adds a scoped key: `externalRequestKey(callerId, targetAgentId, messageId)`, restricted to the authenticated caller and target agent. Its three components are length-prefixed rather than delimiter-separated: IDs are opaque external strings, and a caller able to put delimiters in an ID could otherwise forge another caller's key (covered by an assertion and mutation verification).
-  **The key must be persisted in the same write that accepts the request.** Adding it afterward cannot establish whether a retry is the request currently being accepted, nor reliably reject the same key with different content.
-- **Two gaps in local state:** `TASK_STATE_REJECTED` (the agent declines work) and `TASK_STATE_AUTH_REQUIRED` have no local equivalents. Thread cancellation is implemented. Task continuation is deliberately refused, so a caller can submit, poll, list, and cancel work but cannot add another message to an existing task.
+  **The key must be persisted before the work is started.** The key is reserved in one locked write to the caller's mapping file (`<agentsDir>/a2a/<callerId>.json`, mode 0600), the session is created and the message posted outside the lock (the orchestrator persists runs under the same lock), and the run is recorded afterwards; a retry resumes a reservation that has no run yet, and the post's id is derived from the key so the orchestrator's own idempotency catches a half-finished accept. Adding it afterward cannot establish whether a retry is the request currently being accepted, nor reliably reject the same key with different content.
+- **Two gaps in local state:** `TASK_STATE_REJECTED` (the agent declines work) and `TASK_STATE_AUTH_REQUIRED` have no local equivalents. Cancelling a queued run is immediate; an executing run is asked to stop and reaches `CANCELED` once its program has stopped (`runsStillLive` in the cancel response says which). Adding a message to an existing task is refused; continuing a context is supported.
+- **No carry-over from the thread era.** Tasks and idempotency keys recorded while A2A ran on threads are not read by the session-based store: their task ids answer `not_found`, and a `messageId` from that time is accepted as new work. A2A is behind `experimental.agentCollaboration` (default off) and had no released callers, so nothing is migrated.
 
-## 5. A Non-`_meta` Channel for Run Frames
+## 5. A Non-`_meta` Channel for Local Run Status
 
-Local ACP prompts carry run frames in `_meta`. That is the daemon's trust boundary and **is neither externally reachable nor intended to be**. External tasks use a separate channel: declare the extension URI `https://qwenlm.github.io/qwen-code/a2a/workspace-agents/v1` in `AgentCapabilities.extensions`, and put frames and usage under that URI in `Task.metadata`.
+Local ACP prompts carry run frames in `_meta`. That is the daemon's trust boundary and **is neither externally reachable nor intended to be**. External tasks use a separate channel: declare the extension URI `https://qwenlm.github.io/qwen-code/a2a/workspace-agents/v1` in `AgentCapabilities.extensions`, and put the local run status (`localStatus`), its error and token usage (`tokensUsed`) under that URI in `Task.metadata`.
 
 Set `required: false`: clients that ignore the extension still receive correct Task / Message semantics, but cannot see usage.
 
@@ -65,7 +72,7 @@ It uses a different language and codebase from our server's `@a2a-js/sdk`, avoid
 ## 7. Decisions Still Requiring a Person
 
 1. The production connectivity model: who can reach the daemon and whether the outbound channel must move earlier.
-2. The approval recipient for externally submitted work.
+2. ~~The approval recipient for externally submitted work.~~ Decided 2026-10-06: the workspace owner, in the chat session in WebShell (see §3).
 
 A grant names exactly one caller and one agent. It does not carry a speculative permission scope; the agent's existing tool policy remains the capability boundary.
 
@@ -75,6 +82,4 @@ One additional decision from architecture §5 is needed before P3: what signal a
 
 ## 8. Implementation Status
 
-The daemon publishes the Agent Card and authenticated polling JSON-RPC routes for submit, get, list, and cancel. Grants store only secret digests, intake is idempotent and caller-scoped, and transport tests cover admission plus the successful task lifecycle. Streaming, push notifications, task continuation, and cross-implementation acceptance with the Python client remain out of scope.
-
-The external task stays working while any descendant run or parent report is pending. Unclosed turns fail. The first terminal response (state, timestamp and granted-agent answer) is persisted under the intake record and reused by submit retries, get, list and cancel. Local follow-ups remain visible in extension metadata but cannot reopen that external result; canceling an already published terminal task does not cancel later local work.
+The daemon publishes the Agent Card and authenticated polling JSON-RPC routes for submit (new or continued context), get, list, and cancel, mounted only while agent collaboration is enabled. Grants store only secret digests; intake is idempotent and caller-scoped. Code: `core/src/agents/workspace-agents/{a2a-contract,external-intake,a2a-server}.ts`, `cli/src/serve/session-agents/a2a-sessions.ts` (the orchestrator adapter) and `cli/src/serve/routes/a2a.ts`. Streaming, push notifications and cross-implementation acceptance with the Python client remain out of scope.

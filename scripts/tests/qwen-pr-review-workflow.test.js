@@ -22,6 +22,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import { parse } from 'yaml';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const workflow = readFileSync(
   '.github/workflows/qwen-code-pr-review.yml',
@@ -3426,7 +3427,8 @@ describe('checkout self-heal', () => {
   // A workspace whose entries the owning user cannot unlink: find -exec rm
   // exits nonzero, so the user-mode wipe leg fails deterministically. Root
   // bypasses the 0o500 lock via CAP_DAC_OVERRIDE, so the tests built on it
-  // skip there, and win32 has no POSIX permission bits to honor.
+  // skip where it keeps that capability, and win32 has no POSIX permission
+  // bits to honor.
   const lockFixture = () => {
     const parent = realpathSync(
       mkdtempSync(join(tmpdir(), 'checkout-heal-lock-')),
@@ -3442,7 +3444,7 @@ describe('checkout self-heal', () => {
     rmSync(parent, { recursive: true, force: true });
   };
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'exits 0 and keeps survivors when BOTH wipe legs fail',
     () => {
       // The wipe step has no continue-on-error, so its own never-fail exit
@@ -3472,7 +3474,7 @@ describe('checkout self-heal', () => {
     },
   );
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'escalates to the sudo leg when the user-mode wipe fails',
     () => {
       // Deleting the `|| sudo -n find …` leg (or flipping it to `&&`) must
@@ -3733,8 +3735,8 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
   it('opens the gate on any upstream failure but never on skip or resolve', () => {
     // Every job whose failure marks review-pr 'skipped' is enumerated: the
     // incident's trigger can kill the chain's self-hosted jobs first
-    // (authorize / review-config), and a transient API failure can kill the
-    // hosted ones (precheck-pr / delay-automatic-review).
+    // (authorize / review-config / delay-automatic-review), and a transient
+    // API failure can kill the hosted one (precheck-pr).
     expect(job.needs).toEqual([
       'precheck-pr',
       'review-config',
@@ -3903,7 +3905,9 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.stdout).not.toContain('repaired');
   });
 
-  it.skipIf(!hasGnuMktemp)(
+  // Both cases make a directory unwritable, which only binds where
+  // permission bits do: not for root with its DAC capabilities.
+  it.skipIf(!hasGnuMktemp || !arePermissionBitsEnforced())(
     'repairs a single unwritable directory instead of failing fast',
     () => {
       // Mutant control: a status=1 right after the first failed touch would
@@ -3914,15 +3918,20 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     },
   );
 
-  it('fails fast when repair is impossible', () => {
-    // Mutant control: dropping the post-repair re-probe would report this
-    // unusable directory as repaired (exit 0) and die at FinalizeJob — the
-    // exact PR #8894 death the probe exists to prevent.
-    const r = runHealthProbe({ breakDir: 'home', sudoMode: 'fail' });
-    expect(r.status).toBe(1);
-    expect(r.stdout).toContain('still unusable after repair');
-    expect(r.stdout).toContain('failing fast instead of dying at job finalize');
-  });
+  it.skipIf(!arePermissionBitsEnforced())(
+    'fails fast when repair is impossible',
+    () => {
+      // Mutant control: dropping the post-repair re-probe would report this
+      // unusable directory as repaired (exit 0) and die at FinalizeJob — the
+      // exact PR #8894 death the probe exists to prevent.
+      const r = runHealthProbe({ breakDir: 'home', sudoMode: 'fail' });
+      expect(r.status).toBe(1);
+      expect(r.stdout).toContain('still unusable after repair');
+      expect(r.stdout).toContain(
+        'failing fast instead of dying at job finalize',
+      );
+    },
+  );
 
   it('does not probe _diag when it does not exist', () => {
     // Polarity: an inverted `[ -d ]` guard probes the missing directory,

@@ -359,9 +359,13 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
 
   // --- idle / processing --------------------------------------------------
 
-  /** Parity of `isIdleRef.current`: no dispatched command, no live turn. */
+  /** No command dispatch or model turn in flight; sampled before dispatch. */
   isIdle(): boolean {
     return !this.processing && !this.streaming;
+  }
+
+  isStreaming(): boolean {
+    return this.streaming;
   }
 
   setIsProcessing(processing: boolean): void {

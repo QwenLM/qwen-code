@@ -8,6 +8,7 @@ import type {
   DaemonBackgroundTurn,
   DaemonSessionArtifactInput,
   DaemonInputAnnotation,
+  QwenAgentMessageMeta,
 } from '@qwen-code/sdk/daemon';
 
 import type { components } from '../components/managed/generated/managed-agent-api.js';
@@ -68,6 +69,7 @@ export interface DaemonMessageToolCall {
   content?: readonly DaemonMessageToolCallContent[];
   rawOutput?: unknown;
   toolResult?: components['schemas']['PublicToolResult'];
+  toolDetailsRevision?: number;
   locations?: DaemonMessageToolCallLocation[];
   kind?: DaemonMessageToolKind;
   startTime?: number;
@@ -103,6 +105,8 @@ export interface DaemonMessageAuthor {
  * cross-cutting field is declared once rather than on each role.
  */
 export interface DaemonMessageMeta {
+  sourceRecordIds?: string[];
+  localCommandId?: string;
   backgroundTurn?: DaemonBackgroundTurn;
   /**
    * Admitted prompt this message belongs to, copied from the daemon-stamped
@@ -145,6 +149,8 @@ export interface DaemonUserMessage extends DaemonMessageMeta {
   }>;
   inputAnnotations?: DaemonInputAnnotation[];
   source?: string;
+  /** `_meta.qwenAgentMessage` of an @-mention (`kind: 'agent_mention'`). */
+  agentMessage?: QwenAgentMessageMeta;
 }
 
 export interface DaemonAssistantMessage extends DaemonMessageMeta {
@@ -161,6 +167,11 @@ export interface DaemonAssistantMessage extends DaemonMessageMeta {
    * Absent on sessions whose agent predates usage stamping.
    */
   usage?: { inputTokens: number; outputTokens: number; cachedTokens?: number };
+  /**
+   * `_meta.qwenAgentMessage` of a workspace agent's reply in this session
+   * (`kind: 'agent_message'`): its run status, error, steps and tokens.
+   */
+  agentMessage?: QwenAgentMessageMeta;
 }
 
 export interface DaemonThinkingMessage extends DaemonMessageMeta {

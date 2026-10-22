@@ -24,6 +24,7 @@ import {
   extensionExecutionOf,
   isExtensionDeliveryPending,
   managedExtensionRecordKey,
+  managedChildTaskId,
   managedTaskId,
   projectManagedTask,
   type ManagedRuntimeExecutionView,
@@ -121,6 +122,7 @@ describe('managed-extension-projection/1 fixtures', () => {
               ? {
                   shell: body?.taskKindOf({ kind: 'shell' }),
                   child_agent: body?.taskKindOf({ kind: 'child_agent' }),
+                  workflow: body?.taskKindOf({ kind: 'workflow' }),
                 }
               : body?.taskKindOf({
                   configurationId: 'probe',
@@ -165,9 +167,9 @@ describe('managed-extension-projection/1 fixtures', () => {
 
   it('partitions the enabled domains between the bodies and the envelope list', () => {
     // Every enabled domain commits either through the envelope path (the
-    // list) or through a Stage H body. monitor_run's body is registered
-    // while its domain stays disabled, so the partition is over the
-    // enabled names only.
+    // list) or through a Stage H body. monitor_run is enabled AND carries
+    // a body, so the body check excludes it — the partition still stands
+    // over the enabled names only (#13930 R1-44).
     const bodied = new Set(Object.keys(MANAGED_EXTENSION_RECORD_BODIES));
     expect(
       MANAGED_SESSION_ENABLED_DOMAINS.filter((domain) => !bodied.has(domain)),
@@ -234,6 +236,11 @@ describe('managed-extension-projection/1 fixtures', () => {
     );
     expect(key).toBe(each.recordKey);
     expect(managedTaskId(key)).toBe(each.taskId);
+    if (each.domain === 'child_run') {
+      expect(managedChildTaskId(each.sessionId, each.recordId)).toBe(
+        each.taskId,
+      );
+    }
   });
 
   it.each(fixtures.runStartCases)('judges a run start: $id', (each) => {

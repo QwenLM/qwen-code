@@ -173,6 +173,9 @@ function renderSidebar(
   props: {
     onError?: (error: unknown, message?: string) => void;
     onSessionsDeleted?: (sessionIds: string[]) => void;
+    currentSessionActive?: boolean;
+    managedWorkspaces?: React.ReactNode;
+    onSearchQueryChange?: (query: string) => void;
   } = {},
 ): void {
   const onError = props.onError ?? (() => {});
@@ -192,6 +195,9 @@ function renderSidebar(
           onLoadSession={loadSession}
           onError={onError}
           onSessionsDeleted={props.onSessionsDeleted}
+          currentSessionActive={props.currentSessionActive}
+          managedWorkspaces={props.managedWorkspaces}
+          onSearchQueryChange={props.onSearchQueryChange}
           // Surface delete as an inline hover button so the row's disabled
           // state is directly assertable without opening the dropdown.
           sessionActions={{ inlineItems: ['delete'] }}
@@ -257,6 +263,107 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar current-session delete (issue #12619)', () => {
+  it('shows the active task service and labels daemon workspaces when Managed is available', async () => {
+    renderSidebar({
+      currentSessionActive: false,
+      managedWorkspaces: <div>Managed workspace</div>,
+    });
+    await flushSidebar();
+    const newTask = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="New task"]',
+    )!;
+    expect(newTask.textContent).toContain('Managed');
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (item) =>
+          item.textContent?.includes('project') &&
+          item.textContent.includes('Local'),
+      ),
+    ).toBe(true);
+    renderSidebar({
+      currentSessionActive: true,
+      managedWorkspaces: <div>Managed workspace</div>,
+    });
+    await flushSidebar();
+    expect(newTask.textContent).toContain('Local');
+  });
+  it('keeps Local history beside Managed workspace content without selecting the hidden Local conversation', async () => {
+    active.sessions = [
+      makeSession('session-current', { displayName: 'Current session' }),
+    ];
+    active.data = active.sessions;
+    connection.sessionId = 'session-current';
+    renderSidebar({
+      currentSessionActive: false,
+      managedWorkspaces: <div data-managed-workspaces>Managed workspace</div>,
+    });
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-managed-workspaces]')?.textContent,
+    ).toBe('Managed workspace');
+    expect(
+      container.querySelector('[data-web-shell-session-title]')?.textContent,
+    ).toBe('Current session');
+    const localRow = container
+      .querySelector('[data-web-shell-session-title]')!
+      .closest('[role="button"]')!;
+    expect(localRow.getAttribute('aria-current')).toBeNull();
+    renderSidebar({ currentSessionActive: true });
+    await flushSidebar();
+    expect(localRow.getAttribute('aria-current')).toBe('page');
+  });
+
+  it('keeps mutation ownership for a running Local session while Managed is selected', async () => {
+    active.sessions = [
+      makeSession('session-current', {
+        displayName: 'Current session',
+        hasActivePrompt: true,
+      }),
+    ];
+    active.data = active.sessions;
+    connection.sessionId = 'session-current';
+    renderSidebar({ currentSessionActive: false });
+    await flushSidebar();
+    expect(findSessionDeleteButton('Current session').disabled).toBe(true);
+    expect(active.deleteSession).not.toHaveBeenCalled();
+  });
+
+  it('shares the existing Projects search text with Managed navigation', async () => {
+    const onSearchQueryChange = vi.fn();
+    renderSidebar({
+      managedWorkspaces: <div data-managed-workspaces />,
+      onSearchQueryChange,
+    });
+    await flushSidebar();
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Search sessions"]',
+        )!,
+      ),
+    );
+    await flushSidebar();
+    const input = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search sessions"]',
+    )!;
+    expect(input).not.toBeNull();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Managed needle');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flushSidebar();
+    expect(onSearchQueryChange).toHaveBeenLastCalledWith('Managed needle');
+    await act(async () => {
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    expect(onSearchQueryChange).toHaveBeenLastCalledWith('');
+  });
+
   it('deletes the current session from the sidebar row when it is idle', async () => {
     active.sessions = [
       makeSession('session-current', { displayName: 'Current session' }),

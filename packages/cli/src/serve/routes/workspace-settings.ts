@@ -45,6 +45,7 @@ import {
 } from '../../utils/acpModelUtils.js';
 
 const TUI_ONLY_SETTINGS = new Set([
+  'experimental.mods',
   'general.vimMode',
   'general.terminalBell',
   'general.notificationMode',
@@ -56,6 +57,7 @@ const TUI_ONLY_SETTINGS = new Set([
   'ui.renderMode',
   'ui.useTerminalBuffer',
   'ui.mouseTracking',
+  'ui.arrowKeysScrollTranscript',
   'ui.showScrollbar',
   'ui.hideBanner',
   'ui.accessibility.enableLoadingPhrases',
@@ -67,6 +69,7 @@ const TUI_ONLY_SETTINGS = new Set([
 // their rows and needs to read + persist them; for `voiceModel` the daemon
 // `/voice/stream` then reads it back via `loadSettings`.
 const WEB_SHELL_SETTINGS = new Set([
+  'ui.allowedApprovalModes',
   'ui.compactMode',
   'voiceModel',
   'imageModel',

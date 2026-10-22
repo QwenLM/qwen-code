@@ -24,6 +24,17 @@ export interface TrajectoryTranscriptClient {
   ): Promise<TrajectoryPageResult>;
 }
 
+const IDENTITIES = new WeakMap<
+  TrajectoryPageLoader,
+  { sessionId: string; scope?: string }
+>();
+
+export function trajectoryLoaderIdentity(
+  loader: TrajectoryPageLoader | undefined,
+) {
+  return loader ? IDENTITIES.get(loader) : undefined;
+}
+
 const LOADERS = new WeakMap<
   TrajectoryTranscriptClient,
   Map<string, TrajectoryPageLoader>
@@ -47,13 +58,15 @@ const LOADERS = new WeakMap<
 export function createTrajectoryPageLoader(
   client: TrajectoryTranscriptClient,
   sessionId: string,
+  scope?: string,
 ): TrajectoryPageLoader {
   let bySession = LOADERS.get(client);
   if (!bySession) {
     bySession = new Map();
     LOADERS.set(client, bySession);
   }
-  const existing = bySession.get(sessionId);
+  const key = JSON.stringify([sessionId, scope ?? null]);
+  const existing = bySession.get(key);
   if (existing) return existing;
   // A cursor already carries its direction, and the daemon refuses one sent
   // alongside `direction` as an invalid combination — so it is one or the
@@ -63,6 +76,7 @@ export function createTrajectoryPageLoader(
       ...(cursor !== undefined ? { cursor } : { direction: 'backward' }),
       limit,
     });
-  bySession.set(sessionId, loader);
+  bySession.set(key, loader);
+  IDENTITIES.set(loader, { sessionId, scope });
   return loader;
 }

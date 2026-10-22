@@ -221,9 +221,11 @@ Auto Mode protects you from getting stuck:
   Switching affects only the current runtime session; it does not change your
   saved settings.
 
-- After **3 consecutive policy blocks** the next tool call falls back to
-  the standard manual-approval prompt. This catches the case where the
-  agent keeps trying minor variants of a forbidden command.
+- After **3 consecutive blocks** — classifier policy blocks and deterministic
+  destructive-command blocks both count — the call that reaches the third
+  block falls back to the standard manual-approval prompt. This catches the
+  case where the agent keeps trying minor variants of a forbidden command, or
+  keeps re-issuing a command the destructive guard refuses.
 - After **2 consecutive unavailable** results (classifier API failures),
   later calls skip the known-broken classifier and go directly to manual
   approval. The first unavailable result already asks; the threshold avoids

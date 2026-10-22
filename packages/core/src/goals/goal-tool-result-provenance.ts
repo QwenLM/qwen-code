@@ -33,8 +33,9 @@ export interface GoalToolResultRequest {
  *
  * `get_goal` and `update_goal` are stamped as `goal_runtime` instead: they are
  * the Goal's own bookkeeping, and a catalog that cited its own reads as proof
- * would be circular. `exec` is `execution_output`: the script can rewrite
- * nested results, so only the separately recorded originals attest tool facts.
+ * would be circular. Scripts and aggregate wrappers are `execution_output`:
+ * they can repeat model-authored claims, so only separately recorded original
+ * observations attest external facts.
  *
  * Every site that records tool results during a Goal turn routes through
  * here -- the interactive scheduler, both TUI recording paths, headless, and
@@ -67,7 +68,16 @@ export function goalToolResultProvenance(
   ) {
     return { goalContext: { ...goalContext }, provenance: 'goal_runtime' };
   }
-  if (lowerToolName === ToolNames.EXEC) {
+  if (
+    lowerToolName === ToolNames.EXEC ||
+    lowerToolName === ToolNames.AGENT ||
+    lowerToolName === ToolNames.ADVISOR ||
+    lowerToolName === ToolNames.WORKFLOW ||
+    // The thread tools are gone, but transcripts recorded before their removal
+    // still carry thread_read results, and those restate another participant's
+    // recorded text -- the wrapper class, not an original observation.
+    lowerToolName === 'thread_read'
+  ) {
     return { goalContext: { ...goalContext }, provenance: 'execution_output' };
   }
   return { goalContext: { ...goalContext } };
@@ -120,4 +130,23 @@ export function ambientGoalToolResultProvenance(
     },
     responseParts,
   );
+}
+
+/**
+ * The subtype stamp that marks a nested Code Mode tool result as an original
+ * record: the outer `exec` script can discard or rewrite nested output, so
+ * these separately recorded results -- not the aggregate `exec` response --
+ * are the ones the Goal evidence catalog reads as attested tool facts
+ * (`external_fact`). The aggregate is still catalogued, as `execution_output`,
+ * which cannot prove them. The replay projections deliberately skip them
+ * (`isInternalCodeModeToolResult`): internal calls have no model-emitted
+ * function-call partner.
+ *
+ * Both writer sites own a different carrier for the stamp (the scheduler
+ * merges it into `goalToolResultProvenance`'s options, the ACP session spreads
+ * it into a queued record), so only the literal and the "nested results are
+ * stamped" decision live here.
+ */
+export function codeModeToolResultStamp() {
+  return { subtype: 'code_mode_tool_result' as const };
 }

@@ -874,6 +874,153 @@
       },
       "valid": true,
       "start": false
+    },
+    {
+      "id": "schedule-run-with-effect",
+      "domain": "schedule",
+      "patch": {
+        "run": {
+          "effectId": "effect-1"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "must stay a purely logical lifecycle"
+    },
+    {
+      "id": "schedule-run-with-dispatch",
+      "domain": "schedule",
+      "patch": {
+        "run": {
+          "dispatchId": "claim-1"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "must stay a purely logical lifecycle"
+    },
+    {
+      "id": "schedule-run-with-session-delivery",
+      "domain": "schedule",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "planned"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "must stay a purely logical lifecycle"
+    },
+    {
+      "id": "cron-range-equal-ends",
+      "domain": "schedule",
+      "patch": {
+        "cron": "5-5 * * * *"
+      },
+      "valid": false,
+      "start": false,
+      "error": "ranges must not wrap"
+    },
+    {
+      "id": "cron-day-of-month-zero",
+      "domain": "schedule",
+      "patch": {
+        "cron": "0 0 0 * *"
+      },
+      "valid": false,
+      "start": false,
+      "error": "values must stay within 1-31"
+    },
+    {
+      "id": "cron-month-over-max",
+      "domain": "schedule",
+      "patch": {
+        "cron": "0 0 * 13 *"
+      },
+      "valid": false,
+      "start": false,
+      "error": "values must stay within 1-12"
+    },
+    {
+      "id": "cron-day-of-week-over-max",
+      "domain": "schedule",
+      "patch": {
+        "cron": "0 0 * * 8"
+      },
+      "valid": false,
+      "start": false,
+      "error": "values must stay within 0-7"
+    },
+    {
+      "id": "cron-upper-bounds",
+      "domain": "schedule",
+      "patch": {
+        "cron": "59 23 31 12 7"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "timezone-three-segments",
+      "domain": "schedule",
+      "patch": {
+        "timezone": "America/Argentina/Buenos_Aires"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "timezone-four-segments",
+      "domain": "schedule",
+      "patch": {
+        "timezone": "America/Argentina/Buenos_Aires/X"
+      },
+      "valid": false,
+      "start": false,
+      "error": "IANA timezone name form"
+    },
+    {
+      "id": "slot-leap-second",
+      "domain": "automation_run",
+      "patch": {
+        "occurrenceKey": "schedule:2016-12-31T23:59:60Z"
+      },
+      "valid": false,
+      "start": false,
+      "error": "slot must be a canonical UTC instant"
+    },
+    {
+      "id": "slot-hour-24",
+      "domain": "automation_run",
+      "patch": {
+        "occurrenceKey": "schedule:2026-10-06T24:00:00Z"
+      },
+      "valid": false,
+      "start": false,
+      "error": "slot must be a canonical UTC instant"
+    },
+    {
+      "id": "manual-empty-command",
+      "domain": "automation_run",
+      "patch": {
+        "occurrenceKey": "manual:"
+      },
+      "valid": false,
+      "start": false,
+      "error": "commandId must be a non-empty string"
+    },
+    {
+      "id": "goal-oversize-with-control",
+      "domain": "schedule",
+      "patch": {
+        "goal": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\u0001"
+      },
+      "valid": false,
+      "start": false,
+      "error": "exceeds 4096 UTF-8 bytes"
     }
   ],
   "successors": [
@@ -1270,6 +1417,29 @@
           "execution": "intent",
           "effectId": "effect-2"
         }
+      },
+      "valid": false
+    },
+    {
+      "id": "schedule-run-moves-back",
+      "domain": "schedule",
+      "before": {
+        "run": {
+          "state": "running"
+        }
+      },
+      "after": {
+        "definitionRevision": 2,
+        "definitionDigest": "9999999999999999999999999999999999999999999999999999999999999999"
+      },
+      "valid": false
+    },
+    {
+      "id": "run-fixed-schedule",
+      "domain": "automation_run",
+      "before": {},
+      "after": {
+        "scheduleId": "schedule-2"
       },
       "valid": false
     }

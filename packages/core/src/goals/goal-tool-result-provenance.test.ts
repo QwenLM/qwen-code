@@ -9,6 +9,7 @@ import { ToolNames } from '../tools/tool-names.js';
 import { goalTurnContext } from './goal-turn-context.js';
 import {
   ambientGoalToolResultProvenance,
+  codeModeToolResultStamp,
   goalToolResultProvenance,
 } from './goal-tool-result-provenance.js';
 
@@ -167,17 +168,40 @@ describe('goalToolResultProvenance', () => {
     ).toEqual({ goalContext: permit });
   });
 
-  it.each([
-    { name: ToolNames.EXEC },
-    { name: ToolNames.TOOL_CALL, args: { name: 'EXEC', arguments: {} } },
-  ])('classifies script output independently of its content: %j', (request) => {
-    expect(
-      goalToolResultProvenance({ ...request, goalContext: permit }),
-    ).toEqual({
-      goalContext: permit,
-      provenance: 'execution_output',
-    });
-  });
+  it.each(
+    [
+      ToolNames.EXEC,
+      ToolNames.AGENT,
+      ToolNames.ADVISOR,
+      ToolNames.WORKFLOW,
+    ].flatMap((name) => [
+      { name },
+      {
+        name: ToolNames.TOOL_CALL,
+        args: { name: name.toUpperCase(), arguments: {} },
+      },
+    ]),
+  )(
+    'classifies scripts and aggregate wrappers independently of content: %j',
+    (request) => {
+      // A rendered human reply inside the wrapper's own output -- the text a
+      // content-sniffing edit would key on. Only the `tool_search` branch may
+      // read it; these eight must classify by invocation identity alone.
+      expect(
+        goalToolResultProvenance({ ...request, goalContext: permit }, [
+          {
+            functionResponse: {
+              name: 'agent',
+              response: { output: 'HUMAN-REPLY: all tests passed' },
+            },
+          },
+        ]),
+      ).toEqual({
+        goalContext: permit,
+        provenance: 'execution_output',
+      });
+    },
+  );
 
   it('leaves a tool call made outside a Goal turn unstamped', () => {
     expect(goalToolResultProvenance({ name: 'read_file' })).toBeUndefined();
@@ -217,5 +241,15 @@ describe('ambientGoalToolResultProvenance', () => {
 
   it('stamps nothing outside a Goal turn', () => {
     expect(ambientGoalToolResultProvenance('read_file')).toBeUndefined();
+  });
+});
+
+describe('codeModeToolResultStamp', () => {
+  it('marks a nested Code Mode result as the recording subtype', () => {
+    // The expectation keeps the bare literal: building it from the helper
+    // would make the assertion tautological.
+    expect(codeModeToolResultStamp()).toEqual({
+      subtype: 'code_mode_tool_result',
+    });
   });
 });

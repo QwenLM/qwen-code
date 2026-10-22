@@ -34,9 +34,14 @@ import {
   ApprovalMode,
   SendMessageType,
   SYSTEM_REMINDER_OPEN,
+  LoopReason,
   LoopType,
   getToolCallFingerprint,
   CronScheduler,
+  Storage,
+  readCronTasks,
+  updateCronTasks,
+  withTaskGate,
   AUTONOMOUS_SENTINEL_CRON,
   AUTONOMOUS_SENTINEL_DYNAMIC,
   LOOP_SENTINEL_CRON,
@@ -52,7 +57,9 @@ import {
   goalPauseReasonForRunBudget,
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
-import type { Part } from '@google/genai';
+import type { Content, Part } from '@google/genai';
+import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { EventEmitter } from 'node:events';
 import {
   runNonInteractive,
@@ -66,10 +73,22 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from './config/settings.js';
 import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAdapter.js';
+import { ModSession } from './services/mod-session.js';
 import type { ControlService } from './nonInteractive/control/ControlService.js';
-import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
+import {
+  CommandKind,
+  type ExecutionMode,
+  type SlashCommand,
+} from './ui/commands/types.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
+import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
+import { BundledSkillLoader } from './services/BundledSkillLoader.js';
+import { FileCommandLoader } from './services/FileCommandLoader.js';
+import { McpPromptLoader } from './services/McpPromptLoader.js';
+import { SavedWorkflowLoader } from './services/saved-workflow-loader.js';
+import { SkillCommandLoader } from './services/SkillCommandLoader.js';
+import type { ICommandLoader } from './services/types.js';
 import {
   _resetCleanupFunctionsForTest,
   runExitCleanup,
@@ -263,6 +282,7 @@ describe('runNonInteractive', () => {
   let processStderrSpy: MockInstance;
   let mockLlmClient: {
     sendMessageStream: Mock;
+    admitUserPrompt: Mock;
     getChatRecordingService: Mock;
     getChat: Mock;
     stripOrphanedUserEntriesFromHistory: Mock;
@@ -334,6 +354,7 @@ describe('runNonInteractive', () => {
 
     mockLlmClient = {
       sendMessageStream: vi.fn(),
+      admitUserPrompt: vi.fn(),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       recordCompletedToolCall: vi.fn(),
       addHistory: vi.fn(),
@@ -355,6 +376,7 @@ describe('runNonInteractive', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
       getChatRecordingService: vi.fn().mockReturnValue({
+        readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
         flush: vi.fn().mockResolvedValue(undefined),
         finalize: vi.fn().mockResolvedValue(undefined),
       }),
@@ -1269,6 +1291,10 @@ describe('runNonInteractive', () => {
   it('runs resume with the exact permit scheduled by Core', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
+    mockToolRegistry.getAllToolNames.mockReturnValue([
+      'tool_search',
+      'tool_call',
+    ]);
     await prepareGoalState('paused');
     mockFinishedGoalWorker();
     const abortController = new AbortController();
@@ -1284,6 +1310,8 @@ describe('runNonInteractive', () => {
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
     const [parts, , , options] = mockLlmClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain('Continue working on the active Goal.');
+    expect(parts[0]?.text).toContain('In Direct mode:');
+    expect(parts[0]?.text).not.toContain('In Code Mode, discover');
     expect(parts[0]?.text).toContain(
       `<goal_runtime_data>\n{"goalId":"${options.goalPermit.goalId}","revision":${options.goalPermit.revision},"objective":"existing goal"}\n</goal_runtime_data>`,
     );
@@ -2683,6 +2711,7 @@ describe('runNonInteractive', () => {
     );
     mockLlmClient.getChat = vi.fn(() => ({
       getDebugResponses: mockGetDebugResponses,
+      getHistoryShallow: vi.fn().mockReturnValue([]),
       getHistory: vi.fn().mockReturnValue([
         {
           role: 'model',
@@ -2863,6 +2892,7 @@ describe('runNonInteractive', () => {
       // continuation hands off to that path with Retry semantics.
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi
           .fn()
           .mockReturnValue([
@@ -2896,6 +2926,7 @@ describe('runNonInteractive', () => {
       mockLlmClient.stripOrphanedUserEntriesFromHistory = vi.fn();
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi
           .fn()
           .mockReturnValue([
@@ -2930,6 +2961,7 @@ describe('runNonInteractive', () => {
       setupMetricsMock();
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi.fn().mockReturnValue([
           {
             role: 'model',
@@ -2971,6 +3003,7 @@ describe('runNonInteractive', () => {
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi.fn().mockReturnValue([
           {
             role: 'model',
@@ -3018,6 +3051,7 @@ describe('runNonInteractive', () => {
       setupMetricsMock();
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi
           .fn()
           .mockReturnValue([{ role: 'model', parts: [{ text: 'all done' }] }]),
@@ -3027,6 +3061,114 @@ describe('runNonInteractive', () => {
         continueInterrupted: true,
       });
 
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('refuses a cancelled model prompt after a completed local command', async () => {
+      setupMetricsMock();
+      const content: Content = {
+        role: 'user',
+        parts: [{ text: 'do the thing' }],
+      };
+      markApiHistoryPrompt(content, 'client-A');
+      const historyOwner = { history: [content] } as unknown as LlmChat;
+      mockLlmClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: () => LlmChat.prototype.getHistory.call(historyOwner),
+        getHistoryShallow: () =>
+          LlmChat.prototype.getHistoryShallow.call(historyOwner),
+      }));
+      mockConfig
+        .getChatRecordingService()
+        .readActiveTranscriptChain.mockResolvedValue([
+          {
+            uuid: 'user-A',
+            type: 'user',
+            promptId: 'client-A',
+            daemonPromptId: 'daemon-A',
+            message: content,
+          },
+          {
+            uuid: 'cancel-A',
+            type: 'system',
+            subtype: 'turn_result',
+            promptId: 'client-A',
+            systemPayload: {
+              promptId: 'daemon-A',
+              state: 'cancelled',
+              cancelledAt: 1,
+              cancelReason: 'user',
+              endedAt: 2,
+            },
+          },
+          {
+            uuid: 'docs-B',
+            type: 'user',
+            promptId: 'client-B',
+            daemonPromptId: 'daemon-B',
+            message: { role: 'user', parts: [{ text: '/docs' }] },
+          },
+          {
+            uuid: 'complete-B',
+            type: 'system',
+            subtype: 'turn_result',
+            systemPayload: {
+              promptId: 'daemon-B',
+              state: 'completed',
+              endedAt: 3,
+            },
+          },
+        ]);
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-continue-A',
+        { continueInterrupted: true },
+      );
+
+      expect(exitCode).toBe(0);
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+      expect(processStdoutSpy).toHaveBeenCalledWith(
+        expect.stringContaining('No interrupted turn to continue.'),
+      );
+    });
+
+    it('refuses direct continuation of an unknown legacy cancellation', async () => {
+      setupMetricsMock();
+      mockConfig
+        .getChatRecordingService()
+        .readActiveTranscriptChain.mockResolvedValue([
+          {
+            type: 'system',
+            subtype: 'turn_result',
+            uuid: 'cancel',
+            systemPayload: {
+              promptId: 'turn-9',
+              state: 'cancelled',
+              cancelledAt: 1,
+              endedAt: 2,
+            },
+          },
+        ]);
+      mockLlmClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
+        getHistory: vi
+          .fn()
+          .mockReturnValue([
+            { role: 'user', parts: [{ text: 'do the thing' }] },
+          ]),
+      }));
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-c5',
+        { continueInterrupted: true },
+      );
+      expect(exitCode).toBe(0);
       expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
     });
   });
@@ -3225,18 +3367,14 @@ describe('runNonInteractive', () => {
     );
 
     expect(exitCode).toBe(1);
-    // The consecutive guard is always-on, so the headless message must flag it
-    // as always-on and must NOT suggest the skipLoopDetection escape hatch,
-    // which cannot disable it.
+    // The consecutive guard runs before the skipLoopDetection gate, so the
+    // headless message must point at model.loopProtection, which governs it,
+    // and must NOT suggest skipLoopDetection, which cannot disable it.
     expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'always-on guard and cannot be disabled via `model.skipLoopDetection`',
-      ),
+      expect.stringContaining('Set `model.loopProtection` to "warn"'),
     );
     expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining(
-        'Set the `model.skipLoopDetection` setting to true',
-      ),
+      expect.stringContaining('`model.skipLoopDetection`'),
     );
   });
 
@@ -3348,6 +3486,77 @@ describe('runNonInteractive', () => {
       expect.stringContaining(
         'Set the `model.skipLoopDetection` setting to true',
       ),
+    );
+  });
+
+  it('names the cause when the stop carries its loop reason', async () => {
+    setupMetricsMock();
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Partial work' },
+      {
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.TURN_TOOL_CALL_CAP,
+          loopReason: LoopReason.EXPLICIT_CAP,
+          toolCallCount: 4,
+          toolCallLimit: 3,
+        },
+      },
+    ];
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Long turn',
+      'prompt-id-turn-cap-reason',
+    );
+
+    expect(exitCode).toBe(1);
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)',
+      ),
+    );
+    // The reason replaces the hedged hint that lists every cause.
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('A per-turn tool-call cap was reached'),
+    );
+  });
+
+  it('offers the skipLoopDetection escape for the heuristic global duplicate', async () => {
+    setupMetricsMock();
+    const events: ServerLlmStreamEvent[] = [
+      {
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          loopReason: LoopReason.REPEATED_CALL,
+        },
+      },
+    ];
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Repeat',
+      'prompt-id-global-dup-reason',
+    );
+
+    // The heuristic detector runs only with skipLoopDetection: false, so the
+    // always-on hint the provider-id breaker gets would be wrong here.
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '`model.skipLoopDetection` to true to disable this check',
+      ),
+    );
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('always-on guard'),
     );
   });
 
@@ -3543,6 +3752,7 @@ describe('runNonInteractive', () => {
       mockSettings,
       'Use a tool',
       'prompt-id-2',
+      { humanInput: { text: 'ultracode use a tool' } },
     );
 
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
@@ -3564,6 +3774,7 @@ describe('runNonInteractive', () => {
         type: SendMessageType.UserQuery,
         modelOverride: undefined,
         submittedPrompt: 'Use a tool',
+        humanInput: { text: 'ultracode use a tool' },
       },
     );
     // Verify second call (after tool execution) has type: ToolResult
@@ -4083,7 +4294,12 @@ describe('runNonInteractive', () => {
         )
         .mockReturnValueOnce(createStreamFromEvents(finishTurn));
 
-      await runNonInteractive(mockConfig, 'work the goal', 'p-goal');
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'work the goal',
+        'p-goal',
+      );
 
       const optionsByCallId = new Map(
         recordToolResult.mock.calls.map((call) => [call[1]?.callId, call[2]]),
@@ -4156,13 +4372,78 @@ describe('runNonInteractive', () => {
         )
         .mockReturnValueOnce(createStreamFromEvents(finishTurn));
 
-      await runNonInteractive(mockConfig, 'plain work', 'p-plain');
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'plain work',
+        'p-plain',
+      );
 
       expect(recordToolResult).toHaveBeenCalled();
       for (const call of recordToolResult.mock.calls) {
         expect(call[2]).toBeUndefined();
       }
     });
+
+    it.each([
+      ['no hooks', false, ['git status', 'git status'], 2],
+      ['a PreToolUse hook', true, ['git status', 'git status'], 1],
+      [
+        'a skill earlier in the batch',
+        false,
+        ['skill', 'git status', 'git status'],
+        1,
+      ],
+    ])(
+      'limits read-only shell call concurrency with %s',
+      async (_label, preToolUseHook, commands, maxInFlight) => {
+        setupMetricsMock();
+        Object.assign(mockConfig, {
+          getDisableAllHooks: () => false,
+          hasHooksForEvent: (event: string) =>
+            preToolUseHook && event === 'PreToolUse',
+        });
+        vi.mocked(mockToolRegistry.getTool).mockImplementation(
+          (name: string) =>
+            ({
+              kind: name === ToolNames.SKILL ? Kind.Other : Kind.Execute,
+            }) as unknown as ReturnType<typeof mockToolRegistry.getTool>,
+        );
+        let inFlight = 0;
+        let peak = 0;
+        mockCoreExecuteToolCall.mockImplementation(
+          async (_config: unknown, req: { callId: string; name: string }) => {
+            if (req.name !== ToolNames.SKILL) {
+              inFlight += 1;
+              peak = Math.max(peak, inFlight);
+              await new Promise((resolve) => setTimeout(resolve, 10));
+              inFlight -= 1;
+            }
+            return { responseParts: [{ text: `resp-${req.callId}` }] };
+          },
+        );
+        mockLlmClient.sendMessageStream
+          .mockReturnValueOnce(
+            createStreamFromEvents(
+              commands.map((command, index) => ({
+                type: LlmEventType.ToolCallRequest,
+                value: {
+                  callId: `shell-${index}`,
+                  name: command === 'skill' ? ToolNames.SKILL : ToolNames.SHELL,
+                  args: command === 'skill' ? {} : { command },
+                  isClientInitiated: false,
+                  prompt_id: 'p-shell',
+                },
+              })),
+            ),
+          )
+          .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+        await runNonInteractive(mockConfig, mockSettings, 'go', 'p-shell');
+
+        expect(peak).toBe(maxInFlight);
+      },
+    );
 
     it('runs a batch of concurrency-safe tool calls concurrently', async () => {
       setupMetricsMock();
@@ -4864,6 +5145,11 @@ describe('runNonInteractive', () => {
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(LoopType.GLOBAL_TOOL_CALL_DUPLICATE),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'the provider replayed a tool call id that had already run',
+      ),
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(
@@ -6129,6 +6415,66 @@ describe('runNonInteractive', () => {
     expect(processStderrSpy).toHaveBeenCalledWith(`${jsonError}\n`);
   });
 
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'emits init before startup logs when a Mod fails in %s',
+    async (format) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      for (const write of [processStdoutSpy, processStderrSpy]) {
+        write.mockImplementation((...args: unknown[]) => {
+          const callback = args.at(-1);
+          if (typeof callback === 'function') queueMicrotask(() => callback());
+          return true;
+        });
+      }
+      const close = vi.fn().mockResolvedValue(undefined);
+      vi.spyOn(ModSession, 'create').mockImplementation(
+        (_config, _settings, adapter) =>
+          ({
+            initialize: vi
+              .fn()
+              .mockRejectedValue(new Error('MOD_START_FAILED')),
+            close,
+            flushOutput: vi.fn().mockResolvedValue(undefined),
+            flushLogs: vi.fn().mockImplementationOnce(() => {
+              adapter.emitSystemMessage('ui_log', {
+                plugin: 'broken',
+                text: 'MOD_START_LOG',
+              });
+            }),
+          }) as unknown as ModSession,
+      );
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, '/hello', 'mod-failure'),
+      ).rejects.toThrow();
+
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      expect(messages[0]).toMatchObject({ type: 'system', subtype: 'init' });
+      expect(messages[1]).toMatchObject({
+        type: 'system',
+        subtype: 'ui_log',
+        data: { plugin: 'broken', text: 'MOD_START_LOG' },
+      });
+      expect(messages.at(-1)).toMatchObject({
+        type: 'result',
+        is_error: true,
+        error: { message: expect.stringContaining('MOD_START_FAILED') },
+      });
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalled();
+    },
+  );
+
   it('should handle API errors in text mode and exit with error code', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.TEXT);
     setupMetricsMock();
@@ -6246,6 +6592,7 @@ describe('runNonInteractive', () => {
         error: {
           message: '402 Model gpt-oss-120b is not available for billing.',
           status: 402,
+          requestId: 'a30a1854-1925-4da8-8803-73fee2865116',
         },
       },
     };
@@ -6290,6 +6637,14 @@ describe('runNonInteractive', () => {
         expect(line.match(/\[API Error: /g)?.length ?? 0).toBe(1);
       }
     }
+
+    // End-to-end pin for issue #14115: the StructuredError's requestId must
+    // survive the whole forwarding chain onto the user-facing stderr line
+    // (inside the closing bracket, so the idempotency guard above still
+    // recognizes the line as formatted).
+    expect(stderrOutput).toContain(
+      '(request_id: a30a1854-1925-4da8-8803-73fee2865116)',
+    );
   });
 
   it('should handle FatalInputError with custom exit code in JSON format', async () => {
@@ -6376,6 +6731,211 @@ describe('runNonInteractive', () => {
     );
 
     expect(processStdoutSpy).toHaveBeenCalledWith('Response from command\n');
+  });
+
+  describe('UserPromptSubmit admission before a command expands', () => {
+    const spies: Array<{ mockRestore: () => void }> = [];
+    const admission = Object.freeze({ blocked: false });
+    let deploy: SlashCommand & { action: Mock };
+    const finishedStream = () =>
+      createStreamFromEvents([
+        { type: LlmEventType.Content, value: 'done' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]);
+
+    beforeEach(() => {
+      setupMetricsMock();
+      deploy = {
+        name: 'deploy',
+        description: 'deploy',
+        kind: CommandKind.FILE,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'deploy expanded' }],
+        }),
+      };
+      for (const Loader of [
+        McpPromptLoader,
+        BuiltinCommandLoader,
+        BundledSkillLoader,
+        SkillCommandLoader,
+        SavedWorkflowLoader,
+      ]) {
+        spies.push(
+          vi
+            .spyOn(Loader.prototype as ICommandLoader, 'loadCommands')
+            .mockResolvedValue([]),
+        );
+      }
+      spies.push(
+        vi
+          .spyOn(FileCommandLoader.prototype as ICommandLoader, 'loadCommands')
+          .mockImplementation(async () => [deploy]),
+      );
+      mockCommandServiceCreate.mockImplementation(
+        async (loaders: ICommandLoader[], signal: AbortSignal) => {
+          const commands = (
+            await Promise.all(
+              loaders.map((loader) => loader.loadCommands(signal)),
+            )
+          )
+            .flat()
+            .map((command) => ({ ...command }));
+          return {
+            getCommands: () => commands,
+            getCommandsForMode: (mode: ExecutionMode) =>
+              filterCommandsForMode(commands, mode),
+          };
+        },
+      );
+      mockLlmClient.admitUserPrompt.mockResolvedValue(admission);
+      mockLlmClient.sendMessageStream.mockImplementation(finishedStream);
+    });
+
+    afterEach(() => {
+      for (const spy of spies.splice(0)) spy.mockRestore();
+    });
+
+    it('admits a custom command before it expands and passes the admission to the first send', async () => {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/deploy prod',
+        'prompt-id-admit',
+      );
+
+      expect(mockLlmClient.admitUserPrompt).toHaveBeenCalledExactlyOnceWith(
+        '/deploy prod',
+        'prompt-id-admit',
+      );
+      expect(
+        mockLlmClient.admitUserPrompt.mock.invocationCallOrder[0],
+      ).toBeLessThan(deploy.action.mock.invocationCallOrder[0]!);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledExactlyOnceWith(
+        [{ text: 'deploy expanded' }],
+        expect.any(AbortSignal),
+        'prompt-id-admit',
+        {
+          type: SendMessageType.UserQuery,
+          modelOverride: undefined,
+          submittedPrompt: '/deploy prod',
+          promptAdmission: admission,
+        },
+      );
+    });
+
+    it('sends a refused command unexpanded, with the admission that blocks it', async () => {
+      const refused = Object.freeze({ blocked: true });
+      mockLlmClient.admitUserPrompt.mockResolvedValue(refused);
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/deploy prod',
+        'prompt-id-refused',
+      );
+
+      expect(deploy.action).not.toHaveBeenCalled();
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledExactlyOnceWith(
+        [{ text: '/deploy prod' }],
+        expect.any(AbortSignal),
+        'prompt-id-refused',
+        expect.objectContaining({
+          type: SendMessageType.UserQuery,
+          promptAdmission: refused,
+        }),
+      );
+    });
+
+    it('passes the admission to the first send only', async () => {
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [{ text: 'Tool response' }],
+        executionStatus: 'success',
+      });
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'tool-1',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-id-tool',
+              },
+            },
+          ]),
+        )
+        .mockImplementationOnce(finishedStream);
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/deploy prod',
+        'prompt-id-tool',
+      );
+
+      const sendOptions = mockLlmClient.sendMessageStream.mock.calls.map(
+        (call) => call[3],
+      );
+      expect(sendOptions).toEqual([
+        expect.objectContaining({ promptAdmission: admission }),
+        expect.not.objectContaining({ promptAdmission: expect.anything() }),
+      ]);
+      expect(mockLlmClient.admitUserPrompt).toHaveBeenCalledOnce();
+    });
+
+    it('does not admit a notification batch', async () => {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/deploy prod',
+        'prompt-id-notification',
+        { sendMessageType: SendMessageType.Notification },
+      );
+
+      expect(mockLlmClient.admitUserPrompt).not.toHaveBeenCalled();
+      expect(deploy.action).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      ['before admission', true],
+      ['while admission runs', false],
+    ])(
+      'runs no command when the turn is cancelled %s',
+      async (_, abortFirst) => {
+        const turnAbortController = new AbortController();
+        const cancel = () =>
+          turnAbortController.abort(new TurnInterruptedError());
+        if (abortFirst) cancel();
+        mockLlmClient.admitUserPrompt.mockImplementation(async () => {
+          cancel();
+          return admission;
+        });
+
+        const exitCode = await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          '/deploy prod',
+          'prompt-id-cancelled',
+          {
+            abortController: turnAbortController,
+            recoverableCancellation: true,
+          },
+        );
+
+        expect(exitCode).toBe(130);
+        expect(mockLlmClient.admitUserPrompt).toHaveBeenCalledTimes(
+          abortFirst ? 0 : 1,
+        );
+        expect(deploy.action).not.toHaveBeenCalled();
+        expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it('should handle command that requires confirmation by returning early', async () => {
@@ -8314,6 +8874,261 @@ describe('runNonInteractive', () => {
     );
     expect(predicate({ prompt: 'regular cron job' } as CronJob)).toBe(false);
   });
+
+  it('exits once the final fire of a gated session job settles quietly', async () => {
+    // An expiring recurring job (like a one-shot) leaves the scheduler before
+    // its gate runs; a quiet gate then reaches no consumer, so the hold-open
+    // must be re-checked from the gate's settlement or the run pins forever.
+    setupMetricsMock();
+    let settleGate:
+      | ((result: { kind: 'quiet'; durationMs: number }) => void)
+      | undefined;
+    const scheduler = new CronScheduler(null, 60_000, {
+      runGate: () =>
+        new Promise((resolve) => {
+          settleGate = resolve;
+        }),
+    });
+    const job = scheduler.create('* * * * *', 'gated', true, 'true');
+    job.gateApproved = true;
+    // Park the job past the wall clock so the scheduler's own 1 s tick never
+    // fires it; the test ticks it explicitly, past its expiry.
+    job.lastFiredAt = Date.now() + 10 * 60_000;
+    const startSpy = vi.spyOn(scheduler, 'start');
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: LlmEventType.Content, value: 'ok' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+
+    let finished = false;
+    const run = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'test',
+      'p-cron-gate-final',
+    ).then(() => {
+      finished = true;
+    });
+    await vi.waitFor(() => expect(startSpy).toHaveBeenCalled());
+    expect(scheduler.sessionSize).toBe(1);
+
+    const slot = job.lastFiredAt + 120_000;
+    scheduler.tick(new Date(slot - (slot % 60_000) + 59_000));
+    await vi.waitFor(() => expect(settleGate).toBeDefined());
+    // Final fire: gone from the map, still counted while its gate runs.
+    expect(scheduler.list()).toHaveLength(0);
+    expect(scheduler.sessionSize).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(finished).toBe(false);
+
+    settleGate!({ kind: 'quiet', durationMs: 1 });
+    await run;
+    expect(scheduler.sessionSize).toBe(0);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds open for a durable gated catch-up until its gate delivers', async () => {
+    // Durable jobs never pin the headless run, but start() flushes an
+    // overdue catch-up whose stamp lands before its gate decides: stopping
+    // the scheduler there would abort the gate and lose the slot for good.
+    setupMetricsMock();
+    const tmpDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'headless-gated-catch-up-'),
+    );
+    Storage.setRuntimeBaseDir(tmpDir);
+    const createdAt = Date.now() - 3 * 60 * 60_000;
+    await updateCronTasks(tmpDir, () => [
+      withTaskGate(
+        {
+          id: 'cu1',
+          cron: '0 * * * *',
+          prompt: 'overdue',
+          recurring: true,
+          createdAt,
+          lastFiredAt: createdAt,
+        },
+        './probe.sh',
+      ),
+    ]);
+    let settleGate:
+      | ((result: {
+          kind: 'output';
+          stdout: string;
+          truncated: boolean;
+          durationMs: number;
+        }) => void)
+      | undefined;
+    const scheduler = new CronScheduler(tmpDir, undefined, {
+      runGate: () =>
+        new Promise((resolve) => {
+          settleGate = resolve;
+        }),
+    });
+    try {
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      mockLlmClient.sendMessageStream.mockImplementation(() =>
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'ok' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          },
+        ]),
+      );
+
+      let finished = false;
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'test',
+        'p-cron-gate-catch-up',
+      ).then(() => {
+        finished = true;
+      });
+      await vi.waitFor(() => expect(settleGate).toBeDefined());
+      expect(scheduler.sessionSize).toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(finished).toBe(false);
+
+      settleGate!({
+        kind: 'output',
+        stdout: 'event: comment\n',
+        truncated: false,
+        durationMs: 1,
+      });
+      await run;
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(
+        JSON.stringify(mockLlmClient.sendMessageStream.mock.calls[1]![0]),
+      ).toContain('<gate-output>\\nevent: comment\\n</gate-output>');
+      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+      const [task] = await readCronTasks(tmpDir);
+      expect(task?.runs).toEqual([
+        expect.objectContaining({ kind: 'catch-up', gate: 'delivered' }),
+      ]);
+    } finally {
+      scheduler.destroy();
+      await (scheduler as unknown as { pendingRelease: Promise<unknown> })
+        .pendingRelease;
+      Storage.setRuntimeBaseDir(null);
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each<[string, (scheduler: CronScheduler, root: string) => Promise<void>]>([
+    [
+      'deleted',
+      async (scheduler) => {
+        await scheduler.delete('cu1');
+      },
+    ],
+    [
+      'disabled on disk',
+      async (scheduler, root) => {
+        await updateCronTasks(root, (tasks) =>
+          tasks.map((t) => ({ ...t, enabled: false })),
+        );
+        // The reload the tasks-file watcher runs after its debounce.
+        await (
+          scheduler as unknown as {
+            loadFileTasks(handleMissed: boolean): Promise<void>;
+          }
+        ).loadFileTasks(false);
+      },
+    ],
+  ])(
+    'exits when the durable catch-up it holds open for is %s mid-gate',
+    async (_what, cancel) => {
+      // The hold-open waits on the running gate; cancelling it leaves nothing
+      // to wait for, and its settlement delivers nothing, so the run must
+      // re-check from there instead of pinning with an idle scheduler.
+      setupMetricsMock();
+      const tmpDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'headless-gated-cancel-'),
+      );
+      Storage.setRuntimeBaseDir(tmpDir);
+      const createdAt = Date.now() - 3 * 60 * 60_000;
+      await updateCronTasks(tmpDir, () => [
+        withTaskGate(
+          {
+            id: 'cu1',
+            cron: '0 * * * *',
+            prompt: 'overdue',
+            recurring: true,
+            createdAt,
+            lastFiredAt: createdAt,
+          },
+          './probe.sh',
+        ),
+      ]);
+      let gateSignal: AbortSignal | undefined;
+      // Like the real runner: a cancelled command settles as failed.
+      const scheduler = new CronScheduler(tmpDir, undefined, {
+        runGate: (_gate, { signal }) =>
+          new Promise((resolve) => {
+            gateSignal = signal;
+            signal.addEventListener('abort', () =>
+              resolve({
+                kind: 'failed',
+                detail: 'was cancelled',
+                stderr: '',
+                durationMs: 1,
+              }),
+            );
+          }),
+      });
+      try {
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockLlmClient.sendMessageStream.mockImplementation(() =>
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'ok' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        );
+
+        let finished = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'test',
+          'p-cron-gate-cancel',
+        ).then(() => {
+          finished = true;
+        });
+        await vi.waitFor(() => expect(gateSignal).toBeDefined());
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(finished).toBe(false);
+
+        await cancel(scheduler, tmpDir);
+        expect(gateSignal!.aborted).toBe(true);
+        await vi.waitFor(() => expect(finished).toBe(true), { timeout: 1000 });
+        await run;
+        expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(1);
+      } finally {
+        scheduler.destroy();
+        await (scheduler as unknown as { pendingRelease: Promise<unknown> })
+          .pendingRelease;
+        Storage.setRuntimeBaseDir(null);
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   describe('--json-schema structured output', () => {
     // Helper: walk an emitted event and extract the first tool_use_id when

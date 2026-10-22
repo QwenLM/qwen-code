@@ -14,7 +14,12 @@ import {
 } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { MockTool } from '../test-utils/mock-tool.js';
-import { ToolSearchTool, scoreTool, tokenize } from './tool-search.js';
+import {
+  ToolSearchTool,
+  isDeferredToolBridgeAvailable,
+  scoreTool,
+  tokenize,
+} from './tool-search.js';
 import { resolveDeferredToolCall, ToolCallTool } from './tool-call.js';
 import { ToolErrorType } from './tool-error.js';
 import type { AnyDeclarativeTool, MediaPolicyToolDescriptor } from './tools.js';
@@ -257,6 +262,25 @@ describe.each([false, true])(
     );
   },
 );
+
+describe('isDeferredToolBridgeAvailable', () => {
+  it('counts registered bridge factories before their instances are loaded', () => {
+    const config = new Config(baseConfigParams);
+    const registry = new ToolRegistry(config);
+    registry.registerFactory(
+      ToolNames.TOOL_SEARCH,
+      async () => new MockTool({ name: ToolNames.TOOL_SEARCH }),
+    );
+    expect(isDeferredToolBridgeAvailable(registry)).toBe(false);
+    registry.registerFactory(
+      ToolNames.TOOL_CALL,
+      async () => new MockTool({ name: ToolNames.TOOL_CALL }),
+    );
+    expect(registry.getTool(ToolNames.TOOL_SEARCH)).toBeUndefined();
+    expect(registry.getTool(ToolNames.TOOL_CALL)).toBeUndefined();
+    expect(isDeferredToolBridgeAvailable(registry)).toBe(true);
+  });
+});
 
 describe('Code Mode discovery', () => {
   function setup() {

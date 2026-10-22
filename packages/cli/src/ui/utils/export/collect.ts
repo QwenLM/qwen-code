@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcriptRecords';
 import { isShellResultDisplay } from '@qwen-code/qwen-code-core/shellResult';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -16,6 +17,10 @@ import { parseGoalStateRecordPayloadV2 } from '@qwen-code/qwen-code-core/goals/g
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { SessionContext } from '../../../acp-integration/session/types.js';
 import type { SessionUpdate, ToolCall } from '@agentclientprotocol/sdk';
+import {
+  parseQwenAgentMessageMeta,
+  QWEN_AGENT_MESSAGE_META_KEY,
+} from '@qwen-code/sdk/daemon';
 import { HistoryReplayer } from '../../../acp-integration/session/history-replayer.js';
 import { getExplicitToolResultCallId } from '../../../utils/chat-record-tool-call-id.js';
 import type {
@@ -23,6 +28,7 @@ import type {
   ExportMessage,
   ExportSessionData,
   ExportMetadata,
+  ExportMessageAuthor,
   ExportToolRegistry,
 } from './types.js';
 
@@ -134,7 +140,7 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
   for (const record of records) {
     if (
       record.type !== 'tool_result' ||
-      record.subtype === 'code_mode_tool_result' ||
+      isInternalCodeModeToolResult(record) ||
       !record.toolCallResult
     )
       continue;
@@ -506,6 +512,7 @@ class ExportSessionContext implements SessionContext {
     sourceUuid?: string;
     sourceTimestamp?: string;
     usageMetadata?: GenerateContentResponseUsageMetadata;
+    author?: ExportMessageAuthor;
   } | null = null;
   private activeRecordId: string | null = null;
   private activeRecordTimestamp: string | null = null;
@@ -524,7 +531,13 @@ class ExportSessionContext implements SessionContext {
   async sendUpdate(update: SessionUpdate): Promise<void> {
     switch (update.sessionUpdate) {
       case 'user_message_chunk':
-        this.handleMessageChunk('user', update.content);
+        this.handleMessageChunk(
+          'user',
+          update.content,
+          'user',
+          undefined,
+          agentAuthorOf(update._meta),
+        );
         break;
       case 'agent_message_chunk': {
         // Extract usageMetadata from _meta if available
@@ -554,6 +567,7 @@ class ExportSessionContext implements SessionContext {
           update.content,
           'assistant',
           usageMetadata,
+          agentAuthorOf(update._meta),
         );
         break;
       }
@@ -630,24 +644,25 @@ class ExportSessionContext implements SessionContext {
     content: { type: string; text?: string },
     messageRole: 'user' | 'assistant' | 'thinking' = role,
     usageMetadata?: GenerateContentResponseUsageMetadata,
+    author?: ExportMessageAuthor,
   ): void {
     if (content.type !== 'text' || !content.text) return;
 
-    // If we're starting a new message type, flush the previous one
-    if (
-      this.currentMessage &&
-      (this.currentMessage.type !== role ||
-        this.currentMessage.role !== messageRole)
-    ) {
+    // A new message type, or another author (an agent's reply never merges
+    // into the session's own text, nor into another reply): flush first.
+    const sameMessage =
+      this.currentMessage !== null &&
+      this.currentMessage.type === role &&
+      this.currentMessage.role === messageRole &&
+      this.currentMessage.author?.name === author?.name &&
+      (!author ||
+        this.currentMessage.sourceUuid === (this.activeRecordId ?? undefined));
+    if (this.currentMessage && !sameMessage) {
       this.flushCurrentMessage();
     }
 
     // Add to current message or create new one
-    if (
-      this.currentMessage &&
-      this.currentMessage.type === role &&
-      this.currentMessage.role === messageRole
-    ) {
+    if (this.currentMessage && sameMessage) {
       this.currentMessage.parts.push({ text: content.text });
       // Keep the first source uuid for merged messages, but use the timestamp
       // of the latest record that contributed text to the buffer.
@@ -666,6 +681,7 @@ class ExportSessionContext implements SessionContext {
         sourceUuid: this.activeRecordId ?? undefined,
         sourceTimestamp: this.activeRecordTimestamp ?? undefined,
         ...(usageMetadata && role === 'assistant' ? { usageMetadata } : {}),
+        ...(author ? { author } : {}),
       };
     }
   }
@@ -794,6 +810,10 @@ class ExportSessionContext implements SessionContext {
       },
     };
 
+    if (this.currentMessage.author) {
+      exportMessage.author = this.currentMessage.author;
+    }
+
     // Add usageMetadata for assistant messages
     if (
       this.currentMessage.type === 'assistant' &&
@@ -815,6 +835,19 @@ class ExportSessionContext implements SessionContext {
   getMessages(): ExportMessage[] {
     return this.messages;
   }
+}
+
+/**
+ * The workspace agent behind a replayed `agent_message` / `agent_mention`
+ * update (`_meta.qwenAgentMessage.author`), when there is one.
+ */
+function agentAuthorOf(meta: unknown): ExportMessageAuthor | undefined {
+  if (!meta || typeof meta !== 'object') return undefined;
+  const parsed = parseQwenAgentMessageMeta(
+    (meta as Record<string, unknown>)[QWEN_AGENT_MESSAGE_META_KEY],
+  );
+  const name = parsed?.author?.name.trim();
+  return name ? { name } : undefined;
 }
 
 /**

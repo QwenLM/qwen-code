@@ -21,6 +21,7 @@ import {
 } from './managed-runtime-outcomes.js';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import * as gitUtils from '../utils/gitUtils.js';
+import { ManagedSessionMessageProjection } from './managed-session-message-projection.js';
 
 vi.mock('../utils/gitUtils.js', async (importOriginal) => {
   const original =
@@ -127,6 +128,51 @@ async function checkpointOf(session: ManagedSession) {
 }
 
 describe('LocalManagedRuntimeOutcomes', () => {
+  it('continues and cold-opens a paged Turn without losing the earliest receipt', async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-paged-outcomes-'),
+    );
+    roots.add(root);
+    const opened = await openSession(root, 'session-paged-outcomes');
+    let session = opened.session;
+    try {
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      for (let index = 0; index < 65; index++) {
+        await outcomes.admit(admission(`paged-call-${index}`));
+        await outcomes.settle({
+          functionCallId: `paged-call-${index}`,
+          executionStatus: 'success',
+          payload: { executionStatus: 'success', responseParts: [] },
+        });
+        await outcomes.finalizeBatch();
+      }
+      const physical = JSON.parse(
+        (await session.authority.readCheckpointState())!.toString(),
+      );
+      expect(physical.storageProfile).toBe('managed-checkpoint-paged/1');
+      expect(physical.history.toolCount).toBe(32);
+      await opened.seal();
+      session = (await openSession(root, 'session-paged-outcomes')).session;
+      const restored = new LocalManagedRuntimeOutcomes(session);
+      await restored.recoverCommittedReceipts();
+      expect(
+        await unresolvedRuntimeWorkReason(session.authority),
+      ).toBeUndefined();
+      const authorization = await session.authority.harnessRunAuthorization();
+      expect(authorization.status).toBe('runnable');
+      if (authorization.status !== 'runnable')
+        throw new Error('Missing paged checkpoint');
+      expect(authorization.checkpoint.tools?.items).toHaveLength(65);
+      expect(restored.hasCommittedReceipt('paged-call-0')).toBe(true);
+      await expect(restored.admit(admission('paged-call-0'))).rejects.toThrow(
+        /already/,
+      );
+      expect(events(session, 'tool.receipt')).toHaveLength(65);
+    } finally {
+      await session.close();
+    }
+  }, 60_000);
+
   it('admits a call with its intent and an await_runtime checkpoint', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
     roots.add(root);
@@ -1219,68 +1265,102 @@ describe('restored runtime block', () => {
     }
   });
 
-  it('reads no git branch when a restore has nothing to re-record', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
-    roots.add(root);
-    {
-      const { session, seal } = await openSession(root, 'session-nothing-lost');
-      const outcomes = new LocalManagedRuntimeOutcomes(session);
-      await outcomes.admit(admission('call-a'));
-      await outcomes.settle({
-        functionCallId: 'call-a',
-        executionStatus: 'success',
-        payload: {
+  it.each([
+    { kind: 'managed-message', output: 'the answer' },
+    { kind: 'managed-message-chunks', output: 'the answer'.repeat(18_000) },
+  ])(
+    'does not re-record an existing $kind tool result or read its git branch',
+    async ({ kind, output }) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+      roots.add(root);
+      const sessionId = `session-nothing-lost-${kind}`;
+      {
+        const { session, seal } = await openSession(root, sessionId);
+        const outcomes = new LocalManagedRuntimeOutcomes(session);
+        await outcomes.admit(admission('call-a'));
+        await outcomes.settle({
+          functionCallId: 'call-a',
           executionStatus: 'success',
-          responseParts: [{ type: 'text', text: 'the answer' }],
-        },
-      });
-      // The recorder's record landed before the close.
-      await session.sink.write({
-        ...session.authority.recordEnvelope,
-        uuid: 'recorded-result:call-a',
-        parentUuid: null,
-        sessionId: session.authority.sessionHeader.sessionKey.sessionId,
-        timestamp: new Date().toISOString(),
-        type: 'tool_result',
-        message: {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'call-a',
-                name: 'read_file',
-                response: { output: 'the answer' },
+          payload: {
+            executionStatus: 'success',
+            responseParts: [{ type: 'text', text: output }],
+          },
+        });
+        // The recorder's record landed before the close.
+        await session.sink.write({
+          ...session.authority.recordEnvelope,
+          uuid: 'recorded-result:call-a',
+          parentUuid: null,
+          sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+          timestamp: new Date().toISOString(),
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call-a',
+                  name: 'read_file',
+                  response: { output },
+                },
               },
-            },
-          ],
-        },
-        toolCallResult: {
-          callId: 'call-a',
-          status: 'success',
-          responseParts: [{ text: 'the answer' }],
-        },
-      } as never);
-      await seal();
-    }
+            ],
+          },
+          toolCallResult: {
+            callId: 'call-a',
+            status: 'success',
+            responseParts: [{ text: output }],
+          },
+        } as never);
+        const recorded = events(session, 'message.committed').filter(
+          (event) => event.payload['role'] === 'tool_result',
+        );
+        expect(recorded).toHaveLength(1);
+        expect(recorded[0]!.payload['contentRef']).toMatchObject({ kind });
+        await seal();
+      }
 
-    const { session: restored } = await openSession(
-      root,
-      'session-nothing-lost',
-    );
-    try {
-      vi.mocked(gitUtils.getGitBranch).mockClear();
-      vi.mocked(gitUtils.getCachedGitBranch).mockClear();
-      // Nothing to re-record: the blocking `git rev-parse` never runs. The
-      // branch annotates a record this restore writes, and it writes none.
-      await new LocalManagedRuntimeOutcomes(
-        restored,
-      ).recoverCommittedReceipts();
-      expect(gitUtils.getGitBranch).not.toHaveBeenCalled();
-      expect(gitUtils.getCachedGitBranch).not.toHaveBeenCalled();
-    } finally {
-      await restored.close();
-    }
-  });
+      const { session: restored } = await openSession(root, sessionId);
+      try {
+        vi.mocked(gitUtils.getGitBranch).mockClear();
+        vi.mocked(gitUtils.getCachedGitBranch).mockClear();
+        // Nothing to re-record: the blocking `git rev-parse` never runs. The
+        // branch annotates a record this restore writes, and it writes none.
+        const outcomes = new LocalManagedRuntimeOutcomes(restored);
+        await outcomes.recoverCommittedReceipts();
+        await outcomes.recoverCommittedReceipts();
+        expect(events(restored, 'tool.receipt')).toHaveLength(1);
+        expect(
+          events(restored, 'message.committed').filter(
+            (event) => event.payload['role'] === 'tool_result',
+          ),
+        ).toHaveLength(1);
+        const records = await new ManagedSessionMessageProjection(
+          restored.authority,
+          restored.resources,
+        ).project();
+        expect(records).toHaveLength(1);
+        expect(records[0]).toMatchObject({
+          uuid: 'recorded-result:call-a',
+          parentUuid: null,
+          toolCallResult: { callId: 'call-a' },
+        });
+        expect(records[0]!.message?.parts).toEqual([
+          {
+            functionResponse: {
+              id: 'call-a',
+              name: 'read_file',
+              response: { output },
+            },
+          },
+        ]);
+        expect(gitUtils.getGitBranch).not.toHaveBeenCalled();
+        expect(gitUtils.getCachedGitBranch).not.toHaveBeenCalled();
+      } finally {
+        await restored.close();
+      }
+    },
+  );
 
   it('reads no git branch on a blocked reopen with no receipts to repair', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));

@@ -20,8 +20,13 @@ import {
   readCronTasks,
   removeCronTasks,
   updateCronTasks,
+  withTaskGate,
 } from '@qwen-code/qwen-code-core';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import type {
+  BridgeClientRequestContext,
+  CloseSessionOpts,
+} from '@qwen-code/acp-bridge';
 import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
@@ -72,7 +77,11 @@ interface StubBridge {
     signal?: AbortSignal,
     context?: { onPromptAdmitted?: () => void },
   ): Promise<unknown>;
-  closeSession(sessionId: string): Promise<unknown>;
+  closeSession(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+    opts?: CloseSessionOpts,
+  ): Promise<unknown>;
   ensureDefaultSessionPersisted(sessionId: string): Promise<void>;
   updateSessionMetadata(
     sessionId: string,
@@ -110,6 +119,7 @@ interface StubBridge {
   spawnModels: Array<string | undefined>;
   prompts: Array<{ sessionId: string; text: string }>;
   closed: string[];
+  closeOptions: Array<CloseSessionOpts | undefined>;
   persisted: string[];
   named: Array<{
     sessionId: string;
@@ -131,6 +141,7 @@ function makeStubBridge(): StubBridge {
     spawnModels: [],
     prompts: [],
     closed: [],
+    closeOptions: [],
     persisted: [],
     named: [],
     markSessionCatalogChanged: vi.fn(),
@@ -169,8 +180,9 @@ function makeStubBridge(): StubBridge {
       context?.onPromptAdmitted?.();
       return { stopReason: 'end_turn' };
     },
-    async closeSession(sessionId: string) {
+    async closeSession(sessionId, _context, opts) {
       bridge.closed.push(sessionId);
+      bridge.closeOptions.push(opts);
       bridge.liveSessions.delete(sessionId);
       return undefined;
     },
@@ -468,6 +480,44 @@ describe('scheduled-tasks routes', () => {
     const list = await request(h.app).get('/scheduled-tasks');
     expect(list.body.tasks).toHaveLength(1);
     expect(list.body.tasks[0].id).toBe(res.body.id);
+  });
+
+  it('asks the model to run the gate itself on a manual per-run fire', async () => {
+    // The scheduler is not in the loop of a manual run, so the dispatched
+    // prompt carries the gate for the model to run first. The task gets its
+    // gate the way the cron tool writes it; the route does not accept one yet.
+    const created = await create({
+      cron: '*/2 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+    });
+    expect(created.status).toBe(201);
+    await updateCronTasks(h.workspace, (tasks) =>
+      tasks.map((task) =>
+        task.id === created.body.id
+          ? withTaskGate(task, './probe.sh --gate')
+          : task,
+      ),
+    );
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(
+      list.body.tasks.find(
+        (task: { id: string }) => task.id === created.body.id,
+      ),
+    ).toMatchObject({
+      gate: './probe.sh --gate',
+      gateStatus: null,
+      enabled: true,
+    });
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+    expect(run.status).toBe(200);
+    const text = h.bridge.prompts[0]?.text ?? '';
+    expect(text).toContain('Trigger: manual');
+    expect(text).toContain('Manual run of a gated scheduled task.');
+    expect(text).toContain('\n./probe.sh --gate\n');
+    expect(text).toMatch(/\n\nreview the next PR$/);
   });
 
   it('dispatches each manual per-run fire into a fresh child session', async () => {
@@ -2038,8 +2088,15 @@ describe('scheduled-tasks routes', () => {
       },
     });
     expect(deletionGeneration).toBe(1);
-    // The task's dedicated session is torn down with it (no resident leak).
+    // The task's dedicated session is offered a conditional close with it;
+    // production retains it while work holds it.
     expect(h.bridge.closed).toEqual([created.body.sessionId]);
+    expect(h.bridge.closeOptions).toEqual([
+      {
+        closeIfUnheld: true,
+        reason: 'scheduled_task_deleted',
+      },
+    ]);
 
     const again = await request(h.app).delete(`/scheduled-tasks/${id}`);
     expect(again.status).toBe(404);
