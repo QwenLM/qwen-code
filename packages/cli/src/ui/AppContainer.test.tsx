@@ -698,6 +698,46 @@ describe('AppContainer State Management', () => {
     } as InitializationResult;
   });
 
+  it('applies live workflow keyword opt-out changes to the current Config', () => {
+    const apply = vi.spyOn(mockConfig, 'setWorkflowKeywordTriggerEnabled');
+    const settings = {
+      ...mockSettings,
+      merged: {
+        ...mockSettings.merged,
+        ui: { ...mockSettings.merged.ui, disableWorkflowKeywordTrigger: true },
+      },
+    } as LoadedSettings;
+    const view = render(
+      <AppContainer
+        config={mockConfig}
+        settings={settings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+    expect(apply).toHaveBeenLastCalledWith(false);
+    view.rerender(
+      <AppContainer
+        config={mockConfig}
+        settings={
+          {
+            ...settings,
+            merged: {
+              ...settings.merged,
+              ui: {
+                ...settings.merged.ui,
+                disableWorkflowKeywordTrigger: false,
+              },
+            },
+          } as LoadedSettings
+        }
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+    expect(apply).toHaveBeenLastCalledWith(true);
+  });
+
   it('gives the Agent tool the full SubagentManager surface during initialization', async () => {
     // AppContainer's mount effect runs config.initialize() in an un-awaited
     // IIFE; the real initialize warms the tool registry, constructing
@@ -829,6 +869,145 @@ describe('AppContainer State Management', () => {
       }
     },
   );
+
+  it.each([
+    ['workflow', 'Please use a workflow.', true, false, true, false],
+    ['ultracode', 'ultracode: audit', true, false, true, false],
+    ['ordinary', 'Run the tests', true, false, true, true],
+    ['unknown', 'workflow inspect', false, false, true, true],
+    ['opt-out', 'workflow inspect', true, true, true, true],
+    ['missing tool', 'workflow inspect', true, false, false, true],
+  ] as const)(
+    'accepts completed speculation only without a current workflow intent: %s',
+    async (_label, text, human, optOut, reachable, acceptCached) => {
+      vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue(
+        undefined,
+      );
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'getSdkMode').mockReturnValue(false);
+      vi.spyOn(mockConfig, 'isWorkflowsEnabled').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'isWorkflowNameOnly').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+        getAllToolNames: () => (reachable ? [ToolNames.WORKFLOW] : []),
+        getTool: () => undefined,
+        getMcpClientManager: () => ({
+          getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+        }),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      const addHistory = vi.fn().mockResolvedValue(undefined);
+      const markToolResultsInjected = vi.fn();
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        setTools: vi.fn().mockResolvedValue(undefined),
+        isInitialized: () => false,
+        getHistoryTail: () => [],
+        addHistory,
+        markToolResultsInjected,
+      } as unknown as LlmClient);
+      mockSettings.merged.ui!.enableSpeculation = true;
+      mockSettings.merged.ui!.disableWorkflowKeywordTrigger = optOut;
+      generatePromptSuggestionMock.mockResolvedValue({ suggestion: text });
+      const controller = new AbortController();
+      const speculation = {
+        status: 'completed',
+        suggestion: text,
+        messages: [{ role: 'model', parts: [{ text: 'cached result' }] }],
+        overlayFs: null,
+        abortController: controller,
+        startTime: Date.now(),
+        toolUseCount: 0,
+      };
+      startSpeculationMock.mockResolvedValue(speculation);
+      const queue = vi.fn();
+      mockedUseMessageQueue.mockReturnValue({
+        ...mockedUseMessageQueue(),
+        addMessage: queue,
+      });
+      let setStreaming!: (state: StreamingState) => void;
+      mockedUseLlmStream.mockImplementation(() => {
+        const [streamingState, setState] = useState(StreamingState.Responding);
+        setStreaming = setState;
+        return {
+          streamingState,
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: vi.fn(),
+          retryLastPrompt: vi.fn(),
+          streamingResponseLengthRef: { current: 0 },
+          isReceivingContent: false,
+        };
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await flushConfigInitialization();
+      await act(async () => setStreaming(StreamingState.Idle));
+      await vi.waitFor(() =>
+        expect(startSpeculationMock).toHaveBeenCalledOnce(),
+      );
+      await act(async () => {
+        capturedUIActions.handleFinalSubmit(text, {
+          submittedPrompt: text,
+          displayText: text,
+          ...(human ? { humanInput: { text } } : {}),
+        });
+      });
+      if (acceptCached) {
+        expect(markToolResultsInjected).toHaveBeenCalledOnce();
+        expect(addHistory).toHaveBeenCalledOnce();
+        expect(queue).not.toHaveBeenCalled();
+        expect(controller.signal.aborted).toBe(false);
+      } else {
+        expect(markToolResultsInjected).not.toHaveBeenCalled();
+        expect(addHistory).not.toHaveBeenCalled();
+        expect(queue).toHaveBeenCalledWith(text, false, text, false, {
+          displayText: text,
+          humanInput: { text },
+        });
+        expect(controller.signal.aborted).toBe(true);
+      }
+    },
+  );
+
+  it('does not forward composer human intent when dispatching a slash command', () => {
+    vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+    const submitQuery = vi.fn();
+    mockedUseLlmStream.mockReturnValue({
+      ...mockedUseLlmStream(),
+      streamingState: StreamingState.Idle,
+      submitQuery,
+    });
+    render(
+      <AppContainer
+        config={mockConfig}
+        settings={mockSettings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+    const text = '/skills workflow';
+    act(() => {
+      capturedUIActions.handleFinalSubmit(text, {
+        submittedPrompt: text,
+        displayText: text,
+        humanInput: { text },
+      });
+    });
+    expect(submitQuery).toHaveBeenCalledWith(
+      text,
+      SendMessageType.UserQuery,
+      undefined,
+      { submittedPrompt: text, displayText: text },
+    );
+  });
 
   describe('speculative tool results', () => {
     it('renders error envelopes as failed tools', () => {
@@ -3288,19 +3467,12 @@ describe('AppContainer State Management', () => {
       );
     });
 
-    // The workflow reminder's shell-mode gate is load-bearing through this
-    // call site: a shell-mode submission goes to bash, where a leading
-    // `<system-reminder>` is a syntax error, and is recorded as the command
-    // the user ran. Both arms go through the real handleFinalSubmit and the
-    // real shellModeActive state, so dropping `shellMode: shellModeActive`
-    // from the call turns the shell arm red while the ordinary arm keeps the
-    // assertion from passing vacuously.
     it.each([
       ['a shell-mode submission', true, false],
       ['an ordinary prompt', false, true],
     ])(
-      'adds the workflow keyword reminder only outside shell mode: %s',
-      (_case, shellMode, expectReminder) => {
+      'captures human workflow input without prefixing model text: %s',
+      (_case, shellMode, expectHuman) => {
         const mockQueueMessage = vi.fn();
         // The mount effect's un-awaited config.initialize() runs the real
         // initialization against this partial registry mock and rejects
@@ -3354,20 +3526,289 @@ describe('AppContainer State Management', () => {
         }
         capturedUIActions.handleFinalSubmit('gh workflow list', {
           submittedPrompt: 'gh workflow list',
+          displayText: 'gh workflow list',
+          humanInput: { text: 'gh workflow list' },
         });
 
         expect(mockQueueMessage).toHaveBeenCalledTimes(1);
-        const submitted = mockQueueMessage.mock.calls[0][0] as string;
-        expect(submitted).toContain('gh workflow list');
-        // Asserted on the workflow reminder's own text: this call site gates
-        // only that reminder. The other notices the handler prepends gate
-        // shell mode at their own call sites (see the #11626 cases below).
-        const workflowReminder = 'includes the "workflow" keyword';
-        if (expectReminder) {
-          expect(submitted).toContain(workflowReminder);
-        } else {
-          expect(submitted).not.toContain(workflowReminder);
+        expect(mockQueueMessage.mock.calls[0][0]).toBe('gh workflow list');
+        expect(mockQueueMessage.mock.calls[0][4]).toEqual({
+          displayText: 'gh workflow list',
+          humanInput: expectHuman ? { text: 'gh workflow list' } : undefined,
+        });
+      },
+    );
+
+    it('captures a literal leading envelope from the actual Vim submit without inventing hook provenance', () => {
+      const queue = vi.fn();
+      const raw =
+        '<system-reminder>literal user text</system-reminder>\nworkflow inspect';
+      mockedUseTextBuffer.mockReturnValue({ text: raw, setText: vi.fn() });
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'INSERT',
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        ...mockedUseMessageQueue(),
+        addMessage: queue,
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const submitVim = mockedUseVim.mock.calls.at(-1)?.[1] as (
+        text: string,
+      ) => void;
+      act(() => submitVim(raw));
+      expect(queue).toHaveBeenCalledWith(raw, false, undefined, false, {
+        displayText: raw,
+        humanInput: { text: raw },
+      });
+    });
+
+    it.each([true, false])(
+      'keeps a Vim register paste unknown when Vim remains enabled: %s',
+      (keepVimEnabled) => {
+        const queue = vi.fn();
+        const raw = 'workflow recalled through a register';
+        mockedUseTextBuffer.mockReturnValue({ text: raw, setText: vi.fn() });
+        mockedUseVimModeState.mockReturnValue({
+          vimEnabled: true,
+          vimMode: 'NORMAL',
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          ...mockedUseMessageQueue(),
+          addMessage: queue,
+        });
+        const view = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        const onPaste = mockedUseVim.mock.calls.at(-1)?.[2] as () => void;
+        expect(onPaste).toBeTypeOf('function');
+        act(() => onPaste());
+        if (!keepVimEnabled) {
+          mockedUseVimModeState.mockReturnValue({
+            vimEnabled: false,
+            vimMode: 'NORMAL',
+          });
+          view.rerender(
+            <AppContainer
+              config={mockConfig}
+              settings={mockSettings}
+              version="1.0.0"
+              initializationResult={mockInitResult}
+            />,
+          );
         }
+        const submit = mockedUseVim.mock.calls.at(-1)?.[1] as (
+          text: string,
+        ) => void;
+        act(() => submit(raw));
+        expect(queue).toHaveBeenCalledWith(raw, false, undefined, false, {
+          displayText: raw,
+          humanInput: undefined,
+        });
+      },
+    );
+
+    it('captures expanded fresh Vim paste text as human input', () => {
+      const placeholder = '[Pasted Content 1200 chars]';
+      const body = 'workflow pasted body'.padEnd(1200, 'x');
+      const pasteExpansions = new Map([[placeholder, body]]);
+      const queue = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: placeholder,
+        setText: vi.fn(),
+      });
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'NORMAL',
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        ...mockedUseMessageQueue(),
+        addMessage: queue,
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      act(() => capturedUIActions.setPendingPastes?.(pasteExpansions));
+      act(() => {
+        const submit = mockedUseVim.mock.calls.at(-1)?.[1] as (
+          text: string,
+        ) => void;
+        submit(placeholder);
+      });
+      expect(queue).toHaveBeenCalledWith(body, false, undefined, false, {
+        displayText: placeholder,
+        humanInput: { text: body },
+        pasteExpansions,
+      });
+    });
+
+    it('preserves an unsubmitted pasted draft across a session change', () => {
+      const placeholder = '[Pasted Content 1200 chars]';
+      const body = 'workflow pasted body'.padEnd(1200, 'x');
+      const pasteExpansions = new Map([[placeholder, body]]);
+      const queue = vi.fn();
+      const session = mockedUseSessionStats();
+      mockedUseSessionStats.mockReturnValue({
+        ...session,
+        stats: { ...session.stats, sessionId: 'before-clear' },
+      });
+      mockedUseTextBuffer.mockReturnValue({
+        text: placeholder,
+        setText: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        ...mockedUseMessageQueue(),
+        addMessage: queue,
+      });
+      const view = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      act(() => capturedUIActions.setPendingPastes?.(pasteExpansions));
+      mockedUseSessionStats.mockReturnValue({
+        ...session,
+        stats: { ...session.stats, sessionId: 'after-clear' },
+      });
+      act(() => {
+        view.rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
+      expect(capturedUIState.sessionStats.sessionId).toBe('after-clear');
+      act(() => {
+        capturedUIActions.handleFinalSubmit(placeholder, {
+          displayText: placeholder,
+          humanInput: { text: body },
+        });
+      });
+      expect(queue).toHaveBeenCalledWith(body, false, undefined, false, {
+        displayText: placeholder,
+        humanInput: { text: body },
+        pasteExpansions,
+      });
+    });
+
+    it('preserves paste bodies across an empty Vim buffer and a register paste', () => {
+      const placeholder = '[Pasted Content 1200 chars]';
+      const body = 'workflow pasted body'.padEnd(1200, 'x');
+      const pasteExpansions = new Map([[placeholder, body]]);
+      const queue = vi.fn();
+      let onBufferChange: ((text: string) => void) | undefined;
+      let bufferText = placeholder;
+      mockedUseTextBuffer.mockImplementation((options) => {
+        onBufferChange = options.onChange;
+        return {
+          get text() {
+            return bufferText;
+          },
+          setText: vi.fn(),
+        };
+      });
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'NORMAL',
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        ...mockedUseMessageQueue(),
+        addMessage: queue,
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      act(() => capturedUIActions.setPendingPastes?.(pasteExpansions));
+      act(() => {
+        bufferText = '';
+        onBufferChange?.('');
+      });
+      act(() => {
+        const onPaste = mockedUseVim.mock.calls.at(-1)?.[2] as () => void;
+        onPaste();
+        bufferText = placeholder;
+        onBufferChange?.(placeholder);
+      });
+      act(() => {
+        const submit = mockedUseVim.mock.calls.at(-1)?.[1] as (
+          text: string,
+        ) => void;
+        submit(placeholder);
+      });
+      expect(queue).toHaveBeenCalledWith(body, false, undefined, false, {
+        displayText: placeholder,
+        humanInput: undefined,
+        pasteExpansions,
+      });
+      expect(capturedUIState.pendingPastes?.size).toBe(0);
+    });
+
+    it.each(['stash', 'reverse-search'])(
+      'does not upgrade unknown %s text from composer metadata',
+      (source) => {
+        const raw =
+          '<system-reminder>unknown history</system-reminder>\nworkflow inspect';
+        const queue = vi.fn();
+        mockedUseTextBuffer.mockReturnValue({ text: '', setText: vi.fn() });
+        if (source === 'stash') {
+          mockedRestorePromptStash.mockImplementation(
+            (_targetDir, _currentText, restore) => {
+              restore(raw);
+              return true;
+            },
+          );
+        }
+        mockedUseMessageQueue.mockReturnValue({
+          ...mockedUseMessageQueue(),
+          addMessage: queue,
+        });
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        if (source === 'reverse-search')
+          capturedUIActions.invalidateSubmittedPromptProvenance();
+        capturedUIActions.handleFinalSubmit(raw, {
+          submittedPrompt: raw,
+          displayText: raw,
+          humanInput: { text: raw },
+        });
+        expect(queue).toHaveBeenCalledWith(raw, false, undefined, false, {
+          displayText: raw,
+          humanInput: undefined,
+        });
       },
     );
 
@@ -4001,6 +4442,91 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    it('routes the vim submit through the composer-registered submit path', () => {
+      const mockQueueMessage = vi.fn();
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'INSERT',
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // The composer registers the path that expands large-paste placeholders
+      // and bumps the submit epoch; vim's Enter must use it, not submit the
+      // raw buffer it just cleared.
+      const composerSubmit = vi.fn();
+      const registerSubmit = capturedUIActions.registerPromptSubmit;
+      expect(registerSubmit).toBeDefined();
+      registerSubmit!(composerSubmit);
+      const vimSubmit = mockedUseVim.mock.calls.at(-1)?.[1] as (
+        value: string,
+      ) => void;
+      vimSubmit('[Pasted Content 1200 chars]');
+
+      expect(composerSubmit).toHaveBeenCalledWith(
+        '[Pasted Content 1200 chars]',
+      );
+      expect(mockQueueMessage).not.toHaveBeenCalled();
+    });
+
+    it('keeps a vim composer submit displayed as typed while the model reads the framed paste', () => {
+      const placeholder = '[Pasted Content 1200 chars]';
+      const body = 'pasted body'.padEnd(1200, 'x');
+      const pasteExpansions = new Map([[placeholder, body]]);
+      const framed = `<clipboard-paste>\n${body}\n</clipboard-paste>\nattribution`;
+      const queue = vi.fn();
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'INSERT',
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        ...mockedUseMessageQueue(),
+        addMessage: queue,
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      // What the composer's submit path hands over for a collapsed paste.
+      // Vim drops the submittedPrompt projection, so the transcript, the
+      // session log and a cancel-restore read the display text instead.
+      act(() => {
+        capturedUIActions.handleFinalSubmit(framed, {
+          deferUntilIdle: false,
+          submittedPrompt: placeholder,
+          displayText: placeholder,
+          humanInput: { text: body },
+          pasteExpansions,
+        });
+      });
+      expect(queue).toHaveBeenCalledWith(framed, false, undefined, false, {
+        displayText: placeholder,
+        humanInput: { text: body },
+        pasteExpansions,
+      });
+    });
+
     it('keeps Vim-modified composer text ineligible after Vim is disabled', () => {
       const mockQueueMessage = vi.fn();
       let setVimEnabled: ((enabled: boolean) => void) | undefined;
@@ -4168,6 +4694,10 @@ describe('AppContainer State Management', () => {
         id: number;
         text: string;
         submittedPrompt?: string;
+        humanInput?: { text: string };
+        pasteExpansions?: ReadonlyMap<string, string>;
+        hasUnknownInput?: boolean;
+        modelText?: string;
       } | null;
       canUndoLastLoggedUserMessage: boolean;
       turnProducedMeaningfulContent: boolean;
@@ -4735,6 +5265,261 @@ describe('AppContainer State Management', () => {
       expect(mockStripOrphans).toHaveBeenCalled();
       // Auto-restore itself bailed: there was no user item to rewind.
       expect(mockTruncateToItem).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['queue', false, true, false, false],
+      ['cancel', false, true, false, false],
+      ['queue', true, true, false, false],
+      ['cancel', true, true, false, false],
+      ['queue', true, false, false, false],
+      ['cancel', true, false, false, false],
+      ['queue', false, true, true, false],
+      ['cancel', false, true, true, false],
+      ['queue', false, false, true, false],
+      ['cancel', false, false, true, false],
+      ['queue', false, false, true, true],
+      ['cancel', false, false, true, true],
+      ['queue', false, true, 'current', false],
+      ['cancel', false, true, 'current', false],
+    ] as const)(
+      'preserves restored source constraints (%s, paste: %s, edited: %s, mixed: %s, cleared: %s)',
+      async (source, pasted, editedDraft, mixed, cleared) => {
+        const placeholder = '[Pasted Content 1200 chars]';
+        const body = 'ultracode workflow payload'.padEnd(1200, 'x');
+        const literal = '<system-reminder>user literal</system-reminder>';
+        const currentUnknown = mixed === 'current';
+        const currentDraft = 'unknown workflow history draft';
+        const original = pasted
+          ? `${literal}\n${placeholder}`
+          : mixed === true
+            ? 'unknown workflow text\n\nknown human'
+            : 'workflow inspect';
+        const originalHuman = {
+          text: mixed === true ? 'known human' : original,
+        };
+        const expandedOriginal = pasted ? `${literal}\n${body}` : original;
+        const originalModel =
+          mixed === true
+            ? `<system-reminder>managed notice</system-reminder>\n${expandedOriginal}`
+            : expandedOriginal;
+        const edited = currentUnknown
+          ? `${original}\n${currentDraft}\nappend instruction`
+          : editedDraft
+            ? pasted || mixed
+              ? `${original}\nappend instruction`
+              : 'ultracode inspect the edited draft'
+            : original;
+        const editedModel =
+          !editedDraft && !cleared
+            ? originalModel
+            : pasted
+              ? `${expandedOriginal}\nappend instruction`
+              : edited;
+        const pasteExpansions = pasted
+          ? new Map([[placeholder, body]])
+          : undefined;
+        const queue = vi.fn();
+        let onBufferChange: ((text: string) => void) | undefined;
+        let bufferText = '';
+        mockedUseTextBuffer.mockImplementation((options) => {
+          onBufferChange = options.onChange;
+          return {
+            get text() {
+              return bufferText;
+            },
+            setText: vi.fn(),
+          };
+        });
+        mockedUseHistory.mockReturnValue({
+          history: [
+            { id: 1, type: 'user', text: original },
+            { id: 2, type: 'info', text: 'Request cancelled.' },
+          ],
+          addItem: vi.fn(),
+          updateItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+          truncateToItem: vi.fn(),
+        });
+        installCancelCapture({
+          streamingState: 'responding',
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: vi.fn(),
+          retryLastPrompt: vi.fn(),
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          ...mockedUseMessageQueue(),
+          addMessage: queue,
+          popAllMessages: vi.fn().mockReturnValue(
+            source === 'queue'
+              ? {
+                  kind: 'user',
+                  modelText: originalModel,
+                  displayText: original,
+                  submittedPrompt: original,
+                  humanInput: originalHuman,
+                  ...(mixed === true ? { hasUnknownInput: true } : {}),
+                  ...(pasteExpansions ? { pasteExpansions } : {}),
+                  turnKey: 'known-human',
+                }
+              : null,
+          ),
+        });
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        await Promise.resolve();
+        if (currentUnknown) {
+          act(() => {
+            capturedUIActions.invalidateSubmittedPromptProvenance();
+            bufferText = currentDraft;
+            onBufferChange?.(currentDraft);
+          });
+        }
+        act(() => {
+          if (source === 'queue') {
+            expect(capturedUIActions.popAllQueuedMessages()).toBe(original);
+          } else {
+            const info = cancelInfoFor(original, 1, original);
+            triggerCancel({
+              ...info,
+              lastTurnUserItem: {
+                ...info.lastTurnUserItem,
+                humanInput: originalHuman,
+                ...(mixed === true ? { hasUnknownInput: true } : {}),
+                modelText: originalModel,
+                ...(pasteExpansions ? { pasteExpansions } : {}),
+              },
+            });
+          }
+        });
+        if (pasteExpansions) {
+          expect(capturedUIState.pendingPastes).toEqual(pasteExpansions);
+        }
+        if (cleared) act(() => onBufferChange?.(''));
+        if (editedDraft || cleared) act(() => onBufferChange?.(edited));
+        act(() => {
+          capturedUIActions.handleFinalSubmit(
+            !editedDraft && pasted ? expandedOriginal : edited,
+            {
+              submittedPrompt: edited,
+              displayText: edited,
+              humanInput: { text: edited },
+              ...(!editedDraft && pasteExpansions ? { pasteExpansions } : {}),
+            },
+          );
+        });
+        // text-buffer reports the submit-time empty buffer after the synchronous callback consumes provenance.
+        act(() => onBufferChange?.(''));
+        expect(queue).toHaveBeenCalledWith(
+          editedModel,
+          false,
+          !editedDraft || cleared ? original : undefined,
+          false,
+          {
+            displayText: edited,
+            humanInput:
+              mixed && !cleared
+                ? editedDraft
+                  ? undefined
+                  : originalHuman
+                : { text: edited },
+            ...(mixed && !editedDraft && !cleared
+              ? { hasUnknownInput: true }
+              : {}),
+            ...(pasteExpansions ? { pasteExpansions } : {}),
+          },
+        );
+        expect(capturedUIState.pendingPastes?.size).toBe(0);
+      },
+    );
+
+    it('keeps paste bodies when an idle slash command is cancelled, edited and resubmitted', () => {
+      const placeholder = '[Pasted Content 1200 chars]';
+      const body = 'goal specification'.padEnd(1200, 'x');
+      const raw = `/goal ${placeholder}`;
+      const modelText = `/goal ${body}`;
+      const pasteExpansions = new Map([[placeholder, body]]);
+      const submitQuery = vi.fn();
+      let onBufferChange: ((text: string) => void) | undefined;
+      let bufferText = '';
+      mockedUseTextBuffer.mockImplementation((options) => {
+        onBufferChange = options.onChange;
+        return {
+          get text() {
+            return bufferText;
+          },
+          setText: vi.fn((text: string) => {
+            bufferText = text;
+          }),
+        };
+      });
+      mockedUseHistory.mockReturnValue({
+        ...mockedUseHistory(),
+        history: [{ id: 1, type: 'user', text: raw }],
+      });
+      installCancelCapture({
+        streamingState: 'idle',
+        submitQuery,
+        pendingHistoryItems: [],
+        thought: null,
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      act(() => {
+        capturedUIActions.handleFinalSubmit(modelText, {
+          submittedPrompt: raw,
+          displayText: raw,
+          pasteExpansions,
+        });
+      });
+      const metadata = submitQuery.mock.calls[0]?.[3] as {
+        displayText?: string;
+        submittedPrompt?: string;
+        pasteExpansions?: ReadonlyMap<string, string>;
+      };
+      act(() => {
+        triggerCancel({
+          ...cancelInfoFor(raw, 1, raw),
+          lastTurnUserItem: {
+            id: 1,
+            text: metadata.displayText ?? raw,
+            submittedPrompt: metadata.submittedPrompt,
+            modelText,
+            pasteExpansions: metadata.pasteExpansions,
+          },
+        });
+      });
+      const edited = `${raw} and keep it concise`;
+      act(() => {
+        bufferText = edited;
+        onBufferChange?.(edited);
+      });
+      act(() => {
+        capturedUIActions.handleFinalSubmit(edited, {
+          submittedPrompt: edited,
+          displayText: edited,
+        });
+      });
+      expect(submitQuery).toHaveBeenCalledTimes(2);
+      expect(submitQuery.mock.calls[1]?.[0]).toBe(
+        `${modelText} and keep it concise`,
+      );
     });
 
     it('reuses the cancelled turn provenance on an unchanged resubmit', async () => {
@@ -6861,16 +7646,20 @@ describe('AppContainer State Management', () => {
           await ready;
           if (fails) throw new Error('tool.call is unsupported');
         });
+        const getModSession = interactiveMods.getInteractiveModSession;
+        const modSession = {
+          initialize,
+          subscribe: (listener: (text: string) => void) => {
+            emit = listener;
+            return () => {};
+          },
+          setPresentation: vi.fn(),
+        } as unknown as interactiveMods.InteractiveModSession;
         const owner = vi
           .spyOn(interactiveMods, 'getInteractiveModSession')
-          .mockReturnValue({
-            initialize,
-            subscribe: (listener: (text: string) => void) => {
-              emit = listener;
-              return () => {};
-            },
-            setPresentation: vi.fn(),
-          } as unknown as interactiveMods.InteractiveModSession);
+          .mockImplementation((config) =>
+            config === mockConfig ? modSession : getModSession(config),
+          );
         try {
           render(
             <AppContainer

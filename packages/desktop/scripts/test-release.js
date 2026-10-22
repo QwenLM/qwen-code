@@ -808,6 +808,10 @@ function testRuntimeSmokeChecks(directory, canSpawnShebang) {
     ['node/bin/node', "#!/usr/bin/env sh\nprintf 'v22.0.0\\n'\n"],
     ['lib/cli-entry.js', ''],
     ['lib/web-shell/index.html', '<div id="root"></div>\n'],
+    ['lib/generated-ui/main.js', '// bundled Generated UI\n'],
+    ['lib/generated-ui/app.html', '<html></html>\n'],
+    ['lib/generated-ui/skills/generated-ui/SKILL.md', '# Generated UI\n'],
+    ['lib/generated-ui/THIRD_PARTY_NOTICES.txt', 'third-party licenses\n'],
     [
       'lib/vendor/ripgrep/x64-linux/rg',
       "#!/usr/bin/env sh\nprintf 'ripgrep 15.0.0\\n'\n",
@@ -861,6 +865,30 @@ function testRuntimeSmokeChecks(directory, canSpawnShebang) {
   );
   fs.renameSync(hiddenWebShell, webShell);
   fs.writeFileSync(checksumsPath, `${JSON.stringify(checksums)}\n`);
+
+  const generatedUiAssets = [
+    'lib/generated-ui/main.js',
+    'lib/generated-ui/app.html',
+    'lib/generated-ui/skills/generated-ui/SKILL.md',
+    'lib/generated-ui/THIRD_PARTY_NOTICES.txt',
+  ];
+  for (const relative of generatedUiAssets) {
+    const asset = path.join(runtimeRoot, relative);
+    fs.renameSync(asset, `${asset}.missing`);
+    assert.throws(
+      () => verifyRuntimeIntegrity(runtimeRoot),
+      /Bundled runtime file is missing: lib\/generated-ui\//,
+    );
+    fs.renameSync(`${asset}.missing`, asset);
+    const incompleteChecksums = { ...checksums };
+    delete incompleteChecksums[relative];
+    fs.writeFileSync(checksumsPath, `${JSON.stringify(incompleteChecksums)}\n`);
+    assert.throws(
+      () => verifyRuntimeIntegrity(runtimeRoot),
+      /Bundled runtime checksum is missing: lib\/generated-ui\//,
+    );
+    fs.writeFileSync(checksumsPath, `${JSON.stringify(checksums)}\n`);
+  }
 
   const hiddenNode = `${node}.missing`;
   fs.renameSync(node, hiddenNode);
@@ -1068,7 +1096,14 @@ function testRuntimePreparation(directory) {
     'cli-entry.js',
     path.join('web-shell', 'index.html'),
     path.join('web-shell', 'assets', 'app.js'),
+    path.join('generated-ui', 'main.js'),
+    path.join('generated-ui', 'app.html'),
+    path.join('generated-ui', 'skills', 'generated-ui', 'SKILL.md'),
+    path.join('generated-ui', 'THIRD_PARTY_NOTICES.txt'),
   ]) {
+    fs.mkdirSync(path.dirname(path.join(sourceRoot, 'dist', file)), {
+      recursive: true,
+    });
     fs.writeFileSync(path.join(sourceRoot, 'dist', file), 'test');
   }
   const sourceRipgrep = path.join(
@@ -1201,6 +1236,21 @@ globalThis.fetch = async (url) => {
       'utf8',
     ),
   );
+  for (const relative of [
+    'lib/generated-ui/main.js',
+    'lib/generated-ui/app.html',
+    'lib/generated-ui/skills/generated-ui/SKILL.md',
+    'lib/generated-ui/THIRD_PARTY_NOTICES.txt',
+  ]) {
+    assert.equal(
+      fs.readFileSync(path.join(runtimeDir, 'qwen-code', relative), 'utf8'),
+      'test',
+    );
+    assert.equal(
+      stagedChecksums[relative],
+      crypto.createHash('sha256').update('test').digest('hex'),
+    );
+  }
   assert.equal(
     stagedChecksums[
       'lib/node_modules/@lydell/node-pty-darwin-x64/prebuilds/darwin-x64/pty.node'

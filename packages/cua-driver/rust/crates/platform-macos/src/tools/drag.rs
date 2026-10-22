@@ -240,17 +240,13 @@ impl Tool for DragTool {
         // press-drag-release gesture (the explicit last resort for surfaces
         // that drop background CGEvents), via the same skylight assist click
         // uses. Requires a window_id to have a window to front.
-        let delivery_mode = if args.bool_or("app_context", false) {
-            super::DeliveryMode::Foreground
-        } else {
-            super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref())
-        };
+        let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
         if !delivery_mode.is_foreground() {
             return ToolResult::error(
-                "Background drag is unavailable on macOS; use delivery_mode:\"foreground\"."
+                "Background drag is unavailable on macOS; use set_value for a slider or another semantic action."
                     .to_owned(),
             )
-            .with_structured(serde_json::json!({ "code": "background_unavailable" }));
+            .with_structured(serde_json::json!({ "code": "unsupported_on_platform", "sent":false }));
         }
         // Coerce integer or float from JSON for coordinate fields.
         let coerce = |key: &str| -> Option<f64> {

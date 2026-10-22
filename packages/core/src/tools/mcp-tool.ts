@@ -30,6 +30,7 @@ import type {
 } from '@google/genai';
 import { StructuredToolError, ToolErrorType } from './tool-error.js';
 import type { Config, MCPServerConfig } from '../config/config.js';
+import { BUNDLED_GENERATED_UI_URI } from '../config/generated-ui.js';
 import { truncateToolOutput } from './truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -619,6 +620,12 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    if (
+      this.cliConfig?.isBundledGeneratedUiServer?.(this.serverName) &&
+      !this.cliConfig.getBundledGeneratedUiStatus().enabled
+    ) {
+      throw new Error('Bundled Generated UI is unavailable for this session.');
+    }
     // Use direct MCP client if available (supports progress notifications),
     // otherwise fall back to the @google/genai mcpToTool wrapper.
     if (this.mcpClient) {
@@ -938,6 +945,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       );
       return {
         type: 'mcp_app',
+        ...(this.appResourceUri === BUNDLED_GENERATED_UI_URI &&
+        this.cliConfig?.isBundledGeneratedUiServer?.(this.serverName)
+          ? { requiredFeature: 'generated-ui' as const }
+          : {}),
         serverName: this.serverName,
         resourceUri: this.appResourceUri,
         html,
@@ -971,6 +982,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       );
       return {
         type: 'mcp_app',
+        ...(this.appResourceUri === BUNDLED_GENERATED_UI_URI &&
+        this.cliConfig?.isBundledGeneratedUiServer?.(this.serverName)
+          ? { requiredFeature: 'generated-ui' as const }
+          : {}),
         serverName: this.serverName,
         resourceUri: this.appResourceUri,
         html: '',
@@ -1361,15 +1376,20 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
 
   /**
    * Return a per-session projection of metadata that does not belong to the
-   * shared MCP transport snapshot. Pool entries can be shared by sessions
-   * whose trust and eager-loading settings differ, so neither field may be
-   * mutated on the canonical tool instance.
+   * shared MCP transport snapshot. Trust, eager loading, and the runtime
+   * Config belong to the session, without changing the canonical tool.
    */
   withSessionConfig(
     trust: boolean | undefined,
     alwaysLoad: boolean,
+    cliConfig: Config | undefined = this.cliConfig,
   ): DiscoveredMCPTool {
-    if (trust === this.trust && alwaysLoad === this.alwaysLoad) return this;
+    if (
+      trust === this.trust &&
+      alwaysLoad === this.alwaysLoad &&
+      cliConfig === this.cliConfig
+    )
+      return this;
     return new DiscoveredMCPTool(
       this.mcpTool,
       this.serverName,
@@ -1382,7 +1402,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       // different name would race-register two tools in the same
       // session.
       this.name,
-      this.cliConfig,
+      cliConfig,
       this.mcpClient,
       this.mcpTimeout,
       this.mcpToolIdleTimeoutMs,

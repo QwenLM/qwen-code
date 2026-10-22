@@ -1,5 +1,6 @@
 import {
   ModelRefreshControl,
+  ModelRefreshError,
   type ModelRefreshState,
 } from './ModelRefreshControl';
 import {
@@ -75,7 +76,7 @@ import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { getContextUsageLevel } from '../utils/contextUsage';
 import { pastedTextTitle } from '../utils/largePaste';
-import type { ContextUsageControls } from '../hooks/useContextUsageControls';
+import type { ContextCompressionControls } from '../hooks/useContextUsageControls';
 import { ContextUsagePopover } from './ContextUsagePopover';
 import { VoiceButton } from '../voice/VoiceButton';
 import { LiveVoiceButton } from '../live/LiveVoiceButton';
@@ -282,7 +283,7 @@ interface ChatEditorProps {
   /** Show the context-usage breakdown, exactly like typing /context. */
   onShowContextUsage?: () => void;
   onOpenContextUsage?: () => void;
-  contextUsageControls?: ContextUsageControls;
+  contextUsageControls?: ContextCompressionControls;
   modelRefresh?: ModelRefreshState;
   availableModels?: Array<{ id: string; label?: string }>;
   onSelectMode?: (mode: string) => void;
@@ -761,7 +762,8 @@ function ToolbarPopover({
   searchable = false,
   searchLabel,
   noResultsLabel,
-  footer,
+  searchAction,
+  searchStatus,
   header,
   submenu,
   compact = false,
@@ -778,7 +780,8 @@ function ToolbarPopover({
   searchable?: boolean;
   searchLabel?: string;
   noResultsLabel?: (query: string) => string;
-  footer?: ReactNode;
+  searchAction?: ReactNode;
+  searchStatus?: ReactNode;
   header?: ReactNode;
   submenu?: {
     triggerLabel: string;
@@ -875,27 +878,38 @@ function ToolbarPopover({
       )}
     </div>
   );
+  const searchInput = searchable ? (
+    <Input
+      ref={searchInputRef}
+      type="search"
+      value={searchQuery}
+      aria-label={searchLabel}
+      placeholder={searchLabel}
+      autoComplete="off"
+      onChange={(event) => setSearchQuery(event.target.value)}
+      onKeyDown={(event) => {
+        if (!submenu || event.key !== 'ArrowLeft' || searchQuery) return;
+        event.preventDefault();
+        returningFromSubmenuRef.current = true;
+        setSubmenuOpen(false);
+      }}
+    />
+  ) : null;
   const searchableItems = (
     <>
-      {searchable && (
-        <Input
-          ref={searchInputRef}
-          type="search"
-          value={searchQuery}
-          aria-label={searchLabel}
-          placeholder={searchLabel}
-          autoComplete="off"
-          onChange={(event) => setSearchQuery(event.target.value)}
-          onKeyDown={(event) => {
-            if (!submenu || event.key !== 'ArrowLeft' || searchQuery) return;
-            event.preventDefault();
-            returningFromSubmenuRef.current = true;
-            setSubmenuOpen(false);
-          }}
-        />
-      )}
+      {searchable &&
+        (searchAction ? (
+          <div className={styles.dropdownSearch}>
+            <div className={styles.dropdownSearchRow}>
+              {searchInput}
+              {searchAction}
+            </div>
+            {searchStatus}
+          </div>
+        ) : (
+          searchInput
+        ))}
       {dropdownItems}
-      {footer}
     </>
   );
 
@@ -3720,7 +3734,14 @@ export const ChatEditor = memo(
                         compact={compactOverlays}
                         open={modelDropdownOpen}
                         items={modelItems}
-                        footer={<ModelRefreshControl state={modelRefresh} />}
+                        searchAction={
+                          modelRefresh?.refresh ? (
+                            <ModelRefreshControl state={modelRefresh} />
+                          ) : undefined
+                        }
+                        searchStatus={
+                          <ModelRefreshError state={modelRefresh} />
+                        }
                         activeId={currentModel}
                         onOpenChange={(open) => {
                           setModelDropdownOpen(open);
