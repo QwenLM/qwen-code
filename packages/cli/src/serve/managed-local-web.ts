@@ -5,27 +5,18 @@
  */
 
 import { createHash, createHmac } from 'node:crypto';
-import { stat } from 'node:fs/promises';
-import { createServer, request as httpRequest } from 'node:http';
-import path from 'node:path';
+import { request as httpRequest } from 'node:http';
 import express from 'express';
-import type { ErrorRequestHandler } from 'express';
-import { bearerAuth, denyBrowserOriginCors, hostAllowlist } from './auth.js';
+import type { Application, ErrorRequestHandler } from 'express';
 import { isLoopbackAddress } from './loopback-binds.js';
-import { installSelfOriginStripMiddleware } from './server/self-origin.js';
-import { mountWebShellAssets } from './web-shell-static.js';
-import { resolveWebShellDir } from './web-shell-resolver.js';
 
 export interface ManagedLocalWebOptions {
-  port: number;
-  token: string;
   javaUrl: string;
   signingKey: string;
   tenantId: string;
   actorId: string;
   productScope: string;
   agentId: string;
-  webShellDir?: string;
 }
 
 export function signedManagedHeaders(options: {
@@ -75,10 +66,10 @@ const RESPONSE_HEADERS = [
 const ARTIFACT_CONTENT =
   /^\/v1\/agents\/sessions\/[^/?]+\/artifacts\/[^/?]+\/content$/u;
 
-export async function startManagedLocalWeb(options: ManagedLocalWebOptions) {
-  if (!options.token.trim()) {
-    throw new Error('Managed local serve requires a bearer token.');
-  }
+export function mountManagedLocalWeb(
+  app: Application,
+  options: ManagedLocalWebOptions,
+): void {
   const java = new URL(options.javaUrl);
   if (
     java.protocol !== 'http:' ||
@@ -91,36 +82,6 @@ export async function startManagedLocalWeb(options: ManagedLocalWebOptions) {
   ) {
     throw new Error('Managed local Java URL must be a loopback HTTP origin.');
   }
-  const webShellDir = options.webShellDir ?? resolveWebShellDir();
-  if (
-    !webShellDir ||
-    !(await stat(path.join(webShellDir, 'index.html')).then(
-      (file) => file.isFile(),
-      () => false,
-    )) ||
-    !(await stat(path.join(webShellDir, 'assets')).then(
-      (directory) => directory.isDirectory(),
-      () => false,
-    ))
-  ) {
-    throw new Error('Managed local serve requires built Web Shell assets.');
-  }
-
-  const app = express();
-  app.disable('x-powered-by');
-  const server = createServer(app);
-  const getPort = () => {
-    const address = server.address();
-    return typeof address === 'object' && address ? address.port : 0;
-  };
-  app.use(hostAllowlist('127.0.0.1', getPort));
-  installSelfOriginStripMiddleware(app, getPort, '127.0.0.1');
-  app.use(denyBrowserOriginCors);
-  mountWebShellAssets(app, webShellDir, [], false, true);
-  app.use(bearerAuth(options.token));
-  app.get('/capabilities', (_req, res) => {
-    res.set('Cache-Control', 'no-store').json({ mode: 'managed' });
-  });
   app.get('/managed/boot', (_req, res) => {
     res.set('Cache-Control', 'no-store').json({
       mode: 'managed',
@@ -198,33 +159,16 @@ export async function startManagedLocalWeb(options: ManagedLocalWebOptions) {
       upstream.end(body);
     },
   );
-  app.use((_req, res) => {
-    res.status(404).json({ error: 'not_found' });
-  });
+  app.use(
+    ['/api/agent', '/v1/agents', '/internal/managed-session-store'],
+    (_req, res) => {
+      res.status(404).json({ error: 'not_found' });
+    },
+  );
   const handleError: ErrorRequestHandler = (error, _req, res, _next) => {
     res
       .status(error?.type === 'entity.too.large' ? 413 : 400)
       .json({ error: 'invalid_request' });
   };
   app.use(handleError);
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(options.port, '127.0.0.1', () => {
-      server.removeListener('error', reject);
-      resolve();
-    });
-  });
-  let closePromise: Promise<void> | undefined;
-  return {
-    url: `http://127.0.0.1:${getPort()}`,
-    webShellMounted: true as const,
-    resolvedToken: options.token,
-    close(): Promise<void> {
-      closePromise ??= new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-        server.closeAllConnections();
-      });
-      return closePromise;
-    },
-  };
 }

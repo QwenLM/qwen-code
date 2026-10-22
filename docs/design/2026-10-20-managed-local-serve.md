@@ -38,12 +38,13 @@ reference deployments keep their existing defaults. Public multi-user hosting,
 HA, SSH/Kubernetes setup, and automatic repair of recovery facts are outside
 scope.
 
-The initial Workspace is application-owned. An existing Git checkout is not
-silently imported or copied. Verified storage requires its maintenance marker
-outside every Git worktree; existing creation APIs cannot import arbitrary
-external paths. Users can create Workspaces and select project subdirectories
-through the existing Managed UI. External project import needs its own storage
-registration design.
+The initial Workspace is application-owned. Users can explicitly import an
+existing local project by absolute path through Workspace → Choose existing
+directory. The launcher enables the existing [local directory import](2026-10-21-managed-local-directory-import.md)
+capability under loopback signed authentication. Its registration, OWNER grant,
+physical identity checks and recovery remain authoritative. Files stay in place
+and the maintenance marker stays outside Git worktrees. The launch directory is
+not automatically imported.
 
 ## Proposed components
 
@@ -51,15 +52,17 @@ registration design.
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | CLI managed launcher           | Resolve packaged runtime, lock private data, retain secrets, start and supervise children, wait for readiness, bootstrap through existing APIs, expose the browser URL |
 | `managed-local` Spring profile | Persistent embedded H2, loopback and private-data validation, canonical migrations, local process settings                                                             |
-| Node front door                | Serve packaged assets, authenticate the browser, proxy only the Java WebShell API using server-owned signed identity                                                   |
-| Managed standalone WebShell    | Read authenticated boot options, instantiate the existing Java provider, use the current origin                                                                        |
+| Ordinary daemon front door     | Serve packaged assets and ordinary daemon APIs/transports, authenticate the browser, proxy the Java WebShell API using server-owned signed identity                    |
+| Unified standalone WebShell    | Read authenticated boot options, instantiate the existing Java provider, use shared workspace/session navigation at the current origin                                 |
 | Managed distribution builder   | Package JAR and JRE separately, or add them to a complete standalone distribution; record versions and checksums and retain runtime licenses                           |
 
 ### Startup and persistence
 
-`--managed` is a separate serve mode, lazily loaded. It rejects conflicting
-execution profiles and flags rather than starting an ordinary daemon alongside
-Java. The public listener remains loopback-only and always uses a bearer token.
+`--managed` is an opt-in application launcher, lazily loaded. It starts the
+ordinary daemon alongside Java and the private Harness, rejecting conflicting
+execution profiles and flags. The ordinary daemon owns the public loopback-only
+listener, which always uses a bearer token. See the
+[unified WebShell design](2026-10-21-managed-daemon-web-shell.md).
 `--port`, `--open`, and `--open-with-auth` retain their usual meanings.
 `--managed-data-dir` optionally selects the private state directory; the
 default is beneath the user's Qwen home. Concurrent launchers for the same
@@ -112,7 +115,11 @@ boot options from authenticated `GET /managed/boot`: `mode`, `productScope`,
 actor, private endpoint, or credential. Managed mode ignores `?daemon=` and
 fanout targets and fixes the provider to the page's origin.
 
-`GET /capabilities` is the authenticated process-global browser auth probe.
+`GET /capabilities` is the authenticated process-global browser auth probe and
+returns the ordinary daemon's real capabilities and Workspaces. Authenticated
+boot constructs the Java provider and supplies it to the normal standalone
+WebShell's shared Projects navigation without execution-mode tabs. Local sessions use the launch
+directory; this does not import that directory into Managed storage.
 `/api/agent/web-shell/v1/**` and exact artifact-content GET/HEAD requests at
 `/v1/agents/sessions/:sessionId/artifacts/:artifactId/content` are the proxied
 API surface; the latter is required by the existing Java client. The front door
@@ -124,8 +131,9 @@ maintenance, and general Java routes are not exposed by the front door.
 
 ### Lifecycle and failures
 
-The launcher tracks only children it created. SIGINT/SIGTERM stop admission and
-close the front door, then stop Java and Harness with bounded graceful waits.
+The launcher tracks only children it created and owns process signals, with
+embedded daemon signal handlers disabled. SIGINT/SIGTERM stop admission and
+close the daemon and its transports, then stop Java and Harness with bounded graceful waits.
 Both children use separate process groups so terminal signals reach the launcher
 first. Forced shutdown targets Java itself and the Harness's process group;
 durable workers keep their existing ownership. Startup rechecks child failure
@@ -317,6 +325,6 @@ The first-use download path passed fourteen built-bundle scenarios with the real
 ## Open questions
 
 No blocking design decision remains for this delivery. Future release automation
-may download verified JRE archives at build time, and external project import
-may introduce an explicit registration workflow. Neither is required at runtime
-or silently emulated by this implementation.
+may download verified JRE archives at build time. Local project import uses the
+existing explicit registration workflow; startup does not import a project
+without a user selection.

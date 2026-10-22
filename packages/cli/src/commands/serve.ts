@@ -330,7 +330,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: false,
         description:
-          'Start the local Managed application with embedded storage; downloads the server on first use and requires Java 21.',
+          'Start the daemon and Managed Agent with shared WebShell and embedded storage; downloads the server on first use and requires Java 21.',
       })
       .option('managed-data-dir', {
         type: 'string',

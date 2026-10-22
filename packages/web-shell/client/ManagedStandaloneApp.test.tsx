@@ -3,17 +3,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ManagedAgentWebShellProps } from './ManagedAgentWebShell';
-
-const captured = vi.hoisted(() => ({
-  props: undefined as ManagedAgentWebShellProps | undefined,
-}));
-vi.mock('./ManagedAgentWebShell', () => ({
-  ManagedAgentWebShell: (props: ManagedAgentWebShellProps) => {
-    captured.props = props;
-    return <div>managed-only</div>;
-  },
-}));
+import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 
 import {
   hasManagedAppMarker,
@@ -31,9 +21,12 @@ describe('Managed standalone application', () => {
   let container: HTMLDivElement;
   let root: Root;
   const fetch = vi.fn();
+  const renderShell = vi.fn((provider: ManagedAgentProvider) => (
+    <div>Local and Managed: {provider.kind}</div>
+  ));
 
   beforeEach(() => {
-    captured.props = undefined;
+    renderShell.mockClear();
     fetch.mockReset();
     vi.stubGlobal('fetch', fetch);
     container = document.createElement('div');
@@ -81,11 +74,9 @@ describe('Managed standalone application', () => {
     );
     await act(async () => {
       root.render(
-        <ManagedStandaloneApp
-          daemonToken="browser-token"
-          language="zh-CN"
-          theme="light"
-        />,
+        <ManagedStandaloneApp daemonToken="browser-token" language="zh-CN">
+          {renderShell}
+        </ManagedStandaloneApp>,
       );
     });
     expect(fetch).toHaveBeenCalledWith(
@@ -96,47 +87,102 @@ describe('Managed standalone application', () => {
         redirect: 'error',
       }),
     );
-    expect(container.textContent).toBe('managed-only');
-    expect(captured.props).toMatchObject({
-      baseUrl: window.location.origin,
-      productScope: BOOT.productScope,
-      agentId: 'qwen-code',
-      enableWorkspaceBinding: true,
-      language: 'zh-CN',
-      theme: 'light',
-    });
-    expect(await captured.props?.getHeaders?.()).toEqual({
-      Authorization: 'Bearer browser-token',
-    });
-    expect(captured.props).not.toHaveProperty('tenantId');
-    expect(captured.props).not.toHaveProperty('signingKey');
+    expect(container.textContent).toBe('Local and Managed: java');
+    const provider = renderShell.mock.calls.at(-1)?.[0];
+    expect(provider?.workspaceBinding?.agentId).toBe('qwen-code');
+    expect(provider?.storageKey).toBe(
+      JSON.stringify([
+        window.location.origin,
+        BOOT.productScope,
+        BOOT.agentId,
+        'workspace-binding-v1',
+      ]),
+    );
+    fetch.mockResolvedValueOnce(Response.json({ data: [], hasMore: false }));
+    await provider?.listSessions({ clientId: 'browser-client' });
+    expect(fetch.mock.calls.at(-1)?.[0]).toBe(
+      `${window.location.origin}/api/agent/web-shell/v1/sessions/query`,
+    );
+    const request = fetch.mock.calls.at(-1)?.[1] as RequestInit;
+    const headers = new Headers(request.headers);
+    expect(headers.get('authorization')).toBe('Bearer browser-token');
+    expect(headers.get('x-qwen-tenant-id')).toBeNull();
+    expect(headers.get('x-qwen-actor-id')).toBeNull();
+    expect(headers.get('x-qwen-signature')).toBeNull();
+  });
+
+  it('keeps the composed shell and provider stable across parent renders', async () => {
+    fetch.mockResolvedValue(Response.json(BOOT));
+    await act(async () =>
+      root.render(
+        <ManagedStandaloneApp daemonToken="browser-token">
+          {renderShell}
+        </ManagedStandaloneApp>,
+      ),
+    );
+    const provider = renderShell.mock.calls.at(-1)?.[0];
+    await act(async () =>
+      root.render(
+        <ManagedStandaloneApp daemonToken="browser-token" language="zh-CN">
+          {renderShell}
+        </ManagedStandaloneApp>,
+      ),
+    );
+    expect(renderShell.mock.calls.at(-1)?.[0]).toBe(provider);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it('waits for authenticated boot before composing the shell', async () => {
+    fetch.mockReturnValue(new Promise(() => {}));
+    await act(async () =>
+      root.render(
+        <ManagedStandaloneApp daemonToken="browser-token" language="zh-CN">
+          {renderShell}
+        </ManagedStandaloneApp>,
+      ),
+    );
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      '正在连接…',
+    );
+    expect(renderShell).not.toHaveBeenCalled();
   });
 
   it.each([
     new Response('unavailable', { status: 503 }),
     new Response(JSON.stringify({ ...BOOT, mode: 'daemon' })),
     new Response(JSON.stringify({ ...BOOT, productScope: '' })),
+    new Response(JSON.stringify({ ...BOOT, agentId: '' })),
+    new Response(JSON.stringify({ ...BOOT, enableWorkspaceBinding: false })),
   ])(
     'fails closed on unavailable or invalid boot options',
     async (response) => {
       fetch.mockResolvedValue(response);
       await act(async () =>
-        root.render(<ManagedStandaloneApp daemonToken="browser-token" />),
+        root.render(
+          <ManagedStandaloneApp daemonToken="browser-token">
+            {renderShell}
+          </ManagedStandaloneApp>,
+        ),
       );
       expect(container.querySelector('[role="alert"]')).not.toBeNull();
-      expect(captured.props).toBeUndefined();
+      expect(renderShell).not.toHaveBeenCalled();
     },
   );
 
-  it('retries failed boot without constructing an ordinary daemon provider', async () => {
+  it('retries failed boot before composing the unified shell', async () => {
     fetch
       .mockResolvedValueOnce(new Response('', { status: 503 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(BOOT)));
     await act(async () =>
-      root.render(<ManagedStandaloneApp daemonToken="browser-token" />),
+      root.render(
+        <ManagedStandaloneApp daemonToken="browser-token">
+          {renderShell}
+        </ManagedStandaloneApp>,
+      ),
     );
+    expect(renderShell).not.toHaveBeenCalled();
     await act(async () => container.querySelector('button')?.click());
-    expect(container.textContent).toBe('managed-only');
+    expect(container.textContent).toBe('Local and Managed: java');
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 });

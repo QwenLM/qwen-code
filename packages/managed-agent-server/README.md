@@ -801,7 +801,9 @@ An uncertain response must be retried with the same key and name. The page prese
 
 For a trusted single-user deployment bound to loopback, enable
 `QWEN_MANAGED_AGENT_LOCAL_DIRECTORY_IMPORT_ENABLED=true` alongside Workspace files,
-durable local-process execution, verified recovery, and the trusted actor header.
+durable local-process execution and verified recovery. Authenticate with signed
+requests or OPEN mode plus a trusted actor header. The single-user
+`qwen serve --managed` launcher enables this capability with signed authentication.
 Then **Workspace → Choose existing directory** browses this computer directly,
 without a pre-registered parent or grant. Import keeps the project in place,
 automatically registers its projects parent outside Git worktrees, grants the
@@ -809,7 +811,10 @@ current actor OWNER access, and sets the project as the initial working director
 The parent shares file access and its physical-owner lease across projects; this
 is not a filesystem sandbox. Existing owned roots are reused while sessions run.
 Private Runtime state and creation roots must stay outside imported parents.
-Remote listeners and signed/shared deployments cannot enable this local feature.
+Remote listeners cannot enable this local feature, including with the insecure
+bind override. Signed mode retains signature validation and does not accept a
+trusted actor header in its place. This capability is for a trusted single-user
+host deployment.
 
 The actor-authenticated directory query accepts `localPath` (empty starts at the
 host home directory), and create accepts an absolute `localPath` with the name

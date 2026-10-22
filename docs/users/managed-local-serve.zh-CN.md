@@ -65,12 +65,28 @@ JAR 前提示安装/配置错误，Qwen 不会下载 Java。带 Java 版始终�
 `./qwen-code/bin/qwen serve --managed --open`。
 
 应用监听 `127.0.0.1:4170`。可以用 `--port 0` 选择空闲端口，或指定固定端口。
-保持终端打开；Ctrl+C 会关闭前门、Java 服务和 Harness。运维部署可以自行使用
+保持终端打开；Ctrl+C 会关闭普通 daemon、Java 服务和 Harness。运维部署可以自行使用
 systemd，此命令不依赖它。
+公开端口被占用时沿用普通 daemon 在相邻端口上的有界重试，请使用启动器实际打印的
+浏览器地址。
+
+这一条命令同时启动普通 daemon 与 Managed Agent。同一个 WebShell 使用已有的
+统一的项目导航同时显示普通与托管工作区及其会话，托管工作区带有标识，不再提供执行方式 tab。“新建任务”跟随所选工作区或当前会话。Local 会话使用命令启动目录，Managed 会话使用应用创建的
+Workspace 或显式导入的本机项目。两者共享一个需要认证的浏览器 origin，无需再启动 daemon 命令或打开
+第二个页面。
+
+在“添加工作区”中，提交前可选择“本地（daemon）”或“托管（Managed Agent）”，
+默认跟随当前会话所属服务。工作区行与“新建任务”显示该服务，新任务继承所选
+工作区。daemon 已有的 SSH 工作区支持仍然可用；Managed SSH 登记尚未接入此
+统一弹窗。
 
 终端会打印带 token fragment 的浏览器地址，请把它当作本地密码。浏览器为每次
 API 请求携带 token，Java 签名密钥和内部凭据不会传给浏览器。监听仅限 loopback。
 无图形界面时省略 `--open`，在该机器打开打印的地址，或自行使用认证隧道。
+
+融合应用当前支持本机 loopback 页面。完整界面已有的 Mobile access / Local Control
+入口尚未接入 Managed boot，配对的 LAN 监听无法打开此融合页面。移动端共享需要
+后续单独接入；普通 daemon 继续保留既有 Local Control 行为。
 
 Harness 使用正常的 Qwen 模型配置与 provider 凭据。第一次发送 prompt 前，按
 普通 Qwen CLI 流程配置模型。文件和 Shell 使用 `default` 审批模式，需要审批的
@@ -93,10 +109,17 @@ qwen serve --managed --managed-data-dir /absolute/private/data --open
 拒绝启动；应使用新的数据目录或停止冲突服务，不要直接修改持久事实。
 
 启动通过现有幂等 Workspace API 创建应用管理的默认 Workspace 和 OWNER 授权。
-Managed UI 可以创建更多 Workspace 和选择项目子目录。命令不会导入其启动目录。
-Managed 本地模式拒绝 `--workspace`，接入外部已有 Git 工作树需要独立注册流程。
-请把项目放在创建的 Workspace 的子目录，使 `.qwen-managed-storage.json` 维护
-标记始终位于 Git 工作树外。不要编辑、删除、stash 或提交该标记。
+使用已有本机项目时，打开“工作区 → 选择已有目录”，浏览或输入绝对路径后添加
+文件夹。服务会自动登记项目父目录并授予 OWNER 权限，已有文件保留原处，
+新任务从所选项目启动。也可创建空 Workspace。
+
+启动目录仍供 Local 会话使用，不会自动导入。Managed 本地模式继续拒绝
+`--workspace`，请从界面选择项目。`.qwen-managed-storage.json` 维护标记保留在
+Git 工作树之外，不要编辑、删除、stash 或提交。导入的项目文件位于私有 Managed
+数据目录之外，需要单独备份。
+
+Local 会话历史继续使用普通 Qwen 存储，与 Managed 数据目录独立，仅备份 Managed
+目录不会包含 Local 会话历史。
 
 请整体保存数据目录，包括 `state.json`、`database/`、`runtime/`、`worker-home/`
 和 `workspaces/`。文件系统备份前先完成或取消活动工作、关闭相关 Session，再

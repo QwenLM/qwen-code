@@ -11,6 +11,8 @@ import { act } from 'react';
 // import is the real createRoot — used to mount the boot gate for real.
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
+import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -40,9 +42,6 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 }));
 vi.mock('./components/WorkspaceSessionProvider', () => ({
   WorkspaceSessionProvider: () => null,
-}));
-vi.mock('./ManagedAgentWebShell', () => ({
-  ManagedAgentWebShell: () => null,
 }));
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
@@ -152,9 +151,27 @@ describe('web shell boot', () => {
     const gate = strictMode.props.children;
     expect(gate.props.baseUrl).toBe(window.location.origin);
     expect(gate.props.invalidTarget).toBe(false);
-    expect(gate.props.children('browser-token').type).toBe(
+    const managedBoot = gate.props.children(
+      'browser-token',
+    ) as React.ReactElement<{
+      daemonToken: string;
+      children: (provider: ManagedAgentProvider) => React.ReactElement<{
+        daemonToken: string;
+        managedAgentProvider: ManagedAgentProvider;
+      }>;
+    }>;
+    expect(managedBoot.type).toBe(
       (await import('./ManagedStandaloneApp')).ManagedStandaloneApp,
     );
+    expect(managedBoot.props.daemonToken).toBe('browser-token');
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: window.location.origin,
+      productScope: 'local:installation-1',
+    });
+    const shell = managedBoot.props.children(provider);
+    expect(shell.type).toBe((await import('./main')).StandaloneApp);
+    expect(shell.props.daemonToken).toBe('browser-token');
+    expect(shell.props.managedAgentProvider).toBe(provider);
   });
 
   it('connects with the stored token when the pairing exchange fails', async () => {

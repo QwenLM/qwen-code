@@ -31,10 +31,10 @@ Windows 和 Bun。
 参考部署沿用现有默认配置。公网多用户托管、HA、SSH/Kubernetes 配置和恢复事实
 自动修复不在范围内。
 
-初始 Workspace 由应用管理，不静默导入或复制已有 Git 工作树。已验证存储要求
-维护标记位于所有 Git 工作树之外；现有创建 API 不能导入任意外部路径。用户可以
-通过现有 Managed UI 创建 Workspace 和选择项目子目录。外部项目导入需要独立
-设计存储注册流程。
+初始 Workspace 由应用管理。用户可通过“工作区 → 选择已有目录”按绝对路径
+显式导入已有本机项目。启动器在回环签名认证下启用已有的[本机目录导入](2026-10-21-managed-local-directory-import.zh-CN.md)
+能力，沿用存储登记、OWNER 授权、物理身份校验和恢复流程。文件保留原处，
+维护标记位于 Git 工作树之外。启动目录不会自动导入。
 
 ## 组件方案
 
@@ -42,15 +42,16 @@ Windows 和 Bun。
 | ------------------------------ | --------------------------------------------------------------------------------------------------------- |
 | CLI Managed 启动器             | 解析发行 runtime、锁定私有数据、保留密钥、启动与监督子进程、等待就绪、通过现有 API 初始化并提供浏览器地址 |
 | `managed-local` Spring profile | 持久化嵌入式 H2、loopback 与私有目录校验、规范迁移、本地进程配置                                          |
-| Node 前门                      | 托管发行静态资源、认证浏览器、以服务端签名身份仅代理 Java WebShell API                                    |
-| Managed 独立 WebShell          | 读取认证后的启动选项、创建现有 Java provider、固定使用当前 origin                                         |
+| 普通 daemon 前门               | 托管发行静态资源与普通 daemon API/传输、认证浏览器、以服务端签名身份代理 Java WebShell API                |
+| 融合 standalone WebShell       | 读取认证后的启动选项、创建现有 Java provider、在当前 origin 使用共享工作区与会话导航                      |
 | Managed 发行构建器             | 独立打包 JAR 和 JRE，或将其加入完整 standalone 包；记录版本与校验和，保留 runtime 许可证                  |
 
 ### 启动与持久化
 
-`--managed` 是延迟加载的独立 serve 模式。遇到冲突的执行 profile 或参数会拒绝
-启动，不会在 Java 旁再启动普通 daemon。公开监听仅限 loopback，始终要求 bearer
-token。`--port`、`--open`、`--open-with-auth` 沿用现有含义。
+`--managed` 是延迟加载、显式启用的应用启动器。同时启动普通 daemon、Java 和私有
+Harness，拒绝冲突的执行 profile 或参数。普通 daemon 拥有公开的 loopback 监听，
+始终要求 bearer token。参见[融合 WebShell 设计](2026-10-21-managed-daemon-web-shell.zh-CN.md)。
+`--port`、`--open`、`--open-with-auth` 沿用现有含义。
 `--managed-data-dir` 可指定私有状态目录，默认位于用户 Qwen home 下。相同目录的
 并发启动器会拒绝进入。
 
@@ -89,7 +90,10 @@ schema 校验，继续拒绝外来、部分、仅历史表或不支持的 catalo
 选项，不包含 tenant、actor、私有 endpoint 或密钥。Managed 模式忽略 `?daemon=`
 和 fanout 目标，provider 固定使用页面 origin。
 
-`GET /capabilities` 是认证后的进程级浏览器认证探针。
+`GET /capabilities` 是认证后的进程级浏览器认证探针，返回普通 daemon 的真实能力
+与 Workspace。认证 boot 创建 Java provider，传给正常 standalone WebShell 已有
+的共享项目导航，不再提供执行方式 tab。Local 会话使用启动目录，这不代表把该目录导入 Managed
+存储。
 代理 API 面限于 `/api/agent/web-shell/v1/**`，以及精确的附件内容 GET/HEAD 路径
 `/v1/agents/sessions/:sessionId/artifacts/:artifactId/content`，后者是现有 Java
 client 所需路径。前门清除调用者身份和私有认证头，
@@ -99,7 +103,8 @@ client 所需路径。前门清除调用者身份和私有认证头，
 
 ### 生命周期与故障
 
-启动器仅跟踪自己创建的子进程。SIGINT/SIGTERM 关闭前门、停止新接入，然后在
+启动器仅跟踪自己创建的子进程并独占进程信号，禁用内嵌 daemon 的信号处理。
+SIGINT/SIGTERM 关闭 daemon 与传输、停止新接入，然后在
 有界等待内优雅停止 Java 和 Harness。两个子进程分别使用独立进程组，使终端信号
 先由启动器处理。强制停止仅针对 Java 进程和 Harness 进程组，持久 worker 保留
 既有所有权。公开监听绑定后再次检查子进程失败和中断，确认后才报告启动成功。
@@ -245,5 +250,5 @@ CLI 的生命周期验收。十五项选择检查通过，包括 JAVA_HOME/PATH 
 
 ## 未决问题
 
-本次交付无阻塞设计决策。后续发行自动化可在构建时下载并验证 JRE archive，外部
-项目导入可增加显式注册流程。本次运行时不依赖这些后续工作，也不会静默模拟。
+本次交付无阻塞设计决策。后续发行自动化可在构建时下载并验证 JRE archive。
+本机项目导入复用已有的显式登记流程，启动时不会未经用户选择自动导入项目。

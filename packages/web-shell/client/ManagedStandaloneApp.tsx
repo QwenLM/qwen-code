@@ -1,15 +1,9 @@
-import { useEffect, useState } from 'react';
-import { ManagedAgentWebShell } from './ManagedAgentWebShell';
+import { useEffect, useState, type ReactNode } from 'react';
+import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
+import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import type { WebShellLanguage } from './i18n';
-import type { WebShellTheme } from './themeContext';
-
-interface ManagedLocalBoot {
-  mode: 'managed';
-  productScope: string;
-  agentId: string;
-  enableWorkspaceBinding: true;
-}
+import { buildSessionPathname, parseSessionId } from './utils/sessionPath';
 
 export function hasManagedAppMarker(): boolean {
   return (
@@ -22,15 +16,15 @@ export function hasManagedAppMarker(): boolean {
 export function ManagedStandaloneApp({
   daemonToken,
   language = 'en',
-  theme,
+  children,
 }: {
   daemonToken?: string;
   language?: WebShellLanguage;
-  theme?: WebShellTheme;
+  children: (provider: ManagedAgentProvider) => ReactNode;
 }) {
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<{
-    boot?: ManagedLocalBoot;
+    provider?: ManagedAgentProvider;
     error?: Error;
   }>({});
   useEffect(() => {
@@ -63,14 +57,25 @@ export function ManagedStandaloneApp({
           throw new Error('Managed application returned invalid boot options.');
         }
         if (!controller.signal.aborted) {
-          setState({
-            boot: {
-              mode: 'managed',
-              productScope: boot.productScope,
-              agentId: boot.agentId,
-              enableWorkspaceBinding: true,
-            },
+          const provider = createJavaManagedAgentProvider({
+            baseUrl: window.location.origin,
+            productScope: boot.productScope,
+            agentId: boot.agentId,
+            enableWorkspaceBinding: true,
+            getHeaders: (): HeadersInit =>
+              daemonToken ? { Authorization: `Bearer ${daemonToken}` } : {},
           });
+          const url = new URL(window.location.href);
+          if (url.searchParams.get('managed') === '1') {
+            // Managed restoration must not restore a stale Local route or history target.
+            if (parseSessionId(url.pathname) !== undefined) {
+              url.pathname = buildSessionPathname(url.pathname, undefined);
+            }
+            url.searchParams.delete('workspace');
+            url.searchParams.delete('context');
+            window.history.replaceState(null, '', url);
+          }
+          setState({ provider });
         }
       })
       .catch((error: unknown) => {
@@ -92,24 +97,12 @@ export function ManagedStandaloneApp({
       />
     );
   }
-  if (!state.boot) {
+  if (!state.provider) {
     return (
       <div role="status" style={{ padding: '2rem' }}>
         {language === 'zh-CN' ? '正在连接…' : 'Connecting…'}
       </div>
     );
   }
-  return (
-    <ManagedAgentWebShell
-      baseUrl={window.location.origin}
-      agentId={state.boot.agentId}
-      productScope={state.boot.productScope}
-      enableWorkspaceBinding={state.boot.enableWorkspaceBinding}
-      getHeaders={(): HeadersInit =>
-        daemonToken ? { Authorization: `Bearer ${daemonToken}` } : {}
-      }
-      language={language}
-      theme={theme}
-    />
-  );
+  return children(state.provider);
 }
