@@ -3046,12 +3046,28 @@ exit 0`,
       derived,
       'CI_TIMEOUT_MS must derive from WORKER_TIMEOUT_MS',
     ).not.toBeNull();
+    // Pin the wiring, not just the declarations: these two constants exist to
+    // bound exactly two spawnSync options.
+    expect(source.match(/timeout: WORKER_TIMEOUT_MS,/g)).toHaveLength(1);
+    expect(source.match(/timeout: CI_TIMEOUT_MS,/g)).toHaveLength(1);
     const workerMs = Number(worker[1].replaceAll('_', ''));
     const spawnMs = 2 * workerMs + Number(derived[1].replaceAll('_', ''));
-    // The child runs the node and bun workers sequentially, so an outer cap at
-    // or below twice the worker cap would fire first and lose the host-naming
-    // diagnostic.
-    expect(spawnMs).toBeGreaterThan(2 * workerMs);
+    // The child runs four run() probes and an openssl rsa:2048 keygen before
+    // the first worker, all inside the outer cap but outside either worker's.
+    // A near-zero margin would let the outer cap fire first and lose the
+    // host-naming diagnostic.
+    expect(
+      spawnMs - 2 * workerMs,
+      'outer cap must leave room for pre-worker probes and keygen',
+    ).toBeGreaterThanOrEqual(60_000);
+    // package.json is the only link that places this spawn inside the
+    // quality_scripts job, and the budget counts vitest as running after it.
+    const rootScripts = JSON.parse(
+      readFileSync('package.json', 'utf8'),
+    ).scripts;
+    expect(rootScripts['test:scripts']).toMatch(
+      /^npm run test:standalone:runtimes:ci && vitest run /,
+    );
     // Reserve an estimated 600 s for phases outside the spawn. This checks
     // the declared upper budget, not a minimum cap or live execution time.
     const aroundTheSpawnSeconds = 600;
