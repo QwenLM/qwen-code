@@ -43,7 +43,7 @@ Managed 世界还有本地闸门没有的约束。Harness 从不自己生成进�
 
 ### 4.1 定义
 
-`POST /v1/agent-automations` 与 `POST /v1/agent-automations/{id}` 接受 `gate`（字符串或 null）：一条至多 2048 UTF-8 字节的 shell 命令，不含控制字符，不得用 `&` 把任何部分放到后台。修订可以设置、更换或清除（`null`）它；定义摘要包含它，所以换闸门就是一次新的定义修订。`PublicAutomation` 携带 `gate`（无闸门为 null）和 `gate_status`：`last_outcome`、`last_at`、`quiet_since_delivery`、`consecutive_failures`、`last_error`，闸门首次运行前为 null。
+`POST /v1/agent-automations` 与 `POST /v1/agent-automations/{id}` 接受 `gate`（字符串或 null）：一条至多 2048 UTF-8 字节的 shell 命令，不含控制字符，不得用 `&` 把任何部分放到后台。修订可以设置、更换或清除（`null`）它；定义摘要包含它，所以换闸门就是一次新的定义修订。`PublicAutomation` 携带 `gate`（无闸门时不出现）和 `gate_status`：`last_outcome`、`last_at`、`quiet_since_delivery`、`consecutive_failures`、`last_error`，闸门首次运行前不出现。
 
 闸门需要工具 profile 声明了 Shell 的 Session。在其他 Session 上定义闸门会在提交任何东西之前被 `409 automation_gate_unsupported` 拒绝。
 
@@ -78,6 +78,7 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 
 - `managed-schedule` 第 1 版新增 `gate: string | null`，一个与 `cron` 同类的定义字段：非 null 时是有界文本（≤ 2048 UTF-8 字节，无控制字符）且不含 `&` 后台化。它参与 `automationDefinitionDigest` 和镜像行。封闭键集、夹具模板（`gate: null`）和新用例（`gate-null`、`gate-command`、`gate-empty`、`gate-background`、`gate-number`、`gate-oversize`）在两端锚定它。
 - `managed-automation_run` 第 1 版新增固定键 `gateOutputRef: ManagedSessionDurableRef | null`：批准了这次运行的探针所发布的输出，资源类型 `managed-automation-gate-output`，无闸门定义为 null。它跨修订固定，因为 dispatch 要读它；两端存储都像对 `promptRef` 那样在提交时把它闭合到 Session 的资源上。
+- 这两个键都是第 1 版后来新增的：之前写下的记录没有它们，两端的读取方(包括后继校验)都把缺失读作 null。写入方在值为 null 时省略该键，所以无闸门定义的记录与闸门出现之前的主机写出的完全相同；只要还没有定义带闸门，任一侧的主机都可以先升级或先回滚。存储的探针输出与回合文本一样经过清洗，这限制了它编码后的大小。
 
 ### 5.2 闸门在哪里运行
 
@@ -85,7 +86,7 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 
 1. Session 的工具 profile 没有声明 Shell 时，Harness 直接拒绝探针（`blocked`，原因写明 profile）。
 2. 否则为派生的 Runtime Session `hostedRuntimeSessionId("<automationRunId>:gate")` 打开一个 `HostedWorkspaceBroker`，并在获取任何东西之前先向 Broker 要这个 occurrence 的预留：调用 id `<automationRunId>:gate`、负载 `{toolName: "managed_automation_gate", input: {gate}}`。预留的每一部分都从 occurrence 派生，所以 Broker 的幂等键与引用在每次尝试中都相同。
-3. Broker 在没有活动 Session 的情况下也会答出该键下的终结记录——释放是终态，运行过早先尝试的那个 Session 永远不能再被获取——Harness 读回其结算结果而不启动任何东西。Broker 不知道这个 occurrence 的任何 Session 时，Harness 才获取派生的 Session、重新预留执行、启动并观察到其结算。Broker 持有但报告未就绪的 Session 是一次仍在进行的尝试：答 `unknown`。相同键、不同引用的预留是冲突，永远不是第二次运行。
+3. Broker 在没有活动 Session 的情况下也会答出该键下的终结记录——释放是终态，运行过早先尝试的那个 Session 永远不能再被获取——Harness 读回其结算结果而不启动任何东西。Broker 不知道这个 occurrence 的任何 Session 时，Harness 才获取派生的 Session、重新预留执行、启动并观察到其结算。在 Broker 能说清这个 occurrence 如何结束之前，这次 fire 失败、由扫描器重驱：Broker 持有但报告未就绪的 Session、该键下尚未结算的执行、Broker 故障，都属于这种情况。Runtime 丢失的执行答 `unknown`；相同键下另一个请求的预留(修订在应答丢失后换了闸门)是冲突，永远不是第二次运行，也答 `unknown`。只要本次尝试可能持有派生 Session(获取了它、获取未确认，或 Broker 报告它存活),就先释放再作答，释放失败则让 fire 失败、等待重驱。
 4. Runtime worker 运行 worker 内部工具 `managed_automation_gate`——与模型工具并列被准入，但从不向模型声明——它用共享的 `createCronGateRunner` 在 worker 按调用构造的 `Config` 上运行命令：Session 上下文目录为 cwd、worker 的环境、stdout 与 stderr 分开、保留 16 KiB stdout、20 s 超时。结果（`quiet` / `output` / `failed`）作为一个 JSON 文本片段作答，由 Broker 存为该执行的结算结果。
 5. Harness 释放 Runtime Session 并做决定：`quiet`、`failed`、`blocked`、`unknown` 以 `gate.outcome` 答复控制面且不带运行；`output` 把 stdout 发布为 `managed-automation-gate-output` 资源，带 `gateOutputRef` 提交 claim，并用拼好的文本派发运行。已提交 claim 的重放从存下的输出重建文本，永远不做第二次探测。
 
@@ -133,8 +134,8 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 - `managed-automation-operations.test.ts`：定义里的 `gate`、校验、摘要、预算与带闸门的回合文本。
 - `hosted-automation-session.test.ts`：编排的闸门运行器——静默时不答运行、不提交任何东西；有输出时发布资源、带 `gateOutputRef` 认领、派发拼好的文本；claim 的重放读取存下的输出；failed、blocked、unknown 各答其结果；无闸门定义从不调用运行器。
 - `hosted-workspace-broker.test.ts`：`prepareReplayable` 既答新预留也答终结重放，并拒绝冲突的预留。
-- `hosted-automation-gate.test.ts`：对一个编排好的 Broker，运行器不获取就读回已结算的回执；只在 Broker 不知道该 occurrence 的任何 Session 时才获取并重新预留；另一尝试持有的 Session 答 `unknown`，获取不到的 Session 答 `failed`，没有 Shell 的 profile 在询问之前就答 `blocked`。
-- `managed-runtime-tool-executor.test.ts`：闸门工具被准入、校验输入并作答运行器结果。
+- `hosted-automation-gate.test.ts`：对一个编排好的 Broker，运行器不获取就读回已结算的回执；只在 Broker 不知道该 occurrence 的任何 Session 时才获取并重新预留；Session 被持有或执行未结算时让 fire 失败以便重试，执行丢失或预留冲突时答 `unknown` 并释放，获取不到的 Session 答 `failed`，没有 Shell 的 profile 在询问之前就答 `blocked`;释放失败和未确认的获取都让 fire 保持未结算。
+- `managed-automation-gate-tool.test.ts`：闸门工具被准入、校验输入并作答运行器结果。
 - `AutomationScannerTest`：每种闸门结果结算其 occurrence 并更新定义的闸门状态；投递型闸门与普通触发应答相同；手动运行暴露 `gate_quiet`。
 - `ManagedAgentApiContractTest`：带 `gate` 的创建与修订、`409 automation_gate_unsupported` 拒绝、公开形状。
 - `HostedAutomationFaultGatesIT`：第 5.6 节的 FG11g 用例，在真实 MySQL、真实 Harness 与 Runtime worker 上。
@@ -160,3 +161,4 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 - 失败连段超过某个上限时，是否应像时区无法解析那样把定义停放（`blocked_reason`）？今天只计数。
 - 为连段的第一次失败做一次 channel 投递，让操作者不必轮询 `gate_status` 就能知道凭据过期。
 - `per_run` 分支：等 H4 给它子意图后，探针应在子 Session 创建之前、在父 Session 的 Runtime 里运行。
+- 扫描器容量。带闸门的 `fire_run` 现在会在探针运行期间(最多 20 秒，在中继的 30 秒之内)占用扫描线程，而扫描器逐行处理。同一分钟到期的慢闸门足够多时，一次 tick 会超过迟到容忍度，该节点上所有定义随后的时间槽都会被记为 `missed`。各行是逐行加租约的，所以用有界线程池处理(或让带闸门的 fire 异步作答)是自然的修法；这会改变扫描器的线程模型，留给单独的改动。

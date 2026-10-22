@@ -45,7 +45,10 @@ import type {
   HostedAutomationGateRunner,
 } from './hosted-automation-gate.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
-import { gateStderrTail } from '@qwen-code/qwen-code-core/services/cron-gate.js';
+import {
+  gateStderrTail,
+  sanitizeGateOutput,
+} from '@qwen-code/qwen-code-core/services/cron-gate.js';
 import type {
   CommittedExtensionOperation,
   LocalManagedSessionAuthority,
@@ -422,7 +425,7 @@ export class HostedAutomationSession {
               catchUp: existing.catchUp,
               catchUpLimit: existing.catchUpLimit,
               enabled: existing.enabled,
-              gate: existing.gate,
+              gate: existing.gate ?? null,
             };
       const definition = assertAutomationDefinition(
         params.definition,
@@ -582,7 +585,9 @@ export class HostedAutomationSession {
       const gateOf = (
         run: AutomationRun,
       ): Pick<AutomationFireResult, 'gate'> =>
-        run.gateOutputRef === null ? {} : { gate: { outcome: 'delivered' } };
+        run.gateOutputRef === undefined
+          ? {}
+          : { gate: { outcome: 'delivered' } };
       if (existing !== undefined) {
         if (
           existing.run.execution !== 'intent' ||
@@ -635,14 +640,16 @@ export class HostedAutomationSession {
       }
       let gateOutputRef: ManagedSessionDurableRef | null = null;
       let gate: AutomationGateSummary | undefined;
-      if (schedule.gate !== null) {
+      if (schedule.gate !== undefined) {
         const result = await this.probe(schedule.gate, runId);
         if (result.kind !== 'output') {
           return { inputId, replayed: false, gate: summarizeGate(result) };
         }
         const output: AutomationGateOutput = {
           gate: schedule.gate,
-          stdout: result.stdout,
+          // Stored as the model sees it: raw control bytes would only grow
+          // the resource (each escapes to six bytes) past its limit.
+          stdout: sanitizeGateOutput(result.stdout),
           truncated: result.truncated,
           durationMs: result.durationMs,
         };
@@ -695,7 +702,7 @@ export class HostedAutomationSession {
     // The output the claim recorded, never a second probe: a replay after
     // a crash between the claim and this dispatch composes the same text.
     const gateOutput =
-      claim.gateOutputRef === null
+      claim.gateOutputRef === undefined
         ? null
         : decodeAutomationGateOutput(
             await this.store.resources.read(claim.gateOutputRef),

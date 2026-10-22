@@ -210,11 +210,16 @@ describe('managed-automation-record/1 shared contract', () => {
     );
     if (fixture.valid) {
       const parsed = body.parse(candidate);
-      // A key the record predates reads as null; everything else verbatim.
-      expect(parsed.record).toEqual({
-        ...candidate,
-        ...Object.fromEntries((fixture.omit ?? []).map((key) => [key, null])),
-      });
+      // A later key is kept only with a value: null or absent reads back as
+      // absent, so an ungated record is written exactly as before the gate.
+      expect(parsed.record).toEqual(
+        Object.fromEntries(
+          Object.entries(candidate).filter(
+            ([key, value]) =>
+              !(['gate', 'gateOutputRef'].includes(key) && value === null),
+          ),
+        ),
+      );
       expect(Object.isFrozen(parsed.record)).toBe(true);
       for (const value of Object.values(
         parsed.record as Record<string, unknown>,

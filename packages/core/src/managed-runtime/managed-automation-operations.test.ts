@@ -7,6 +7,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
+  AutomationGateInvalidError,
   AUTOMATION_RUN_INSTRUCTION,
   MANAGED_AUTOMATION_LIMITS,
   assertAutomationDefinition,
@@ -190,6 +191,10 @@ describe('automation definitions', () => {
       expect(() => assertAutomationDefinition({ ...base, gate })).toThrow(
         message,
       );
+      // Typed, so the Harness answers it as a pre-commit refusal.
+      expect(() => assertAutomationDefinition({ ...base, gate })).toThrow(
+        AutomationGateInvalidError,
+      );
     }
   });
 
@@ -206,7 +211,8 @@ describe('automation definitions', () => {
     expect(
       automationDefinitionDigest({ ...definition, gate: './other.sh' }),
     ).not.toBe(gated);
-    expect(open().gate).toBeNull();
+    // An ungated definition is written without the key, as before the gate.
+    expect(JSON.parse(JSON.stringify(open()))).not.toHaveProperty('gate');
     expect(
       scheduleOpenBody({
         scheduleId: 'asch_1',

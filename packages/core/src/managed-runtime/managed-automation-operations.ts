@@ -39,6 +39,18 @@ import {
 // these builders onto `commitExtensionRecord`. See
 // docs/design/2026-10-07-managed-automation-runtime.md.
 
+/**
+ * A definition's gate the shell checks refuse. The Harness answers it before
+ * anything commits, so the control plane releases the caller's idempotency
+ * key instead of burning it on a request it could not accept.
+ */
+export class AutomationGateInvalidError extends ManagedSessionRecordError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AutomationGateInvalidError';
+  }
+}
+
 export const MANAGED_AUTOMATION_LIMITS = Object.freeze({
   /** The raw prompt bound; the real budget is the final input's. */
   maxPromptBytes: 64 * 1024,
@@ -225,7 +237,9 @@ export function assertAutomationDefinition(
   if (gateValue !== null) {
     const gateError = gateCommandError(gateValue);
     if (gateError !== null) {
-      fail(`Automation definition gate ${gateError}.`);
+      throw new AutomationGateInvalidError(
+        `Automation definition gate ${gateError}.`,
+      );
     }
     gate = (gateValue as string).trim();
   }
@@ -367,7 +381,10 @@ function scheduleFields(
     catchUp: definition.catchUp,
     catchUpLimit: definition.catchUpLimit,
     enabled: definition.enabled,
-    gate: definition.gate,
+    // `undefined`, not left out: a revision spreads its predecessor first,
+    // and a cleared gate must replace the old one (the key is then dropped
+    // when the record is written).
+    gate: definition.gate ?? undefined,
   };
 }
 

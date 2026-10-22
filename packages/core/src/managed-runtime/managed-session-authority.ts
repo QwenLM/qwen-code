@@ -3206,7 +3206,7 @@ export class LocalManagedSessionAuthority {
     } else if (domain === 'schedule') {
       refs = [parseScheduleRecord(record).promptRef];
     } else if (domain === 'automation_run') {
-      refs = [parseAutomationRunRecord(record).gateOutputRef];
+      refs = [parseAutomationRunRecord(record).gateOutputRef ?? null];
     } else if (domain === 'monitor_run') {
       const monitor = parseMonitorRun(record);
       refs = [

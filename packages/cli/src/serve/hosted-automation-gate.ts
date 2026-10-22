@@ -97,8 +97,8 @@ export function createHostedAutomationGateRunner(options: {
       // the Runtime Session that ran the probe was released — a release is
       // final, so re-acquiring that Session would be refused — and only
       // the absence of a receipt costs an acquisition.
-      let prepared = await replayableWithoutSession(broker, callId, digest);
-      if (prepared === 'held') {
+      const answer = await replayableWithoutSession(broker, callId, digest);
+      if (answer === 'held') {
         // The Session exists but is not ready: an attempt still running, or
         // an acquisition whose answer was lost still being admitted. Neither
         // outcome is known yet, and settling the occurrence now would leave
@@ -107,36 +107,50 @@ export function createHostedAutomationGateRunner(options: {
           "the occurrence's Runtime Session is held by another attempt",
         );
       }
-      // A live reservation means the Session exists: whatever this attempt's
-      // own acquire answers, the Session is released at the end.
-      if (prepared !== undefined && prepared.settled === undefined) {
+      if (answer === 'unknown' || answer === 'superseded') {
+        // The probe may have run under this Session and its outcome cannot
+        // be read back; the Session is released before the answer.
         mayHold = true;
-      }
-      if (prepared?.settled === undefined) {
-        try {
-          await broker.acquire();
-        } catch (cause) {
-          // Only the Broker's own refusal proves nothing was acquired. A lost
-          // or unreadable answer may follow a committed acquisition, whose
-          // Session would stay a Workspace execution member with nobody left
-          // to release it.
-          if (
-            !(cause instanceof HostedWorkspaceBrokerRejection) ||
-            cause.status >= 500
-          ) {
-            mayHold = true;
-            unconfirmed = true;
-          }
-          throw cause;
-        }
-        mayHold = true;
-        prepared ??= await broker.prepareReplayable(callId, digest);
+        result = {
+          kind: 'unknown',
+          reason:
+            answer === 'unknown'
+              ? "the Runtime lost the occurrence's probe before it settled"
+              : 'this occurrence was already probed under an earlier gate command',
+        };
       } else {
-        replayed = true;
+        let prepared = answer;
+        // A live reservation means the Session exists: whatever this
+        // attempt's own acquire answers, the Session is released at the end.
+        if (prepared !== undefined && prepared.settled === undefined) {
+          mayHold = true;
+        }
+        if (prepared?.settled === undefined) {
+          try {
+            await broker.acquire();
+          } catch (cause) {
+            // Only the Broker's own refusal proves nothing was acquired. A
+            // lost or unreadable answer may follow a committed acquisition,
+            // whose Session would stay a Workspace execution member with
+            // nobody left to release it.
+            if (
+              !(cause instanceof HostedWorkspaceBrokerRejection) ||
+              cause.status >= 500
+            ) {
+              mayHold = true;
+              unconfirmed = true;
+            }
+            throw cause;
+          }
+          mayHold = true;
+          prepared ??= await broker.prepareReplayable(callId, digest);
+        } else {
+          replayed = true;
+        }
+        result = await settle(broker, prepared, payloadJson, signal, () => {
+          started = true;
+        });
       }
-      result = await settle(broker, prepared, payloadJson, signal, () => {
-        started = true;
-      });
     } catch (cause) {
       if (cause instanceof HostedAutomationGateHeld) throw cause;
       const message = cause instanceof Error ? cause.message : String(cause);
@@ -243,8 +257,10 @@ async function releaseDerivedSession(
  * Session: the settled receipt of an earlier attempt, a fresh reservation
  * when the derived Session is still live in the Broker, `undefined` when
  * the Session is not active there (the first attempt, or one whose
- * predecessor never reserved), or `held` when the Session exists but is not
- * ready — an attempt still in flight, whose outcome this one cannot know.
+ * predecessor never reserved), `held` when the outcome is not known yet (a
+ * Session not ready, an execution not settled, a Broker fault), `unknown`
+ * when the Runtime lost an execution that may have run, or `superseded`
+ * when the key holds an execution of an earlier gate command.
  */
 async function replayableWithoutSession(
   broker: HostedWorkspaceBroker,
@@ -253,17 +269,37 @@ async function replayableWithoutSession(
 ): Promise<
   | Awaited<ReturnType<HostedWorkspaceBroker['prepareReplayable']>>
   | 'held'
+  | 'unknown'
+  | 'superseded'
   | undefined
 > {
   try {
     return await broker.prepareReplayable(callId, digest);
   } catch (cause) {
-    if (!(cause instanceof HostedWorkspaceBrokerRejection)) throw cause;
+    // An execution under the key that has not settled (the client throws a
+    // plain error for it), a transport failure or a Broker fault: the probe
+    // may still be running, or a Session may still be held. A later attempt
+    // reads the settled receipt and releases.
+    if (!(cause instanceof HostedWorkspaceBrokerRejection)) return 'held';
+    if (cause.status >= 500) return 'held';
     if (cause.status === 404 && cause.code === 'runtime_session_not_found') {
       return undefined;
     }
     if (cause.status === 409 && cause.code === 'runtime_session_not_ready') {
       return 'held';
+    }
+    // The Runtime lost an execution that may have run.
+    if (
+      cause.status === 409 &&
+      (cause.code === 'runtime_broker_execution_unknown' ||
+        cause.code === 'runtime_admission_closed')
+    ) {
+      return 'unknown';
+    }
+    // The key holds an execution of another request: a revision changed the
+    // gate after this occurrence was probed and its answer was lost.
+    if (cause.status === 409 && cause.code === 'runtime_idempotency_conflict') {
+      return 'superseded';
     }
     throw cause;
   }

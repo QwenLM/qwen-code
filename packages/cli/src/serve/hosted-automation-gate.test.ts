@@ -254,6 +254,55 @@ describe('createHostedAutomationGateRunner', () => {
     expect(calls.map((call) => call.path)).toEqual(['/executions:prepare']);
   });
 
+  it.each([
+    [
+      'an execution still running',
+      {
+        body: {
+          ...identity,
+          executionCallId: 'gate-execution',
+          status: { state: 'executing' },
+        },
+      },
+    ],
+    ['a Broker fault', rejection(503, 'runtime_store_unavailable')],
+  ] as const)(
+    'fails the fire for a retry, releasing nothing, on %s',
+    async (_what, prepare) => {
+      // The probe may still be running under another attempt's Session, or
+      // a Session may still be held: a later attempt reads the settled
+      // receipt and releases. "Could not start" would settle the occurrence
+      // and strand the Session.
+      const { calls, probe } = await rig(() => prepare);
+      await expect(probe()).rejects.toThrow(
+        "the occurrence's Runtime Session is held by another attempt",
+      );
+      expect(calls.map((call) => call.path)).toEqual(['/executions:prepare']);
+    },
+  );
+
+  it.each([
+    [
+      'runtime_broker_execution_unknown',
+      "the Runtime lost the occurrence's probe before it settled",
+    ],
+    [
+      'runtime_idempotency_conflict',
+      'this occurrence was already probed under an earlier gate command',
+    ],
+  ])('answers unknown and releases the Session on %s', async (code, reason) => {
+    const { calls, probe } = await rig((path) =>
+      path === RELEASE
+        ? { body: { ...identity, released: true } }
+        : rejection(409, code),
+    );
+    await expect(probe()).resolves.toEqual({ kind: 'unknown', reason });
+    expect(calls.map((call) => call.path)).toEqual([
+      '/executions:prepare',
+      RELEASE,
+    ]);
+  });
+
   it('keeps a not-found release after a lost acquisition from settling the fire', async () => {
     // The Broker may still be admitting the acquisition whose answer was
     // lost: "not found" now proves nothing, so the fire is retried.

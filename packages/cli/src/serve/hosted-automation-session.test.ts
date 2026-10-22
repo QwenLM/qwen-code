@@ -28,6 +28,7 @@ import {
   automationInputId,
   automationRunClaimBody,
   automationRunId,
+  decodeAutomationGateOutput,
   decodeAutomationInputEnvelope,
   encodeAutomationGateOutput,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-operations.js';
@@ -1470,6 +1471,39 @@ describe('hosted automation gates', () => {
     );
   });
 
+  it('publishes a printing gate’s output sanitized, so control bytes cannot push it past the resource limit', async () => {
+    // Each raw C0 control byte would escape to six bytes in the published
+    // JSON: 12 000 of them would outgrow the resource and drop the fire.
+    const harness = await createHarness();
+    const gate = scriptedGate([
+      {
+        kind: 'output',
+        stdout: `${'\u0001'.repeat(12_000)}event: comment\n`,
+        truncated: false,
+        durationMs: 3,
+      },
+    ]);
+    await withSession(
+      harness,
+      async (automations) => {
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        const fired = await automations.fire(fireParams());
+        expect(fired.run).toBeDefined();
+        expect(fired.gate).toMatchObject({ outcome: 'delivered' });
+        // Stored as the model sees it: no control byte left to escape.
+        const stored = decodeAutomationGateOutput(
+          await harness.store.read(fired.run!.gateOutputRef!),
+        );
+        expect(stored.stdout).toBe('event: comment');
+      },
+      { gate: gate.runner },
+    );
+  });
+
   it('keeps the newest stderr of a failed gate, sanitized and within what the control plane stores', async () => {
     // A failed gate runs no turn: the detail is the only place its reason
     // reaches, so a long, colored stderr must not push that reason out.
@@ -1522,7 +1556,8 @@ describe('hosted automation gates', () => {
           definition: { ...definition, gate: null },
         });
         const fired = await automations.fire(fireParams(2));
-        expect(fired.run!.gateOutputRef).toBeNull();
+        // An ungated run is written without the key.
+        expect(fired.run!).not.toHaveProperty('gateOutputRef');
         expect(fired.gate).toBeUndefined();
         expect(gate.calls).toHaveLength(0);
       },
@@ -1570,7 +1605,9 @@ describe('hosted automation gates', () => {
           operationId: nextOperationId(),
           definition: { gate: null },
         });
-        expect(cleared.schedule.gate).toBeNull();
+        expect(JSON.parse(JSON.stringify(cleared.schedule))).not.toHaveProperty(
+          'gate',
+        );
         expect(cleared.schedule.definitionRevision).toBe(3);
         await expect(
           automations.define({

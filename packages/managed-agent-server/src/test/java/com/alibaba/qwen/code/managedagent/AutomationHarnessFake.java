@@ -72,6 +72,8 @@ public final class AutomationHarnessFake {
      * `outcome:detail`); an empty queue delivers.
      */
     public final Deque<String> gateAnswers = new ArrayDeque<>();
+    /** Runs after a probe and before its answer: a revision landing then. */
+    public Runnable beforeGateAnswer;
     /** The gate probes the fake ran, as `scheduleId|occurrenceKey`. */
     public final List<String> probes = new ArrayList<>();
 
@@ -117,6 +119,12 @@ public final class AutomationHarnessFake {
                         + body.get("operationId");
                 Map<String, Object> prior = mutations.get(mutationKey);
                 Map<?, ?> definition = (Map<?, ?>) body.get("definition");
+                // The Harness's shell checks refuse a backgrounded gate before
+                // anything commits.
+                if (definition != null && definition.get("gate") instanceof String gate
+                        && gate.trim().endsWith("&")) {
+                    throw refusal(400, "automation_gate_invalid");
+                }
                 if (prior != null) {
                     replayCheck(prior, scheduleId, definition);
                     result.put("schedule", new LinkedHashMap<>(prior));
@@ -258,6 +266,11 @@ public final class AutomationHarnessFake {
                     // derived from the occurrence; only a delivery claims.
                     probes.add(scheduleId + "|" + occurrenceKey);
                     String scripted = gateAnswers.pollFirst();
+                    Runnable hook = beforeGateAnswer;
+                    if (hook != null) {
+                        beforeGateAnswer = null;
+                        hook.run();
+                    }
                     String outcome = scripted == null ? "delivered"
                             : scripted.split(":", 2)[0];
                     gate = new LinkedHashMap<>();

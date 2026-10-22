@@ -119,8 +119,9 @@ Non-goals:
 `gate` (string or null): a shell command of at most 2048 UTF-8 bytes, with no
 control characters and no part backgrounded with `&`. A revision may set,
 change or clear it (`null`); the definition digest includes it, so a changed
-gate is a new definition revision. `PublicAutomation` carries `gate` (null for
-an ungated definition) and `gate_status`: `last_outcome`, `last_at`,
+gate is a new definition revision. `PublicAutomation` carries `gate` (absent
+for an ungated definition) and `gate_status` (absent until the gate first
+runs): `last_outcome`, `last_at`,
 `quiet_since_delivery`, `consecutive_failures` and `last_error`, or null
 until the gate first ran.
 
@@ -174,6 +175,13 @@ tag names defanged) and cut at 16 KiB with the cut noted.
   `managed-automation-gate-output`, null for an ungated definition. It is
   fixed across revisions because the dispatch reads it, and both stores close
   it over the Session's resources at commit time like `promptRef`.
+- Both keys are later additions to version 1: records written before them
+  have neither, and every reader on both hosts reads the absence as null (in
+  successor checks too). A writer leaves a key out while it is null, so a
+  record of an ungated definition is byte-for-byte what a host that predates
+  the gate wrote; a host of either side can therefore be upgraded or rolled
+  back first while no definition carries a gate. The stored probe output is
+  sanitized like the turn text, which bounds its encoding.
 
 ### 5.2 Where the gate runs
 
@@ -197,10 +205,16 @@ the route wires the real one:
    can never be re-acquired — and the Harness reads its settled result back
    instead of starting anything. When the Broker knows no Session for the
    occurrence, the Harness acquires the derived Session, reserves the
-   execution afresh, starts it and observes it to its settlement. A Session
-   the Broker holds but reports not ready is an attempt still in flight: the
-   answer is `unknown`. A reservation under the same key with a different
-   reference is a conflict, never a second run.
+   execution afresh, starts it and observes it to its settlement. Until the
+   Broker can say how the occurrence ended, the fire fails and the scanner
+   re-drives it: a Session it holds but reports not ready, an execution under
+   the key that has not settled, a Broker fault. An execution the Runtime
+   lost answers `unknown`, and a reservation under the same key for another
+   request (a revision changed the gate after a lost answer) is a conflict,
+   never a second run: it answers `unknown` too. Whenever the attempt may
+   hold the derived Session (it acquired it, its acquisition was not
+   confirmed, or the Broker reports it live), it releases the Session before
+   answering, and a release that fails fails the fire for a re-drive.
 4. The Runtime worker runs the worker-internal tool
    `managed_automation_gate` — admitted beside the model tools, never
    declared to a model — which runs the command with the shared
@@ -330,10 +344,13 @@ file on every execution:
   reservation and a terminal replay, and refuses a conflicting one.
 - `hosted-automation-gate.test.ts`: against a scripted Broker, the runner
   reads a settled receipt without acquiring, acquires and reserves afresh
-  only when the Broker knows no Session for the occurrence, answers
-  `unknown` for a Session another attempt holds, `failed` for a Session it
-  cannot acquire, and `blocked` for a profile without Shell before asking.
-- `managed-runtime-tool-executor.test.ts`: the gate tool is admitted,
+  only when the Broker knows no Session for the occurrence, fails the fire
+  for a retry while a Session is held or an execution has not settled,
+  answers `unknown` and releases for a lost execution or a conflicting
+  reservation, `failed` for a Session it cannot acquire, and `blocked` for a
+  profile without Shell before asking; release failures and unconfirmed
+  acquisitions keep the fire unsettled.
+- `managed-automation-gate-tool.test.ts`: the gate tool is admitted,
   validates its input and answers the runner's result.
 - `AutomationScannerTest`: each gate outcome settles its occurrence and
   updates the definition's gate status; a fired gate answers like a plain
@@ -381,3 +398,11 @@ One PR, stacked on #15069 (it reuses `cron-gate.ts`):
   about an expired credential without polling `gate_status`.
 - The `per_run` arm, once H4 gives it a child intent: the probe would run
   before the child Session is created, in the parent's Runtime.
+- Scanner capacity. A gated `fire_run` now holds the scanner thread for the
+  probe (up to 20 s, inside the relay's 30 s), and the scanner works its
+  rows one after another. Enough slow gates due in the same minute push a
+  tick past the late tolerance, and later slots of every definition on the
+  node are then recorded `missed`. Rows are leased one by one, so working
+  them on a bounded pool (or answering a gated fire asynchronously) is the
+  natural fix; it changes the scanner's threading and is left to its own
+  change.

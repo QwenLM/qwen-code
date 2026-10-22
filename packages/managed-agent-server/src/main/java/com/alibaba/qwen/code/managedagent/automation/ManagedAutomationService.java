@@ -470,7 +470,8 @@ public class ManagedAutomationService {
      * binding its successful sibling owns.
      */
     private static final Set<String> PRE_COMMIT_REFUSALS = Set.of(
-            "automation_mode_disabled", "automation_gate_unsupported");
+            "automation_mode_disabled", "automation_gate_unsupported",
+            "automation_gate_invalid");
 
     /**
      * The relay of a claimed mutation. Only a refusal in

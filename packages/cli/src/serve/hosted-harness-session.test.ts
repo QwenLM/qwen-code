@@ -2947,6 +2947,15 @@ describe('Hosted Harness no-tool session', () => {
     });
     expect(perRun.status).toBe(409);
     expect(perRun.body.code).toBe('automation_mode_disabled');
+    // A gate the shell checks refuse is a pre-commit refusal of its own, so
+    // the control plane can release the caller's key.
+    const backgrounded = await operations({
+      kind: 'define_schedule',
+      scheduleId: AUTOMATION_ID,
+      definition: { ...automationDefinition, gate: 'sleep 5 &' },
+    });
+    expect(backgrounded.status).toBe(400);
+    expect(backgrounded.body.code).toBe('automation_gate_invalid');
     const badCron = await operations({
       kind: 'define_schedule',
       scheduleId: AUTOMATION_ID,

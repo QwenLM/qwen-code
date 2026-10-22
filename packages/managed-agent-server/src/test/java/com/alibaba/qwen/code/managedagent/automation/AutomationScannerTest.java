@@ -233,6 +233,24 @@ class AutomationScannerTest {
     }
 
     @Test
+    void anOutcomeOfAReplacedGateDoesNotLandOnTheNewOne() {
+        // The gate is revised while its probe runs: the old command's answer
+        // must not count on the new command's freshly reset status.
+        PublicAutomation automation = defineGated("./probe.sh");
+        fake.gateAnswers.add("failed:exited with code 1");
+        fake.beforeGateAnswer = () -> service.update(tenant, ACTOR,
+                automation.id(), "key-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(null, null, null, null, null,
+                        null, null, null, null, null,
+                        TextNode.valueOf("./other.sh")));
+        clock.set(T0 + MINUTE + 1_000);
+        scanner.tick(clock.get());
+        PublicAutomation revised = service.get(tenant, ACTOR, automation.id());
+        assertThat(revised.gate()).isEqualTo("./other.sh");
+        assertThat(revised.gateStatus()).isNull();
+    }
+
+    @Test
     void everySlotOfOneScanCountsInTheGateStatus() {
         // One scan hands every due slot the same schedule snapshot: the
         // counters must still move once per probe.
@@ -1857,6 +1875,27 @@ class AutomationScannerTest {
         assertThat(ledger.findCommand(tenant, key).orElseThrow().resultJson())
                 .contains(scheduleId)
                 .doesNotContain("other");
+    }
+
+    @Test
+    void aGateTheHarnessRefusesReleasesTheClaimSoAFixedRetrySucceeds() {
+        // The server's own checks accept `sleep 5 &`; the Harness's shell
+        // checks refuse it before committing, so the key goes back.
+        String key = "gate-" + UUID.randomUUID();
+        assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true,
+                        TextNode.valueOf("sleep 5 &"))))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(error.getCode()).isEqualTo("automation_gate_invalid");
+                });
+        assertThat(ledger.findCommand(tenant, key)).isEmpty();
+        PublicAutomation fixed = service.create(tenant, ACTOR, key,
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true,
+                        TextNode.valueOf("./probe.sh"))).body();
+        assertThat(fixed.gate()).isEqualTo("./probe.sh");
     }
 
     @Test

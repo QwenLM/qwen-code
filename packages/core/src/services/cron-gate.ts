@@ -267,6 +267,12 @@ export function createCronGateRunner(
  * line, like a `Monitor` line, so a probe's output cannot close the
  * `<gate-output>` block it is wrapped in or spoof a notification boundary.
  */
+/** Gate output as the model may see it; storing it this way also bounds
+ * its JSON encoding (no control character survives to escape to 6 bytes). */
+export function sanitizeGateOutput(text: string): string {
+  return sanitizeGateText(text);
+}
+
 function sanitizeGateText(text: string): string {
   return stripAnsi(text)
     .split('\n')

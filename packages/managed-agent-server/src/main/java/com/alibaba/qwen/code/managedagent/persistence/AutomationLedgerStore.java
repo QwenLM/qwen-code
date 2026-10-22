@@ -400,9 +400,14 @@ public class AutomationLedgerStore {
                         + ", gate_failures = " + failures + ","
                         + " gate_last_error = ?, gmt_modified = ?"
                         + " WHERE tenant_id = ? AND schedule_id = ?"
-                        + " AND lease_owner = ? AND fence = ?",
+                        + " AND lease_owner = ? AND fence = ?"
+                        // Only the gate that was probed: a revision that
+                        // replaced or cleared it reset the status for its
+                        // own command.
+                        + " AND gate = ?",
                 outcome, now, error, now,
-                row.tenantId(), row.scheduleId(), owner, fence) == 1;
+                row.tenantId(), row.scheduleId(), owner, fence,
+                row.gate()) == 1;
     }
 
     /**

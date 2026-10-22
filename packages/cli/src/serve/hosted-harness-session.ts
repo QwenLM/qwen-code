@@ -239,6 +239,7 @@ import {
 import { createHostedAutomationGateRunner } from './hosted-automation-gate.js';
 import {
   AUTOMATION_INPUT_SOURCE,
+  AutomationGateInvalidError,
   automationInputId,
   MANAGED_AUTOMATION_LIMITS,
   automationRunId,
@@ -11663,7 +11664,7 @@ export function registerHostedHarnessSessionRoutes(
       catchUp: schedule.catchUp,
       catchUpLimit: schedule.catchUpLimit,
       enabled: schedule.enabled,
-      gate: schedule.gate,
+      gate: schedule.gate ?? null,
       state: schedule.run.state,
     });
     const runSummary = (run: AutomationRun) => ({
@@ -11875,6 +11876,8 @@ export function registerHostedHarnessSessionRoutes(
           undefined,
           message,
         );
+      if (cause instanceof AutomationGateInvalidError)
+        return error(res, 400, 'automation_gate_invalid', undefined, message);
       if (cause instanceof ManagedSessionModeGateError)
         return error(res, 409, 'automation_mode_disabled', undefined, message);
       // Typed classification, no message substrings: a dead writer is not a

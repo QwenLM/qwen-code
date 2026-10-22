@@ -82,11 +82,12 @@ export interface Schedule {
   /**
    * The shell command the Runtime runs at each fire before any run is
    * claimed: silence skips the fire, output wakes the target Session with
-   * the output attached, a failure is recorded and counted. Null for a
-   * definition that fires every slot. See
+   * the output attached, a failure is recorded and counted. Absent for a
+   * definition that fires every slot: an ungated record is written without
+   * the key, so a host that predates the gate reads it unchanged. See
    * docs/design/2026-10-22-managed-automation-gate.md.
    */
-  readonly gate: string | null;
+  readonly gate?: string;
   readonly run: ExtensionRun;
 }
 
@@ -108,10 +109,11 @@ export interface AutomationRun {
   readonly targetSessionId: string | null;
   /**
    * The published output of the gate probe that admitted this run, which
-   * the dispatch reads so a replay never probes again; null for a run of a
-   * definition without a gate. Fixed from the claim on.
+   * the dispatch reads so a replay never probes again; absent for a run of
+   * a definition without a gate (written without the key, like `gate`).
+   * Fixed from the claim on.
    */
-  readonly gateOutputRef: ManagedSessionDurableRef | null;
+  readonly gateOutputRef?: ManagedSessionDurableRef;
   readonly run: ExtensionRun;
 }
 
@@ -218,6 +220,15 @@ function id(value: ManagedSessionJsonValue, label: string): string {
 
 function text(value: ManagedSessionJsonValue, label: string): string {
   return boundedString(value, label, MANAGED_SESSION_LIMITS.maxTextBytes);
+}
+
+/** `{ [key]: value }`, or nothing for null: a later key of schema version 1
+ * is written and read back only when it has a value. */
+function optional<Key extends string, Value>(
+  key: Key,
+  value: Value | null,
+): { [K in Key]?: Value } {
+  return (value === null ? {} : { [key]: value }) as { [K in Key]?: Value };
 }
 
 /** A gate command: bounded text under its own, tighter cap. */
@@ -429,7 +440,7 @@ export function parseScheduleRecord(value: unknown): Schedule {
     catchUp,
     catchUpLimit,
     enabled: boolean(body.enabled, 'enabled'),
-    gate: nullable(body.gate ?? null, gate),
+    ...optional('gate', nullable(body.gate ?? null, gate)),
     run,
   });
 }
@@ -556,8 +567,11 @@ export function parseAutomationRunRecord(value: unknown): AutomationRun {
     occurrenceKey: occurrenceKey(body.occurrenceKey),
     sessionMode,
     targetSessionId,
-    gateOutputRef: nullable(body.gateOutputRef ?? null, (each) =>
-      ref(each, 'gateOutputRef'),
+    ...optional(
+      'gateOutputRef',
+      nullable(body.gateOutputRef ?? null, (each) =>
+        ref(each, 'gateOutputRef'),
+      ),
     ),
     run,
   });

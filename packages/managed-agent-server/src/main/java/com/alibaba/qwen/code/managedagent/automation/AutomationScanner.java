@@ -506,13 +506,13 @@ public class AutomationScanner {
         }
         // A gated definition answers how its probe decided: only a delivery
         // claimed a run; every other outcome settles the slot skipped under
-        // its own reason, with the detail, and moves the definition's
-        // gate status — nothing of it touched the journal.
+        // its own reason, with the detail. The definition's gate status
+        // moves once the occurrence is settled, so a settle that fails and is
+        // re-driven does not count its replayed answer twice.
         if (answer != null && answer.get("gate") instanceof Map<?, ?> gate) {
             String outcome = String.valueOf(gate.get("outcome"));
             String detail = gate.get("detail") instanceof String text
                     ? text : null;
-            store.recordGateOutcome(row, owner, fence, outcome, detail, now);
             if (!AutomationLedgerStore.GATE_DELIVERED.equals(outcome)) {
                 String reason = switch (outcome) {
                     case AutomationLedgerStore.GATE_QUIET -> REASON_GATE_QUIET;
@@ -520,12 +520,22 @@ public class AutomationScanner {
                         REASON_GATE_UNKNOWN;
                     default -> REASON_GATE_FAILED;
                 };
-                store.settleOccurrence(row.tenantId(), row.scheduleId(),
+                if (store.settleOccurrence(row.tenantId(), row.scheduleId(),
                         occurrence.occurrenceKey(),
                         AutomationLedgerStore.OUTCOME_SKIPPED, reason, detail,
-                        owner, fence, now);
+                        owner, fence, now)) {
+                    store.recordGateOutcome(row, owner, fence, outcome, detail,
+                            now);
+                }
                 return false;
             }
+            boolean fired = store.settleOccurrence(row.tenantId(),
+                    row.scheduleId(), occurrence.occurrenceKey(),
+                    AutomationLedgerStore.OUTCOME_FIRED, null, owner, fence, now);
+            if (fired) {
+                store.recordGateOutcome(row, owner, fence, outcome, detail, now);
+            }
+            return fired;
         }
         return store.settleOccurrence(row.tenantId(), row.scheduleId(),
                 occurrence.occurrenceKey(), AutomationLedgerStore.OUTCOME_FIRED,
