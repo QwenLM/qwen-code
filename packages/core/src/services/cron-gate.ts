@@ -28,6 +28,7 @@ import { getErrorMessage } from '../utils/errors.js';
 import {
   backgroundsAnyPart,
   normalizeMonitorCommand,
+  runsOnlyComments,
 } from '../utils/shell-utils.js';
 import { extractCommandRules } from '../utils/shellAstParser.js';
 import type { CronJob } from './cronScheduler.js';
@@ -129,11 +130,7 @@ export function gateCommandError(gate: unknown): string | null {
   }
   // A shell runs a comment as nothing: exit 0, no stdout. Explicit no-ops
   // such as `true` and `:` stay accepted.
-  if (
-    normalizeMonitorCommand(gate)
-      .safetyCommand.split('\n')
-      .every((line) => /^\s*(#|$)/.test(line))
-  ) {
+  if (runsOnlyComments(gate)) {
     return 'must run a command, not only a comment';
   }
   if (backgroundsAnyPart(gate) || endsWithBackgroundAmp(gate)) {

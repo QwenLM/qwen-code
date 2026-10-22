@@ -409,6 +409,12 @@ describe('gateCommandError', () => {
     // An `&` inside a quoted argument backgrounds nothing.
     ['a quoted &', "gh api 'repos/o/r/pulls?state=open&per_page=5'"],
     ['&&', 'a && b'],
+    // The command after a wrapper runs: the wrapper's comment scope ends
+    // with its script.
+    [
+      'a wrapper comment then a command',
+      "bash -c '# comment' && printf 'ready\\n'",
+    ],
     ['a command at the cap', 'x'.repeat(MAX_CRON_GATE_CHARS)],
   ])('accepts %s', (_what, gate) => {
     expect(gateCommandError(gate)).toBeNull();
@@ -432,6 +438,11 @@ describe('gateCommandError', () => {
     ['a bare #', '#', 'not only a comment'],
     ['comment lines only', '# a\n  # b\n', 'not only a comment'],
     ['a wrapper running a comment', "bash -c '# probe'", 'not only a comment'],
+    [
+      'nested wrappers running a comment',
+      `bash -c "sh -c '# probe'"`,
+      'not only a comment',
+    ],
     [
       'a command past the cap',
       'x'.repeat(MAX_CRON_GATE_CHARS + 1),

@@ -1628,6 +1628,24 @@ export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
 }
 
 /**
+ * Whether `command` runs nothing but comments: every line blank or a `#`
+ * comment, or a shell wrapper whose script does (checked the same way, so
+ * nested wrappers too) with nothing after that script. Anything after the
+ * script (`bash -c '# x' && echo hi`) may run, so it counts as a command.
+ * Explicit no-ops such as `true` and `:` are commands.
+ */
+export function runsOnlyComments(command: string): boolean {
+  const { wrapperTokens, innerCommand, innerArgsSuffix } =
+    parseMonitorShellWrapper(command);
+  if (wrapperTokens) {
+    return (
+      (innerArgsSuffix ?? '').trim() === '' && runsOnlyComments(innerCommand)
+    );
+  }
+  return command.split('\n').every((line) => /^\s*(#|$)/.test(line));
+}
+
+/**
  * Whether a command backgrounds any part of itself with `&`: anywhere at its
  * top level, at its end, or inside a script it hands to a shell wrapper —
  * also a wrapper behind a prefix `normalizeMonitorCommand` does not unwrap
