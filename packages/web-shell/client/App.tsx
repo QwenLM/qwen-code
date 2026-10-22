@@ -536,6 +536,7 @@ import {
 import {
   WebShellCustomizationProvider,
   type WebShellCustomization,
+  type WebShellWorkspaceDirectoryPicker,
   type WebShellAssistantFeedbackOptions,
   type WebShellComposerApi,
   type WebShellComposerInput,
@@ -1471,6 +1472,8 @@ export interface WebShellProps {
   ) => void;
   /** Open a workspace file in the embedding host instead of WebShell preview. */
   onWorkspaceFileOpen?: (path: string) => void;
+  /** Select a directory on the connected daemon. Overrides native picking without registering or trusting the path. */
+  onPickWorkspaceDirectory?: WebShellWorkspaceDirectoryPicker;
   /** Open a completed Insight report in a host-native surface. */
   onInsightReportOpen?: (path: string) => void;
   /** Open context usage details in the host instead of the built-in panel. */
@@ -3466,6 +3469,7 @@ export function App({
   onRightPanelOpen,
   onFileReviewOpen,
   onWorkspaceFileOpen,
+  onPickWorkspaceDirectory,
   onInsightReportOpen,
   onContextUsageOpen,
   messageTurnOutputs,
@@ -15473,6 +15477,32 @@ export function App({
   const workspaceAddLocationIsConnected =
     workspaceAddSelectedLocation ===
     (workspace.baseUrl || window.location.origin);
+  const workspacePickerTarget = useMemo(
+    () => ({
+      client: workspace.client,
+      baseUrl: workspace.baseUrl,
+      status: workspace.status,
+    }),
+    [workspace.client, workspace.baseUrl, workspace.status],
+  );
+  let workspaceDirectoryPicker: WebShellWorkspaceDirectoryPicker | undefined;
+  if (workspaceAddLocationIsConnected) {
+    if (onPickWorkspaceDirectory) {
+      if (workspace.status === 'connected') {
+        workspaceDirectoryPicker = onPickWorkspaceDirectory;
+      }
+    } else if (
+      nativeDirectoryPickerSupported &&
+      (!workspace.baseUrl ||
+        new URL(workspace.baseUrl, window.location.origin).origin ===
+          window.location.origin)
+    ) {
+      workspaceDirectoryPicker = async () => {
+        const result = await workspaceActions.pickWorkspaceDirectory();
+        return result.selected ? result.path : undefined;
+      };
+    }
+  }
   const changeWorkspaceAddLocation = useCallback((origin: string) => {
     setWorkspaceAddLocation(origin);
     return true;
@@ -21715,19 +21745,9 @@ export function App({
                     : handleAddWorkspace
                 }
                 onSuggest={suggestWorkspacePathsForLocation}
-                onPick={
-                  workspaceAddLocationIsConnected &&
-                  nativeDirectoryPickerSupported &&
-                  (!workspace.baseUrl ||
-                    new URL(workspace.baseUrl, window.location.origin)
-                      .origin === window.location.origin)
-                    ? async () => {
-                        const result =
-                          await workspaceActions.pickWorkspaceDirectory();
-                        return result.selected ? result.path : undefined;
-                      }
-                    : undefined
-                }
+                onPick={workspaceDirectoryPicker}
+                pickerTarget={workspacePickerTarget}
+                pickerUsesHostUi={Boolean(onPickWorkspaceDirectory)}
                 persistenceSupported={
                   workspaceAddLocationIsConnected &&
                   persistentWorkspaceRegistrationSupported

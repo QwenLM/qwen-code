@@ -296,6 +296,7 @@ export type {
   WebShellAtProviderTab,
   WebShellAtItem,
   WebShellAtProvider,
+  WebShellWorkspaceDirectoryPicker,
   WebShellBottomStatusItem,
   WebShellCodeBlockRenderInfo,
   WebShellMarkdownChartCustomization,

@@ -565,6 +565,55 @@ Web Shell 时生效。配置变化不会自动改变当前会话模式；当前�
 | `unavailableModels`            | `readonly WebShellUnavailableModel[]`  | 可选。在输入框模型选择器中追加禁用模型；见 [不可用模型目录](#不可用模型目录)。                                                                 |
 | `mountUnavailableModelTooltip` | `WebShellUnavailableModelTooltipMount` | 可选。为禁用模型挂载自定义提示层，Solid/原生 DOM 宿主可写入传入的 `HTMLElement`。                                                              |
 
+### 宿主目录选择
+
+`WebShell` 和 `WebShellWithProviders` 均接受可选的
+`onPickWorkspaceDirectory`，其公开类型 `WebShellWorkspaceDirectoryPicker` 为
+`(opts?: { signal?: AbortSignal }) => Promise<string | undefined>`。
+宿主返回当前已连接 daemon 文件系统中已存在目录的绝对路径；用户取消时返回
+`undefined`，也可以抛出 `AbortError`。浏览器本机的目录句柄不能作为返回值。
+
+```tsx
+import {
+  WebShellWithProviders,
+  type WebShellWorkspaceDirectoryPicker,
+} from '@qwen-code/web-shell';
+
+const onPickWorkspaceDirectory: WebShellWorkspaceDirectoryPicker = (opts) =>
+  openHostDirectoryPicker({ daemonOrigin, signal: opts?.signal });
+
+<WebShellWithProviders
+  baseUrl={daemonOrigin}
+  onPickWorkspaceDirectory={onPickWorkspaceDirectory}
+/>;
+```
+
+示例中的 `openHostDirectoryPicker` 由宿主实现，并与 `daemonOrigin` 指向同一台
+计算机。配置回调后，现有 Add Workspace 对话框的 Browse 按钮优先调用它；
+headless 或跨源 daemon 无需声明 `native_directory_picker`。
+回调只服务于当前已连接目标，不能用它为 Folder source 中另一台计算机选择路径。
+返回路径只回填输入框，不会自动注册；用户仍通过 Add 完成现有注册、刷新和选中流程，
+持久化能力检查和 trust 语义保持不变。选择进行中时 Add 按钮不可用，表单提交也会被
+阻止，避免注册选择前的旧路径。
+
+宿主选择器进行中时，Add Workspace 临时释放模态限制，允许点击和聚焦 Web Shell
+portal 外的宿主 UI；完成或取消后恢复。宿主负责自己的选择器可访问性、焦点管理和
+层叠顺序。原生选择器保留原来的模态行为；这不增加公开的模态配置选项。
+
+Escape 仍沿用 Add Workspace 的关闭行为：宿主使用普通冒泡 Escape 处理器时，
+`DialogShell` 的 document 捕获处理会先关闭 Add 并取消选择器。宿主显式 Cancel
+返回 `undefined` 则保留 Add；只取消宿主选择器的独立 Escape 归属仍待评审。
+
+每次选择都会传入独立的 signal。对话框关闭、卸载、目标或连接变化、宿主/原生选择
+方式切换、请求被后续选择替换时会触发 abort，宿主应据此关闭自己的 UI 并取消相关请求。即使宿主忽略 abort，
+旧请求迟到的结果或错误也不会修改当前对话框。普通渲染中重建回调引用不会取消当前选择。
+返回 `undefined`、`AbortError` 或其他错误均不会自动调用原生选择器；真实错误使用
+现有错误提示。未配置回调时，保留原生选择器的能力、目标和同源检查及手动输入行为。
+客户端取消不保证关闭服务端原生 OS 对话框。
+
+API 位置、签名和宿主优先级是本次实现的选择，仍待维护者评审，详见
+[设计文档](../../docs/design/web-shell-host-directory-picker.zh-CN.md)。
+
 ### Workspace 会话创建超时
 
 Workspace 创建由 SDK 分别约束能力查询和创建请求。能力查询沿用 SDK 的通用 30 秒
@@ -605,6 +654,7 @@ daemon 参数的完整含义和配置方式见
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `onSessionIdChange`            | `(sessionId: string \| undefined, workspaceId?: string, workspaceCwd?: string, sessionContext?: DaemonProductSessionContext) => void` | 当前 session、工作区或显式产品上下文变化时触发；standalone 和 Live 通过第四个参数上报                                                                                        |
 | `onRefreshModels`              | `({ workspaceCwd: string, sessionId?: string }) => void \| Promise<void>`                                                             | 用户刷新模型选择器时先调用；宿主可拉取并保存平台目录。未提供或返回空值都会继续重载 Qwen 模型目录并回读当前列表；拒绝则保留旧列表并显示错误。不会自动切换模型或通知其他页面。 |
+| `onPickWorkspaceDirectory`     | `WebShellWorkspaceDirectoryPicker`                                                                                                    | 可选。接入宿主的 daemon 目录选择器，优先于原生选择器；见 [宿主目录选择](#宿主目录选择)。                                                                                     |
 | `onSessionCreated`             | `(sessionId: string) => Promise<void> \| void`                                                                                        | 新 session 创建后触发；完成前会阻塞 session 初始化和 prompt 提交，最长等待 30 秒                                                                                             |
 | `theme`                        | `'dark' \| 'light'`                                                                                                                   | UI 主题，默认 `dark`                                                                                                                                                         |
 | `onThemeChange`                | `(theme: WebShellTheme) => void`                                                                                                      | `/theme` 命令切换主题后触发                                                                                                                                                  |

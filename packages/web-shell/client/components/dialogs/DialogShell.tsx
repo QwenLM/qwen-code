@@ -28,6 +28,7 @@ interface DialogShellProps {
   size?: DialogSize;
   allowFullscreen?: boolean;
   dismissible?: boolean;
+  modal?: boolean;
   onClose: () => void;
   children: ReactNode;
 }
@@ -82,6 +83,7 @@ export function DialogShell({
   size = 'md',
   allowFullscreen = false,
   dismissible = true,
+  modal = true,
   onClose,
   children,
 }: DialogShellProps) {
@@ -175,6 +177,7 @@ export function DialogShell({
   return (
     <Dialog
       open
+      modal={modal}
       onOpenChange={(open) => {
         if (!open && dismissible) onClose();
       }}
@@ -200,7 +203,7 @@ export function DialogShell({
           data-web-shell-dialog
           data-fullscreen={fullscreen ? 'true' : undefined}
           data-web-shell-dialog-title={title}
-          onPointerDownOutside={(event) => event.preventDefault()}
+          onInteractOutside={(event) => event.preventDefault()}
           onEscapeKeyDown={(event) => {
             if (event.defaultPrevented) return;
             if (event.isComposing || event.keyCode === 229) {
@@ -214,6 +217,7 @@ export function DialogShell({
           }}
           onOpenAutoFocus={(event) => {
             event.preventDefault();
+            if (!modal) return;
             const preferred = getFocusable(panelRef.current).find(
               (element) => !element.hasAttribute('data-dialog-close'),
             );
