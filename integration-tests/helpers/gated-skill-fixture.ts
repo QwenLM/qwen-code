@@ -189,7 +189,7 @@ export function fakeModelLaunchArgs(fakeServer: FakeOpenAIServer): string[] {
  */
 export function makeWaitFor(rig: TestRig, getOutput: () => string) {
   return async (label: string, done: () => boolean): Promise<void> => {
-    const ok = await rig.poll(done, 30000, 100);
+    const ok = await rig.poll(done, rig.getDefaultTimeout(), 100);
     expect(ok, `timed out waiting for ${label}. Output:\n${getOutput()}`).toBe(
       true,
     );

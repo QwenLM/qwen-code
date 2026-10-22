@@ -27,6 +27,7 @@ import {
   makeWaitFor,
   stubFakeModelEnv,
 } from './helpers/gated-skill-fixture.js';
+import { readyPromptBudgetMs } from './ready-prompt-budget.js';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 
@@ -94,7 +95,13 @@ describe('skill hooks fire on both invocation paths', () => {
       output += d;
     });
 
-    const ready = await rig.waitForText('Type your message', 30000);
+    // The docker leg's container boot has stalled past 30s before the prompt
+    // renders (#13552, #14191); use the measured self-hosted budget instead of
+    // the old fixed 30s.
+    const ready = await rig.waitForText(
+      'Type your message',
+      readyPromptBudgetMs(process.env),
+    );
     expect(ready, `CLI did not start. Output:\n${output}`).toBe(true);
 
     const waitFor = makeWaitFor(rig, () => output);
@@ -154,7 +161,7 @@ describe('skill hooks fire on both invocation paths', () => {
       `gate did not fire. Output tail:\n${output.slice(-1500)}`,
     ).toContain(GATE_MARKER);
     expect(executed).toBe(false);
-  }, 120000);
+  }, 420_000); // CI: 180s ready-prompt ceiling + 3 waits at 60s, plus slack.
 
   it('user-invoked skill (/<skill-name>): the gate fires and blocks the shell call', async () => {
     const { output, executed } = await driveSession({
@@ -166,5 +173,5 @@ describe('skill hooks fire on both invocation paths', () => {
       `gate did not fire. Output tail:\n${output.slice(-1500)}`,
     ).toContain(GATE_MARKER);
     expect(executed).toBe(false);
-  }, 120000);
+  }, 540_000); // CI: 180s ready-prompt ceiling + 5 waits at 60s, plus slack.
 });
