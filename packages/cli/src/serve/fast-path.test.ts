@@ -1389,23 +1389,42 @@ describe('serve fast path environment bootstrap', () => {
     },
   );
 
-  it('loads QWEN_SERVER_TOKEN from the workspace .env before the daemon starts', async () => {
-    delete process.env['QWEN_SERVER_TOKEN'];
-    useTempQwenHome();
-    tempWorkspace = realpathSync(
-      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-env-')),
-    );
-    mkdirSync(join(tempWorkspace, '.qwen'));
-    writeFileSync(
-      join(tempWorkspace, '.qwen', '.env'),
-      'QWEN_SERVER_TOKEN=from-workspace-env\n',
-    );
-    process.chdir(tempWorkspace);
+  it.each(['.env', '.qwen/.env'])(
+    'never applies QWEN_SERVER_TOKEN from the workspace %s before the daemon starts',
+    async (envRelPath) => {
+      delete process.env['QWEN_SERVER_TOKEN'];
+      delete process.env['QWEN_SERVE_RATE_LIMIT'];
+      vi.stubEnv('qwen_server_token', undefined);
+      useTempQwenHome();
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-token-reject-')),
+      );
+      const envPath = join(tempWorkspace, ...envRelPath.split('/'));
+      mkdirSync(dirname(envPath), { recursive: true });
+      writeFileSync(
+        envPath,
+        [
+          'QWEN_SERVER_TOKEN=from-workspace-env',
+          'qwen_server_token=from-workspace-env-lower',
+          // Positive control: the file is read and merged under the default
+          // (trust-disabled) configuration; only the token keys are
+          // rejected.
+          'QWEN_SERVE_RATE_LIMIT=7',
+        ].join('\n'),
+      );
+      process.chdir(tempWorkspace);
 
-    await bootstrapServeFastPathEnvironment(tempWorkspace);
+      try {
+        await bootstrapServeFastPathEnvironment(tempWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-workspace-env');
-  });
+        expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+        expect(process.env['qwen_server_token']).toBeUndefined();
+        expect(process.env['QWEN_SERVE_RATE_LIMIT']).toBe('7');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it('preserves workspace .env compile cache over the pending default', async () => {
     delete process.env['NODE_COMPILE_CACHE'];
@@ -1428,6 +1447,7 @@ describe('serve fast path environment bootstrap', () => {
   });
 
   it('loads .env from --workspace even when launched from another directory', async () => {
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     delete process.env['QWEN_SERVER_TOKEN'];
     useTempQwenHome();
     tempWorkspace = realpathSync(
@@ -1439,15 +1459,19 @@ describe('serve fast path environment bootstrap', () => {
     mkdirSync(join(tempWorkspace, '.qwen'));
     writeFileSync(
       join(tempWorkspace, '.qwen', '.env'),
-      'QWEN_SERVER_TOKEN=from-explicit-workspace-env\n',
+      [
+        'FAST_PATH_REFERENCED_TOKEN=from-explicit-workspace-env',
+        'QWEN_SERVER_TOKEN=from-explicit-workspace-env',
+      ].join('\n'),
     );
     process.chdir(tempLaunchCwd);
 
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe(
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe(
       'from-explicit-workspace-env',
     );
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
   it('loads home .env after workspace .env for daemon boot-time keys', async () => {
@@ -1495,8 +1519,9 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
-  it('loads QWEN_SERVER_TOKEN from workspace settings.env without the full settings loader', async () => {
+  it('never applies QWEN_SERVER_TOKEN from workspace settings.env without the full settings loader', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['QWEN_SERVE_RATE_LIMIT'];
     useTempQwenHome();
     tempWorkspace = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-settings-env-')),
@@ -1505,16 +1530,20 @@ describe('serve fast path environment bootstrap', () => {
     writeFileSync(
       join(tempWorkspace, '.qwen', 'settings.json'),
       JSON.stringify({
-        env: { QWEN_SERVER_TOKEN: 'from-workspace-settings-env' },
+        env: {
+          QWEN_SERVER_TOKEN: 'from-workspace-settings-env',
+          // Positive control: settings.env is merged and applied; only the
+          // token key is rejected.
+          QWEN_SERVE_RATE_LIMIT: '7',
+        },
       }),
     );
     process.chdir(tempWorkspace);
 
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe(
-      'from-workspace-settings-env',
-    );
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['QWEN_SERVE_RATE_LIMIT']).toBe('7');
   });
 
   it('pre-resolves home env overrides in the same order as the full loader', () => {
@@ -2070,7 +2099,7 @@ describe('serve fast path environment bootstrap', () => {
   });
 
   it('caches trusted folders during a single fast-path bootstrap', () => {
-    delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trust-cache-')),
@@ -2087,7 +2116,10 @@ describe('serve fast path environment bootstrap', () => {
       process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
       JSON.stringify({ [tempWorkspace]: TrustLevel.TRUST_FOLDER }),
     );
-    writeFileSync(join(tempWorkspace, '.env'), 'QWEN_SERVER_TOKEN=trusted\n');
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      'FAST_PATH_REFERENCED_TOKEN=trusted\n',
+    );
 
     const settings = loadServeFastPathSettings(tempWorkspace);
     writeFileSync(
@@ -2097,7 +2129,42 @@ describe('serve fast path environment bootstrap', () => {
 
     loadServeFastPathEnvironment(settings, tempWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe('trusted');
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('trusted');
+  });
+
+  it('never applies QWEN_SERVER_TOKEN from a trusted workspace .env under folder trust', async () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['QWEN_SERVE_RATE_LIMIT'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trusted-token-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+      qwenHome,
+      'trustedFolders.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({ [tempWorkspace]: TrustLevel.TRUST_FOLDER }),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      [
+        'QWEN_SERVER_TOKEN=from-trusted-workspace-env',
+        // Positive control: the trusted workspace's .env loads; trust never
+        // waives the project-scope exclusion for the daemon bearer.
+        'QWEN_SERVE_RATE_LIMIT=7',
+      ].join('\n'),
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    expect(process.env['QWEN_SERVE_RATE_LIMIT']).toBe('7');
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
   it.each(['.env', '.qwen/.env', 'settings.env'])(
@@ -2753,6 +2820,7 @@ describe('serve fast path environment bootstrap', () => {
   });
 
   it('allows a trusted child rule to override an untrusted parent', async () => {
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
@@ -2778,12 +2846,18 @@ describe('serve fast path environment bootstrap', () => {
     );
     writeFileSync(
       join(trustedWorkspace, '.env'),
-      'QWEN_SERVER_TOKEN=from-trusted-child-env\n',
+      [
+        'FAST_PATH_REFERENCED_TOKEN=from-trusted-child-env',
+        'QWEN_SERVER_TOKEN=from-trusted-child-env',
+      ].join('\n'),
     );
 
     await bootstrapServeFastPathEnvironment(subDir);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-trusted-child-env');
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe(
+      'from-trusted-child-env',
+    );
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
   it('does not load a distrusted parent .env for a trusted child workspace', async () => {
@@ -2820,6 +2894,7 @@ describe('serve fast path environment bootstrap', () => {
   });
 
   it('loads an ancestor .env of an explicitly trusted child workspace', async () => {
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
@@ -2829,7 +2904,10 @@ describe('serve fast path environment bootstrap', () => {
     mkdirSync(childWorkspace);
     writeFileSync(
       join(tempWorkspace, '.env'),
-      'QWEN_SERVER_TOKEN=from-trusted-ancestor-env\n',
+      [
+        'FAST_PATH_REFERENCED_TOKEN=from-trusted-ancestor-env',
+        'QWEN_SERVER_TOKEN=from-trusted-ancestor-env',
+      ].join('\n'),
     );
     writeFileSync(
       join(qwenHome, 'settings.json'),
@@ -2851,10 +2929,14 @@ describe('serve fast path environment bootstrap', () => {
 
     await bootstrapServeFastPathEnvironment(childWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-trusted-ancestor-env');
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe(
+      'from-trusted-ancestor-env',
+    );
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
   it('treats TRUST_PARENT as trusting the containing folder', async () => {
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
@@ -2874,11 +2956,18 @@ describe('serve fast path environment bootstrap', () => {
         [join(tempWorkspace, 'marker')]: TrustLevel.TRUST_PARENT,
       }),
     );
-    writeFileSync(join(tempWorkspace, '.env'), 'QWEN_SERVER_TOKEN=trusted\n');
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      [
+        'FAST_PATH_REFERENCED_TOKEN=trusted',
+        'QWEN_SERVER_TOKEN=from-trust-parent-workspace',
+      ].join('\n'),
+    );
 
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe('trusted');
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('trusted');
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
   it('matches Cloud Shell default project behavior for empty env values', async () => {
@@ -2896,6 +2985,7 @@ describe('serve fast path environment bootstrap', () => {
   });
 
   it('expands process environment placeholders in workspace settings.env', async () => {
+    delete process.env['QWEN_SERVE_RATE_LIMIT'];
     delete process.env['QWEN_SERVER_TOKEN'];
     useTempQwenHome();
     process.env['FAST_PATH_REFERENCED_TOKEN'] = 'from-referenced-env';
@@ -2906,14 +2996,20 @@ describe('serve fast path environment bootstrap', () => {
     writeFileSync(
       join(tempWorkspace, '.qwen', 'settings.json'),
       JSON.stringify({
-        env: { QWEN_SERVER_TOKEN: '${FAST_PATH_REFERENCED_TOKEN}' },
+        env: {
+          QWEN_SERVE_RATE_LIMIT: '${FAST_PATH_REFERENCED_TOKEN}',
+          QWEN_SERVER_TOKEN: '${FAST_PATH_REFERENCED_TOKEN}',
+        },
       }),
     );
     process.chdir(tempWorkspace);
 
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-referenced-env');
+    // Placeholder expansion still happens in the settings merge; the
+    // project-scope rejection applies only to the daemon bearer key itself.
+    expect(process.env['QWEN_SERVE_RATE_LIMIT']).toBe('from-referenced-env');
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
   it('never expands Qwen-internal secrets referenced from workspace settings.env', async () => {
@@ -2948,6 +3044,7 @@ describe('serve fast path environment bootstrap', () => {
   });
 
   it('expands home .env fallback placeholders in workspace settings.env', async () => {
+    delete process.env['QWEN_SERVE_RATE_LIMIT'];
     delete process.env['QWEN_SERVER_TOKEN'];
     delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     const qwenHome = useTempQwenHome();
@@ -2962,14 +3059,14 @@ describe('serve fast path environment bootstrap', () => {
     writeFileSync(
       join(tempWorkspace, '.qwen', 'settings.json'),
       JSON.stringify({
-        env: { QWEN_SERVER_TOKEN: '${FAST_PATH_REFERENCED_TOKEN}' },
+        env: { QWEN_SERVE_RATE_LIMIT: '${FAST_PATH_REFERENCED_TOKEN}' },
       }),
     );
     process.chdir(tempWorkspace);
 
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-home-env');
+    expect(process.env['QWEN_SERVE_RATE_LIMIT']).toBe('from-home-env');
   });
 
   it.each([

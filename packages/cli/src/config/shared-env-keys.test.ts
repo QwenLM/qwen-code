@@ -278,11 +278,13 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     );
   });
 
-  // Workspace settings.env QWEN_SERVER_TOKEN is an intentional fast-path
-  // feature (fast-path.test.ts loads it without the full settings loader);
-  // it stays reload-only rather than hardcoded-excluded.
-  it('keeps QWEN_SERVER_TOKEN out of the hardcoded exclusions', () => {
-    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).not.toContain('QWEN_SERVER_TOKEN');
+  // The serve daemon bearer token must come from the operator (--token, an
+  // exported env var, or a home-scoped .env) — never from repository content
+  // — so the key sits in the hardcoded project exclusions: a cloned repo's
+  // project .env/.qwen/.env or settings.env must not preset the credential
+  // that guards the daemon the operator launches.
+  it('keeps QWEN_SERVER_TOKEN in the hardcoded exclusions', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_SERVER_TOKEN');
   });
 
   it('does not bootstrap attribution markers from a home .env', () => {
@@ -302,7 +304,8 @@ describe('isHardcodedProjectEnvExclusion', () => {
     expect(isHardcodedProjectEnvExclusion('qwen_cli_entry')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('DEV')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('dev')).toBe(true);
-    expect(isHardcodedProjectEnvExclusion('QWEN_SERVER_TOKEN')).toBe(false);
+    expect(isHardcodedProjectEnvExclusion('QWEN_SERVER_TOKEN')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_server_token')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('NODE_OPTIONS')).toBe(false);
   });
 

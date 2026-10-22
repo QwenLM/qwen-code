@@ -262,6 +262,17 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // operator set in the daemon's launch env still apply.
   'QWEN_CDP_MCP_COMMAND',
   'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
+  // The serve daemon bearer token. `qwen serve` resolves its credential from
+  // --token, the operator's exported environment, or — when neither is
+  // supplied — a generated one-time random token. A project `.env`,
+  // `.qwen/.env`, or workspace settings.env supplying it would let a cloned
+  // repository preset the daemon credential for the operator who launches
+  // `qwen serve` there, silently displacing the one-time random bearer; the
+  // full loader's settings.env paths already rejected the key via the reload
+  // tier, and the fast path must not be a second, weaker entry point. The
+  // operator channels (export/--token) and home-scoped `.env` files are
+  // unaffected.
+  'QWEN_SERVER_TOKEN',
   // QWEN_SERVE_NEW_FILE_MODE decides the creation mode of every agent-written
   // NEW file (owner-only 0600 vs umask-derived). A project `.env` flipping it
   // to `system` would silently widen file visibility daemon-wide — including

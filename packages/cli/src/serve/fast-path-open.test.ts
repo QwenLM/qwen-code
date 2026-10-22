@@ -193,9 +193,11 @@ describe('serve fast path --open import boundary', () => {
     useTempQwenHome();
     fs.writeFileSync(
       path.join(tempQwenHome!, 'settings.json'),
-      JSON.stringify({ env: { QWEN_SERVER_TOKEN: 'from-settings' } }),
+      JSON.stringify({
+        env: { FAST_PATH_OPEN_SETTINGS_MARKER: 'from-settings' },
+      }),
     );
-    delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['FAST_PATH_OPEN_SETTINGS_MARKER'];
 
     const runtimeReady = new Promise<void>(() => undefined);
     const runQwenServe = vi.fn(
@@ -205,7 +207,9 @@ describe('serve fast path --open import boundary', () => {
       }),
     );
     const applyOpenWithAuth = vi.fn(() => {
-      expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-settings');
+      expect(process.env['FAST_PATH_OPEN_SETTINGS_MARKER']).toBe(
+        'from-settings',
+      );
     });
     vi.doMock('./run-qwen-serve.js', () => ({ runQwenServe }));
     vi.doMock('./open-with-auth.js', () => ({
