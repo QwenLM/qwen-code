@@ -19,6 +19,12 @@
 
 首个档案覆盖 Managed Workspace 的 Read/Write/Edit 和前台 Shell。MCP server、Hooks、可执行扩展、LSP、自定义 executor，以及使用不同 executor 的嵌套 agent，在具备等价隔离路径前都必须拒绝。隐藏模型工具声明不能替代拒绝未受约束的路径。
 
+首个 opt-in 的范围是单个 Workspace，并且采用 all-or-nothing。一个选定的
+Workspace 要么所有准入路径都使用已获资格的档案，要么在执行 payload 前明确拒绝或
+关闭该档案。无法使用同一隔离边界的 MCP、Hook、LSP、自定义 executor 或其他产生命令
+的路径，不能静默混入部分隔离的 Workspace，也不能回退到宿主。只有明确处于档案关闭
+状态时，才能根据部署策略选择现有的可信路径。
+
 本提案不启用 Kubernetes、static/remote provisioner、公开 CLI `serve` 或 ACP 策略接入，不覆盖 macOS、Windows、Landlock、任意配置加载、容量限流或空闲回收，也不修改生产安全默认值。公开 `serve` 继续受现有 selected-runtime 与 delegation 门禁约束。
 
 ## 拟议启用与资格验证
@@ -28,6 +34,11 @@
 只有 Linux 上的 `provisioner=local-process` 才接受 `linux-bwrap-v1`。选定的 Runtime 在资格回执中记录档案版本、策略 digest、binding ID、generation、Runtime instance 和 epoch。每次工具调用都检查相同的选定身份与不可变策略；进程全局标志或 primary Runtime 不能替代它。
 
 资格验证必须在第一个用户 payload 之前，对选定 Runtime 做正向能力检查。它实际运行打包的 bwrap relay，证明所需的挂载、PID/网络 namespace、完成回执和父进程死亡行为；如果档案包含进程清理，还必须具备委派的 cgroup root 和 #14667 的空证明路径。缺少 bwrap、namespace 不可用、根目录变化、委派缺失、回执过期或结果未知时，Runtime 保持未获资格。Broker 在 payload 执行前返回 `confinement_unavailable`，绝不回退到宿主执行。
+
+私有 root 挂载清单仍是开放的设计工作。只有在真实资格证据验证了某个 Linux 发行版的
+interpreter 及其运行库、CA/NSS 数据、locale、临时目录和 Workspace 路径后，该发行版
+才支持启用此档案。在完成对应清单验证前，档案在该发行版上必须保持拒绝或关闭；挂载
+发现不能静默扩大 root。
 
 ## 文件系统与工具边界
 
@@ -61,7 +72,7 @@
 
 ## 待定决策与后续工作
 
-- 确定受支持 Linux 发行版上的私有 root 挂载清单，包括 interpreter library、证书、临时文件和 Runtime 状态。
+- 为每个受支持的 Linux 发行版确定并验证私有 root 挂载清单，包括 interpreter library、证书、locale、临时文件和 Runtime 状态；完成验证前不得在该发行版启用档案。
 - 确定 local-process、Hook 和 MCP lane 共享的委派 cgroup root 的所有者与稳定命名。
 - 定义三个拒绝类型的协议形状，避免泄露宿主路径或触发模型重试。
 - 决定后续档案是否需要显式批准的网络访问，以及不支持平台如何报告拒绝。

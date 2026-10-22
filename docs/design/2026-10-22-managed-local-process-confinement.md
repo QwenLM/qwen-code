@@ -19,6 +19,14 @@ The repository already contains a Linux bubblewrap (`bwrap`) execution foundatio
 
 The initial profile covers Read/Write/Edit and foreground Shell for a Managed Workspace. MCP servers, Hooks, executable extensions, LSP, custom executors, and nested agents with a different executor must be rejected until they have an equivalent confined route. Hiding a model-tool declaration is not sufficient.
 
+The initial opt-in is Workspace-scoped and all-or-nothing. A selected
+Workspace either uses the qualified profile for every admitted route or has the
+profile explicitly refused or disabled before payload execution. An unsupported
+MCP, Hook, LSP, custom executor or other process-producing route must never be
+silently mixed into a partially confined Workspace or fall back to the host.
+Only an explicit profile-disabled state may select the existing trusted path,
+according to deployment policy.
+
 This proposal does not enable Kubernetes, static/remote provisioners, public CLI `serve` or ACP policy integration, macOS, Windows, Landlock, arbitrary configuration loading, capacity limiting or idle reclamation. It does not change production security defaults. Public `serve` remains behind its existing selected-runtime and delegation gate.
 
 ## Proposed activation and qualification
@@ -28,6 +36,13 @@ The deployment supplies a versioned confinement profile under the Managed runtim
 `linux-bwrap-v1` is accepted only for `provisioner=local-process` on Linux. The selected Runtime records the profile version, policy digest, binding ID, generation, Runtime instance and epoch in its qualification receipt. Every tool call checks the same selected identity and immutable policy; a process-global flag or primary Runtime cannot substitute for it.
 
 Qualification is a positive check on the selected Runtime before the first user payload. It exercises the packaged bwrap relay and proves the required mount, PID/network namespace, completion receipt and parent-death behavior. It also requires the delegated cgroup root and #14667 empty-proof path when process cleanup is part of the profile. Missing bwrap, unavailable namespaces, changed roots, missing delegation, stale receipts and unknown results leave the Runtime unqualified. The Broker returns `confinement_unavailable` before payload execution and never falls back to host execution.
+
+The private-root mount inventory remains open design work. A Linux
+distribution is supported for this profile only after qualification evidence
+validates its interpreter and runtime libraries, CA/NSS data, locale, temporary
+directories and Workspace paths. Until that inventory is validated for a
+distribution, the profile remains refused or disabled there; mount discovery
+must not silently broaden the root.
 
 ## Filesystem and tool boundary
 
@@ -61,7 +76,7 @@ Maintainers can approve implementation when `linux-bwrap-v1` is a deployment-own
 
 ## Open decisions and follow-up
 
-- Finalize the private-root mount inventory across supported Linux distributions, including interpreter libraries, certificates, temporary files and runtime state.
+- Finalize and validate the private-root mount inventory for each supported Linux distribution, including interpreter libraries, certificates, locale, temporary files and runtime state; do not enable a profile on a distribution before that validation.
 - Decide ownership and stable naming for the delegated cgroup root shared by local-process, Hook and MCP lanes.
 - Define the protocol shape for the three refusal classes without leaking host paths or causing model retries.
 - Decide whether any later profile needs explicitly approved network access, and how unsupported platforms report refusal.
