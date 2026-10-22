@@ -75,6 +75,7 @@ vi.mock('../utils/github-prs.js', async (importOriginal) => ({
 import { isCommandAllowed, stripShellWrapper } from '../utils/shell-utils.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import {
+  SHELL_RECORD_ARTIFACT_REMINDER,
   ShellTool,
   type ShellToolInvocation,
   type ShellToolParams,
@@ -359,6 +360,7 @@ describe('ShellTool', () => {
       getPermissionsAsk: vi.fn().mockReturnValue([]),
       getPermissionsDeny: vi.fn().mockReturnValue([]),
       getDebugMode: vi.fn().mockReturnValue(false),
+      isRecordArtifactEnabled: vi.fn().mockReturnValue(true),
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
       getSessionId: vi.fn().mockReturnValue('test-session'),
       getWorkspaceContext: vi
@@ -2128,6 +2130,59 @@ describe('ShellTool', () => {
       expectSpawned('dir', { cwd: '/test/dir' });
     });
 
+    it('asks the model to record deliverable files after a successful command', async () => {
+      const result = await runFg('python rewrite.py', {
+        output: 'wrote orders.csv',
+        exitCode: 0,
+      });
+
+      expect(result.llmContent).toContain('call record_artifact');
+      expect(result.llmContent).toContain('workspacePath');
+      expect(result.returnDisplay).toMatchObject({
+        text: 'wrote orders.csv',
+      });
+      expect(
+        (result.returnDisplay as { text?: string }).text ?? '',
+      ).not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact when recording is disabled', async () => {
+      vi.mocked(mockConfig.isRecordArtifactEnabled).mockReturnValue(false);
+
+      const result = await runFg('python rewrite.py', {
+        output: 'wrote orders.csv',
+        exitCode: 0,
+      });
+
+      expect(String(result.llmContent)).not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact after a read-only command', async () => {
+      const result = await runFg('ls', { output: 'orders.csv', exitCode: 0 });
+
+      expect(String(result.llmContent)).not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact when the command exits non-zero', async () => {
+      const result = await runFg('python rewrite.py', {
+        exitCode: 2,
+        output: 'err',
+      });
+
+      expect(result.error?.message ?? '').not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact when the command fails', async () => {
+      const result = await runFg('python rewrite.py', {
+        error: new Error('boom'),
+        exitCode: 1,
+        output: 'err',
+      });
+
+      expect(result.error?.message ?? '').not.toContain('record_artifact');
+      expect(String(result.llmContent)).not.toContain('record_artifact');
+    });
+
     it('should format error messages correctly', async () => {
       const error = new Error('wrapped command failed');
       const result = await runFg('user-command', {
@@ -2938,6 +2993,7 @@ describe('ShellTool', () => {
     describe('output truncation threshold', () => {
       const TRUNCATED = 'Tool output was too large and has been truncated';
       const ADVISORY = 'this foreground command ran for 60s';
+      const recordReminderReserve = 2 + SHELL_RECORD_ARTIFACT_REMINDER.length;
 
       /** Runs `mid-output-cmd` to `output`/`exitCode` after 60s of faked Date/performance (so the advisory appends). */
       const runPastAdvisory = (output: string, exitCode = 0) => {
@@ -2971,7 +3027,9 @@ describe('ShellTool', () => {
           mockConfig,
           ShellTool.Name,
           expect.any(String),
-          expect.objectContaining({ threshold: 30_000 }),
+          expect.objectContaining({
+            threshold: 30_000 - recordReminderReserve,
+          }),
         );
       });
 
@@ -3052,7 +3110,7 @@ describe('ShellTool', () => {
           ShellTool.Name,
           expect.any(String),
           expect.objectContaining({
-            threshold: 10_000,
+            threshold: 10_000 - recordReminderReserve,
             previewChars: 4000,
             lines: Number.POSITIVE_INFINITY,
           }),
@@ -3074,7 +3132,10 @@ describe('ShellTool', () => {
           mockConfig,
           ShellTool.Name,
           expect.any(String),
-          expect.objectContaining({ threshold: 1000, previewChars: 1000 }),
+          expect.objectContaining({
+            threshold: 1000 - recordReminderReserve,
+            previewChars: 1000 - recordReminderReserve,
+          }),
         );
       });
 
@@ -3181,7 +3242,7 @@ describe('ShellTool', () => {
         it('still delivers a band-fitting body whole with the advisory', async () => {
           // Guards against over-shrinking: a body comfortably under
           // budget-minus-advisory is delivered whole, advisory included.
-          const output = 'x'.repeat(29_000);
+          const output = 'x'.repeat(29_000 - recordReminderReserve);
           const result = await runPastAdvisory(output);
 
           expect(result.outputBudgetApplied).toBe(true);
