@@ -708,6 +708,77 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/sessions/compress": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Admits idle-only context compression without creating a Turn. A trusted Workspace OPERATOR or OWNER is required. Read authorization precedes actor-scoped idempotency replay; replay precedes mutable role, capability, revision and busy checks. Expected compaction revision begins at zero. Returns 409 session_context_busy for active or queued Turns, approvals, unsettled Hooks, recovery or conflicting context operations; 409 compaction_revision_conflict for a stale revision; 409 idempotency_conflict for key reuse with different content. A 202 is durable admission; query the original operation for completion. Unknown acceptance is reconciled from native evidence without blind redelivery. A compressed outcome invalidates the prior context usage until a new main-model observation; noop and failure preserve history and revision. */
+        post: operations["webShellCompressContext"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/sessions/export/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Read one immutable public Session snapshot page for reading exports
+         * @description Requires current Session read authorization on every page. Reuses the public item snapshot cursor, whose subsequent pages retain the original snapshot version and watermark. No private journal, Runtime or storage credentials are returned. The client waits for a snapshot covering its captured Session watermark before using its first page.
+         */
+        post: operations["webShellExportSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-recovery/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read authorized durable recovery facts and only already attached Harness evidence without loading a Session, acquiring a Runtime, invoking tools or models, stopping work or clearing a block. Missing or unreadable native readiness evidence never proves ready. This is Session-scoped; ordinary Workspace admission and concurrent unrelated Sessions remain independent. */
+        post: operations["queryWebShellSessionRecovery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-recovery/recheck": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Recheck only the latest original Turn under the existing cancellation/cleanup authorization. Repeated requests coalesce and may only advance existing cancellation/reconciliation or retry settled cleanup; they never resubmit input, replay effects, reset retry budgets or change claim generations. A stale Turn returns recovery_target_changed and ineligible work returns recovery_recheck_unavailable. 202 means requested, not cancelled or ready. For a terminal Java Turn whose Harness attachment is cold or whose status cannot be read, this POST may attempt a narrow cleanup-only load. It must verify the original prompt has a durable native terminal, covered continuation checkpoint or lawful initial state, and no pending input before retrying only its existing cleanup. It never resumes models, tools, MCP or Hooks, clears a permanent journal block, or treats a historical SQL failure as native settlement. */
+        post: operations["recheckWebShellSessionRecovery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -786,6 +857,12 @@ export interface components {
             cursor?: string | null;
             /** @default 20 */
             limit?: number | null;
+            /**
+             * @description Filter before pagination. Omission preserves all readable, undeleted Sessions. Cursors are bound to this filter; legacy cursors are valid only for all.
+             * @default all
+             * @enum {string}
+             */
+            archiveState?: "unarchived" | "archived" | "all";
         };
         WebShellSessionRequest: {
             /** Format: uuid */
@@ -924,6 +1001,17 @@ export interface components {
             planMode?: boolean;
             /** @description Optional deployment capability; missing means false. */
             planModeSupported?: boolean;
+            /**
+             * Format: int64
+             * @description Sequence of the most recent native context.compacted event; independent of Workspace context revision. Omitted when retained pre-upgrade evidence cannot establish the revision, and context compression is unavailable.
+             * @default 0
+             */
+            compactionRevision?: number | null;
+            /** @description Current durable context compression operation, including recovery_blocked; absent when none is active. */
+            contextCompressionOperationId?: string | null;
+            /** @description Current unsettled lifecycle operation, queried in batch under Session read authorization. A failed close/delete may leave the Session closing/deleting; only explicit retry starts a new operation. Settled Sessions omit this projection. */
+            lifecycleOperation?: components["schemas"]["WebShellLifecycleOperation"];
+            recovery?: components["schemas"]["SessionRecovery"];
         };
         WebShellSessionCapabilities: {
             /**
@@ -946,22 +1034,22 @@ export interface components {
             tasks: boolean;
             artifacts: boolean;
             /**
-             * @description Deployment support for close independently of archive/delete. Admission also requires Session ownership and current read access for a bound Session.
+             * @description Close support including current actor authority. Workspace-bound Sessions require the recorded Session owner and current read access. Source-state and idle admission remain authoritative on the server.
              * @default false
              */
             sessionClose?: boolean;
             /**
-             * @description Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply.
+             * @description Archive support including current actor authority. Workspace-bound Sessions require completed reliable-close evidence, the recorded Session owner and current read access. Source-state and idle admission remain authoritative on the server.
              * @default false
              */
             sessionArchive?: boolean;
             /**
-             * @description Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply.
+             * @description Unarchive support including current actor authority. Workspace-bound Sessions require completed reliable-close evidence, the recorded Session owner and current read access. Source-state and idle admission remain authoritative on the server.
              * @default false
              */
             sessionUnarchive?: boolean;
             /**
-             * @description Optional support capability. ACTIVE Workspace files Sessions require L3 lifecycle protocol and reliable original Runtime stop; CLOSED/ARCHIVED Sessions use independent L2 close evidence. Current creator/read authorization and idle/source-state admission checks still apply. The aggregate session lifecycle capability is unchanged.
+             * @description Delete support including current actor authority. ACTIVE Workspace Sessions require a supported reliable-close protocol; CLOSED/ARCHIVED Sessions use completed close evidence. Workspace-bound Sessions require the recorded Session owner and current read access. Source-state and idle admission remain authoritative on the server. The aggregate session lifecycle capability is unchanged.
              * @default false
              */
             sessionDelete?: boolean;
@@ -978,6 +1066,11 @@ export interface components {
              * @default false
              */
             rename?: boolean;
+            /**
+             * @description Requires a compatible Hosted Harness and an active Workspace Session. WebShell also reflects the current caller OPERATOR or OWNER grant; admission separately checks idle state.
+             * @default false
+             */
+            contextCompression?: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -1287,7 +1380,7 @@ export interface components {
             policyRevision: string;
             answers: components["schemas"]["WebShellQuestionAnswer"][];
         };
-        WebShellOperation: components["schemas"]["WebShellCwdOperation"] | components["schemas"]["WebShellCommandOperation"];
+        WebShellOperation: components["schemas"]["WebShellCwdOperation"] | components["schemas"]["WebShellCommandOperation"] | components["schemas"]["WebShellContextCompressionOperation"];
         WebShellActionQueryRequest: {
             /** Format: uuid */
             sessionId: string;
@@ -1312,6 +1405,8 @@ export interface components {
             /** Format: uuid */
             sessionId: string;
             idempotencyKey: string;
+            /** @description Trace-only client request identity, excluded from idempotency digests. */
+            requestId?: string | null;
         };
         WebShellWorkspaceQueryRequest: {
             cursor?: string | null;
@@ -1797,6 +1892,76 @@ export interface components {
             /** @description Whether the user may invoke this Skill; defaults to true. */
             user_invocable?: boolean;
         };
+        WebShellContextCompressionRequest: {
+            requestId?: string;
+            sessionId: string;
+            idempotencyKey: string;
+            /** Format: int64 */
+            expectedCompactionRevision: number;
+        };
+        WebShellContextCompressionOperation: {
+            operationId: string;
+            /** Format: uuid */
+            sessionId: string;
+            /** @constant */
+            type: "context_compression";
+            /** @enum {string} */
+            status: "pending" | "running" | "recovery_blocked" | "completed" | "failed";
+            /** Format: int64 */
+            expectedCompactionRevision: number;
+            /** Format: int64 */
+            compactionRevision?: number | null;
+            /** @enum {string|null} */
+            outcome?: "compressed" | "noop" | null;
+            failureCode?: string | null;
+            replayed: boolean;
+        };
+        WebShellLifecycleOperation: {
+            operationId: string;
+            /** @enum {string} */
+            type: "close" | "archive" | "delete";
+            /** @enum {string} */
+            status: "pending" | "running" | "completed" | "failed" | "recovery_blocked";
+            failureCode?: string | null;
+        };
+        WebShellExportPage: {
+            items: components["schemas"]["WebShellItem"][];
+            nextCursor?: string | null;
+            hasMore: boolean;
+            /** Format: int64 */
+            snapshotThroughSequence: number;
+        };
+        WebShellExportRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            cursor?: string | null;
+            /** @default 100 */
+            limit?: number | null;
+        };
+        SessionRecoveryActions: {
+            recheck: boolean;
+            cancel: boolean;
+            continueInNewSession: boolean;
+        };
+        /** @description Separate from Session lifecycle and Turn outcome. ready requires affirmative native input settlement and an admissible continuation boundary with no active Java Turn or blocking debt. Actions are authorization-scoped hints, checked again by their mutations. A new-Session action opens an editable text handoff and grants no additional Workspace permission. A cold or unreadable terminal Turn may advertise a proof-checked cleanup recheck while remaining operator_required with nextTurnAllowed=false; only affirmative native evidence after that mutation can establish readiness. */
+        SessionRecovery: {
+            /** @enum {string} */
+            state: "recovering" | "awaiting_evidence" | "cleanup_pending" | "ready" | "operator_required";
+            reasonCode: string;
+            /** @description Public Turn identity; never an internal prompt, checkpoint or execution reference. */
+            turnId?: string;
+            nextTurnAllowed: boolean;
+            actions: components["schemas"]["SessionRecoveryActions"];
+            /**
+             * Format: int64
+             * @description Known next reconciliation time in Unix epoch milliseconds.
+             */
+            nextRecheckAt?: number;
+        };
+        WebShellRecoveryRecheckRequest: {
+            sessionId: string;
+            turnId: string;
+        };
     };
     responses: {
         /** @description The authenticated actor belongs to another tenant than X-Qwen-Tenant-Id or has an invalid ID (actor_scope_mismatch, which the tenant filter answers on every /v1/agents/ and WebShell route), or the resource is readable but the actor lacks this operation or the original Action responder permission. Artifact content reads may also return artifact_content_forbidden when the actor cannot read the original bytes. */
@@ -1846,6 +2011,15 @@ export interface components {
         };
         /** @description Resource absent or outside the caller tenant scope. */
         NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
+        /** @description Replay cursor is older than the retained replay floor. */
+        CursorExpired: {
             headers: {
                 [name: string]: unknown;
             };
@@ -3288,6 +3462,128 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+        };
+    };
+    webShellCompressContext: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellContextCompressionRequest"];
+            };
+        };
+        responses: {
+            /** @description Durable context compression operation. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellContextCompressionOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellExportSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExportRequest"];
+            };
+        };
+        responses: {
+            /** @description Immutable public item snapshot page. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellExportPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["CursorExpired"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    queryWebShellSessionRecovery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Current recovery evidence. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionRecovery"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    recheckWebShellSessionRecovery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellRecoveryRecheckRequest"];
+            };
+        };
+        responses: {
+            /** @description Current recovery evidence; recheck admission is not settlement. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionRecovery"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            503: components["responses"]["Unavailable"];
         };
     };
 }

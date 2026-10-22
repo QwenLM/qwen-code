@@ -260,14 +260,16 @@ describe('Hosted real-process gates', () => {
     },
   );
 
-  it('keeps real MySQL separate from the existing MariaDB slice and fails on missing tests', () => {
+  it('keeps Hosted MySQL separate from the non-Hosted MySQL slice and fails on missing tests', () => {
     const job = java.jobs['hosted-harness-mysql'];
     expect(job.services.mysql.image).toBe('mysql:8.4.6');
     expect(job.services.mysql.ports).toEqual(['3306/tcp']);
     expect(job.if).toBe("${{ inputs.tier != 'fast' }}");
-    expect(java.jobs['mysql-integration'].services.mariadb.image).toMatch(
-      /^mariadb:/,
-    );
+    expect(
+      java.jobs['mysql-integration'].steps.find(
+        (step) => step.name === 'Start MySQL without native AIO',
+      ).run,
+    ).toContain('mysql:8.4.6 --innodb-use-native-aio=0');
     // Keep daily coverage and run the same suite before Java publication.
     expect(Object.keys(java.on).sort()).toEqual([
       'schedule',
@@ -313,9 +315,9 @@ describe('Hosted real-process gates', () => {
     const selection = /it\.test|includesFile|excludesFile|<test>/;
     expect(read('.github/workflows/sdk-java.yml')).not.toMatch(selection);
     expect(pom).not.toMatch(selection);
-    const [mariadb, hosted] = pom.split('<id>hosted-harness-mysql</id>');
-    expect(mariadb).toContain('<id>mysql-integration</id>');
-    expect(mariadb).toContain('<exclude>**/Hosted*IT.java</exclude>');
+    const [nonHosted, hosted] = pom.split('<id>hosted-harness-mysql</id>');
+    expect(nonHosted).toContain('<id>mysql-integration</id>');
+    expect(nonHosted).toContain('<exclude>**/Hosted*IT.java</exclude>');
     expect(hosted).toContain('<include>**/Hosted*IT.java</include>');
     expect(hosted).toContain('<failIfNoTests>true</failIfNoTests>');
     const isolationProfile = hosted.split('</profile>')[0];
@@ -343,17 +345,17 @@ describe('Hosted real-process gates', () => {
         'packages/managed-agent-server/src/test/resources/META-INF/services/org.junit.jupiter.api.extension.Extension',
       ).trim(),
     ).toBe('com.alibaba.qwen.code.managedagent.HostedMySqlIsolationExtension');
-    // The MariaDB job must not narrow its selection either, or an IT outside
+    // The non-Hosted MySQL job must not narrow its selection either, or an IT outside
     // the Hosted family would silently run nowhere.
-    const mariadbRun = java.jobs['mysql-integration'].steps.find(
+    const mysqlRun = java.jobs['mysql-integration'].steps.find(
       (step) =>
         step.name ===
         'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration',
     );
-    expect(mariadbRun.run).toContain('-Pmysql-integration');
-    expect(mariadbRun.run).not.toContain('-Dit.test');
-    // The H2 unit suite runs once, in the MariaDB job: the Hosted job's three
-    // Maven steps would each repeat it, and the MariaDB job must keep it.
+    expect(mysqlRun.run).toContain('-Pmysql-integration');
+    expect(mysqlRun.run).not.toContain('-Dit.test');
+    // The H2 unit suite runs once, in the non-Hosted MySQL job: the Hosted job's three
+    // Maven steps would each repeat it, and the non-Hosted MySQL job must keep it.
     const profile = (id) =>
       pom.split(`<id>${id}</id>`)[1].split('</profile>')[0];
     const skipsUnits =
@@ -368,17 +370,17 @@ describe('Hosted real-process gates', () => {
     expect(profile('mysql-integration')).not.toContain('maven-surefire-plugin');
     // The step stages the SDK with -DskipTests before the MySQL run; only
     // the integration command itself must keep its tests.
-    const mariadbVerify = mariadbRun.run.slice(
-      mariadbRun.run.indexOf('-Pmysql-integration'),
+    const mysqlVerify = mysqlRun.run.slice(
+      mysqlRun.run.indexOf('-Pmysql-integration'),
     );
-    expect(mariadbVerify).not.toMatch(/-D(skipTests|maven\.test\.skip)/);
+    expect(mysqlVerify).not.toMatch(/-D(skipTests|maven\.test\.skip)/);
     // Those checks read only the command lines, so each job also compares
     // the reports of its run with the source tree, right after its last
     // integration-test step.
     for (const [name, after, check] of [
       [
         'mysql-integration',
-        mariadbRun.name,
+        mysqlRun.name,
         'non-hosted packages/managed-agent-server',
       ],
       [
@@ -396,7 +398,7 @@ describe('Hosted real-process gates', () => {
       expect(steps[index]['continue-on-error'], name).toBeUndefined();
     }
     // Keep the existing integration tests in their families: a renamed Hosted
-    // test would move to MariaDB, a renamed MariaDB test to the Hosted job.
+    // test would move to non-Hosted MySQL, a renamed non-Hosted test to the Hosted job.
     const its = readdirSync(
       new URL(
         '../../packages/managed-agent-server/src/test/java/',
@@ -528,9 +530,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (196 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (198 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 286, 299],
+    ['hosted-harness-mysql', 288, 301],
     // Twenty failover arms at 10 each.
     ['hosted-failover-e2e', 200, 215],
   ])(
@@ -773,12 +775,16 @@ describe('Hosted real-process gates', () => {
       // minutes; the FG13a dispatch ack-loss cell adds 150 s, moving the fork
       // to 10983 and the step to 194 minutes; the FG13a registration-settle
       // ack-loss cell adds 150 s, moving the fork to 11133 and the step to
-      // 196 minutes):
+      // 196 minutes; the FG11e stream cells add 42 s (2x their measured
+      // 14.1 s and 6.1 s), moving the fork to 11175; the FG11d cancel-retry cell adds 12 s (2x its
+      // measured 5.8 s), moving the fork to 11187; the FG11d second-fire refusal
+      // cell adds 25 s (2x its measured 12.3 s), moving the fork to 11212 and
+      // leaving the step at 197 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(11133);
+        expect(forkSeconds).toBe(11223);
       }
     },
   );
@@ -868,12 +874,16 @@ describe('Hosted real-process gates', () => {
   // 9s (2x its measured 4.5s), so it becomes 10083s; the FG13a result store
   // ack-loss cell adds 150s, so it becomes 10233s; the FG13a dispatch
   // ack-loss cell adds 150s, so it becomes 10383s; the FG13a registration-settle
-  // ack-loss cell adds 150s, so it becomes 10533s. The largest
+  // ack-loss cell adds 150s, so it becomes 10533s; the FG11e stream cells
+  // add 42s (2x their measured 14.1s and 6.1s), so it becomes 10575s; the cancel-retry cell adds 12s (2x its measured
+  // 5.8s), so it becomes 10587s; the second-fire refusal cell adds 25s (2x its
+  // measured 12.3s), so it becomes 10612s. The
+  // largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 10533;
+  const hostedForkHealthySeconds = 10623;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')

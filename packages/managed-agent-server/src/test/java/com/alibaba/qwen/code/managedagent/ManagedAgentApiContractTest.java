@@ -153,6 +153,9 @@ class ManagedAgentApiContractTest {
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final Map<Class<?>, List<String>> RECORD_SCHEMAS =
             Map.ofEntries(
+                    entry(ApiModels.WebShellLifecycleOperation.class, List.of("WebShellLifecycleOperation")),
+                    entry(ApiModels.WebShellExportRequest.class, List.of("WebShellExportRequest")),
+                    entry(ApiModels.WebShellExportPage.class, List.of("WebShellExportPage")),
                     entry(ApiModels.AgentDefinitionRequest.class, List.of("AgentDefinitionRequest")),
                     entry(ApiModels.AgentDefinition.class, List.of("AgentDefinition")),
                     entry(ApiModels.PermissionResponse.class, List.of("PermissionResponse")),
@@ -184,6 +187,10 @@ class ManagedAgentApiContractTest {
                             List.of("SessionEventRequest")),
                     entry(UpdateSessionRequest.class,
                             List.of("UpdateSessionRequest")),
+                    entry(ApiModels.CompressSessionRequest.class, List.of("CompressSessionRequest")),
+                    entry(ApiModels.WebShellContextCompressionRequest.class, List.of("WebShellContextCompressionRequest")),
+                    entry(ApiModels.PublicContextCompressionOperation.class, List.of("PublicContextCompressionOperation")),
+                    entry(ApiModels.WebShellContextCompressionOperation.class, List.of("WebShellContextCompressionOperation")),
                     entry(ChangeCwdRequest.class, List.of("ChangeCwdRequest")),
                     entry(PublicCwdOperation.class,
                             List.of("PublicCwdOperation")),
@@ -197,6 +204,10 @@ class ManagedAgentApiContractTest {
                     entry(WebShellWorkspace.class,
                             List.of("WebShellWorkspaceContext")),
                     entry(PublicSession.class, List.of("PublicSession")),
+                    entry(ApiModels.SessionRecovery.class, List.of("SessionRecovery")),
+                    entry(ApiModels.SessionRecoveryActions.class, List.of("SessionRecoveryActions")),
+                    entry(ApiModels.RecoveryRecheckRequest.class, List.of("RecoveryRecheckRequest")),
+                    entry(ApiModels.WebShellRecoveryRecheckRequest.class, List.of("WebShellRecoveryRecheckRequest")),
                     entry(PublicCommandOperation.class,
                             List.of("PublicCommandOperation")),
                     entry(SessionCapabilities.class,
@@ -607,6 +618,88 @@ class ManagedAgentApiContractTest {
     }
 
     @Test
+    void archivedHistoryFiltersBeforePaginationAndBindsItsCursor() throws Exception {
+        String tenant = "tenant-filter-" + UUID.randomUUID();
+        for (String state : List.of("ACTIVE", "ARCHIVED", "CLOSED", "ARCHIVED", "ACTIVE")) {
+            String id = json(mvc.perform(post(WEB_SHELL + "/sessions/create").header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                            "idempotencyKey", UUID.randomUUID().toString(), "agentId", "qwen-code", "input", List.of()))))
+                    .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString())
+                    .path("sessionId").asText();
+            jdbc.update("UPDATE ma_session SET status = ? WHERE tenant_id = ? AND session_id = ?", state, tenant, id);
+        }
+        String firstBody = mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"archiveState\":\"archived\",\"limit\":1}"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        JsonNode first = json(firstBody);
+        assertThat(first.path("data")).hasSize(1);
+        assertThat(first.at("/data/0/status").asText()).isEqualTo("archived");
+        String cursor = first.path("nextCursor").asText();
+        assertThat(cursor).isNotBlank();
+        JsonNode next = json(mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                        "archiveState", "archived", "limit", 1, "cursor", cursor))))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        assertThat(next.path("data")).hasSize(1);
+        assertThat(next.at("/data/0/sessionId").asText()).isNotEqualTo(first.at("/data/0/sessionId").asText());
+        assertThat(next.path("nextCursor").isNull()).isTrue();
+        mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                        "archiveState", "unarchived", "cursor", cursor))))
+                .andExpect(status().isBadRequest());
+        for (String filter : List.of("unarchived", "all")) {
+            JsonNode page = json(mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                            "archiveState", filter, "limit", 100))))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+            assertThat(page.path("data")).hasSize(filter.equals("all") ? 5 : 3);
+        }
+        JsonNode all = json(mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"limit\":1}"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        String decoded = new String(java.util.Base64.getUrlDecoder().decode(all.path("nextCursor").asText()),
+                StandardCharsets.UTF_8);
+        String legacy = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                decoded.substring("v2:all:".length()).getBytes(StandardCharsets.UTF_8));
+        mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of("cursor", legacy))))
+                .andExpect(status().isOk());
+        mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"archiveState\":\"bad\"}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void lifecycleCommandsEchoTraceIdentityAndExposeTheirOperation() throws Exception {
+        String tenant = "tenant-lifecycle-ui-" + UUID.randomUUID();
+        String id = json(mvc.perform(post(WEB_SHELL + "/sessions/create").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                        "idempotencyKey", UUID.randomUUID().toString(), "agentId", "qwen-code", "input", List.of()))))
+                .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString()).path("sessionId").asText();
+        var response = mvc.perform(post(WEB_SHELL + "/sessions/close").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                        "sessionId", id, "idempotencyKey", "close-ui", "requestId", "ui-trace"))))
+                .andExpect(status().isAccepted()).andReturn().getResponse();
+        assertThat(response.getHeader(RequestIdFilter.HEADER)).isEqualTo("ui-trace");
+        assertThat(json(response.getContentAsString()).path("operationId").asText()).isNotBlank();
+        var replay = mvc.perform(post(WEB_SHELL + "/sessions/close").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                        "sessionId", id, "idempotencyKey", "close-ui", "requestId", "retry-trace"))))
+                .andExpect(status().isAccepted()).andReturn().getResponse();
+        assertThat(replay.getHeader(RequestIdFilter.HEADER)).isEqualTo("retry-trace");
+        assertThat(json(replay.getContentAsString()).path("operationId").asText())
+                .isEqualTo(json(response.getContentAsString()).path("operationId").asText());
+        assertThat(json(replay.getContentAsString()).path("replayed").asBoolean()).isTrue();
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            JsonNode session = json(mvc.perform(post(WEB_SHELL + "/sessions/get").header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of("sessionId", id))))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+            assertThat(session.path("status").asText()).isEqualTo("closed");
+            assertThat(session.hasNonNull("lifecycleOperation")).isFalse();
+        });
+    }
+
+    @Test
     void routesAnswerWithTheirSchemas() throws Exception {
         Map<String, String> drift = new TreeMap<>();
         String tenant = "tenant-contract-" + UUID.randomUUID();
@@ -619,6 +712,17 @@ class ManagedAgentApiContractTest {
                 {"agent_id":"qwen-code","metadata":{"title":"contract"},
                  "input":[{"type":"input_text","text":"hello"}]}
                 """)).get("id").asText();
+        exchange(drift, "getSessionRecovery", 200,
+                get("/v1/agents/sessions/{id}/recovery", sessionId).header(TENANT, tenant), null);
+        exchange(drift, "queryWebShellSessionRecovery", 200,
+                post(WEB_SHELL + "/session-recovery/query").header(TENANT, tenant),
+                "{\"sessionId\":\"" + sessionId + "\"}");
+        exchange(drift, "recheckSessionRecovery", 409,
+                post("/v1/agents/sessions/{id}/recovery/recheck", sessionId).header(TENANT, tenant),
+                "{\"turnId\":\"turn_stale\"}");
+        exchange(drift, "recheckWebShellSessionRecovery", 409,
+                post(WEB_SHELL + "/session-recovery/recheck").header(TENANT, tenant),
+                "{\"sessionId\":\"" + sessionId + "\",\"turnId\":\"turn_stale\"}");
         exchange(drift, "listArtifacts", 401,
                 get("/v1/agents/sessions/%s/artifacts".formatted(sessionId))
                         .header(TENANT, tenant), null);
@@ -885,6 +989,12 @@ class ManagedAgentApiContractTest {
                  "agentId":"qwen-code","title":"web",
                  "metadata":{"clientId":"contract"},"input":[]}
                 """)).get("sessionId").asText();
+        exchange(drift, "webShellExportSession", 200,
+                post(WEB_SHELL + "/sessions/export/query").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"limit\":1}".formatted(webSessionId));
+        exchange(drift, "webShellExportSession", 404,
+                post(WEB_SHELL + "/sessions/export/query").header(TENANT, otherTenant),
+                "{\"sessionId\":\"%s\"}".formatted(webSessionId));
         String renameBody = """
                 {"requestId":"contract-rename","sessionId":"%s",
                  "idempotencyKey":"contract-web-rename","title":"renamed web"}
@@ -1339,6 +1449,20 @@ class ManagedAgentApiContractTest {
         // workspace-files opt-in is disabled, so a bound Session answers
         // workspace_unavailable; the operation-level behavior is exercised
         // by the cwd integration tests.
+        exchange(drift, "compressSessionContext", 400,
+                post("/v1/agents/sessions/{id}/compress", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "compress-shape"), "{}");
+        exchange(drift, "compressSessionContext", 409,
+                post("/v1/agents/sessions/{id}/compress", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "compress-disabled"), "{\"expected_compaction_revision\":0}");
+        exchange(drift, "webShellCompressContext", 400,
+                post(WEB_SHELL + "/sessions/compress").header(TENANT, workspaceTenant).principal(actor), "{}");
+        exchange(drift, "webShellCompressContext", 409,
+                post(WEB_SHELL + "/sessions/compress").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\",\"idempotencyKey\":\"compress-web-disabled\","
+                        + "\"expectedCompactionRevision\":0}");
         String cwdBody = """
                 {"cwd_relative":"services/api","expected_context_revision":1}
                 """;
@@ -2711,7 +2835,7 @@ class ManagedAgentApiContractTest {
             JsonNode capabilities = json("""
                     {"items":true,"snapshots":true,"artifacts":false,
                      "resync":true,"session_lifecycle":true,"tasks":true,"actions":false,"session_close":true,
-                     "session_archive":true,"session_unarchive":true,"session_delete":true}
+                     "session_archive":true,"session_unarchive":true,"session_delete":true,"context_compression":false}
                     """);
             if (javaDurableAdmission != null) {
                 ((com.fasterxml.jackson.databind.node.ObjectNode) capabilities)
@@ -2733,7 +2857,7 @@ class ManagedAgentApiContractTest {
                         .isEqualTo(session.get("last_event_id").asLong());
                 JsonNode webCapabilities = json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true}
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false}
                                 """);
                 if (javaDurableAdmission != null) {
                     ((com.fasterxml.jackson.databind.node.ObjectNode) webCapabilities)

@@ -3,8 +3,10 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.ChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.CompressSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CreateSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCommandOperation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicContextCompressionOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCwdOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
@@ -12,16 +14,20 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSession;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTask;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTaskEvent;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTurn;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.RecoveryRecheckRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionEventRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecovery;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.UpdateSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.session.ContextCompressionService;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService.SessionMutationResult;
 import com.alibaba.qwen.code.managedagent.session.ManagedEventStreamService;
 import com.alibaba.qwen.code.managedagent.session.ManagedTaskCancelService;
 import com.alibaba.qwen.code.managedagent.session.ManagedTaskService;
 import com.alibaba.qwen.code.managedagent.session.SessionLifecycleService;
+import com.alibaba.qwen.code.managedagent.session.SessionRecoveryService;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import jakarta.validation.Valid;
 import org.apache.commons.lang3.StringUtils;
@@ -48,16 +54,24 @@ public class PublicAgentController {
     private final SessionLifecycleService lifecycle;
     private final ManagedTaskService tasks;
     private final ManagedTaskCancelService taskCancels;
+    private final SessionRecoveryService recovery;
+    private ContextCompressionService compressions;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    void setCompressions(ContextCompressionService compressions) {
+        this.compressions = compressions;
+    }
 
     public PublicAgentController(ManagedAgentService service,
             ManagedEventStreamService streams,
             SessionLifecycleService lifecycle, ManagedTaskService tasks,
-            ManagedTaskCancelService taskCancels) {
+            ManagedTaskCancelService taskCancels, SessionRecoveryService recovery) {
         this.service = service;
         this.streams = streams;
         this.lifecycle = lifecycle;
         this.tasks = tasks;
         this.taskCancels = taskCancels;
+        this.recovery = recovery;
     }
 
     @PostMapping
@@ -114,6 +128,21 @@ public class PublicAgentController {
                 tenant.actorId(), sessionId);
     }
 
+    @GetMapping("/{sessionId}/recovery")
+    public ResponseEntity<SessionRecovery> recovery(TenantContext tenant,
+            @PathVariable String sessionId) {
+        return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore())
+                .body(recovery.query(tenant.tenantId(), tenant.actorId(), sessionId));
+    }
+
+    @PostMapping("/{sessionId}/recovery/recheck")
+    public ResponseEntity<SessionRecovery> recheckRecovery(TenantContext tenant,
+            @PathVariable String sessionId,
+            @Valid @RequestBody RecoveryRecheckRequest request) {
+        return ResponseEntity.accepted().body(recovery.recheck(tenant.tenantId(),
+                tenant.actorId(), sessionId, request.turnId()));
+    }
+
     @PatchMapping("/{sessionId}")
     public ResponseEntity<PublicSession> rename(TenantContext tenant,
             @PathVariable String sessionId,
@@ -161,6 +190,15 @@ public class PublicAgentController {
             @PathVariable String operationId) {
         return lifecycle.getPublicOperation(tenant.tenantId(),
                 tenant.actorId(), sessionId, operationId);
+    }
+
+    @PostMapping("/{sessionId}/compress")
+    public ResponseEntity<PublicContextCompressionOperation> compress(
+            TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            @Valid @RequestBody CompressSessionRequest request) {
+        return ResponseEntity.accepted().body(compressions.admitPublic(tenant.tenantId(),
+                tenant.actorId(), sessionId, idempotencyKey, request.expectedCompactionRevision()));
     }
 
     @PostMapping("/{sessionId}/cwd")

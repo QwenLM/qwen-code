@@ -11,6 +11,8 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -49,6 +51,39 @@ class ManagedAgentPreflightTest {
         assertTrue(ManagedAgentPreflight.isCredentialKey(encoded(32)));
         assertFalse(ManagedAgentPreflight.isCredentialKey(encoded(31)));
         assertFalse(ManagedAgentPreflight.isCredentialKey("not-base64"));
+    }
+
+    @Test
+    void reportsDurableCapacityStatesWithoutClaimingPhysicalResources()
+            throws Exception {
+        try (Connection connection = DriverManager.getConnection(
+                "jdbc:h2:mem:preflight-capacity;DB_CLOSE_DELAY=-1")) {
+            try (var statement = connection.createStatement()) {
+                statement.execute("CREATE TABLE ma_runtime_binding "
+                        + "(binding_state VARCHAR(32))");
+                statement.execute("CREATE TABLE ma_runtime_session "
+                        + "(session_state VARCHAR(32))");
+                statement.execute("CREATE TABLE ma_operation "
+                        + "(state VARCHAR(32))");
+                statement.execute("INSERT INTO ma_runtime_binding VALUES "
+                        + "('READY'), ('READY'), ('DRAINING')");
+                statement.execute("INSERT INTO ma_runtime_session VALUES "
+                        + "('READY'), ('RELEASED')");
+                statement.execute("INSERT INTO ma_operation VALUES "
+                        + "('PENDING'), ('COMPLETED')");
+            }
+
+            ManagedAgentPreflight.Check check =
+                    ManagedAgentPreflight.capacityCheck(connection);
+
+            assertEquals(ManagedAgentPreflight.Status.PASS, check.status());
+            assertTrue(check.detail().contains("READY=2"));
+            assertTrue(check.detail().contains("PENDING=1"));
+            assertTrue(check.detail().contains("physical-processes=unknown"));
+            assertTrue(check.detail().contains("memory=unknown"));
+            assertTrue(check.detail().contains(
+                    "idle-reclamation=not measured"));
+        }
     }
 
     @Test
