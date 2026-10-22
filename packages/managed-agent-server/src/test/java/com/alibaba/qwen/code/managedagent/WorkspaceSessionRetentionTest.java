@@ -327,6 +327,13 @@ class WorkspaceSessionRetentionTest {
         String tenant = tenant();
         String session = closed(tenant, false);
         grant(tenant, "reader");
+        request(post(WEB + "/sessions/get").contentType(MediaType.APPLICATION_JSON)
+                .content(mapper.writeValueAsString(java.util.Map.of("sessionId", session))), tenant, "reader", null)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.capabilities.sessionClose").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionArchive").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionUnarchive").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionDelete").value(false));
         for (String operation : new String[] {"archive", "unarchive", "delete"}) {
             web(operation, tenant, session, "reader", "key").andExpect(status().isForbidden())
                     .andExpect(jsonPath("$.error.code").value("session_operation_forbidden"));
