@@ -56,11 +56,12 @@ class ManagedSchemaRowsTest {
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
             statement.execute("CREATE TABLE fixture (tenant_id VARBINARY(64), actor_id VARBINARY(64),"
                     + " record_bytes BLOB, revision BIGINT, enabled TINYINT, workspace_bound BOOLEAN,"
-                    + " committed_sequence BIGINT, gmt_create BIGINT UNSIGNED)");
+                    + " committed_sequence BIGINT, gmt_create BIGINT UNSIGNED,"
+                    + " execution_exclusive TINYINT)");
             byte[] actor = {(byte) 0xff, 0};
             byte[] payload = {0, (byte) 0xfe, 10};
             long timestamp = java.time.Instant.parse("2026-10-14T01:02:03.123Z").toEpochMilli();
-            try (var insert = connection.prepareStatement("INSERT INTO fixture VALUES (?, ?, ?, ?, ?, ?, ?, ?)")) {
+            try (var insert = connection.prepareStatement("INSERT INTO fixture VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
                 insert.setBytes(1, "tenant-用户 ".getBytes(StandardCharsets.UTF_8));
                 insert.setBytes(2, actor);
                 insert.setBytes(3, payload);
@@ -69,10 +70,11 @@ class ManagedSchemaRowsTest {
                 insert.setObject(6, null);
                 insert.setObject(7, null);
                 insert.setLong(8, timestamp);
+                insert.setInt(9, 1);
                 insert.executeUpdate();
             }
             try (var result = statement.executeQuery("SELECT tenant_id, actor_id, record_bytes,"
-                    + " revision, enabled, workspace_bound, committed_sequence, gmt_create,"
+                    + " revision, enabled, workspace_bound, committed_sequence, gmt_create, execution_exclusive,"
                     + " CASE WHEN enabled = 1 THEN 1 ELSE 0 END AS quarantined FROM fixture")) {
                 result.next();
                 ResultSet driver = differentObjectTypes(result);
@@ -82,6 +84,7 @@ class ManagedSchemaRowsTest {
                 assertArrayEquals(payload, (byte[]) row.get("record_bytes"));
                 assertEquals(9_007_199_254_740_993L, row.get("revision"));
                 assertEquals(Boolean.TRUE, row.get("enabled"));
+                assertEquals(Boolean.TRUE, row.get("execution_exclusive"));
                 assertEquals(1, row.get("quarantined"));
                 assertNull(row.get("workspace_bound"));
                 assertNull(row.get("committed_sequence"));
