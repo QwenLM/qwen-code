@@ -265,6 +265,36 @@ export class JavaManagedAgentClient {
     return this.post('/session-options/query', { agentId }, signal);
   }
 
+  lifecycleCommand(
+    kind: 'close' | 'archive' | 'delete',
+    request: Schemas['WebShellLifecycleRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellCommandOperation']>(
+      `/sessions/${kind}`,
+      request,
+      signal,
+    );
+  }
+
+  unarchiveSession(
+    request: Schemas['WebShellLifecycleRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<JavaAgentSession>('/sessions/unarchive', request, signal);
+  }
+
+  exportSnapshot(
+    request: Schemas['WebShellExportRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellExportPage']>(
+      '/sessions/export/query',
+      request,
+      signal,
+    );
+  }
+
   getTranscript(
     request: Schemas['WebShellTranscriptRequest'],
     signal?: AbortSignal,
