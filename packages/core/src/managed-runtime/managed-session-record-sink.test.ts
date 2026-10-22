@@ -439,10 +439,10 @@ describe('managed session record sink', () => {
       message: { role: 'user', parts: [{ text: 'Continue' }] },
     });
     await harness.sink.write(later);
-    expect((await harness.sink.projectModelHistory()).apiHistory).toEqual([
-      ...compressedHistory,
-      later.message,
-    ]);
+    // toMatchObject: restored records also carry their record-derived rewind id.
+    expect((await harness.sink.projectModelHistory()).apiHistory).toMatchObject(
+      [...compressedHistory, later.message],
+    );
     expect(await harness.sink.project()).toEqual([original, later]);
     const cold = await readManagedSessionRecords({
       transcriptPath: harness.transcriptPath,
