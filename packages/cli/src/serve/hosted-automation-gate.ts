@@ -41,6 +41,9 @@ export interface HostedAutomationGateRequest {
   readonly signal: AbortSignal;
 }
 
+/** A fire whose occurrence's Session is mid-flight: the scanner retries it. */
+export class HostedAutomationGateHeld extends Error {}
+
 export type HostedAutomationGateRunner = (
   request: HostedAutomationGateRequest,
 ) => Promise<HostedAutomationGateResult>;
@@ -78,8 +81,13 @@ export function createHostedAutomationGateRunner(options: {
     });
     const digest = `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`;
     // Whether this attempt may hold the derived Runtime Session, so owes its
-    // release: an acquisition, or one whose answer never arrived.
+    // release: an acquisition, one whose answer never arrived, or a Session
+    // the Broker already holds live for the occurrence.
     let mayHold = false;
+    // An acquisition whose answer never arrived may still be admitted after
+    // a release finds nothing: until a later attempt sees the Broker settle
+    // it, "not found" proves nothing.
+    let unconfirmed = false;
     let replayed = false;
     let started = false;
     let result: HostedAutomationGateResult;
@@ -91,11 +99,18 @@ export function createHostedAutomationGateRunner(options: {
       // the absence of a receipt costs an acquisition.
       let prepared = await replayableWithoutSession(broker, callId, digest);
       if (prepared === 'held') {
-        // That attempt owns the Session and its release.
-        return {
-          kind: 'unknown',
-          reason: "the occurrence's Runtime Session is held by another attempt",
-        };
+        // The Session exists but is not ready: an attempt still running, or
+        // an acquisition whose answer was lost still being admitted. Neither
+        // outcome is known yet, and settling the occurrence now would leave
+        // a late acquisition with nobody to release it: retry instead.
+        throw new HostedAutomationGateHeld(
+          "the occurrence's Runtime Session is held by another attempt",
+        );
+      }
+      // A live reservation means the Session exists: whatever this attempt's
+      // own acquire answers, the Session is released at the end.
+      if (prepared !== undefined && prepared.settled === undefined) {
+        mayHold = true;
       }
       if (prepared?.settled === undefined) {
         try {
@@ -110,6 +125,7 @@ export function createHostedAutomationGateRunner(options: {
             cause.status >= 500
           ) {
             mayHold = true;
+            unconfirmed = true;
           }
           throw cause;
         }
@@ -122,6 +138,7 @@ export function createHostedAutomationGateRunner(options: {
         started = true;
       });
     } catch (cause) {
+      if (cause instanceof HostedAutomationGateHeld) throw cause;
       const message = cause instanceof Error ? cause.message : String(cause);
       // Once the start left, the command may have run: only a settled
       // answer could say; everything else is unknown, never a second start.
@@ -138,7 +155,9 @@ export function createHostedAutomationGateRunner(options: {
     // A replayed receipt may be all that is left of an attempt that settled
     // the probe and then failed to release, or died before it could: this
     // attempt inherits that release.
-    if (mayHold || replayed) await releaseDerivedSession(broker);
+    if (mayHold || replayed) {
+      await releaseDerivedSession(broker, { notFoundIsFinal: !unconfirmed });
+    }
     return result;
   };
 }
@@ -193,15 +212,19 @@ async function settle(
  * blocks its rewind, and once the scanner settles the occurrence nothing
  * comes back for it: a release that fails therefore fails the fire, so the
  * scanner re-drives it and the replay, which reads the settled receipt and
- * runs nothing, releases again. A Session the Broker does not know is gone.
+ * runs nothing, releases again. A Session the Broker does not know is gone,
+ * except after an acquisition whose answer was lost: the Broker may still be
+ * admitting it, so the fire is retried and the next attempt finds it.
  */
 async function releaseDerivedSession(
   broker: HostedWorkspaceBroker,
+  { notFoundIsFinal }: { notFoundIsFinal: boolean },
 ): Promise<void> {
   try {
     await broker.release();
   } catch (cause) {
     if (
+      notFoundIsFinal &&
       cause instanceof HostedWorkspaceBrokerRejection &&
       cause.status === 404 &&
       cause.code === 'runtime_session_not_found'

@@ -241,15 +241,64 @@ describe('createHostedAutomationGateRunner', () => {
     });
   });
 
-  it('answers unknown while another attempt holds the occurrence’s Session', async () => {
+  it('fails the fire for a retry while the occurrence’s Session is held', async () => {
+    // An attempt still running, or a lost acquisition still being admitted:
+    // settling now could strand a late acquisition, and the Session is not
+    // this attempt's to release.
     const { calls, probe } = await rig(() =>
       rejection(409, 'runtime_session_not_ready'),
     );
-    await expect(probe()).resolves.toEqual({
-      kind: 'unknown',
-      reason: "the occurrence's Runtime Session is held by another attempt",
-    });
+    await expect(probe()).rejects.toThrow(
+      "the occurrence's Runtime Session is held by another attempt",
+    );
     expect(calls.map((call) => call.path)).toEqual(['/executions:prepare']);
+  });
+
+  it('keeps a not-found release after a lost acquisition from settling the fire', async () => {
+    // The Broker may still be admitting the acquisition whose answer was
+    // lost: "not found" now proves nothing, so the fire is retried.
+    const { calls, probe } = await rig((path) => {
+      switch (path) {
+        case '/executions:prepare':
+          return rejection(404, 'runtime_session_not_found');
+        case '/tool-sessions:acquire':
+          return 'drop';
+        default:
+          return rejection(404, 'runtime_session_not_found');
+      }
+    });
+    await expect(probe()).rejects.toThrow(/Runtime Session was not released/);
+    expect(calls.at(-1)?.path).toBe(RELEASE);
+  });
+
+  it('releases a Session the Broker already holds even when its own acquire is refused', async () => {
+    // A live reservation for the occurrence means the Session exists: a
+    // late acquisition from a lost answer, say. A refused acquire must not
+    // leave it behind.
+    const { calls, probe } = await rig((path) => {
+      switch (path) {
+        case '/executions:prepare':
+          return {
+            body: {
+              ...identity,
+              executionCallId: 'gate-execution',
+              status: { state: 'prepared' },
+            },
+          };
+        case '/tool-sessions:acquire':
+          return rejection(409, 'runtime_session_not_acquirable');
+        case RELEASE:
+          return { body: { ...identity, released: true } };
+        default:
+          throw new Error(`unexpected ${path}`);
+      }
+    });
+    await expect(probe()).resolves.toMatchObject({ kind: 'failed' });
+    expect(calls.map((call) => call.path)).toEqual([
+      '/executions:prepare',
+      '/tool-sessions:acquire',
+      RELEASE,
+    ]);
   });
 
   it('answers failed, not unknown, when the derived Session cannot be acquired', async () => {
