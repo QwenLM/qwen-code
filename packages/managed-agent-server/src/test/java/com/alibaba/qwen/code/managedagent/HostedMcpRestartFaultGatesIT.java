@@ -1254,17 +1254,8 @@ class HostedMcpRestartFaultGatesIT {
         RuntimeException last = null;
         for (int attempt = 0; attempt < 60; attempt++) {
             try {
-                // Publish the fixture's claim with admission, so the live
-                // coordinator cannot acquire this operation between them.
-                return transactions.execute(status -> {
-                    var admission = store.beginWorkspaceLifecycle(tenant,
-                            session.id(), OperationKind.CLOSE, "actor",
-                            DigestUtils.sha256Hex("actor"), key,
-                            "sha256:" + DigestUtils.sha256Hex(key), true, 2);
-                    return store.claimOperation(tenant, session.id(),
-                            admission.operation().operationId(), "fg12d-close",
-                            Duration.ofMinutes(10)).orElseThrow();
-                });
+                return HostedGateTestSupport.admitAndClaimClose(transactions,
+                        store, tenant, session.id(), key, "fg12d-close");
             } catch (RuntimeException failure) {
                 last = failure;
                 String message = String.valueOf(failure.getMessage());
