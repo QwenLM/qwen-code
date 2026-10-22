@@ -680,6 +680,44 @@ public final class HostedHarnessClient implements AutoCloseable {
                 operation, "continuation");
     }
 
+    public Map<String, Object> compressContext(HarnessSessionRef session, Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        if (!capabilities().getFeatures().contains("context-compression/1")) {
+            throw new DaemonProtocolException("Hosted context compression capability is required");
+        }
+        String operation = "POST /session/:id/context/compress";
+        HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/context/compress",
+                body, ref.getHarnessSessionId(), ref.getHarnessClientId(), operation);
+        DaemonClient.requireStatus(response, 202, operation);
+        try {
+            return contextCompressionResponse(response, body.get("operationId"));
+        } catch (DaemonProtocolException error) {
+            throw new MutationOutcomeUnknownException(operation, error);
+        }
+    }
+
+    public Map<String, Object> readContextCompression(HarnessSessionRef session, String operationId) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String id = requireBoundedRecoveryText(operationId, "operationId");
+        String operation = "GET /session/:id/context/compressions/:operationId";
+        HttpSupport.Response response = sendRead(sessionPath(ref.getHarnessSessionId())
+                + "/context/compressions/" + java.net.URLEncoder.encode(id, StandardCharsets.UTF_8), ref, operation);
+        DaemonClient.requireStatus(response, 200, operation);
+        return contextCompressionResponse(response, id);
+    }
+
+    private static Map<String, Object> contextCompressionResponse(HttpSupport.Response response, Object operationId) {
+        Map<String, Object> json = JsonSupport.parseObject(response.getBody(), "context compression response");
+        if (!JsonSupport.requiredString(json, "operationId", "context compression").equals(operationId)) {
+            throw new DaemonProtocolException("Hosted Harness returned a different compression operation");
+        }
+        String status = JsonSupport.requiredString(json, "status", "context compression");
+        if (!List.of("pending", "running", "recovery_blocked", "completed", "failed").contains(status)) {
+            throw new DaemonProtocolException("Hosted Harness returned an invalid compression status");
+        }
+        return json;
+    }
+
     /**
      * H6b/H6c: one automation operation onto the Session's journal (the
      * control plane's verbs). The Hosted side commits through its funnel and
