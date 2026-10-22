@@ -875,6 +875,11 @@ export function handleVimAction(
       while (col < lineCodePoints.length && /\s/.test(lineCodePoints[col])) {
         col++;
       }
+      // A blank line offers no first non-whitespace column; its last character
+      // is the landing column, keeping the cursor inside the line.
+      if (col >= lineCodePoints.length) {
+        col = Math.max(0, lineCodePoints.length - 1);
+      }
 
       return {
         ...state,
