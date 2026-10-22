@@ -65,9 +65,12 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
   still releases automatically at the step boundary — the helper changes
   acquisition order, not release semantics.
 - On timeout the helper prints
-  `::error::sdk-java host lock not acquired within N minutes as queue ticket S; head of queue is H`
-  naming the ticket that blocked it when it was not the head, and returns 1,
-  keeping the existing error-message contract.
+  `::error::sdk-java host lock not acquired within N minutes as queue ticket S (CLASS); head of queue is H`
+  and returns 1. `CLASS` is `fast` or `normal`, as the ticket stood when it
+  gave up; `H` is the head of the queue at that moment, or
+  `(no other ticket queued)` when this ticket was the last one. The
+  `lock not acquired within` substring is the contract the rerun classifiers
+  match.
 - Wait observability: a non-blocking probe runs first, and only a waiter
   that actually has to wait prints its ticket number and the remaining
   budget — before it blocks, and at most once a minute after. A blocked head
@@ -96,16 +99,27 @@ physical lock:
 - A full-tier head already blocked in `flock(2)` keeps its kernel wait
   position, and the smallest fast ticket that arrives behind it becomes the
   new minimum and parks too. The Linux wake order measured for this queue is
-  insertion order, so the parked head still wins the next release. A fast job
-  therefore waits for the hold already running plus at most two parked heads,
-  not for the full-tier queue behind them; later fast tickets are never the
-  minimum while that parked fast ticket stands, so they loop and are served
-  in ticket order.
+  insertion order (kernel 6.6, util-linux `flock` 2.38.1, six real waiters,
+  3/3 runs; the run is recorded in qwen-code#15035), so the parked head
+  still wins the next release. Later fast tickets are never the minimum
+  while that parked fast ticket stands, so they loop and are served in
+  ticket order.
+- A fast job therefore waits for the hold already running, at most one
+  parked full-tier head, and the fast-class tickets ahead of it — older fast
+  tickets and promoted ones, parked or not — never for the full-tier queue
+  still waiting in userspace. Only one full-tier head can be parked at a
+  time: a normal ticket parks only as the minimum, so only while no
+  fast-class ticket is queued, and while it is parked its keepalive keeps its
+  ticket ahead of every later normal ticket. More than two tickets can still
+  be parked at once — a full-tier head, the fast ticket that arrived behind
+  it, and an older normal ticket promoted after that — and the kernel serves
+  them in the order they parked.
 - A normal ticket that waits past `SDK_JAVA_LOCK_PROMOTE_AFTER` (default
   1200 s) is renamed into the fast class. It keeps its sequence, so it
   precedes fast tickets that arrived after it, and continuous fast traffic
-  cannot starve the full tier. Only a ticket that is not head yet needs this:
-  a parked head is already next.
+  cannot starve the full tier. Promotion protects waiting full-tier tickets,
+  not parked ones: a parked head never loops back to the promotion check, and
+  it does not need to, because it is already next.
 - The promotion window bounds the overtake, not a hold. A fast ticket that
   arrived before the promotion and already parked in `flock` keeps its
   earlier kernel position, so the promoted ticket waits one more hold behind
@@ -114,8 +128,9 @@ physical lock:
   threshold together, the queue is plain sequence order, and a fast ticket
   arriving afterwards has nothing left to overtake.
 
-The release semantics, the 5400 s budget, and the pinned
-`lock not acquired within` error are unchanged.
+The release semantics, the 5400 s budget, and the
+`lock not acquired within` substring the rerun classifiers match are
+unchanged; the timeout line now also names the ticket's class.
 
 Priority does not bound a single hold. The same 2026-10-21 job then waited
 its last 52 minutes as head behind one hold and timed out, and full-tier
@@ -165,10 +180,12 @@ order this section exists to prevent.
   `scripts/tests/sdk-java-lock.test.js` (POSIX-only): FIFO ordering across
   two waiters, a fast ticket overtaking a waiting normal ticket behind a
   parked head, promotion of a waiting normal ticket ahead of a later fast
-  ticket, a parked head's ticket surviving another waiter's reaper,
-  a timed-out parked head naming the ticket that displaced it, the keepalive
-  stopping at acquisition and after its owner dies, stale-owner reaping,
-  timeout signature and ticket cleanup, with `flock` stubbed on `PATH`. The
+  ticket, a promoted ticket reporting the fast class when it times out, a
+  parked head's ticket surviving another waiter's reaper, a timed-out parked
+  head naming the ticket that displaced it, the keepalive stopping at
+  acquisition and after its owner dies, the keepalive holding no fd on the
+  lock (read from `/proc`, so Linux only), stale-owner reaping, timeout
+  signature and ticket cleanup, with `flock` stubbed on `PATH`. The
   ordering stubs park `flock --wait` until release, as the kernel does, so a
   head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:

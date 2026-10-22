@@ -980,9 +980,10 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
       '::error::sdk-java host lock not acquired within',
     );
     const seconds = Number(step.run.match(/sdk_java_lock_acquire (\d+)/)?.[1]);
-    // The fast tier owns the same lock and waits behind this job, so one
-    // acquisition budget applies to every lane; run 39229303984 died at the
-    // old 60-minute wait before Maven started.
+    // The fast tier owns the same lock: it overtakes this job only while
+    // this ticket still waits, then waits out its hold, so one acquisition
+    // budget applies to every lane; run 39229303984 died at the old
+    // 60-minute wait before Maven started.
     expect(seconds).toBe(90 * 60);
     // This site stays in the normal class: a tier argument here would put
     // full-tier MariaDB holds ahead of fast PR-feedback work.

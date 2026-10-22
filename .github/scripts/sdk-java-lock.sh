@@ -14,12 +14,13 @@
 # userspace that have waited less than SDK_JAVA_LOCK_PROMOTE_AFTER. It does
 # not overtake the hold already running, nor a head already parked in `flock`,
 # which keeps its kernel wait position: a fast job waits for the hold already
-# running plus at most two parked heads, not for the full-tier queue behind
-# them. A normal ticket that waits more than SDK_JAVA_LOCK_PROMOTE_AFTER
-# seconds (default 1200) is promoted into the fast class, so continuous fast
-# traffic cannot starve the full tier; under a single hold longer than that
-# window every waiting normal ticket crosses the threshold together and the
-# queue is plain sequence order.
+# running, at most one parked full-tier head, and the fast-class tickets
+# ahead of it (older fast or promoted ones, parked or not), never for the
+# full-tier queue still waiting in userspace. A normal ticket that waits more
+# than SDK_JAVA_LOCK_PROMOTE_AFTER seconds (default 1200) is promoted into the
+# fast class, so continuous fast traffic cannot starve the full tier; under a
+# single hold longer than that window every waiting normal ticket crosses the
+# threshold together and the queue is plain sequence order.
 #
 # Source this file and call `sdk_java_lock_acquire <wait-seconds> [fast|full]`
 # (an empty tier means normal); it returns non-zero on timeout with the pinned
@@ -98,6 +99,7 @@ sdk_java_lock_acquire() {
       if mv "${ticket}" "${promoted_ticket}" 2>/dev/null; then
         ticket="${promoted_ticket}"
         promoted=1
+        class=fast
         echo "Promoted sdk-java host lock queue ticket ${seq} to the fast class after $((promote_after / 60)) minutes"
       fi
     fi
@@ -118,11 +120,13 @@ sdk_java_lock_acquire() {
         return 0
       fi
       blocking=1
-      # A head that cannot take the lock is starved by an unticketed holder;
-      # name it once here instead of waiting out the budget to find it.
+      # A head that cannot take the lock waits behind the holder, which left
+      # the queue when it acquired or never joined it, and behind any ticket
+      # that parked in `flock` before rank order made this one the head. Name
+      # the holder once here instead of waiting out the budget to find it.
       if ((head_hint == 0)); then
         head_hint=1
-        echo "::warning::head of the queue as ticket ${seq} but the lock is held; holder visible from this host:"
+        echo "::warning::head of the queue as ticket ${seq} (${class}) but the lock is held, and any ticket already parked in flock still goes first; holder visible from this host:"
         sdk_java_lock_holder_hint "${lock}"
       fi
     fi
@@ -160,8 +164,10 @@ sdk_java_lock_acquire() {
       rm -f "${ticket}"
       # Rank order and promotion can displace a parked head after it entered
       # `flock --wait`; name the queue as it is at timeout, not the value this
-      # ticket saw when it parked.
+      # ticket saw when it parked. Once this was the last ticket the glob
+      # stays literal, so say so instead of printing `*`.
       head=$(printf '%s\n' "${queue}/"* | grep -v '/\.seq$' | sort | sed -n '1p')
+      [[ -e ${head} ]] || head='(no other ticket queued)'
       echo "::error::sdk-java host lock not acquired within $((wait_seconds / 60)) minutes as queue ticket ${seq} (${class}); head of queue is ${head##*/}"
       echo "holder of ${lock} at timeout:"
       sdk_java_lock_holder_hint "${lock}"
