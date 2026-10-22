@@ -41,6 +41,7 @@ import { useManagedSession } from './use-managed-session';
 import { useManagedSessionRename } from './use-managed-session-rename';
 import { useManagedActions } from './use-managed-actions';
 import { useManagedCwdChange } from './use-managed-cwd-change';
+import { useManagedContextCompression } from './use-managed-context-compression';
 import { useManagedModelChange } from './use-managed-model-change';
 import { useManagedApprovalChange } from './use-managed-approval-change';
 import { useManagedSkills } from './use-managed-skills';
@@ -466,6 +467,26 @@ function ManagedSessionsContent({
     detail.refreshSummary,
     interactive,
   );
+  const compression = useManagedContextCompression(
+    provider,
+    clientId,
+    sessionId,
+    detail.summary,
+    detail.refreshSummary,
+    () =>
+      interactive &&
+      !busy &&
+      !encoding.current &&
+      !detail.loading &&
+      !pendingRef.current &&
+      !pendingApproval &&
+      !cwd.isBlocked() &&
+      !modelChange.isBlocked() &&
+      !approvalChange.isBlocked() &&
+      ['created', 'completed', 'failed', 'cancelled'].includes(
+        detail.summary?.phase ?? '',
+      ),
+  );
   // The reason line below is mounted exactly when this holds, so the dialog can
   // point at it without ever leaving a dangling IDREF. A latch-only render has
   // no `alert` node and no operable option left, so this line is the only place
@@ -620,7 +641,8 @@ function ManagedSessionsContent({
       encoding.current ||
       cwd.isBlocked() ||
       modelChange.isBlocked() ||
-      approvalChange.isBlocked()
+      approvalChange.isBlocked() ||
+      compression.isBlocked()
     )
       return;
     setDiscarded(false);
@@ -793,6 +815,7 @@ function ManagedSessionsContent({
   const displayedModel =
     selectedModel ?? modelContext?.modelId ?? currentSummary?.agentId ?? '';
   const contextUsageKnown =
+    !compression.usageInvalidated &&
     (!selectedModel || modelContext?.modelId === selectedModel) &&
     modelContext?.inputTokens !== undefined &&
     Number.isSafeInteger(modelContext.inputTokens) &&
@@ -1232,6 +1255,7 @@ function ManagedSessionsContent({
                     pendingApproval ||
                     busy ||
                     modelChange.blocked ||
+                    compression.blocked ||
                     approvalChange.blocked ||
                     pending?.sessionId === sessionId
                       ? t('managed.cwd.busy')
@@ -1241,6 +1265,7 @@ function ManagedSessionsContent({
                     if (
                       pendingRef.current?.sessionId === sessionId ||
                       modelChange.isBlocked() ||
+                      compression.isBlocked() ||
                       approvalChange.isBlocked() ||
                       busy ||
                       active ||
@@ -1335,7 +1360,7 @@ function ManagedSessionsContent({
               </p>
               <Button
                 size="sm"
-                disabled={busy || cwd.blocked}
+                disabled={busy || cwd.blocked || compression.blocked}
                 onClick={() => void submit()}
               >
                 {t('managed.retry')}
@@ -1400,7 +1425,7 @@ function ManagedSessionsContent({
                 // holds for every approval this Session raises — until an
                 // explicit retry re-probes, so the latch is scoped to the
                 // Session rather than the Action.
-                disabled={approvals.respondForbidden}
+                disabled={approvals.respondForbidden || compression.blocked}
                 extraDescriptionId={
                   [
                     pendingApproval.rawInput === undefined
@@ -1411,9 +1436,11 @@ function ManagedSessionsContent({
                     .filter(Boolean)
                     .join(' ') || undefined
                 }
-                onConfirm={(actionId, optionId) =>
-                  approvals.respond(actionId, optionId)
-                }
+                onConfirm={(actionId, optionId) => {
+                  if (!compression.isBlocked())
+                    return approvals.respond(actionId, optionId);
+                  return Promise.resolve();
+                }}
               />
               {pendingApproval.rawInput === undefined && (
                 <p
@@ -1568,6 +1595,7 @@ function ManagedSessionsContent({
                   approvalChange.busy ||
                   modelChange.blocked ||
                   approvalChange.blocked ||
+                  compression.blocked ||
                   busy ||
                   Boolean(active) ||
                   Boolean(pendingApproval) ||
@@ -1587,7 +1615,8 @@ function ManagedSessionsContent({
                           active ||
                           pendingApproval ||
                           cwd.isBlocked() ||
-                          approvalChange.isBlocked()
+                          approvalChange.isBlocked() ||
+                          compression.isBlocked()
                         )
                           return;
                         void modelChange.submit(modelId);
@@ -1600,6 +1629,9 @@ function ManagedSessionsContent({
                 }
                 contextUsageKnown={contextUsageKnown}
                 contextUsageAlwaysVisible={Boolean(sessionId)}
+                contextUsageControls={
+                  interactive ? compression.controls : undefined
+                }
                 currentMode={summary?.approvalMode ?? ''}
                 planMode={summary?.planMode === true}
                 planControlsDisabled={
@@ -1608,6 +1640,7 @@ function ManagedSessionsContent({
                   !approvalChange.options?.supported ||
                   approvalChange.optionsLoading ||
                   approvalChange.isBlocked() ||
+                  compression.isBlocked() ||
                   busy ||
                   Boolean(active) ||
                   Boolean(pendingApproval) ||
@@ -1627,7 +1660,8 @@ function ManagedSessionsContent({
                           !pendingApproval &&
                           !pendingRef.current &&
                           !cwd.isBlocked() &&
-                          !modelChange.isBlocked()
+                          !modelChange.isBlocked() &&
+                          !compression.isBlocked()
                         )
                           void approvalChange.submit(
                             summary.approvalMode!,
@@ -1647,6 +1681,7 @@ function ManagedSessionsContent({
                   approvalChange.optionsLoading ||
                   approvalChange.busy ||
                   approvalChange.blocked ||
+                  compression.blocked ||
                   busy ||
                   ((Boolean(active) || Boolean(pendingApproval)) &&
                     !approvalChange.options.liveSupported) ||
@@ -1670,7 +1705,8 @@ function ManagedSessionsContent({
                             !approvalChange.options?.liveSupported) ||
                           summary?.phase === 'cancelling' ||
                           cwd.isBlocked() ||
-                          modelChange.isBlocked()
+                          modelChange.isBlocked() ||
+                          compression.isBlocked()
                         )
                           return;
                         if (
@@ -1687,6 +1723,7 @@ function ManagedSessionsContent({
                   busy ||
                   fileReferences.busy ||
                   cwd.blocked ||
+                  compression.blocked ||
                   modelChange.busy ||
                   approvalChange.busy
                 }
@@ -1705,11 +1742,55 @@ function ManagedSessionsContent({
                   busy ||
                   Boolean(pending) ||
                   modelChange.blocked ||
+                  compression.blocked ||
                   approvalChange.blocked ||
                   Boolean(sessionId && !summary?.capabilities.canSend)
                 }
                 placeholderText={t('managed.prompt')}
               />
+              {interactive && compression.blocked && (
+                <div
+                  className="flex items-center gap-2 text-xs text-muted-foreground"
+                  role="status"
+                >
+                  <span>
+                    {t(
+                      compression.errorCode === 'recovery_blocked'
+                        ? 'managed.compression.recoveryBlocked'
+                        : compression.busy
+                          ? 'contextUsage.compressing'
+                          : 'managed.compression.unconfirmed',
+                    )}
+                  </span>
+                  {!compression.busy && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={!provider.contextCompression}
+                      onClick={() => void compression.confirm()}
+                    >
+                      {t('managed.compression.confirm')}
+                    </Button>
+                  )}
+                </div>
+              )}
+              {interactive && compression.errorCode && !compression.blocked && (
+                <p className="text-xs text-destructive" role="alert">
+                  {t(
+                    compression.errorCode === 'storage_unavailable'
+                      ? 'managed.compression.storage'
+                      : compression.errorCode === 'storage_update_failed'
+                        ? 'managed.compression.storageUpdate'
+                        : compression.errorCode ===
+                            'compaction_revision_conflict'
+                          ? 'managed.compression.conflict'
+                          : compression.errorCode === 'session_context_busy'
+                            ? 'managed.compression.busy'
+                            : 'contextUsage.compressFailed',
+                  )}
+                </p>
+              )}
               {interactive &&
                 (modelChange.supported || modelChange.blocked) && (
                   <div
