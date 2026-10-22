@@ -6,6 +6,7 @@
 
 import { Turn, LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
 import { parseAndFormatApiError } from '@qwen-code/qwen-code-core/utils/errorParsing.js';
+import { getErrorStatus } from '@qwen-code/qwen-code-core/utils/errors.js';
 import {
   LlmRequestPreparationError,
   llmPreparedProviderPin,
@@ -14,13 +15,20 @@ import {
 } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import type { HostedModelRequest } from './hosted-model-recovery.js';
 import type { HostedModelSelection } from './hosted-model-selection.js';
+import { HOSTED_MODEL_REQUEST_BYTES } from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
 
 import type { Content, Part } from '@google/genai';
 import { createHash, randomUUID } from 'node:crypto';
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import { DEFAULT_TOOL_OUTPUT_BATCH_BUDGET } from '@qwen-code/qwen-code-core/config/config.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
-import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import type {
+  ChatRecord,
+  ChatCompressionRecordPayload,
+} from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
+import { buildSessionHistoryFromConversation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
@@ -71,6 +79,49 @@ export interface HostedHarnessModelResult {
   text: string;
   parts?: Part[];
   model: string;
+}
+
+export const HOSTED_MODEL_API_ERROR_MESSAGES = {
+  model_payment_required:
+    'Model API payment required (HTTP 402). Check the provider account balance and billing before retrying.',
+  model_authentication_failed:
+    'Model API authentication failed (HTTP 401). Check the configured provider credentials.',
+  model_access_denied:
+    'Model API access denied (HTTP 403). Check the provider account and model permissions.',
+  model_request_timeout: 'The model API request timed out. Try again later.',
+  model_rate_limited:
+    'Model API rate limit exceeded (HTTP 429). Wait and try again later.',
+  model_request_rejected:
+    'The model API rejected the request. Check the model configuration and input.',
+  model_service_unavailable:
+    'The model API service is unavailable. Try again later.',
+  model_request_failed:
+    'Model API request failed. Check the server logs for this session before retrying.',
+} as const;
+
+export class HostedModelApiError extends Error {
+  readonly code: keyof typeof HOSTED_MODEL_API_ERROR_MESSAGES;
+
+  constructor(error: unknown) {
+    super(parseAndFormatApiError(error));
+    const status = getErrorStatus(error);
+    this.code =
+      status === 402
+        ? 'model_payment_required'
+        : status === 401
+          ? 'model_authentication_failed'
+          : status === 403
+            ? 'model_access_denied'
+            : status === 408 || status === 504
+              ? 'model_request_timeout'
+              : status === 429
+                ? 'model_rate_limited'
+                : status !== undefined && status >= 500
+                  ? 'model_service_unavailable'
+                  : status !== undefined && status >= 400
+                    ? 'model_request_rejected'
+                    : 'model_request_failed';
+  }
 }
 
 export class HostedModelRoundLimitError extends Error {
@@ -136,10 +187,22 @@ export async function applyHostedModelPin(
   }
 }
 
+export function hostedToolOutputBudget(cwd: string): number {
+  return (
+    loadSettings(cwd, {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: true,
+      workspaceTrusted: false,
+    }).merged.tools?.toolOutputBatchBudget ?? DEFAULT_TOOL_OUTPUT_BATCH_BUDGET
+  );
+}
+
 export async function runHostedHarnessTextTurn(input: {
   sessionId: string;
   cwd: string;
   history: readonly ChatRecord[];
+  excludedPromptIds?: ReadonlySet<string>;
+  commitCompression?: (payload: ChatCompressionRecordPayload) => Promise<void>;
   prompt: string;
   attachmentParts?: readonly Part[];
   promptId: string;
@@ -170,6 +233,7 @@ export async function runHostedHarnessTextTurn(input: {
         | 'resumeHookResults'
         | 'hookStopReason'
         | 'setModelRound'
+        | 'setToolOutputBudget'
         | 'planModeInstructions'
       >
     >;
@@ -209,6 +273,9 @@ export async function runHostedHarnessTextTurn(input: {
     true,
     { toolInvocationGuard: () => ({ allowed: false }) },
   );
+  const outputBudget = config.getToolOutputBatchBudget?.();
+  if (outputBudget !== undefined)
+    input.toolTurn?.setToolOutputBudget?.(outputBudget);
   const contextWithInstructions = (context: string | undefined) =>
     [
       input.agentInstructions
@@ -230,18 +297,16 @@ export async function runHostedHarnessTextTurn(input: {
   let pendingToolResults =
     input.resumeFromToolResults !== undefined ||
     (input.resumeModel?.pendingToolResults ?? false);
-  const initialMessages: Content[] = input.history.flatMap((record) =>
-    (record.type === 'user' ||
-      record.type === 'assistant' ||
-      record.type === 'tool_result') &&
-    record.message?.parts
-      ? [
-          {
-            role: record.type === 'assistant' ? 'model' : 'user',
-            parts: record.message.parts,
-          },
-        ]
-      : [],
+  const excludeUnanswered = (history: Content[]) =>
+    history.filter(
+      (entry) =>
+        entry.role !== 'user' ||
+        !input.excludedPromptIds?.has(getApiHistoryPromptId(entry) ?? ''),
+    );
+  const initialMessages: Content[] = excludeUnanswered(
+    buildSessionHistoryFromConversation({
+      messages: input.history,
+    }).apiHistory,
   );
   if (!input.resumeFromToolResults && !input.resumeModel)
     initialMessages.push({
@@ -449,29 +514,59 @@ export async function runHostedHarnessTextTurn(input: {
     // injects them before the first request too.
     let injectedContext: string | undefined;
     let injectedTools: ReadonlySet<string> | undefined;
+    const lastAssistant = input.history.findLastIndex(
+      (record) => record.type === 'assistant',
+    );
+    const resumedIds = new Set(
+      input.resumeFromToolResults?.flatMap((part) =>
+        part.functionResponse?.id ? [part.functionResponse.id] : [],
+      ),
+    );
     const historyRecords = input.resumeFromToolResults
-      ? input.history.slice(
-          0,
-          input.history.findLastIndex((record) => record.type === 'assistant') +
-            1,
-        )
+      ? input.history.flatMap((record, index) => {
+          if (index <= lastAssistant) return [record];
+          if (record.type !== 'system' || record.subtype !== 'chat_compression')
+            return [];
+          const payload = record.systemPayload as ChatCompressionRecordPayload;
+          const prefix = payload.summaryPrefixLength;
+          const pending = payload.compressedHistory?.at(-1);
+          const responses = pending?.parts?.flatMap((part) =>
+            part.functionResponse ? [part.functionResponse] : [],
+          );
+          // A pre-send snapshot owns the pending response too. Restore its
+          // compressed prefix, then send that response through the resume path.
+          if (
+            typeof prefix !== 'number' ||
+            !Number.isSafeInteger(prefix) ||
+            prefix < 0 ||
+            payload.compressedHistory.length !== prefix + 1 ||
+            pending?.role !== 'user' ||
+            !responses?.length ||
+            responses.some((response) => !resumedIds.has(response.id ?? ''))
+          )
+            return [record];
+          return [
+            {
+              ...record,
+              systemPayload: {
+                ...payload,
+                compressedHistory: payload.compressedHistory.slice(0, prefix),
+                ...(payload.promptIds
+                  ? { promptIds: payload.promptIds.slice(0, prefix) }
+                  : {}),
+              },
+            },
+          ];
+        })
       : input.history;
-    const history: Content[] = historyRecords.flatMap((record) => {
-      if (
-        (record.type === 'user' ||
-          record.type === 'assistant' ||
-          (input.toolTurn && record.type === 'tool_result')) &&
-        record.message?.parts
-      ) {
-        return [
-          {
-            role: record.type === 'assistant' ? 'model' : 'user',
-            parts: record.message.parts,
-          },
-        ];
-      }
-      return [];
+    const restored = buildSessionHistoryFromConversation({
+      messages: historyRecords,
     });
+    const history = excludeUnanswered(restored.apiHistory);
+    if (input.commitCompression)
+      client.setCompressionObserver(input.commitCompression, {
+        restoreRecentFiles: false,
+      });
     // Failed and cancelled turns have no assistant record, and curated
     // history drops an empty assistant record while keeping its prompt. Omit
     // both kinds of unanswered prompt even when later completed turns follow.
@@ -489,6 +584,7 @@ export async function runHostedHarnessTextTurn(input: {
                 : answered(entry),
             ),
       );
+    client.getChat().setCompletedToolCallIds?.(restored.completedToolCallIds);
     historyReady = true;
     input.hooks?.setMessagesProvider(() =>
       client.getHistory().map((message) => ({ ...message })),
@@ -633,7 +729,7 @@ export async function runHostedHarnessTextTurn(input: {
         finished = false;
         usage.length = 0;
       };
-      prepare.maxSnapshotBytes = 64 * 1024;
+      prepare.maxSnapshotBytes = HOSTED_MODEL_REQUEST_BYTES;
       const usage: unknown[] = [];
       let finalOutputHandled = false;
       try {
@@ -723,7 +819,7 @@ export async function runHostedHarnessTextTurn(input: {
             // request id on the message, so the daemon stderr line and the
             // StopFailure hook's error_details keep an id the operator can
             // quote to their provider.
-            throw new Error(parseAndFormatApiError(event.value.error));
+            throw new HostedModelApiError(event.value.error);
           } else if (event.type === LlmEventType.UserCancelled) {
             modelFailure = false;
             throw new Error('Hosted Harness turn was cancelled.');

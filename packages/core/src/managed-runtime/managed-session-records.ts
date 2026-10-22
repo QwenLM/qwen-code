@@ -135,6 +135,7 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     'mcp_operation',
     'hook_registration',
     'hook_execution',
+    'history_maintenance',
     'schedule',
     'automation_run',
     'child_acceptance',
@@ -431,6 +432,36 @@ export class ManagedSessionWritesStoppedError extends ManagedSessionRecordError 
       `session log writes stopped after an earlier failure: ${cause.message}`,
     );
     this.name = 'ManagedSessionWritesStoppedError';
+  }
+}
+
+/**
+ * An append the journal could not observe: the transaction may or may not have
+ * committed. A journal that can prove the answer from its durable head keeps
+ * the attempt and answers `settleAppend`; until then the authority must not
+ * latch the log dead, because a lapsed writer lease is re-acquirable.
+ */
+export class ManagedSessionAppendUnsettledError extends ManagedSessionRecordError {
+  override readonly code: string = 'managed_session_append_unsettled';
+
+  constructor(readonly failure: Error) {
+    super(`session log append outcome is unknown: ${failure.message}`);
+    this.name = 'ManagedSessionAppendUnsettledError';
+  }
+}
+
+/**
+ * Settlement proved another writer owns this append position. Unlike an
+ * unknown outcome, this fence is permanent: the Session needs a takeover.
+ * It is typed so the Hosted routes classify it as a store-side fence rather
+ * than as a request-shape refusal.
+ */
+export class ManagedSessionJournalFencedError extends ManagedSessionRecordError {
+  override readonly code: string = 'managed_session_journal_fenced';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'ManagedSessionJournalFencedError';
   }
 }
 

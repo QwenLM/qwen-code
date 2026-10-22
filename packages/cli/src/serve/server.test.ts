@@ -747,12 +747,14 @@ const EXPECTED_STAGE1_FEATURES = [
   'permission_mediation',
   'non_blocking_prompt',
   'session_language',
+  'session_message_deletion',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
   'workspace_extensions',
   'session_branch',
   'session_branch_worktree',
+  'workspace_model_reload',
   'channel_delivery',
   'workspace_channel_observed_contacts',
   'workspace_display_name',
@@ -803,7 +805,12 @@ const EXPECTED_REGISTERED_FEATURES = [
       return [feature, 'workspace_skills_config_runtime'];
     }
     if (feature === 'session_artifacts') {
-      return [feature, 'session_artifacts_persistence', 'session_sources'];
+      return [
+        feature,
+        'session_artifacts_persistence',
+        'session_artifact_library',
+        'session_sources',
+      ];
     }
     if (feature === 'mcp_guardrail_events') {
       return [feature, 'external_tool_guard'];
@@ -841,12 +848,14 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'permission_mediation' &&
       f !== 'non_blocking_prompt' &&
       f !== 'session_language' &&
+      f !== 'session_message_deletion' &&
       f !== 'session_rewind' &&
       f !== 'workspace_hooks' &&
       f !== 'session_hooks' &&
       f !== 'workspace_extensions' &&
       f !== 'session_branch' &&
       f !== 'session_branch_worktree' &&
+      f !== 'workspace_model_reload' &&
       f !== 'channel_delivery' &&
       f !== 'workspace_channel_observed_contacts' &&
       f !== 'workspace_display_name' &&
@@ -895,6 +904,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'non_blocking_prompt',
   'session_language',
   'user_language_sync',
+  'session_message_deletion',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
@@ -903,6 +913,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_branch_worktree',
   'rate_limit',
   'workspace_reload',
+  'workspace_model_reload',
   'channel_delivery',
   'channel_reload',
   'channel_control',
@@ -2696,6 +2707,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionTasksOptions.push(opts);
       return sessionTasksImpl(sessionId, opts);
     },
+    async getSessionTaskRuntime(sessionId, taskId) {
+      return { v: 1, sessionId, taskId, runtime: { outputTail: 'ready' } };
+    },
     async getSessionAgentsStatus(sessionId) {
       sessionAgentsCalls.push(sessionId);
       return sessionAgentsImpl(sessionId);
@@ -3523,6 +3537,15 @@ describe('createServeApp', () => {
       // predicate must be false, otherwise the tag would fail the
       // "default-off" property baseline tags get for free.
       for (const [feature, predicate] of CONDITIONAL_SERVE_FEATURES) {
+        if (feature === 'session_message_deletion') {
+          expect(predicate({ hostedHarness: true })).toBe(false);
+          expect(predicate({})).toBe(true);
+          expect(
+            getAdvertisedServeFeatures(undefined, { hostedHarness: true }),
+          ).not.toContain(feature);
+          expect(getAdvertisedServeFeatures()).toContain(feature);
+          continue;
+        }
         if (
           feature === 'hosted_harness_private_v1' ||
           feature === 'managed_session_journal_delta_v1'
@@ -3694,6 +3717,7 @@ describe('createServeApp', () => {
         }
         if (
           feature === 'session_artifacts_persistence' ||
+          feature === 'session_artifact_library' ||
           feature === 'session_sources'
         ) {
           expect(
@@ -11440,13 +11464,17 @@ describe('createServeApp', () => {
     it('dispatches read-only session snapshots through the live owner runtime', async () => {
       const primaryBridge = fakeBridge();
       const secondaryBridge = fakeBridge({
-        summaryImpl: (sessionId) => ({
-          sessionId,
-          workspaceCwd: WS_DIFFERENT,
-          createdAt: '2026-05-17T12:00:00.000Z',
-          clientCount: 1,
-          hasActivePrompt: false,
-        }),
+        summaryImpl: (sessionId) => {
+          if (sessionId !== 's-secondary')
+            throw new SessionNotFoundError(sessionId);
+          return {
+            sessionId,
+            workspaceCwd: WS_DIFFERENT,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          };
+        },
         sessionContextImpl: async (sessionId) => ({
           v: 1,
           sessionId,
@@ -11485,6 +11513,14 @@ describe('createServeApp', () => {
           bridge: secondaryBridge,
         }),
       ]);
+      const primaryRuntimeRead = vi.spyOn(
+        primaryBridge,
+        'getSessionTaskRuntime',
+      );
+      const secondaryRuntimeRead = vi.spyOn(
+        secondaryBridge,
+        'getSessionTaskRuntime',
+      );
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
         undefined,
@@ -11498,6 +11534,24 @@ describe('createServeApp', () => {
         .get('/session/s-secondary/resources')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
+      const runtimeRes = await request(app)
+        .get('/session/s-secondary/tasks/bg_1/runtime')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(runtimeRes.status).toBe(200);
+      expect(runtimeRes.body).toEqual({
+        v: 1,
+        sessionId: 's-secondary',
+        taskId: 'bg_1',
+        runtime: { outputTail: 'ready' },
+      });
+      expect(secondaryRuntimeRead).toHaveBeenCalledWith('s-secondary', 'bg_1');
+      expect(primaryRuntimeRead).not.toHaveBeenCalled();
+      const missingRes = await request(app)
+        .get('/session/missing/tasks/bg_1/runtime')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(missingRes.status).toBe(404);
+      expect(secondaryRuntimeRead).toHaveBeenCalledTimes(1);
+      expect(primaryRuntimeRead).not.toHaveBeenCalled();
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
         sessionId: 's-secondary',
@@ -40929,6 +40983,45 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
         bridge: fakeBridge(),
       }),
     ).toThrow(/Non-loopback HTTP\(S\).*code execution/);
+  });
+
+  it('rejects an embedded loopback port wildcard without a token', () => {
+    const wildOpts = {
+      ...baseOpts,
+      allowOrigins: ['http://127.0.0.1:*'],
+    };
+    expect(() =>
+      createServeApp(wildOpts, () => 4170, {
+        bridge: fakeBridge(),
+      }),
+    ).toThrow(/loopback port wildcard/i);
+  });
+
+  it('serves an ephemeral loopback origin through the port wildcard', async () => {
+    const app = createServeApp(
+      {
+        ...baseOpts,
+        token: 'secret',
+        allowOrigins: ['http://127.0.0.1:*'],
+      },
+      () => 4170,
+      { bridge: fakeBridge() },
+    );
+    const res = await request(app)
+      .options('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://127.0.0.1:54321')
+      .set('Access-Control-Request-Method', 'GET');
+    expect(res.status).toBe(204);
+    expect(res.headers['access-control-allow-origin']).toBe(
+      'http://127.0.0.1:54321',
+    );
+    const foreign = await request(app)
+      .options('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://localhost:54321')
+      .set('Access-Control-Request-Method', 'GET');
+    expect(foreign.status).toBe(403);
   });
 
   it('preserves tokenless browser-extension origins for local automation', async () => {

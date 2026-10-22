@@ -196,9 +196,11 @@ export async function ensureNativePayload({
   } = await import(NATIVE_ASSETS_MODULE.href)
   version ??= cuaSdkVersion()
   const target = nativeTarget(platform, arch, version)
+  const uiAccess = platform === "win32" && env.CUA_DRIVER_USE_UIACCESS === "1"
+  if (uiAccess) target.companions = ["qwen-cua-driver-uia.exe"]
   if (env[CUA_SDK_NATIVE_DIR_ENV]) {
     const directory = resolveNativeDirectory(env, platform, arch, version)
-    if (platform === "win32") {
+    if (uiAccess) {
       await installUiAccessWorker(
         join(directory, "qwen-cua-driver-uia.exe"),
         version,
@@ -210,7 +212,7 @@ export async function ensureNativePayload({
 
   const destination = cachedNativeDirectory(target, version, env, platform)
   if (hasCompletedNativePayload(destination, target)) {
-    if (platform === "win32") {
+    if (uiAccess) {
       await installUiAccessWorker(
         join(destination, "qwen-cua-driver-uia.exe"),
         version,
@@ -265,7 +267,7 @@ export async function ensureNativePayload({
       source: archiveResult.url,
       version,
     })
-    if (platform === "win32") {
+    if (uiAccess) {
       await installUiAccessWorker(
         join(destination, "qwen-cua-driver-uia.exe"),
         version,

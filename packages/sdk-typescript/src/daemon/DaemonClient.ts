@@ -97,6 +97,7 @@ import type {
   DaemonStatusReport,
   DaemonUpdateStatus,
   DaemonStatusReportDetail,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
@@ -150,6 +151,7 @@ import type {
   DaemonRuntimeStopOptions,
   DaemonWorkspaceRuntimeStopResult,
   DaemonWorkspaceSkillsStatus,
+  DaemonWorkspaceSkillsSnapshot,
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
@@ -232,6 +234,8 @@ import type {
   SessionSourceUpsertResult,
   SessionSourceRemoveResult,
   DaemonRewindSnapshotInfo,
+  DaemonMessageGroupsSnapshot,
+  DaemonDeleteMessageGroupsResult,
   DaemonRewindResult,
   ForkSessionRequest,
   DaemonSessionHooksStatus,
@@ -263,6 +267,7 @@ import type {
   DaemonWorkspacePermissionsStatus,
   DaemonSettingUpdateResult,
   DaemonModelConfiguration,
+  DaemonModelProviderRuntimeSyncResult,
   DaemonModelConfigurationUpdateResult,
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,
@@ -407,15 +412,18 @@ export interface DaemonClientOptions {
   fetch?: typeof globalThis.fetch;
   /**
    * Per-call request timeout in milliseconds. Applied to short-lived
-   * methods (`health`, `capabilities`, `createOrAttachSession`,
-   * `listWorkspaceSessions`, read-only status routes, `setSessionModel`,
-   * `cancel`, `respondToPermission`) so an unresponsive daemon doesn't block
-   * callers indefinitely. **NOT** applied to `prompt()` — model + tool
-   * turns can take minutes, so prompt explicitly bypasses
-   * `fetchTimeoutMs`; cancellation is via the optional `signal` arg.
+   * methods (`health`, `capabilities`, `listWorkspaceSessions`, read-only
+   * status routes, `setSessionModel`, `cancel`, `respondToPermission`) so an
+   * unresponsive daemon doesn't block callers indefinitely. **NOT** applied
+   * to `prompt()` — model + tool turns can take minutes, so prompt explicitly
+   * bypasses `fetchTimeoutMs`; cancellation is via the optional `signal` arg.
    * Streaming (`subscribeEvents`) is similarly excluded for the
    * long-lived SSE body, though it does apply `fetchTimeoutMs` to the
    * initial connect phase (request → headers received).
+   * Routes that wait on an ACP child handshake (`createOrAttachSession`,
+   * `resetWorktreeSession`, session restore) size themselves from the
+   * daemon's advertised session budget instead, and use this value only when
+   * it is set explicitly.
    * Defaults to 30s. Set to `0` or `Infinity` to disable.
    */
   fetchTimeoutMs?: number;
@@ -3371,6 +3379,11 @@ export class DaemonClient {
         }
         return session;
       },
+      // Creating a session waits for the ACP child handshake: charging it to
+      // the generic request deadline abandons a spawn the daemon still
+      // completes. Floored, unlike a restore, whose budget an operator may
+      // deliberately pin below the spawn cost.
+      this.resolveSessionSpawnTimeoutMs(),
     );
   }
 
@@ -3736,6 +3749,7 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonSession;
       },
+      this.resolveSessionSpawnTimeoutMs(),
     );
   }
 
@@ -3919,6 +3933,26 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /session/:id/tasks');
         }
         return (await res.json()) as DaemonSessionTasksStatus;
+      },
+    );
+  }
+
+  async sessionTaskRuntime(
+    sessionId: string,
+    taskId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionTaskRuntimeStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks/${urlEncode(taskId)}/runtime`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/tasks/:taskId/runtime',
+          );
+        }
+        return (await res.json()) as DaemonSessionTaskRuntimeStatus;
       },
     );
   }
@@ -4229,6 +4263,21 @@ export class DaemonClient {
       }
       return perRequestTimeoutMs > MAX_TIMER_DELAY_MS ? 0 : perRequestTimeoutMs;
     }
+    return this.resolveSessionOperationTimeoutMs();
+  }
+
+  /**
+   * Deadline for a request the daemon answers only after an ACP child
+   * handshake, sized from `limits.sessionRestoreTimeoutMs`. That field is the
+   * restore knob: the daemon derives it from its initialize timeout, but an
+   * operator may pin it lower, so for a spawn it hints at the handshake cost
+   * rather than bounding it. A client that creates before ever reading
+   * capabilities has no advertised value to size from and falls back to
+   * `DEFAULT_SESSION_RESTORE_TIMEOUT_MS`. Restore uses the result as-is;
+   * create and worktree reset go through `resolveSessionSpawnTimeoutMs`, which
+   * floors it.
+   */
+  private resolveSessionOperationTimeoutMs(): number {
     if (this.hasExplicitFetchTimeout) {
       return this.fetchTimeoutMs > MAX_TIMER_DELAY_MS ? 0 : this.fetchTimeoutMs;
     }
@@ -4236,6 +4285,21 @@ export class DaemonClient {
       ? this.cachedSessionRestoreTimeoutMs + SESSION_RESTORE_TIMEOUT_HEADROOM_MS
       : DEFAULT_SESSION_RESTORE_TIMEOUT_MS;
     return derived > MAX_TIMER_DELAY_MS ? 0 : derived;
+  }
+
+  /**
+   * Deadline for the two routes that spawn an ACP child: create and worktree
+   * reset. An operator may pin `--session-restore-timeout-ms` well below the
+   * spawn cost `--initialize-timeout-ms` allows, and that restore knob measures
+   * different work, so floor the derived budget at the generic request deadline
+   * these routes used before: a short restore budget must not shorten a create.
+   * Restore keeps the unfloored budget, where pinning it low is deliberate.
+   */
+  private resolveSessionSpawnTimeoutMs(): number {
+    const timeoutMs = this.resolveSessionOperationTimeoutMs();
+    return timeoutMs === 0 || this.hasExplicitFetchTimeout
+      ? timeoutMs
+      : Math.max(timeoutMs, DEFAULT_FETCH_TIMEOUT_MS);
   }
 
   /**
@@ -4279,6 +4343,48 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonApprovalModeResult;
       },
+    );
+  }
+
+  async getMessageGroups(
+    sessionId: string,
+  ): Promise<DaemonMessageGroupsSnapshot> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/message-groups`,
+      { method: 'GET', headers: this.headers() },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'GET /session/:id/message-groups');
+        return (await res.json()) as DaemonMessageGroupsSnapshot;
+      },
+      undefined,
+      'rest',
+    );
+  }
+
+  async deleteMessageGroups(
+    sessionId: string,
+    snapshot: string,
+    groupIds: string[],
+    clientId?: string,
+  ): Promise<DaemonDeleteMessageGroupsResult> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/messages/delete`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ snapshot, groupIds }),
+      },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/messages/delete',
+          );
+        return (await res.json()) as DaemonDeleteMessageGroupsResult;
+      },
+      undefined,
+      'rest',
     );
   }
 
@@ -7981,6 +8087,17 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  workspaceSkillsSnapshot(
+    signal?: AbortSignal,
+  ): Promise<DaemonWorkspaceSkillsSnapshot> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/config/skills/snapshot',
+      'GET /workspaces/:workspace/config/skills/snapshot',
+      { mode: 'rest', signal },
+    );
+  }
+
   workspaceConfigSkills(): Promise<DaemonWorkspaceSkillsStatus> {
     return this.client.workspaceJsonRequest(
       this.workspaceSelector,
@@ -8733,6 +8850,18 @@ export class WorkspaceDaemonClient {
       {},
       opts?.clientId,
       opts?.timeoutMs ?? MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  reloadModelProviders(opts?: {
+    clientId?: string;
+  }): Promise<DaemonModelProviderRuntimeSyncResult> {
+    return this.post(
+      '/models/reload',
+      'POST /workspaces/:workspace/models/reload',
+      {},
+      opts?.clientId,
+      35_000,
     );
   }
 

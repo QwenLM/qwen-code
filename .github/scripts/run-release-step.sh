@@ -23,7 +23,12 @@ publish_package() {
       echo "::notice::${package_name}@${RELEASE_VERSION} already published; skipping"
       exit 0
     fi
-    corepack pnpm publish --no-git-checks --provenance "${publish_args[@]}"
+    # npm, not pnpm: pnpm's packer writes 0644 for every entry outside `bin`, so
+    # the generated CLI's `vendor/ripgrep/*/rg` lost the exec bit that
+    # copy_bundle_assets.js restores on purpose — a fresh install then could not
+    # spawn the bundled ripgrep at all (#12668). npm keeps the working-tree mode.
+    # Only this generated package needs it; the workspace loop stays on pnpm.
+    npm publish --provenance "${publish_args[@]}"
   )
 }
 
@@ -165,6 +170,11 @@ case "${step}" in
       exit 1
     }
     npm run prepare:package
+    # Last check before the publish step: the tarball the registry will serve
+    # must carry the exec bit on every spawned vendored binary (#12668). The gate
+    # rides the workflow-pinned checkout, not the selected release ref, which may
+    # predate it; `dist` still resolves against the release ref's package.
+    node .release-workflow/scripts/check-release-tarball-exec-bits.mjs dist
     ;;
 
   build-archives)

@@ -369,8 +369,8 @@ function renderPerCommitBody({ analysis, occurrence }) {
   return [
     `<!-- ${LEGACY_MARKER_PREFIX}${occurrence.sha} -->`,
     '',
-    'A main-branch CI run failed on `main` before any test result was',
-    'reported, so this issue is tracked per commit.',
+    'A CI run failed before any test result was reported, so this issue is',
+    'tracked per commit.',
     '',
     `- Workflow: ${analysis.workflow}`,
     ...(analysis.failedJobs.length
@@ -399,6 +399,41 @@ function cappedTestLines(tests) {
   if (tests.length > MAX_BODY_TESTS)
     lines.push(`- …and ${tests.length - MAX_BODY_TESTS} more`);
   return lines;
+}
+
+export function renderFailureComment({ analysis, occurrence, jobs = [] }) {
+  const code = (text) => `\`${String(text).replace(/[`\r\n]/g, ' ')}\``;
+  return [
+    `<!-- qwen-managed-agent-ci-failure:${occurrence.runId} -->`,
+    `### ${code(analysis.workflow)} failed`,
+    '',
+    `[Run ${occurrence.runId}](${occurrence.runUrl}) · commit ${code(occurrence.sha.slice(0, 12))}`,
+    '',
+    ...jobs
+      .filter((job) => job.conclusion === 'failure')
+      .map((job) => {
+        const steps = (job.steps ?? [])
+          .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))
+          .map((step) => code(step.name));
+        return `- [${code(job.name)}](${job.html_url})${steps.length ? `: ${steps.join(', ')}` : ''}`;
+      }),
+    '',
+    ...(analysis.tests.length
+      ? [
+          '**Failing tests**',
+          '',
+          ...analysis.tests
+            .slice(0, MAX_BODY_TESTS)
+            .map((test) => `- ${code(test.id)}`),
+          ...(analysis.tests.length > MAX_BODY_TESTS
+            ? [`- …and ${analysis.tests.length - MAX_BODY_TESTS} more`]
+            : []),
+        ]
+      : [
+          'No test identifier was available; follow the run link for job logs and annotations.',
+        ]),
+    '',
+  ].join('\n');
 }
 
 /**
@@ -431,7 +466,7 @@ export function renderIssueBody({
       `<!-- ${SIGNATURE_MARKER_PREFIX}${analysis.signature} -->`,
       ...bodyMarkers.map((marker) => `<!-- ${marker} -->`),
       '',
-      `A main-branch \`${analysis.workflow}\` run failed on \`main\`.`,
+      `A \`${analysis.workflow}\` run failed.`,
       // The failing tests name what broke; the failed jobs name which lane
       // broke — a guard's diagnosis (the colliding files) lives only in its
       // job log.
@@ -541,10 +576,38 @@ function readFailedJobs(path) {
     return [];
   }
 }
+/**
+ * The workflow's jobs listing can be missing or truncated (the redirect
+ * empties it when `gh api` dies before writing), and the comment must degrade
+ * the same way the issue path does — name no job — instead of failing the
+ * analyze job and losing both reports.
+ */
+function readJobs(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')).jobs ?? [];
+  } catch {
+    return [];
+  }
+}
 
 export function runCli(argv) {
   const [command, ...rest] = argv;
   const { options, positional } = parseArgs(rest);
+
+  if (command === 'comment') {
+    process.stdout.write(
+      renderFailureComment({
+        analysis: JSON.parse(readFileSync(options.analysis, 'utf8')),
+        occurrence: {
+          sha: options.sha,
+          runId: options['run-id'],
+          runUrl: options['run-url'],
+        },
+        jobs: readJobs(options['jobs-json']),
+      }),
+    );
+    return;
+  }
 
   if (command === 'analyze') {
     const logTexts = positional.map((file) => readFileSync(file, 'utf8'));

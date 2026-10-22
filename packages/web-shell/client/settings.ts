@@ -51,6 +51,7 @@ const SETTING_KEYS = {
   'setting:model-proposed-goals': 'goals.modelProposed',
   'setting:arena-artifacts': 'agents.arena.preserveArtifacts',
   'setting:session-workflow': 'experimental.sessionWorkflow',
+  'setting:generated-ui': 'experimental.generatedUi',
   'setting:scheduled-tasks': 'experimental.cron',
   'setting:session-writer-lease': 'experimental.sessionWriterLease',
   'setting:agent-team': 'experimental.agentTeam',

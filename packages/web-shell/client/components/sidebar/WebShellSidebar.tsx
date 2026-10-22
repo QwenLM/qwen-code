@@ -10,6 +10,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactElement,
   type ReactNode,
+  type RefObject,
 } from 'react';
 import {
   useActions,
@@ -125,7 +126,7 @@ import {
 } from './sessionSearch';
 import { useSessionContentSearch } from './useSessionContentSearch';
 import { useLivePresence } from '../../live/live-presence';
-import { SessionPrBadge } from '../SessionPrBadge';
+import { SessionPrBadge, openableSessionPrs } from '../SessionPrBadge';
 import {
   hasWorkspaceExpansionPreference,
   migrateWorkspaceExpansionPreference,
@@ -522,6 +523,10 @@ interface WebShellSidebarProps {
   /** Replace daemon history with navigation owned by an external session provider. */
   sessionContent?: ReactNode;
   sessionHeader?: ReactNode;
+  managedWorkspaces?: ReactNode;
+  onSearchQueryChange?: (query: string) => void;
+  /** Selection styling only; the attached session still owns its actions. */
+  currentSessionActive?: boolean;
   /** Whether to show the Tasks/Channels session-source switch. Defaults to true. */
   showSessionSourceSwitch?: boolean;
   /** Show Live conversations and, in rail layout, the Live entry. Defaults to false. */
@@ -815,6 +820,7 @@ function SidebarSessionSurface({
   open,
   onOpenChange,
   isCloseBlocked,
+  home,
   children: defaultChildren,
   content,
   header,
@@ -827,6 +833,11 @@ function SidebarSessionSurface({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   isCloseBlocked: () => boolean;
+  home?: {
+    anchor: RefObject<HTMLButtonElement | null>;
+    hidden: boolean;
+    section: 'home' | 'channels' | 'live';
+  };
   children: ReactNode;
   content?: ReactNode;
   header?: ReactNode;
@@ -843,6 +854,8 @@ function SidebarSessionSurface({
   const focusInsideSurfaceRef = useRef(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const anchorRef = home?.anchor ?? triggerRef;
+  if (home && open) pointerOpenRef.current = true;
   const changeOpen = useCallback(
     (nextOpen: boolean) => {
       if (!nextOpen && isCloseBlocked()) return;
@@ -885,7 +898,7 @@ function SidebarSessionSurface({
         (event.composedPath()[0] as Node | undefined) ?? event.target;
       const insideSurface =
         target instanceof Node &&
-        (triggerRef.current?.contains(target) ||
+        (anchorRef.current?.contains(target) ||
           contentRef.current?.contains(target));
       const insideNestedOverlay =
         target instanceof Element &&
@@ -903,77 +916,105 @@ function SidebarSessionSurface({
       document.removeEventListener('pointermove', handlePointerMove);
       window.clearTimeout(closeTimerRef.current);
     };
-  }, [cancelClose, closeAfterDelay, collapsed, open]);
+  }, [anchorRef, cancelClose, closeAfterDelay, collapsed, open]);
 
-  if (!collapsed) {
-    return <div className={styles.sessionList}>{children}</div>;
+  const surfaceContent = home ? (
+    <div
+      className={styles.homeColumn}
+      hidden={home.hidden && !open}
+      data-web-shell-home-column
+      data-web-shell-sidebar-section={home.section}
+    >
+      {children}
+    </div>
+  ) : (
+    children
+  );
+  if (!collapsed || (home && !open)) {
+    return home ? (
+      surfaceContent
+    ) : (
+      <div className={styles.sessionList}>{children}</div>
+    );
   }
 
   return (
-    <div className={styles.sessionList}>
+    <div className={home ? styles.homePopoverAnchor : styles.sessionList}>
       <Popover open={open} onOpenChange={changeOpen}>
-        <PopoverTrigger asChild>
-          <button
-            ref={triggerRef}
-            className={styles.pluginButton}
-            type="button"
-            aria-label={statusLabel ? `${label}: ${statusLabel}` : label}
-            data-web-shell-collapsed-session-trigger
-            onPointerEnter={() => {
-              // Only an open initiated by the pointer uses hover semantics;
-              // a graze over a keyboard-opened switcher must not suppress
-              // focus restoration when it later closes.
-              if (!open) pointerOpenRef.current = true;
-              cancelClose();
-              changeOpen(true);
-            }}
-            onPointerLeave={closeAfterDelay}
-            onPointerDown={() => {
-              if (!open) pointerOpenRef.current = true;
-            }}
-            onClick={(event) => {
-              event.preventDefault();
-              cancelClose();
-              changeOpen(true);
-            }}
-            onKeyDown={() => {
-              pointerOpenRef.current = false;
-            }}
-          >
-            <span className={styles.navIcon}>
-              <FolderClosedIcon size={16} strokeWidth={1.2} />
-              {status && (
-                <span
-                  className={cx(
-                    styles.collapsedSessionStatusDot,
-                    status === 'approval' &&
-                      styles.collapsedSessionStatusApproval,
-                    status === 'question' &&
-                      styles.collapsedSessionStatusQuestion,
-                  )}
-                  data-web-shell-collapsed-session-status={status}
-                  aria-hidden="true"
-                />
-              )}
-            </span>
-          </button>
-        </PopoverTrigger>
+        {home ? (
+          home.anchor.current && (
+            <PopoverAnchor virtualRef={{ current: home.anchor.current }} />
+          )
+        ) : (
+          <PopoverTrigger asChild>
+            <button
+              ref={triggerRef}
+              className={styles.pluginButton}
+              type="button"
+              aria-label={statusLabel ? `${label}: ${statusLabel}` : label}
+              data-web-shell-collapsed-session-trigger
+              onPointerEnter={() => {
+                // Only an open initiated by the pointer uses hover semantics;
+                // a graze over a keyboard-opened switcher must not suppress
+                // focus restoration when it later closes.
+                if (!open) pointerOpenRef.current = true;
+                cancelClose();
+                changeOpen(true);
+              }}
+              onPointerLeave={closeAfterDelay}
+              onPointerDown={() => {
+                if (!open) pointerOpenRef.current = true;
+              }}
+              onClick={(event) => {
+                event.preventDefault();
+                cancelClose();
+                changeOpen(true);
+              }}
+              onKeyDown={() => {
+                pointerOpenRef.current = false;
+              }}
+            >
+              <span className={styles.navIcon}>
+                <FolderClosedIcon size={16} strokeWidth={1.2} />
+                {status && (
+                  <span
+                    className={cx(
+                      styles.collapsedSessionStatusDot,
+                      status === 'approval' &&
+                        styles.collapsedSessionStatusApproval,
+                      status === 'question' &&
+                        styles.collapsedSessionStatusQuestion,
+                    )}
+                    data-web-shell-collapsed-session-status={status}
+                    aria-hidden="true"
+                  />
+                )}
+              </span>
+            </button>
+          </PopoverTrigger>
+        )}
         <PopoverContent
           ref={contentRef}
           side="right"
           align="start"
-          sideOffset={8}
+          sideOffset={home ? 16 : 8}
           collisionPadding={8}
           onFocus={() => {
             focusInsideSurfaceRef.current = true;
           }}
-          className={styles.collapsedSessionPopover}
+          className={
+            home
+              ? cx(styles.sidebar, styles.railLayout, styles.homePopover)
+              : styles.collapsedSessionPopover
+          }
           style={
             {
               '--collapsed-session-popover-width': `${width}px`,
             } as CSSProperties
           }
-          data-web-shell-collapsed-session-switcher
+          aria-label={home ? label : undefined}
+          data-web-shell-home-popover={home ? '' : undefined}
+          data-web-shell-collapsed-session-switcher={home ? undefined : ''}
           onOpenAutoFocus={(event) => {
             if (pointerOpenRef.current) event.preventDefault();
           }}
@@ -993,6 +1034,9 @@ function SidebarSessionSurface({
           }}
           onEscapeKeyDown={() => {
             interactionOpenRef.current = false;
+            if (home && focusInsideSurfaceRef.current) {
+              home.anchor.current?.focus();
+            }
           }}
           onPointerEnter={cancelClose}
           onPointerLeave={closeAfterDelay}
@@ -1021,7 +1065,7 @@ function SidebarSessionSurface({
             }
           }}
         >
-          {children}
+          {surfaceContent}
         </PopoverContent>
       </Popover>
     </div>
@@ -1075,6 +1119,9 @@ export function WebShellSidebar({
   primaryNav: primaryNavOptions,
   sessionContent,
   sessionHeader,
+  managedWorkspaces,
+  onSearchQueryChange,
+  currentSessionActive = true,
   showSessionSourceSwitch = true,
   showLive = false,
   hideProjectHeader,
@@ -1088,6 +1135,8 @@ export function WebShellSidebar({
   onStandaloneNotice,
 }: WebShellSidebarProps) {
   const [moreOpen, setMoreOpen] = useState(false);
+  const [homePreviewOpen, setHomePreviewOpen] = useState(false);
+  const homeTriggerRef = useRef<HTMLButtonElement>(null);
   const [updateSlot, setUpdateSlot] = useState<HTMLDivElement | null>(null);
   const [desktopRelaySlot, setDesktopRelaySlot] =
     useState<HTMLDivElement | null>(null);
@@ -1099,6 +1148,7 @@ export function WebShellSidebar({
   // returns with a phantom menu the user never reopened.
   useEffect(() => {
     setMoreOpen(false);
+    setHomePreviewOpen(false);
   }, [mobileOpen, collapsed, activePage, layout]);
   const railLayout = layout === 'rail';
   const [navigationHint, setNavigationHint] =
@@ -1127,6 +1177,7 @@ export function WebShellSidebar({
   ) => {
     if (railLayout) {
       setMoreOpen(false);
+      setHomePreviewOpen(false);
       if (restoresColumn && collapsed) onCollapsedChange(false);
     }
     open?.();
@@ -1215,14 +1266,16 @@ export function WebShellSidebar({
     showSessionSourceSwitch &&
     sourceMetadataEnabled &&
     primaryNavItems.has('channels');
-  const channelView = channelNavigationEnabled && activePage === 'channels';
+  const channelView =
+    channelNavigationEnabled && activePage === 'channels' && !homePreviewOpen;
   const liveNavigationEnabled =
     railLayout &&
     projectFeaturesEnabled &&
     showLive &&
     primaryNavItems.has('live') &&
     Boolean(onOpenLive);
-  const liveView = liveNavigationEnabled && activePage === 'live';
+  const liveView =
+    liveNavigationEnabled && activePage === 'live' && !homePreviewOpen;
   const sectionView = channelView || liveView;
   const homeHidden =
     railLayout &&
@@ -1700,6 +1753,9 @@ export function WebShellSidebar({
     };
   }, []);
   const [searchQuery, setSearchQuery] = useState('');
+  useEffect(() => {
+    onSearchQueryChange?.(searchQuery);
+  }, [onSearchQueryChange, searchQuery]);
   // Order-insensitive membership key: poll-driven catalog updates change
   // it only when the session-id set actually changes, so externally
   // deleted/archived sessions invalidate content-search hits the same way
@@ -3164,7 +3220,9 @@ export function WebShellSidebar({
 
   useEffect(() => {
     if (railLayout) {
-      if (homeHidden) {
+      if (homeHidden && !homePreviewOpen) {
+        setSearchOpen(false);
+        setSearchQuery('');
         setCollapsedSessionsOpen(false);
         cancelRename();
         setGroupMenu(null);
@@ -3205,6 +3263,7 @@ export function WebShellSidebar({
     collapsedSessionsOpen,
     railLayout,
     homeHidden,
+    homePreviewOpen,
     liveView,
   ]);
 
@@ -4636,6 +4695,11 @@ export function WebShellSidebar({
         </span>
       ) : null;
       const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
+      // The badge is a click target of its own right before the meta slot, so
+      // its row keeps the slot at the hover actions' width instead of growing
+      // it on hover — growing slid `#N` left and put Pin where it had been.
+      const reserveActionsWidth =
+        openableSessionPrs(session.prs ?? []).length > 0;
       const withDetails = (row: ReactElement) => (
         <Fragment key={sessionIdentity}>
           {sessionActionItems.has('details') ? (
@@ -4718,11 +4782,16 @@ export function WebShellSidebar({
             )}
             {prBadge}
             <div
-              className={styles.sessionMetaSlot}
+              className={cx(
+                styles.sessionMetaSlot,
+                reserveActionsWidth && styles.sessionMetaSlotReserved,
+              )}
               style={
-                hasArchivedActions
-                  ? ({ '--session-actions-width': '26px' } as CSSProperties)
-                  : undefined
+                {
+                  '--session-actions-width': hasArchivedActions
+                    ? '26px'
+                    : '0px',
+                } as CSSProperties
               }
             >
               {scheduledTaskMarker}
@@ -4883,7 +4952,7 @@ export function WebShellSidebar({
         <div
           className={cx(
             styles.sessionRow,
-            isCurrent && styles.currentSession,
+            currentSessionActive && isCurrent && styles.currentSession,
             session.isPinned && styles.pinnedSession,
             running && !backgroundRunning && styles.runningSession,
             busy && styles.busySession,
@@ -4894,7 +4963,7 @@ export function WebShellSidebar({
           onFocus={(event) => measureSessionTitleScroll(event.currentTarget)}
           role="button"
           tabIndex={0}
-          aria-current={isCurrent ? 'page' : undefined}
+          aria-current={currentSessionActive && isCurrent ? 'page' : undefined}
           onClick={() =>
             standalone
               ? standalone.onOpen()
@@ -4998,13 +5067,16 @@ export function WebShellSidebar({
               </span>
               {prBadge}
               <div
-                className={styles.sessionMetaSlot}
+                className={cx(
+                  styles.sessionMetaSlot,
+                  reserveActionsWidth && styles.sessionMetaSlotReserved,
+                )}
+                // Always set, so a row without actions does not grow to the
+                // stylesheet's fallback width on hover.
                 style={
-                  sessionActionCount > 0
-                    ? ({
-                        '--session-actions-width': `${sessionActionCount * 26}px`,
-                      } as CSSProperties)
-                    : undefined
+                  {
+                    '--session-actions-width': `${sessionActionCount * 26}px`,
+                  } as CSSProperties
                 }
               >
                 {scheduledTaskMarker}
@@ -5280,6 +5352,7 @@ export function WebShellSidebar({
       handleUnarchive,
       isCurrentSession,
       openGroupMenuFromAnchor,
+      currentSessionActive,
       saveRename,
       searchQuery,
       sessionActionItems,
@@ -6348,7 +6421,12 @@ export function WebShellSidebar({
                 if (event.pointerType !== 'mouse') return;
                 const button = (event.target as Element).closest('button');
                 setNavigationHint(
-                  !moreOpen && event.currentTarget.contains(button)
+                  !moreOpen &&
+                    !(
+                      collapsed &&
+                      button?.hasAttribute('data-web-shell-home-trigger')
+                    ) &&
+                    event.currentTarget.contains(button)
                     ? button
                     : null,
                 );
@@ -6365,7 +6443,12 @@ export function WebShellSidebar({
               onFocusCapture={(event) => {
                 const button = event.target.closest('button');
                 setNavigationHint(
-                  !moreOpen && event.currentTarget.contains(button)
+                  !moreOpen &&
+                    !(
+                      collapsed &&
+                      button?.hasAttribute('data-web-shell-home-trigger')
+                    ) &&
+                    event.currentTarget.contains(button)
                     ? button
                     : null,
                 );
@@ -6386,9 +6469,21 @@ export function WebShellSidebar({
                       : t('sidebar.home')
                   }
                   aria-current={activePage === 'home' ? 'page' : undefined}
-                  aria-expanded={!homeHidden}
+                  aria-expanded={!homeHidden || homePreviewOpen}
+                  aria-haspopup={collapsed ? 'dialog' : undefined}
                   onClick={() => openNavigation(onOpenHome, true)}
                   data-web-shell-home-trigger
+                  ref={homeTriggerRef}
+                  onPointerEnter={(event) => {
+                    if (
+                      event.pointerType === 'mouse' &&
+                      collapsed &&
+                      !mobileOpen
+                    ) {
+                      setMoreOpen(false);
+                      setHomePreviewOpen(true);
+                    }
+                  }}
                 >
                   <span className={styles.navIcon}>
                     <HouseIcon size={16} strokeWidth={1.2} />
@@ -6493,13 +6588,18 @@ export function WebShellSidebar({
             </PopoverContent>
           </Popover>
         )}
-        <div
-          className={styles.homeColumn}
-          hidden={homeHidden}
-          data-web-shell-home-column
-          data-web-shell-sidebar-section={
-            liveView ? 'live' : channelView ? 'channels' : 'home'
-          }
+        <SidebarSessionSurface
+          collapsed={railLayout && collapsed && !mobileOpen}
+          label={t('sidebar.home')}
+          width={sidebarWidth - SIDEBAR_RAIL_WIDTH}
+          open={homePreviewOpen}
+          onOpenChange={setHomePreviewOpen}
+          isCloseBlocked={isCollapsedCloseBlocked}
+          home={{
+            anchor: homeTriggerRef,
+            hidden: homeHidden,
+            section: liveView ? 'live' : channelView ? 'channels' : 'home',
+          }}
         >
           {sectionView && (
             <div className={styles.sectionHeader}>
@@ -6534,7 +6634,7 @@ export function WebShellSidebar({
                         <IconQwenLogo />
                       ))}
                   </span>
-                  {(!collapsed || mobileOpen) && (
+                  {(!collapsed || mobileOpen || homePreviewOpen) && (
                     <span className={styles.brandName}>{brandName}</span>
                   )}
                 </>
@@ -6559,7 +6659,20 @@ export function WebShellSidebar({
                 <span className={styles.navIcon}>
                   <SquarePenIcon size={16} strokeWidth={1.2} />
                 </span>
-                {!collapsed && <span>{t('sidebar.newTask')}</span>}
+                {(!collapsed || homePreviewOpen) && (
+                  <span>
+                    {t('sidebar.newTask')}
+                    {managedWorkspaces !== undefined && (
+                      <span className="ml-2 text-xs text-muted-foreground">
+                        {t(
+                          currentSessionActive
+                            ? 'managed.localMode'
+                            : 'managed.managedMode',
+                        )}
+                      </span>
+                    )}
+                  </span>
+                )}
               </button>
             </div>
           )}
@@ -6781,6 +6894,7 @@ export function WebShellSidebar({
                   >
                     <span>{t('sidebar.project')}</span>
                     {workspaceOverviewEnabled &&
+                      managedWorkspaces === undefined &&
                       projectWorkspaces.length > 1 && (
                         <span
                           className={styles.projectsHeaderCount}
@@ -6881,6 +6995,7 @@ export function WebShellSidebar({
                   {!hideProjectHeader && <WorkspaceHostHeading />}
                   <div className={styles.workspacePicker}>
                     <div className={styles.workspaceList}>
+                      {!channelView && managedWorkspaces}
                       {standaloneSessionsVisible &&
                         onLoadStandaloneSession &&
                         onStandaloneNotice && (
@@ -6929,6 +7044,11 @@ export function WebShellSidebar({
                         <Fragment key={ws.id}>
                           <WorkspaceSection
                             workspace={ws}
+                            executionLabel={
+                              managedWorkspaces !== undefined
+                                ? t('managed.localMode')
+                                : undefined
+                            }
                             remote={!isPageOriginDaemon(workspace.baseUrl)}
                             renderHeader={
                               lockedWorkspaceCwd &&
@@ -7327,7 +7447,7 @@ export function WebShellSidebar({
             footer.render && (
               <div className={styles.homeFooter}>{footer.render()}</div>
             )}
-        </div>
+        </SidebarSessionSurface>
         {!railLayout && footerContent}
         <div
           className={styles.resizeHandle}

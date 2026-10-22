@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.IsolatedManagedSchemaMySqlTestDatabase;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;

@@ -3,26 +3,26 @@ package com.alibaba.qwen.code.managedagent;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.ActionResponseCoordinator;
-import com.alibaba.qwen.code.managedagent.service.ManagedActionService;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
-import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.session.ActionResponseCoordinator;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.session.ManagedActionService;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -115,7 +115,7 @@ class ManagedActionsTest {
     static class Configuration {
         @Bean @Primary
         ManagedAgentStore actionStore(JdbcTemplate jdbc, ObjectMapper mapper, ManagedWorkspaceRegistry registry,
-                Clock clock, com.alibaba.qwen.code.managedagent.store.CommittedEventPublisher publisher) {
+                Clock clock, com.alibaba.qwen.code.managedagent.event.CommittedEventPublisher publisher) {
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
             return new ManagedAgentStore(jdbc, mapper, clock, publisher, registry, properties);
@@ -276,7 +276,7 @@ class ManagedActionsTest {
             local.options.put("v", 2);
             local.options.set("inputRef", foreign.options.path("inputRef").deepCopy());
             assertThatThrownBy(() -> local.change("requested", null))
-                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode())
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode())
                             .isEqualTo("managed_session_resource_missing"));
             assertThat(actions.find(tenant, session, local.id)).isEmpty();
             ActionJournal committed = new ActionJournal(local, 100, 1000)
@@ -369,7 +369,7 @@ class ManagedActionsTest {
                 }
             }
             assertThatThrownBy(() -> journal.change("requested", null), "invalid inputRef (%s)", fault)
-                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode())
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode())
                             .isEqualTo("danglingRef".equals(fault)
                                     ? "managed_session_resource_missing" : "managed_session_action_rejected"));
             assertThat(actions.find(tenant, session, journal.id)).isEmpty();
@@ -484,7 +484,7 @@ class ManagedActionsTest {
                                             "extension-writer-token-0123456789",
                                             invalid))
                     .isInstanceOfSatisfying(
-                            ApiException.class,
+                            ManagedAgentException.class,
                             error -> assertThat(error.getCode()).isEqualTo(expected));
             assertThat(actions.find(tenant, session, action.id)).isEmpty();
         }
@@ -511,7 +511,7 @@ class ManagedActionsTest {
                                 .put("policyRevision", "hosted-tool-approval/2"))) {
             assertThatThrownBy(() -> journal.change("decided", response))
                     .isInstanceOfSatisfying(
-                            ApiException.class,
+                            ManagedAgentException.class,
                             error ->
                                     assertThat(error.getCode())
                                             .isEqualTo("managed_session_action_rejected"));
@@ -916,15 +916,36 @@ class ManagedActionsTest {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         ManagedAgentProperties properties = new ManagedAgentProperties();
-        properties.getDispatch().setLeaseDuration(Duration.ofMillis(300));
-        // 400ms > leaseDuration/3, so the coordinator's clamp (min → 100ms)
-        // is what picks the period. Inverting the clamp (max → 400ms) starves
-        // the 300ms lease and the competing replica must win it.
-        properties.getDispatch().setLeaseRenewInterval(Duration.ofMillis(400));
+        Duration lease = Duration.ofSeconds(3);
+        properties.getDispatch().setLeaseDuration(lease);
+        // 4s > leaseDuration/3, so the coordinator's clamp (min → 1s) is
+        // what picks the period. renewInterval > leaseDuration is deliberate
+        // (asserted below): only then does inverting the clamp (max → 4s)
+        // starve the lease — the first renewal comes after the lease has
+        // lapsed and can no longer be extended, so the competing replica must
+        // win it. HarnessCoordinator rejects this range (renew must be
+        // <= lease/2); ActionResponseCoordinator clamps instead, and this
+        // test pins the clamp. Two seconds of renewal slack per period —
+        // matching current `main` — keep scheduler jitter on a loaded CI
+        // runner from lapsing the lease mid-hold (#14476).
+        properties.getDispatch().setLeaseRenewInterval(Duration.ofSeconds(4));
+        // Deriving the hold as lease + 6 clamped renewal periods keeps "hold
+        // outlasts the lease" structural under rescale and leaves six renewal
+        // ticks past the lease deadline, so a renewal loop that stops after
+        // <= 5 successful renewals still loses the claim; at 3 periods only
+        // <= 3 was caught, against 7 for the literal hold this replaced.
+        // The release latch and the hold await scale with the hold, so
+        // widening the lease cannot strand them on a stale literal ceiling.
+        long period = Math.max(1, Math.min(
+                properties.getDispatch().getLeaseRenewInterval().toMillis(),
+                lease.toMillis() / 3));
+        long holdMillis = lease.toMillis() + 6 * period;
+        long holdBudgetMillis = holdMillis + 5_000;
         AtomicInteger calls = new AtomicInteger();
         ActionResponseCoordinator first = null;
         ActionResponseCoordinator sibling = null;
         try {
+            assertThat(properties.getDispatch().getLeaseRenewInterval()).isGreaterThan(lease);
             String tenant = tenant();
             String session = session(tenant);
             ActionJournal journal = action(tenant, session, System.currentTimeMillis(), 9007199254740991L);
@@ -945,7 +966,7 @@ class ManagedActionsTest {
                     }
                     calls.incrementAndGet();
                     entered.countDown();
-                    if (!release.await(5, TimeUnit.SECONDS)) {
+                    if (!release.await(holdBudgetMillis, TimeUnit.MILLISECONDS)) {
                         throw new IllegalStateException("held approval was not released");
                     }
                     journal.change("decided", call.getArgument(3));
@@ -955,10 +976,14 @@ class ManagedActionsTest {
             });
             first = new ActionResponseCoordinator(sessions, actions, available, executor, Clock.systemUTC(), properties);
             sibling = new ActionResponseCoordinator(sessions, actions, available, executor, Clock.systemUTC(), properties);
-            long started = System.currentTimeMillis();
             first.dispatch(tenant, session, operation);
-            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
-            await().atMost(Duration.ofSeconds(5)).until(() -> System.currentTimeMillis() - started >= 1000);
+            assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+            // The claim precedes resolveAction's entry, so anchoring the hold
+            // to `entered` guarantees the delivery is held past the lease
+            // deadline however long dispatch and claiming took.
+            long heldSince = System.currentTimeMillis();
+            await().atMost(Duration.ofMillis(holdBudgetMillis))
+                    .until(() -> System.currentTimeMillis() - heldSince >= holdMillis);
             var claimed = sessions.findOperation(tenant, session, operation).orElseThrow();
             assertThat(claimed.claimGeneration()).isEqualTo(1);
             assertThat(sessions.claimOperation(tenant, session, operation, "competing-replica", Duration.ofSeconds(1)))
