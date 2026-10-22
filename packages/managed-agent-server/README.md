@@ -714,6 +714,16 @@ no dispatched Shell is automatically replayed. Keep the opt-in off until the
 deployment passes #12904, #13010 and public FG6f physical failure gates. See
 [the complete design](../../docs/design/public-hosted-shell-admission.md).
 
+### Public child agents
+
+`QWEN_MANAGED_AGENT_WORKSPACE_CHILD_AGENTS_ENABLED` defaults to true and enables public `agent` delegation for qualified new built-in `qwen-code` Workspace Sessions. Set it to false to disable new delegation. Admission requires public Shell, a durable LOCAL process Broker, Session isolation, and a Harness advertising `public-child-agents/1`, approval selection and Shell lifecycle v2. Other deployment profiles continue to start without public child admission. Existing Sessions remain opted out. SSH, resident/CSI, custom definitions, Team, Workflow, messaging, nesting and isolated child Workspaces are excluded from this first release.
+
+Children share the parent's directory, definition and owner, start without its conversation, and keep the effective approval mode, actual model route and Skills captured at launch. Later parent policy changes apply only to new children. Default execution is background; explicit foreground waits retain the existing mount restrictions. Each root admits at most four active children and 64 launches over its lifetime.
+
+The optional `child_agents` / WebShell `childAgents` capability identifies orchestration support. Turning the deployment switch off blocks new launches while admitted tasks can still recover, receive approvals, stop and deliver results. Query pending approvals with `include_children=true` or WebShell `includeChildren: true`; answer each Action on its actual owner Session. Aggregation grants no new response permission.
+
+Stopping a parent Turn durably stops new launches and requests cancellation for active children from that prompt only. A stop request is distinct from physical termination. Late results remain available through the task's `childSessionId` transcript without automatically waking cancelled work. Public children reject independent new Turns and policy/model changes. See the [bilingual design](../../docs/design/2026-10-22-managed-public-child-agents.md) for recovery and rollout acceptance.
+
 ### Initial Workspace Turn (G0)
 
 `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true` opts in to an initial
@@ -834,9 +844,7 @@ Public Shell close, archive, unarchive and delete stay unavailable, including
 protocol-0. Archive, delete and unarchive of non-Shell Sessions follow their
 separate retention capabilities after reliable Workspace close. Controlled cwd
 changes ship below (W2); broad Workspace capability advertisement remains
-gated. Public foreground Shell does not publish the child agent tool, and it
-has no Session message funnel because that funnel shares the child
-orchestrator's write chain.
+gated. Qualified new public Shell Sessions expose `agent` under the public-child admission above; public Session messaging remains unavailable.
 Background Shell, Monitor and complete in-flight recovery remain separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.
@@ -962,8 +970,20 @@ Local-process workers run model-directed tools, so the Broker starts them
 without any environment variable whose name begins, in any letter case, with
 `QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `SPRING_` or `OSS_`. Every other
 variable of the server process still reaches the worker and its tools. Keep
-unrelated secrets out of the service environment. This does not isolate files:
-a worker runs as the service account and can read whatever that account can.
+unrelated secrets out of the service environment. A worker that uses the
+artifact tool's `oss` publisher therefore needs its credentials under the
+`ALIBABA_CLOUD_ACCESS_KEY_ID`, `ALIBABA_CLOUD_ACCESS_KEY_SECRET` and
+`ALIBABA_CLOUD_SECURITY_TOKEN` names, which that publisher also accepts. Those
+names are not filtered: they reach every worker the Broker starts and every
+model-directed tool it runs. The Broker copies its environment into a worker
+once, at launch, and never refreshes it; a Broker restart does not refresh a
+durable worker that it adopts by pid. Give those names a long-lived RAM
+identity that can only write the artifact bucket and prefix, never the account
+key that the `OSS_` filter withholds. A short-lived STS token needs a rotation
+path that re-execs the Broker before it expires, and even then an adopted
+durable worker keeps its launch-time credentials. One credential set serves
+every tenant and workspace on the host. This does not isolate files: a worker
+runs as the service account and can read whatever that account can.
 
 After a credential-key rotation, keep each prior key in
 `previous-credential-keys` until no persisted Runtime binding references its
@@ -1206,7 +1226,7 @@ local workloads. The W0e recovery above handles trusted host reboot; it
 does not provide physical isolation or recovery after worker-only death.
 Public bound Turn admission is limited to the initial Workspace Turn described
 in G0 above (file tools, or mandatory-approval foreground Shell under the Shell
-opt-in; the public Shell tool list does not include the child agent tool) and
+opt-in; the public-child admission above controls `agent`) and
 later Turns submitted by any caller holding OPERATOR on the Workspace under the
 same opt-in while the Session's creator-keyed execution facts hold (the WebShell
 adapter's per-caller `workspaceTurns` capability flag mirrors that same rule;

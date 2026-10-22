@@ -15,10 +15,15 @@ import {
 } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import type { HostedModelRequest } from './hosted-model-recovery.js';
 import type { HostedModelSelection } from './hosted-model-selection.js';
+import type { PublicChildModelRoute } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import { HOSTED_MODEL_REQUEST_BYTES } from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
 
 import type { Content, Part } from '@google/genai';
 import { createHash, randomUUID } from 'node:crypto';
+import {
+  runWithRuntimeContentGenerator,
+  type RuntimeContentGeneratorView,
+} from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import { DEFAULT_TOOL_OUTPUT_BATCH_BUDGET } from '@qwen-code/qwen-code-core/config/config.js';
@@ -187,6 +192,53 @@ export async function applyHostedModelPin(
   }
 }
 
+export async function applyHostedPublicChildModelPin(
+  config: Awaited<ReturnType<typeof loadCliConfig>>,
+  model: { id: string } | undefined,
+  route: PublicChildModelRoute,
+): Promise<void> {
+  try {
+    const initial = config.getModelsConfig().getGenerationConfig();
+    const sameDefault =
+      config.getModel() === model?.id &&
+      config.getModelsConfig().getCurrentAuthType() === route.authType &&
+      createHash('sha256')
+        .update(initial.baseUrl ?? '')
+        .digest('hex') === route.endpointDigest;
+    if (!sameDefault) {
+      const matches = config.getAllConfiguredModels().filter(
+        (entry) =>
+          !entry.isRuntimeModel &&
+          entry.id === model?.id &&
+          entry.authType === route.authType &&
+          createHash('sha256')
+            .update(entry.baseUrl ?? '')
+            .digest('hex') === route.endpointDigest,
+      );
+      if (matches.length !== 1) throw new HostedModelUnavailableError();
+      const selected = matches[0]!;
+      await config.switchModel(selected.authType, selected.id, {
+        requireCachedCredentials: true,
+        ...(selected.registryBaseUrl
+          ? { baseUrl: selected.registryBaseUrl }
+          : {}),
+      });
+    }
+  } catch (cause) {
+    try {
+      await config.shutdown({
+        shutdownTelemetry: false,
+        strictResourceCleanup: true,
+      });
+    } catch (cleanupCause) {
+      writeStderrLineSafe(
+        `qwen serve: Hosted child model cleanup failed: ${String(cleanupCause)}`,
+      );
+    }
+    throw new HostedModelUnavailableError(cause);
+  }
+}
+
 export function hostedToolOutputBudget(cwd: string): number {
   return (
     loadSettings(cwd, {
@@ -234,12 +286,15 @@ export async function runHostedHarnessTextTurn(input: {
         | 'hookStopReason'
         | 'setModelRound'
         | 'setToolOutputBudget'
+        | 'capturesChildModelRoute'
+        | 'setChildModelRoute'
         | 'planModeInstructions'
       >
     >;
   workspaceContext?: { read(): string | undefined };
   agentDefinition?: HostedAgentDefinition;
   modelSelection?: HostedModelSelection;
+  publicChildModelRoute?: PublicChildModelRoute;
   agentInstructions?: string;
   skills?: HostedSkillCatalog;
   textDeltas?: HostedHarnessTextDeltas;
@@ -290,7 +345,43 @@ export async function runHostedHarnessTextTurn(input: {
   const model = input.modelSelection
     ? { id: input.modelSelection.modelId }
     : input.agentDefinition?.model;
-  await applyHostedModelPin(config, model);
+  if (input.publicChildModelRoute)
+    await applyHostedPublicChildModelPin(
+      config,
+      input.publicChildModelRoute.origin
+        ? { id: input.publicChildModelRoute.origin.modelId }
+        : model,
+      input.publicChildModelRoute.origin ?? input.publicChildModelRoute,
+    );
+  else await applyHostedModelPin(config, model);
+  if (input.publicChildModelRoute?.origin) {
+    // Config falls back to its own generator until authentication fills this frame.
+    const view = {} as RuntimeContentGeneratorView;
+    return runWithRuntimeContentGenerator(view, () =>
+      runPreparedHostedHarnessTextTurn(
+        input,
+        config,
+        model,
+        contextWithInstructions,
+        view,
+      ),
+    );
+  }
+  return runPreparedHostedHarnessTextTurn(
+    input,
+    config,
+    model,
+    contextWithInstructions,
+  );
+}
+
+async function runPreparedHostedHarnessTextTurn(
+  input: Parameters<typeof runHostedHarnessTextTurn>[0],
+  config: Awaited<ReturnType<typeof loadCliConfig>>,
+  model: HostedAgentDefinition['model'] | undefined,
+  contextWithInstructions: (context: string | undefined) => string,
+  runtimeView?: RuntimeContentGeneratorView,
+): Promise<HostedHarnessModelResult> {
   let runPromptHook: HostedPromptHookRunner | undefined;
   let modelReady = false;
   let historyReady = false;
@@ -414,6 +505,7 @@ export async function runHostedHarnessTextTurn(input: {
       skipSkillManager: true,
       skipFileCheckpointing: true,
       lenientToolWarmup: true,
+      ...(runtimeView ? { skipLlmInitialization: true } : {}),
       ...(input.hooks ? { managedHookDispatcher: dispatcher } : {}),
     });
     const authType = config.getModelsConfig().getCurrentAuthType();
@@ -430,6 +522,104 @@ export async function runHostedHarnessTextTurn(input: {
       if (model) throw new HostedModelUnavailableError(cause);
       throw cause;
     }
+    const origin = input.publicChildModelRoute?.origin;
+    if (origin) {
+      if (
+        llmPreparedProviderPin(config.getContentGeneratorConfig()) !==
+        origin.providerPin
+      )
+        throw new HostedModelUnavailableError();
+      const route = input.publicChildModelRoute!;
+      const matches = config.getAllConfiguredModels().filter(
+        (entry) =>
+          !entry.isRuntimeModel &&
+          entry.id === model?.id &&
+          entry.authType === route.authType &&
+          createHash('sha256')
+            .update(entry.baseUrl ?? '')
+            .digest('hex') === route.endpointDigest,
+      );
+      if (matches.length !== 1) throw new HostedModelUnavailableError();
+      const selected = matches[0];
+      const resolved = await config
+        .getBaseLlmClient()
+        .resolveForModel(
+          `${selected.authType}:${selected.id}${selected.registryBaseUrl ? `\0${selected.registryBaseUrl}` : ''}`,
+          { failClosed: true },
+        );
+      if (
+        llmPreparedProviderPin(resolved.contentGeneratorConfig) !==
+        route.providerPin
+      )
+        throw new HostedModelUnavailableError();
+      Object.assign(runtimeView!, {
+        contentGenerator: resolved.contentGenerator,
+        contentGeneratorConfig: resolved.contentGeneratorConfig,
+      });
+      await config.getLlmClient().initialize(undefined, input.signal);
+    }
+    if (
+      input.publicChildModelRoute &&
+      llmPreparedProviderPin(config.getContentGeneratorConfig()) !==
+        input.publicChildModelRoute.providerPin
+    ) {
+      throw new HostedModelUnavailableError();
+    }
+    const captureChildRoute = async (prepared: LlmPreparedRequest) => {
+      if (
+        input.publicChildModelRoute &&
+        prepared.providerPin !== input.publicChildModelRoute.providerPin
+      )
+        throw new HostedModelUnavailableError();
+      if (!input.toolTurn?.capturesChildModelRoute?.()) return;
+      const active = config.getContentGeneratorConfig();
+      let routed: typeof active | undefined = active;
+      if (prepared.providerPin !== llmPreparedProviderPin(active)) {
+        routed = undefined;
+        for (const selector of new Set([
+          ...config.getModelFallbacks(),
+          prepared.routeSelector,
+        ])) {
+          try {
+            const candidate = (
+              await config
+                .getBaseLlmClient()
+                .resolveForModel(selector, { failClosed: true })
+            ).contentGeneratorConfig;
+            if (prepared.providerPin === llmPreparedProviderPin(candidate)) {
+              routed = candidate;
+              break;
+            }
+          } catch {
+            continue;
+          }
+        }
+      }
+      if (
+        !routed?.authType ||
+        prepared.providerPin !== llmPreparedProviderPin(routed)
+      )
+        throw new HostedModelUnavailableError();
+      input.toolTurn.setChildModelRoute?.(prepared.request.model, {
+        authType: routed.authType,
+        endpointDigest: createHash('sha256')
+          .update(routed.baseUrl ?? '')
+          .digest('hex'),
+        providerPin: prepared.providerPin,
+        ...(prepared.providerPin !== llmPreparedProviderPin(active)
+          ? {
+              origin: {
+                modelId: config.getModel(),
+                authType: active.authType!,
+                endpointDigest: createHash('sha256')
+                  .update(active.baseUrl ?? '')
+                  .digest('hex'),
+                providerPin: llmPreparedProviderPin(active),
+              },
+            }
+          : {}),
+      });
+    };
     if (
       [...initialMessages, ...(input.resumeModel?.prepared.history ?? [])].some(
         (message) =>
@@ -704,6 +894,7 @@ export async function runHostedHarnessTextTurn(input: {
         prepared,
         captureUnsupported,
       ) => {
+        await captureChildRoute(prepared);
         const activeConfig = config.getContentGeneratorConfig();
         contextWindowSize =
           prepared.providerPin === llmPreparedProviderPin(activeConfig)
@@ -756,7 +947,11 @@ export async function runHostedHarnessTextTurn(input: {
               // already delivered content replays the request, and the RETRY
               // handling below retracts the orphaned prefix (#13319).
               retractDeliveredOutputOnRetry: true,
-              ...(input.prepareModel ? { onPreparedRequest: prepare } : {}),
+              ...(input.prepareModel ||
+              input.publicChildModelRoute ||
+              input.toolTurn?.capturesChildModelRoute?.()
+                ? { onPreparedRequest: prepare }
+                : {}),
             });
         preparedRecovery = undefined;
         for await (const event of stream) {

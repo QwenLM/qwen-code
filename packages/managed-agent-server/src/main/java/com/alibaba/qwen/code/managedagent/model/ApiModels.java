@@ -146,7 +146,15 @@ public final class ApiModels {
             @JsonProperty("session_delete") boolean sessionDelete,
             @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("foreground_shell") Boolean foregroundShell,
             @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("durable_operations") Boolean durableOperations,
-            @JsonProperty("context_compression") boolean contextCompression) {
+            @JsonProperty("context_compression") boolean contextCompression,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("child_agents") Boolean childAgents) {
+        public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
+                boolean sessionLifecycle, boolean tasks, boolean actions, boolean sessionClose,
+                boolean sessionArchive, boolean sessionUnarchive, boolean sessionDelete,
+                Boolean foregroundShell, Boolean durableOperations, boolean contextCompression) {
+            this(items, snapshots, artifacts, resync, sessionLifecycle, tasks, actions, sessionClose,
+                    sessionArchive, sessionUnarchive, sessionDelete, foregroundShell, durableOperations, contextCompression, null);
+        }
         public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
                 boolean sessionLifecycle, boolean tasks, boolean actions, boolean sessionClose,
                 boolean sessionArchive, boolean sessionUnarchive, boolean sessionDelete,
@@ -164,7 +172,17 @@ public final class ApiModels {
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean approvalModeChange,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean durableOperations,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments,
-            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename, boolean contextCompression) {
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename, boolean contextCompression,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents) {
+        public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
+                boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
+                boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange, Boolean foregroundShell,
+                Boolean modelChange, Boolean approvalModeChange, Boolean durableOperations,
+                Boolean inputAttachments, Boolean rename, boolean contextCompression) {
+            this(tasks, artifacts, actions, workspaceTurns, sessionClose, sessionArchive, sessionUnarchive,
+                    sessionDelete, cwdChange, foregroundShell, modelChange, approvalModeChange,
+                    durableOperations, inputAttachments, rename, contextCompression, null);
+        }
         public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
                 boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
                 boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange, Boolean foregroundShell,
@@ -762,7 +780,16 @@ public final class ApiModels {
             @JsonProperty("artifact_refs") List<String> artifactRefs,
             @JsonProperty("action_capabilities")
                     List<String> actionCapabilities,
-            @JsonProperty("child_session_id") String childSessionId) {
+            @JsonProperty("child_session_id") String childSessionId,
+            @JsonProperty("stop_requested") Boolean stopRequested,
+            @JsonProperty("approval_mode") String approvalMode) {
+        public PublicTask(String id, String object, String sessionId, String kind,
+                String state, Long definitionRevision, String runtimeState, long createdAt,
+                Long startedAt, Long settledAt, String outputCursor, List<String> artifactRefs,
+                List<String> actionCapabilities, String childSessionId) {
+            this(id, object, sessionId, kind, state, definitionRevision, runtimeState, createdAt,
+                    startedAt, settledAt, outputCursor, artifactRefs, actionCapabilities, childSessionId, null, null);
+        }
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -771,7 +798,14 @@ public final class ApiModels {
             long createdAt, Long startedAt, Long settledAt,
             String outputCursor,
             List<String> artifactRefs, List<String> actionCapabilities,
-            String childSessionId) {
+            String childSessionId, Boolean stopRequested, String approvalMode) {
+        public WebShellTask(String taskId, String sessionId, String kind, String state,
+                Long definitionRevision, String runtimeState, long createdAt, Long startedAt,
+                Long settledAt, String outputCursor, List<String> artifactRefs,
+                List<String> actionCapabilities, String childSessionId) {
+            this(taskId, sessionId, kind, state, definitionRevision, runtimeState, createdAt,
+                    startedAt, settledAt, outputCursor, artifactRefs, actionCapabilities, childSessionId, null, null);
+        }
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -823,7 +857,10 @@ public final class ApiModels {
     }
 
     public record WebShellActionQueryRequest(
-            @NotBlank String sessionId, @Size(max = 512) String cursor, Integer limit) {
+            @NotBlank String sessionId, @Size(max = 512) String cursor, Integer limit, Boolean includeChildren) {
+        public WebShellActionQueryRequest(String sessionId, String cursor, Integer limit) {
+            this(sessionId, cursor, limit, null);
+        }
         @JsonAnySetter
         public void rejectUnknown(String name, JsonNode value) {
             throw new IllegalArgumentException("Unknown Action request field: " + name);
@@ -901,8 +938,11 @@ public final class ApiModels {
         }
     }
 
-    public record WebShellPage<T>(List<T> data, String nextCursor,
-            boolean hasMore) {
+    public record WebShellPage<T>(List<T> data, String nextCursor, boolean hasMore) {
+    }
+
+    public record WebShellTaskPage(List<WebShellTask> data, String nextCursor,
+            boolean hasMore, @JsonInclude(JsonInclude.Include.NON_NULL) Long activeChildCount) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
