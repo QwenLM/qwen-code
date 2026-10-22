@@ -1,7 +1,9 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
 import jakarta.annotation.PostConstruct;
 import org.apache.commons.lang3.StringUtils;
@@ -19,6 +21,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -335,6 +338,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         // warns with the unit hint before the range check below fails the
         // boot, and the refusal message itself names the convention.
         warnOnSecondScaleOverrides();
+        validateExternalRuntime();
         if (runtimeBroker.getSsh().isEnabled() && (!harness.isWorkspaceFilesEnabled()
                 || runtimeBroker.getSsh().getNodes().isEmpty())) {
             throw new IllegalStateException("SSH Runtime requires Workspace files and configured nodes");
@@ -477,6 +481,65 @@ public class ManagedAgentProperties implements EnvironmentAware {
                         + " under a UTF-8 locale (sun.jnu.encoding is "
                         + System.getProperty("sun.jnu.encoding") + ")");
             }
+        }
+    }
+
+    /** Shared startup and preflight validation for scratch-only external workers. */
+    public void validateExternalRuntime() {
+        if (!ExternalRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())) {
+            return;
+        }
+        if (harness.isWorkspaceFilesEnabled() || harness.isWorkspaceShellEnabled()
+                || !runtimeBroker.getWorkspaceMounts().isEmpty()
+                || !runtimeBroker.getResidentWorkspaces().isEmpty()
+                || StringUtils.isNotBlank(runtimeBroker.getWorkspaceCreationRoot())
+                || runtimeBroker.isLocalDirectoryImportEnabled()
+                || runtimeBroker.isVerifiedWorkspaceRecoveryEnabled()
+                || runtimeBroker.isOperatorRecoveryEnabled()
+                || runtimeBroker.isChildWorkspacesEnabled() || runtimeBroker.isChildSnapshotsEnabled()
+                || runtimeBroker.getSsh().isEnabled() || !runtimeBroker.getSsh().getNodes().isEmpty()) {
+            throw new IllegalStateException("External Runtime supports scratch Sessions only;"
+                    + " managed Workspace features must be disabled");
+        }
+        if (!"session".equals(runtimeBroker.getIsolationClass())
+                || !"session".equals(runtimeBroker.getBoundSessionIsolationClass())
+                || runtimeBroker.isSessionCreateWarm()) {
+            throw new IllegalStateException("External Runtime requires session isolation without Session-create warm");
+        }
+        if (runtimeBroker.isTrustedLocalRebootRecovery()) {
+            throw new IllegalStateException("External Runtime requires"
+                    + " QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false");
+        }
+        URI provider;
+        try {
+            provider = URI.create(runtimeBroker.getExternalProviderUrl());
+        } catch (IllegalArgumentException | NullPointerException error) {
+            throw new IllegalStateException("External Runtime provider URL must be an HTTP(S) URL");
+        }
+        if ((!"http".equals(provider.getScheme()) && !"https".equals(provider.getScheme()))
+                || provider.getHost() == null || provider.getUserInfo() != null
+                || provider.getQuery() != null || provider.getFragment() != null) {
+            throw new IllegalStateException("External Runtime provider URL must be an HTTP(S) URL"
+                    + " without credentials, query or fragment");
+        }
+        String token = runtimeBroker.getExternalProviderToken();
+        if (token == null || !token.matches("[A-Za-z0-9._~+/=-]{16,4096}")) {
+            throw new IllegalStateException("External Runtime provider token must be 16-4096 safe characters");
+        }
+        BrokerValues.requireId(runtimeBroker.getExternalProviderId(), "External Runtime provider ID");
+        BrokerValues.requireId(runtimeBroker.getWorkspaceId(), "External Runtime workspace ID");
+        String cwd = runtimeBroker.getWorkspaceCwd();
+        if (cwd == null || !cwd.startsWith("/")
+                || java.util.Arrays.stream(cwd.substring(1).split("/", -1))
+                        .anyMatch(part -> part.isEmpty() || part.equals(".") || part.equals(".."))) {
+            throw new IllegalStateException("External Runtime workspace cwd must be an absolute normalized"
+                    + " worker path other than the filesystem root");
+        }
+        Duration request = runtimeBroker.getExternalRequestTimeout();
+        Duration startup = runtimeBroker.getExternalStartupTimeout();
+        if (request == null || request.compareTo(Duration.ofMillis(1)) < 0
+                || startup == null || startup.compareTo(Duration.ofMillis(1)) < 0) {
+            throw new IllegalStateException("External Runtime request and startup timeouts must be at least 1ms");
         }
     }
 
@@ -1193,6 +1256,13 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private String workerEntry = "";
         private String staticEndpoint = "";
         private String staticToken = "";
+        private String externalProviderUrl = "";
+        private String externalProviderToken = "";
+        private String externalProviderId = "external";
+        @DurationUnit(ChronoUnit.SECONDS)
+        private Duration externalRequestTimeout = Duration.ofSeconds(30);
+        @DurationUnit(ChronoUnit.SECONDS)
+        private Duration externalStartupTimeout = Duration.ofMinutes(3);
         private String staticRuntimeInstanceId = "standalone-runtime";
         private String staticLeaseId = "standalone-lease";
         private long staticEpoch = 1;
@@ -1533,6 +1603,46 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setStaticToken(String staticToken) {
             this.staticToken = staticToken;
+        }
+
+        public String getExternalProviderUrl() {
+            return externalProviderUrl;
+        }
+
+        public void setExternalProviderUrl(String externalProviderUrl) {
+            this.externalProviderUrl = externalProviderUrl;
+        }
+
+        public String getExternalProviderToken() {
+            return externalProviderToken;
+        }
+
+        public void setExternalProviderToken(String externalProviderToken) {
+            this.externalProviderToken = externalProviderToken;
+        }
+
+        public String getExternalProviderId() {
+            return externalProviderId;
+        }
+
+        public void setExternalProviderId(String externalProviderId) {
+            this.externalProviderId = externalProviderId;
+        }
+
+        public Duration getExternalRequestTimeout() {
+            return externalRequestTimeout;
+        }
+
+        public void setExternalRequestTimeout(Duration externalRequestTimeout) {
+            this.externalRequestTimeout = externalRequestTimeout;
+        }
+
+        public Duration getExternalStartupTimeout() {
+            return externalStartupTimeout;
+        }
+
+        public void setExternalStartupTimeout(Duration externalStartupTimeout) {
+            this.externalStartupTimeout = externalStartupTimeout;
         }
 
         public String getStaticRuntimeInstanceId() {

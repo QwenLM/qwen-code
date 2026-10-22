@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.preflight;
 import com.alibaba.qwen.code.managedagent.config.BrokerSecurity;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeProvisioner;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
@@ -486,6 +487,11 @@ public final class ManagedAgentPreflight {
                 properties.getRuntimeBroker();
         boolean files = harness.isWorkspaceFilesEnabled();
         boolean shell = harness.isWorkspaceShellEnabled();
+        if (ExternalRuntimeProvisioner.KIND.equals(broker.getProvisioner()) && (files || shell)) {
+            return new Check("tool-path", Status.FAIL,
+                    "External Runtime supports scratch Sessions only",
+                    "disable managed Workspace files and Shell");
+        }
         if (broker.getSsh().isEnabled()
                 && (!files || broker.getSsh().getNodes().isEmpty())) {
             return new Check("tool-path", Status.FAIL,
@@ -602,8 +608,9 @@ public final class ManagedAgentPreflight {
                         "re-enter the recorded key"));
             }
         }
-        checks.add(directoryCheck("broker-state",
-                broker.getStateDirectory()));
+        if (!ExternalRuntimeProvisioner.KIND.equals(broker.getProvisioner())) {
+            checks.add(directoryCheck("broker-state", broker.getStateDirectory()));
+        }
         if ("local-process".equals(broker.getProvisioner())) {
             checks.add(executableCheck("node", broker.getNodeExecutable()));
             checks.add(readableCheck("worker-entry",
@@ -615,15 +622,29 @@ public final class ManagedAgentPreflight {
                         "static provisioner needs endpoint and token",
                         "set static-endpoint and static-token"));
             }
+        } else if (ExternalRuntimeProvisioner.KIND.equals(broker.getProvisioner())) {
+            try {
+                properties.validateExternalRuntime();
+                checks.add(new Check("broker", Status.PASS,
+                        "external-scratch configuration accepted; provider reachability and worker attestation"
+                                + " are checked on first use", null));
+            } catch (RuntimeException error) {
+                checks.add(new Check("broker", Status.FAIL, rootMessage(error),
+                        "correct the external Runtime configuration"));
+            }
         } else {
             checks.add(new Check("broker", Status.FAIL,
                     "unknown provisioner " + broker.getProvisioner(),
-                    "use local-process or static"));
+                    "use local-process, static or " + ExternalRuntimeProvisioner.KIND));
         }
         return checks;
     }
 
     private static Check workspaceCheck(ManagedAgentProperties properties) {
+        if (ExternalRuntimeProvisioner.KIND.equals(properties.getRuntimeBroker().getProvisioner())) {
+            return new Check("workspace", Status.SKIP,
+                    "external scratch cwd belongs to the worker; no local directory required", null);
+        }
         String cwd = properties.getRuntimeBroker().getWorkspaceCwd();
         if (StringUtils.isBlank(cwd)) {
             return new Check("workspace", Status.SKIP,

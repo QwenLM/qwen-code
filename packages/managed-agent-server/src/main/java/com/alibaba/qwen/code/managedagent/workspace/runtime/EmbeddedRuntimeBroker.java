@@ -24,6 +24,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalHttpRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.provisioning.StaticRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
@@ -147,6 +149,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             org.springframework.jdbc.core.JdbcTemplate jdbc,
             org.springframework.transaction.PlatformTransactionManager manager,
             RuntimeProvisioner residentProvisioner, SshWorkspaceService ssh) {
+        properties.validateExternalRuntime();
         this.store = store;
         this.ssh = ssh;
         ManagedAgentProperties.RuntimeBroker broker =
@@ -574,12 +577,24 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     broker.getStaticToken(), broker.getStaticLeaseId(),
                     broker.getStaticEpoch()));
         }
+        if (ExternalRuntimeProvisioner.KIND.equals(broker.getProvisioner())) {
+            if (!"session".equals(broker.getIsolationClass())) {
+                throw new IllegalStateException("External Runtime requires"
+                        + " session isolation");
+            }
+            require(broker.getExternalProviderUrl(), "External Runtime provider URL");
+            require(broker.getExternalProviderToken(), "External Runtime provider token");
+            return new ExternalRuntimeProvisioner(new ExternalHttpRuntimeClient(
+                    URI.create(broker.getExternalProviderUrl()), broker.getExternalProviderToken(),
+                    broker.getExternalRequestTimeout()), broker.getExternalProviderId(),
+                    broker.getExternalStartupTimeout());
+        }
         if ("kubernetes".equals(broker.getProvisioner()) || "kubernetes-workspace".equals(broker.getProvisioner())) {
             throw new IllegalStateException("Kubernetes Runtime provisioner"
-                    + " is not supported (supported: local-process, static)");
+                    + " is not supported (supported: local-process, static, " + ExternalRuntimeProvisioner.KIND + ")");
         }
         throw new IllegalStateException("Runtime Broker provisioner must be"
-                + " local-process or static");
+                + " local-process, static or " + ExternalRuntimeProvisioner.KIND);
     }
 
     private static void requireRecoveryDirectoryOutsideWorkspaces(ManagedAgentProperties.RuntimeBroker broker,
