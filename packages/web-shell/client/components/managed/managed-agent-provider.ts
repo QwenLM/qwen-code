@@ -1,4 +1,8 @@
 import type { components } from './generated/managed-agent-api';
+import type {
+  ManagedMcpManagementCommand,
+  ManagedMcpManagementSnapshot,
+} from './managed-mcp-management-types';
 import type { ManagedToolResultReader } from './managed-tool-result-types';
 
 export type ManagedAgentSessionPhase =
@@ -42,12 +46,19 @@ export type ManagedSessionRecovery = components['schemas']['SessionRecovery'];
 export type ManagedTurnCancelOperation =
   components['schemas']['WebShellCommandOperation'];
 
+export interface ManagedModelPreset {
+  agentId: string;
+  label: string;
+  modelId?: string;
+}
+
 export interface ManagedSessionOptions {
   approvalMode: ManagedApprovalMode;
   availableApprovalModes: ManagedApprovalMode[];
   planModeSupported?: boolean;
   inputAttachments?: boolean;
   skillsSupported?: boolean;
+  modelSelectionSupported?: boolean;
 }
 
 export interface ManagedSessionApproval extends ManagedSessionOptions {
@@ -138,6 +149,7 @@ export interface ManagedAgentSessionSummary {
     sessionUnarchive?: boolean;
     sessionDelete?: boolean;
     actions?: boolean;
+    childAgents?: boolean;
     tasks?: boolean;
     artifacts?: boolean;
     /** The caller may submit later Turns to this Workspace-bound Session. */
@@ -319,11 +331,29 @@ export interface ManagedAgentProvider {
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedSessionMcp>;
   };
+  readonly mcpManagement?: {
+    /** Explicit tenant/actor namespace for pending commands saved in this tab. */
+    readonly storageScope?: string;
+    query(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedMcpManagementSnapshot>;
+    submit(
+      sessionId: string,
+      command: ManagedMcpManagementCommand,
+      options: ManagedAgentCommandOptions & { requestId: string },
+    ): Promise<ManagedMcpManagementSnapshot>;
+    operation(
+      sessionId: string,
+      operationId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedMcpManagementSnapshot>;
+  };
   /** Present when the provider can serve Hosted permission Actions. */
   readonly actions?: {
     listPending(
       sessionId: string,
-      options: ManagedAgentRequestOptions,
+      options: ManagedAgentRequestOptions & { includeChildren?: boolean },
     ): Promise<ManagedAgentPendingAction[]>;
     respond(
       action: ManagedAgentPendingAction,
@@ -431,8 +461,8 @@ export interface ManagedAgentProvider {
   readonly workspaceBinding?: {
     readonly agentId: string;
     readonly registration?: ManagedWorkspaceRegistration;
-    /** Host-published model-specific AgentDefinitions available for new Sessions. */
-    readonly modelPresets?: readonly { agentId: string; label: string }[];
+    /** Host-published models and legacy AgentDefinition presets for new Sessions. */
+    readonly modelPresets?: readonly ManagedModelPreset[];
     list(
       options: ManagedAgentRequestOptions & { cursor?: string; limit?: number },
     ): Promise<{
@@ -471,6 +501,7 @@ export interface ManagedAgentProvider {
     createEmpty(
       request: {
         agentId: string;
+        modelId?: string;
         workspaceId: string;
         cwdRelative: string;
         approvalMode?: ManagedApprovalMode;
@@ -482,6 +513,7 @@ export interface ManagedAgentProvider {
     createSession?(
       request: {
         agentId: string;
+        modelId?: string;
         workspaceId: string;
         cwdRelative: string;
         text: string;

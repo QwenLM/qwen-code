@@ -389,8 +389,9 @@ class SessionRowLockOrderTest {
         // session-row INSERT is the lock.
         assertThat(audit.lockers()).containsExactlyInAnyOrder(
                 "insertTurnCommand", "insertCancelCommand", "changeSessionModel", "changeSessionApproval",
+                "requireMcpManagement", "requireMcpSettingsCommit",
                 "insertSessionCommand", "insertWorkspaceSessionCommand",
-                "insertChildSessionCommand",
+                "insertChildSessionCommand", "insertPublicChildSessionCommand",
                 "insertInternalTeamLeadSessionCommand",
                 "beginSessionMutation",
                 "beginTaskCancelOperation", "completeSessionMutation",
@@ -468,7 +469,7 @@ class SessionRowLockOrderTest {
                         "findRuntimeRecoveryParked",
                         "parkTurnForRuntimeRecovery",
                         "insertCancelCommand", "insertChildSession",
-                        "insertChildSessionCommand", "insertCsiSessionCommand",
+                        "insertChildSessionCommand", "insertPublicChildSessionCommand", "insertCsiSessionCommand",
                         "insertInternalTeamLeadSessionCommand",
                         "insertSession", "insertSessionCommand", "insertTurn",
                         "insertTurnCommand", "insertWorkspaceSessionCommand",
@@ -479,7 +480,8 @@ class SessionRowLockOrderTest {
                         "materializeNextBatch", "recordAdmission",
                         "recordHarnessEvents", "recordRecoveryAdmission",
                         "releaseTurnLease", "renewTurn", "requireTurn",
-                        "requireTurnForUpdate", "requirePolicyChange", "retractContinuationOutput",
+                        "requireTurnForUpdate", "requirePolicyChange", "requireMcpManagement", "requireMcpSettingsCommit",
+                        "requireMcpManagementIdle", "retractContinuationOutput",
                         "retractHarnessTurnOutput", "scheduleTurnRetry",
                         "settleTurnCommands",
                         // D7-2's journal evidence for a parked input reads

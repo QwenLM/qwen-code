@@ -241,6 +241,16 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellListRequest")),
                     entry(WebShellSessionRequest.class,
                             List.of("WebShellSessionRequest")),
+                    entry(ApiModels.ManagedMcpServerPin.class,
+                            List.of("ManagedMcpServerPin")),
+                    entry(ApiModels.ManagedMcpManagementCommand.class,
+                            List.of("ManagedMcpManagementCommand")),
+                    entry(ApiModels.WebShellMcpManagementQuery.class,
+                            List.of("WebShellMcpManagementQuery")),
+                    entry(ApiModels.WebShellMcpManagementSubmit.class,
+                            List.of("WebShellMcpManagementSubmit")),
+                    entry(ApiModels.WebShellMcpManagementOperationQuery.class,
+                            List.of("WebShellMcpManagementOperationQuery")),
                     entry(ApiModels.WebShellRenameRequest.class,
                             List.of("WebShellRenameRequest")),
                     entry(ApiModels.WebShellRenameResult.class,
@@ -286,8 +296,9 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.WebShellModelChangeResult.class, List.of("WebShellModelChangeResult")),
                     entry(WebShellSessionCapabilities.class,
                             List.of("WebShellSessionCapabilities")),
+                    entry(ApiModels.WebShellTaskPage.class, List.of("WebShellTaskPage")),
                     entry(WebShellPage.class, List.of("WebShellSessionPage",
-                            "WebShellTaskPage", "WebShellTaskEventPage",
+                            "WebShellTaskEventPage",
                             "WebShellActionPage", "WebShellArtifactPage")),
                     entry(PublicTask.class, List.of("PublicTask")),
                     entry(WebShellTask.class, List.of("WebShellTask")),
@@ -1668,6 +1679,28 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant).principal(actor),
                 "{\"sessionId\":\"" + publicBoundId + "\"}");
         assertThat(json(webMcp)).isEqualTo(json(mcpCatalog));
+        String mcpManagement = exchange(drift, "getSessionMcpManagement", 200,
+                get("/v1/agents/sessions/{id}/mcp-management", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        assertThat(json(mcpManagement).path("supported").asBoolean()).isFalse();
+        exchange(drift, "queryWebShellSessionMcpManagement", 200,
+                post(WEB_SHELL + "/session-mcp/management/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        String mcpCommand = "{\"action\":\"restart\",\"serverId\":\"docs\",\"expectedRevision\":0}";
+        exchange(drift, "submitSessionMcpManagement", 409,
+                post("/v1/agents/sessions/{id}/mcp-management/commands", publicBoundId)
+                        .header(TENANT, workspaceTenant).header("Idempotency-Key", "mcp-restart").principal(actor), mcpCommand);
+        exchange(drift, "submitWebShellSessionMcpManagement", 409,
+                post(WEB_SHELL + "/session-mcp/management/submit").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + publicBoundId + "\",\"idempotencyKey\":\"mcp-restart\","
+                        + mcpCommand.substring(1));
+        String mcpOperation = "11111111-1111-4111-8111-111111111111";
+        exchange(drift, "getSessionMcpManagementOperation", 409,
+                get("/v1/agents/sessions/{id}/mcp-management/commands/{operation}", publicBoundId, mcpOperation)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "queryWebShellSessionMcpManagementOperation", 409,
+                post(WEB_SHELL + "/session-mcp/management/operations/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + publicBoundId + "\",\"operationId\":\"" + mcpOperation + "\"}");
         exchange(drift, "queryWebShellSessionMcp", 401,
                 post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant),
                 "{\"sessionId\":\"" + publicBoundId + "\"}");
