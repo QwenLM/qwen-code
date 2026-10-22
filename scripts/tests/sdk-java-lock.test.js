@@ -52,7 +52,7 @@ const freeFlock = '#!/bin/sh\nexit 0';
 // at once, the blocking wait stays parked until the test kills the child.
 const blockingFlock = `#!/bin/sh
 case "$*" in
-  *"--wait"*) sleep 5; exit 1 ;;
+  *"--wait"*) echo 'STUB_FLOCK_WAIT_ENTERED'; sleep 5; exit 1 ;;
   *" 9") exit 1 ;;
   *) exit 0 ;;
 esac
@@ -228,10 +228,12 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       // budget — the exact state the cancelled pool run left in its log.
       const stub = flockStub(blockingFlock);
       const { child, state, done } = startAcquire(home, 60, stub);
-      await new Promise((r) => setTimeout(r, 1500));
-      const announced = state.out.includes(
-        'Waiting for the sdk-java host lock as queue ticket 1',
+      await waitFor('the blocking flock was not reached', () =>
+        state.out.includes('STUB_FLOCK_WAIT_ENTERED'),
       );
+      const announced = state.out
+        .split('STUB_FLOCK_WAIT_ENTERED')[0]
+        .includes('Waiting for the sdk-java host lock as queue ticket 1');
       const ticket = headTicket(home);
       const before = statSync(ticket).mtimeMs;
       child.kill('SIGKILL');
