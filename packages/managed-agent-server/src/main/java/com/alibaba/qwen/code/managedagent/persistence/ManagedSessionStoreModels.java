@@ -71,6 +71,7 @@ public final class ManagedSessionStoreModels {
 
     public static int inlineResourceBytes(String kind) {
         return switch (kind) {
+            case "managed-checkpoint" -> MAX_EVENT_BYTES;
             case "managed-input" -> MAX_ATTACHMENT_INPUT_BYTES;
             case "managed-agent-skills" -> MAX_AGENT_SKILLS_BYTES;
             case "hosted-model-request" -> MAX_MODEL_REQUEST_BYTES;

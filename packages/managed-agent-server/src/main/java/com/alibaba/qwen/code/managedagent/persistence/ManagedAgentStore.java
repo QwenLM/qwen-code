@@ -4866,8 +4866,9 @@ public class ManagedAgentStore implements AgentStateStore {
                 || !live && hasRetainedRuntimeSession(tenantId, sessionId)
                 || !jdbc.queryForList("SELECT 1 FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
                         + " AND (status IN ('RECOVERY_BLOCKED', 'CANCELLING') OR status IN ('ACCEPTED', 'RUNNING')"
-                        + " AND error_code IN (?, ?)) LIMIT 1", tenantId, sessionId,
-                        AgentStateStore.RUNTIME_RECOVERY_BLOCKED, AgentStateStore.WORKFLOW_RECOVERY_BLOCKED).isEmpty()
+                        + " AND error_code IN (?, ?, ?)) LIMIT 1", tenantId, sessionId,
+                        AgentStateStore.RUNTIME_RECOVERY_BLOCKED, AgentStateStore.WORKFLOW_RECOVERY_BLOCKED,
+                        AgentStateStore.HARNESS_RECOVERY_BLOCKED).isEmpty()
                 || !jdbc.queryForList("SELECT 1 FROM ma_session_head WHERE tenant_id = ?"
                         + " AND session_id = ? AND head_kind = 'MANAGED_SESSION' AND"
                         + " (state <> 'ACTIVE' OR recovery_status <> 'READY')", tenantId, sessionId).isEmpty()) {
@@ -5276,12 +5277,9 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     public List<DispatchTarget> findDispatchable(long now, int limit) {
-        // #14387 / D7-2: a Turn marked recovery-blocked (its workflow's
-        // generation was lost, or its parked Runtime execution's acceptance
-        // is still unknown) is parked, never re-dispatched — without the
-        // carve-out the sweep would claim → refuse → release it once per
-        // tick forever. A cancel still scans it: settling the Turn
-        // cancelled is the cancel's own act, not a re-dispatch.
+        // Workflow/Runtime parks have separate settlement paths. A due
+        // Harness park enters only the coordinator's read-only observation
+        // branch; cancellation still uses the normal dispatch lane.
         return jdbc.query(
                 "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "')) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
@@ -5352,19 +5350,20 @@ public class ManagedAgentStore implements AgentStateStore {
             String errorCode, String errorMessage) {
         requireLegacyMutation(tenantId, sessionId);
         long now = clock.millis();
-        // The verdict parks the Turn out of the dispatch sweep, so it is
-        // fenced by the live dispatch lease like every terminal decision:
-        // an owner whose lease already expired holds nothing to park with.
+        Long retryAfter = AgentStateStore.HARNESS_RECOVERY_BLOCKED.equals(errorCode)
+                ? now + 15_000L : null;
+        // A sampled Harness block can lift. Retain the unsettled outcome
+        // and back off its read-only recheck without consuming retry budget.
         return jdbc.update("UPDATE ma_turn SET error_code = ?,"
-                        + " error_message = ?, dispatch_owner = NULL,"
+                        + " error_message = ?, retry_after = ?, dispatch_owner = NULL,"
                         + " dispatch_lease_until = NULL, gmt_modified = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until >= ?"
                         + " AND status IN ('ACCEPTED', 'RUNNING',"
-                        + " 'CANCELLING')",
-                errorCode, errorMessage, now, tenantId, sessionId, turnId,
-                owner, now) == 1;
+                        + " 'CANCELLING') AND (? <> ? OR status <> 'CANCELLING')",
+                errorCode, errorMessage, retryAfter, now, tenantId, sessionId, turnId,
+                owner, now, errorCode, AgentStateStore.HARNESS_RECOVERY_BLOCKED) == 1;
     }
 
     @Override
@@ -6962,11 +6961,9 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     /**
-     * #14387: the lifecycle gate's active-Turn count. A Turn marked
-     * recovery-blocked is parked out of the dispatch sweep and never
-     * drives again — it is evidence of an unwitnessed execution, not live
-     * work, so it does not hold a lifecycle operation open. A CANCELLING
-     * Turn still blocks: its cancel is in flight.
+     * Only a permanently refused workflow leaves this lifecycle gate.
+     * Runtime and Harness parks still await authoritative settlement;
+     * closing them could discard a later result. Cancellation also waits.
      */
     private boolean hasLiveTurn(String tenantId, String sessionId) {
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM"

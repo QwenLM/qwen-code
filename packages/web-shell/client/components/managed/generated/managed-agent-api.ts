@@ -1009,6 +1009,7 @@ export interface components {
             turnId: string;
             /** Format: uuid */
             sessionId: string;
+            /** @description recovery_blocked with hosted_harness_recovery_blocked means the Harness stopped without a safely settled Turn. The input remains active internally. Execution redispatch is parked, while bounded read-only observation of the original Harness journal may settle a later terminal result. Policy changes and lifecycle close wait for settlement; explicit cancellation remains available. */
             status: string;
             /** Format: int64 */
             submittedAt: number;
