@@ -725,7 +725,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/agent/web-shell/v1/sessions/export/query": {
+    "/api/agent/web-shell/v1/session-mcp/management/query": {
         parameters: {
             query?: never;
             header?: never;
@@ -734,11 +734,42 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Read one immutable public Session snapshot page for reading exports
-         * @description Requires current Session read authorization on every page. Reuses the public item snapshot cursor, whose subsequent pages retain the original snapshot version and watermark. No private journal, Runtime or storage credentials are returned. The client waits for a snapshot covering its captured Session watermark before using its first page.
-         */
-        post: operations["webShellExportSession"];
+        /** @description Requires a trusted Workspace operator and the Session creator execution grants. Manage only the selected active public Session; commands retain immutable definition pins, serialize while idle, and select only deployed Runtime definitions. Status reads persisted receipts without restarting or replaying the original effect. Management reattachment never drives recovery, cleanup, or wake dispatch. After a Harness restart, continue or recover the Session through its normal execution flow first; otherwise management returns 409 hosted_mcp_session_load_required. A fresh empty Session can initialize without a Turn; command status never creates one. Unsupported management queries return supported=false. Responses never include private executable recipes or credentials. */
+        post: operations["queryWebShellSessionMcpManagement"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-mcp/management/submit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires a trusted Workspace operator and the Session creator execution grants. Manage only the selected active public Session; commands retain immutable definition pins, serialize while idle, and select only deployed Runtime definitions. Status reads persisted receipts without restarting or replaying the original effect. Management reattachment never drives recovery, cleanup, or wake dispatch. After a Harness restart, continue or recover the Session through its normal execution flow first; otherwise management returns 409 hosted_mcp_session_load_required. A fresh empty Session can initialize without a Turn; command status never creates one. Unsupported management queries return supported=false. Responses never include private executable recipes or credentials. */
+        post: operations["submitWebShellSessionMcpManagement"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-mcp/management/operations/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires a trusted Workspace operator and the Session creator execution grants. Manage only the selected active public Session; commands retain immutable definition pins, serialize while idle, and select only deployed Runtime definitions. Status reads persisted receipts without restarting or replaying the original effect. Management reattachment never drives recovery, cleanup, or wake dispatch. After a Harness restart, continue or recover the Session through its normal execution flow first; otherwise management returns 409 hosted_mcp_session_load_required. A fresh empty Session can initialize without a Turn; command status never creates one. Unsupported management queries return supported=false. Responses never include private executable recipes or credentials. */
+        post: operations["queryWebShellSessionMcpManagementOperation"];
         delete?: never;
         options?: never;
         head?: never;
@@ -773,6 +804,26 @@ export interface paths {
         put?: never;
         /** @description Recheck only the latest original Turn under the existing cancellation/cleanup authorization. Repeated requests coalesce and may only advance existing cancellation/reconciliation or retry settled cleanup; they never resubmit input, replay effects, reset retry budgets or change claim generations. A stale Turn returns recovery_target_changed and ineligible work returns recovery_recheck_unavailable. 202 means requested, not cancelled or ready. For a terminal Java Turn whose Harness attachment is cold or whose status cannot be read, this POST may attempt a narrow cleanup-only load. It must verify the original prompt has a durable native terminal, covered continuation checkpoint or lawful initial state, and no pending input before retrying only its existing cleanup. It never resumes models, tools, MCP or Hooks, clears a permanent journal block, or treats a historical SQL failure as native settlement. */
         post: operations["recheckWebShellSessionRecovery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/sessions/export/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Read one immutable public Session snapshot page for reading exports
+         * @description Requires current Session read authorization on every page. Reuses the public item snapshot cursor, whose subsequent pages retain the original snapshot version and watermark. No private journal, Runtime or storage credentials are returned. The client waits for a snapshot covering its captured Session watermark before using its first page.
+         */
+        post: operations["webShellExportSession"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1923,27 +1974,65 @@ export interface components {
             failureCode?: string | null;
             replayed: boolean;
         };
-        WebShellLifecycleOperation: {
+        ManagedMcpServerPin: {
+            serverId: string;
+            serverRevision: number;
+            definitionDigest: string;
+        };
+        ManagedMcpPublishedServer: {
+            serverId: string;
+            serverRevision: number;
+            definitionDigest: string;
+            /** @enum {string} */
+            transport: "stdio" | "streamable-http" | "sse";
+        };
+        ManagedMcpManagementServer: {
+            serverId: string;
+            serverRevision: number;
+            definitionDigest: string;
+            /** @enum {string} */
+            state: "enabled" | "disabled" | "removed";
+        };
+        ManagedMcpManagementOperation: {
+            /** Format: uuid */
             operationId: string;
             /** @enum {string} */
-            type: "close" | "archive" | "delete";
+            action: "add" | "edit" | "remove" | "enable" | "disable" | "reload" | "restart";
+            serverId: string;
+            revision: number;
             /** @enum {string} */
-            status: "pending" | "running" | "completed" | "failed" | "recovery_blocked";
-            failureCode?: string | null;
+            state: "pending" | "settled" | "failed" | "recovery_required";
+            error?: {
+                code: string;
+            };
         };
-        WebShellExportPage: {
-            items: components["schemas"]["WebShellItem"][];
-            nextCursor?: string | null;
-            hasMore: boolean;
-            /** Format: int64 */
-            snapshotThroughSequence: number;
-        };
-        WebShellExportRequest: {
-            /** Format: uuid */
+        ManagedMcpManagementSnapshot: {
             sessionId: string;
-            cursor?: string | null;
-            /** @default 100 */
-            limit?: number | null;
+            revision: number;
+            supported: boolean;
+            availableServers: components["schemas"]["ManagedMcpPublishedServer"][];
+            servers: components["schemas"]["ManagedMcpManagementServer"][];
+            operation?: components["schemas"]["ManagedMcpManagementOperation"];
+        };
+        WebShellMcpManagementQuery: {
+            sessionId: string;
+            requestId?: string;
+        };
+        WebShellMcpManagementSubmit: {
+            sessionId: string;
+            requestId?: string;
+            idempotencyKey: string;
+            /** @enum {string} */
+            action: "add" | "edit" | "remove" | "enable" | "disable" | "reload" | "restart";
+            serverId: string;
+            expectedRevision: number;
+            server?: components["schemas"]["ManagedMcpServerPin"];
+        };
+        WebShellMcpManagementOperationQuery: {
+            sessionId: string;
+            /** Format: uuid */
+            operationId: string;
+            requestId?: string;
         };
         SessionRecoveryActions: {
             recheck: boolean;
@@ -1968,6 +2057,28 @@ export interface components {
         WebShellRecoveryRecheckRequest: {
             sessionId: string;
             turnId: string;
+        };
+        WebShellLifecycleOperation: {
+            operationId: string;
+            /** @enum {string} */
+            type: "close" | "archive" | "delete";
+            /** @enum {string} */
+            status: "pending" | "running" | "completed" | "failed" | "recovery_blocked";
+            failureCode?: string | null;
+        };
+        WebShellExportPage: {
+            items: components["schemas"]["WebShellItem"][];
+            nextCursor?: string | null;
+            hasMore: boolean;
+            /** Format: int64 */
+            snapshotThroughSequence: number;
+        };
+        WebShellExportRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            cursor?: string | null;
+            /** @default 100 */
+            limit?: number | null;
         };
     };
     responses: {
@@ -3501,7 +3612,7 @@ export interface operations {
             413: components["responses"]["PayloadTooLarge"];
         };
     };
-    webShellExportSession: {
+    queryWebShellSessionMcpManagement: {
         parameters: {
             query?: never;
             header?: never;
@@ -3510,25 +3621,112 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["WebShellExportRequest"];
+                "application/json": components["schemas"]["WebShellMcpManagementQuery"];
             };
         };
         responses: {
-            /** @description Immutable public item snapshot page. */
+            /** @description Session-local MCP settings and operation snapshot. Inventory describes published pins rather than live connection health; operation status omits inventory. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WebShellExportPage"];
+                    "application/json": components["schemas"]["ManagedMcpManagementSnapshot"];
                 };
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            409: components["responses"]["CursorExpired"];
+            409: components["responses"]["Conflict"];
             413: components["responses"]["PayloadTooLarge"];
+            /** @description The original MCP Runtime or management operation cannot be confirmed. Retry the same operation identity. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    submitWebShellSessionMcpManagement: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellMcpManagementSubmit"];
+            };
+        };
+        responses: {
+            /** @description Session-local MCP settings and operation snapshot. Inventory describes published pins rather than live connection health; operation status omits inventory. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedMcpManagementSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description The original MCP Runtime or management operation cannot be confirmed. Retry the same operation identity. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    queryWebShellSessionMcpManagementOperation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellMcpManagementOperationQuery"];
+            };
+        };
+        responses: {
+            /** @description Session-local MCP settings and operation snapshot. Inventory describes published pins rather than live connection health; operation status omits inventory. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedMcpManagementSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description The original MCP Runtime or management operation cannot be confirmed. Retry the same operation identity. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
         };
     };
     queryWebShellSessionRecovery: {
@@ -3591,6 +3789,36 @@ export interface operations {
             409: components["responses"]["Conflict"];
             413: components["responses"]["PayloadTooLarge"];
             503: components["responses"]["Unavailable"];
+        };
+    };
+    webShellExportSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExportRequest"];
+            };
+        };
+        responses: {
+            /** @description Immutable public item snapshot page. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellExportPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["CursorExpired"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
 }
