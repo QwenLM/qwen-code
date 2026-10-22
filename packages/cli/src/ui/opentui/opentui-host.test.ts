@@ -18,6 +18,11 @@ import type { OpenTuiCommandHost } from './commands-context.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import { handleBranchSession, handleResumeSession } from './session-switch.js';
 import { OpenTuiAppHost, type OpenTuiAppHostDeps } from './opentui-host.js';
+import {
+  foldLiveEvent,
+  rewindBoundaryHistory,
+  type LiveHistoryItem,
+} from './live-session-model.js';
 
 vi.mock('./session-switch.js', () => ({
   handleResumeSession: vi.fn(async () => {}),
@@ -324,10 +329,11 @@ describe('OpenTuiAppHost — transcript and session switch delegation', () => {
 describe('OpenTuiAppHost — transcript projection (U-28/U-29)', () => {
   it('projects each recorded item into a transcript append', () => {
     const { host, transcriptAppend } = makeHost();
-    host.addItem({ type: 'info', text: 'Done.' } as never, 1000);
+    const id = host.addItem({ type: 'info', text: 'Done.' } as never, 1000);
     expect(transcriptAppend).toHaveBeenCalledWith({
       type: 'info',
       text: 'Done.',
+      historyId: id,
     });
   });
 
@@ -355,6 +361,67 @@ describe('OpenTuiAppHost — transcript projection (U-28/U-29)', () => {
       promptId: 'turn-1',
     });
     expect(host.getHistory()).toHaveLength(1);
+  });
+
+  it('preserves equal-text model invocations as distinct projected rewind boundaries', () => {
+    const { host, transcriptAppend } = makeHost();
+    const first = host.addItem(
+      { type: 'user', text: '/repeat', sentToModel: false },
+      1,
+    );
+    host.updateItem(first, { sentToModel: true, promptId: 'turn-1' });
+    const second = host.addItem(
+      { type: 'user', text: '/repeat', sentToModel: false },
+      1,
+    );
+    host.updateItem(second, { sentToModel: true, promptId: 'turn-2' });
+    expect([first, second]).toEqual([2, 3]);
+    expect(host.getHistory()).toEqual([
+      {
+        id: first,
+        type: 'user',
+        text: '/repeat',
+        sentToModel: true,
+        promptId: 'turn-1',
+      },
+      {
+        id: second,
+        type: 'user',
+        text: '/repeat',
+        sentToModel: true,
+        promptId: 'turn-2',
+      },
+    ]);
+    const live = transcriptAppend.mock.calls.reduce<readonly LiveHistoryItem[]>(
+      (items, [event]) => foldLiveEvent(items, event),
+      [],
+    );
+    expect(
+      live.map((item) => ({
+        historyId: item.historyId,
+        promptId: item.kind === 'user' ? item.promptId : undefined,
+      })),
+    ).toEqual([
+      { historyId: first, promptId: 'turn-1' },
+      { historyId: second, promptId: 'turn-2' },
+    ]);
+    expect(
+      rewindBoundaryHistory(live).map((item) =>
+        item.type === 'user' ? item.promptId : undefined,
+      ),
+    ).toEqual(['turn-1', 'turn-2']);
+  });
+
+  it('still suppresses consecutive unqualified slash echoes', () => {
+    const { host, transcriptAppend } = makeHost();
+    host.addItem({ type: 'user', text: '/local', sentToModel: false }, 1);
+    const duplicate = host.addItem(
+      { type: 'user', text: '/local', sentToModel: false },
+      1,
+    );
+    expect(duplicate).toBe(3);
+    expect(host.getHistory()).toHaveLength(1);
+    expect(transcriptAppend).toHaveBeenCalledTimes(1);
   });
 
   it('loadHistory replaces history without touching the transcript', () => {

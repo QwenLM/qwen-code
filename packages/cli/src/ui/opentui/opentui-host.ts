@@ -205,12 +205,14 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
     const newItem = { ...itemData, id } as HistoryItem;
 
     const prev = this.history;
+    const lastItem = prev[prev.length - 1];
     if (
       !(
         prev.length > 0 &&
-        prev[prev.length - 1].type === 'user' &&
+        lastItem.type === 'user' &&
         newItem.type === 'user' &&
-        prev[prev.length - 1].text === newItem.text
+        lastItem.sentToModel !== true &&
+        lastItem.text === newItem.text
       )
     ) {
       const next = [...prev, newItem];

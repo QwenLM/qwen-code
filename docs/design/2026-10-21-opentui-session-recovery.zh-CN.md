@@ -184,3 +184,9 @@ canonical 回放将每个压缩标记保留为一个已有 compaction 行，携�
 ### 裸退出与持久输入召回
 
 仅既有 normalizer 识别的精确裸退出 token 绕过 dispatcher USER 日志，使新 Logger 冷加载后仍召回最后一条真实 prompt。带参数的 quit/exit、带空格的 slash 输入和无关 help/clear/reset/new 命令仍保留精确 trimmed 召回及原 await 后 session guard。这与 transcript 的 slash 录制排除策略分离。原 1a2a 八别名失败和普通 prompt/help 正控均保留；在源码 1a2a703cfba99d8bfaf54ee1acf0a7e0b543411c 加 patch 1272d01a2b986080d603d46b018b3884560a3c6fd40caaffac3dd51beb9a138d 上，未改的原诊断两案通过（另 90 案精确未选中），dispatcher/gateway 两个完整文件 126 案全部通过，包含新增 15 案真实文件系统回归。此候选的 build/typecheck、native 与安装 PTY 尚未通过；与 R3 整合后仍需新源码/产物绑定。旧 217 案证据仍只归属原 c395/patch622b 组合。
+
+### 重复模型 slash 的身份
+
+命令 host 仅在前一条调用尚未送达模型时抑制连续同文用户回显。一旦前条 `sentToModel` 为 true，后续同文调用必须获得实际入库的 host 行及自己的 history ID，既有 dispatcher 更新才能附上下一轮 prompt ID。live 投影保留两行，共享 rewind 接收到两个 prompt 身份，即使 assistant 输出只存在于 live transcript。local/未送模型的重复回显继续保持原去重和分配新 ID 后返回的行为。ID 分配、dispatcher 提交、fold/replay 匹配、logger admission 和录制策略均不改。
+
+在整合源码 c0cd94c0f2ecb89dce9f9b6f7620de406a362e7a 上，独立组件诊断的一个正控通过，重复模型 slash 案失败（另 105 案精确未选中）：两个不同提交结果仅产生一个 host/live 用户行与一个 rewind 边界。原始失败保留。候选增加实际 fold 的 host 回归及显式未送模型重复正控；候选准备时，源码验证和整合后的 build/type/native/安装产物 PTY 验收均为 NOT_RUN。随后在 c0cd 加候选 patch f9d535 上，不变的原诊断两案通过（另 105 案未选中）；仅校准旧 info 投影断言以精确包含既有 historyId 后，c0cd 加 patch 0958e48 的 host/dispatcher 两完整文件 136 案通过，无跳过或 bail 未运行，两项新增回归实际执行。原 124 通过、1 失败、11 bail 未运行结果保留。当前整合后的 build/type/native/安装产物 PTY 仍为 NOT_RUN。先前 217 案和裸退出冷召回结果继续只归属其具名旧源码/patch 组合。
