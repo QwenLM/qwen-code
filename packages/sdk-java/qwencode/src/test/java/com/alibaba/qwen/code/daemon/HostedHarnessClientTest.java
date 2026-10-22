@@ -5709,6 +5709,11 @@ class HostedHarnessClientTest {
                     if (promptCalls.incrementAndGet() == 1) {
                         exchange.getResponseHeaders().set("Content-Type",
                                 "text/plain");
+                        // See sendSessionNoContent: never pool a body-less
+                        // fixture response (Java 11 keeps the dead
+                        // connection and the next submission fails on it).
+                        exchange.getResponseHeaders().set("Connection",
+                                "close");
                         exchange.sendResponseHeaders(404, -1);
                         exchange.close();
                         return;
