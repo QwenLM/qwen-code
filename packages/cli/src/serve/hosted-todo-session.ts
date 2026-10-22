@@ -40,7 +40,8 @@ export async function writeHostedTodos(
       operation: 'writeHostedTodos',
       commandId: `todo:${callKey}`,
       sessionKey: session.authority.sessionHeader.sessionKey,
-      contentDigest: `sha256:${managedToolDigest(input)}`,
+      // Bare hex: assertManagedSessionDigest rejects the argsDigest prefix.
+      contentDigest: managedToolDigest(input),
     },
     { domain: 'todo_state', content: { todos: input['todos'] } },
     { class: 'trusted_entry' },
