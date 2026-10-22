@@ -42,8 +42,7 @@ export interface HostedApprovalSettings {
 // Listing what each mode pre-approves means a tool added to a profile later
 // is asked about until someone decides otherwise. `task_list` only reads the
 // Session's own team board (H4e-b1). `todo_write` only writes the Session's
-// own task list, so it is as safe to pre-approve as a read; `web_fetch` is
-// deliberately absent, because it reaches a URL nobody in the Session chose.
+// own task list and does not edit Workspace files.
 const PREAPPROVED_TOOLS: Readonly<
   Record<Exclude<HostedApprovalMode, 'yolo'>, readonly string[]>
 > = {

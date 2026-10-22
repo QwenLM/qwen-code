@@ -141,7 +141,7 @@ class ManagedActionsTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"read_file", "write_file", "edit", "run_shell_command",
-            "web_fetch", "todo_write",
+            "todo_write",
             "team_create", "task_create", "task_update", "workflow",
             "request_shutdown", "exit_plan_mode", "team_plan_approval"})
     void previewsExactInputOnPublicAndWebShellListsAndDetails(String tool) throws Exception {
@@ -152,8 +152,6 @@ class ManagedActionsTest {
             case "write_file" -> "{ \"file_path\" : \"notes.md\", \"content\" : \"\\u4e2d\\n\" }";
             case "edit" -> "{ \"file_path\" : \"notes.md\", \"old_string\" : \"a\", \"new_string\" : \"b\" }";
             case "run_shell_command" -> "{ \"command\" : \"printf 'text'\" }";
-            // #15076: the URL is what the operator must see before answering.
-            case "web_fetch" -> "{ \"url\" : \"https://example.com/a\", \"prompt\" : \"summarize\" }";
             case "todo_write" -> "{ \"todos\" : [ { \"id\" : \"1\", \"content\" : \"audit\", \"status\" : \"pending\" } ] }";
             case "team_create" -> "{ \"team_name\" : \"review\" }";
             case "task_create" -> "{ \"subject\" : \"Audit\", \"description\" : \"the diff\" }";

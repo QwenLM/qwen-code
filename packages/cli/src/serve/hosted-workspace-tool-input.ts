@@ -4,18 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// #15076: the argument checks for the two tools only the `/3` profiles
-// declare. They run before the Runtime is acquired, so a malformed call
-// costs no durable work and its refusal stays model-correctable. The exact
-// rules stay in the core tools (WebFetchTool, TodoWriteTool); these checks
-// keep the shapes those tools reject from reaching a Runtime round trip.
-
-/** The longest URL a Hosted `web_fetch` accepts, in bytes. */
-export const HOSTED_WEB_FETCH_URL_MAX_BYTES = 2048;
-
-/** The content formats `web_fetch` accepts, as the core tool declares them. */
-const WEB_FETCH_FORMATS = new Set(['auto', 'markdown', 'html', 'text']);
-
 const TODO_STATUSES = new Set(['pending', 'in_progress', 'completed']);
 
 const TODO_ID_MAX_LENGTH = 500;
@@ -23,77 +11,6 @@ const TODO_ID_MAX_LENGTH = 500;
 export interface HostedToolInputCheck {
   input: Record<string, unknown>;
   error?: string;
-}
-
-/**
- * Checks a `web_fetch` call. The URL is dispatched as trimmed, and only the
- * three declared keys survive: a call carrying an undeclared argument is a
- * schema confusion the profile refuses rather than forwards.
- */
-export function checkHostedWebFetchInput(
-  args: Record<string, unknown>,
-): HostedToolInputCheck {
-  const input: Record<string, unknown> = { ...args };
-  const unsupported = Object.keys(args).find(
-    (key) => !['url', 'prompt', 'format'].includes(key),
-  );
-  if (unsupported !== undefined)
-    return {
-      input,
-      error: `Hosted web_fetch received unsupported argument ${JSON.stringify(unsupported)}. Correct the arguments and retry.`,
-    };
-  const rawUrl = args['url'];
-  if (typeof rawUrl !== 'string' || rawUrl.trim() === '')
-    return {
-      input,
-      error:
-        'Hosted web_fetch requires a nonempty url. Correct the arguments and retry.',
-    };
-  const url = rawUrl.trim();
-  input['url'] = url;
-  if (Buffer.byteLength(url, 'utf8') > HOSTED_WEB_FETCH_URL_MAX_BYTES)
-    return {
-      input,
-      error: `Hosted web_fetch accepts urls up to ${HOSTED_WEB_FETCH_URL_MAX_BYTES} bytes. Shorten the url and retry.`,
-    };
-  if (!/^https?:\/\//i.test(url))
-    return {
-      input,
-      error:
-        'Hosted web_fetch requires a url starting with http:// or https://. Correct the arguments and retry.',
-    };
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return {
-      input,
-      error: 'Hosted web_fetch received a malformed url. Correct it and retry.',
-    };
-  }
-  // Credentials in the URL would travel to the Runtime's logs and to the
-  // remote host; the tool has no way to authenticate anyway.
-  if (parsed.username || parsed.password)
-    return {
-      input,
-      error:
-        'Hosted web_fetch does not accept a url with embedded credentials. Remove them and retry.',
-    };
-  const prompt = args['prompt'];
-  if (typeof prompt !== 'string' || prompt.trim() === '')
-    return {
-      input,
-      error:
-        'Hosted web_fetch requires a nonempty prompt. Correct the arguments and retry.',
-    };
-  const format = args['format'];
-  if (format !== undefined && !WEB_FETCH_FORMATS.has(format as string))
-    return {
-      input,
-      error:
-        'Hosted web_fetch format must be one of auto, markdown, html or text. Correct the arguments and retry.',
-    };
-  return { input };
 }
 
 /**

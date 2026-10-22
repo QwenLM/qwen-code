@@ -27,7 +27,6 @@ import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
 import { GlobTool } from '@qwen-code/qwen-code-core/tools/glob.js';
 import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
-import { WebFetchTool } from '@qwen-code/qwen-code-core/tools/web-fetch.js';
 import { TodoWriteTool } from '@qwen-code/qwen-code-core/tools/todoWrite.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ShellToolInvocation } from '@qwen-code/qwen-code-core/tools/shell.js';
@@ -241,9 +240,6 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   EditTool.Name,
   ShellTool.Name,
   GlobTool.Name,
-  // #15076: the two tools only the `/3` profiles declare. Neither touches a
-  // Workspace file: the fetch writes nothing, the task list is bookkeeping.
-  WebFetchTool.Name,
   TodoWriteTool.Name,
 ]);
 
@@ -2704,8 +2700,6 @@ export function createManagedToolSet(
           executionTimeoutMs: 5_000,
         }),
         new ShellTool(config),
-        // #15076: the managed mode keeps a fetch to its one transfer.
-        new WebFetchTool(config, { managed: true }),
         new TodoWriteTool(config),
       ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
     ),

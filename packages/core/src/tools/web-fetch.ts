@@ -205,22 +205,6 @@ function readHintForPath(persistedPath: string): string {
 }
 
 /**
- * The processing a fetch may run after the transfer completes. The default
- * is the local experience: a per-Session cache, binary payloads saved to
- * disk, and a fast-model side query that answers the prompt. A hosted
- * Runtime uses `managed`, which keeps the fetch to the one transfer: nothing
- * is written to the Runtime's disk and no second model call leaves the
- * Session's own accounting.
- */
-export interface WebFetchToolOptions {
-  /**
-   * Refuse binary payloads instead of saving them, skip the response cache,
-   * and return the fetched text instead of summarizing it.
-   */
-  managed?: boolean;
-}
-
-/**
  * Parameters for the WebFetch tool
  */
 export interface WebFetchToolParams {
@@ -255,7 +239,6 @@ class WebFetchToolInvocation extends BaseToolInvocation<
   constructor(
     private readonly config: Config,
     params: WebFetchToolParams,
-    private readonly options: WebFetchToolOptions = {},
   ) {
     super(params);
     this.debugLogger = createDebugLogger('WEB_FETCH');
@@ -360,7 +343,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
     // that share one Config/Storage (/clear and /new call startNewSession
     // with a fresh ID); old-session entries age out of the LRU.
     const cacheKey = `${this.config.getSessionId?.() ?? ''}|${acceptHeader} ${fetchUrl}`;
-    const cached = this.options.managed ? undefined : urlCache.get(cacheKey);
+    const cached = urlCache.get(cacheKey);
     if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
       this.debugLogger.debug(`[WebFetchTool] Cache hit for ${fetchUrl}`);
       return cached;
@@ -456,14 +439,6 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
     let persistedSize: number | undefined;
     let persistedMime: string | undefined;
     let content: string;
-
-    // A managed Runtime owns no tool-result directory the model can read
-    // back, so it refuses a binary payload instead of saving an orphan.
-    if (isBinary && this.options.managed) {
-      throw new Error(
-        `Fetched ${response.body.length} bytes of binary content (${contentType || 'unknown content type'}), which this profile does not save. Fetch a text page instead.`,
-      );
-    }
 
     if (isBinary) {
       // Keep the raw bytes on disk so the model (or shell tools) can inspect
@@ -652,20 +627,6 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
         };
       }
 
-      // #15076: a managed Runtime never runs the summarizer — that is a
-      // second model call the Session's own accounting does not see. Return
-      // the page as fetched and let the model read it against its prompt.
-      if (this.options.managed) {
-        return {
-          llmContent: `${header}\n\n${entry.content}${binaryNote}`,
-          returnDisplay: `${displaySummary}${elapsedSuffix()} — content returned as fetched`,
-          rawOutputSize: entry.rawOutputSize,
-          ...(entry.persistedPath
-            ? { resultFilePaths: [entry.persistedPath] }
-            : {}),
-        };
-      }
-
       const fallbackPrompt = `The user requested the following: "${this.params.prompt}".
 
 I have fetched the content from ${this.params.url}. Fetch metadata:
@@ -822,10 +783,7 @@ export class WebFetchTool extends BaseDeclarativeTool<
 > {
   static readonly Name: string = ToolNames.WEB_FETCH;
 
-  constructor(
-    private readonly config: Config,
-    private readonly options: WebFetchToolOptions = {},
-  ) {
+  constructor(private readonly config: Config) {
     super(
       WebFetchTool.Name,
       ToolDisplayNames.WEB_FETCH,
@@ -889,14 +847,10 @@ export class WebFetchTool extends BaseDeclarativeTool<
     // Normalize before the invocation exists: the scheduler feeds
     // invocation.params into evaluatePermissionFlow, so this is what makes
     // domain rules match the host actually contacted.
-    return new WebFetchToolInvocation(
-      this.config,
-      {
-        ...params,
-        url: rewriteGitHubBlobUrl(params.url),
-      },
-      this.options,
-    );
+    return new WebFetchToolInvocation(this.config, {
+      ...params,
+      url: rewriteGitHubBlobUrl(params.url),
+    });
   }
 
   override toAutoClassifierInput(
