@@ -53,7 +53,11 @@ vi.mock('node:os', async (importOriginal) => {
   return { ...patched, default: patched };
 });
 
-import { DEFAULT_WRITE_QUEUE_BYTES } from '../utils/bun-pty.js';
+import {
+  DEFAULT_WRITE_QUEUE_BYTES,
+  processPtyBudget,
+} from '../utils/bun-pty.js';
+import * as bunPty from '../utils/bun-pty.js';
 import {
   MAX_CONCURRENT_WEB_TERMINALS,
   resolveWebTerminalShell,
@@ -1259,6 +1263,105 @@ describe('WebTerminalRegistry', () => {
     expect(registry.write('terminal:paste', paste)).toBe('backpressure');
     expect(write).toHaveBeenCalledOnce();
     registry.dispose();
+  });
+
+  it.each(['lydell-node-pty', 'node-pty'])(
+    'bounds idle input frames on %s in UTF-8 bytes',
+    async (name) => {
+      loadPty.mockResolvedValue({
+        impl: { module: { spawn }, name },
+        loadError: null,
+      });
+      const registry = await start('terminal:frame-limit');
+      const limit = 1024 * 1024;
+      expect(
+        registry.write('terminal:frame-limit', 'é'.repeat(limit / 2 + 1)),
+      ).toBe('backpressure');
+      expect(write).not.toHaveBeenCalled();
+      expect(
+        registry.write('terminal:frame-limit', 'é'.repeat(limit / 2)),
+      ).toBe('written');
+      expect(write).toHaveBeenCalledOnce();
+      inputSocket.writableLength = 0;
+      expect(
+        registry.write('terminal:frame-limit', 'x'.repeat(300 * 1024)),
+      ).toBe('written');
+      registry.dispose();
+    },
+  );
+
+  it('reserves a native queue for other Bun PTYs under shared-budget pressure', async () => {
+    const originalLimit = processPtyBudget.totalWriteQueueBytes;
+    expect(
+      MAX_CONCURRENT_WEB_TERMINALS * DEFAULT_WRITE_QUEUE_BYTES,
+    ).toBeLessThanOrEqual(originalLimit);
+    processPtyBudget.totalWriteQueueBytes =
+      (MAX_CONCURRENT_WEB_TERMINALS + 1) * 4096 + DEFAULT_WRITE_QUEUE_BYTES;
+    let sharedPending = 0;
+    let backendFailures = 0;
+    const queues: Array<{ pending: number }> = [];
+    vi.spyOn(bunPty, 'getPtyBudgetStats').mockImplementation(() => ({
+      activePtys: queues.length,
+      pausedHoldBytes: 0,
+      writeQueueBytes: sharedPending,
+    }));
+    const writeNative = (queue: { pending: number }, data: string | Buffer) => {
+      const bytes = Buffer.byteLength(data);
+      if (sharedPending + bytes > processPtyBudget.totalWriteQueueBytes) {
+        backendFailures++;
+        return;
+      }
+      queue.pending += bytes;
+      sharedPending += bytes;
+    };
+    spawn.mockImplementation(() => {
+      const queue = { pending: 0 };
+      queues.push(queue);
+      return {
+        ...createSpawnedPty(),
+        _agent: undefined,
+        _socket: undefined,
+        get stats() {
+          return { writeQueuedBytes: queue.pending };
+        },
+        write: vi.fn((data: string | Buffer) => writeNative(queue, data)),
+      };
+    });
+    loadPty.mockResolvedValue({
+      impl: { module: { spawn }, name: 'qwen-bun-pty' },
+      loadError: null,
+    });
+    const registry = new WebTerminalRegistry();
+    try {
+      for (let i = 0; i < MAX_CONCURRENT_WEB_TERMINALS; i++) {
+        await create(registry, `terminal:shared-${i}`);
+        expect(registry.write(`terminal:shared-${i}`, 'x'.repeat(4096))).toBe(
+          'written',
+        );
+      }
+      // Equality at the web admission ceiling is allowed; the next byte is not.
+      expect(registry.write('terminal:shared-0', 'x'.repeat(4096))).toBe(
+        'written',
+      );
+      expect(sharedPending).toBe(
+        processPtyBudget.totalWriteQueueBytes - DEFAULT_WRITE_QUEUE_BYTES,
+      );
+      expect(registry.write('terminal:shared-1', 'x')).toBe('backpressure');
+      expect(registry.write('terminal:shared-1', '\x03')).toBe('backpressure');
+      const otherPty = { pending: 0 };
+      writeNative(otherPty, Buffer.alloc(DEFAULT_WRITE_QUEUE_BYTES));
+      expect(otherPty.pending).toBe(DEFAULT_WRITE_QUEUE_BYTES);
+      expect(backendFailures).toBe(0);
+      expect(
+        registry.readSnapshot('terminal:shared-1')?.failed,
+      ).toBeUndefined();
+      sharedPending = 0;
+      for (const queue of queues) queue.pending = 0;
+      expect(registry.write('terminal:shared-1', 'next\r')).toBe('written');
+    } finally {
+      registry.dispose();
+      processPtyBudget.totalWriteQueueBytes = originalLimit;
+    }
   });
 
   it('admits Bun input from public stats across output, drain and reconnect', async () => {

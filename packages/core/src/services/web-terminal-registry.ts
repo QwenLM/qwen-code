@@ -10,7 +10,11 @@ import type { Terminal } from '@xterm/headless';
 import { loadPty, type PtyLoadResult } from '../utils/getPty.js';
 import { collectPtyProcessTree } from '../utils/pty-process-tree.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { DEFAULT_WRITE_QUEUE_BYTES } from '../utils/bun-pty.js';
+import {
+  DEFAULT_WRITE_QUEUE_BYTES,
+  getPtyBudgetStats,
+  processPtyBudget,
+} from '../utils/bun-pty.js';
 import {
   createDebugLogger,
   isDebugLogFileEnabled,
@@ -81,6 +85,7 @@ export type WebTerminalWriteResult = 'written' | 'backpressure' | 'unavailable';
 const MAX_BUFFER_CHUNKS = 4000;
 const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 const MAX_BUFFERED_INPUT_BYTES = 256 * 1024;
+const MAX_INPUT_FRAME_BYTES = 1024 * 1024;
 export const MAX_CONCURRENT_WEB_TERMINALS = 8;
 /** Reclaim a PTY session after this long with no connected listener. */
 const IDLE_RECLAIM_MS = 15 * 60 * 1000;
@@ -673,6 +678,17 @@ export class WebTerminalRegistry {
     const bytes = Buffer.byteLength(data);
     const isRecoveryControl =
       data.length === 1 && '\x03\x04\x1a\x1c'.includes(data);
+    if (!isRecoveryControl && bytes > MAX_INPUT_FRAME_BYTES) {
+      return 'backpressure';
+    }
+    // Leave one native queue budget available to non-web PTYs in this process.
+    if (
+      session.maxInputQueueBytes !== undefined &&
+      getPtyBudgetStats().writeQueueBytes + bytes >
+        processPtyBudget.totalWriteQueueBytes - DEFAULT_WRITE_QUEUE_BYTES
+    ) {
+      return 'backpressure';
+    }
     if (!isRecoveryControl || session.maxInputQueueBytes !== undefined) {
       const bufferedBytes = session.measureBufferedInputBytes();
       if (
