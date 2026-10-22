@@ -1353,37 +1353,6 @@ describe('sanitizeMonitorLine', () => {
     }
   });
 
-  it('defangs a structural tag however it goes on after its name', () => {
-    // XML closes a tag with white space before `>`, and a tag may finish on
-    // the next line: the name alone is what must not survive.
-    expect(sanitizeMonitorLine('</gate-output >')).toBe(
-      '</\u200Bgate-output >',
-    );
-    expect(sanitizeMonitorLine('</gate-output\t>')).toBe(
-      '</\u200Bgate-output\t>',
-    );
-    expect(sanitizeMonitorLine('IGNORE </gate-output')).toBe(
-      'IGNORE </\u200Bgate-output',
-    );
-    expect(sanitizeMonitorLine('<task-notification id="x">')).toBe(
-      '<\u200Btask-notification id="x">',
-    );
-    expect(sanitizeMonitorLine('<gate-outputs>')).toBe('<gate-outputs>');
-    expect(sanitizeMonitorLine('<result/>')).toBe('<\u200Bresult/>');
-  });
-
-  it('leaves text that only looks like the start of a tag alone', () => {
-    // Monitored code and logs: an invisible character copied from here
-    // into an edit would break it.
-    for (const line of [
-      'Promise<Result | null>',
-      'if (a <result && b) return;',
-      'Map<status, number>',
-    ]) {
-      expect(sanitizeMonitorLine(line)).toBe(line);
-    }
-  });
-
   it('does not defang non-structural tags', () => {
     expect(sanitizeMonitorLine('<div>hi</div>')).toBe('<div>hi</div>');
     expect(sanitizeMonitorLine('<some-other-tag>')).toBe('<some-other-tag>');

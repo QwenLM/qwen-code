@@ -341,16 +341,33 @@ function killGroup(pgid: number): void {
 }
 
 /**
+ * The gate's own wrappers, however the tag goes on after the name
+ * (`</gate-output x>`, `</gate-output/ >`, or `>` on the next line): a parser
+ * still reads those as tags, and the words have no other use, so any of them
+ * is defanged.
+ */
+const GATE_ENVELOPE_TAG = /<(\/?)(gate-output|gate-stderr)(?![a-z0-9-])/gi;
+
+/** Invisible characters that could hide a wrapper tag from the defang. */
+const HIDING_CHARACTERS = /[\u00ad\u200b\u200c\u2060\ufeff]/g;
+
+/**
  * Strips ANSI and control characters and defangs envelope tag names line by
  * line, like a `Monitor` line, so a probe's output cannot close the
  * `<gate-output>` block it is wrapped in or spoof a notification boundary.
+ * The block is not XML-escaped, so the defang is the whole defence: the
+ * gate's wrappers are defanged in every form, not only as `<name>`.
  */
 function sanitizeGateText(text: string): string {
   // Line by line: an escape sequence left open on one line (an OSC title
   // with no terminator) must not swallow the lines after it.
   return text
     .split('\n')
-    .map((line) => sanitizeMonitorLine(stripAnsi(line.replace(/\r$/, ''))))
+    .map((line) =>
+      sanitizeMonitorLine(
+        stripAnsi(line.replace(/\r$/, '')).replace(HIDING_CHARACTERS, ''),
+      ).replace(GATE_ENVELOPE_TAG, '<$1\u200B$2'),
+    )
     .join('\n')
     .trim();
 }

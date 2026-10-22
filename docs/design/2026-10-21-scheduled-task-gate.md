@@ -181,9 +181,12 @@ in the existing `buildScheduledTaskRunPrompt` header.
 - The task card shows the gate and its last outcome
   (`quiet ×41 · last delivered 13:05 · 0 failures`).
 - "Run now" on a gated task sends a manual-run prompt that asks the model to
-  run the gate as an ordinary shell command, exactly as written so that the
-  session's permission rules apply to it as they do to the scheduled fire,
-  and then follow the task prompt with the output as data only when the
+  run the gate as an ordinary shell command, exactly as written, so that
+  the session's `Bash(...)` rules and read-only check apply to the command
+  itself. A scheduled fire checks it as a `Monitor` command instead, which
+  unwraps `bash -c`, and a `Monitor(...)` rule (what "Always allow" saves
+  for a gate) does not cover a shell call, so a manual run can ask where the
+  scheduled fire runs; only `Bash(...)` rules apply to both. Then follow the task prompt with the output as data only when the
   command exited 0 and printed something on standard output (warnings on
   standard error do not count, though the shell tool shows both streams
   together); to say that the gate printed nothing when it exited 0 silently,
@@ -354,7 +357,11 @@ the command is proposed and checked again where it runs.
   after a restart.
 - **Output is data.** Gate output is sanitized like `Monitor` lines (control
   characters stripped, envelope tag names defanged, `gate-output` and
-  `gate-stderr` added to that list), wrapped in the text of Section 4.2, and
+  `gate-stderr` added to that list). The block is not XML-escaped, so the
+  gate's own wrapper names are defanged in every form a parser reads as a
+  tag (`</gate-output x>`, `</gate-output/ >`, a `>` on the next line, a name
+  split by an invisible character), not only as `<name>`. It is then
+  wrapped in the text of Section 4.2, and
   delivered on the existing cron path, which cannot answer a pending
   permission prompt and skips the `UserPromptSubmit` hook. One fix rides
   along: the TUI drain passes an explicit non-shell intent for cron fires, so
