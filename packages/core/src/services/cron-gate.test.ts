@@ -147,34 +147,63 @@ describe('createCronGateRunner', () => {
     // the mock's, and a real signal would reach whatever group has that id.
     vi.useFakeTimers({ toFake: ['setTimeout'] });
     const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
-    const result = await createCronGateRunner(
-      makeConfig({ mode: ApprovalMode.YOLO }),
-    )('./probe.sh', { signal: signal(), approvedInProcess: false });
-    expect(result).toMatchObject({
-      kind: 'failed',
-      detail: expect.stringContaining(
-        'something it started in the background still held its stdout open',
-      ),
-    });
-    // What it left in its group is stopped, gently first: each fire would
-    // add one more.
-    if (process.platform !== 'win32') {
-      expect(kill).toHaveBeenCalledWith(-4242, 'SIGTERM');
-      expect(kill).not.toHaveBeenCalledWith(-4242, 'SIGKILL');
+    const exitListeners = process.listenerCount('exit');
+    try {
+      const result = await createCronGateRunner(
+        makeConfig({ mode: ApprovalMode.YOLO }),
+      )('./probe.sh', { signal: signal(), approvedInProcess: false });
+      expect(result).toMatchObject({
+        kind: 'failed',
+        detail: expect.stringContaining(
+          'something it started in the background still held its stdout open',
+        ),
+      });
+      if (process.platform !== 'win32') {
+        // What it left in its group is stopped, gently first: each fire
+        // would add one more.
+        expect(kill).toHaveBeenCalledWith(-4242, 'SIGTERM');
+        expect(kill).not.toHaveBeenCalledWith(-4242, 'SIGKILL');
+        // A process that exits before the SIGKILL is due still sends it.
+        expect(process.listenerCount('exit')).toBe(exitListeners + 1);
+        const atExit = process.listeners('exit').at(-1) as () => void;
+        atExit();
+        process.removeListener('exit', atExit);
+        expect(kill).toHaveBeenCalledWith(-4242, 'SIGKILL');
+        kill.mockClear();
+        vi.advanceTimersByTime(200);
+        expect(kill).not.toHaveBeenCalled();
+      }
+      // Output printed in the foreground is still delivered; the SIGKILL
+      // follows 200 ms after the SIGTERM.
+      scriptShell({ stdout: 'event: comment\n', stdoutHeldAfterExit: true });
+      expect(
+        await createCronGateRunner(makeConfig({ mode: ApprovalMode.YOLO }))(
+          './probe.sh',
+          { signal: signal(), approvedInProcess: false },
+        ),
+      ).toMatchObject({ kind: 'output', stdout: 'event: comment\n' });
+      if (process.platform !== 'win32') {
+        expect(kill).toHaveBeenCalledWith(-4242, 'SIGTERM');
+        vi.advanceTimersByTime(200);
+        expect(kill).toHaveBeenCalledWith(-4242, 'SIGKILL');
+        expect(process.listenerCount('exit')).toBe(exitListeners);
+      }
+      // Nothing visible and a held stdout fails even when the output was cut.
+      scriptShell({
+        stdout: '\x1b[0m'.repeat(CRON_GATE_OUTPUT_CAP_BYTES / 4 + 1),
+        stdoutHeldAfterExit: true,
+      });
+      expect(
+        await createCronGateRunner(makeConfig({ mode: ApprovalMode.YOLO }))(
+          './probe.sh',
+          { signal: signal(), approvedInProcess: false },
+        ),
+      ).toMatchObject({ kind: 'failed' });
       vi.advanceTimersByTime(200);
-      expect(kill).toHaveBeenCalledWith(-4242, 'SIGKILL');
+    } finally {
+      vi.useRealTimers();
+      kill.mockRestore();
     }
-    // Output printed in the foreground is still delivered.
-    scriptShell({ stdout: 'event: comment\n', stdoutHeldAfterExit: true });
-    expect(
-      await createCronGateRunner(makeConfig({ mode: ApprovalMode.YOLO }))(
-        './probe.sh',
-        { signal: signal(), approvedInProcess: false },
-      ),
-    ).toMatchObject({ kind: 'output', stdout: 'event: comment\n' });
-    vi.advanceTimersByTime(200);
-    vi.useRealTimers();
-    kill.mockRestore();
   });
 
   it('never judges a cut output quiet, and keeps a line an open escape would swallow', async () => {

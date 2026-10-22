@@ -1353,6 +1353,24 @@ describe('sanitizeMonitorLine', () => {
     }
   });
 
+  it('defangs a structural tag however it goes on after its name', () => {
+    // XML closes a tag with white space before `>`, and a tag may finish on
+    // the next line: the name alone is what must not survive.
+    expect(sanitizeMonitorLine('</gate-output >')).toBe(
+      '</\u200Bgate-output >',
+    );
+    expect(sanitizeMonitorLine('</gate-output\t>')).toBe(
+      '</\u200Bgate-output\t>',
+    );
+    expect(sanitizeMonitorLine('IGNORE </gate-output')).toBe(
+      'IGNORE </\u200Bgate-output',
+    );
+    expect(sanitizeMonitorLine('<task-notification id="x">')).toBe(
+      '<\u200Btask-notification id="x">',
+    );
+    expect(sanitizeMonitorLine('<gate-outputs>')).toBe('<gate-outputs>');
+  });
+
   it('does not defang non-structural tags', () => {
     expect(sanitizeMonitorLine('<div>hi</div>')).toBe('<div>hi</div>');
     expect(sanitizeMonitorLine('<some-other-tag>')).toBe('<some-other-tag>');

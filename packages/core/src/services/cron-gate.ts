@@ -267,9 +267,8 @@ export function createCronGateRunner(config: Config): CronGateRunner {
     }
     const durationMs = Math.round(performance.now() - startedAt);
     // Judged as delivered: output of escape sequences alone would wake the
-    // session with an empty block. A cut output is never quiet: what was
-    // kept may be noise in front of what was cut.
-    if (!truncated && sanitizeGateText(stdout).length === 0) {
+    // session with an empty block.
+    if (sanitizeGateText(stdout).length === 0) {
       // A part the command put in the background outlived it with its
       // stdout still open: whatever it prints is lost, so "quiet" would
       // skip every fire. Catches what the lexical `&` check misses (`eval`,
@@ -279,7 +278,9 @@ export function createCronGateRunner(config: Config): CronGateRunner {
           'exited with nothing on stdout while something it started in the background still held its stdout open (a gate must finish in the foreground)',
         );
       }
-      return { kind: 'quiet', durationMs };
+      // A cut output is never quiet: what was kept may be noise in front
+      // of what was cut.
+      if (!truncated) return { kind: 'quiet', durationMs };
     }
     return { kind: 'output', stdout, truncated, durationMs };
   };
@@ -303,14 +304,34 @@ function stopLeftovers(pgid: number): void {
   } catch {
     return; // Gone already.
   }
+  stoppingGroups.add(pgid);
+  if (stoppingGroups.size === 1) process.once('exit', killStoppingGroups);
   setTimeout(() => {
-    try {
-      process.kill(-pgid, 0);
-      process.kill(-pgid, 'SIGKILL');
-    } catch {
-      // Gone.
+    if (!stoppingGroups.delete(pgid)) return;
+    if (stoppingGroups.size === 0) {
+      process.removeListener('exit', killStoppingGroups);
     }
+    killGroup(pgid);
   }, LEFTOVER_KILL_DELAY_MS).unref();
+}
+
+/** Groups sent SIGTERM whose SIGKILL is still due. */
+const stoppingGroups = new Set<number>();
+
+/** A process that exits first (a headless run ending with its last gate)
+ * sends the SIGKILLs still due, or a part that ignored SIGTERM outlives it. */
+function killStoppingGroups(): void {
+  for (const pgid of stoppingGroups) killGroup(pgid);
+  stoppingGroups.clear();
+}
+
+function killGroup(pgid: number): void {
+  try {
+    process.kill(-pgid, 0);
+    process.kill(-pgid, 'SIGKILL');
+  } catch {
+    // Gone.
+  }
 }
 
 /**

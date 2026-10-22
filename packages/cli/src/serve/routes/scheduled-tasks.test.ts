@@ -679,7 +679,7 @@ describe('scheduled-tasks routes', () => {
     const text = h.bridge.prompts[0]?.text ?? '';
     expect(text).toContain('Trigger: manual');
     expect(text).toContain('Manual run of a gated scheduled task.');
-    expect(text).toContain('\n./probe.sh --gate\n');
+    expect(text).toContain('\n{ ./probe.sh --gate\n} 2>/dev/null\n');
     expect(text).toMatch(/\n\nreview the next PR$/);
   });
 
