@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -47,7 +47,8 @@ describe.skipIf(process.platform === 'win32')(
     it('is admitted beside the worker tools and runs in the Session directory', async () => {
       expect(await run('printf "%s" "$PWD"')).toMatchObject({
         kind: 'output',
-        stdout: workspace,
+        // The shell reports the canonical path (macOS: /private/var/...).
+        stdout: await realpath(workspace),
         truncated: false,
       });
     });
