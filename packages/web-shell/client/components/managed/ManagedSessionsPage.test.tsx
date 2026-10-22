@@ -1116,7 +1116,7 @@ describe('ManagedSessionsPage', () => {
     expect(container.querySelector('textarea')?.value).toBe(
       'Keep my next message',
     );
-    expect(container.textContent).toContain(
+    expect(container.textContent).not.toContain(
       'subsequent tool calls in this turn',
     );
     expect(mocks.client.submitPrompt).not.toHaveBeenCalled();

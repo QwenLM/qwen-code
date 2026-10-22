@@ -2248,7 +2248,10 @@ function ManagedSessionsContent({
                 </p>
               )}
               {interactive &&
-                (modelChange.supported || modelChange.blocked) && (
+                (modelChange.busy ||
+                  modelChange.blocked ||
+                  modelChange.optionsLoading ||
+                  modelChange.optionsError) && (
                   <div
                     className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
                     role="status"
@@ -2261,9 +2264,7 @@ function ManagedSessionsContent({
                             ? 'managed.model.unconfirmed'
                             : modelChange.optionsLoading
                               ? 'managed.model.loading'
-                              : modelChange.optionsError
-                                ? 'managed.model.optionsError'
-                                : 'managed.model.nextTurn',
+                              : 'managed.model.optionsError',
                       )}
                     </span>
                     {modelChange.pending && (
@@ -2310,7 +2311,10 @@ function ManagedSessionsContent({
                   </p>
                 )}
               {interactive &&
-                (approvalChange.supported || approvalChange.blocked) && (
+                (approvalChange.busy ||
+                  approvalChange.blocked ||
+                  approvalChange.optionsLoading ||
+                  approvalChange.optionsError) && (
                   <div
                     className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
                     role="status"
@@ -2323,11 +2327,7 @@ function ManagedSessionsContent({
                             ? 'managed.approvalChange.unconfirmed'
                             : approvalChange.optionsLoading
                               ? 'managed.approvalChange.loading'
-                              : approvalChange.optionsError
-                                ? 'managed.approvalChange.optionsError'
-                                : approvalChange.options?.liveSupported
-                                  ? 'managed.approvalChange.live'
-                                  : 'managed.approvalChange.nextTurn',
+                              : 'managed.approvalChange.optionsError',
                       )}
                     </span>
                     {approvalChange.pending && (
