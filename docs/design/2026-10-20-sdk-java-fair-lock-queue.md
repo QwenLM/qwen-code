@@ -101,6 +101,16 @@ drop fd 9 so a survivor
 cannot retain the lock. A hold now measures the copy instead of the suite, and
 the fast tier's 90-minute budget is again far above one hold.
 
+The test job had the same shape and the same failure: it held the lock across
+the sdk-java suite and the managed-agent H2 suite (925 s). On 2026-10-22 run
+39811435705's fast job stayed head of the queue for the full 5400 s as ticket
+271 on both attempts and failed before Maven ran. It now seeds a job-local
+repository from the host cache, runs all three Maven commands unlocked, and
+takes the lock only for its write-back. A write-back acquisition that times
+out warns and skips the copy instead of failing a step whose suite already
+passed; the `lock not acquired within` substring, the 5400 s budget, and the
+fd 9 closures are unchanged.
+
 ### Fast-tier priority
 
 The FIFO queue bounds a waiter by its position, but it still puts a fast-tier
@@ -209,9 +219,10 @@ order this section exists to prevent.
   head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper and the
-  `sdk_java_lock_acquire 5400` budget at each acquisition site, the MariaDB
-  lane's Maven runs above its acquisition and its write-back children's fd 9
-  close, and the `.size-baseline` records the workflow's new size.
+  `sdk_java_lock_acquire 5400` budget at each acquisition site, every Maven
+  run above its acquisition, both write-backs' fd 9 closes, the test job's
+  skip when the write-back lock is unavailable, and the `.size-baseline`
+  records the workflow's new size.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
@@ -219,6 +230,9 @@ order this section exists to prevent.
 
 - Both lock sites in `sdk-java.yml` acquire through the helper at 5400 s;
   the test job passes its tier and the MariaDB site defaults to normal.
+- Every Maven run resolves from a job-local repository above its acquisition,
+  and the test job's failed write-back acquisition skips the copy without
+  failing the step.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.

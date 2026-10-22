@@ -87,6 +87,14 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 只量一次复制，而不是一整套测试，fast 通道的 90 分钟预算又远大于一次
 持锁时长。
 
+test job 也是同样的形状、同样的失败：它把锁持在 sdk-java 套件和
+managed-agent H2 套件（925 s）之上。2026-10-22 的 run 39811435705 中，
+fast job 两次尝试都以票据 271 停在队首整整 5400 s，在 Maven 启动前失败。
+现在该 job 先从宿主缓存播种 job 本地仓库，三次 Maven 运行都不持锁，只在
+写回时取锁。写回取锁超时会发出警告并跳过复制，而不是让一个套件已经通过
+的 step 失败；`lock not acquired within` 子串、5400 s 预算与 fd 9 关闭
+逻辑都保持不变。
+
 ### fast 档优先
 
 FIFO 队列把 waiter 的等待限制在它的排位内，但 fast 档 job 仍然排在所有
@@ -177,8 +185,8 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
   也不会被超过。
 - 工作流的 pin 随机制迁移：`scripts/tests/sdk-java-workflow.test.js`
   pin 的是 source 该辅助脚本和两处 `sdk_java_lock_acquire 5400` 预算、
-  MariaDB 通道的 Maven 运行在取锁之前、写回子进程关闭 fd 9，以及
-  `.size-baseline` 记录的工作流新尺寸。
+  每次 Maven 运行都在取锁之前、两处写回都关闭 fd 9、test job 拿不到
+  写回锁时跳过复制，以及 `.size-baseline` 记录的工作流新尺寸。
 - 真实宿主机上的浸泡验证就是 CI 本身：合并后第一批池上运行要么
   按票序拿到锁，要么带着可归因的票据号超时。
 
@@ -186,6 +194,8 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
 
 - `sdk-java.yml` 的两处取锁点都以 5400 秒通过该辅助脚本获取；
   test job 传入自己的 tier，MariaDB 站点默认 normal。
+- 每次 Maven 运行都从 job 本地仓库解析、位于取锁之前；test job 写回
+  取锁失败时跳过复制，但不让 step 失败。
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   通过。
