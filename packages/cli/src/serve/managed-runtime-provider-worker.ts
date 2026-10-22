@@ -30,7 +30,6 @@ import {
 import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
 import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
-import { WebFetchTool } from '@qwen-code/qwen-code-core/tools/web-fetch.js';
 import { TodoWriteTool } from '@qwen-code/qwen-code-core/tools/todoWrite.js';
 import {
   ShellTool,
@@ -501,6 +500,10 @@ export class ManagedRuntimeProviderWorker {
           : ApprovalMode.DEFAULT,
         fileCheckpointingEnabled: true,
         fileReadCacheDisabled: true,
+        // #15076: the `/3` profiles declare `todo_write`, so the Worker opts
+        // in explicitly rather than registering a tool the core default
+        // leaves off.
+        todoWriteEnabled: true,
       });
       const toolConfig = deriveConfig(config, {
         getFileHistoryService: () => history(value).service,
@@ -511,8 +514,6 @@ export class ManagedRuntimeProviderWorker {
         new WriteFileTool(toolConfig),
         new EditTool(toolConfig),
         ...(context.filesOnly ? [] : [shell]),
-        // #15076: the managed mode keeps a fetch to its one transfer.
-        new WebFetchTool(toolConfig, { managed: true }),
         new TodoWriteTool(toolConfig),
       ];
       const policyRevision = randomUUID();

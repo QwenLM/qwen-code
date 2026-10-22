@@ -27,7 +27,6 @@ import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
 import { GlobTool } from '@qwen-code/qwen-code-core/tools/glob.js';
 import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
-import { WebFetchTool } from '@qwen-code/qwen-code-core/tools/web-fetch.js';
 import { TodoWriteTool } from '@qwen-code/qwen-code-core/tools/todoWrite.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ShellToolInvocation } from '@qwen-code/qwen-code-core/tools/shell.js';
@@ -241,9 +240,8 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   EditTool.Name,
   ShellTool.Name,
   GlobTool.Name,
-  // #15076: the two tools only the `/3` profiles declare. Neither touches a
-  // Workspace file: the fetch writes nothing, the task list is bookkeeping.
-  WebFetchTool.Name,
+  // #15076: `todo_write`, declared only by the `/3` profiles. It writes no
+  // Workspace file: the task list is the Worker's own bookkeeping.
   TodoWriteTool.Name,
 ]);
 
@@ -2685,6 +2683,12 @@ export function createManagedToolSet(
     fileCheckpointingEnabled: false,
     // The worker has no conversation history to justify cached read elision.
     fileReadCacheDisabled: true,
+    // #15076: the `/3` profiles declare `todo_write`, so the Worker opts in
+    // explicitly. Core defaults this off and the operator-facing path gates
+    // registration on it; leaving it at the default while registering the
+    // tool would give a managed Session a tool the same setting hides
+    // elsewhere.
+    todoWriteEnabled: true,
   });
   registerSessionProjectDir(sessionId, config.storage.getProjectDir());
   return {
@@ -2704,8 +2708,6 @@ export function createManagedToolSet(
           executionTimeoutMs: 5_000,
         }),
         new ShellTool(config),
-        // #15076: the managed mode keeps a fetch to its one transfer.
-        new WebFetchTool(config, { managed: true }),
         new TodoWriteTool(config),
       ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
     ),

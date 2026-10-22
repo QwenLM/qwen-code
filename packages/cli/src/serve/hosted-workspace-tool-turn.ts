@@ -25,10 +25,7 @@ import {
   checkHostedGlobPattern,
   HOSTED_GLOB_TOO_COMPLEX,
 } from './hosted-glob-pattern.js';
-import {
-  checkHostedTodoWriteInput,
-  checkHostedWebFetchInput,
-} from './hosted-workspace-tool-input.js';
+import { checkHostedTodoWriteInput } from './hosted-workspace-tool-input.js';
 import {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
@@ -665,46 +662,14 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
   HOSTED_GLOB_TOOL,
 ];
 
-// #15076: `web_fetch` and `todo_write`, declared only on the `/3` profiles.
-// The Worker runs both, and neither touches a Workspace file: the fetch
-// writes nothing (binary payloads are refused in the managed mode) and the
-// task list is the Worker's own bookkeeping.
-const HOSTED_WEB_FETCH_TOOL: FunctionDeclaration = {
-  name: 'web_fetch',
-  description: `Fetches a public web page and returns its text. Takes a URL and a prompt describing the information to extract.
-
-Usage notes:
-  - The URL must start with http:// or https:// and must not embed credentials.
-  - A cross-host redirect is not followed; the result names the redirect target, and you fetch it with another call.
-  - Binary payloads (PDFs, images, archives) are refused in this profile. This tool writes no file: the fetched text is the whole result.
-  - The page text is returned as fetched; it is not summarized, so ask for the specific parts you need when the page is long.`,
-  parametersJsonSchema: {
-    type: 'object',
-    properties: {
-      url: {
-        type: 'string',
-        description: 'The absolute http(s) URL to fetch.',
-      },
-      prompt: {
-        type: 'string',
-        description: 'What information to extract from the page.',
-      },
-      format: {
-        type: 'string',
-        enum: ['auto', 'markdown', 'html', 'text'],
-        description:
-          'Preferred content format, sent as the Accept header. All content is returned as text.',
-      },
-    },
-    required: ['url', 'prompt'],
-    additionalProperties: false,
-  },
-};
-
+// #15076: `todo_write`, declared only on the `/3` profiles. The Worker keeps
+// the list, which writes no Workspace file. The `web_fetch` half is held: a
+// maintainer ruling on the issue defers it, and a files-profile Session has no
+// shell, so a fetch there would open a new outbound path rather than reuse one.
 const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
   name: 'todo_write',
   description:
-    'Create or replace the task list of this Session for complex or multi-step work. Send the whole list each time: the call replaces the stored list. A reminder of the unfinished items is shown to you again between tool turns.',
+    'Create or replace the task list for complex or multi-step work in this turn. Send the whole list each time: the call replaces the stored list.',
   parametersJsonSchema: {
     type: 'object',
     properties: {
@@ -737,17 +702,13 @@ const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
   },
 };
 
-const HOSTED_WORKSPACE_FETCH_TOOLS: FunctionDeclaration[] = [
-  HOSTED_WEB_FETCH_TOOL,
-  HOSTED_TODO_WRITE_TOOL,
-];
 export const HOSTED_WORKSPACE_FILE_TOOLS_V3: FunctionDeclaration[] = [
   ...HOSTED_WORKSPACE_FILE_TOOLS_V2,
-  ...HOSTED_WORKSPACE_FETCH_TOOLS,
+  HOSTED_TODO_WRITE_TOOL,
 ];
 export const HOSTED_WORKSPACE_SHELL_TOOLS_V3: FunctionDeclaration[] = [
   ...HOSTED_WORKSPACE_SHELL_TOOLS_V2,
-  ...HOSTED_WORKSPACE_FETCH_TOOLS,
+  HOSTED_TODO_WRITE_TOOL,
 ];
 // #13753 I3: the read profile of a snapshot child, which reads a frozen copy
 // of its parent's Workspace. Nothing here writes, and the turn refuses any
@@ -779,7 +740,6 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'write_file',
   'edit',
   'run_shell_command',
-  'web_fetch',
   'todo_write',
   'agent',
   'send_message',
@@ -791,16 +751,6 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'exit_plan_mode',
   'team_plan_approval',
 ];
-
-/**
- * The run-in-plan-mode gate for a workspace Session (`plan-mode/1`): it may
- * only read. `web_fetch` reads the network and writes nothing, so it joins
- * the reads; `todo_write` writes the task list and does not.
- */
-const HOSTED_PUBLIC_PLAN_READS_V3: ReadonlySet<string> = new Set([
-  ...HOSTED_PUBLIC_PLAN_READS,
-  'web_fetch',
-]);
 
 /**
  * H4e-b3 decision 9 (b3a): what a run in plan mode still admits. This
@@ -1998,11 +1948,11 @@ export class HostedWorkspaceToolTurn {
   }
 
   /**
-   * #15076: whether this Session's profile declares `web_fetch` and
-   * `todo_write`. Only the `/3` profiles do; every earlier profile keeps its
-   * exact vocabulary, so the turn refuses both names there.
+   * #15076: whether this Session's profile declares `todo_write`. Only the
+   * `/3` profiles do; every earlier profile keeps its exact vocabulary, so
+   * the turn refuses the name there.
    */
-  private declaresFetchTools(): boolean {
+  private declaresTodoTool(): boolean {
     return (
       this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
       this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3
@@ -2050,18 +2000,18 @@ export class HostedWorkspaceToolTurn {
     // board commands — resolved once, both declarations follow it.
     const memberCommands = await this.memberCommandsDeclared();
     const skill = this.skills?.declaration();
-    // #15076: only a `/3` profile declares `web_fetch` and `todo_write`, so
-    // every earlier profile keeps the exact array it has always declared.
-    const fetchTools = this.declaresFetchTools();
+    // #15076: only a `/3` profile declares `todo_write`, so every earlier
+    // profile keeps the exact array it has always declared.
+    const todoTool = this.declaresTodoTool();
     this.advertised = [
       ...(this.publication || this.shell
         ? search
-          ? fetchTools
+          ? todoTool
             ? HOSTED_WORKSPACE_SHELL_TOOLS_V3
             : HOSTED_WORKSPACE_SHELL_TOOLS_V2
           : HOSTED_WORKSPACE_SHELL_TOOLS
         : search
-          ? fetchTools
+          ? todoTool
             ? HOSTED_WORKSPACE_FILE_TOOLS_V3
             : HOSTED_WORKSPACE_FILE_TOOLS_V2
           : HOSTED_WORKSPACE_FILE_TOOLS
@@ -2172,13 +2122,11 @@ export class HostedWorkspaceToolTurn {
       );
     }
     if (this.publicPlanMode) this.advertised.push(HOSTED_PUBLIC_PLAN_TOOL);
-    const planReads = this.declaresFetchTools()
-      ? HOSTED_PUBLIC_PLAN_READS_V3
-      : HOSTED_PUBLIC_PLAN_READS;
     return this.planning
       ? this.advertised.filter(
           (tool) =>
-            tool.name === 'exit_plan_mode' || planReads.has(tool.name ?? ''),
+            tool.name === 'exit_plan_mode' ||
+            HOSTED_PUBLIC_PLAN_READS.has(tool.name ?? ''),
         )
       : this.advertised;
   }
@@ -3614,10 +3562,6 @@ export class HostedWorkspaceToolTurn {
               }
             }
           }
-        } else if (call.name === 'web_fetch') {
-          const check = checkHostedWebFetchInput(call.args);
-          input = check.input;
-          if (check.error) validationError = check.error;
         } else if (call.name === 'todo_write') {
           const check = checkHostedTodoWriteInput(call.args);
           input = check.input;

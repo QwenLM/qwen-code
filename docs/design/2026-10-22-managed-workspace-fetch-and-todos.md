@@ -1,20 +1,18 @@
-# Managed Workspace: `web_fetch` and `todo_write`
+# Managed Workspace: `todo_write` on the `/3` profiles
 
 [中文](2026-10-22-managed-workspace-fetch-and-todos.zh-CN.md) | English
+
+> Scope note: this document was first written for a change that added both
+> `web_fetch` and `todo_write`. A recorded maintainer ruling on the issue
+> defers native web fetch, so the delivered change is the `todo_write` slice
+> only. The fetch analysis is kept below as the reason it is not delivered.
 
 ## Problem
 
 A Managed Agent Workspace Session offers six tools: `read_file`, `write_file`,
 `edit`, `glob`, `run_shell_command` and `monitor`. The shared core already has
-`web_fetch` and `todo_write`, and a `qwen serve` session exposes both. The
-Managed path never declares them, so a Managed Session cannot read a web page
-and cannot keep a task list.
-
-Without `web_fetch`, a session that must read a changelog, an issue page or a
-library document has to run `curl` through `run_shell_command`, and every such
-call asks for approval under the default and auto-edit approval modes. Without
-`todo_write`, a long multi-step task has no durable plan of record, so
-progress and intent are lost between turns.
+`todo_write`, and a `qwen serve` session exposes it. The Managed path never
+declares it, so a long multi-step task has no plan surface of its own.
 
 Issue: [#15076](https://github.com/QwenLM/qwen-code/issues/15076).
 
@@ -39,122 +37,125 @@ Two profiles are current: `/1` (`files`, `shell`) and `/2` (each plus `glob`).
 A profile name is persisted with the Session definition, and a load that names
 a different profile is refused with `409 hosted_tool_profile_conflict`
 (`hostedWorkspaceProfileConflictRefusal` in `hosted-harness-session.ts`). So a
-new tool cannot widen an existing profile: a Tool a `/1` or `/2` Session was
+new tool cannot widen an existing profile: a tool a `/1` or `/2` Session was
 never offered would become callable on its next load.
 
 ## Proposed change
 
-Add both tools through two new profiles:
+Add `todo_write` through two new profiles:
 
 - `hosted-workspace-files/3` — `read_file`, `write_file`, `edit`, `glob`,
-  `web_fetch`, `todo_write`
-- `hosted-workspace-shell/3` — the same six plus `run_shell_command` and
+  `todo_write`
+- `hosted-workspace-shell/3` — the same five plus `run_shell_command` and
   `monitor`
 
-`/3` borrows its tool arrays from the `/2` declarations and appends the two
-new declarations, so the six existing declarations stay byte-identical.
+`/3` borrows its tool array from the `/2` declarations and appends one new
+declaration, so the existing declarations stay byte-identical.
 
 `hosted-workspace-team-lead/1` and `hosted-workspace-read/1` do not gain the
-tools. A team lead is a Session the control plane creates internally, and the
-read profile belongs to a snapshot child that must not fetch or write.
+tool. A team lead is a Session the control plane creates internally, and the
+read profile belongs to a snapshot child that must not write.
 
 ### Design decisions
 
 1. **A new profile version, not a change to `/1` or `/2`.** Tool admission
    rests on what the Session's own profile offered. Adding a name to `/2`
-   would make an existing `/2` Session's next load expose tools its earlier
+   would make an existing `/2` Session's next load expose a tool its earlier
    turns never had. The precedent is the `glob` change (`#13166`), which added
    `/2` for the same reason.
-2. **`web_fetch` runs inside the Worker, through the Runtime's existing
-   outbound channel.** A Hosted Session already reaches the network through
-   `run_shell_command` in the same Worker, with the same egress path and the
-   same trust boundary. Running `web_fetch` there adds no new network policy
-   and no new host. What it must add is the removal of the three local side
-   effects a local `qwen serve` session accepts:
-
-   | Side effect            | Local behaviour                                                                           | Managed behaviour                                               |
-   | ---------------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-   | Binary payload to disk | PDFs and images are saved under the tool-results directory and the model is told the path | Refused with a refusal the model can act on; no file is written |
-   | Response cache         | A 15-minute in-memory cache per Session                                                   | Disabled, so every fetch is a real request                      |
-   | Summarizing side query | Content is summarized by a fast-model call                                                | Disabled; the fetched content is returned as text               |
-
-   The side query is a second model call from inside the Worker that the
-   Session's own token accounting does not see, so turning it off also keeps
-   the fetch within the Session's recorded cost.
-
-3. **`todo_write` runs inside the Worker and is not persisted as a Session
-   record.** The tool needs its own file store, and the Worker gives one per
-   Session. The file is bookkeeping the model reads back on its next call. The
-   task list also enters the model's context because the Worker appends active
-   todos to its own instructions, so the plan survives across turns of a
-   Session. Projecting the list to clients as a durable record is a separate
-   change; this one does not touch the Session Store schema, Java, or Web
-   Shell.
-
-4. **Approval.** Under `yolo`, nothing asks, as today. Under `default` and
-   `auto-edit`, `todo_write` is pre-approved: it writes only its own bookkeeping
-   and changes no file the user owns. `web_fetch` asks, because it reaches a URL
-   that nobody in the Session chose. This matches the local experience, where a
-   pre-approved URL list in settings can spare the question; the Hosted path has
-   no per-Session URL allowlist, so it asks. The approval card carries the
-   call's input, so the URL, prompt and format are visible before the operator
-   answers, exactly as for `run_shell_command`.
-
-5. **Input validation is per-tool and stays model-correctable.** A refused
-   argument never acquires the mount. `web_fetch` requires a nonempty `url` that
-   starts with `http://` or `https://`, carries no embedded credentials, and is
-   at most 2048 bytes, plus a nonempty `prompt` and an optional `format` from
-   the fixed set. `todo_write` requires a `todos` array, and each item must
+2. **`web_fetch` is not delivered, by a recorded decision.** On the issue, a
+   maintainer ruled that native fetch is deferred and that a Managed Session
+   should keep using `run_shell_command` for the web. Two facts make that
+   ruling the technical answer here as well. First, the egress argument does
+   not hold for a files-profile Session: it has no shell, so a fetch there
+   would open a new outbound path rather than reuse an existing one. Second,
+   nothing in the Hosted path contains the destination — admission checks the
+   scheme, credentials and length but not the host, `isPrivateHost` is only
+   used to skip the https upgrade, and under `yolo` neither the Worker (built
+   with `ApprovalMode.YOLO`) nor the Harness asks. A files/3 Session would
+   therefore reach link-local and metadata endpoints unattended. Delivering it
+   needs a destination policy first, which is follow-up work.
+3. **`todo_write` runs inside the Worker and writes no Workspace file.** The
+   list is bookkeeping in the Worker's runtime directory. It does not touch
+   the Session Store schema, Java storage, or the Workspace, which is also why
+   it is safe to pre-approve.
+4. **The list is scoped to one turn, and the tool says so.** The Worker's tool
+   set is keyed by the Runtime session id, and the Harness derives that id per
+   turn (`hostedRuntimeSessionId(promptId)` returns the prompt id). The Worker's
+   runtime directory is likewise per Runtime instance. So the stored list does
+   not survive into the next turn. The declaration therefore promises a list
+   for the current turn only, and no reminder path is claimed: the reminder a
+   local Session shows is injected by the model loop, which runs in the Harness
+   and never sees this Worker's `Config`. Making the list durable needs a
+   stable Session identity supplied to the Worker by the Harness — a protocol
+   change recorded below, not implied by this profile.
+5. **The Worker opts in to the tool explicitly.** Core defaults
+   `todoWriteEnabled` to false and the operator-facing path gates registration
+   on it. Both Worker configs set it to true, so the tool is admitted because
+   the profile says so, not because a default was bypassed.
+6. **Approval.** Under `default` and `auto-edit` the tool is pre-approved: it
+   writes only its own bookkeeping and changes no file the user owns. Under
+   `yolo` nothing asks, as today.
+7. **Input validation stays model-correctable.** A refused argument never
+   acquires the mount. `todo_write` requires a `todos` array whose items
    repeat the shape the core tool validates: nonempty `id` and `content`,
    `status` one of the three states, and an optional `blockedBy` array of ids.
-   The exact checks stay in the core tools; admission checks only what it must
+   The exact rules stay in the core tool; admission checks only what it must
    to keep a malformed call out of a durable Runtime round trip.
-
-6. **Plan-mode and Hook gates follow the existing sets.** A public plan-mode
-   turn admits reads only; `web_fetch` joins `HOSTED_PUBLIC_PLAN_READS` because
-   it only reads the network, and `todo_write` does not, because it writes.
-   A member run in plan mode keeps its narrower set unchanged.
+8. **Plan mode is unchanged.** `todo_write` writes, so it does not join the
+   public plan-mode read set. `/3` Sessions also cannot enter public plan mode
+   today: the constructor admits only `files/1`, `shell/1` and `shell/2`, so
+   this change adds no plan-mode branch that the build cannot reach.
 
 ### Follow-ups this design does not cover
 
-- Projecting the task list to Web Shell or an interactive client as a durable
+- **A destination policy for `web_fetch`** (allowlist or denylist, plus a
+  decision on private and metadata hosts), after which the fetch half can be
+  re-proposed. It is not a rollout toggle today.
+- **A stable Session identity for the task list**, so the plan survives a
+  turn. This needs the Harness to pass a stable hosted Session id to the
+  Worker, and a decision on where that list is stored across Runtime
+  instances.
+- **Java profile predicates for `/3`.** `WorkspaceToolProfiles` is exact-match:
+  `lifecycleProtocol("hosted-workspace-files/3")` returns 0, `isPublicShell`
+  covers only `/1` and `/2`, and `supportsApprovalSelection` requires exactly
+  `files/1` or a public shell. Enabling `/3` therefore needs Java predicate
+  work, not only a configuration change.
+- **Projecting the task list to Web Shell or another client** as a durable
   Session record.
-- A per-Session URL allowlist or denylist for `web_fetch` in managed
-  deployments.
-- Enabling `/3` in the production connector. This change adds the profiles,
-  the Worker admission and the admission rules; which deployment pins `/3` is
-  a rollout decision, as it was for `/2`.
+- **Enabling `/3` in the production connector.** Which deployment pins `/3`
+  is a rollout decision, as it was for `/2`.
 
 ## Files affected
 
-| Area                                            | File                                                                                                               |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| Profiles                                        | `packages/cli/src/serve/hosted-workspace-profiles.ts`                                                              |
-| Declaration, admission, preview set, plan reads | `packages/cli/src/serve/hosted-workspace-tool-turn.ts`                                                             |
-| Approval                                        | `packages/cli/src/serve/hosted-tool-approval.ts`                                                                   |
-| Worker admission and tool set                   | `packages/cli/src/serve/managed-runtime-tool-executor.ts`                                                          |
-| Provider worker tool set                        | `packages/cli/src/serve/managed-runtime-provider-worker.ts`                                                        |
-| Tunnel fetch behaviour                          | `packages/core/src/tools/web-fetch.ts`                                                                             |
-| Java action preview                             | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedActionService.java` |
-| Tests                                           | Collocated `*.test.ts` files, and the Java test for the preview set                                                |
+| Area                                | File                                                                                                               |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Profiles                            | `packages/cli/src/serve/hosted-workspace-profiles.ts`                                                              |
+| Declaration, admission, preview set | `packages/cli/src/serve/hosted-workspace-tool-turn.ts`                                                             |
+| Argument validation                 | `packages/cli/src/serve/hosted-workspace-tool-input.ts`                                                            |
+| Approval                            | `packages/cli/src/serve/hosted-tool-approval.ts`                                                                   |
+| Worker admission and tool set       | `packages/cli/src/serve/managed-runtime-tool-executor.ts`                                                          |
+| Provider worker tool set            | `packages/cli/src/serve/managed-runtime-provider-worker.ts`                                                        |
+| Java action preview                 | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedActionService.java` |
+| Tests                               | Collocated `*.test.ts` files, and the Java test for the preview set                                                |
 
-No Java Broker change is needed. The Broker admits a payload for any tool name
-the Worker knows, and `managed-runtime-tools/1` keeps its identity.
+No TypeScript change to `packages/core`. No Java Broker change: the Broker
+admits a payload for any tool name the Worker knows, and
+`managed-runtime-tools/1` keeps its identity.
 
 ## Acceptance criteria
 
-1. A `hosted-workspace-files/3` Session declares `web_fetch` and `todo_write`
-   next to the four file tools; a `hosted-workspace-shell/3` Session declares
-   them next to the shell tools.
-2. A `/1` or `/2` Session still refuses both names with the existing
+1. A `hosted-workspace-files/3` Session declares `todo_write` next to the four
+   file tools; a `hosted-workspace-shell/3` Session declares it next to the
+   shell tools. Neither declares `web_fetch`.
+2. A `/1` or `/2` Session still refuses `todo_write` with the existing
    `Hosted Workspace profile refused a tool call.` error and spends no Runtime
    work.
-3. A malformed `web_fetch` or `todo_write` argument earns a model-correctable
-   refusal, committed as a tool result, without acquisition, reservation or
-   dispatch.
+3. A malformed `todo_write` argument earns a model-correctable refusal,
+   committed as a tool result, without acquisition, reservation or dispatch.
 4. Under `default` and `auto-edit`, `todo_write` runs without an approval
-   request and `web_fetch` asks before dispatch, with the URL in the Action's
-   input preview.
-5. The Worker executes both tools, and `web_fetch` writes no file and returns
-   the page text itself.
-6. Java's action preview returns the input for both tools.
+   request.
+5. The Worker admits `todo_write`, keeps the list for the Session's calls, and
+   refuses a dependency cycle. The Worker rejects `web_fetch` even though core
+   still implements it.
+6. Java's action preview returns the input for `todo_write`.

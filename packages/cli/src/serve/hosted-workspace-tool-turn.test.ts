@@ -1794,7 +1794,7 @@ it('refuses a glob call a /1 profile never advertised', async () => {
   expect(broker.acquire).not.toHaveBeenCalled();
 });
 
-// #15076: `web_fetch` and `todo_write` ship only with the `/3` profiles.
+// #15076: `todo_write` ships only with the `/3` profiles.
 function createV3Turn(profile = 'hosted-workspace-files/3') {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -1811,38 +1811,37 @@ function createV3Turn(profile = 'hosted-workspace-files/3') {
 }
 
 it.each([
-  ['hosted-workspace-files/3', ['web_fetch', 'todo_write'], false],
-  ['hosted-workspace-shell/3', ['web_fetch', 'todo_write'], true],
-])(
-  'declares web_fetch and todo_write on %s',
-  async (profile, expected, shell) => {
-    turn = new HostedWorkspaceToolTurn(
-      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-      session,
-      harness,
-      'prompt',
-      commit,
-      messageFitsInline,
-      shell
-        ? { resources: session.resources, assertWritable: async () => {} }
-        : undefined,
-      undefined,
-      undefined,
-      { profile },
-    );
-    const declarations = await turn.declarations(new AbortController().signal);
-    const names = declarations.map((tool) => tool.name);
-    for (const name of expected) expect(names).toContain(name);
-    expect(names).toContain('glob');
-    if (!shell) expect(names).not.toContain('run_shell_command');
-  },
-);
+  ['hosted-workspace-files/3', false],
+  ['hosted-workspace-shell/3', true],
+])('declares todo_write on %s', async (profile, shell) => {
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    shell
+      ? { resources: session.resources, assertWritable: async () => {} }
+      : undefined,
+    undefined,
+    undefined,
+    { profile },
+  );
+  const declarations = await turn.declarations(new AbortController().signal);
+  const names = declarations.map((tool) => tool.name);
+  expect(names).toContain('todo_write');
+  expect(names).toContain('glob');
+  // The fetch half is held for a recorded maintainer decision.
+  expect(names).not.toContain('web_fetch');
+  if (!shell) expect(names).not.toContain('run_shell_command');
+});
 
 it.each([
   'hosted-workspace-files/1',
   'hosted-workspace-files/2',
   'hosted-workspace-shell/2',
-])('never offers web_fetch or todo_write on %s', async (profile) => {
+])('never offers todo_write on %s', async (profile) => {
   turn = new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
@@ -1860,12 +1859,10 @@ it.each([
   const names = (await turn.declarations(new AbortController().signal)).map(
     (tool) => tool.name,
   );
-  expect(names).not.toContain('web_fetch');
   expect(names).not.toContain('todo_write');
 });
 
 it.each([
-  ['web_fetch', { url: 'https://example.com', prompt: 'p' }],
   ['todo_write', { todos: [{ id: 'a', content: 'a', status: 'pending' }] }],
 ])('refuses %s on a /2 profile before the Broker', async (name, args) => {
   turn = createSearchTurn();
@@ -1881,41 +1878,26 @@ it.each([
   expect(broker.acquire).not.toHaveBeenCalled();
 });
 
-// #15076: a malformed fetch or task-list call is refused before the Runtime
-// is acquired, so its correction costs no durable work.
-it.each([
-  {},
-  { url: '', prompt: 'p' },
-  { url: '   ', prompt: 'p' },
-  { url: 'ftp://example.com', prompt: 'p' },
-  { url: 'https://u:p@example.com', prompt: 'p' },
-  { url: 'https://example.com' },
-  { url: 'https://example.com', prompt: '   ' },
-  { url: 'https://example.com', prompt: 'p', format: 'pdf' },
-  { url: `https://example.com/${'a'.repeat(2048)}`, prompt: 'p' },
-  { url: 'https://example.com', prompt: 'p', extra: 1 },
-])(
-  'persists a correctable web_fetch argument error without dispatch: %j',
-  async (args) => {
-    turn = createV3Turn();
-    const call = { ...calls[0], name: 'web_fetch', args };
-    const responses = await turn.execute(
+it('refuses web_fetch on a /3 profile before the Broker', async () => {
+  turn = createV3Turn();
+  const call = {
+    ...calls[0],
+    name: 'web_fetch',
+    args: { url: 'https://example.com', prompt: 'p' },
+  };
+  await expect(
+    turn.execute(
       [call],
       [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
       'model',
       new AbortController().signal,
-    );
-    const error = responses[0].functionResponse?.response?.['error'];
-    expect(responses[0].functionResponse?.id).toBe(call.callId);
-    expect(error).toContain('web_fetch');
-    expect(error).toContain('retry');
-    expect(broker.acquire).not.toHaveBeenCalled();
-    expect(broker.prepare).not.toHaveBeenCalled();
-    expect(broker.execute).not.toHaveBeenCalled();
-    await expect(turn.finish()).resolves.toBeUndefined();
-  },
-);
+    ),
+  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
 
+// #15076: a malformed task-list call is refused before the Runtime is
+// acquired, so its correction costs no durable work.
 it.each([
   {},
   { todos: 'x' },
@@ -1949,29 +1931,17 @@ it.each([
   },
 );
 
-it.each(['web_fetch', 'todo_write'])(
-  'pre-approves %s under default while web_fetch asks',
-  async (name) => {
-    expect(
-      hostedApprovalAsks({ mode: 'default', timeoutMs: 60_000 }, 'todo_write'),
-    ).toBe(false);
-    expect(
-      hostedApprovalAsks(
-        { mode: 'auto-edit', timeoutMs: 60_000 },
-        'todo_write',
-      ),
-    ).toBe(false);
-    expect(
-      hostedApprovalAsks({ mode: 'default', timeoutMs: 60_000 }, 'web_fetch'),
-    ).toBe(true);
-    expect(
-      hostedApprovalAsks({ mode: 'auto-edit', timeoutMs: 60_000 }, 'web_fetch'),
-    ).toBe(true);
-    expect(hostedApprovalAsks({ mode: 'yolo', timeoutMs: 60_000 }, name)).toBe(
-      false,
-    );
-  },
-);
+it('pre-approves todo_write under default and auto-edit, and never under yolo alone', () => {
+  expect(
+    hostedApprovalAsks({ mode: 'default', timeoutMs: 60_000 }, 'todo_write'),
+  ).toBe(false);
+  expect(
+    hostedApprovalAsks({ mode: 'auto-edit', timeoutMs: 60_000 }, 'todo_write'),
+  ).toBe(false);
+  expect(
+    hostedApprovalAsks({ mode: 'yolo', timeoutMs: 60_000 }, 'todo_write'),
+  ).toBe(false);
+});
 
 it.each([
   {},
@@ -4705,13 +4675,13 @@ it('admits exactly the declared native tools to the version 2 input preview', ()
   // set is pinned here and each name must still be a declared native tool —
   // the child launch declares through HOSTED_AGENT_TOOL, a session message
   // through its two send_message declarations and the team board through
-  // HOSTED_TEAM_TOOLS, not the shell set.
+  // HOSTED_TEAM_TOOLS, not the shell set. `todo_write` is declared only by the
+  // `/3` profiles, so the declaration list is the `/3` shell set.
   expect(HOSTED_INPUT_PREVIEW_TOOLS).toEqual([
     'read_file',
     'write_file',
     'edit',
     'run_shell_command',
-    'web_fetch',
     'todo_write',
     'agent',
     'send_message',

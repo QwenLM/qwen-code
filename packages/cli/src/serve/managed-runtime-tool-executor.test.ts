@@ -4,10 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import fs, { readdirSync, readFileSync, existsSync } from 'node:fs';
+import fs, { readFileSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { createServer } from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { createHash } from 'node:crypto';
 import { syncBuiltinESMExports } from 'node:module';
 import {
@@ -2392,10 +2390,10 @@ describe('original CSI worker synchronous ACK confirmation', () => {
 // The route-level fixtures cannot express these geometries (a Session root is
 // always a deep unique tmpdir path), so the anchoring invariants are pinned
 // against the function directly.
-// #15076: the `/3` profiles' two tools run in the Worker. The fetch keeps to
-// its one transfer (no cache, no disk, no summarizer) and the task list is
-// per-Session bookkeeping under the Worker's own runtime directory.
-describe('web_fetch and todo_write in the Worker', () => {
+// #15076: `todo_write` runs in the Worker as per-Session bookkeeping under
+// the Worker's own runtime directory. The native fetch half is held by a
+// recorded maintainer decision, so the Worker admits no fetch.
+describe('todo_write in the Worker', () => {
   let workspace: string;
   let runtimeDir: string;
 
@@ -2420,13 +2418,15 @@ describe('web_fetch and todo_write in the Worker', () => {
     await rm(runtimeDir, { recursive: true, force: true });
   });
 
-  it('admits both tools only through the tool set that declares them', () => {
+  it('admits todo_write and not the held web_fetch half', () => {
     const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-15076');
-    expect(exec.hasTool('web_fetch')).toBe(true);
     expect(exec.hasTool('todo_write')).toBe(true);
+    // #15076: a maintainer ruling defers native fetch, so the Worker admits
+    // no fetch even though the shared core still implements the tool.
+    expect(exec.hasTool('web_fetch')).toBe(false);
   });
 
-  it('keeps a task list across calls and refuses a cycle', async () => {
+  it('keeps a task list across calls in one Session and refuses a cycle', async () => {
     const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-15076');
     const first = {
       todos: [
@@ -2479,63 +2479,6 @@ describe('web_fetch and todo_write in the Worker', () => {
     expect(refused.executionStatus).toBe('error');
     expect(refused.error?.message).toContain('cycle');
     await exec.close();
-  });
-
-  it('fetches the page text without writing a file', async () => {
-    const server = createServer((request, response) => {
-      if (request.url === '/doc.md') {
-        response.writeHead(200, { 'content-type': 'text/markdown' });
-        response.end('# Title\n\nBody line.');
-        return;
-      }
-      // A one-pixel PNG: binary content the managed mode refuses to save.
-      response.writeHead(200, { 'content-type': 'image/png' });
-      response.end(
-        Buffer.from(
-          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
-          'base64',
-        ),
-      );
-    });
-    await new Promise<void>((resolve) => server.listen(0, resolve));
-    const { port } = server.address() as AddressInfo;
-    const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-15076');
-    try {
-      const input = {
-        url: `http://127.0.0.1:${port}/doc.md`,
-        prompt: 'Summarize the page',
-      };
-      const fetched = await exec.execute(
-        reference('fetch-1', input),
-        'web_fetch',
-        input,
-      );
-      expect(fetched.executionStatus).toBe('success');
-      const text = (fetched.responseParts as Array<{ text?: string }>)
-        .map((part) => part.text ?? '')
-        .join('');
-      // Returned as fetched: the managed mode runs no summarizer.
-      expect(text).toContain('Body line.');
-      expect(text).not.toContain('Summarize the page');
-
-      const binaryInput = {
-        url: `http://127.0.0.1:${port}/pixel.png`,
-        prompt: 'Describe it',
-      };
-      const refused = await exec.execute(
-        reference('fetch-2', binaryInput),
-        'web_fetch',
-        binaryInput,
-      );
-      expect(refused.executionStatus).toBe('error');
-      expect(refused.error?.message).toContain('does not save');
-
-      const resultsDir = new Storage(workspace).getToolResultsDir();
-      expect(existsSync(resultsDir) ? readdirSync(resultsDir) : []).toEqual([]);
-    } finally {
-      await exec.close();
-      server.close();
-    }
   });
 });
 
