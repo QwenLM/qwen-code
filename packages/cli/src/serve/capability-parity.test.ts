@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CAPABILITY_PARITY,
   MANAGED_ONLY_NOT_A_GAP,
+  MANAGED_ONLY_REPORTED,
   managedOnlyLabels,
   MANAGED_SURFACE_FILE,
   MANAGED_SURFACE_SOURCE,
@@ -148,7 +149,7 @@ describe('capability parity matrix', () => {
       )
       .sort();
     expect(managedOnlyLabels(surface)).toEqual(uncited);
-    expect(uncited).toEqual([]);
+    expect(uncited).toEqual([...MANAGED_ONLY_REPORTED].sort());
   });
 
   it('reports a Managed route with no legacy tag', () => {

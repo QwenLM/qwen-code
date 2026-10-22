@@ -5,10 +5,17 @@ The TypeScript side of the parity matrix (issue #15075). The test
 
 ## Managed routes
 
-`managed-surface.txt` is a copy of `SurfaceRegistry`. The Java suite
-`ManagedSurfaceCaptureTest` keeps the copy identical to the enum. The test
-`SurfaceRegistryApiTest` checks that every public and WebShell route appears
-in the published OpenAPI document.
+`managed-surface.txt` is a copy of `SurfaceRegistry`. Each line is
+`label method template surface`. The Java suite `ManagedSurfaceCaptureTest`
+keeps the copy identical to the enum and never writes on an ordinary run.
+Re-capture only when a registry change is intended:
+
+```bash
+mvn -Dtest=ManagedSurfaceCaptureTest -Dcapability.parity.capture=true test
+```
+
+Route-to-spec agreement is covered by `ManagedAgentApiContractTest` together
+with `SurfaceRegistryGateTest`; this directory does not repeat those checks.
 
 ## Evidence
 
@@ -20,3 +27,14 @@ test checks each evidence token against the code:
   `SurfaceRegistry.Capability`.
 - `route:<prefix>`: `managed-surface.txt` records a route with this prefix.
 - `docs:<path>`: the file exists in the repository.
+
+A `docs:` token proves only that the file is there, never that the behavior
+exists. Prefer a `surface:` or `tool:` token whenever one applies.
+
+## The managed-only column
+
+`managedOnlyLabels()` derives the third column: every route label no
+`managed` row cites, minus `MANAGED_ONLY_NOT_A_GAP`. An exclusion entry must
+name a label the twin records. Whatever remains is a real Managed-only
+capability, pinned by `MANAGED_ONLY_REPORTED` so an addition fails the suite
+until someone decides how to account for it.

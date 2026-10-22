@@ -82,7 +82,11 @@ registry change fails on both sides.
   no `managed` row cites. An exclusion set records why a label is not a gap,
   and every entry in that set must name a label the twin records. A route that
   is mounted with no legacy tag and no exclusion appears in the column, which
-  is the signal #15075 asked for. The column is currently empty.
+  is the signal #15075 asked for. The remaining labels are pinned in
+  `MANAGED_ONLY_REPORTED`, so an addition fails the suite until someone
+  records it. The column currently reports `SESSION_CONTEXT_COMPRESSION`: the
+  Managed path serves a Session context-compression route on both the public
+  and the WebShell surface, and the daemon advertises no compression tag.
 
 ## Acceptance
 

@@ -6,10 +6,11 @@ import java.util.TreeMap;
 /**
  * Prints the committed route twin of {@link SurfaceRegistry} that the
  * TypeScript capability parity matrix reads, and fails the moment the enum
- * and the committed file disagree. Re-capture after a registry change with
+ * and the committed file disagree. Re-capture after an intended registry
+ * change with
  *
  * <pre>
- * mvn -Dtest=ManagedSurfaceCaptureTest#capture test
+ * mvn -Dtest=ManagedSurfaceCaptureTest -Dcapability.parity.capture=true test
  * </pre>
  *
  * which rewrites {@code src/test/resources/capability-parity/managed-surface.txt}.

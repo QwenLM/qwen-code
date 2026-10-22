@@ -591,6 +591,21 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
 ]);
 
 /**
+ * The Managed capabilities the matrix reports with no legacy counterpart.
+ * Each entry is a real gap, not an exclusion: the Managed path serves it and
+ * `SERVE_CAPABILITY_REGISTRY` has no tag for it. Pinning the list makes the
+ * column checked — a route added or removed without a decision fails the
+ * suite — while the signal stays visible to whoever reads the matrix.
+ *
+ * `SESSION_CONTEXT_COMPRESSION` is a Session's context-compression route on
+ * both the public and the WebShell surface; the daemon advertises no
+ * compression tag.
+ */
+export const MANAGED_ONLY_REPORTED: readonly string[] = [
+  'SESSION_CONTEXT_COMPRESSION',
+];
+
+/**
  * Every `surface:` target a row cites, so a claim is one place only. */
 function citedLabels(): Set<string> {
   const cited = new Set<string>();
