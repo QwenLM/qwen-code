@@ -923,6 +923,29 @@ async function worker(root, node, bun, expectedHost) {
   }
 }
 
+// Published digests of the pinned runtime archives: the Node v24.19.0
+// SHASUMS256.txt entry and the npm `dist.integrity` of @oven/bun-* 1.3.14.
+// Pinning them lets CI verify an archive, downloaded or cached, without first
+// fetching checksum metadata from the network.
+const RUNTIME_ARCHIVE_DIGESTS = {
+  'linux-x64': {
+    node: 'f625d97cd707df4ff96254916fbc5ff014f09c09effe5a1e0ca8f6d41a8789d4',
+    bun: 'sha512-7OVTAKvwfPmSbIV1HpdOoVVx5VRc427GuPPne93N6vk4eQBPId9nXmZDh9/zGaKPdbVjVtQSZafWQoUjx38Utw==',
+  },
+  'linux-arm64': {
+    node: 'd28c8a5bf0a808f0ed434a1dce8c54ae98f0371c0bd86ac58abc613f73e6643f',
+    bun: 'sha512-X5SsPZHs+iYO8R/efIcRtc7gT2Q2DgPfliCxEkx4cXBumwkw0c/EsHMNwH3EgGpCDaZ7IYVPhpCG/xBOQHEwZw==',
+  },
+  'darwin-x64': {
+    node: 'd1b5e999db158c62fe8f7267a4476b035d8bd93b1a605bac24a3f0dd166e3316',
+    bun: 'sha512-FFj3QdU/OhlDyZOJ8CWfN5eWLpRlT4qjZg7lMQi7jA6GuoY5ajlO1zWLP/MuHYRSbXQUvV52RejNi8DVnAp13w==',
+  },
+  'darwin-arm64': {
+    node: '8294b7aa9b03997481c06babf1e8b270c859358f27da57a11509afe537ac381d',
+    bun: 'sha512-Omj20SuiHBOUjUBIyqtkNjSUIjOtEOJwmbix/ZyFH4BaQ6OZTaaRWIR4TjHVz0yadHgli6lLTiAh1uarnvD49A==',
+  },
+};
+
 // Existing test:scripts CI invokes this mode. Provision only the two fixed
 // runtime tools; package manifests and the dependency lock remain unchanged.
 async function ci() {
@@ -935,14 +958,63 @@ async function ci() {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), 'standalone-runtime-tools-'),
   );
-  const download = async (url) => {
-    const response = await fetch(url, { signal: AbortSignal.timeout(300_000) });
-    assert.equal(response.status, 200, `runtime download: ${url}`);
-    return Buffer.from(await response.arrayBuffer());
+  // Persistent runners point this at a host-wide directory, so each archive
+  // is downloaded once per host instead of on every run.
+  const cacheDir = process.env.QWEN_STANDALONE_RUNTIME_CACHE;
+  const fetchArchive = async (url, filename, verified) => {
+    const cached = cacheDir && path.join(cacheDir, filename);
+    if (cached) {
+      try {
+        const bytes = fs.readFileSync(cached);
+        // A mismatching copy is replaced by the download below.
+        if (verified(bytes)) return bytes;
+      } catch {
+        // Not cached yet, or unreadable: download it below.
+      }
+    }
+    let bytes;
+    for (let attempt = 1; !bytes; attempt++) {
+      try {
+        const response = await fetch(url, {
+          signal: AbortSignal.timeout(300_000),
+        });
+        assert.equal(
+          response.status,
+          200,
+          `runtime download: ${url} returned ${response.status}`,
+        );
+        bytes = Buffer.from(await response.arrayBuffer());
+      } catch (error) {
+        if (attempt === 3) throw error;
+        console.log(`runtime download attempt ${attempt} failed: ${error}`);
+        await new Promise((resolve) => setTimeout(resolve, attempt * 5_000));
+      }
+    }
+    assert(verified(bytes), `runtime archive digest mismatch: ${url}`);
+    if (cached) {
+      // Rename into place so a concurrent job never reads a partial file.
+      // The cache only saves time: failing to fill it must not fail the run.
+      const partial = `${cached}.${process.pid}.tmp`;
+      try {
+        fs.mkdirSync(cacheDir, { recursive: true });
+        fs.writeFileSync(partial, bytes);
+        fs.renameSync(partial, cached);
+      } catch (error) {
+        fs.rmSync(partial, { force: true });
+        console.log(`runtime archive not cached: ${error}`);
+      }
+    }
+    return bytes;
   };
   try {
     let node = process.env.PINNED_NODE;
     let bun = process.env.PINNED_BUN;
+    const platform = `${process.platform}-${process.arch}`;
+    const digests = RUNTIME_ARCHIVE_DIGESTS[platform];
+    assert(
+      digests || (node && bun),
+      `no pinned runtime archives for ${platform}; set PINNED_NODE and PINNED_BUN`,
+    );
     if (!node) {
       const filename = `node-v24.19.0-${process.platform}-${process.arch}.tar.gz`;
       const base =
@@ -956,36 +1028,26 @@ async function ci() {
         'runtime source must not contain credentials',
       );
       assert(base.endsWith('/'), 'runtime source must end with /');
-      const sums = (await download(base + 'SHASUMS256.txt')).toString();
-      const expected = sums
-        .split('\n')
-        .find((line) => line.endsWith('  ' + filename))
-        ?.split(' ')[0];
-      assert.match(expected || '', /^[a-f0-9]{64}$/);
-      const bytes = await download(base + filename);
-      assert.equal(createHash('sha256').update(bytes).digest('hex'), expected);
+      const bytes = await fetchArchive(
+        base + filename,
+        filename,
+        (data) =>
+          createHash('sha256').update(data).digest('hex') === digests.node,
+      );
       const archive = path.join(root, 'node.tgz');
       fs.writeFileSync(archive, bytes);
       run('tar', ['-xzf', archive, '-C', root]);
       node = path.join(root, filename.slice(0, -7), 'bin/node');
     }
     if (!bun) {
-      const name = `@oven/bun-${process.platform}-${process.arch === 'arm64' ? 'aarch64' : process.arch}`;
-      const metadata = JSON.parse(
-        (
-          await download(`https://registry.npmjs.org/${name}/1.3.14`)
-        ).toString(),
-      );
-      assert.equal(metadata.name, name);
-      assert.equal(metadata.version, '1.3.14');
-      assert.equal(
-        new URL(metadata.dist.tarball).origin,
-        'https://registry.npmjs.org',
-      );
-      const bytes = await download(metadata.dist.tarball);
-      assert.equal(
-        'sha512-' + createHash('sha512').update(bytes).digest('base64'),
-        metadata.dist.integrity,
+      const name = `bun-${process.platform}-${process.arch === 'arm64' ? 'aarch64' : process.arch}`;
+      const filename = `${name}-1.3.14.tgz`;
+      const bytes = await fetchArchive(
+        `https://registry.npmjs.org/@oven/${name}/-/${filename}`,
+        filename,
+        (data) =>
+          'sha512-' + createHash('sha512').update(data).digest('base64') ===
+          digests.bun,
       );
       const dir = path.join(root, 'bun');
       fs.mkdirSync(dir);

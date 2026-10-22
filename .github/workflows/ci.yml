@@ -623,6 +623,16 @@ jobs:
           echo "Using persistent npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
+      # test:scripts runs the standalone runtime regression against pinned
+      # Node and Bun archives. Keep them on the persistent host so only the
+      # first run per host downloads them: the download cost minutes per run,
+      # and a 502 from npm once reddened an otherwise green run. Exported here
+      # because the test step overrides HOME.
+      - name: 'Configure persistent standalone runtime cache (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          echo "QWEN_STANDALONE_RUNTIME_CACHE=${HOME}/.cache/qwen-code/standalone-runtimes" >> "${GITHUB_ENV}"
+
       - name: 'Configure npm for rate limiting'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
