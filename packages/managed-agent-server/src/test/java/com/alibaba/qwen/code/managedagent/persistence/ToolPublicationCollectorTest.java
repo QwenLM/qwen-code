@@ -311,19 +311,19 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
     }
 
     @Test
-    void activeReaderWaitsForItsOwnExpiryAndCollectsAfterTheLeaseCloses() {
+    void activeReaderRetryIsCappedAtTheClaimInterval() {
         addObject("one", "reader/exact-key", null);
         var objects = new DeletingObjects();
         var gc = collector(objects);
         try (var lease = retention.read(key)) {
             lease.check();
             retire();
+            long before = ToolPublicationRetentionStore.now(jdbc);
             assertThat(gc.runOnce()).isFalse();
+            long after = ToolPublicationRetentionStore.now(jdbc);
             assertThat(blocker()).isEqualTo("reader_active");
-            long expiry = jdbc.queryForObject("SELECT expires_at FROM ma_read_lease WHERE tenant_key = ?",
-                    Long.class, ToolPublicationRetentionStore.hash(tenant));
             assertThat(jdbc.queryForObject("SELECT available_at FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?",
-                    Long.class, scope)).isEqualTo(expiry);
+                    Long.class, scope)).isBetween(before + 59_000, after + 61_000);
             assertThat(held()).isEqualTo(3000);
             assertThat(objects.deleted).isEmpty();
         }
@@ -332,6 +332,22 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         assertThat(state()).isEqualTo("COLLECTED");
         assertThat(held()).isZero();
         assertThat(objects.deleted).containsExactly("reader/exact-key");
+    }
+
+    @Test
+    void soonExpiringReadLeaseSchedulesItsOwnInstant() {
+        addObject("one", "reader/near-key", null);
+        var gc = collector(new DeletingObjects());
+        try (var lease = retention.read(key)) {
+            long near = ToolPublicationRetentionStore.now(jdbc) + 20_000;
+            jdbc.update("UPDATE ma_read_lease SET expires_at = ? WHERE tenant_key = ?", near,
+                    ToolPublicationRetentionStore.hash(tenant));
+            retire();
+            assertThat(gc.runOnce()).isFalse();
+            assertThat(blocker()).isEqualTo("reader_active");
+            assertThat(jdbc.queryForObject("SELECT available_at FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?",
+                    Long.class, scope)).isEqualTo(near);
+        }
     }
 
     @Test

@@ -317,10 +317,12 @@ public final class ToolPublicationCollector {
                     jdbc.queryForObject("SELECT retired_at FROM ma_session WHERE tenant_id = ?"
                             + " AND session_id = ?", Long.class, tenant, session),
                     grace.toMillis());
-            // The lease expiry is the instant this blocker can clear; a flat claim interval
-            // after it only adds latency.
-            case "reader_active" -> ToolPublicationRetentionStore.earliestReadLeaseExpiry(jdbc,
-                    tenant, session);
+            // The lease expiry is the instant this blocker can clear, but a graceful close
+            // deletes the row without moving the scheduled instant; the claim interval bounds
+            // that path.
+            case "reader_active" -> Math.min(
+                    ToolPublicationRetentionStore.earliestReadLeaseExpiry(jdbc, tenant, session),
+                    now + CLAIM_MILLIS);
             // The Session collector deletes these owner rows and then marks its ledger complete,
             // so this is a handoff in progress rather than a pinned publication.
             case "resource_referenced" -> sessionCollectionPending(tenant, session)

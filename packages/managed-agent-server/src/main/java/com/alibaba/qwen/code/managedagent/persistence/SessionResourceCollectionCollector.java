@@ -241,10 +241,10 @@ public final class SessionResourceCollectionCollector {
                                                                 .getDeletionGrace()
                                                                 .toMillis());
                                     } else if ("reader_active".equals(blocker)) {
-                                        // The last lease's expiry is the instant this blocker
-                                        // clears; 0 leaves the row due immediately.
-                                        next = ToolPublicationRetentionStore
-                                                .earliestReadLeaseExpiry(jdbc, tenant, session);
+                                        // A graceful close deletes the row without moving the
+                                        // scheduled instant; the claim interval bounds that path.
+                                        next = Math.min(next, ToolPublicationRetentionStore
+                                                .earliestReadLeaseExpiry(jdbc, tenant, session));
                                     }
                                     if (!blocker.equals(row.get("failure_code"))) {
                                         LOG.info(

@@ -174,7 +174,8 @@ never hold the live-session scheduler.
    reschedules with the
    same backoff taxonomy as the publication collector: `recovery_protected`
    waits 24 hours, `grace_period` waits until `retired_at + grace`,
-   `reader_active` waits until the last read lease expires, and every
+   `reader_active` waits until the last read lease expires, capped at one claim
+   interval, and every
    other blocker waits 60 seconds. While the Session ledger has not settled,
    the publication collector rechecks `resource_referenced` every 5 seconds
    instead of a full minute, because the Session collector owns that handoff.
