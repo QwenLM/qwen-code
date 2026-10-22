@@ -196,6 +196,11 @@ class SessionRowLockOrderTest {
                                     "ManagedExtensionRecordStore.storedRow/2")),
                     Map.entry("ManagedExtensionRecords.java",
                             Set.of("ManagedExtensionRecords.require/2")),
+                    // The closure callback validates resource/JOURNAL ownership
+                    // under its caller's pinned head; it never locks Session
+                    // rows or accesses Turn rows.
+                    Map.entry("ManagedHostedRecoveryRecords.java",
+                            Set.of("HistoricalResources.checkpointHistory/1")),
                     Map.entry("ManagedSchemaJdbcTemplate.java",
                             Set.of("ManagedSchemaJdbcTemplate.getSingleColumnRowMapper/1")),
                     Map.entry("ManagedSessionStore.java",

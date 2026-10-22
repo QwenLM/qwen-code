@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.StoredResource;
+import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.http.HttpStatus;
 
@@ -17,6 +18,10 @@ import java.util.function.Function;
 public final class ManagedHostedRecoveryRecords {
     public static final Set<String> KINDS = Set.of("hosted-approval-continuation",
             "hosted-model-request", "hosted-turn-cleanup");
+
+    public interface HistoricalResources extends Function<String, StoredResource> {
+        void checkpointHistory(JsonNode ref);
+    }
 
     private ManagedHostedRecoveryRecords() {}
 
@@ -149,7 +154,11 @@ public final class ManagedHostedRecoveryRecords {
                     && stored.schemaVersion() == node.get("schemaVersion").asInt()
                     && stored.byteLength() == node.get("byteLength").asLong()
                     && stored.digest().equals(node.get("digest").asText()), "Hosted nested resource conflicts.");
-            if (KINDS.contains(stored.kind()) || List.of("managed-action-options", "managed-checkpoint", "managed-definition",
+            if (ManagedCheckpointHistory.KIND.equals(stored.kind()) && resources instanceof HistoricalResources historical) {
+                historical.checkpointHistory(node);
+                return;
+            }
+            if (KINDS.contains(stored.kind()) || List.of("managed-action-options", "managed-checkpoint", ManagedCheckpointHistory.KIND, "managed-definition",
                     "managed-hook-plan", "managed-hook-message-chunks", "managed-message-chunks").contains(stored.kind())
                     || ManagedExtensionRecords.DOMAINS.stream().anyMatch(domain -> ("managed-" + domain).equals(stored.kind()))) {
                 JsonNode body = ManagedExtensionRecordStore.parse(new String(stored.bytes(), StandardCharsets.UTF_8));

@@ -1226,9 +1226,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
           const frame = lastFrame();
           expect(frame).toContain('Coding Plan');
           expect(frame).toContain('Token Plan');
-          expect(frame).toContain(
-            'Usage-based billing with dedicated endpoint',
-          );
+          expect(frame).toContain('Subscription with a monthly Credit quota');
         },
         { timeout: WAIT_FOR_TIMEOUT },
       );

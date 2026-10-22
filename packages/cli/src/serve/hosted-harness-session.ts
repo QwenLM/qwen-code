@@ -86,11 +86,12 @@ import type { Application, Request, Response } from 'express';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { parseBridgeManagedSessionStore } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
-  parseHarnessCheckpointV1,
   type HarnessRunAuthorization,
   harnessCheckpointIsAgentWait,
   harnessCheckpointIsCommandWait,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import { readHarnessCheckpoint } from '@qwen-code/qwen-code-core/managed-runtime/managed-checkpoint-history.js';
+import { collectNestedResourceRefs } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { MANAGED_MCP_MAX_CONNECTIONS } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import {
@@ -163,6 +164,8 @@ import {
 import {
   HostedModelRoundLimitError,
   HostedImageInputUnsupportedError,
+  HostedModelApiError,
+  HOSTED_MODEL_API_ERROR_MESSAGES,
   runHostedHarnessTextTurn,
   hostedToolOutputBudget,
 } from './hosted-harness-model.js';
@@ -352,6 +355,7 @@ const RESTORE_CONTAINER_KINDS = new Set([
   'managed-tool-outcome',
   'managed-tool-result-manifest',
   'managed-checkpoint',
+  'managed-checkpoint-history',
   'managed-hook-plan',
   'managed-hook-message-chunks',
 ]);
@@ -2504,13 +2508,14 @@ async function verifyWorkspaceRestore(
         );
     }
     if (ref.kind === 'managed-checkpoint') {
-      const checkpoint = parseHarnessCheckpointV1(bytes);
+      const checkpoint = await readHarnessCheckpoint(resources, ref);
+      refs.push(...collectNestedResourceRefs(ref, bytes));
       if (
         checkpoint.resume.fileHistoryRef ||
         checkpoint.output.mediaRefs.length
       )
         throw new Error('Hosted recovery layout is unsupported.');
-      const refs = [
+      const checkpointRefs = [
         checkpoint.resume.apiHistoryRef,
         checkpoint.resume.artifactRef,
         checkpoint.resume.goalRecordsRef,
@@ -2529,9 +2534,12 @@ async function verifyWorkspaceRestore(
         checkpoint.output.llmContentRef,
         checkpoint.output.hookResultRef,
       ];
-      for (const nested of refs) {
+      for (const nested of checkpointRefs) {
         if (nested) await readRef(nested);
       }
+    }
+    if (ref.kind === 'managed-checkpoint-history') {
+      refs.push(...collectNestedResourceRefs(ref, bytes));
     }
     if (ref.kind === 'managed-hook-plan') {
       const plan = object(JSON.parse(bytes.toString()));
@@ -2564,6 +2572,7 @@ async function verifyWorkspaceRestore(
         'hook_registration',
         'hook_execution',
         'file_history',
+        'history_maintenance',
         // H3 families: an admitted child_run or monitor_run journal is
         // exactly what a workspace-profile load must restore, driven by
         // their own record parsers up front.
@@ -3075,6 +3084,12 @@ async function eventEnvelope(
     const roundLimit = event.payload['stopReason'] === 'model_round_limit';
     const imageUnsupported =
       event.payload['stopReason'] === 'image_input_unsupported';
+    const stopReason = event.payload['stopReason'];
+    const modelApiFailure =
+      typeof stopReason === 'string' &&
+      Object.hasOwn(HOSTED_MODEL_API_ERROR_MESSAGES, stopReason)
+        ? (stopReason as keyof typeof HOSTED_MODEL_API_ERROR_MESSAGES)
+        : undefined;
     return {
       v: 1,
       id: event.sequence,
@@ -3083,24 +3098,28 @@ async function eventEnvelope(
       data: {
         sessionId,
         promptId,
-        code: expired
-          ? 'hosted_turn_deadline_exceeded'
-          : modelUnavailable
-            ? 'model_unavailable'
-            : storeUnavailable
-              ? 'managed_session_store_unavailable'
-              : imageUnsupported
-                ? 'image_input_unsupported'
-                : roundLimit
-                  ? 'hosted_turn_limit_exceeded'
-                  : 'hosted_turn_failed',
-        message: expired
-          ? 'The Hosted Harness Turn exceeded its deadline.'
-          : imageUnsupported
-            ? 'The selected model does not support image input. Choose a model with image support or remove the image.'
-            : roundLimit
-              ? 'The Hosted Harness Turn reached its configured model round limit.'
-              : 'Hosted Harness turn failed.',
+        code:
+          modelApiFailure ??
+          (expired
+            ? 'hosted_turn_deadline_exceeded'
+            : modelUnavailable
+              ? 'model_unavailable'
+              : storeUnavailable
+                ? 'managed_session_store_unavailable'
+                : imageUnsupported
+                  ? 'image_input_unsupported'
+                  : roundLimit
+                    ? 'hosted_turn_limit_exceeded'
+                    : 'hosted_turn_failed'),
+        message: modelApiFailure
+          ? HOSTED_MODEL_API_ERROR_MESSAGES[modelApiFailure]
+          : expired
+            ? 'The Hosted Harness Turn exceeded its deadline.'
+            : imageUnsupported
+              ? 'The selected model does not support image input. Choose a model with image support or remove the image.'
+              : roundLimit
+                ? 'The Hosted Harness Turn reached its configured model round limit.'
+                : 'Hosted Harness turn failed.',
       },
     };
   }
@@ -3700,6 +3719,8 @@ async function executeHostedTurn(
             cause instanceof HostedModelRoundLimitError
           )
             stopReason = 'model_round_limit';
+          if (stopReason === 'error' && cause instanceof HostedModelApiError)
+            stopReason = cause.code;
           if (
             stopReason === 'error' &&
             cause instanceof WorkflowStartCancelledError
@@ -9785,6 +9806,8 @@ export function registerHostedHarnessSessionRoutes(
             failureReason = 'image_input_unsupported';
           if (state === 'error' && cause instanceof HostedModelUnavailableError)
             failureReason = 'model_unavailable';
+          if (state === 'error' && cause instanceof HostedModelApiError)
+            failureReason = cause.code;
           if (state === 'error') {
             const storeFailure = namedStoreFailure(cause);
             if (storeFailure !== undefined) failureReason = storeFailure;

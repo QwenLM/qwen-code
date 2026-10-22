@@ -378,6 +378,37 @@ describe('Hosted real-process gates', () => {
       expect(profile(id), id).toMatch(skipsUnits);
     }
     expect(profile('mysql-integration')).not.toContain('maven-surefire-plugin');
+    const mysqlProfile = profile('mysql-integration');
+    expect(mysqlProfile).toContain(
+      '<mysql.integration.forks>1</mysql.integration.forks>',
+    );
+    const mysqlFailsafe = mysqlProfile
+      .split('<artifactId>maven-failsafe-plugin</artifactId>')[1]
+      .split('</plugin>')[0];
+    expect(mysqlFailsafe).toContain(
+      '<forkCount>${mysql.integration.forks}</forkCount>',
+    );
+    expect(mysqlFailsafe).toContain('<reuseForks>true</reuseForks>');
+    expect(mysqlFailsafe).toContain(
+      'junit.jupiter.execution.parallel.enabled = false',
+    );
+    const routingProperties = mysqlFailsafe
+      .split('<systemPropertyVariables>')[1]
+      .split('</systemPropertyVariables>')[0];
+    expect(routingProperties).toContain(
+      '<qwen.mysql.forkCount>${mysql.integration.forks}</qwen.mysql.forkCount>',
+    );
+    expect(routingProperties).toContain(
+      '<qwen.mysql.forkNumber>0${surefire.forkNumber}</qwen.mysql.forkNumber>',
+    );
+    expect(pom.match(/<qwen\.mysql\.forkCount>/g)).toHaveLength(1);
+    expect(pom.match(/<qwen\.mysql\.forkNumber>/g)).toHaveLength(1);
+    expect(
+      read(
+        'packages/managed-agent-server/src/test/resources/META-INF/services/org.junit.platform.launcher.LauncherSessionListener',
+      ).trim(),
+    ).toBe('com.alibaba.qwen.code.managedagent.MySqlForkRoutingListener');
+    expect(mysqlRun.run).not.toMatch(/-DforkCount\b/);
     // The step stages the SDK with -DskipTests before the MySQL run; only
     // the integration command itself must keep its tests.
     const mysqlVerify = mysqlRun.run.slice(
