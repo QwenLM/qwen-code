@@ -175,14 +175,15 @@ jobs:
           # including the infra classifier, which counts only the jobs present
           # and would turn a regression parked on the missing page into a
           # rerun instead of an issue. `total_count` is the receipt, so the
-          # guard holds even where the shell runs without pipefail; a run that
-          # yields no receipt at all falls back to the empty list the
-          # per-commit body already tolerates, and says so.
+          # guard holds even where the shell runs without pipefail, and a
+          # response that carries no receipt at all cannot be certified
+          # complete either: absence of the receipt is a missing receipt, not
+          # a licence to publish, so it takes the same fallback.
           jobs_json="${RUNNER_TEMP}/run-jobs.json"
           jobs_tmp="${jobs_json}.tmp"
           if gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
             --paginate \
-            | jq -s '{jobs: [ .[].jobs[]? ]} as $doc | ([.[].total_count] | max) as $total | if $total == null or ($doc.jobs | length) == $total then $doc else error("listed \($doc.jobs | length) of \($total) jobs") end' \
+            | jq -s '{jobs: [ .[].jobs[]? ]} as $doc | ([.[].total_count] | max) as $total | if $total != null and ($doc.jobs | length) == $total then $doc else error("incomplete job list: merged \($doc.jobs | length) of \($total)") end' \
               > "${jobs_tmp}"; then
             mv "${jobs_tmp}" "${jobs_json}"
           else

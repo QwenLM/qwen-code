@@ -491,9 +491,12 @@ printf '%s\\n' '${liveAttempt}'
     // that partial list is what every consumer — the infra classifier included
     // — reads as the whole run. The receipt therefore gates the promotion:
     // `total_count` has to match the jobs merged before the staged file
-    // replaces `run-jobs.json`.
+    // replaces `run-jobs.json` — and a response carrying no `total_count` at
+    // all cannot certify itself either, so `$total != null` is part of the
+    // pass condition rather than a skip: absence of the receipt is a missing
+    // receipt, not a licence to publish.
     expect(download).toContain(
-      '| jq -s \'{jobs: [ .[].jobs[]? ]} as $doc | ([.[].total_count] | max) as $total | if $total == null or ($doc.jobs | length) == $total then $doc else error("listed \\($doc.jobs | length) of \\($total) jobs") end\' > "${jobs_tmp}"; then mv "${jobs_tmp}" "${jobs_json}"',
+      '| jq -s \'{jobs: [ .[].jobs[]? ]} as $doc | ([.[].total_count] | max) as $total | if $total != null and ($doc.jobs | length) == $total then $doc else error("incomplete job list: merged \\($doc.jobs | length) of \\($total)") end\' > "${jobs_tmp}"; then mv "${jobs_tmp}" "${jobs_json}"',
     );
     // A run whose pages cannot be read at all degrades the way the per-commit
     // body already tolerates: no stale staging file, an empty list, and a
@@ -648,6 +651,20 @@ printf '%s\\n' '{"jobs":[]}'
     expect(truncated.jobs).toEqual([]);
     expect(truncated.staged).toBe(false);
     expect(truncated.stdout).toContain(
+      '::warning::Could not read the whole job list of run',
+    );
+
+    // A response carrying no `total_count` at all cannot be certified
+    // complete either — this is the input on which a pass condition written
+    // `$total == null or …` would publish page 1 as the whole run, so the
+    // receipt has to be required rather than merely checked when present.
+    const noReceipt = runPages([
+      { body: { jobs: page([9001]).jobs } },
+      { body: { jobs: [] }, fail: true },
+    ]);
+    expect(noReceipt.jobs).toEqual([]);
+    expect(noReceipt.staged).toBe(false);
+    expect(noReceipt.stdout).toContain(
       '::warning::Could not read the whole job list of run',
     );
 
