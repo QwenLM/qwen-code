@@ -45,17 +45,17 @@ Managed 世界还有本地闸门没有的约束。Harness 从不自己生成进�
 
 `POST /v1/agent-automations` 与 `POST /v1/agent-automations/{id}` 接受 `gate`（字符串或 null）：一条至多 2048 UTF-8 字节的 shell 命令，不含控制字符，不得用 `&` 把任何部分放到后台。修订可以设置、更换或清除（`null`）它；定义摘要包含它，所以换闸门就是一次新的定义修订。`PublicAutomation` 携带 `gate`（无闸门时不出现）和 `gate_status`：`last_outcome`、`last_at`、`quiet_since_delivery`、`consecutive_failures`、`last_error`，闸门首次运行前不出现。
 
-闸门需要工具 profile 声明了 Shell、且部署没有为它配置 Hook 的 Session：探针目前不经过部署方的 PreToolUse 与 PermissionRequest Hook，在那里设闸门等于运行一条这些 Hook 从未看到的命令。在其他 Session 上定义闸门会在提交任何东西之前被 `409 automation_gate_unsupported` 拒绝。被 Harness 的 shell 检查拒绝的闸门（为空，或用 `&` 把任何部分放到后台）以 `400 automation_gate_invalid` 拒绝，且不消耗调用方的 `Idempotency-Key`。
+闸门需要工具 profile 声明了 Shell、且部署没有为它钉住 Hook catalog 的 Session(规则只看是否钉了 catalog，不看内容，所以没有工具决策类 Hook、甚至空的 catalog 也会拒绝闸门)：探针目前不经过部署方的 PreToolUse 与 PermissionRequest Hook，在那里设闸门等于运行一条这些 Hook 从未看到的命令。在其他 Session 上定义闸门会在提交任何东西之前被 `409 automation_gate_unsupported` 拒绝。空闸门由控制面以 `400 invalid_automation` 拒绝；被 Harness 的 shell 检查拒绝的闸门（只有注释，或用 `&` 把任何部分放到后台）以 `400 automation_gate_invalid` 拒绝。两者都不消耗调用方的 `Idempotency-Key`。
 
 ### 4.2 Occurrence
 
-| 闸门结果                                     | Occurrence                                       | 发生什么                                 |
-| -------------------------------------------- | ------------------------------------------------ | ---------------------------------------- |
-| 退出码 0，stdout 为空                        | `skipped`，原因 `gate_quiet`                     | 什么都不到达 Session                     |
-| 退出码 0，有输出                             | `fired`                                          | 运行的回合文本 = 提示词 + 作为数据的输出 |
-| 非零退出、超时、无法启动                     | `skipped`，原因 `gate_failed`；`last_error` 写明 | 什么都不到达 Session；连段增长           |
-| Runtime 无法作答（探针进行中 worker 被替换） | `skipped`，原因 `gate_unknown`                   | 什么都不到达 Session；下个槽再探         |
-| blocked：没有 Broker，或配置了 Hook          | `skipped`，原因 `gate_failed`；`last_error` 说明 | Harness 没有 Broker；定义时本就会被拒绝  |
+| 闸门结果                                     | Occurrence                                                     | 发生什么                                 |
+| -------------------------------------------- | -------------------------------------------------------------- | ---------------------------------------- |
+| 退出码 0，stdout 为空                        | `skipped`，原因 `gate_quiet`                                   | 什么都不到达 Session                     |
+| 退出码 0，有输出                             | `fired`                                                        | 运行的回合文本 = 提示词 + 作为数据的输出 |
+| 非零退出、超时、无法启动                     | `skipped`，原因 `gate_failed`；细节见 `gate_status.last_error` | 什么都不到达 Session；连段增长           |
+| Runtime 无法作答（探针进行中 worker 被替换） | `skipped`，原因 `gate_unknown`                                 | 什么都不到达 Session；下个槽再探         |
+| blocked：没有 Broker，或钉了 Hook catalog    | `skipped`，原因 `gate_failed`；细节见 `gate_status.last_error` | Harness 没有 Broker；定义时本就会被拒绝  |
 
 手动运行（`POST .../runs`）走同一条路径：闸门静默时答 `409 automation_run_skipped`，原因 `gate_quiet`，与今天的 overlap 拒绝一致。
 
@@ -86,7 +86,7 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 
 1. Session 的工具 profile 没有声明 Shell、部署为该 Session 配置了 Hook，或没有 Broker 可用时，Harness 直接拒绝探针（`blocked`，附原因）。
 2. 否则为派生的 Runtime Session `hostedRuntimeSessionId("<automationRunId>:gate:<revision>")` 打开一个 `HostedWorkspaceBroker`（`<revision>` 是该 occurrence 钉住的定义修订号），并在获取任何东西之前先向 Broker 要这个 occurrence 的预留：调用 id `<automationRunId>:gate:<revision>`、负载 `{toolName: "managed_automation_gate", input: {gate}}`。预留的每一部分都从 occurrence 及其修订号派生，所以同一修订下每次尝试的 Broker 幂等键与引用都相同。
-3. Broker 在没有活动 Session 的情况下也会答出该键下的终结记录——释放是终态，运行过早先尝试的那个 Session 永远不能再被获取——Harness 读回其结算结果而不启动任何东西。Broker 不知道这个 occurrence 的任何 Session 时，Harness 才获取派生的 Session、重新预留执行、启动并观察到其结算。在 Broker 能说清这个 occurrence 如何结束之前，这次 fire 失败、由扫描器重驱：Broker 持有但报告未就绪的 Session、该键下尚未结算的执行、Broker 故障，都属于这种情况——无论是在获取之前还是之后问到的，因为重启过的 Broker 可能还不认识这个 Session，却仍保存着该键下的执行。Runtime 丢失的执行答 `unknown`；相同键下另一个请求的预留是冲突，永远不是第二次运行，也答 `unknown`。本次尝试启动了执行、却在其结算前失去了对它的观察（一次轮询失败、观察窗口用完）时，会重新读取预留：已结算的回执就是答案；仍在运行的执行交给重试，由之后的尝试读取真实回执；仍只是 prepared 的预留——它的 start 从未到达——会被取消，这样它不会在作答之后才运行，而探针并没有运行。只要本次尝试可能持有派生 Session(获取了它、获取未确认，或 Broker 报告它存活),就先释放再作答，释放失败则让 fire 失败、等待重驱。
+3. Broker 在没有活动 Session 的情况下也会答出该键下的终结记录——释放是终态，运行过早先尝试的那个 Session 永远不能再被获取——Harness 读回其结算结果而不启动任何东西。Broker 不知道这个 occurrence 的任何 Session 时，Harness 才获取派生的 Session、重新预留执行、启动并观察到其结算。在 Broker 能说清这个 occurrence 如何结束之前，这次 fire 失败、由扫描器重驱：Broker 持有但报告未就绪的 Session、该键下尚未结算的执行、Broker 故障，都属于这种情况——无论是在获取之前还是之后问到的，因为重启过的 Broker 可能还不认识这个 Session，却仍保存着该键下的执行。Runtime 丢失的执行答 `unknown`；相同键下另一个请求的预留是冲突，永远不是第二次运行，也答 `unknown`。本次尝试启动了执行、却在其结算前失去了对它的观察（一次轮询失败、观察窗口用完）时，会重新读取预留：已结算的回执就是答案；仍在运行的执行交给重试，由之后的尝试读取真实回执；仍只是 prepared 的预留——它的 start 从未到达——会被取消，这样它不会在作答之后才运行，而探针并没有运行；除非取消时发现迟到的 start 终究到达了：先结算的探针以其回执作答，仍在运行的交给重试。只要本次尝试可能持有派生 Session(获取了它、获取未确认，或 Broker 报告它存活),就先释放再作答，释放失败则让 fire 失败、等待重驱。重启过的 Broker 只在记录里持有存活的 Session，对它的释放会答 `503 runtime_reconciliation_required`；这时尝试先 acquire(把它认领进新的 Broker 进程)再释放。
 4. Runtime worker 运行 worker 内部工具 `managed_automation_gate`——与模型工具并列被准入，但从不向模型声明——它用共享的 `createCronGateRunner` 在 worker 按调用构造的 `Config` 上运行命令：Session 上下文目录为 cwd、worker 的环境、stdout 与 stderr 分开、保留 16 KiB stdout、20 s 超时。结果（`quiet` / `output` / `failed`）作为一个 JSON 文本片段作答，由 Broker 存为该执行的结算结果。命令的进程组一启动就像 Shell 调用那样进入 worker 的 ledger：SSH Runtime 在探针完成时停掉它留下的进程，重启后的 worker 会清扫它。
 5. Harness 释放 Runtime Session 并做决定：`quiet`、`failed`、`blocked`、`unknown` 以 `gate.outcome` 答复控制面且不带运行；`output` 把 stdout 发布为 `managed-automation-gate-output` 资源，带 `gateOutputRef` 提交 claim，并用拼好的文本派发运行。已提交 claim 的重放从存下的输出重建文本，永远不做第二次探测。
 
@@ -96,7 +96,7 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 
 ### 5.3 扫描器与账本
 
-`AutomationScanner.fire` 从应答里读 `gate`。`delivered` 照旧结算为 `fired`。`quiet`、`failed`、`blocked`、`unknown` 结算为 `skipped`，原因分别为 `gate_quiet`、`gate_failed`、`gate_failed`、`gate_unknown`，细节写入 occurrence 的 `last_error`，且不碰 journal。每次结算都在租约下把闸门状态记到定义行：`gate_last_outcome`、`gate_last_at`、`gate_quiet_since_delivery`、`gate_failures`（连续的 failed、blocked、unknown）和 `gate_last_error`，由 `PublicAutomation.gate_status` 报告。只有定义行仍处在该 occurrence 钉住的修订时状态才会更新：此后的修订已为它自己的命令重置了状态，而更早修订下的应答——定义被修订时仍在运行的探针，或修订前已认领的运行的重放投递——都不属于那条命令。水位线与租约的行为与任何已决定的槽相同。
+`AutomationScanner.fire` 从应答里读 `gate`。`delivered` 照旧结算为 `fired`。`quiet`、`failed`、`blocked`、`unknown` 结算为 `skipped`，原因分别为 `gate_quiet`、`gate_failed`、`gate_failed`、`gate_unknown`，细节写入 occurrence 的账本 `last_error`（公开 API 以 `gate_status.last_error` 显示最近一条；`PublicAutomationRun` 不带细节），且不碰 journal。每次结算都在租约下把闸门状态记到定义行：`gate_last_outcome`、`gate_last_at`、`gate_quiet_since_delivery`、`gate_failures`（连续的 failed、blocked、unknown）和 `gate_last_error`，由 `PublicAutomation.gate_status` 报告。只有定义行仍处在该 occurrence 钉住的修订时状态才会更新：此后的修订已为它自己的命令重置了状态，而更早修订下的应答——定义被修订时仍在运行的探针，或修订前已认领的运行的重放投递——都不属于那条命令。水位线与租约的行为与任何已决定的槽相同。
 
 `ma_schedule` 增加 `gate` 列和五个状态列（`V18__schedule_gate.sql`，追加到 `ManagedSchema` 的迁移列表）；`gate_last_at` 加入被锚定的纪元列。
 

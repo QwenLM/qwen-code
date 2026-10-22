@@ -124,24 +124,27 @@ for an ungated definition) and `gate_status` (absent until the gate first
 runs): `last_outcome`, `last_at`, `quiet_since_delivery`,
 `consecutive_failures` and `last_error`.
 
-A gate needs a Session whose tool profile declares Shell and whose
-deployment configures no Hooks: a probe does not run through the
+A gate needs a Session whose tool profile declares Shell and for which the
+deployment pins no Hook catalog: a probe does not run through the
 deployment's PreToolUse and PermissionRequest Hooks yet, so a gate there
-would run a command those Hooks never saw. A definition that names one on
+would run a command those Hooks never saw. The rule reads only whether a
+catalog is pinned, not what it holds, so a catalog with no tool-decision
+Hooks (or none at all) refuses gates too. A definition that names one on
 another Session is refused with `409 automation_gate_unsupported` before
-anything commits. A gate the Harness's shell checks refuse (empty, or any
-part backgrounded with `&`) is refused with `400 automation_gate_invalid`,
-without spending the caller's `Idempotency-Key`.
+anything commits. An empty gate is refused by the control plane with
+`400 invalid_automation`; one the Harness's shell checks refuse (only a
+comment, or any part backgrounded with `&`) with `400
+automation_gate_invalid`. Neither spends the caller's `Idempotency-Key`.
 
 ### 4.2 Occurrences
 
-| Gate outcome                                       | Occurrence                                             | What happens                                               |
-| -------------------------------------------------- | ------------------------------------------------------ | ---------------------------------------------------------- |
-| exit 0, empty stdout                               | `skipped`, reason `gate_quiet`                         | nothing reaches the Session                                |
-| exit 0, output                                     | `fired`                                                | the run's turn text is the prompt plus the output, as data |
-| non-zero exit, timeout, could not start            | `skipped`, reason `gate_failed`; `last_error` names it | nothing reaches the Session; the streak grows              |
-| the Runtime cannot say (worker replaced mid-probe) | `skipped`, reason `gate_unknown`                       | nothing reaches the Session; the next slot probes again    |
-| blocked: no Broker, or Hooks configured            | `skipped`, reason `gate_failed`; `last_error` says so  | a Harness without a Broker; refused at definition anyway   |
+| Gate outcome                                       | Occurrence                                                          | What happens                                               |
+| -------------------------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------- |
+| exit 0, empty stdout                               | `skipped`, reason `gate_quiet`                                      | nothing reaches the Session                                |
+| exit 0, output                                     | `fired`                                                             | the run's turn text is the prompt plus the output, as data |
+| non-zero exit, timeout, could not start            | `skipped`, reason `gate_failed`; detail in `gate_status.last_error` | nothing reaches the Session; the streak grows              |
+| the Runtime cannot say (worker replaced mid-probe) | `skipped`, reason `gate_unknown`                                    | nothing reaches the Session; the next slot probes again    |
+| blocked: no Broker, or a Hook catalog pinned       | `skipped`, reason `gate_failed`; detail in `gate_status.last_error` | a Harness without a Broker; refused at definition anyway   |
 
 A manual run (`POST .../runs`) takes the same path: a quiet gate answers
 `409 automation_run_skipped` with reason `gate_quiet`, as an overlap refusal
@@ -228,11 +231,17 @@ the route wires the real one:
    again: a settled receipt is the answer, an execution still running is
    retried so a later attempt reads its real receipt, and a reservation
    still only prepared — its start never arrived — is cancelled, so it
-   cannot run after the answer, and the probe did not run. Whenever the
+   cannot run after the answer, and the probe did not run — unless the
+   cancel finds that a late start landed after all: a probe that settled
+   first answers with its receipt, and one still running is retried.
+   Whenever the
    attempt may hold the derived Session (it acquired it, its acquisition was
    not confirmed, or the Broker reports it live), it releases the Session
    before answering, and a release that fails fails the fire for a
-   re-drive.
+   re-drive. A Broker that restarted holds a live Session only on record
+   and answers `503 runtime_reconciliation_required` to its release; the
+   attempt then acquires it, which adopts it into the new Broker process,
+   and releases it again.
 4. The Runtime worker runs the worker-internal tool
    `managed_automation_gate` — admitted beside the model tools, never
    declared to a model — which runs the command with the shared
@@ -276,7 +285,9 @@ the Broker's receipt once it settles, and the command still runs once.
 `AutomationScanner.fire` reads `gate` from the answer. `delivered` settles
 `fired` as today. `quiet`, `failed`, `blocked` and `unknown` settle `skipped`
 with reasons `gate_quiet`, `gate_failed`, `gate_failed` and `gate_unknown`,
-the detail in the occurrence's `last_error`, and never touch the journal.
+the detail in the occurrence's ledger `last_error` (the public API shows
+the latest one as `gate_status.last_error`; `PublicAutomationRun` carries
+no detail), and never touch the journal.
 Every settlement records the gate's status on the definition row under the
 lease: `gate_last_outcome`, `gate_last_at`, `gate_quiet_since_delivery`,
 `gate_failures` (the consecutive failed, blocked and unknown outcomes) and

@@ -196,9 +196,12 @@ export class AutomationGateUnsupportedError extends Error {
   }
 }
 
-/** Why a Session whose deployment configures Hooks runs no gate. */
+/** How long a release nobody owes may hold up the fire that asks it. */
+const COURTESY_RELEASE_WAIT_MS = 2_000;
+
+/** Why a Session whose deployment pins a Hook catalog runs no gate. */
 const GATE_HOOKS_REASON =
-  "the deployment's Hooks would not see the gate command: a probe does not run through PreToolUse or PermissionRequest yet";
+  'the deployment pins a Hook catalog for this Session, and a probe does not run through its Hooks yet (PreToolUse and PermissionRequest would never see the gate command)';
 
 export interface HostedAutomationSessionOptions {
   /** Runs a definition's gate; absent, every gated fire is `blocked`. */
@@ -214,8 +217,10 @@ export interface HostedAutomationSessionOptions {
   /** Whether this Session's tool profile declares Shell, at define time. */
   readonly shellAvailable?: () => boolean;
   /**
-   * Whether the deployment configures Hooks for this Session. A gate would
-   * run around them, so a Session with Hooks refuses and blocks gates.
+   * Whether the deployment pins a Hook catalog for this Session. A gate
+   * would run around its Hooks, so such a Session refuses and blocks gates;
+   * the catalog's contents are not read for this (an empty one counts too),
+   * which keeps the answer synchronous and off the Broker.
    */
   readonly hooksConfigured?: () => boolean;
 }
@@ -735,11 +740,27 @@ export class HostedAutomationSession {
   ): Promise<void> {
     if (this.options.releaseGate === undefined) return;
     const owed = `${automationRunId}|${revision}`;
+    if (!this.owedGateReleases.has(owed)) {
+      // A courtesy waits briefly: a Broker that hangs must not hold up a
+      // definition that needs no Broker, nor the funnel queued behind it.
+      const release = this.options
+        .releaseGate(automationRunId, revision)
+        .catch(() => undefined);
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        release,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, COURTESY_RELEASE_WAIT_MS);
+          timer.unref?.();
+        }),
+      ]);
+      clearTimeout(timer);
+      return;
+    }
     try {
       await this.options.releaseGate(automationRunId, revision);
       this.owedGateReleases.delete(owed);
     } catch (cause) {
-      if (!this.owedGateReleases.has(owed)) return;
       throw new HostedAutomationGateHeld(
         cause instanceof Error ? cause.message : String(cause),
       );

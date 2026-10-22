@@ -671,6 +671,25 @@ export class HostedWorkspaceBroker {
     await this.request(`/executions/${encodeURIComponent(id)}:cancel`, {});
   }
 
+  /**
+   * Requests a cancel and answers the execution's state as the Broker holds
+   * it afterwards: a terminal record stays as it settled, so the answer can
+   * be the receipt of a run the cancel came too late for.
+   */
+  async cancelReading(
+    id: string,
+  ): Promise<{ state: string; settled?: ManagedToolResultPayload }> {
+    const response = await this.request(
+      `/executions/${encodeURIComponent(id)}:cancel`,
+      {},
+    );
+    const status = object(response['status']);
+    const state = String(status['state']);
+    return state === 'settled'
+      ? { state, settled: settledResult(status) }
+      : { state };
+  }
+
   async control(
     operation: ManagedMcpControl,
   ): Promise<ManagedMcpOperationView> {

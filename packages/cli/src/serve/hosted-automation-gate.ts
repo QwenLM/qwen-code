@@ -304,7 +304,22 @@ async function releaseDerivedSession(
   { notFoundIsFinal }: { notFoundIsFinal: boolean },
 ): Promise<void> {
   try {
-    await broker.release();
+    try {
+      await broker.release();
+    } catch (cause) {
+      if (
+        !(cause instanceof HostedWorkspaceBrokerRejection) ||
+        cause.status !== 503 ||
+        cause.code !== 'runtime_reconciliation_required'
+      ) {
+        throw cause;
+      }
+      // A Broker that restarted holds the Session only on record and
+      // cannot prove its release: acquiring adopts it into this Broker
+      // process, and the release then can.
+      await broker.acquire();
+      await broker.release();
+    }
   } catch (cause) {
     if (
       notFoundIsFinal &&
@@ -358,18 +373,41 @@ async function afterLostWatch(
       reason: "the Broker no longer holds the occurrence's probe",
     };
   }
-  if (now.settled !== undefined) {
-    return settle(broker, now, '', new AbortController().signal, () => {
-      throw new Error('a settled receipt never starts');
-    });
+  if (now.settled !== undefined) return fromReceipt(broker, now);
+  const after = await broker
+    .cancelReading(executionCallId)
+    .catch(() => undefined);
+  if (after !== undefined && after.settled === undefined) {
+    // The start landed after all, and the probe was running when the
+    // cancel reached it: a later attempt reads how it ended.
+    throw new HostedAutomationGateHeld(
+      "the occurrence's probe started late and has not settled",
+    );
   }
-  await broker.cancel(executionCallId).catch(() => undefined);
+  if (
+    after?.settled !== undefined &&
+    after.settled.executionStatus !== 'cancelled' &&
+    after.settled.executionStatus !== 'not_started'
+  ) {
+    // The start landed after all and the probe settled first: the cancel
+    // left its receipt as it was, and that is the answer.
+    return fromReceipt(broker, { executionCallId, settled: after.settled });
+  }
   return {
     kind: 'failed',
     detail: 'could not start: the Runtime never started the probe',
     stderr: '',
     durationMs: 0,
   };
+}
+
+function fromReceipt(
+  broker: HostedWorkspaceBroker,
+  receipt: Reservation,
+): Promise<HostedAutomationGateResult> {
+  return settle(broker, receipt, '', new AbortController().signal, () => {
+    throw new Error('a settled receipt never starts');
+  });
 }
 
 function heldByAnotherAttempt(): HostedAutomationGateHeld {

@@ -1363,6 +1363,7 @@ describe('hosted automation gates', () => {
   it('retries a fire whose stale revision’s probe Session this process owes, and only that one', async () => {
     const harness = await createHarness();
     let failing = true;
+    let hanging = false;
     await withSession(
       harness,
       async (automations) => {
@@ -1400,6 +1401,13 @@ describe('hosted automation gates', () => {
         await expect(
           automations.fire(fireParams(2, 'schedule:2026-03-09T07:00:00Z')),
         ).rejects.toThrow(AutomationRevisionStaleError);
+        // Nor on one that hangs: the courtesy waits two seconds at most.
+        hanging = true;
+        const started = Date.now();
+        await expect(
+          automations.fire(fireParams(2, 'schedule:2026-03-10T07:00:00Z')),
+        ).rejects.toThrow(AutomationRevisionStaleError);
+        expect(Date.now() - started).toBeLessThan(4_000);
       },
       {
         gate: async () => {
@@ -1408,6 +1416,7 @@ describe('hosted automation gates', () => {
           );
         },
         releaseGate: async () => {
+          if (hanging) return new Promise<void>(() => {});
           if (failing) throw new Error('Broker unavailable');
         },
       },
@@ -1683,7 +1692,7 @@ describe('hosted automation gates', () => {
             operationId: nextOperationId(),
             definition: gated,
           }),
-        ).rejects.toThrow(/deployment's Hooks would not see the gate command/);
+        ).rejects.toThrow(/pins a Hook catalog for this Session/);
         expect(automations.schedules()).toHaveLength(0);
       },
       { gate: gate.runner, hooksConfigured: () => true },
@@ -1703,7 +1712,7 @@ describe('hosted automation gates', () => {
         expect(fired.run).toBeUndefined();
         expect(fired.gate).toMatchObject({
           outcome: 'blocked',
-          detail: expect.stringContaining('PreToolUse or PermissionRequest'),
+          detail: expect.stringContaining('pins a Hook catalog'),
         });
         expect(gate.calls).toHaveLength(0);
       },

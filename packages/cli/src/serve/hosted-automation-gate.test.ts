@@ -436,11 +436,15 @@ describe('createHostedAutomationGateRunner', () => {
           case '/executions/gate-execution':
             return rejection(503, 'runtime_store_unavailable');
           case '/executions/gate-execution:cancel':
+            // A prepared reservation settles at once as cancelled.
             return {
               body: {
                 ...identity,
                 executionCallId: 'gate-execution',
-                status: { state: 'cancel_requested' },
+                status: {
+                  state: 'settled',
+                  result: { executionStatus: 'cancelled', responseParts: [] },
+                },
               },
             };
           case RELEASE:
@@ -472,6 +476,98 @@ describe('createHostedAutomationGateRunner', () => {
       expect(paths().at(-1)).toBe(RELEASE);
     },
   );
+
+  it.each([
+    [
+      'settled first: its receipt is the answer',
+      {
+        body: settled(
+          '{"kind":"output","stdout":"late mail\\n","truncated":false,"durationMs":5}',
+        ),
+      },
+      'output',
+    ],
+    [
+      'still running: a later attempt reads how it ended',
+      {
+        body: {
+          ...identity,
+          executionCallId: 'gate-execution',
+          status: { state: 'cancel_requested' },
+        },
+      },
+      'held',
+    ],
+  ] as const)(
+    'answers by what the cancel finds when a late start landed after all: %s',
+    async (_what, cancelled, expected) => {
+      let prepares = 0;
+      const { calls, probe } = await rig((path) => {
+        switch (path) {
+          case '/executions:prepare':
+            prepares++;
+            return prepares === 1
+              ? rejection(404, 'runtime_session_not_found')
+              : {
+                  body: {
+                    ...identity,
+                    executionCallId: 'gate-execution',
+                    status: { state: 'prepared' },
+                  },
+                };
+          case '/tool-sessions:acquire':
+            return { body: acquired };
+          case '/executions/gate-execution:start':
+          case '/executions/gate-execution':
+            return rejection(503, 'runtime_store_unavailable');
+          case '/executions/gate-execution:cancel':
+            return cancelled;
+          case RELEASE:
+            return { body: { ...identity, released: true } };
+          default:
+            throw new Error(`unexpected ${path}`);
+        }
+      });
+      if (expected === 'held') {
+        await expect(probe()).rejects.toBeInstanceOf(HostedAutomationGateHeld);
+        expect(calls.map((call) => call.path)).not.toContain(RELEASE);
+      } else {
+        await expect(probe()).resolves.toMatchObject({
+          kind: 'output',
+          stdout: 'late mail\n',
+        });
+        expect(calls.at(-1)?.path).toBe(RELEASE);
+      }
+    },
+  );
+
+  it('adopts the Session a restarted Broker holds only on record, then releases it', async () => {
+    // The replay never acquires; a Broker that restarted cannot prove the
+    // release of a Session it no longer holds in memory until it adopts it.
+    let releases = 0;
+    const { calls, probe } = await rig((path) => {
+      switch (path) {
+        case '/executions:prepare':
+          return { body: settled('{"kind":"quiet","durationMs":3}') };
+        case RELEASE:
+          releases++;
+          return releases === 1
+            ? rejection(503, 'runtime_reconciliation_required')
+            : { body: { ...identity, released: true } };
+        case '/tool-sessions:acquire':
+          return { body: acquired };
+        default:
+          throw new Error(`unexpected ${path}`);
+      }
+    });
+    await expect(probe()).resolves.toEqual({ kind: 'quiet', durationMs: 3 });
+    expect(calls.map((call) => call.path)).toEqual([
+      '/executions:prepare',
+      RELEASE,
+      '/tool-sessions:acquire',
+      RELEASE,
+    ]);
+  });
 
   it.each([
     ['released', { body: { ...identity, released: true } }, true],
