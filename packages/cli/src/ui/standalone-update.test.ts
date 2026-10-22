@@ -482,6 +482,7 @@ describe('standalone-update', () => {
         cliSource?: string;
         binless?: boolean;
         entryless?: boolean;
+        omitRuntime?: boolean;
       } = {},
     ) {
       const fixtureTarget = options.target ?? 'linux-x64';
@@ -495,7 +496,12 @@ describe('standalone-update', () => {
         target: fixtureTarget,
         version: options.manifestVersion ?? '1.2.3',
         name: '@qwen-code/qwen-code',
-        runtime: options.runtime ?? 'node',
+        ...(options.omitRuntime
+          ? {
+              nodeArchive: 'node-v22.23.2-linux-x64.tar.xz',
+              createdAt: '2026-08-22T00:00:00.000Z',
+            }
+          : { runtime: options.runtime ?? 'node' }),
       };
       if (options.nameless) delete manifest['name'];
       fs.writeFileSync(
@@ -1255,7 +1261,6 @@ describe('standalone-update', () => {
         { target: 'linux-arm64' },
         'does not match the expected target, runtime and version',
       ],
-      ['missing runtime', { runtime: undefined }, 'requires a valid runtime'],
       ['null runtime', { runtime: null }, 'requires a valid runtime'],
       ['unknown runtime', { runtime: 'deno' }, 'requires a valid runtime'],
       [
@@ -1320,6 +1325,24 @@ describe('standalone-update', () => {
         ).toBe(false);
       },
     );
+
+    it('accepts a pre-v0.23.0 downloaded manifest without a runtime field', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      await serveArchive({
+        runnable: true,
+        omitRuntime: true,
+        manifestVersion: '0.22.0',
+        reportedVersion: '0.22.0',
+      });
+      await expect(
+        performStandaloneUpdate(standaloneDir, '0.22.0'),
+      ).resolves.toBe('done');
+      expect(
+        JSON.parse(
+          fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+        ),
+      ).toMatchObject({ version: '0.22.0' });
+    });
 
     it.each(['{', 'null', '[]'])(
       'rejects malformed or non-object downloaded JSON (%s)',

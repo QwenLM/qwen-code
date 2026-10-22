@@ -1276,10 +1276,13 @@ function downloadedStandaloneManifest(standaloneDir: string) {
     );
   }
   validateTarget(target);
-  if (runtime !== 'node' && runtime !== 'bun') {
+  // Archives published before v0.23.0 predate the runtime field; the
+  // installed-manifest reader already defaults them to the node flavor.
+  const resolvedRuntime = runtime === undefined ? 'node' : runtime;
+  if (resolvedRuntime !== 'node' && resolvedRuntime !== 'bun') {
     throw new Error('Downloaded standalone manifest requires a valid runtime');
   }
-  return { target, runtime, version };
+  return { target, runtime: resolvedRuntime, version };
 }
 
 export async function prepareStandaloneUpdate(
