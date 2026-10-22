@@ -1,5 +1,8 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
+import type {
+  ManagedAgentProvider,
+  ManagedModelPreset,
+} from './components/managed/managed-agent-provider';
 import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import type { WebShellLanguage } from './i18n';
@@ -66,18 +69,23 @@ export function ManagedStandaloneApp({
               !('agentId' in item) ||
               typeof item.agentId !== 'string' ||
               !item.agentId.trim() ||
+              ('modelId' in item &&
+                (typeof item.modelId !== 'string' || !item.modelId.trim())) ||
               !('label' in item) ||
               typeof item.label !== 'string' ||
               !item.label.trim(),
           ) ||
-          new Set(rawPresets.map((item: { agentId: string }) => item.agentId))
-            .size !== rawPresets.length
+          new Set(
+            (rawPresets as ManagedModelPreset[]).map(
+              (item) => item.modelId ?? item.agentId,
+            ),
+          ).size !== rawPresets.length
         ) {
           throw new Error(
             'Managed application returned invalid model presets.',
           );
         }
-        const modelPresets = rawPresets as { agentId: string; label: string }[];
+        const modelPresets = rawPresets as ManagedModelPreset[];
         if (!controller.signal.aborted) {
           const provider = createJavaManagedAgentProvider({
             baseUrl: window.location.origin,

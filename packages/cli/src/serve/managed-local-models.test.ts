@@ -1,20 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
 import { loadSettings } from '../config/settings.js';
-import {
-  loadManagedLocalModels,
-  registerManagedLocalModels,
-} from './managed-local-models.js';
+import { loadManagedLocalModels } from './managed-local-models.js';
 
 vi.mock('../config/settings.js', () => ({ loadSettings: vi.fn() }));
-
-const options = {
-  javaUrl: 'http://127.0.0.1:5011',
-  signingKey: 'private-signing-key',
-  tenantId: 'local-installation',
-  actorId: 'owner',
-};
-const agentId = 'agent_0123456789abcdef0123456789abcdef';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -115,66 +104,4 @@ describe('local Managed model catalog', () => {
       defaultModelId: 'model-b',
     });
   });
-});
-
-describe('local model presets', () => {
-  it('creates model-pinned shell definitions through signed, replayable private requests', async () => {
-    const fetch = vi.fn(async () =>
-      Response.json({ id: agentId }, { status: 202 }),
-    );
-    vi.stubGlobal('fetch', fetch);
-    const models = [{ modelId: 'model-b', label: 'Model B' }];
-    expect(await registerManagedLocalModels(options, models)).toEqual([
-      { agentId, label: 'Model B' },
-    ]);
-    await registerManagedLocalModels(options, [
-      { ...models[0]!, label: 'Renamed' },
-    ]);
-    const [url, request] = fetch.mock.calls[0]! as unknown as [
-      string,
-      RequestInit,
-    ];
-    expect(url).toBe(`${options.javaUrl}/v1/agents`);
-    expect(JSON.parse(String(request.body))).toEqual({
-      model: { id: 'model-b' },
-      instructions: '',
-      tools: [{ type: 'hosted_profile', profile: 'hosted-workspace-shell/1' }],
-      permission_policy: { approval_mode: 'default' },
-    });
-    const headers = new Headers(request.headers);
-    expect(headers.get('x-qwen-signature')).toMatch(/^v1=/u);
-    expect(headers.get('x-qwen-tenant-id')).toBe(options.tenantId);
-    expect(headers.get('idempotency-key')).toBe(
-      new Headers(
-        (fetch.mock.calls[1] as unknown as [string, RequestInit])[1].headers,
-      ).get('idempotency-key'),
-    );
-    expect(String(request.body)).not.toContain(options.signingKey);
-  });
-
-  it.each([
-    () => new Response('secret upstream diagnostic', { status: 409 }),
-    () => Response.json({ id: 'qwen-code' }),
-    () => new Response('invalid secret response'),
-  ])(
-    'fails startup instead of advertising an unregistered model',
-    async (response) => {
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(async () => response()),
-      );
-      await expect(
-        registerManagedLocalModels(options, [
-          { modelId: 'model-a', label: 'A' },
-        ]),
-      ).rejects.toThrow(/Local model registration/u);
-      try {
-        await registerManagedLocalModels(options, [
-          { modelId: 'model-a', label: 'A' },
-        ]);
-      } catch (error) {
-        expect(String(error)).not.toContain('secret');
-      }
-    },
-  );
 });

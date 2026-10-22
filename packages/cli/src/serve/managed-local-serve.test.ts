@@ -22,7 +22,6 @@ const mocks = vi.hoisted(() => ({
   startWeb: vi.fn(),
   stdout: vi.fn(),
   loadModels: vi.fn(),
-  registerModels: vi.fn(),
 }));
 
 vi.mock('node:child_process', () => ({ spawn: mocks.spawn }));
@@ -41,7 +40,6 @@ vi.mock('./managed-local-web.js', () => ({
 }));
 vi.mock('./managed-local-models.js', () => ({
   loadManagedLocalModels: mocks.loadModels,
-  registerManagedLocalModels: mocks.registerModels,
 }));
 vi.mock('./run-qwen-serve.js', () => ({
   runQwenServe: mocks.startWeb,
@@ -150,9 +148,10 @@ describe('Managed local startup supervision', () => {
         brokerPort: 5013,
       };
       const models = [{ modelId: 'model-b', label: 'Model B' }];
-      const modelPresets = [{ agentId: 'agent_local_b', label: 'Model B' }];
+      const modelPresets = [
+        { agentId: 'qwen-code', modelId: 'model-b', label: 'Model B' },
+      ];
       mocks.loadModels.mockReturnValue({ models, defaultModelId });
-      mocks.registerModels.mockResolvedValue([...modelPresets]);
       await mkdir(path.join(directory, 'logs'));
       mocks.stdout.mockClear();
       mocks.openState.mockResolvedValue({ state, directory, release });
@@ -227,13 +226,6 @@ describe('Managed local startup supervision', () => {
                   ],
             }),
           }),
-        );
-        expect(mocks.registerModels).toHaveBeenCalledWith(
-          expect.objectContaining({
-            javaUrl: 'http://127.0.0.1:5011',
-            tenantId: 'local-installation',
-          }),
-          models,
         );
         expect(
           JSON.parse(mocks.spawn.mock.calls[1]![2].env.SPRING_APPLICATION_JSON)[

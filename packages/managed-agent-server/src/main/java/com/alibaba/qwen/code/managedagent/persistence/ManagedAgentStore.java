@@ -423,6 +423,19 @@ public class ManagedAgentStore implements AgentStateStore {
             String payloadDigest, WorkspaceSelection selection, String requestedApprovalMode,
             boolean approvalSelectionSupported, Boolean requestedPlanMode, boolean planModeSupported,
             List<Map<String, Object>> skills) {
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, requestedApprovalMode,
+                approvalSelectionSupported, requestedPlanMode, planModeSupported, skills, null);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title, List<Map<String, Object>> input,
+            String payloadDigest, WorkspaceSelection selection, String requestedApprovalMode,
+            boolean approvalSelectionSupported, Boolean requestedPlanMode, boolean planModeSupported,
+            List<Map<String, Object>> skills, String modelId) {
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
@@ -433,6 +446,11 @@ public class ManagedAgentStore implements AgentStateStore {
         if (!existing.isEmpty()) {
             return replayWorkspaceCommand(tenantId, actorId,
                     requestDigest, existing.getFirst(), false);
+        }
+        if (modelId != null && (!"qwen-code".equals(agentId) || !workspaceFilesEnabled
+                || modelCatalog.stream().noneMatch(option -> option.modelId().equals(modelId)))) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_model",
+                    "The model is not published for this Agent.");
         }
         AgentPin pin = selectApprovalMode(resolveAgentPin(tenantId, agentId,
                 requestedRevision, true), requestedApprovalMode, approvalSelectionSupported);
@@ -478,7 +496,7 @@ public class ManagedAgentStore implements AgentStateStore {
         var effectiveSkills = AgentDefinitionExtensions.sessionSkills(merged);
         Admission admission = insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
-                workspace, actorId, pin, null, planMode);
+                workspace, actorId, pin, null, planMode, modelId);
         if (!skills.isEmpty()) {
             creationSkills.save(tenantId, admission.sessionId(), effectiveSkills);
         }
@@ -1124,6 +1142,14 @@ public class ManagedAgentStore implements AgentStateStore {
             String requestDigest, String agentId, String title, List<Map<String, Object>> input,
             String payloadDigest, ResolvedBinding resolved, String actorId, AgentPin pin,
             WorkspaceCsiRegistration registration, boolean planMode) {
+        return insertSession(tenantId, operation, idempotencyKey, requestDigest, agentId, title,
+                input, payloadDigest, resolved, actorId, pin, registration, planMode, null);
+    }
+
+    private Admission insertSession(String tenantId, String operation, String idempotencyKey,
+            String requestDigest, String agentId, String title, List<Map<String, Object>> input,
+            String payloadDigest, ResolvedBinding resolved, String actorId, AgentPin pin,
+            WorkspaceCsiRegistration registration, boolean planMode, String modelId) {
         ContextBinding workspace = resolved == null ? null
                 : resolved.binding();
         long now = clock.millis();
@@ -1148,9 +1174,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " context_revision, workspace_config_ref,"
                         + " workspace_policy_ref, tool_profile,"
                         + " creator_actor_key, owner_actor_key, runtime_request_key, approval_mode,"
-                        + " plan_enabled, selected_approval_mode, approval_revision) VALUES"
+                        + " plan_enabled, selected_approval_mode, approval_revision, model_id, model_revision) VALUES"
                         + " (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?,"
-                        + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tenantId, sessionId, agentId, pin.revision(), pin.digest(),
                 title, now, now,
                 workspace == null ? null : workspace.getWorkspaceId(),
@@ -1166,7 +1192,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         : workspace == null ? null : pin.toolProfile(),
                 actorKey, actorKey,
                 runtimeRequestKey, workspace != null || pin.digest() != null ? pin.approvalMode() : "yolo",
-                planMode, planMode ? pin.approvalMode() : null, planMode ? 1 : 0);
+                planMode, planMode ? pin.approvalMode() : null, planMode ? 1 : 0, modelId, modelId == null ? 0 : 1);
         jdbc.update("INSERT INTO ma_event_stream"
                         + " (tenant_id, session_id, stream_kind, stream_id,"
                         + " covered_sequence, gmt_modified) VALUES"

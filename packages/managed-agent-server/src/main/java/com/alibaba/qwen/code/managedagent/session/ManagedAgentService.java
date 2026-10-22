@@ -246,12 +246,14 @@ public class ManagedAgentService {
         var options = store.workspaceSessionOptions(tenantId, agentId);
         if ("qwen-code".equals(agentId) && store.workspaceShellEnabled() && harness.supportsApprovalSelection()) {
             return new WebShellSessionOptions(options.approvalMode(), List.of("default", "auto-edit", "yolo"),
-                    harness.supportsPlanMode(), harness.supportsInputAttachments(), harness.supportsSessionSkills());
+                    harness.supportsPlanMode(), harness.supportsInputAttachments(), harness.supportsSessionSkills(),
+                    store.workspaceFilesEnabled() && !store.modelOptions().isEmpty() && harness.supportsModelSelection());
         }
         return new WebShellSessionOptions(options.approvalMode(), options.availableApprovalModes(),
                 harness.supportsPlanMode() && harness.supportsAgentDefinitionApprovalSelection()
                         && options.planModeSupported(),
-                harness.supportsInputAttachments(), harness.supportsSessionSkills());
+                harness.supportsInputAttachments(), harness.supportsSessionSkills(),
+                "qwen-code".equals(agentId) && store.workspaceFilesEnabled() && !store.modelOptions().isEmpty() && harness.supportsModelSelection());
     }
 
     public WebShellSessionModels queryWebShellSessionModels(String tenantId, String actorId,
@@ -337,6 +339,15 @@ public class ManagedAgentService {
             String agentRevision, String title, Map<String, Object> metadata,
             List<InputBlock> blocks, WorkspaceSelection selection, String approvalMode, Boolean planMode,
             List<Map<String, Object>> skills) {
+        return createWorkspaceSession(tenantId, actorId, idempotencyKey, agentId, agentRevision,
+                title, metadata, blocks, selection, approvalMode, planMode, skills, null);
+    }
+
+    public CommandAdmission createWorkspaceSession(String tenantId,
+            String actorId, String idempotencyKey, String agentId,
+            String agentRevision, String title, Map<String, Object> metadata,
+            List<InputBlock> blocks, WorkspaceSelection selection, String approvalMode, Boolean planMode,
+            List<Map<String, Object>> skills, String modelId) {
         validateIdempotencyKey(idempotencyKey);
         var additions = AgentDefinitionExtensions.sessionSkills(skills);
         if (actorId == null || actorId.isEmpty()) {
@@ -365,6 +376,9 @@ public class ManagedAgentService {
         if (!additions.isEmpty()) {
             semantic.put("skills", additions);
         }
+        if (modelId != null) {
+            semantic.put("modelId", modelId);
+        }
         String requestDigest = digests.digest(semantic);
         String payloadDigest = input.isEmpty() ? null
                 : SubmitHarnessTurn.computePayloadDigest(input);
@@ -375,6 +389,10 @@ public class ManagedAgentService {
         if (recorded.isPresent()) {
             dispatch(tenantId, recorded.get(), true);
             return response(recorded.get());
+        }
+        if (modelId != null && (!"qwen-code".equals(agentId) || !harness.supportsModelSelection())) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature",
+                    "Initial model selection is unavailable for this Agent.");
         }
         if (!additions.isEmpty() && !harness.supportsSessionSkills()) {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature",
@@ -387,7 +405,13 @@ public class ManagedAgentService {
         }
         Admission admission;
         try {
-            admission = approvalMode == null && planMode == null && additions.isEmpty()
+            admission = modelId != null
+                    ? store.insertWorkspaceSessionCommand(tenantId,
+                            actorId, idempotencyKey, requestDigest, agentId,
+                            agentRevision, effectiveTitle, input, payloadDigest,
+                            selection, approvalMode, harness.supportsApprovalSelection(),
+                            planMode, harness.supportsPlanMode(), additions, modelId)
+                    : approvalMode == null && planMode == null && additions.isEmpty()
                     ? store.insertWorkspaceSessionCommand(tenantId,
                             actorId, idempotencyKey, requestDigest, agentId,
                             agentRevision, effectiveTitle, input, payloadDigest, selection)

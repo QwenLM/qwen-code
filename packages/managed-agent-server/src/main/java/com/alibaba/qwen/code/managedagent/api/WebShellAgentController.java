@@ -199,6 +199,10 @@ public class WebShellAgentController {
                     "unsupported_approval_mode",
                     "Approval mode selection requires a bound Workspace.");
         }
+        if (selection == null && request.modelId() != null) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature",
+                    "Model selection requires a bound Workspace.");
+        }
         if (selection == null && request.skills() != null && !request.skills().isEmpty()) {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature",
                     "Session Skills require a bound Workspace.");
@@ -214,7 +218,7 @@ public class WebShellAgentController {
                 : service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), request.idempotencyKey(),
                         request.agentId(), null, request.title(), null,
-                        request.input(), selection, request.approvalMode(), request.planMode(), request.skills()));
+                        request.input(), selection, request.approvalMode(), request.planMode(), request.skills(), request.modelId()));
         return ResponseEntity.accepted().body(admission);
     }
 

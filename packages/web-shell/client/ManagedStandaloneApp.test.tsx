@@ -147,6 +147,24 @@ describe('Managed standalone application', () => {
     ).toEqual(modelPresets);
   });
 
+  it('keeps multiple local model choices on the built-in Agent', async () => {
+    const modelPresets = [
+      { agentId: 'qwen-code', modelId: 'model-a', label: 'A' },
+      { agentId: 'qwen-code', modelId: 'model-b', label: 'B' },
+    ];
+    fetch.mockResolvedValue(Response.json({ ...BOOT, modelPresets }));
+    await act(async () =>
+      root.render(
+        <ManagedStandaloneApp daemonToken="browser-token">
+          {renderShell}
+        </ManagedStandaloneApp>,
+      ),
+    );
+    expect(
+      renderShell.mock.calls.at(-1)?.[0]?.workspaceBinding?.modelPresets,
+    ).toEqual(modelPresets);
+  });
+
   it('waits for authenticated boot before composing the shell', async () => {
     fetch.mockReturnValue(new Promise(() => {}));
     await act(async () =>

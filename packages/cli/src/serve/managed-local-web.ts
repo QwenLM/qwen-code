@@ -17,7 +17,11 @@ export interface ManagedLocalWebOptions {
   actorId: string;
   productScope: string;
   agentId: string;
-  modelPresets?: ReadonlyArray<{ agentId: string; label: string }>;
+  modelPresets?: ReadonlyArray<{
+    agentId: string;
+    label: string;
+    modelId?: string;
+  }>;
 }
 
 export function signedManagedHeaders(options: {

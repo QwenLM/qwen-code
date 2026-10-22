@@ -23,7 +23,6 @@ import { runQwenServe, type RunHandle } from './run-qwen-serve.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import {
   loadManagedLocalModels,
-  registerManagedLocalModels,
   type ManagedLocalModel,
 } from './managed-local-models.js';
 
@@ -330,10 +329,15 @@ export async function runManagedLocalServe(
     });
     const tenantId = `local-${state.installationId}`;
     const actorId = 'local-user';
-    const modelPresets = await registerManagedLocalModels(
-      { javaUrl, signingKey: state.signingKey, tenantId, actorId },
-      models,
-    );
+    const modelPresets: Array<{
+      agentId: string;
+      label: string;
+      modelId?: string;
+    }> = models.map(({ modelId, label }) => ({
+      agentId: 'qwen-code',
+      modelId,
+      label,
+    }));
     if (models.length && !defaultModelId) {
       modelPresets.unshift({
         agentId: 'qwen-code',

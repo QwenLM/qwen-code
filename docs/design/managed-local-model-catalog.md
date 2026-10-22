@@ -4,7 +4,7 @@
 
 ## Problem and scope
 
-The local `qwen serve --managed` adapter inherits the user's model configuration for Hosted Harness execution, but neither configures the Java model catalog nor supplies new-task model presets. The UI therefore shows only the server default despite configured local models. Main already supplies both Java contracts. This change connects the local launcher to them; it adds no Java API, provider credential transport, remote provisioning behavior, or changes to existing Sessions.
+The local `qwen serve --managed` adapter inherits the user's model configuration for Hosted Harness execution, but neither configures the Java model catalog nor supplies new-task model presets. The UI therefore shows only the server default despite configured local models. Main supplies the Session model catalog and approval contracts. This change connects the local launcher to them and adds optional initial model selection to WebShell creation, as detailed in [the creation design](2026-10-22-managed-initial-model-selection.md). It adds no provider credential transport, remote provisioning behavior, or changes to existing Sessions.
 
 ## Design
 
@@ -12,9 +12,9 @@ At startup, load the same deployment settings as the Hosted Harness: honor the s
 
 Pass only `{modelId,label}` entries and allowed model IDs to Java through a launcher-owned `SPRING_APPLICATION_JSON` array. Allow the existing `hosted-workspace-shell/1` definition profile. The launcher continues to filter inherited Spring and Managed server overrides and keeps the signed loopback boundary.
 
-After readiness, create one immutable AgentDefinition per model using the existing signed `POST /v1/agents` API. Its content includes only the model ID, empty instructions, the shell tool profile and default asking policy. Derive the idempotency key from that exact content so restarts and label changes reuse the stored definition. A failed or malformed admission aborts startup, rather than advertising a choice that cannot execute. Definitions are created only by the launcher; the browser proxy does not expose management routes.
+Use the built-in `qwen-code` Agent for new local tasks. Publish each configured model as a separate `modelId`; do not register a custom AgentDefinition whose compiled asking policy would constrain the permission menu. Keep definition model/profile allowlists for existing custom Sessions, and keep management routes private.
 
-The authenticated, same-origin `/managed/boot` response supplies `{agentId,label}` presets. The standalone client validates them and forwards them to the existing provider. New tasks pin the chosen definition. Existing Sessions use the separate Java Session model catalog and its idle/revision/Workspace-grant gates. Model pin resolution and cached credentials remain in Hosted Harness. Credentials, provider URLs and signing material are absent from the boot response, definitions and model catalog.
+The authenticated, same-origin `/managed/boot` response supplies `{agentId: "qwen-code",modelId,label}` presets. The standalone client validates unique model choices and forwards them to the provider, while legacy `{agentId,label}` presets remain supported. New tasks select the host-catalog model and approval independently; a capability-gated creation request persists both before its first Turn. Existing Sessions use the separate Java Session model catalog and its idle/revision/Workspace-grant gates. Model pin resolution and cached credentials remain in Hosted Harness. Credentials, provider URLs and signing material are absent from the boot response, definitions and model catalog.
 
 ## Constraints and risks
 
@@ -22,4 +22,4 @@ The catalog is a startup snapshot; reload configuration by restarting the local 
 
 ## Validation and acceptance
 
-Focused tests cover local settings scope, protocol routing and ambiguous IDs, specialized-model filtering, selected-model ordering, metadata-only serialization, signed idempotent registration, failed admission, and boot validation. Build, typecheck and run the affected package tests. In an isolated deployment using two controlled model endpoints, select B for a new task and observe `request.model=B`, switch the idle Session to A and observe the next `request.model=A`, then reread the selection after refresh and a new service cohort. Verify catalog/boot output contains no provider endpoint or secret and an unauthenticated browser cannot fetch boot. Update the existing local preview only after validation and confirm its original Workspace/Session data survives.
+Focused tests cover local settings scope, protocol routing and ambiguous IDs, specialized-model filtering, selected-model ordering, metadata-only serialization, independent model/approval selection, atomic creation/replay, unsupported admission, and boot validation. Build, typecheck and run the affected package tests. In an isolated deployment using two controlled model endpoints, select B for a new task and observe `request.model=B`, switch the idle Session to A and observe the next `request.model=A`, then reread the selection after refresh and a new service cohort. Verify catalog/boot output contains no provider endpoint or secret and an unauthenticated browser cannot fetch boot. Update the existing local preview only after validation and confirm its original Workspace/Session data survives.

@@ -4,7 +4,7 @@
 
 ## 问题与范围
 
-本地 `qwen serve --managed` 适配层为 Hosted Harness 执行继承了用户模型配置，却没有配置 Java 模型目录，也没有提供新建任务模型预设。即使本地已经配置模型，页面仍只显示服务端默认模型。主干已有这两项 Java 协议。本次将本地启动器接到已有协议，不新增 Java API、提供方凭据传输、远程部署行为，也不修改已有 Session。
+本地 `qwen serve --managed` 适配层为 Hosted Harness 执行继承了用户模型配置，却没有配置 Java 模型目录，也没有提供新建任务模型预设。即使本地已经配置模型，页面仍只显示服务端默认模型。主干已有 Session 模型目录与审批协议。本次将本地启动器接到这些协议，并为 WebShell 创建增加可选初始模型选择，详见[创建模型设计](2026-10-22-managed-initial-model-selection.zh-CN.md)。不新增提供方凭据传输或远程部署行为，也不修改已有 Session。
 
 ## 设计
 
@@ -12,9 +12,9 @@
 
 通过启动器控制的 `SPRING_APPLICATION_JSON` 数组，仅向 Java 传递 `{modelId,label}` 条目和允许的模型 ID。允许使用已有 `hosted-workspace-shell/1` 定义配置。启动器继续过滤继承的 Spring 和 Managed 服务端覆盖配置，保留签名的回环地址边界。
 
-服务就绪后，通过已有签名 `POST /v1/agents` API，为每个模型创建不可变的 AgentDefinition。内容仅包含模型 ID、空 instructions、shell 工具配置及默认询问策略。由完整内容推导幂等键，使重启和显示名称变化复用已保存定义。准入失败或响应格式错误时中止启动，避免展示无法执行的选项。只有启动器创建定义，浏览器代理不开放管理路由。
+本地新任务使用内置 `qwen-code` Agent，将每个已配置模型作为独立 `modelId` 发布，不再注册会以编译后询问策略限制权限菜单的自定义 AgentDefinition。保留定义模型和工具配置白名单，使已有自定义 Session 可用；管理路由继续不对外开放。
 
-通过已鉴权的同源 `/managed/boot` 返回 `{agentId,label}` 预设，独立客户端验证后传入已有 provider。新任务固定所选定义。已有 Session 使用独立的 Java Session 模型目录及其空闲状态、版本和 Workspace 授权校验。模型固定解析与缓存凭据继续由 Hosted Harness 负责。boot、定义和模型目录均不包含凭据、提供方 URL 或签名材料。
+通过已鉴权的同源 `/managed/boot` 返回 `{agentId: "qwen-code",modelId,label}` 预设，独立客户端验证模型选项唯一后传入 provider，并兼容原有 `{agentId,label}` 预设。新任务分别选择宿主目录模型和审批策略；创建请求通过能力检查后，在首轮之前同时保存这两项选择。已有 Session 使用独立的 Java Session 模型目录及其空闲状态、版本和 Workspace 授权校验。模型固定解析与缓存凭据继续由 Hosted Harness 负责。boot、定义和模型目录均不包含凭据、提供方 URL 或签名材料。
 
 ## 约束与风险
 
@@ -22,4 +22,4 @@
 
 ## 验证与验收
 
-定向测试覆盖本地配置作用域、协议路由与歧义 ID、专用模型过滤、选定模型排序、仅元数据序列化、签名幂等注册、准入失败及 boot 验证。完成构建、类型检查和相关包测试。在使用两个受控模型端点的隔离部署中，新建任务选择 B，观察 `request.model=B`；空闲 Session 切换到 A，观察下一轮 `request.model=A`；刷新以及更换服务进程后重新读取选择。验证目录和 boot 不包含提供方地址或秘密，未鉴权浏览器无法读取 boot。仅在验证通过后更新现有本地预览，并确认原 Workspace/Session 数据保留。
+定向测试覆盖本地配置作用域、协议路由与歧义 ID、专用模型过滤、选定模型排序、仅元数据序列化、模型与审批独立选择、原子创建与重试、不支持的准入及 boot 验证。完成构建、类型检查和相关包测试。在使用两个受控模型端点的隔离部署中，新建任务选择 B，观察 `request.model=B`；空闲 Session 切换到 A，观察下一轮 `request.model=A`；刷新以及更换服务进程后重新读取选择。验证目录和 boot 不包含提供方地址或秘密，未鉴权浏览器无法读取 boot。仅在验证通过后更新现有本地预览，并确认原 Workspace/Session 数据保留。
