@@ -15,6 +15,7 @@ import { managedRequestId } from './managed-session-storage';
 import { isManagedApprovalMode } from './managed-agent-provider';
 import { browserArtifactSave } from './managed-artifact-download';
 import type { ManagedArtifactSave } from './managed-tool-result-types';
+import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
 import type {
   ManagedAgentCommandOptions,
   ManagedAgentPendingAction,
@@ -245,6 +246,54 @@ export function createJavaManagedAgentProvider(
     mcp: {
       list: (sessionId, request) =>
         client.getSessionMcp(sessionId, request.signal),
+    },
+    mcpManagement: {
+      storageScope: options.productScope?.trim()
+        ? storageKey(options)
+        : undefined,
+      async query(sessionId, request) {
+        return requireMcpManagementSnapshot(
+          await client.queryMcpManagement(
+            { sessionId, requestId: managedRequestId() },
+            request.signal,
+          ),
+          sessionId,
+        );
+      },
+      async submit(sessionId, command, request) {
+        const snapshot = requireMcpManagementSnapshot(
+          await client.submitMcpManagement(
+            {
+              ...command,
+              sessionId,
+              requestId: request.requestId,
+              idempotencyKey: request.idempotencyKey,
+            },
+            request.signal,
+          ),
+          sessionId,
+        );
+        if (
+          !snapshot.operation ||
+          snapshot.operation.action !== command.action ||
+          snapshot.operation.serverId !== command.serverId ||
+          snapshot.operation.revision !== command.expectedRevision + 1
+        )
+          throw new Error('Managed MCP operation identity mismatch');
+        return snapshot;
+      },
+      async operation(sessionId, operationId, request) {
+        const snapshot = requireMcpManagementSnapshot(
+          await client.getMcpManagementOperation(
+            { sessionId, operationId, requestId: managedRequestId() },
+            request.signal,
+          ),
+          sessionId,
+        );
+        if (snapshot.operation?.operationId !== operationId)
+          throw new Error('Managed MCP operation identity mismatch');
+        return snapshot;
+      },
     },
     tasks: {
       list: (sessionId, request) =>
@@ -1065,6 +1114,22 @@ function requireTaskCancelOperation(
   )
     throw new Error('Task cancel operation identity mismatch');
   return operation as ManagedTaskCancelOperation;
+}
+
+function requireMcpManagementSnapshot(
+  snapshot: ManagedMcpManagementSnapshot,
+  sessionId: string,
+): ManagedMcpManagementSnapshot {
+  if (
+    snapshot.sessionId !== sessionId ||
+    !Number.isSafeInteger(snapshot.revision) ||
+    snapshot.revision < 0 ||
+    typeof snapshot.supported !== 'boolean' ||
+    !Array.isArray(snapshot.servers) ||
+    !Array.isArray(snapshot.availableServers)
+  )
+    throw new Error('Managed MCP Session identity mismatch');
+  return snapshot;
 }
 
 function storageKey(options: JavaManagedAgentProviderOptions): string {
