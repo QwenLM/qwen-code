@@ -31038,6 +31038,149 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
+  it.each([false, true])(
+    'claims recovery cancellation once after concurrent child fences (first completed: %s)',
+    async (firstCompleted) => {
+      await parkToolTurn();
+      let stopped = false;
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
+        async () => ({
+          state: stopped ? 'settled' : 'prepared',
+        }),
+      );
+      const { server, loaded } = await loadReplacement(true);
+      expect(loaded.status).toBe(200);
+      const resident = (
+        wakeDeps.last as {
+          session: {
+            managed: Awaited<ReturnType<typeof openManagedSession>>;
+            publicChildAgentsVersion?: 1;
+            childAgents?: HostedChildAgentSession;
+          };
+        }
+      ).session;
+      resident.publicChildAgentsVersion = 1;
+      resident.childAgents = new HostedChildAgentSession(
+        {
+          authority: resident.managed.authority,
+          resources: resident.managed.resources,
+        },
+        resident.managed.authority.sessionHeader.sessionKey,
+      );
+      let releaseFirst!: () => void;
+      let releaseSecond!: () => void;
+      let releaseBroker!: () => void;
+      const gates = [
+        new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        }),
+        new Promise<void>((resolve) => {
+          releaseSecond = resolve;
+        }),
+      ];
+      const brokerGate = new Promise<void>((resolve) => {
+        releaseBroker = resolve;
+      });
+      const original = HostedChildAgentSession.prototype.cancelSourcePrompt;
+      let fenceCount = 0;
+      const fence = vi
+        .spyOn(HostedChildAgentSession.prototype, 'cancelSourcePrompt')
+        .mockImplementation(async function (
+          this: HostedChildAgentSession,
+          promptId,
+          commit,
+        ) {
+          await gates[fenceCount++];
+          await original.call(this, promptId, commit);
+        });
+      const cancel = vi
+        .mocked(HostedWorkspaceBroker.prototype.cancel)
+        .mockImplementation(async () => {
+          await brokerGate;
+          stopped = true;
+        });
+      cancel.mockClear();
+      const recovery = loaded.body._meta?.[
+        'qwen.daemon.managedRuntimeRecovery'
+      ] as {
+        checkpointId: string;
+        activationId: string;
+      };
+      const send = () =>
+        replacementHeaders(
+          supertest(server).post(
+            `/session/${SESSION_ID}/managed-runtime/cancel`,
+          ),
+        )
+          .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+          .send({
+            promptId: PROMPT_ID,
+            checkpointId: recovery.checkpointId,
+            activationId: recovery.activationId,
+          });
+      const completed: supertest.Response[] = [];
+      const record = (response: supertest.Response) => {
+        completed.push(response);
+        return response;
+      };
+      const first = send().then(record);
+      const second = send().then(record);
+      try {
+        await vi.waitFor(() => expect(fence).toHaveBeenCalledTimes(2), {
+          timeout: SETTLE_TIMEOUT_MS,
+        });
+        releaseFirst();
+        await vi.waitFor(() => expect(cancel).toHaveBeenCalledTimes(1), {
+          timeout: SETTLE_TIMEOUT_MS,
+        });
+        if (firstCompleted) {
+          releaseBroker();
+          await vi.waitFor(() => expect(completed).toHaveLength(1), {
+            timeout: SETTLE_TIMEOUT_MS,
+          });
+          expect(completed[0].status).toBe(200);
+        }
+        releaseSecond();
+        await vi.waitFor(
+          () =>
+            expect(
+              completed.length > (firstCompleted ? 1 : 0) ||
+                cancel.mock.calls.length > 1,
+            ).toBe(true),
+          {
+            timeout: SETTLE_TIMEOUT_MS,
+          },
+        );
+        expect(cancel).toHaveBeenCalledTimes(1);
+        releaseBroker();
+        const responses = await Promise.all([first, second]);
+        expect(responses.map((response) => response.status)).toEqual([
+          200, 200,
+        ]);
+        expect(responses[1].body.lastEventId).toBe(
+          responses[0].body.lastEventId,
+        );
+        const events = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+        expect(
+          events.body.events.filter(
+            (event: { type: string; promptId?: string }) =>
+              event.type === 'turn_complete' && event.promptId === PROMPT_ID,
+          ),
+        ).toHaveLength(1);
+      } finally {
+        releaseFirst();
+        releaseSecond();
+        releaseBroker();
+        await Promise.allSettled([first, second]);
+        await replacementHeaders(
+          supertest(server).delete(`/session/${SESSION_ID}`),
+        );
+      }
+    },
+  );
+
   it('answers a settled cancellation even when the final handback fails', async () => {
     await parkToolTurn();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({

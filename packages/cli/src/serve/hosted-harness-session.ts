@@ -10076,6 +10076,46 @@ export function registerHostedHarnessSessionRoutes(
     // runnable authorization the guards above established.
     const cancelRunnable = cancelAuthorization.authorization;
     await stopPublicChildSource(session, promptId);
+    // The child fence yields; another recovery may have claimed or settled it.
+    if (identity(req, sessions) !== session)
+      return error(res, 404, 'hosted_session_not_found');
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    if (session.mcpBusy || session.mcpRecovering)
+      return error(res, 409, 'hosted_mcp_operation_active');
+    if (session.blocked)
+      return error(
+        res,
+        409,
+        'hosted_turn_recovery_required',
+        hostedTurnBusyReason(session),
+      );
+    const concurrentCancel = session.admissions.get(promptId);
+    if (concurrentCancel?.digest === recoveryDigest) {
+      if (!session.active && session.runtimeLeaseHeld?.promptId === promptId)
+        releaseRecoveredRuntime(session);
+      res.status(200).json({
+        accepted: true,
+        promptId,
+        lastEventId: concurrentCancel.lastEventId,
+        eventEpoch: epoch,
+      });
+      return;
+    }
+    if (session.active) return error(res, 409, 'hosted_turn_active');
+    if (unsettledPromptId(session) !== promptId) {
+      if (settledReplay(session, promptId, res)) {
+        if (session.runtimeLeaseHeld?.promptId === promptId)
+          releaseRecoveredRuntime(session);
+        return;
+      }
+      return error(res, 409, 'hosted_recovery_identity_mismatch');
+    }
+    if (
+      session.managed.activation.activationId !== activationId ||
+      session.managed.authority.latestCheckpoint?.checkpointId !==
+        cancelRunnable.checkpoint.identity.checkpointId
+    )
+      return error(res, 409, 'hosted_recovery_identity_mismatch');
     session.admissions.set(promptId, {
       digest: recoveryDigest,
       lastEventId: session.managed.authority.committedSequence,

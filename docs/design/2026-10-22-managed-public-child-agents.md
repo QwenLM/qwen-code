@@ -12,7 +12,7 @@ Implemented with public child delegation enabled by default for qualified new Se
 
 Carry the public surface through create, load and recovery. Public Sessions expose only the ordinary tools and `agent`, with no team, workflow, messaging, isolation, custom definition or nested launch. Keep orchestration available for existing work after the deployment switch turns off, while refusing new launches. Private internal paths retain their existing tools. SSH, CSI/resident, workspace isolation and mount-owning MCP/Hooks remain excluded.
 
-Recovery cleanup and targeted-cancellation loads carry the same public version and model route; SDK request copies also preserve the original prompt identity. A delayed cancellation fences children of that source only and releases a recovered lease only when it belongs to the original prompt, preserving later Turns.
+Recovery cleanup and targeted-cancellation loads carry the same public version and model route; SDK request copies also preserve the original prompt identity. A delayed cancellation fences children of that source only and releases a recovered lease only when it belongs to the original prompt, preserving later Turns. After an asynchronous child stop fence, cancellation rechecks the original recovery identity and any concurrent admission before synchronously claiming the Turn; repeated requests retain the same receipt.
 
 ## Execution and ownership
 
