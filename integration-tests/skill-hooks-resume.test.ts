@@ -134,10 +134,7 @@ describe('skill hooks survive session resume', () => {
 
       const waitFor = makeWaitFor(rig, () => output);
 
-      const ready = await rig.waitForText(
-        'Type your message',
-        rig.getDefaultTimeout(),
-      );
+      const ready = await rig.waitForText('Type your message');
       expect(ready, `CLI did not start. Output:\n${output}`).toBe(true);
 
       /**
