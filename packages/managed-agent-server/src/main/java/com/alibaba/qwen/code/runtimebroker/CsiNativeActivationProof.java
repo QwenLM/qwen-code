@@ -712,7 +712,14 @@ public final class CsiNativeActivationProof {
 
     public static JsonNode readCheckpoint(JsonNode ref, Function<JsonNode, byte[]> resources) {
         JsonNode physical = readObject(reference(ref, "managed-checkpoint", resources));
-        checkpointResources(physical, resources);
+        if (ManagedCheckpointHistory.paged(physical)) {
+            // Hydration verifies history through its revision-scoped reader.
+            ObjectNode active = physical.deepCopy();
+            active.remove("history");
+            checkpointResources(active, resources);
+        } else {
+            checkpointResources(physical, resources);
+        }
         try {
             return ManagedCheckpointHistory.hydrate(physical, resources);
         } catch (IllegalArgumentException error) {

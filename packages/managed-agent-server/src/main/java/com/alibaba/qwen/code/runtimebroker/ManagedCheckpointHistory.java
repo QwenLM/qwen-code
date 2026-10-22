@@ -97,7 +97,6 @@ public final class ManagedCheckpointHistory {
         require(tools > 0 && physical.path("tools").path("items").isArray());
         JsonNode next = history.path("ref");
         pageRef(next);
-        CsiNativeActivationProof.reference(next, KIND, resources);
         var pages = new ArrayDeque<JsonNode>();
         var visited = new HashSet<String>();
         long ceiling = resources instanceof Reader reader ? reader.revision() : Long.MAX_VALUE;
