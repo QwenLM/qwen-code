@@ -5,57 +5,55 @@
 ## 问题与范围
 
 Windows SDK 的可选 UIAccess 模式在将 worker 部署到 Program Files 前要求有效的
-Authenticode 签名；默认 Windows 安装不部署该 worker。PR #12442 在打包前增加签名；本次修订将其中的 PFX
-导入路径替换为项目的 SignPath 服务。不降低安装校验要求，不发布版本，也不要求
-用户安装测试根证书。本次接入仅签署 UIAccess worker。
+Authenticode 签名；默认 Windows 安装不部署该 worker。PR #12442 将早期的 PFX
+导入方案替换为项目的 SignPath 测试签名服务，使 CI 能端到端验证已签名的
+UIAccess 安装。不降低安装校验要求，不发布版本，也不要求用户安装测试根证书。
 
 ## 签名流程
 
-托管 Windows job 为各架构构建未签名 worker，以包含架构的唯一文件名上传原始
-PE artifact。固定提交版本的 SignPath action 将该 artifact ID 提交到组织
-`e2bc00ea-6f24-4cde-9cfc-f0b19b2b6ece`、项目 `qwen-code`、产物配置
-`initial`，随后下载已完成签名请求的输出。Windows job 只有 `actions: read`
-和 `contents: read` 权限。`SIGNPATH_API_TOKEN` 保存在 Actions secret 中；
-runner 不导入私有签名密钥。action 的认证下载绑定到为所上传 artifact、仓库和
-workflow run 创建的签名请求。
+发布构建保持现有约定：Windows 归档携带未签名的 UIAccess worker，需要 UIAccess
+的部署方在目标机器上签名并信任它。发布从不依赖 SignPath，因此缺少生产证书不会
+阻塞普通模式的 Windows 发布。
 
-只有分支上的 `workflow_dispatch` 且 `dry_run=true` 才选择 `test-signing`。
-tag ref 和所有发布运行均选择 `release-signing`；即使手动对 tag dispatch 时
-保留默认 `dry_run` 值，也使用生产策略。生产策略审批和公开受信任证书是服务端
-前置条件。
+只有分支上的 `workflow_dispatch` 且 `dry_run=true` 才对 worker 做测试签名；
+tag ref 和发布运行跳过该步骤。Windows job 只有 `contents: read` 权限。仓库内
+脚本使用 Actions secret `SIGNPATH_API_TOKEN`，将各架构的 worker 直接提交到
+SignPath REST API（`SubmitWithArtifact`），目标为组织
+`e2bc00ea-6f24-4cde-9cfc-f0b19b2b6ece`、项目 `qwen-code`、策略
+`test-signing`、产物配置 `initial`，随后轮询签名请求并下载签名文件。runner
+不导入私有签名密钥。
 
-测试路径先校验已知测试证书指纹
-`0B27B4BA9D646BCDB1FD59B4F229C0DAA7E8EEF0`，再将其导入一次性托管
-runner 的 Root 和 TrustedPublisher 证书存储。此信任仅用于 CI，自托管 runner
-不在本设计范围内。生产路径不导入根证书。两条路径均要求 Authenticode 状态为
-`Valid` 才能打包；输出缺失或签名无效会让 job 失败。
+直接调用 API 不经过 SignPath 的 GitHub 连接器；该连接器需要 SignPath GitHub
+App 做来源验证。本仓库无法安装该 App，而 `test-signing` 策略不要求来源验证。
 
-全新安装检查设置 `CUA_DRIVER_USE_UIACCESS=1`，使用打包后的产物，启用生命周期
-脚本安装 SDK，并检查部署到 Program Files 的 worker 签名。它覆盖打包与安装；原生产物覆盖变量使其不经过
-公开下载与校验和路径。
+脚本先校验已知测试证书指纹 `0B27B4BA9D646BCDB1FD59B4F229C0DAA7E8EEF0`，
+再将其导入一次性托管 runner 的 Root 和 TrustedPublisher 证书存储，并要求
+Authenticode 状态为 `Valid` 后才替换构建出的 worker。此信任仅用于 CI，自托管
+runner 不在本设计范围内。缺少输出、签名者不符或签名无效都会使 job 失败。
+
+干净安装检查使用打包后的 payload，并在启用 lifecycle scripts 的情况下安装 SDK。
+dry run 设置 `CUA_DRIVER_USE_UIACCESS=1` 并检查 Program Files 中已部署 worker
+的签名；发布构建以普通模式安装，并检查没有部署 UIAccess worker。本地 native
+payload 覆盖不验证公开下载与校验和路径。
 
 ## 验证与验收
 
-工作流测试检查策略选择、artifact 输入、权限，以及从未签名构建到签名、打包、
-安装的顺序。PowerShell 解析和 actionlint 检查语法。保留的手工测试签名 x64
-worker 为测试证书和 PE 内容提供独立证据，但不能证明工作流的认证 API 提交。
+workflow 测试检查 dry run 路由、测试签名步骤、权限，以及从构建到打包、安装的
+步骤顺序。PowerShell 解析和 actionlint 检查语法。
 
-合并前配置 `SIGNPATH_API_TOKEN`，在精确候选提交上对两个构建目标执行分支
-dry run。两个 Windows job 和 SDK 安装都必须通过，发布 job 必须跳过。
-ARM64 在 x64 runner 上交叉构建，因此不构成 ARM64 实机运行证据。
+合并前，需要在分支 dry run 中对两个构建目标运行确切候选版本；两个 Windows job
+和 SDK 安装都必须通过，发布 job 必须保持跳过。ARM64 在 x64 runner 上交叉编译，
+不构成原生 ARM64 执行证据。
 
-公开发布验收前，需配置生产证书、完成生产策略审批，并在没有导入测试根证书的
-干净 Windows 机器上安装 publisher 签名的候选包，实际执行一次 UIAccess 输入。
-测试签名结果不能满足这项验收条件。
+测试签名结果不证明公开信任。发布公开受信任的 UIAccess worker，需要由公开受信任
+CA 签发给经过验证的法律实体的证书，例如公司签名服务、Azure Artifact Signing
+或 CA 签发的代码签名证书。SignPath 生产策略要求通过 GitHub App 做来源验证，
+本仓库无法安装该 App。这一决定不在本 PR 范围内。
 
-## 当前状态与未完成前置条件
+## 当前状态与待满足条件
 
-截至 2026-10-22，`SIGNPATH_API_TOKEN` 已于 UTC 14:09:38 重新生成并配置。
-原始 PE 配置与 test-signing 策略有效，SignPath 显示已关联 GitHub trusted builds；
-但这不代表 GitHub App 已安装并获授权。
-[run 39793940639](https://github.com/QwenLM/qwen-code/actions/runs/39793940639)
-在 `67e69b53bc9d55e489c3d780240b2792482274ed` 上完成两个 Windows 目标构建后，
-提交签名时以 `Failed to retrieve GitHub App token` 失败，未运行签名后打包与安装。
-需修复 GitHub App 安装或访问授权。生产证书状态为 `CSR PENDING`，
-`release-signing` 为 `INVALID`。在线签名和 Windows 验收完成前，PR 保持 Draft。
-本次工作不授权 release 或 npm 发布。
+截至 2026-10-22，`SIGNPATH_API_TOKEN` 已配置，原始 PE 配置和测试签名策略有效。
+[运行 39793940639](https://github.com/QwenLM/qwen-code/actions/runs/39793940639)
+构建了两个 Windows 目标，但 GitHub 连接器报错
+`Failed to retrieve GitHub App token`，因此改为直接调用 API 的设计。PR 保持
+Draft，等待直接 API 的 dry run 与 Windows 验收。本工作不授权任何发布或 npm 发布。

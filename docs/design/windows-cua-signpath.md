@@ -6,68 +6,68 @@
 
 The Windows SDK's optional UIAccess mode requires a valid Authenticode signature
 before deploying its worker under Program Files. Default Windows installation
-does not deploy that worker. PR #12442 adds signing before packaging;
-this revision replaces its PFX import path with the project's SignPath service.
-It does not weaken installation checks, publish a release, or ask users to
-install a test root. Only the UIAccess worker is signed by this integration.
+does not deploy that worker. PR #12442 replaces the earlier PFX import attempt
+with the project's SignPath test-signing service so CI can exercise the signed
+UIAccess installation end to end. It does not weaken installation checks,
+publish a release, or ask users to install a test root.
 
 ## Signing flow
 
-The hosted Windows job builds an unsigned worker for each architecture and
-uploads it as a raw PE artifact with a unique architecture-specific filename.
-The pinned SignPath action submits that artifact ID to organization
-`e2bc00ea-6f24-4cde-9cfc-f0b19b2b6ece`, project `qwen-code`, artifact
-configuration `initial`, then downloads the completed signing request's output.
-The Windows job has only `actions: read` and `contents: read` permissions.
-`SIGNPATH_API_TOKEN` is an Actions secret; no private signing key is imported
-into the runner. The action binds its authenticated download to the signing
-request created for the uploaded artifact, repository and workflow run.
+Release builds keep the existing contract: Windows archives carry an unsigned
+UIAccess worker, and deployments that need UIAccess sign and trust it on the
+target machine. A release never depends on SignPath, so a missing production
+certificate cannot block ordinary-mode Windows releases.
 
-Only a branch `workflow_dispatch` with `dry_run=true` selects `test-signing`.
-Tag refs and all publishing runs select `release-signing`. This includes manual
-tag dispatches even when `dry_run` retains its default. Production policy
-approval and a publicly trusted certificate are service-side prerequisites.
+Only a branch `workflow_dispatch` with `dry_run=true` test-signs the worker.
+Tag refs and publishing runs skip that step. The Windows job has only
+`contents: read` permission. A repository script submits each architecture's
+worker directly to the SignPath REST API (`SubmitWithArtifact`) for
+organization `e2bc00ea-6f24-4cde-9cfc-f0b19b2b6ece`, project `qwen-code`,
+policy `test-signing` and artifact configuration `initial`, using the
+`SIGNPATH_API_TOKEN` Actions secret. It polls the request and downloads the
+signed file. No private signing key is imported into the runner.
 
-For tests, the installer checks the known test certificate fingerprint
-`0B27B4BA9D646BCDB1FD59B4F229C0DAA7E8EEF0` before importing that certificate into
-the disposable hosted runner's Root and TrustedPublisher stores. This trust is
-only for CI. A self-hosted runner is outside this design. Production execution
-does not import a root. Both paths require `Valid` Authenticode status before
-packaging. Missing output or an invalid signature fails the job.
+The direct API does not use SignPath's GitHub connector, which needs the
+SignPath GitHub App for origin verification. The repository cannot install that
+App, and the `test-signing` policy does not require origin verification.
 
-The clean-install check sets `CUA_DRIVER_USE_UIACCESS=1`, consumes the packaged
-payload, installs the SDK with lifecycle scripts enabled, and checks the deployed
-Program Files worker's signature. It exercises packaging and installation; its native payload
+The script checks the known test certificate fingerprint
+`0B27B4BA9D646BCDB1FD59B4F229C0DAA7E8EEF0` before importing it into the
+disposable hosted runner's Root and TrustedPublisher stores, then requires
+`Valid` Authenticode status before replacing the built worker. This trust is
+only for CI; a self-hosted runner is outside this design. Missing output, an
+unexpected signer or an invalid signature fails the job.
+
+The clean-install check consumes the packaged payload and installs the SDK with
+lifecycle scripts enabled. Dry runs set `CUA_DRIVER_USE_UIACCESS=1` and check
+the deployed Program Files worker's signature. Release builds install in
+ordinary mode and check that no UIAccess worker is deployed. The native payload
 override does not exercise the public download/checksum path.
 
 ## Validation and acceptance
 
-Workflow tests check policy routing, artifact inputs, permissions, and ordering
-from unsigned build through signing, packaging, and installation. PowerShell
-parsing and actionlint check syntax. A retained manually test-signed x64 worker
-provides separate evidence of the configured test certificate and PE payload;
-it does not prove the workflow's authenticated API submission.
+Workflow tests check dry-run routing, the test-signing step, permissions, and
+ordering from build through packaging and installation. PowerShell parsing and
+actionlint check syntax.
 
 Before merging, run the exact candidate through the branch dry run for both
-build targets with `SIGNPATH_API_TOKEN` configured. Both Windows jobs and SDK
-installation must pass; publication jobs must remain skipped. ARM64 is
-cross-built on an x64 runner, so this is not native ARM64 execution evidence.
+build targets. Both Windows jobs and SDK installation must pass; publication
+jobs must remain skipped. ARM64 is cross-built on an x64 runner, so this is not
+native ARM64 execution evidence.
 
-Before public release acceptance, provision the production certificate, complete
-the release policy approval, and install the publisher-signed candidate on a
-clean Windows machine without importing a test root. Exercise an actual UIAccess
-input action. A test-signing result cannot satisfy this acceptance criterion.
+A test-signing result does not prove public trust. Shipping a publicly trusted
+UIAccess worker requires a certificate from a publicly trusted CA issued to a
+validated legal entity, for example a company signing service, Azure Artifact
+Signing, or a CA-issued code signing certificate. SignPath's production policy
+requires origin verification through the GitHub App, which this repository
+cannot install. That decision is outside this PR.
 
 ## Current status and open prerequisites
 
-As of 2026-10-22, `SIGNPATH_API_TOKEN` was regenerated and configured at
-14:09:38 UTC. The raw-PE configuration and test-signing policy are valid, and
-SignPath reports GitHub trusted builds linked; that does not establish GitHub
-App installation or authorization. However,
-[run 39793940639](https://github.com/QwenLM/qwen-code/actions/runs/39793940639)
-at `67e69b53bc9d55e489c3d780240b2792482274ed` built both Windows targets but
-failed submission with `Failed to retrieve GitHub App token`; signed packaging
-and installation did not run. GitHub App installation/access must be repaired.
-The production certificate is `CSR PENDING` and `release-signing` is `INVALID`.
-The PR remains a draft pending online signing and Windows acceptance.
+As of 2026-10-22, `SIGNPATH_API_TOKEN` is configured. The raw-PE configuration
+and test-signing policy are valid.
+[Run 39793940639](https://github.com/QwenLM/qwen-code/actions/runs/39793940639)
+built both Windows targets but the GitHub connector failed with
+`Failed to retrieve GitHub App token`, which led to the direct API design.
+The PR remains a draft pending the direct-API dry run and Windows acceptance.
 No release or npm publication is authorized by this work.
