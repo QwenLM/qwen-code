@@ -2,7 +2,7 @@
 
 [English](browser-action-notifications.md) | [简体中文](browser-action-notifications.zh-CN.md)
 
-Status: current as of 2026-10-12. Extends turn-end notifications with action reminders and panel authorization; the linked branding and content/navigation designs still specify their unchanged behavior.
+Status: updated 2026-10-22 for desktop permission recovery (#15109). Extends turn-end notifications with action reminders and panel authorization; the linked branding and content/navigation designs still specify their unchanged behavior.
 
 ## Problem and scope
 
@@ -100,8 +100,8 @@ Both OS guides start collapsed, with a chevron beside each heading to expand or
 collapse the instructions independently.
 The web page cannot detect OS-level permission; do not claim that it can.
 
-On the first eligible panel appearance, attempt authorization once per browser
-site through the existing settings controller. Record the attempt before calling
+Outside the packaged desktop shell, on the first eligible panel appearance,
+attempt authorization once per browser site through the existing settings controller. Record the attempt before calling
 the API to cover duplicate panes and Strict Mode; use an in-memory fallback when
 storage is unavailable. Only attempt while permission is default, with no explicit
 saved off preference. Do not retry automatically after dismissal, rejection, or
@@ -123,8 +123,8 @@ The Settings row and panel control share the new “Task notifications” label.
 Settings exclusions continue to match `builtin:browser-notifications`, not
 the display label.
 
-The first eligible approval/question panel attempts authorization and enables
-notifications after a grant. This replaces the previous public guarantee that
+Outside the packaged desktop shell, the first eligible approval/question panel
+attempts authorization and enables notifications after a grant. This replaces the previous public guarantee that
 permission is never requested automatically. Hosts opting in through
 `browserNotifications` receive this behavior; hosts without it and iframes do
 not expose the control. `defaultEnabled` still only supplies the initial
@@ -132,7 +132,7 @@ preference, and an explicitly saved off choice suppresses automatic requests.
 Manual permission attempts also count toward the site attempt; dismissing one
 never triggers an automatic retry, including when another panel mounts later.
 Browsers may suppress a request without a gesture or return denial; denied
-permission requires recovery through browser site settings.
+permission in a regular browser requires recovery through browser site settings.
 
 Tool-name classification lives in the UI-free `constants/toolNames.ts` and is
 re-exported by the display formatting module, keeping its display-name map out
@@ -146,3 +146,30 @@ scope; `App.test.tsx`, `SettingsMessage.dom.test.tsx`, and
 `BrowserNotificationControl.test.tsx` and `DaemonSessionProvider.test.tsx` for
 interaction/projection regressions; and `e2e/utils/mockDaemon.ts` for realistic
 permission option shapes.
+
+## Desktop permission recovery (#15109)
+
+Reuse `isDesktopShell()` to recognize the packaged host. Its approval/question
+panels do not automatically request notification permission; users can request
+it explicitly while permission is `default`. Existing `granted` delivery and
+regular-browser automatic authorization remain unchanged. The notification
+provider, persistence, daemon APIs, and public component props do not change.
+
+When the desktop permission is `denied` or `unavailable`, both the panel and
+Settings explain the limitation and direct users to run
+`qwen serve --port 4170 --open` from their project folder, allow notifications,
+and use the chat in a regular browser with that page open. This is an alternative
+place to run the chat, not a relay for the desktop window's reminders. A desktop
+installation without `qwen` on PATH can use its bundled CLI.
+
+Do not show an authorization action for a permission that cannot be requested.
+Settings disables only the impossible off-to-on transition: an existing enabled
+preference can still be turned off after permission becomes denied or unavailable.
+No native notification integration, WebView permission reset, or origin change
+is introduced, and desktop detection does not imply all platforms lack support.
+
+Regression tests cover both controls in denied/unavailable desktop states,
+explicit desktop authorization, granted behavior, normal browser behavior, and
+turning existing preferences off. Browser tests simulate the desktop marker and
+Notification API; local Docker Linux runs validate the same production UI. These
+tests do not establish Windows WebView2 permission behavior or native OS delivery.
