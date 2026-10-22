@@ -36,6 +36,7 @@ import {
   type UserPromptAdmission,
 } from './client.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
+import { detectTurnInterruption } from './turn-interruption.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import { ChatCompressionService } from '../services/chatCompressionService.js';
 import {
@@ -121,6 +122,7 @@ import {
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
   buildMcpServerInstructionsReminderFromEntries,
+  getDirectoryContextString,
   getInitialChatHistory,
   wrapSystemReminder,
 } from './environmentContext.js';
@@ -3708,6 +3710,51 @@ describe('Gemini Client (client.ts)', () => {
       expect(mockChat.addHistory).toHaveBeenCalledWith(newContent);
     });
   });
+
+  it.each([null, 'Git snapshot'])(
+    'does not mistake a working-directory refresh for interrupted input (%s)',
+    async (gitStatus) => {
+      await client.startChat();
+      vi.mocked(getDirectoryContextString).mockResolvedValue(
+        'Mocked directory context',
+      );
+      vi.mocked(getRecentGitStatus).mockReturnValue(gitStatus);
+      const history: Content[] = [userText('review'), modelText('done')];
+      vi.spyOn(client.getChat(), 'addHistory').mockImplementation((entry) => {
+        history.push(entry);
+      });
+
+      await client.addWorkingDirectoryChangedContext('/old', '/new');
+
+      const serialized = JSON.parse(JSON.stringify(history)) as Content[];
+      expect(serialized.slice(2)).toEqual([
+        {
+          role: 'user',
+          parts: [
+            {
+              text:
+                "The session's working directory has changed from /old to /new via /cd. " +
+                'The startup directory context above is stale. All tool calls and relative paths now resolve from /new.',
+            },
+            ...(gitStatus
+              ? [
+                  {
+                    text: `<system-reminder>\n${gitStatus}\n</system-reminder>`,
+                  },
+                ]
+              : []),
+          ],
+        },
+        userText('Mocked directory context'),
+      ]);
+      expect(detectTurnInterruption(history).kind).toBe('none');
+      // The same words submitted as real input must still be recoverable.
+      expect(detectTurnInterruption(serialized)).toEqual({
+        kind: 'interrupted_prompt',
+        parts: serialized.slice(2).flatMap((entry) => entry.parts ?? []),
+      });
+    },
+  );
 
   describe('getMainSessionSystemInstruction', () => {
     it('does not collect local git or agent context for an execution environment', async () => {
