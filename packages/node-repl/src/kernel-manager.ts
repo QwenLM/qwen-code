@@ -997,6 +997,10 @@ export class NodeReplKernelManager {
   private async terminateHandle(handle: KernelHandle): Promise<void> {
     try {
       handle.toKernel.write(encodeFrame({ type: 'shutdown' }));
+      // The kernel's pending read on this pipe keeps its process.exit()
+      // from completing until the pipe reaches EOF; without it every
+      // shutdown waits out the grace period and ends in a signal.
+      handle.toKernel.end();
     } catch {
       // The hard stop below remains authoritative.
     }

@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   NodeReplKernelManager,
   type KernelManagerOptions,
@@ -1614,6 +1614,23 @@ describe('NodeReplKernelManager', () => {
         'const fixture = await import("plain-fixture"); nodeRepl.write(fixture.authority);',
       );
       expect(texts(result)).toEqual(['undefined/object']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'lets an idle kernel exit on reset and disposal without a signal',
+    async () => {
+      await run('nodeRepl.write("up");');
+      const kill = vi.spyOn(process, 'kill');
+      try {
+        await manager.reset();
+        await run('nodeRepl.write("up");');
+        await manager.dispose();
+        expect(kill).not.toHaveBeenCalled();
+      } finally {
+        kill.mockRestore();
+      }
     },
     TEST_TIMEOUT,
   );
