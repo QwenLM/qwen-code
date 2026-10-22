@@ -680,6 +680,76 @@ class ManagedAgentApiContractTest {
     }
 
     @Test
+    void titleSearchIsLiteralAndBindsBothApisToTheirFilters() throws Exception {
+        String tenant = "tenant-title-query-" + UUID.randomUUID();
+        for (String title : List.of("Alpha_%", "Unrelated", "alpha_% next")) {
+            String id = json(mvc.perform(post(WEB_SHELL + "/sessions/create").header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                            "idempotencyKey", UUID.randomUUID().toString(), "agentId", "qwen-code", "input", List.of()))))
+                    .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString())
+                    .path("sessionId").asText();
+            jdbc.update("UPDATE ma_session SET title = ?, status = ? WHERE tenant_id = ? AND session_id = ?",
+                    title, title.equals("Alpha_%") ? "ARCHIVED" : "CLOSED", tenant, id);
+        }
+        JsonNode first = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
+                .param("title_query", " ALPHA_% ").param("limit", "1"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        assertThat(first.path("data")).hasSize(1);
+        assertThat(first.path("has_more").asBoolean()).isTrue();
+        String cursor = first.path("next_cursor").asText();
+        JsonNode next = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
+                .param("title_query", "ALPHA_%").param("limit", "1").param("cursor", cursor))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        assertThat(next.path("data")).hasSize(1);
+        assertThat(next.at("/data/0/id").asText()).isNotEqualTo(first.at("/data/0/id").asText());
+        assertThat(next.path("has_more").asBoolean()).isFalse();
+        mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
+                .param("title_query", "Unrelated").param("cursor", cursor))
+                .andExpect(status().isBadRequest());
+        mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
+                .param("archive_state", "archived").param("title_query", "ALPHA_%").param("cursor", cursor))
+                .andExpect(status().isBadRequest());
+        for (String state : List.of("all", "unarchived", "archived")) {
+            JsonNode web = json(mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                            "titleQuery", "_%", "archiveState", state))))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+            JsonNode api = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
+                    .param("title_query", "_%").param("archive_state", state))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+            assertThat(web.path("data")).hasSize(state.equals("all") ? 2 : 1);
+            assertThat(api.path("data")).hasSize(state.equals("all") ? 2 : 1);
+        }
+        for (String query : List.of("\u00a0\ufeff _% \u00a0", "\u00a0\ufeff")) {
+            int expected = query.contains("_%") ? 2 : 3;
+            JsonNode web = json(mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                            "titleQuery", query))))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+            JsonNode api = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
+                    .param("title_query", query))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+            assertThat(web.path("data")).hasSize(expected);
+            assertThat(api.path("data")).hasSize(expected);
+        }
+        JsonNode alias = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
+                .param("include_archived", "false").param("title_query", "_%"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        assertThat(alias.path("data")).hasSize(1);
+        mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
+                .param("include_archived", "false").param("archive_state", "archived"))
+                .andExpect(status().isBadRequest());
+        mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                        "titleQuery", "other", "cursor", cursor))))
+                .andExpect(status().isBadRequest());
+        JsonNode other = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant + "-other")
+                .param("title_query", "_%"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        assertThat(other.path("data")).isEmpty();
+    }
+
+    @Test
     void lifecycleCommandsEchoTraceIdentityAndExposeTheirOperation() throws Exception {
         String tenant = "tenant-lifecycle-ui-" + UUID.randomUUID();
         String id = json(mvc.perform(post(WEB_SHELL + "/sessions/create").header(TENANT, tenant)

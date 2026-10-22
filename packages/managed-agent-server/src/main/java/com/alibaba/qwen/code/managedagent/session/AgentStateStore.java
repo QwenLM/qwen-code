@@ -650,6 +650,9 @@ public interface AgentStateStore {
     SessionPage listSessions(String tenantId, String actorId, Long beforeCreatedAt,
             String beforeSessionId, int limit, String archiveState);
 
+    SessionPage listSessions(String tenantId, String actorId, Long beforeCreatedAt,
+            String beforeSessionId, int limit, String archiveState, String titleQuery);
+
     Map<String, WebShellLifecycleOperation> findLatestLifecycleOperations(String tenantId, List<String> sessionIds);
 
     Optional<TurnRecord> findTurn(String tenantId, String sessionId,

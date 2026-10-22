@@ -1969,7 +1969,7 @@ jobs:
           for attempt in 1 2 3; do
             if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
               if [[ "${attempt}" != "1" ]]; then
-                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step also runs prepare's build, so check the failure class before counting it toward #11726."
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step skips prepare's build, so check the failure class before counting it toward #11726."
               fi
               break
             fi

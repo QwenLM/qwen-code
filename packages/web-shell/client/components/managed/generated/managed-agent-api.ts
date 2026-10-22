@@ -914,6 +914,8 @@ export interface components {
              * @enum {string}
              */
             archiveState?: "unarchived" | "archived" | "all";
+            /** @description Case-insensitive literal title substring, with surrounding whitespace stripped. Empty means no title filter; %, _ and backslash are literal. Applied before pagination. Cursors are bound to the stripped query and archiveState; listing is not a snapshot across title or archive changes. */
+            titleQuery?: string | null;
         };
         WebShellSessionRequest: {
             /** Format: uuid */
