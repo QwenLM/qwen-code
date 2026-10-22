@@ -60,9 +60,14 @@ input action. A test-signing result cannot satisfy this acceptance criterion.
 
 ## Current status and open prerequisites
 
-As of 2026-10-22, the local retained test artifact and static checks are available.
-The repository and inherited organization secret lists do not expose
-`SIGNPATH_API_TOKEN` to this repository. The previous authenticated SignPath
-browser session is unavailable, so the current production certificate status
-has not been reverified. The PR remains a draft pending the online signing and
-Windows checks. No release or npm publication is authorized by this work.
+As of 2026-10-22, `SIGNPATH_API_TOKEN` was regenerated and configured at
+14:09:38 UTC. The raw-PE configuration and test-signing policy are valid, and
+SignPath reports GitHub trusted builds linked; that does not establish GitHub
+App installation or authorization. However,
+[run 39793940639](https://github.com/QwenLM/qwen-code/actions/runs/39793940639)
+at `67e69b53bc9d55e489c3d780240b2792482274ed` built both Windows targets but
+failed submission with `Failed to retrieve GitHub App token`; signed packaging
+and installation did not run. GitHub App installation/access must be repaired.
+The production certificate is `CSR PENDING` and `release-signing` is `INVALID`.
+The PR remains a draft pending online signing and Windows acceptance.
+No release or npm publication is authorized by this work.

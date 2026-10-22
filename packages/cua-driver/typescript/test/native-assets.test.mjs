@@ -227,38 +227,105 @@ test("default Windows native installation needs no UIAccess worker or Program Fi
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("installUiAccessWorker names elevation when the deploy target is not writable", async () => {
-  // The Windows Program Files ACL denial arrives as EPERM/EACCES from the
-  // mkdir; the user-facing message must name elevation and the elevated
-  // install.ps1 alternative (which deploys the byte-identical path, letting
-  // this installer short-circuit afterwards). Both effects are injected —
-  // Linux has no `powershell`, and this test runs as root, where permission
-  // bits cannot produce the denial.
-  const eperm = Object.assign(new Error("mkdir EPERM"), { code: "EPERM" })
-  await assert.rejects(
-    installUiAccessWorker(
-      "unused-source.exe",
-      "0.0.0-test",
-      { ProgramFiles: join(tmpdir(), "cua-program-files-probe") },
-      async () => {},
-      async () => {
-        throw eperm
-      },
-    ),
-    /elevat/i,
-  )
-  // A non-permission mkdir failure propagates unmapped.
-  const enospc = Object.assign(new Error("mkdir ENOSPC"), { code: "ENOSPC" })
-  await assert.rejects(
-    installUiAccessWorker(
-      "unused-source.exe",
-      "0.0.0-test",
-      { ProgramFiles: join(tmpdir(), "cua-program-files-probe") },
-      async () => {},
-      async () => {
-        throw enospc
-      },
-    ),
-    (error) => error === enospc,
-  )
+test("installUiAccessWorker explains mkdir and copy permission failures", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cua-deploy-denial-"))
+  const env = { ProgramFiles: directory }
+  const destination = uiAccessWorkerPath("0.0.0-test", env)
+  try {
+    for (const stage of ["mkdir", "copy"]) {
+      const denial = Object.assign(new Error(`${stage} EPERM`), {
+        code: "EPERM",
+      })
+      const calls = []
+      await assert.rejects(
+        installUiAccessWorker(
+          "source.exe",
+          "0.0.0-test",
+          env,
+          async (path) => {
+            calls.push(path)
+          },
+          async () => {
+            if (stage === "mkdir") throw denial
+          },
+          async () => {
+            throw denial
+          },
+        ),
+        (error) => {
+          assert.equal(error.cause, denial)
+          assert.ok(error.message.includes(destination))
+          assert.match(
+            error.message,
+            /Rerun the SDK installation from an elevated terminal with CUA_DRIVER_USE_UIACCESS=1/u,
+          )
+          assert.doesNotMatch(error.message, /install\.ps1/u)
+          return true
+        },
+      )
+      assert.deepEqual(calls, ["source.exe"])
+    }
+    const enospc = Object.assign(new Error("mkdir ENOSPC"), { code: "ENOSPC" })
+    await assert.rejects(
+      installUiAccessWorker(
+        "source.exe",
+        "0.0.0-test",
+        env,
+        async () => {},
+        async () => {
+          throw enospc
+        },
+      ),
+      (error) => error === enospc,
+    )
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("installed UIAccess worker is reverified before reuse without writing", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cua-installed-worker-"))
+  const env = { ProgramFiles: directory }
+  const destination = uiAccessWorkerPath("0.0.0-test", env)
+  mkdirSync(join(directory, "Qwen", "CuaDriver", "0.0.0-test"), {
+    recursive: true,
+  })
+  writeFileSync(destination, "installed worker")
+  const calls = []
+  const unexpectedWrite = async () => {
+    throw new Error("must not write")
+  }
+  try {
+    assert.equal(
+      await installUiAccessWorker(
+        "source.exe",
+        "0.0.0-test",
+        env,
+        async (path) => {
+          calls.push(path)
+        },
+        unexpectedWrite,
+        unexpectedWrite,
+      ),
+      destination,
+    )
+    assert.deepEqual(calls, ["source.exe", destination])
+    const invalid = new Error("HashMismatch")
+    await assert.rejects(
+      installUiAccessWorker(
+        "source.exe",
+        "0.0.0-test",
+        env,
+        async (path) => {
+          if (path === destination) throw invalid
+        },
+        unexpectedWrite,
+        unexpectedWrite,
+      ),
+      (error) => error === invalid,
+    )
+    assert.equal(readFileSync(destination, "utf8"), "installed worker")
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })

@@ -50,7 +50,12 @@ ARM64 在 x64 runner 上交叉构建，因此不构成 ARM64 实机运行证据�
 
 ## 当前状态与未完成前置条件
 
-截至 2026-10-22，本地保留的测试产物与静态检查证据可用。仓库级及可继承组织级
-secret 列表中均没有供本仓库使用的 `SIGNPATH_API_TOKEN`。此前已认证的 SignPath
-浏览器会话不可用，尚未重新核实生产证书当前状态。在线签名和 Windows 验证完成
-前，PR 保持 Draft。本次工作不授权 release 或 npm 发布。
+截至 2026-10-22，`SIGNPATH_API_TOKEN` 已于 UTC 14:09:38 重新生成并配置。
+原始 PE 配置与 test-signing 策略有效，SignPath 显示已关联 GitHub trusted builds；
+但这不代表 GitHub App 已安装并获授权。
+[run 39793940639](https://github.com/QwenLM/qwen-code/actions/runs/39793940639)
+在 `67e69b53bc9d55e489c3d780240b2792482274ed` 上完成两个 Windows 目标构建后，
+提交签名时以 `Failed to retrieve GitHub App token` 失败，未运行签名后打包与安装。
+需修复 GitHub App 安装或访问授权。生产证书状态为 `CSR PENDING`，
+`release-signing` 为 `INVALID`。在线签名和 Windows 验收完成前，PR 保持 Draft。
+本次工作不授权 release 或 npm 发布。

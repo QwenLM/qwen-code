@@ -192,6 +192,7 @@ export async function installUiAccessWorker(
   env,
   verifySignature = requireValidAuthenticodeSignature,
   mkdirImpl = mkdir,
+  copyFileImpl = copyFile,
 ) {
   await verifySignature(source)
   const destination = uiAccessWorkerPath(version, env)
@@ -200,20 +201,21 @@ export async function installUiAccessWorker(
     await verifySignature(destination)
     return destination
   }
+  const temporary = `${destination}.${process.pid}.tmp`
   try {
     await mkdirImpl(dirname(destination), { recursive: true })
+    await copyFileImpl(source, temporary)
+    await rename(temporary, destination)
   } catch (error) {
+    await rm(temporary, { force: true }).catch(() => {})
     if (error?.code === "EPERM" || error?.code === "EACCES") {
       throw new Error(
-        `Installing the UIAccess worker requires an elevated terminal: the worker must be deployed under Program Files (${error.message}). Run packages/cua-driver/scripts/install.ps1 once from an elevated terminal — it deploys the byte-identical path, and this installer then short-circuits on the already-installed worker.`,
+        `Installing the UIAccess worker requires an elevated terminal: the worker must be deployed to ${destination} (${error.message}). Rerun the SDK installation from an elevated terminal with CUA_DRIVER_USE_UIACCESS=1.`,
         { cause: error },
       )
     }
     throw error
   }
-  const temporary = `${destination}.${process.pid}.tmp`
-  await copyFile(source, temporary)
-  await rename(temporary, destination)
   return destination
 }
 

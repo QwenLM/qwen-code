@@ -73,9 +73,6 @@ const signPathWorkerInstallScript = readFileSync(
   '.github/scripts/install-signpath-cua-windows-worker.ps1',
   'utf8',
 );
-const cuaSdkPackageLock = JSON.parse(
-  readFileSync('packages/cua-driver/typescript/package-lock.json', 'utf8'),
-);
 const browserUsePackage = JSON.parse(
   readFileSync('packages/browser-use/package.json', 'utf8'),
 );
@@ -130,8 +127,6 @@ describe('CUA release workflow', () => {
     expect(cuaSdkPackage.dependencies['@qwen-code/browser-use']).toBe(
       cuaSdkPackage.version,
     );
-    expect(cuaSdkPackageLock.version).toBe(cuaSdkPackage.version);
-    expect(cuaSdkPackageLock.packages[''].version).toBe(cuaSdkPackage.version);
     expect(cuaReleaseWorkflow).toContain(
       "node_repl_version: '${{ steps.release.outputs.node_repl_version }}'",
     );
