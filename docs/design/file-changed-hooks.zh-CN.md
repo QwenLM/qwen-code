@@ -34,6 +34,10 @@
 最后一个显式提供且有效的列表替换之前的动态列表；空列表清空，省略或非法列表
 保持不变。静态路径继续保留。异步 hook 输出不注册路径。
 
+递归发现忽略文件名以 `.<12 位小写十六进制字符>.tmp` 结尾的原子写入临时文件，
+即使重命名延迟或失败后文件仍存在。显式注册的文件仍可观察，同样后缀的目录仍会
+遍历，其他 `.tmp` 文件正常产生通知。
+
 初始目录扫描不回放。最近写入的 native 文件系统事件可能在注册后才到达。
 不遍历符号链接；请注册真实目录根路径。复用已有 chokidar 依赖，在写入稳定后报告事件。静态注册在
 HookSystem 初始化时等待 watcher 就绪，无需额外配置 SessionStart hook；
@@ -92,7 +96,9 @@ Hook reload 和启用/禁用会更新静态根路径；事件通过当前可信 
 扫描抑制、监听会话归属、会话轮换、失败隔离、reload/disable 和存在排队任务时的关闭。
 远程与托管 Config 不得启动本地 watcher；MCP reconnect 必须禁用监听，未运行
 SessionStart 的轮换后延迟注册只可绑定到当前会话。另一个 hook 返回 watchPaths 时，
-已有 SessionStart additional context 行为仍须正常。
+已有 SessionStart additional context 行为仍须正常。临时同级文件在延迟重命名及
+孤儿清理过程中必须保持静默；最终目标、普通 `.tmp` 文件、显式注册文件及同样
+命名的目录必须仍可观察。
 
 执行 build、typecheck、bundle、针对 hook/config/schema 的测试，以及隔离本地
 CLI 测试计划。macOS runtime 结果需与 Linux/Windows CI、Claude Code 目录

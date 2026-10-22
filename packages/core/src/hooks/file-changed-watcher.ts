@@ -105,6 +105,12 @@ export class FileChangedWatcher {
             if (stats && !stats.isFile() && !stats.isDirectory()) return true;
             const file = path.resolve(candidate);
             if (
+              stats?.isFile() &&
+              /\.[0-9a-f]{12}\.tmp$/.test(path.basename(file)) &&
+              !next.includes(file)
+            )
+              return true;
+            if (
               dynamic.some(
                 (root) =>
                   isWithin(root, file) &&

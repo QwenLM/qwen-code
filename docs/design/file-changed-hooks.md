@@ -46,6 +46,11 @@ list in hook execution order replaces the previous dynamic list; an empty list
 clears it, and an omitted or invalid list leaves it unchanged. Static paths
 remain registered. Async hook output does not register paths.
 
+Recursive discovery ignores atomic-write temporary files whose names end in
+`.<12 lowercase hex characters>.tmp`, even if a delayed or failed rename leaves
+them present. Explicitly registered files remain observable, and directories
+with this suffix remain traversable. Other `.tmp` files are observed normally.
+
 The initial directory scan is not replayed. Native filesystem events from a
 recent write may arrive after registration. Symbolic links are not traversed;
 register the real directory root. Watchers settle writes before reporting them,
@@ -118,6 +123,9 @@ initial-scan suppression, listener-session ownership, session rotation, failure 
 reload/disable, and shutdown with queued work. Remote and managed configs must
 not start a local watcher. MCP reconnect must opt out, and late registration
 after a rotation without SessionStart must rebind only to the current session.
+Temporary siblings must stay silent through delayed rename and orphan cleanup;
+the final target, ordinary `.tmp` files, explicit file registrations, and
+similarly named directories must remain observable.
 Existing SessionStart additional context must still
 work when another hook returns watchPaths.
 

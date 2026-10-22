@@ -131,6 +131,74 @@ describe('FileChangedWatcher with real files', () => {
     expect(notify.mock.calls.map(([file]) => file)).toEqual([nested]);
   });
 
+  it('ignores atomic-write temporary siblings, including delayed renames and orphans', async () => {
+    const notify = vi.fn().mockResolvedValue(undefined);
+    watcher = new FileChangedWatcher(notify);
+    await watcher.setPaths([root]);
+    const target = path.join(root, 'topic.md');
+    const temporary = `${target}.a1b2c3d4e5f6.tmp`;
+    const orphan = path.join(root, 'orphan.md.0123456789ab.tmp');
+    const ordinary = path.join(root, 'ordinary.tmp');
+    const differentSuffix = path.join(root, 'topic.md.0123456789abc.tmp');
+    for (const file of [temporary, orphan, ordinary, differentSuffix]) {
+      await fs.writeFile(file, 'created');
+    }
+    await vi.waitFor(() => {
+      for (const file of [ordinary, differentSuffix]) {
+        expect(notify).toHaveBeenCalledWith(
+          file,
+          'add',
+          expect.any(AbortSignal),
+        );
+      }
+    }, waitOptions);
+    await delay(700);
+    expect(notify.mock.calls.map(([file]) => file).sort()).toEqual(
+      [ordinary, differentSuffix].sort(),
+    );
+
+    await fs.rename(temporary, target);
+    await fs.unlink(orphan);
+    await vi.waitFor(() => {
+      expect(notify).toHaveBeenCalledWith(
+        target,
+        'add',
+        expect.any(AbortSignal),
+      );
+    }, waitOptions);
+    await delay(300);
+    expect(notify.mock.calls.map(([file]) => file).sort()).toEqual(
+      [ordinary, differentSuffix, target].sort(),
+    );
+  });
+
+  it.each(['static', 'dynamic'])(
+    'preserves %s temporary-file registrations and similarly named directories',
+    async (registration) => {
+      const explicit = path.join(root, 'selected.md.a1b2c3d4e5f6.tmp');
+      const nested = path.join(root, 'directory.a1b2c3d4e5f6.tmp', 'topic.md');
+      const notify = vi.fn().mockResolvedValue(undefined);
+      watcher = new FileChangedWatcher(notify);
+      await watcher.setPaths(
+        [root, explicit],
+        registration === 'static' ? [explicit] : [],
+      );
+      await fs.mkdir(path.dirname(nested));
+      for (const file of [explicit, nested])
+        await fs.writeFile(file, 'created');
+      await vi.waitFor(() => {
+        for (const file of [explicit, nested]) {
+          expect(notify).toHaveBeenCalledWith(
+            file,
+            'add',
+            expect.any(AbortSignal),
+          );
+        }
+      }, waitOptions);
+      expect(notify.mock.calls).toHaveLength(2);
+    },
+  );
+
   it('watches both missing static files without traversing siblings and retains dynamic recursion', async () => {
     const parent = path.join(root, 'static');
     const dynamic = path.join(root, 'dynamic');

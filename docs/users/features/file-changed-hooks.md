@@ -77,7 +77,14 @@ including children created later. Recursive discovery skips `.git` and
 `node_modules` subtrees. To observe a path inside them, register that file or
 directory explicitly. Special file types are ignored, and ordinary directories
 have no depth limit. Initial registration waits for watcher
-readiness before `SessionStart` returns. For example, register memory folders:
+readiness before `SessionStart` returns.
+
+Recursive discovery ignores atomic-write temporary files named
+`<target>.<12 lowercase hex characters>.tmp`, including delayed renames and
+orphans. Explicitly registering such a file still observes it. Directories with
+this suffix remain traversable, and other `.tmp` files are observed normally.
+
+For example, register memory folders:
 
 ```json
 {
