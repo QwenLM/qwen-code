@@ -65,6 +65,13 @@ export interface CronTaskRun {
    * Absent means the dispatch did not fail (or predates this field). */
   sessionDispatchFailed?: boolean;
   /**
+   * How the task's gate (see {@link DurableCronTask.gate}) decided this fire.
+   * Quiet fires are never booked as runs — a one-minute gate would flush the
+   * ring in twenty minutes — so a present value is always one that reached a
+   * session: the prompt with the gate's output, or a failure/blocked notice.
+   */
+  gate?: CronGateRunOutcome;
+  /**
    * READ-ONLY backward-compatibility field. A pre-removal version stamped this
    * on a fire whose precondition withheld the prompt (it was booked as a run
    * but nothing executed). The isolated/precondition machinery is gone, so this
@@ -91,6 +98,34 @@ export interface CronTaskDelivery {
     type: 'user' | 'chat';
     id: string;
   };
+}
+
+/** A gate outcome that reached a session (quiet fires reach nothing). */
+export type CronGateRunOutcome = 'delivered' | 'failed' | 'blocked';
+
+export type CronGateOutcome = 'quiet' | CronGateRunOutcome;
+
+/**
+ * Running summary of a task's gate, kept on the job and persisted for
+ * durable tasks so a management UI can show "quiet ×41 · last delivered
+ * 13:05 · 0 failures" without reading the run ring.
+ */
+export interface CronGateStatus {
+  /** Fire time (epoch ms) of the most recent gate run. */
+  lastAt: number;
+  lastOutcome: CronGateOutcome;
+  /** Quiet fires since the last delivery (reset when the gate delivers). */
+  quietSinceDelivery: number;
+  /** Epoch ms of the last fire whose output reached a session. */
+  lastDeliveredAt?: number;
+  /**
+   * Failed and blocked fires since the last quiet or delivered one. Only the
+   * first failure of a streak is delivered as a notice; the rest are counted
+   * here so `cron_list` and the task card can still show them.
+   */
+  consecutiveFailures: number;
+  /** One line describing the most recent failure; cleared on success. */
+  lastError?: string;
 }
 
 export interface DurableCronTask {
@@ -144,6 +179,38 @@ export interface DurableCronTask {
    * Appended at the scheduler's persist sites via {@link appendCronRun}.
    */
   runs?: CronTaskRun[];
+  /**
+   * Shell command the scheduler runs at each fire, outside the model. Empty
+   * stdout and exit 0 skip the fire; output delivers the fire with the output
+   * attached; a non-zero exit or timeout is reported once per streak. See
+   * `docs/design/2026-10-21-scheduled-task-gate.md`. Always written together
+   * with {@link DurableCronTask.condition} through {@link withTaskGate}.
+   */
+  gate?: string;
+  gateStatus?: CronGateStatus;
+  /**
+   * Downgrade fuse for `gate`. Older binaries ignore `gate` and would fire a
+   * gated task unconditionally; they do, however, fail closed on a non-empty
+   * `condition` (the removed isolated-mode precondition). The writer mirrors
+   * the gate here so an older reader withholds the task instead of running it
+   * every slot. This version never reads it except in
+   * {@link taskHasLegacyCondition}, which ignores it when `gate` is present.
+   */
+  condition?: string;
+}
+
+/**
+ * Sets or clears a task's gate. The downgrade fuse must move with the gate:
+ * a gate without the fuse runs unconditionally on an older binary, and a fuse
+ * without the gate makes this version treat the task as a legacy precondition
+ * and never fire it. Returns a fresh task.
+ */
+export function withTaskGate(
+  task: DurableCronTask,
+  gate: string | undefined,
+): DurableCronTask {
+  const { gate: _gate, condition: _condition, ...rest } = task;
+  return gate ? { ...rest, gate, condition: gate } : rest;
 }
 
 /** How a per-run fire's fresh-session dispatch ended: the session the run
@@ -204,10 +271,38 @@ export function appendCronRun(
  * the manual `/run` endpoint — uses this to FAIL CLOSED (skip / block / reject)
  * so a removed safety gate ("only run when X") can never silently degrade into
  * "always run" on any path. The user re-creates the task if they still want it.
+ *
+ * A task with a `gate` is not legacy: its `condition` is the downgrade fuse
+ * written by {@link withTaskGate} for older readers, and this version runs
+ * the gate instead.
  */
 export function taskHasLegacyCondition(task: DurableCronTask): boolean {
+  if (typeof task.gate === 'string' && task.gate.length > 0) return false;
   const condition = (task as unknown as Record<string, unknown>)['condition'];
   return typeof condition === 'string' && condition.length > 0;
+}
+
+const GATE_OUTCOMES: ReadonlySet<string> = new Set([
+  'quiet',
+  'delivered',
+  'failed',
+  'blocked',
+]);
+
+function isValidGateStatus(value: unknown): value is CronGateStatus {
+  if (typeof value !== 'object' || value === null) return false;
+  const status = value as Record<string, unknown>;
+  return (
+    isFiniteTimestamp(status['lastAt']) &&
+    typeof status['lastOutcome'] === 'string' &&
+    GATE_OUTCOMES.has(status['lastOutcome']) &&
+    typeof status['quietSinceDelivery'] === 'number' &&
+    typeof status['consecutiveFailures'] === 'number' &&
+    (status['lastDeliveredAt'] === undefined ||
+      isFiniteTimestamp(status['lastDeliveredAt'])) &&
+    (status['lastError'] === undefined ||
+      typeof status['lastError'] === 'string')
+  );
 }
 
 /**
@@ -708,6 +803,8 @@ function isValidRuns(value: unknown): value is CronTaskRun[] {
         typeof run['sessionId'] === 'string') &&
       (run['sessionDispatchFailed'] === undefined ||
         typeof run['sessionDispatchFailed'] === 'boolean') &&
+      (run['gate'] === undefined ||
+        (typeof run['gate'] === 'string' && GATE_OUTCOMES.has(run['gate']))) &&
       // Read-only legacy compat: validate so a stored `withheld` marker isn't
       // rejected on read (it is never written anymore).
       (run['withheld'] === undefined || typeof run['withheld'] === 'boolean')
@@ -775,6 +872,11 @@ function isValidTask(value: unknown): value is DurableCronTask {
     (obj['groupId'] === undefined ||
       isValidCronTaskRoutingId(obj['groupId'])) &&
     (obj['delivery'] === undefined || isValidDelivery(obj['delivery'])) &&
-    (obj['runs'] === undefined || isValidRuns(obj['runs']))
+    (obj['runs'] === undefined || isValidRuns(obj['runs'])) &&
+    // A gate is a command: an empty string would be run as nothing and
+    // deliver on every slot, so it fails validation like any corrupt field.
+    (obj['gate'] === undefined ||
+      (typeof obj['gate'] === 'string' && obj['gate'].length > 0)) &&
+    (obj['gateStatus'] === undefined || isValidGateStatus(obj['gateStatus']))
   );
 }

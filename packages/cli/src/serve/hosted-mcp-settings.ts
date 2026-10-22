@@ -285,7 +285,6 @@ export async function commitHostedMcpSettings(
       contentDigest: createHash('sha256')
         .update(JSON.stringify(command))
         .digest('hex'),
-      expectedSequence: session.authority.committedSequence,
     },
     { domain: 'config_install', content },
     { class: 'trusted_entry' },

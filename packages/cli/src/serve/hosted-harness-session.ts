@@ -5,6 +5,11 @@
  */
 
 import {
+  parsePublicChildModelRoute,
+  type PublicChildModelRoute,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+
+import {
   HostedContextCompression,
   HostedCompressionRefusal,
 } from './hosted-context-compression.js';
@@ -46,6 +51,7 @@ import {
   reconcileHostedTurnCleanup,
   hasHostedCleanupDebt,
 } from './hosted-turn-cleanup.js';
+import { inspectHostedRecovery } from './hosted-recovery-status.js';
 import {
   readHostedActionOptions,
   hostedActionAllowed,
@@ -86,11 +92,12 @@ import type { Application, Request, Response } from 'express';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { parseBridgeManagedSessionStore } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
-  parseHarnessCheckpointV1,
   type HarnessRunAuthorization,
   harnessCheckpointIsAgentWait,
   harnessCheckpointIsCommandWait,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import { readHarnessCheckpoint } from '@qwen-code/qwen-code-core/managed-runtime/managed-checkpoint-history.js';
+import { collectNestedResourceRefs } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { MANAGED_MCP_MAX_CONNECTIONS } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import {
@@ -165,6 +172,8 @@ import {
 import {
   HostedModelRoundLimitError,
   HostedImageInputUnsupportedError,
+  HostedModelApiError,
+  HOSTED_MODEL_API_ERROR_MESSAGES,
   runHostedHarnessTextTurn,
   hostedToolOutputBudget,
 } from './hosted-harness-model.js';
@@ -355,6 +364,7 @@ const RESTORE_CONTAINER_KINDS = new Set([
   'managed-tool-outcome',
   'managed-tool-result-manifest',
   'managed-checkpoint',
+  'managed-checkpoint-history',
   'managed-hook-plan',
   'managed-hook-message-chunks',
 ]);
@@ -512,6 +522,9 @@ interface HostedSession {
   recoveryReason?: string;
   toolProfile?: HostedWorkspaceToolProfile | typeof HOSTED_MCP_PROFILE;
   foregroundOnly?: boolean;
+  publicChildAgentsVersion?: 1;
+  publicChildModelRoute?: PublicChildModelRoute;
+  publicChildLaunchEnabled?: boolean;
   publication?: { owner: HttpToolPublicationOwner; captureBytes: number };
   shell?: HostedShellTurnOptions;
   // The record funnel of a publication-mode turn's background Shells and
@@ -570,6 +583,7 @@ interface HostedSession {
   lifecycle?: ManagedSessionLifecycleAuthority;
   lifecycleKind?: 'close' | 'delete';
   cleanupBlocked?: boolean;
+  recoveryCleanupOnly?: boolean;
   lifecycleProtocolVersion?: 1 | 2;
   /** Fetched Workspace instructions; undefined until the first fetch. */
   workspaceContext?: string;
@@ -1053,6 +1067,48 @@ function childAgentsOf(session: HostedSession) {
     session.childAgents && {
       funnel: session.childAgents,
       depth: session.childDepth ?? 0,
+      publicChildren: session.publicChildAgentsVersion === 1,
+      launchEnabled: () => session.publicChildLaunchEnabled !== false,
+      snapshot: async (
+        promptId: string,
+        model: string,
+        route: PublicChildModelRoute,
+      ) => {
+        const selection = parseHostedApprovalSelection(
+          await session.stores!.approvalSelection(),
+        );
+        const admitted = await readHostedTurnApprovalSelection(
+          session.managed,
+          promptId,
+        );
+        if (
+          !selection ||
+          (admitted &&
+            (selection.revision < admitted.revision ||
+              (selection.revision === admitted.revision &&
+                selection.mode !== admitted.mode)))
+        )
+          throw new Error(
+            'Public child approval snapshot is unavailable or regressed.',
+          );
+        const modelSelection = await readHostedTurnModelSelection(
+          session.managed,
+          promptId,
+        );
+        return {
+          version: 1 as const,
+          sourcePromptId: promptId,
+          approvalMode: selection.mode,
+          approvalRevision: selection.revision,
+          modelId: model,
+          modelRevision: modelSelection?.revision ?? 0,
+          modelRoute: route,
+          skillsRef:
+            session.sessionSkillsRef ??
+            session.agentDefinition?.skillsRef ??
+            null,
+        };
+      },
       childWorkspaces: session.childWorkspaces === true,
       childSnapshots:
         session.childWorkspaces === true && session.childSnapshots === true,
@@ -1060,6 +1116,41 @@ function childAgentsOf(session: HostedSession) {
         session.childConsumption.add(childRunId),
     }
   );
+}
+
+async function stopPublicChildSource(
+  session: HostedSession,
+  promptId: string,
+): Promise<void> {
+  if (session.publicChildAgentsVersion !== 1 || !session.childAgents) return;
+  const authority = session.managed.authority;
+  await session.childAgents.cancelSourcePrompt(promptId, async () => {
+    const commandId = `hosted-cancel:${promptId}`;
+    await authority.appendExecutionEvent(
+      {
+        operation: 'requestCancel',
+        commandId,
+        sessionKey: authority.sessionHeader.sessionKey,
+        contentDigest: createHash('sha256').update(promptId).digest('hex'),
+      },
+      (sequence) => ({
+        v: 1,
+        sequence,
+        eventId: commandId,
+        sessionKey: authority.sessionHeader.sessionKey,
+        kind: 'cancel.requested',
+        occurredAt: Date.now(),
+        payload: {
+          requestId: commandId,
+          target: { turnId: promptId },
+          reason: 'user',
+          requestedBy: 'hosted',
+        },
+      }),
+      { class: 'trusted_entry' },
+    );
+    if (session.active?.promptId === promptId) session.active.abort.abort();
+  });
 }
 
 function hasAcceptedInput(session: HostedSession, promptId: string): boolean {
@@ -1424,10 +1515,17 @@ export async function settleCrashedWakeTurnAftermath(params: {
       messages: session.messages,
       commands: session.commands,
     });
-    const continuationId = await enqueueHostedWakeContinuation(
-      session.managed,
-      turnId,
-    );
+    const notificationId = isHostedWakeContinuationId(turnId)
+      ? (await readHostedWakeContinuation(session.managed, turnId))
+          .notificationTurnId
+      : turnId;
+    const sourceCancelled =
+      session.publicChildAgentsVersion === 1 &&
+      ((await session.childAgents?.cancelledNotification(turnId)) ||
+        (await session.childAgents?.cancelledNotification(notificationId)));
+    const continuationId = sourceCancelled
+      ? undefined
+      : await enqueueHostedWakeContinuation(session.managed, turnId);
     // Consume the crashed input: until its turnId settles, every reload
     // re-classifies it as recovery and re-blocks the Session over the
     // same crash (the journal-filter rule in the history builders then
@@ -1448,8 +1546,8 @@ export async function settleCrashedWakeTurnAftermath(params: {
           subtype: 'turn_result',
           systemPayload: {
             promptId: turnId,
-            state: 'error',
-            stopReason: 'error',
+            state: sourceCancelled ? 'cancelled' : 'error',
+            stopReason: sourceCancelled ? 'cancelled' : 'error',
             endedAt: Date.now(),
           },
         });
@@ -1845,6 +1943,7 @@ async function settleCancelledHarnessTurn(
   sessionId: string,
   promptId: string,
 ): Promise<void> {
+  await stopPublicChildSource(session, promptId);
   // A cancelled terminal whose park was an approval wait must close the
   // WAIT first, or the checkpoint dies one phase behind the journal's
   // terminal: the sink only advances next-turn checkpoints at a
@@ -2418,13 +2517,14 @@ async function verifyWorkspaceRestore(
         );
     }
     if (ref.kind === 'managed-checkpoint') {
-      const checkpoint = parseHarnessCheckpointV1(bytes);
+      const checkpoint = await readHarnessCheckpoint(resources, ref);
+      refs.push(...collectNestedResourceRefs(ref, bytes));
       if (
         checkpoint.resume.fileHistoryRef ||
         checkpoint.output.mediaRefs.length
       )
         throw new Error('Hosted recovery layout is unsupported.');
-      const refs = [
+      const checkpointRefs = [
         checkpoint.resume.apiHistoryRef,
         checkpoint.resume.artifactRef,
         checkpoint.resume.goalRecordsRef,
@@ -2443,9 +2543,12 @@ async function verifyWorkspaceRestore(
         checkpoint.output.llmContentRef,
         checkpoint.output.hookResultRef,
       ];
-      for (const nested of refs) {
+      for (const nested of checkpointRefs) {
         if (nested) await readRef(nested);
       }
+    }
+    if (ref.kind === 'managed-checkpoint-history') {
+      refs.push(...collectNestedResourceRefs(ref, bytes));
     }
     if (ref.kind === 'managed-hook-plan') {
       const plan = object(JSON.parse(bytes.toString()));
@@ -2488,6 +2591,7 @@ async function verifyWorkspaceRestore(
         'hook_registration',
         'hook_execution',
         'file_history',
+        'history_maintenance',
         ...(session.mcp ? ['mcp_configuration', 'mcp_operation'] : []),
         // H3 families: an admitted child_run or monitor_run journal is
         // exactly what a workspace-profile load must restore, driven by
@@ -3000,6 +3104,12 @@ async function eventEnvelope(
     const roundLimit = event.payload['stopReason'] === 'model_round_limit';
     const imageUnsupported =
       event.payload['stopReason'] === 'image_input_unsupported';
+    const stopReason = event.payload['stopReason'];
+    const modelApiFailure =
+      typeof stopReason === 'string' &&
+      Object.hasOwn(HOSTED_MODEL_API_ERROR_MESSAGES, stopReason)
+        ? (stopReason as keyof typeof HOSTED_MODEL_API_ERROR_MESSAGES)
+        : undefined;
     return {
       v: 1,
       id: event.sequence,
@@ -3008,24 +3118,28 @@ async function eventEnvelope(
       data: {
         sessionId,
         promptId,
-        code: expired
-          ? 'hosted_turn_deadline_exceeded'
-          : modelUnavailable
-            ? 'model_unavailable'
-            : storeUnavailable
-              ? 'managed_session_store_unavailable'
-              : imageUnsupported
-                ? 'image_input_unsupported'
-                : roundLimit
-                  ? 'hosted_turn_limit_exceeded'
-                  : 'hosted_turn_failed',
-        message: expired
-          ? 'The Hosted Harness Turn exceeded its deadline.'
-          : imageUnsupported
-            ? 'The selected model does not support image input. Choose a model with image support or remove the image.'
-            : roundLimit
-              ? 'The Hosted Harness Turn reached its configured model round limit.'
-              : 'Hosted Harness turn failed.',
+        code:
+          modelApiFailure ??
+          (expired
+            ? 'hosted_turn_deadline_exceeded'
+            : modelUnavailable
+              ? 'model_unavailable'
+              : storeUnavailable
+                ? 'managed_session_store_unavailable'
+                : imageUnsupported
+                  ? 'image_input_unsupported'
+                  : roundLimit
+                    ? 'hosted_turn_limit_exceeded'
+                    : 'hosted_turn_failed'),
+        message: modelApiFailure
+          ? HOSTED_MODEL_API_ERROR_MESSAGES[modelApiFailure]
+          : expired
+            ? 'The Hosted Harness Turn exceeded its deadline.'
+            : imageUnsupported
+              ? 'The selected model does not support image input. Choose a model with image support or remove the image.'
+              : roundLimit
+                ? 'The Hosted Harness Turn reached its configured model round limit.'
+                : 'Hosted Harness turn failed.',
       },
     };
   }
@@ -3073,8 +3187,10 @@ async function startHostedRecoveredTurn(
         )
       : undefined;
   timer?.unref();
-  if (cancelled) abort.abort();
-  else if (typeof deadline === 'number' && deadline <= Date.now())
+  if (cancelled) {
+    await stopPublicChildSource(session, resume.promptId);
+    abort.abort();
+  } else if (typeof deadline === 'number' && deadline <= Date.now())
     abort.abort(HOSTED_TURN_DEADLINE);
   session.active = {
     promptId: resume.promptId,
@@ -3549,6 +3665,7 @@ async function executeHostedTurn(
                   modelScope,
                   workspaceContext,
                   agentDefinition: session.agentDefinition,
+                  publicChildModelRoute: session.publicChildModelRoute,
                   modelSelection: await readHostedTurnModelSelection(
                     session.managed,
                     promptId,
@@ -3622,6 +3739,8 @@ async function executeHostedTurn(
             cause instanceof HostedModelRoundLimitError
           )
             stopReason = 'model_round_limit';
+          if (stopReason === 'error' && cause instanceof HostedModelApiError)
+            stopReason = cause.code;
           if (
             stopReason === 'error' &&
             cause instanceof WorkflowStartCancelledError
@@ -3773,6 +3892,7 @@ export function registerHostedHarnessSessionRoutes(
       eventEpoch: epoch,
       // A Harness older than approvals omits this, so a caller can tell.
       ...(session.approval ? { approvalMode: session.approval.mode } : {}),
+      ...(session.recoveryCleanupOnly ? { recoveryCleanupOnly: true } : {}),
       ...(session.blocked || session.hooks?.hasPendingOperations
         ? { recoveryRequired: true }
         : {}),
@@ -3835,12 +3955,116 @@ export function registerHostedHarnessSessionRoutes(
       runSettleProjection(resident, sessionId, settle, brokerOptions);
   };
 
+  const cleanupOriginalRecovery = async (
+    session: HostedSession,
+    promptId: string,
+  ): Promise<void> => {
+    const history = await readHostedFileHistory(session.managed);
+    if (
+      history?.pendingUndo ||
+      (history?.pendingTurn && history.pendingTurn !== promptId)
+    )
+      throw new Error('Original file history cleanup cannot be verified.');
+    await dropPendingHostedFileHistoryTurn(session.managed, promptId);
+    if (session.fileHistoryOwed === promptId)
+      session.fileHistoryOwed = undefined;
+    if (brokerOptions) {
+      await reconcileHostedTurnCleanup(
+        session.managed,
+        brokerOptions,
+        promptId,
+      );
+      const lease = session.runtimeLeaseHeld;
+      if (
+        lease?.promptId === promptId &&
+        session.runtimeLeaseOwedByTerminalRoute &&
+        (await releaseHeldRuntime(session, brokerOptions, lease)) &&
+        session.runtimeLeaseHeld === lease
+      ) {
+        session.runtimeLeaseHeld = undefined;
+        session.runtimeLeaseOwedByTerminalRoute = false;
+      }
+    }
+    if (
+      session.cleanupBlocked &&
+      session.managed.authority
+        .eventsInSequenceRange(1, session.managed.authority.committedSequence)
+        .findLast((event) => event.kind === 'input.accepted')?.payload[
+        'turnId'
+      ] === promptId &&
+      !hasHostedCleanupDebt(session.managed) &&
+      !session.fileHistoryOwed &&
+      !session.runtimeLeaseOwedByTerminalRoute
+    )
+      liftRecoveryBlock(session);
+  };
+
+  const cancellationTargetState = (
+    managed: ManagedSession,
+    promptId: string,
+  ): 'pending' | 'settled' | undefined => {
+    const events = managed.authority.eventsInSequenceRange(
+      1,
+      managed.authority.committedSequence,
+    );
+    if (
+      !events.some(
+        (event) =>
+          event.kind === 'input.accepted' &&
+          event.payload['turnId'] === promptId,
+      )
+    )
+      return undefined;
+    if (
+      !events.some(
+        (event) =>
+          event.kind === 'turn.settled' && event.payload['turnId'] === promptId,
+      )
+    )
+      return 'pending';
+    return events.findLast((event) => event.kind === 'input.accepted')?.payload[
+      'turnId'
+    ] === promptId
+      ? 'settled'
+      : undefined;
+  };
+
   const open = async (
     req: Request,
     res: Response,
     create: boolean,
+    holdCancellation?: (session: HostedSession) => void,
   ): Promise<void> => {
     const body = object(req.body);
+    let cleanupPromptId = body?.['recoveryCleanupPromptId'];
+    const cancellationPromptId = body?.['cancellationPromptId'];
+    if (
+      cancellationPromptId !== undefined &&
+      (create ||
+        typeof cancellationPromptId !== 'string' ||
+        !HOSTED_UUID.test(cancellationPromptId) ||
+        body?.['cancellationTakeover'] !== true ||
+        body?.['passiveManagedRuntimeRecovery'] !== true ||
+        body?.['driveRuntimeRecovery'] === true ||
+        cleanupPromptId !== undefined ||
+        body?.['lifecycleAuthority'] !== undefined)
+    ) {
+      error(res, 400, 'invalid_managed_runtime_recovery');
+      return;
+    }
+    if (
+      cleanupPromptId !== undefined &&
+      (create ||
+        typeof cleanupPromptId !== 'string' ||
+        !HOSTED_UUID.test(cleanupPromptId) ||
+        body?.['driveRuntimeRecovery'] === true ||
+        body?.['passiveManagedRuntimeRecovery'] === true ||
+        body?.['cancellationTakeover'] === true ||
+        body?.['lifecycleAuthority'] !== undefined)
+    ) {
+      error(res, 400, 'invalid_managed_runtime_recovery');
+      return;
+    }
     const sessionId = create ? body?.['sessionId'] : req.params['id'];
     let agentDefinition: HostedAgentDefinition | undefined;
     let sessionSkillsRef: ManagedSessionDurableRef | undefined;
@@ -3856,6 +4080,38 @@ export function registerHostedHarnessSessionRoutes(
     }
     let toolProfile = body?.['toolProfile'];
     let captureBytes = body?.['captureBytes'];
+    const publicChildAgentsVersion = body?.['publicChildAgentsVersion'] ?? 0;
+    let publicChildModelRoute: PublicChildModelRoute | undefined;
+    try {
+      publicChildModelRoute =
+        body?.['publicChildModelRoute'] === undefined
+          ? undefined
+          : parsePublicChildModelRoute(body['publicChildModelRoute']);
+      if (
+        publicChildModelRoute &&
+        (publicChildAgentsVersion !== 1 || (!body?.['lineage'] && create))
+      )
+        throw new Error('A model route belongs only to a public child.');
+    } catch {
+      return error(res, 400, 'invalid_public_child_model_route');
+    }
+    if (publicChildAgentsVersion !== 0 && publicChildAgentsVersion !== 1) {
+      error(res, 400, 'invalid_public_child_agents_version');
+      return;
+    }
+    if (
+      publicChildAgentsVersion === 1 &&
+      (toolProfile !== 'hosted-workspace-shell/1' ||
+        body?.['foregroundOnly'] === true ||
+        body?.['mcpServers'] !== undefined ||
+        body?.['hookCatalog'] !== undefined ||
+        agentDefinition !== undefined ||
+        body?.['childWorkspaces'] === true ||
+        body?.['childSnapshots'] === true)
+    ) {
+      error(res, 400, 'hosted_tool_profile_unavailable');
+      return;
+    }
     const requestedForegroundOnly = body?.['foregroundOnly'];
     let foregroundOnly = requestedForegroundOnly === true;
     if (
@@ -4004,7 +4260,7 @@ export function registerHostedHarnessSessionRoutes(
     ) {
       return error(res, 409, 'hosted_lifecycle_profile_unavailable');
     }
-    const resident = sessions.get(sessionId);
+    let resident = sessions.get(sessionId);
     // H4f × H4d-b: the load of a stopped run's child carries the stop, so
     // its wake pump starts none of its message inputs, not even the first
     // pass this load kicks before the stop itself arrives.
@@ -4057,10 +4313,12 @@ export function registerHostedHarnessSessionRoutes(
         passiveRecovery ||
         driveRecovery ||
         stopMessages ||
-        body?.['cancellationTakeover'] === true
+        body?.['cancellationTakeover'] === true ||
+        cleanupPromptId !== undefined
       )
         return error(res, 400, 'invalid_mcp_management_attachment');
-      if (!resident) return error(res, 409, 'hosted_mcp_session_load_required');
+      if (!resident || resident.recoveryCleanupOnly)
+        return error(res, 409, 'hosted_mcp_session_load_required');
       const key = resident.managed.authority.sessionHeader.sessionKey;
       if (
         key.tenantId !== store.tenantId ||
@@ -4089,13 +4347,148 @@ export function registerHostedHarnessSessionRoutes(
         return error(res, 409, 'hosted_tool_profile_conflict');
       if (resident.lifecycle || resident.mcpClosing)
         return error(res, 409, 'hosted_session_closing');
-      await resident.stores!.assertWritable().then(
-        () => sendAttachment(res, sessionId, resident),
+      const attachedSession = resident;
+      await attachedSession.stores!.assertWritable().then(
+        () => sendAttachment(res, sessionId, attachedSession),
         () => error(res, 503, 'managed_session_open_failed'),
       );
       return;
     }
     const takeoverFlags = passiveRecovery || driveRecovery;
+    if (resident && typeof cancellationPromptId === 'string') {
+      const key = resident.managed.authority.sessionHeader.sessionKey;
+      const definition = resident.definition;
+      if (
+        key.tenantId !== store.tenantId ||
+        key.workspaceId !== store.workspaceId ||
+        resident.storeBaseUrl !== store.baseUrl ||
+        (toolProfile !== undefined && toolProfile !== resident.toolProfile) ||
+        JSON.stringify(definition?.['mcpServers']) !==
+          JSON.stringify(mcpServers) ||
+        !isDeepStrictEqual(
+          definition?.['hookCatalog'],
+          hookCatalog ?? definition?.['hookCatalog'],
+        ) ||
+        (isHostedWorkspaceShellProfile(resident.toolProfile) &&
+          captureBytes !== undefined &&
+          definition?.['captureBytes'] !== captureBytes) ||
+        resident.lifecycle ||
+        resident.mcpClosing ||
+        opening.has(sessionId)
+      ) {
+        error(res, 409, 'hosted_session_already_attached');
+        return;
+      }
+      const target = cancellationTargetState(
+        resident.managed,
+        cancellationPromptId,
+      );
+      if (
+        target === undefined ||
+        (resident.active && resident.active.promptId !== cancellationPromptId)
+      ) {
+        error(res, 409, 'hosted_cancel_identity_mismatch');
+        return;
+      }
+      if (
+        target === 'settled' ||
+        resident.active?.promptId === cancellationPromptId
+      ) {
+        sendAttachment(res, sessionId, resident);
+        return;
+      }
+      if (
+        resident.hooksBusy ||
+        resident.mcpBusy ||
+        resident.mcpRecovering ||
+        unsettledPromptId(resident) !== cancellationPromptId
+      ) {
+        error(res, 409, 'hosted_turn_recovery_required');
+        return;
+      }
+      resident.hooksBusy = true;
+      holdCancellation?.(resident);
+    }
+    if (
+      resident &&
+      (cleanupPromptId !== undefined || resident.recoveryCleanupOnly)
+    ) {
+      const key = resident.managed.authority.sessionHeader.sessionKey;
+      if (
+        key.tenantId !== store.tenantId ||
+        key.workspaceId !== store.workspaceId ||
+        resident.storeBaseUrl !== store.baseUrl ||
+        resident.active ||
+        resident.hooksBusy ||
+        resident.mcpBusy ||
+        resident.mcpRecovering ||
+        resident.mcpClosing ||
+        opening.has(sessionId)
+      ) {
+        error(res, 409, 'hosted_turn_recovery_required');
+        return;
+      }
+      if (cleanupPromptId !== undefined) {
+        const sequence = resident.managed.authority.committedSequence;
+        const status = await inspectHostedRecovery(resident, cleanupPromptId);
+        if (
+          sessions.get(sessionId) !== resident ||
+          opening.has(sessionId) ||
+          resident.managed.authority.committedSequence !== sequence ||
+          resident.active ||
+          resident.recoveredTurn ||
+          resident.hooksBusy ||
+          resident.mcpBusy ||
+          resident.mcpRecovering ||
+          resident.mcpClosing ||
+          !status.inputSettled ||
+          !status.continuationReady ||
+          !['ready', 'cleanup_pending'].includes(status.state)
+        ) {
+          error(res, 409, 'hosted_turn_recovery_required');
+          return;
+        }
+        resident.hooksBusy = true;
+        try {
+          await cleanupOriginalRecovery(resident, cleanupPromptId);
+          sendAttachment(res, sessionId, resident);
+        } catch {
+          error(res, 503, 'hosted_turn_recovery_required');
+        } finally {
+          resident.hooksBusy = false;
+        }
+        return;
+      }
+      if (passiveRecovery) {
+        if (
+          (toolProfile !== undefined && toolProfile !== resident.toolProfile) ||
+          mcpServers !== undefined ||
+          hookCatalog !== undefined ||
+          (isHostedWorkspaceShellProfile(resident.toolProfile) &&
+            captureBytes !== undefined &&
+            captureBytes !== resident.definition?.['captureBytes'])
+        ) {
+          error(res, 409, 'hosted_tool_profile_conflict');
+          return;
+        }
+        sendAttachment(res, sessionId, resident);
+        return;
+      }
+      opening.add(sessionId);
+      resident.mcpClosing = true;
+      try {
+        await resident.managed.close();
+        await resident.stores!.close();
+        for (const stop of resident.streams) stop();
+        sessions.delete(sessionId);
+        resident = undefined;
+      } catch {
+        error(res, 503, 'hosted_turn_recovery_required');
+        return;
+      } finally {
+        opening.delete(sessionId);
+      }
+    }
     // H4b: a child Session arrives with its ancestry; the definition
     // document persists it so a later load answers the same depth.
     let lineage:
@@ -4212,6 +4605,32 @@ export function registerHostedHarnessSessionRoutes(
       }
       // The owner proven above restates the host's capability; a later
       // Turn reads it, never a stale one from the first attach.
+      if (
+        (resident.publicChildAgentsVersion ?? 0) !== publicChildAgentsVersion
+      ) {
+        error(res, 409, 'hosted_tool_profile_conflict');
+        return;
+      }
+      if (
+        !isDeepStrictEqual(
+          resident.publicChildModelRoute,
+          publicChildModelRoute,
+        )
+      ) {
+        error(res, 409, 'hosted_tool_profile_conflict');
+        return;
+      }
+      if (resident.childAgents) {
+        await resident.childAgents.serialized(async () => {
+          resident.publicChildLaunchEnabled =
+            body?.['suppressChildAgents'] !== true;
+        });
+      } else {
+        resident.publicChildLaunchEnabled =
+          body?.['suppressChildAgents'] !== true;
+      }
+      if (resident.publicChildAgentsVersion === 1)
+        await resident.childAgents?.stopCancelledSources();
       resident.childWorkspaces = childWorkspaces;
       resident.childSnapshots = childSnapshots;
       if (
@@ -4252,6 +4671,24 @@ export function registerHostedHarnessSessionRoutes(
           if (resident.active !== undefined) {
             error(res, 409, 'hosted_session_already_attached');
             return;
+          }
+          if (typeof cancellationPromptId === 'string') {
+            const target = cancellationTargetState(
+              resident.managed,
+              cancellationPromptId,
+            );
+            if (target === 'settled') {
+              sendAttachment(res, sessionId, resident);
+              return;
+            }
+            if (
+              target !== 'pending' ||
+              parkedForCancellation !== cancellationPromptId ||
+              unsettledPromptId(resident) !== cancellationPromptId
+            ) {
+              error(res, 409, 'hosted_cancel_identity_mismatch');
+              return;
+            }
           }
           try {
             await settleCancelledHarnessTurn(
@@ -4715,6 +5152,10 @@ export function registerHostedHarnessSessionRoutes(
                   engine: 'managed',
                   sessionId,
                   ...(agentDefinition ? { agentDefinition } : {}),
+                  ...(publicChildAgentsVersion === 1
+                    ? { publicChildAgentsVersion }
+                    : {}),
+                  ...(publicChildModelRoute ? { publicChildModelRoute } : {}),
                   ...(sessionSkillsRef ? { sessionSkillsRef } : {}),
                   ...(toolProfile ? { toolProfile } : {}),
                   ...(foregroundOnly ? { foregroundOnly: true } : {}),
@@ -4759,6 +5200,15 @@ export function registerHostedHarnessSessionRoutes(
           ? { create: refs, requireNew: true }
           : { retainVerifiedResources: true }),
       });
+      if (typeof cancellationPromptId === 'string') {
+        const target = cancellationTargetState(managed, cancellationPromptId);
+        if (target === undefined) {
+          await managed.close();
+          error(res, 409, 'hosted_cancel_identity_mismatch');
+          return;
+        }
+        if (target === 'settled') cleanupPromptId = cancellationPromptId;
+      }
       // Taken now, so the authority keeps none of it for the Session's
       // lifetime; a cold Workspace load reuses it below.
       const preverified =
@@ -4807,6 +5257,21 @@ export function registerHostedHarnessSessionRoutes(
           typeof definition['foregroundOnly'] !== 'boolean') ||
         (requestedForegroundOnly !== undefined &&
           foregroundOnly !== (definition?.['foregroundOnly'] === true))
+      ) {
+        await managed.close();
+        error(res, 409, 'hosted_tool_profile_conflict');
+        return;
+      }
+      if (
+        !isDeepStrictEqual(
+          definition?.['publicChildModelRoute'],
+          publicChildModelRoute,
+        )
+      )
+        throw new Error('Public child model route changed.');
+      if (
+        (definition?.['publicChildAgentsVersion'] ?? 0) !==
+        publicChildAgentsVersion
       ) {
         await managed.close();
         error(res, 409, 'hosted_tool_profile_conflict');
@@ -4886,6 +5351,11 @@ export function registerHostedHarnessSessionRoutes(
         storeBaseUrl: store.baseUrl,
         definition,
         agentDefinition: savedAgentDefinition,
+        ...(publicChildAgentsVersion === 1
+          ? { publicChildAgentsVersion: 1 as const }
+          : {}),
+        ...(publicChildModelRoute ? { publicChildModelRoute } : {}),
+        publicChildLaunchEnabled: body?.['suppressChildAgents'] !== true,
         ...(savedSessionSkillsRef
           ? { sessionSkillsRef: savedSessionSkillsRef }
           : {}),
@@ -4973,6 +5443,42 @@ export function registerHostedHarnessSessionRoutes(
         throw new Error(
           'Hosted MCP management is unavailable for this Session.',
         );
+      if (
+        typeof cancellationPromptId === 'string' &&
+        cleanupPromptId === undefined &&
+        unsettledPromptId(session) !== cancellationPromptId
+      ) {
+        await managed.close();
+        error(res, 409, 'hosted_cancel_identity_mismatch');
+        return;
+      }
+      if (typeof cleanupPromptId === 'string') {
+        const status = await inspectHostedRecovery(session, cleanupPromptId);
+        if (
+          !workspaceProfile ||
+          hookCatalog ||
+          mcpServers ||
+          mcpSettings.length > 0 ||
+          !status.inputSettled ||
+          !status.continuationReady ||
+          !['ready', 'cleanup_pending'].includes(status.state)
+        ) {
+          await managed.close();
+          error(res, 409, 'hosted_turn_recovery_required');
+          return;
+        }
+        session.recoveryCleanupOnly = true;
+        if (pinned) session.approval = pinned;
+        try {
+          await cleanupOriginalRecovery(session, cleanupPromptId);
+        } catch {
+          session.cleanupBlocked = true;
+          session.blocked = true;
+        }
+        sessions.set(sessionId, session);
+        sendAttachment(res, sessionId, session);
+        return;
+      }
       if ((mcpServers || mcpSettings.length) && brokerOptions)
         session.mcp = new HostedMcpSession(
           { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
@@ -5005,7 +5511,8 @@ export function registerHostedHarnessSessionRoutes(
           if (
             hostedShellLaneAttachesChildAgents(
               true,
-              body?.['suppressChildAgents'] === true,
+              publicChildAgentsVersion !== 1 &&
+                body?.['suppressChildAgents'] === true,
             )
           )
             session.childAgents = new HostedChildAgentSession(
@@ -5014,17 +5521,34 @@ export function registerHostedHarnessSessionRoutes(
                 resources: session.managed.resources,
               },
               session.managed.authority.sessionHeader.sessionKey,
+              (promptId) =>
+                session.managed.authority
+                  .eventsInSequenceRange(
+                    1,
+                    session.managed.authority.committedSequence,
+                  )
+                  .some(
+                    (event) =>
+                      event.kind === 'cancel.requested' &&
+                      (
+                        event.payload['target'] as
+                          | { turnId?: string }
+                          | undefined
+                      )?.turnId === promptId,
+                  ),
+              () => session.publicChildLaunchEnabled !== false,
             );
-          session.teams = new HostedTeamSession(
-            {
-              authority: session.managed.authority,
-              resources: session.managed.resources,
-            },
-            session.managed.authority.sessionHeader.sessionKey,
-            // H4e-b3 decision 10: request_shutdown commits the stop an
-            // H4f cancel would, through the child funnel's own chain.
-            session.childAgents,
-          );
+          if (publicChildAgentsVersion !== 1)
+            session.teams = new HostedTeamSession(
+              {
+                authority: session.managed.authority,
+                resources: session.managed.resources,
+              },
+              session.managed.authority.sessionHeader.sessionKey,
+              // H4e-b3 decision 10: request_shutdown commits the stop an
+              // H4f cancel would, through the child funnel's own chain.
+              session.childAgents,
+            );
           // H4d-b: the Session messages along its lineage on the same
           // writes chain; a child names its parent from its definition.
           const lineage =
@@ -5039,7 +5563,7 @@ export function registerHostedHarnessSessionRoutes(
           // H4d-b: messages share the child orchestrator's write chain, so
           // a Shell lane that suppressed the agent tool has no funnel. The
           // commands funnel (H4e-b3) rides the same guard.
-          if (session.childAgents) {
+          if (session.childAgents && publicChildAgentsVersion !== 1) {
             session.messages = new HostedSessionMessageSession(
               {
                 authority: session.managed.authority,
@@ -5397,9 +5921,17 @@ export function registerHostedHarnessSessionRoutes(
                 ),
               busy: wakeBusy,
               held: (turn) => stoppedMessage(turn.source),
-              cancelled: (turn) =>
-                turn.source === AUTOMATION_INPUT_SOURCE &&
-                session.automations?.cancelRequested(turn.turnId) === true,
+              cancelled: async (turn) =>
+                (turn.source === AUTOMATION_INPUT_SOURCE &&
+                  session.automations?.cancelRequested(turn.turnId) === true) ||
+                (session.publicChildAgentsVersion === 1 &&
+                  ((await session.childAgents!.cancelledNotification(
+                    turn.turnId,
+                  )) ||
+                    (turn.notificationTurnId !== undefined &&
+                      (await session.childAgents!.cancelledNotification(
+                        turn.notificationTurnId,
+                      ))))),
               needsRecovery: monitorWakeNeedsRecovery,
               // F5/direction (a): channel turns interrupted mid-flight get
               // terminal settlement from their own funnel; monitor turns
@@ -5759,6 +6291,11 @@ export function registerHostedHarnessSessionRoutes(
           return;
         }
       }
+      if (session.publicChildAgentsVersion === 1) {
+        if (body?.['cancellationTakeover'] === true && unsettled)
+          await stopPublicChildSource(session, unsettled);
+        else await session.childAgents?.stopCancelledSources();
+      }
       let resume: { promptId: string; text: string; parts: Part[] } | undefined;
       let resumeModel: HostedModelRequest | undefined;
       let committedModelOutput: { promptId: string } | undefined;
@@ -5927,6 +6464,17 @@ export function registerHostedHarnessSessionRoutes(
             !brokerOptions ||
             (await parkNeedsNoRuntimeSettlement(managed)))
         ) {
+          if (
+            typeof cancellationPromptId === 'string' &&
+            (unsettled !== cancellationPromptId ||
+              cancellationTargetState(managed, cancellationPromptId) !==
+                'pending' ||
+              unsettledPromptId(session) !== cancellationPromptId)
+          ) {
+            await managed.close();
+            error(res, 409, 'hosted_cancel_identity_mismatch');
+            return;
+          }
           try {
             await settleCancelledHarnessTurn(
               managed,
@@ -6384,7 +6932,12 @@ export function registerHostedHarnessSessionRoutes(
     void open(req, res, true);
   });
   app.post('/session/:id/load', (req, res) => {
-    void open(req, res, false);
+    let held: HostedSession | undefined;
+    void open(req, res, false, (session) => {
+      held = session;
+    }).finally(() => {
+      if (held) held.hooksBusy = false;
+    });
   });
 
   app.use('/session/:id', async (req, res, next) => {
@@ -6740,6 +7293,8 @@ export function registerHostedHarnessSessionRoutes(
   ): Promise<void> => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.recoveryCleanupOnly)
+      return error(res, 409, 'hosted_turn_recovery_required');
     if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
     if (session.hooksBusy)
       return error(res, 409, 'hosted_hook_operation_active');
@@ -7509,6 +8064,8 @@ export function registerHostedHarnessSessionRoutes(
   app.get('/session/:id/mcp/management', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.recoveryCleanupOnly)
+      return error(res, 409, 'hosted_mcp_session_load_required');
     void (async () => {
       const manager = mcpManager(session);
       await manager.open();
@@ -7519,6 +8076,8 @@ export function registerHostedHarnessSessionRoutes(
   app.get('/session/:id/mcp/management/operations/:operationId', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.recoveryCleanupOnly)
+      return error(res, 409, 'hosted_mcp_session_load_required');
     void (async () => {
       const manager = mcpManager(session);
       await manager.open();
@@ -7531,6 +8090,8 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/mcp/management', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.recoveryCleanupOnly)
+      return error(res, 409, 'hosted_mcp_session_load_required');
     if (
       session.active ||
       session.hooksBusy ||
@@ -8925,7 +9486,8 @@ export function registerHostedHarnessSessionRoutes(
     const recoveryDigest = `recovery:${checkpointId}:${activationId}`;
     const admittedRecovery = session.admissions.get(promptId);
     if (admittedRecovery?.digest === recoveryDigest) {
-      if (!session.active) releaseRecoveredRuntime(session);
+      if (!session.active && session.runtimeLeaseHeld?.promptId === promptId)
+        releaseRecoveredRuntime(session);
       res.status(200).json({
         accepted: true,
         promptId,
@@ -8946,7 +9508,8 @@ export function registerHostedHarnessSessionRoutes(
     }
     if (!matchesRecovery(session, promptId, checkpointId, activationId)) {
       if (settledReplay(session, promptId, res)) {
-        releaseRecoveredRuntime(session);
+        if (session.runtimeLeaseHeld?.promptId === promptId)
+          releaseRecoveredRuntime(session);
         return;
       }
       releaseRecoveredRuntime(session);
@@ -9411,6 +9974,7 @@ export function registerHostedHarnessSessionRoutes(
             signal: abort.signal,
             workspaceContext,
             agentDefinition: session.agentDefinition,
+            publicChildModelRoute: session.publicChildModelRoute,
             modelSelection: await readHostedTurnModelSelection(
               session.managed,
               promptId,
@@ -9439,6 +10003,8 @@ export function registerHostedHarnessSessionRoutes(
             failureReason = 'image_input_unsupported';
           if (state === 'error' && cause instanceof HostedModelUnavailableError)
             failureReason = 'model_unavailable';
+          if (state === 'error' && cause instanceof HostedModelApiError)
+            failureReason = cause.code;
           if (state === 'error') {
             const storeFailure = namedStoreFailure(cause);
             if (storeFailure !== undefined) failureReason = storeFailure;
@@ -9637,7 +10203,9 @@ export function registerHostedHarnessSessionRoutes(
     const recoveryDigest = `recovery:${checkpointId}:${activationId}`;
     const admittedCancel = session.admissions.get(promptId);
     if (admittedCancel?.digest === recoveryDigest) {
-      if (!session.active) releaseRecoveredRuntime(session);
+      await stopPublicChildSource(session, promptId);
+      if (!session.active && session.runtimeLeaseHeld?.promptId === promptId)
+        releaseRecoveredRuntime(session);
       res.status(200).json({
         accepted: true,
         promptId,
@@ -9657,9 +10225,16 @@ export function registerHostedHarnessSessionRoutes(
       session.managed.activation.activationId === activationId &&
       unsettledPromptId(session) === promptId;
     if (!attachedToUnsettled) {
-      if (settledReplay(session, promptId, res)) {
-        releaseRecoveredRuntime(session);
-        return;
+      if (
+        hasAcceptedInput(session, promptId) &&
+        !unsettledInputs(session).has(promptId)
+      ) {
+        await stopPublicChildSource(session, promptId);
+        if (settledReplay(session, promptId, res)) {
+          if (session.runtimeLeaseHeld?.promptId === promptId)
+            releaseRecoveredRuntime(session);
+          return;
+        }
       }
       // A foreign-epoch cancel against a stranger's or settled Turn is not a
       // teardown: keep the lease owed and re-acquirable — the same owed
@@ -9720,6 +10295,47 @@ export function registerHostedHarnessSessionRoutes(
     // cancelAuthorization.authorization does not reach it, so pin the
     // runnable authorization the guards above established.
     const cancelRunnable = cancelAuthorization.authorization;
+    await stopPublicChildSource(session, promptId);
+    // The child fence yields; another recovery may have claimed or settled it.
+    if (identity(req, sessions) !== session)
+      return error(res, 404, 'hosted_session_not_found');
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    if (session.mcpBusy || session.mcpRecovering)
+      return error(res, 409, 'hosted_mcp_operation_active');
+    if (session.blocked)
+      return error(
+        res,
+        409,
+        'hosted_turn_recovery_required',
+        hostedTurnBusyReason(session),
+      );
+    const concurrentCancel = session.admissions.get(promptId);
+    if (concurrentCancel?.digest === recoveryDigest) {
+      if (!session.active && session.runtimeLeaseHeld?.promptId === promptId)
+        releaseRecoveredRuntime(session);
+      res.status(200).json({
+        accepted: true,
+        promptId,
+        lastEventId: concurrentCancel.lastEventId,
+        eventEpoch: epoch,
+      });
+      return;
+    }
+    if (session.active) return error(res, 409, 'hosted_turn_active');
+    if (unsettledPromptId(session) !== promptId) {
+      if (settledReplay(session, promptId, res)) {
+        if (session.runtimeLeaseHeld?.promptId === promptId)
+          releaseRecoveredRuntime(session);
+        return;
+      }
+      return error(res, 409, 'hosted_recovery_identity_mismatch');
+    }
+    if (
+      session.managed.activation.activationId !== activationId ||
+      session.managed.authority.latestCheckpoint?.checkpointId !==
+        cancelRunnable.checkpoint.identity.checkpointId
+    )
+      return error(res, 409, 'hosted_recovery_identity_mismatch');
     session.admissions.set(promptId, {
       digest: recoveryDigest,
       lastEventId: session.managed.authority.committedSequence,
@@ -10213,9 +10829,18 @@ export function registerHostedHarnessSessionRoutes(
     void pump();
   });
 
-  app.get('/session/:id/status', (req, res) => {
+  app.get('/session/:id/status', async (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    const promptId = req.query['promptId'];
+    if (
+      promptId !== undefined &&
+      (typeof promptId !== 'string' || !HOSTED_UUID.test(promptId))
+    )
+      return error(res, 400, 'invalid_managed_runtime_recovery');
+    const recovery = await inspectHostedRecovery(session, promptId);
+    if (identity(req, sessions) !== session)
+      return error(res, 404, 'hosted_session_not_found');
     res.json({
       sessionId: req.params['id'],
       hasActivePrompt: !!session.active || session.recoveredTurn !== undefined,
@@ -10226,7 +10851,67 @@ export function registerHostedHarnessSessionRoutes(
       ...(session.recoveryReason === undefined
         ? {}
         : { recoveryReason: session.recoveryReason }),
+      recovery,
     });
+  });
+  const recoveryCleanups = new Map<
+    string,
+    { promptId: string; pending: Promise<void> }
+  >();
+  app.post('/session/:id/recovery/recheck', async (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    const promptId = object(req.body)?.['promptId'];
+    if (typeof promptId !== 'string' || !HOSTED_UUID.test(promptId))
+      return error(res, 400, 'invalid_managed_runtime_recovery');
+    const sessionId = req.params['id'];
+    let cleanup = recoveryCleanups.get(sessionId);
+    if (!cleanup) {
+      const sequence = session.managed.authority.committedSequence;
+      const recovery = await inspectHostedRecovery(session, promptId);
+      cleanup = recoveryCleanups.get(sessionId);
+      if (!cleanup) {
+        if (
+          identity(req, sessions) === session &&
+          session.managed.authority.committedSequence === sequence &&
+          recovery.nextTurnAllowed
+        ) {
+          res.status(202).json({ accepted: true, promptId });
+          return;
+        }
+        if (
+          identity(req, sessions) !== session ||
+          session.managed.authority.committedSequence !== sequence ||
+          session.active ||
+          session.recoveredTurn ||
+          session.hooksBusy ||
+          session.mcpBusy ||
+          session.mcpRecovering ||
+          session.mcpClosing ||
+          !recovery.inputSettled ||
+          !recovery.continuationReady ||
+          recovery.state !== 'cleanup_pending'
+        )
+          return error(res, 409, 'hosted_turn_recovery_required');
+        session.hooksBusy = true;
+        const pending = cleanupOriginalRecovery(session, promptId).finally(
+          () => {
+            session.hooksBusy = false;
+            recoveryCleanups.delete(sessionId);
+          },
+        );
+        cleanup = { promptId, pending };
+        recoveryCleanups.set(sessionId, cleanup);
+      }
+    }
+    if (cleanup.promptId !== promptId)
+      return error(res, 409, 'hosted_recovery_identity_mismatch');
+    try {
+      await cleanup.pending;
+      res.status(202).json({ accepted: true, promptId });
+    } catch {
+      error(res, 503, 'hosted_turn_recovery_required');
+    }
   });
   app.get('/session/:id/transcript', (req, res) => {
     const session = identity(req, sessions);
@@ -10283,6 +10968,49 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/cancel', async (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    const targetPromptId = object(req.body)?.['promptId'];
+    if (targetPromptId !== undefined) {
+      if (
+        typeof targetPromptId !== 'string' ||
+        !HOSTED_UUID.test(targetPromptId)
+      )
+        return error(res, 400, 'invalid_hosted_cancel');
+      const authority = session.managed.authority;
+      const events = authority.eventsInSequenceRange(
+        1,
+        authority.committedSequence,
+      );
+      if (
+        !events.some(
+          (event) =>
+            event.kind === 'input.accepted' &&
+            event.payload['turnId'] === targetPromptId,
+        )
+      )
+        return error(res, 409, 'hosted_cancel_identity_mismatch');
+      if (
+        events.some(
+          (event) =>
+            event.kind === 'turn.settled' &&
+            event.payload['turnId'] === targetPromptId,
+        )
+      ) {
+        try {
+          await stopPublicChildSource(session, targetPromptId);
+        } catch {
+          return error(res, 503, 'hosted_cancel_commit_failed');
+        }
+        res.sendStatus(204);
+        return;
+      }
+      if (session.active?.promptId !== targetPromptId)
+        return error(
+          res,
+          409,
+          'hosted_turn_recovery_required',
+          'inputs_unsettled',
+        );
+    }
     // Honest refusal instead of a silent no-op 204 (R10-3): with no live
     // Turn in this process, nothing aborts here, while the journal still
     // holds an input unsettled — a recovered-but-undriven Turn's parked
@@ -10305,34 +11033,42 @@ export function registerHostedHarnessSessionRoutes(
       );
     if (session.active) {
       const active = session.active;
-      active.abort.abort();
+      if (session.publicChildAgentsVersion !== 1) active.abort.abort();
       const promptId = active.promptId;
       const authority = session.managed.authority;
       const commandId = `hosted-cancel:${promptId}`;
       try {
-        await authority.appendExecutionEvent(
-          {
-            operation: 'requestCancel',
-            commandId,
-            sessionKey: authority.sessionHeader.sessionKey,
-            contentDigest: createHash('sha256').update(promptId).digest('hex'),
-          },
-          (sequence) => ({
-            v: 1,
-            sequence,
-            eventId: commandId,
-            sessionKey: authority.sessionHeader.sessionKey,
-            kind: 'cancel.requested',
-            occurredAt: Date.now(),
-            payload: {
-              requestId: commandId,
-              target: { turnId: promptId },
-              reason: 'user',
-              requestedBy: 'hosted',
+        const commitCancel = () =>
+          authority.appendExecutionEvent(
+            {
+              operation: 'requestCancel',
+              commandId,
+              sessionKey: authority.sessionHeader.sessionKey,
+              contentDigest: createHash('sha256')
+                .update(promptId)
+                .digest('hex'),
             },
-          }),
-          { class: 'trusted_entry' },
-        );
+            (sequence) => ({
+              v: 1,
+              sequence,
+              eventId: commandId,
+              sessionKey: authority.sessionHeader.sessionKey,
+              kind: 'cancel.requested',
+              occurredAt: Date.now(),
+              payload: {
+                requestId: commandId,
+                target: { turnId: promptId },
+                reason: 'user',
+                requestedBy: 'hosted',
+              },
+            }),
+            { class: 'trusted_entry' },
+          );
+        if (session.publicChildAgentsVersion === 1) {
+          await stopPublicChildSource(session, promptId);
+        } else {
+          await commitCancel();
+        }
       } catch {
         return error(res, 503, 'hosted_cancel_commit_failed');
       }

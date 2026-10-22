@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelContext;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelOption;
@@ -63,6 +64,8 @@ public interface AgentStateStore {
      */
     String RUNTIME_RECOVERY_BLOCKED = "hosted_runtime_recovery_blocked";
 
+    String HARNESS_RECOVERY_BLOCKED = "hosted_harness_recovery_blocked";
+
     // The annotation must sit on the default itself: the delegating body runs
     // on the target instance, so without it the self-call bypasses the proxy.
     @org.springframework.transaction.annotation.Transactional
@@ -93,6 +96,13 @@ public interface AgentStateStore {
             String requestDigest, String title, List<Map<String, Object>> input,
             String payloadDigest, StoreModels.SessionLineage lineage) {
         throw new UnsupportedOperationException("Child Session creation is unavailable");
+    }
+
+    default StoreModels.Admission insertPublicChildSessionCommand(String tenantId,
+            String parentSessionId, String idempotencyKey, String requestDigest,
+            String title, List<Map<String, Object>> input, String payloadDigest,
+            StoreModels.SessionLineage lineage, com.fasterxml.jackson.databind.JsonNode snapshot) {
+        throw new UnsupportedOperationException("Public child Session creation is unavailable");
     }
 
     /**
@@ -199,6 +209,16 @@ public interface AgentStateStore {
         return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
                 agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
                 approvalSelectionSupported, planMode, planModeSupported);
+    }
+
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
+            String approvalMode, boolean approvalSelectionSupported, Boolean planMode, boolean planModeSupported,
+            List<Map<String, Object>> skills, boolean publicChildrenSupported) {
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
+                approvalSelectionSupported, planMode, planModeSupported, skills);
     }
 
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
@@ -644,6 +664,14 @@ public interface AgentStateStore {
             Long beforeCreatedAt,
             String beforeSessionId, int limit);
 
+    SessionPage listSessions(String tenantId, String actorId, Long beforeCreatedAt,
+            String beforeSessionId, int limit, String archiveState);
+
+    SessionPage listSessions(String tenantId, String actorId, Long beforeCreatedAt,
+            String beforeSessionId, int limit, String archiveState, String titleQuery);
+
+    Map<String, WebShellLifecycleOperation> findLatestLifecycleOperations(String tenantId, List<String> sessionIds);
+
     Optional<TurnRecord> findTurn(String tenantId, String sessionId,
             String turnId);
 
@@ -802,7 +830,9 @@ public interface AgentStateStore {
      * the error code stays on the still-active row for the child result
      * relay to classify from, and the dispatch lease is released so the
      * drive ends without settling the Turn. Never a terminal status: the
-     * unwitnessed execution's outcome was never observed.
+     * unwitnessed execution's outcome was never observed. A Harness park
+     * backs off before read-only journal observation; it may still settle
+     * from later authoritative evidence without replaying execution.
      */
     boolean markTurnRecoveryBlocked(String tenantId, String sessionId,
             String turnId, String owner, String errorCode,
@@ -815,6 +845,12 @@ public interface AgentStateStore {
      */
     boolean parkTurnForRuntimeRecovery(String tenantId, String sessionId,
             String turnId, String owner, String message, long retryAfter);
+
+    boolean markTurnFailureRecovery(String tenantId, String sessionId,
+            String turnId, String owner, String message);
+
+    boolean requestRecoveryRecheck(String tenantId, String sessionId,
+            String turnId);
 
     void deferTurnRetry(String tenantId, String sessionId, String turnId,
             String owner, long retryAfter);

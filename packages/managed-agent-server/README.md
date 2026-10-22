@@ -211,7 +211,13 @@ publishes an immutable prerelease. See
 [Managed Agent reference deployment](../../docs/users/managed-agent-reference-deployment.md)
 and the [distribution design](../../docs/design/2026-10-14-managed-agent-reference-distribution.md).
 The bundled launcher also supports `--check`, a read-only preflight for
-configuration, Harness reachability, ports and database grants.
+configuration, Harness reachability, ports and database grants. When the
+database check succeeds, the output includes a `capacity` line with grouped
+counts from `ma_runtime_binding`, `ma_runtime_session` and `ma_operation`.
+These are durable logical records for capacity triage; they are not a count of
+physical worker processes or memory usage. The line explicitly reports
+physical processes and memory as unknown, and does not infer idle work or
+reclaim anything. If the database check fails, capacity remains skipped.
 
 ## Prerequisites
 
@@ -244,6 +250,16 @@ export QWEN_MANAGED_AGENT_WORKSPACE_ID='local-dev-workspace'
 
 mvn spring-boot:run
 ```
+
+Instead of the token and digest, `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`
+can name the Harness's own environment file. The server then reads
+`QWEN_SERVER_TOKEN` and `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` from it into its
+configuration, never into its process environment, and refuses to start when
+either direct value is also set. Write each credential as `KEY=value` on one
+line, with no whitespace around the `=` and only letters, digits and `._:/+=-`
+in the value. The server refuses, by file and line, any line it might read
+differently from systemd or a shell, such as a continuation, a carriage return
+from CRLF line endings, an unterminated quote or text after a closing quote.
 
 Create a Session:
 
@@ -698,6 +714,16 @@ no dispatched Shell is automatically replayed. Keep the opt-in off until the
 deployment passes #12904, #13010 and public FG6f physical failure gates. See
 [the complete design](../../docs/design/public-hosted-shell-admission.md).
 
+### Public child agents
+
+`QWEN_MANAGED_AGENT_WORKSPACE_CHILD_AGENTS_ENABLED` defaults to true and enables public `agent` delegation for qualified new built-in `qwen-code` Workspace Sessions. Set it to false to disable new delegation. Admission requires public Shell, a durable LOCAL process Broker, Session isolation, and a Harness advertising `public-child-agents/1`, approval selection and Shell lifecycle v2. Other deployment profiles continue to start without public child admission. Existing Sessions remain opted out. SSH, resident/CSI, custom definitions, Team, Workflow, messaging, nesting and isolated child Workspaces are excluded from this first release.
+
+Children share the parent's directory, definition and owner, start without its conversation, and keep the effective approval mode, actual model route and Skills captured at launch. Later parent policy changes apply only to new children. Default execution is background; explicit foreground waits retain the existing mount restrictions. Each root admits at most four active children and 64 launches over its lifetime.
+
+The optional `child_agents` / WebShell `childAgents` capability identifies orchestration support. Turning the deployment switch off blocks new launches while admitted tasks can still recover, receive approvals, stop and deliver results. Query pending approvals with `include_children=true` or WebShell `includeChildren: true`; answer each Action on its actual owner Session. Aggregation grants no new response permission.
+
+Stopping a parent Turn durably stops new launches and requests cancellation for active children from that prompt only. A stop request is distinct from physical termination. Late results remain available through the task's `childSessionId` transcript without automatically waking cancelled work. Public children reject independent new Turns and policy/model changes. See the [bilingual design](../../docs/design/2026-10-22-managed-public-child-agents.md) for recovery and rollout acceptance.
+
 ### Initial Workspace Turn (G0)
 
 `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true` opts in to an initial
@@ -818,9 +844,7 @@ Public Shell close, archive, unarchive and delete stay unavailable, including
 protocol-0. Archive, delete and unarchive of non-Shell Sessions follow their
 separate retention capabilities after reliable Workspace close. Controlled cwd
 changes ship below (W2); broad Workspace capability advertisement remains
-gated. Public foreground Shell does not publish the child agent tool, and it
-has no Session message funnel because that funnel shares the child
-orchestrator's write chain.
+gated. Qualified new public Shell Sessions expose `agent` under the public-child admission above; public Session messaging remains unavailable.
 Background Shell, Monitor and complete in-flight recovery remain separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.
@@ -1190,7 +1214,7 @@ local workloads. The W0e recovery above handles trusted host reboot; it
 does not provide physical isolation or recovery after worker-only death.
 Public bound Turn admission is limited to the initial Workspace Turn described
 in G0 above (file tools, or mandatory-approval foreground Shell under the Shell
-opt-in; the public Shell tool list does not include the child agent tool) and
+opt-in; the public-child admission above controls `agent`) and
 later Turns submitted by any caller holding OPERATOR on the Workspace under the
 same opt-in while the Session's creator-keyed execution facts hold (the WebShell
 adapter's per-caller `workspaceTurns` capability flag mirrors that same rule;
@@ -1404,7 +1428,7 @@ QWEN_MANAGED_HOOK_CGROUP_ROOT=/sys/fs/cgroup/your-delegated-root \
   -Dmysql.user=root -Dmysql.password= verify
 ```
 
-Missing Linux/MySQL/cgroup prerequisites are not acceptance. This selector verifies only the extension class; it does not establish that the complete Hosted profile passed. Evidence is saved before forced fixture teardown under `target/failsafe-reports/hosted-extension-evidence/` and is included in the existing CI report upload. The interrupted MCP case leaves its public Turn `RUNNING`, its ordinary execution `UNKNOWN`, and rejects new input and close with `409 turn_active`; successful cleanup is established by the separate healthy-close case. This gate uses a controlled loopback model and local stdio transport, so it does not establish upstream-model, remote transport, reboot, cross-machine, SSH MCP/Hook, or production acceptance. See the complete [English design](../../docs/design/2026-10-16-managed-extension-acceptance.md) and [Chinese design](../../docs/design/2026-10-16-managed-extension-acceptance.zh-CN.md).
+Missing Linux/MySQL/cgroup prerequisites are not acceptance. This selector verifies only the extension class; it does not establish that the complete Hosted profile passed. Evidence is saved before forced fixture teardown under `target/failsafe-reports/hosted-extension-evidence/` and is included in the existing CI report upload. The interrupted MCP case leaves its public Turn `RUNNING` with durable `ma_turn.error_code = hosted_runtime_recovery_blocked` and ordinary execution `UNKNOWN`, rejects new input and close with `409 turn_active`, and does not replay the physical effect; successful cleanup is established by the separate healthy-close case. This gate uses a controlled loopback model and local stdio transport, so it does not establish upstream-model, remote transport, reboot, cross-machine, SSH MCP/Hook, or production acceptance. See the complete [English design](../../docs/design/2026-10-16-managed-extension-acceptance.md) and [Chinese design](../../docs/design/2026-10-16-managed-extension-acceptance.zh-CN.md).
 
 ## Real-model end-to-end check
 
@@ -1682,7 +1706,7 @@ Deploy matching Java, Java SDK, Broker, Runtime and WebShell artifacts. The Harn
 
 Use the Session's **Manage MCP** entry or the MCP management page. Add or edit selects an exact server revision published in that tenant and Workspace's Runtime-private `QWEN_MANAGED_MCP_CONFIG` manifest. Remove, enable, disable, reload and restart apply to the current Session. The manifest remains deployment administration: this interface neither accepts arbitrary executable recipes nor imports daemon settings, credentials or OAuth state. Inventory exposes only the published identifier, revision, digest and transport. Keep historical manifest revisions available for existing Sessions.
 
-Management reattaches only to a Session resident in the current Harness and never triggers cleanup, recovery or wake dispatch. After a Harness restart, continue or recover the Session through its normal execution flow first; management otherwise returns `hosted_mcp_session_load_required`. A new empty Session may initialize through management without sending a Turn. Command status never creates a Session, and uncertain creation never loads a cold journal implicitly.
+Management reattaches only to a Session resident in the current Harness and never triggers cleanup, recovery or wake dispatch. After a Harness restart, continue or recover the Session through its normal execution flow first; management otherwise returns `hosted_mcp_session_load_required`. A new empty Session may initialize through management without sending a Turn. Command status never creates a Session, and uncertain creation never loads a cold journal implicitly. Cleanup-only recovery attachments also refuse management until a normal execution load upgrades them.
 
 The original AgentDefinition and Skills stay pinned. Explicit management commands append independent Session MCP settings revisions; they do not change other Sessions or future defaults. Each snapshot retains at most 32 server identities including removed tombstones, with at most 16 enabled selections; the existing shared Runtime connection quota still applies. Removed and disabled selections survive Session reload. Direct detach remains governed by the existing lifecycle protocol. The Session retains its original owner and MCP history until ordered close, so Plan remains unavailable after MCP management even when every server is removed. File/Shell tools, approvals, backups and rewind retain their ordinary behavior. Restart drains the selected connection before reconnecting, without restarting a shared worker.
 

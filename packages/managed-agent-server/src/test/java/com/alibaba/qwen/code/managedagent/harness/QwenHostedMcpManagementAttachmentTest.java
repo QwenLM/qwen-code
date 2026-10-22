@@ -38,6 +38,7 @@ class QwenHostedMcpManagementAttachmentTest {
     private static final String SESSION = "33333333-3333-4333-8333-333333333333";
     private static final String BOOT = "11111111-1111-4111-8111-111111111111";
     private static final String OPERATION = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    private static final String PROMPT = "44444444-4444-4444-8444-444444444444";
 
     @ParameterizedTest
     @ValueSource(strings = {"query", "submit"})
@@ -78,12 +79,15 @@ class QwenHostedMcpManagementAttachmentTest {
         fixture.connector.mcpManagement("tenant", SESSION);
         assertThat(fixture.connector.attachedSessions()).isEmpty();
 
-        fixture.connector.recoverManagedRuntime("tenant", SESSION, cancellation);
+        fixture.connector.recoverManagedRuntime("tenant", SESSION, cancellation, PROMPT);
 
         var loads = ArgumentCaptor.forClass(LoadHarnessSession.class);
         verify(fixture.client).loadSession(loads.capture());
         Map<String, Object> request = ReflectionTestUtils.invokeMethod(loads.getValue(), "toJson");
         assertThat(request).containsEntry(cancellation ? "cancellationTakeover" : "driveRuntimeRecovery", true);
+        if (cancellation) {
+            assertThat(request).containsEntry("cancellationPromptId", PROMPT);
+        }
         verify(fixture.client).loadMcpManagementSession(any());
         assertThat(fixture.connector.attachedSessions()).hasSize(1);
     }
@@ -193,7 +197,7 @@ class QwenHostedMcpManagementAttachmentTest {
             var ref = mock(HarnessSessionRef.class);
             when(client.capabilities()).thenReturn(capabilities);
             when(capabilities.getBootId()).thenReturn(BOOT);
-            when(capabilities.getFeatures()).thenReturn(List.of("session-mcp-management/1"));
+            when(capabilities.getFeatures()).thenReturn(List.of("session-mcp-management/1", "targeted-cancel/1"));
             when(ref.getHarnessBootId()).thenReturn(BOOT);
             when(ref.getApprovalMode()).thenReturn("default");
             when(client.createSession(any())).thenReturn(ref);

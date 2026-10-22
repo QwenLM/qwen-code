@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import { readHarnessCheckpoint } from '@qwen-code/qwen-code-core/managed-runtime/managed-checkpoint-history.js';
 import {
   HOSTED_RECOVERY_RESOURCE_KINDS,
   parseHostedRecoveryResource,
@@ -14,13 +15,13 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import {
   describeTransaction,
+  collectNestedResourceRefs,
   parseStoredTransaction,
   requireStoredTransactionMatches,
   type StoredTransaction,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
   HARNESS_TURN_COMPLETE_BOUNDARY,
-  parseHarnessCheckpointV1,
   type HarnessCheckpointV1,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import {
@@ -196,6 +197,7 @@ const RESOURCE_KINDS = new Set([
   'managed-turn-result',
   'managed-compaction-summary',
   'managed-checkpoint',
+  'managed-checkpoint-history',
   'managed-api-history',
   ...DOMAINS.map((domain) => `managed-${domain}`),
   ...Object.values(MANAGED_TOOL_RESULT_KINDS),
@@ -950,7 +952,9 @@ export async function verifyRecoverySession(
               (latestCheckpoint?.id ?? null),
           'checkpoint coverage or predecessor conflicts',
         );
-        const state = parseHarnessCheckpointV1(await read(ref));
+        for (const nested of collectNestedResourceRefs(ref, await read(ref)))
+          await io.enqueue(nested);
+        const state = await readHarnessCheckpoint({ read }, ref);
         requireValue(
           managedSessionKeysEqual(state.identity.sessionKey, key) &&
             state.identity.checkpointId === event.payload['checkpointId'] &&
@@ -1046,12 +1050,17 @@ export async function verifyRecoverySession(
     )
       await domainBody(ref);
     else if (ref.kind === 'managed-checkpoint') {
-      const state = parseHarnessCheckpointV1(bytes);
+      for (const nested of collectNestedResourceRefs(ref, bytes))
+        await io.enqueue(nested);
+      const state = await readHarnessCheckpoint({ read }, ref);
       requireValue(
         key && managedSessionKeysEqual(state.identity.sessionKey, key),
         'checkpoint closure owner conflicts',
       );
       await enqueueRefs(state, io);
+    } else if (ref.kind === 'managed-checkpoint-history') {
+      for (const nested of collectNestedResourceRefs(ref, bytes))
+        await io.enqueue(nested);
     } else if (HOSTED_RECOVERY_RESOURCE_KINDS.has(ref.kind)) {
       for (const nested of hostedRecoveryReferences(
         parseHostedRecoveryResource(bytes, key ?? undefined, ref.kind),

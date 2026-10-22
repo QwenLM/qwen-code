@@ -82,6 +82,20 @@ in 45 minutes, check whether the integration tests passed
 
 Qwen Code pins the fire time to a specific minute and hour using a cron expression and confirms when it will fire.
 
+## Wake the session only when something changed
+
+A recurring task can carry a **gate**: a shell command that runs at each fire time, outside the model. If it prints nothing and exits 0, the fire is skipped — no turn runs and nothing is added to the conversation. If it prints output, the task's prompt runs with that output attached and marked as data produced by the command. A command that fails, prints binary data or runs longer than 60 seconds is reported once, then counted silently until it succeeds again; `CronList` shows the count.
+
+Use a gate for watches that are usually quiet, with a command that keeps its own cursor and prints only what changed:
+
+```text
+every 2 minutes, run ./check-pr.sh 15057 as a gate; when it prints something, handle the events it lists
+```
+
+Qwen Code calls `CronCreate` with `gate: "./check-pr.sh 15057"` and confirms the command the way it confirms a `Monitor` command: once, when the task is created, with the option to always allow it. The command then runs unattended from the project directory with the session's environment. A durable gated task keeps working after a restart when the command is read-only, a saved `Monitor(...)` or `Bash(...)` rule allows it, or the session runs in auto or yolo mode; otherwise the next fire reports the rule to add instead of running the command. A deny rule for the command stops the gate in every mode.
+
+Write a gated prompt as instructions ("for each event in the gate output, …"), not as a slash command. A gate is not yet available for tasks bound to the current daemon conversation (`sessionMode: "current"`). In a `qwen serve` daemon, "Run now" on a gated task asks the model to run the gate itself first and to follow the task only when the command exits 0 and prints something.
+
 ## Manage scheduled tasks
 
 Ask Qwen Code in natural language to list or cancel tasks, or reference the underlying tools directly.
@@ -96,17 +110,17 @@ cancel the deploy check job
 
 Under the hood, Qwen Code uses these tools:
 
-| Tool         | Purpose                                                                                                         |
-| :----------- | :-------------------------------------------------------------------------------------------------------------- |
-| `CronCreate` | Schedule a new task. Accepts a 5-field cron expression, the prompt to run, and whether it recurs or fires once. |
-| `CronList`   | List all scheduled tasks with their IDs, schedules, and prompts.                                                |
-| `CronDelete` | Cancel a task by ID.                                                                                            |
+| Tool         | Purpose                                                                                                                                   |
+| :----------- | :---------------------------------------------------------------------------------------------------------------------------------------- |
+| `CronCreate` | Schedule a new task. Accepts a 5-field cron expression, the prompt to run, whether it recurs or fires once, and an optional gate command. |
+| `CronList`   | List all scheduled tasks with their IDs, schedules, prompts, and the gate and its recent outcomes when one is set.                        |
+| `CronDelete` | Cancel a task by ID.                                                                                                                      |
 
 Each scheduled task has an 8-character ID you can pass to `CronDelete`. A session can hold up to 50 scheduled tasks at once.
 
 ## How scheduled tasks run
 
-The scheduler checks every second for due tasks and enqueues them when the session is idle. A scheduled prompt fires between your turns, not while Qwen Code is mid-response. If Qwen Code is busy when a task comes due, the prompt waits until the current turn ends.
+The scheduler checks every second for due tasks and enqueues them when the session is idle. A scheduled prompt fires between your turns, not while Qwen Code is mid-response. If Qwen Code is busy when a task comes due, the prompt waits until the current turn ends. A gated task runs its gate command first and is enqueued only when the command prints output.
 
 All times are interpreted in your local timezone. A cron expression like `0 9 * * *` means 9am wherever you're running Qwen Code, not UTC.
 

@@ -196,6 +196,11 @@ class SessionRowLockOrderTest {
                                     "ManagedExtensionRecordStore.storedRow/2")),
                     Map.entry("ManagedExtensionRecords.java",
                             Set.of("ManagedExtensionRecords.require/2")),
+                    // The closure callback validates resource/JOURNAL ownership
+                    // under its caller's pinned head; it never locks Session
+                    // rows or accesses Turn rows.
+                    Map.entry("ManagedHostedRecoveryRecords.java",
+                            Set.of("HistoricalResources.checkpointHistory/1")),
                     Map.entry("ManagedSchemaJdbcTemplate.java",
                             Set.of("ManagedSchemaJdbcTemplate.getSingleColumnRowMapper/1")),
                     Map.entry("ManagedSessionStore.java",
@@ -386,7 +391,7 @@ class SessionRowLockOrderTest {
                 "insertTurnCommand", "insertCancelCommand", "changeSessionModel", "changeSessionApproval",
                 "requireMcpManagement", "requireMcpSettingsCommit",
                 "insertSessionCommand", "insertWorkspaceSessionCommand",
-                "insertChildSessionCommand",
+                "insertChildSessionCommand", "insertPublicChildSessionCommand",
                 "insertInternalTeamLeadSessionCommand",
                 "beginSessionMutation",
                 "beginTaskCancelOperation", "completeSessionMutation",
@@ -400,7 +405,8 @@ class SessionRowLockOrderTest {
                 "recordRecoveryAdmission", "retractContinuationOutput",
                 "retractHarnessTurnOutput", "recordHarnessEvents",
                 "cancelUnadmittedTurn", "cancelBeforeAdmission", "failTurn",
-                "failRecoveryBlockedTurn",
+                "failRecoveryBlockedTurn", "markTurnFailureRecovery",
+                "requestRecoveryRecheck",
                 "appendPublicEventIfAbsent", "appendLiveSessionEventIfAbsent",
                 // Main's rename-delivery family (#13682): each takes the
                 // session-row FOR UPDATE before its delivery-row work.
@@ -463,12 +469,13 @@ class SessionRowLockOrderTest {
                         "findRuntimeRecoveryParked",
                         "parkTurnForRuntimeRecovery",
                         "insertCancelCommand", "insertChildSession",
-                        "insertChildSessionCommand", "insertCsiSessionCommand",
+                        "insertChildSessionCommand", "insertPublicChildSessionCommand", "insertCsiSessionCommand",
                         "insertInternalTeamLeadSessionCommand",
                         "insertSession", "insertSessionCommand", "insertTurn",
                         "insertTurnCommand", "insertWorkspaceSessionCommand",
                         "listTurns", "markSubmissionAttempted",
-                        "markTurnRecoveryBlocked",
+                        "markTurnRecoveryBlocked", "markTurnFailureRecovery",
+                        "requestRecoveryRecheck",
                         "materializeEvent", "materializeInput",
                         "materializeNextBatch", "recordAdmission",
                         "recordHarnessEvents", "recordRecoveryAdmission",
@@ -510,7 +517,8 @@ class SessionRowLockOrderTest {
     void theOrderPinnedEntriesKeepTheirTransactionalBoundary() {
         for (String name : List.of("recordAdmission", "failTurn", "failRecoveryBlockedTurn",
                 "cancelUnadmittedTurn", "cancelBeforeAdmission",
-                "beginContextCompression", "markContextCompressionSubmitted")) {
+                "beginContextCompression", "markContextCompressionSubmitted", "markTurnFailureRecovery",
+                "requestRecoveryRecheck")) {
             List<Method> entries = Arrays.stream(ManagedAgentStore.class
                     .getDeclaredMethods())
                     .filter(method -> method.getName().equals(name))
