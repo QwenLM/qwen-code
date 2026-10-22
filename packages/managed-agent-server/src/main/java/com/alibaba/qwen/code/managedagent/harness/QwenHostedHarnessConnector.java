@@ -523,6 +523,56 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsContextCompression() {
+        try {
+            return client().capabilities().getFeatures().contains("context-compression/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
+    public ContextCompressionSubmission prepareContextCompression(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        requireReadyForNewWork(tenantId, sessionId, false);
+        reattachTakenOver(tenantId, sessionId);
+        HarnessSessionRef ref = attachment(tenantId, sessionId, true);
+        var preparedClient = client();
+        if (!preparedClient.capabilities().getFeatures().contains("context-compression/1")) {
+            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(
+                    org.springframework.http.HttpStatus.CONFLICT, "unsupported_feature",
+                    "Hosted context compression is unavailable.");
+        }
+        return () -> {
+            try {
+                return preparedClient.compressContext(ref, body);
+            } catch (HostedHarnessGenerationException error) {
+                adoptGeneration(error);
+                throw error;
+            }
+        };
+    }
+
+    @Override
+    public Map<String, Object> runContextCompression(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        return prepareContextCompression(tenantId, sessionId, body).submit();
+    }
+
+    @Override
+    public Map<String, Object> readContextCompression(String tenantId, String sessionId,
+            String operationId) {
+        try {
+            reattachTakenOver(tenantId, sessionId);
+            HarnessSessionRef ref = attachment(tenantId, sessionId, true);
+            return client().readContextCompression(ref, operationId);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
     public boolean supportsModelSelection() {
         try {
             return client().capabilities().getFeatures().contains("model-selection/1");

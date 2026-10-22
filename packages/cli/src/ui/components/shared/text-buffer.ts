@@ -4,16 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawnSync } from 'node:child_process';
-import fs from 'node:fs';
-import os from 'node:os';
-import pathMod from 'node:path';
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   createDebugLogger,
   unescapePath,
   escapePath,
-  getExternalEditorCommand,
   type EditorType,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -23,6 +18,7 @@ import {
   stripUnsafeCharacters,
   getCachedStringWidth,
 } from '../../utils/textUtils.js';
+import { editTextInExternalEditor } from '../../utils/external-editor.js';
 import type { VimAction } from './vim-buffer-actions.js';
 import { handleVimAction } from './vim-buffer-actions.js';
 
@@ -1251,6 +1247,141 @@ export type TextBufferAction =
   | { type: 'vim_move_to_line'; payload: { lineNumber: number } }
   | { type: 'vim_escape_insert_mode' };
 
+/** Shared logical word target; each renderer keeps its own buffer and undo. */
+export function getWordMovePosition(
+  lines: readonly string[],
+  cursorRow: number,
+  cursorCol: number,
+  direction: 'wordLeft' | 'wordRight',
+): { row: number; col: number } {
+  if (direction === 'wordLeft') {
+    if (cursorCol === 0 && cursorRow === 0)
+      return { row: cursorRow, col: cursorCol };
+
+    let newCursorRow = cursorRow;
+    let newCursorCol = cursorCol;
+
+    if (cursorCol === 0) {
+      // At start of line, move to end of previous line
+      newCursorRow--;
+      newCursorCol = cpLen(lines[newCursorRow] ?? '');
+    } else {
+      const lineContent = lines[cursorRow];
+      const arr = toCodePoints(lineContent);
+      let start = cursorCol;
+
+      // Try CJK segmentation first for lines containing CJK
+      const boundaries = getWordBoundaries(lineContent, arr);
+      const startBoundary = findPrevWordStart(boundaries, start);
+      if (startBoundary !== null) {
+        start = startBoundary;
+      } else {
+        // Fallback: word boundary detection
+        // Check if we're in a whitespace-only prefix before any word
+        let onlySpaces = true;
+        for (let i = 0; i < start; i++) {
+          if (isWordCharStrict(arr[i] ?? '')) {
+            onlySpaces = false;
+            break;
+          }
+        }
+
+        if (onlySpaces) {
+          // All characters before cursor are whitespace/special
+          // Jump to column 0 (start of line)
+          start = 0;
+        } else {
+          // First: skip backwards over non-word characters (punctuation)
+          while (start > 0 && !isWordCharStrict(arr[start - 1] ?? '')) start--;
+          // Then: move to the start of the current word
+          // For CJK text (same script), treat each character as a word
+          while (start > 0) {
+            const prevChar = arr[start - 1];
+            const currChar = arr[start];
+            if (
+              !isWordCharStrict(prevChar ?? '') ||
+              (isWordCharStrict(currChar ?? '') &&
+                isDifferentScript(currChar ?? '', prevChar ?? ''))
+            ) {
+              break;
+            }
+            // If current and previous are both CJK (same script), stop here
+            // so each CJK character becomes its own word
+            if (isCjkChar(currChar ?? '') && isCjkChar(prevChar ?? '')) {
+              break;
+            }
+            start--;
+          }
+        }
+      }
+      newCursorCol = start;
+    }
+    return {
+      row: newCursorRow,
+      col: newCursorCol,
+    };
+  } else {
+    if (
+      cursorRow === lines.length - 1 &&
+      cursorCol === cpLen(lines[cursorRow] ?? '')
+    ) {
+      return { row: cursorRow, col: cursorCol };
+    }
+
+    let newCursorRow = cursorRow;
+    let newCursorCol = cursorCol;
+    const lineContent = lines[cursorRow] ?? '';
+    const arr = toCodePoints(lineContent);
+
+    if (cursorCol >= arr.length) {
+      newCursorRow++;
+      newCursorCol = 0;
+    } else {
+      // Try segmentation first for lines containing CJK
+      const boundaries = getWordBoundaries(lineContent, arr);
+      const endBoundary = findNextWordEnd(boundaries, cursorCol);
+
+      let end: number;
+      if (endBoundary !== null) {
+        end = endBoundary;
+        // Modern editor behavior: skip whitespace to land on next word's start
+        while (end < arr.length && isWhitespace(arr[end] ?? '')) {
+          end++;
+        }
+      } else if (
+        cursorCol < arr.length &&
+        !isWordCharStrict(arr[cursorCol] ?? '')
+      ) {
+        // Cursor is on non-word character (space/punctuation)
+        // Skip over non-word characters first, then find next word end
+        end = cursorCol;
+        while (end < arr.length && !isWordCharStrict(arr[end] ?? '')) end++;
+        // Now find the end of the word we just reached
+        if (end < arr.length) {
+          // Check if boundaries cover this new position
+          const nextEnd = findNextWordEnd(boundaries, end);
+          if (nextEnd !== null) {
+            end = nextEnd;
+          } else {
+            end = findWordEndFallback(arr, end);
+          }
+        }
+      } else {
+        // Fallback: word boundary detection
+        end = cursorCol;
+        // Skip over non-word characters (punctuation/whitespace)
+        while (end < arr.length && !isWordCharStrict(arr[end] ?? '')) end++;
+        end = findWordEndFallback(arr, end);
+      }
+      newCursorCol = end;
+    }
+    return {
+      row: newCursorRow,
+      col: newCursorCol,
+    };
+  }
+}
+
 function textBufferReducerLogic(
   state: TextBufferState,
   action: TextBufferAction,
@@ -1492,136 +1623,15 @@ function textBufferReducerLogic(
 
       // Logical movements
       switch (dir) {
-        case 'wordLeft': {
-          if (cursorCol === 0 && cursorRow === 0) return state;
-
-          let newCursorRow = cursorRow;
-          let newCursorCol = cursorCol;
-
-          if (cursorCol === 0) {
-            // At start of line, move to end of previous line
-            newCursorRow--;
-            newCursorCol = cpLen(lines[newCursorRow] ?? '');
-          } else {
-            const lineContent = lines[cursorRow];
-            const arr = toCodePoints(lineContent);
-            let start = cursorCol;
-
-            // Try CJK segmentation first for lines containing CJK
-            const boundaries = getWordBoundaries(lineContent, arr);
-            const startBoundary = findPrevWordStart(boundaries, start);
-            if (startBoundary !== null) {
-              start = startBoundary;
-            } else {
-              // Fallback: word boundary detection
-              // Check if we're in a whitespace-only prefix before any word
-              let onlySpaces = true;
-              for (let i = 0; i < start; i++) {
-                if (isWordCharStrict(arr[i] ?? '')) {
-                  onlySpaces = false;
-                  break;
-                }
-              }
-
-              if (onlySpaces) {
-                // All characters before cursor are whitespace/special
-                // Jump to column 0 (start of line)
-                start = 0;
-              } else {
-                // First: skip backwards over non-word characters (punctuation)
-                while (start > 0 && !isWordCharStrict(arr[start - 1] ?? ''))
-                  start--;
-                // Then: move to the start of the current word
-                // For CJK text (same script), treat each character as a word
-                while (start > 0) {
-                  const prevChar = arr[start - 1];
-                  const currChar = arr[start];
-                  if (
-                    !isWordCharStrict(prevChar ?? '') ||
-                    (isWordCharStrict(currChar ?? '') &&
-                      isDifferentScript(currChar ?? '', prevChar ?? ''))
-                  ) {
-                    break;
-                  }
-                  // If current and previous are both CJK (same script), stop here
-                  // so each CJK character becomes its own word
-                  if (isCjkChar(currChar ?? '') && isCjkChar(prevChar ?? '')) {
-                    break;
-                  }
-                  start--;
-                }
-              }
-            }
-            newCursorCol = start;
-          }
-          return {
-            ...state,
-            cursorRow: newCursorRow,
-            cursorCol: newCursorCol,
-            preferredCol: null,
-          };
-        }
+        case 'wordLeft':
         case 'wordRight': {
-          if (
-            cursorRow === lines.length - 1 &&
-            cursorCol === cpLen(lines[cursorRow] ?? '')
-          ) {
+          const target = getWordMovePosition(lines, cursorRow, cursorCol, dir);
+          if (target.row === cursorRow && target.col === cursorCol)
             return state;
-          }
-
-          let newCursorRow = cursorRow;
-          let newCursorCol = cursorCol;
-          const lineContent = lines[cursorRow] ?? '';
-          const arr = toCodePoints(lineContent);
-
-          if (cursorCol >= arr.length) {
-            newCursorRow++;
-            newCursorCol = 0;
-          } else {
-            // Try segmentation first for lines containing CJK
-            const boundaries = getWordBoundaries(lineContent, arr);
-            const endBoundary = findNextWordEnd(boundaries, cursorCol);
-
-            let end: number;
-            if (endBoundary !== null) {
-              end = endBoundary;
-              // Modern editor behavior: skip whitespace to land on next word's start
-              while (end < arr.length && isWhitespace(arr[end] ?? '')) {
-                end++;
-              }
-            } else if (
-              cursorCol < arr.length &&
-              !isWordCharStrict(arr[cursorCol] ?? '')
-            ) {
-              // Cursor is on non-word character (space/punctuation)
-              // Skip over non-word characters first, then find next word end
-              end = cursorCol;
-              while (end < arr.length && !isWordCharStrict(arr[end] ?? ''))
-                end++;
-              // Now find the end of the word we just reached
-              if (end < arr.length) {
-                // Check if boundaries cover this new position
-                const nextEnd = findNextWordEnd(boundaries, end);
-                if (nextEnd !== null) {
-                  end = nextEnd;
-                } else {
-                  end = findWordEndFallback(arr, end);
-                }
-              }
-            } else {
-              // Fallback: word boundary detection
-              end = cursorCol;
-              // Skip over non-word characters (punctuation/whitespace)
-              while (end < arr.length && !isWordCharStrict(arr[end] ?? ''))
-                end++;
-              end = findWordEndFallback(arr, end);
-            }
-            newCursorCol = end;
-          }
           return {
             ...state,
-            cursorRow: newCursorRow,
-            cursorCol: newCursorCol,
+            cursorRow: target.row,
+            cursorCol: target.col,
             preferredCol: null,
           };
         }
@@ -2505,124 +2515,20 @@ export function useTextBuffer({
 
   const openInExternalEditor = useCallback(
     async (opts: { editor?: string } = {}): Promise<void> => {
-      let tmpDir: string;
-      let filePath: string;
-      try {
-        tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'qwen-edit-'));
-        filePath = pathMod.join(tmpDir, 'buffer.txt');
-      } catch (err) {
-        debugLogger.error(
-          '[useTextBuffer] failed to create temp directory',
-          err,
-        );
-        return;
-      }
-
-      let editorCmd: string;
-      let editorArgs: string[];
-      let useShell = false;
-      let editorSource: 'opts' | 'preferred' | 'env/default' = 'env/default';
-
-      if (opts.editor) {
-        // Explicit programmatic override takes highest priority
-        editorCmd = opts.editor;
-        editorArgs = [filePath];
-        editorSource = 'opts';
-        if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(editorCmd)) {
-          if (/["|%!]/.test(editorCmd)) {
-            debugLogger.error(
-              `[useTextBuffer] opts.editor command contains unsafe characters: ${editorCmd}`,
-            );
-            try {
-              fs.rmSync(tmpDir, { recursive: true, force: true });
-            } catch {
-              /* ignore */
-            }
-            return;
-          }
-          useShell = true;
-        }
-      } else {
-        const resolved = preferredEditor
-          ? getExternalEditorCommand(preferredEditor, filePath)
-          : null;
-
-        if (resolved) {
-          editorCmd = resolved.command;
-          editorArgs = resolved.args;
-          useShell = resolved.needsShell;
-          editorSource = 'preferred';
-        } else {
-          if (preferredEditor) {
-            debugLogger.warn(
-              `[useTextBuffer] preferred editor "${preferredEditor}" not found, falling back to env/default`,
-            );
-          }
-          editorCmd =
-            process.env['VISUAL'] ??
-            process.env['EDITOR'] ??
-            (process.platform === 'win32' ? 'notepad' : 'vi');
-          editorArgs = [filePath];
-          if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(editorCmd)) {
-            if (/["|%!]/.test(editorCmd)) {
-              debugLogger.error(
-                `[useTextBuffer] Editor command from environment contains unsafe characters: ${editorCmd}`,
-              );
-              try {
-                fs.rmSync(tmpDir, { recursive: true, force: true });
-              } catch {
-                /* ignore */
-              }
-              return;
-            }
-            useShell = true;
-          }
-        }
-      }
-
-      if (useShell) {
-        // .cmd/.bat launch through cmd.exe on Windows. Quote both the
-        // command and args so paths with spaces survive cmd.exe parsing.
-        // These are process-generated paths; do not reuse for
-        // user-controlled arguments.
-        editorCmd = `"${editorCmd}"`;
-        editorArgs = editorArgs.map((a) => `"${a}"`);
-      }
-
       const wasRaw = stdin?.isRaw ?? false;
       try {
         const currentText = stateRef.current.lines.join('\n');
-        fs.writeFileSync(filePath, currentText, {
-          encoding: 'utf8',
-          mode: 0o600,
+        const newText = editTextInExternalEditor(currentText, {
+          editor: opts.editor,
+          preferredEditor,
+          beforeLaunch: () => setRawMode?.(false),
         });
-        setRawMode?.(false);
-
-        debugLogger.warn(
-          `[useTextBuffer] launching external editor (cmd=${editorCmd}, shell=${useShell}, source=${editorSource}, file=${filePath})`,
-        );
-        const { status, error, signal } = spawnSync(editorCmd, editorArgs, {
-          stdio: 'inherit',
-          shell: useShell,
-          timeout: 30 * 60 * 1000,
-        });
-        if (error) throw error;
-        if (signal)
-          throw new Error(`External editor was killed by signal ${signal}`);
-        if (typeof status === 'number' && status !== 0)
-          throw new Error(`External editor exited with status ${status}`);
-
-        let newText = fs.readFileSync(filePath, 'utf8');
-        newText = newText.replace(/\r\n?/g, '\n');
         if (newText !== currentText) {
           dispatch({ type: 'create_undo_snapshot' });
           dispatch({ type: 'set_text', payload: newText, pushToUndo: false });
         }
       } catch (err) {
-        debugLogger.error(
-          `[useTextBuffer] external editor error (cmd=${editorCmd}, shell=${useShell}, source=${editorSource}, file=${filePath})`,
-          err,
-        );
+        debugLogger.error('[useTextBuffer] external editor error', err);
       } finally {
         try {
           if (wasRaw) setRawMode?.(true);
@@ -2631,14 +2537,6 @@ export function useTextBuffer({
             '[useTextBuffer] failed to restore raw mode after external editor',
             rawErr,
           );
-        }
-        try {
-          // recursive+force handles leftover swap files (.swp) from vim/neovim.
-          // On Windows, EPERM/EBUSY from locked files may still cause a partial
-          // delete — the catch below keeps it non-fatal.
-          fs.rmSync(tmpDir, { recursive: true, force: true });
-        } catch {
-          /* best-effort cleanup */
         }
       }
     },
