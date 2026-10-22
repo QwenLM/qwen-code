@@ -343,6 +343,13 @@ export class JavaManagedAgentClient {
     return this.post('/sessions/cwd/change', request, signal);
   }
 
+  compressContext(
+    request: Schemas['WebShellContextCompressionRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellContextCompressionOperation']> {
+    return this.post('/sessions/compress', request, signal);
+  }
+
   getSessionModels(sessionId: string, signal?: AbortSignal) {
     return this.post<Schemas['WebShellSessionModels']>(
       '/session-models/query',

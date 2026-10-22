@@ -1053,7 +1053,11 @@ class ManagedSessionStoreHttpClient {
               // So is a session message the lineage refuses: only the
               // store holds a child's lineage, so the authority could not
               // refuse it first, and the Session's log stays writable.
-              error.remoteCode === 'session_message_lineage_refused')) ||
+              error.remoteCode === 'session_message_lineage_refused' ||
+              error.remoteCode ===
+                'context_compression_authorization_revoked' ||
+              (descriptor.operation === 'contextCompression' &&
+                error.remoteCode === 'workspace_unavailable'))) ||
             (this.lifecycleAuthority &&
               (error.status === 403 ||
                 (error.status === 409 &&
