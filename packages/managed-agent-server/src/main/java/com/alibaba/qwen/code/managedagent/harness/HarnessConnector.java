@@ -22,9 +22,33 @@ public interface HarnessConnector extends AutoCloseable {
 
     default boolean supportsModelSelection() { return false; }
 
+    default boolean supportsContextCompression() { return false; }
+
+    @FunctionalInterface
+    interface ContextCompressionSubmission {
+        Map<String, Object> submit();
+    }
+
+    default ContextCompressionSubmission prepareContextCompression(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        return () -> runContextCompression(tenantId, sessionId, body);
+    }
+
+    default Map<String, Object> runContextCompression(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        throw new UnsupportedOperationException("Context compression is unavailable");
+    }
+
+    default Map<String, Object> readContextCompression(String tenantId, String sessionId,
+            String operationId) {
+        throw new UnsupportedOperationException("Context compression is unavailable");
+    }
+
     default boolean supportsPlanMode() { return false; }
 
     default boolean supportsInputAttachments() { return false; }
+
+    default boolean supportsSessionSkills() { return false; }
 
     default boolean isWorkspaceFilesAvailable() {
         return false;

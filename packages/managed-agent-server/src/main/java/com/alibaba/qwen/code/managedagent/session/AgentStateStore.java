@@ -187,6 +187,20 @@ public interface AgentStateStore {
                 approvalMode, approvalSelectionSupported);
     }
 
+    @org.springframework.transaction.annotation.Transactional
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest,
+            WorkspaceSelection selection, String approvalMode, boolean approvalSelectionSupported,
+            Boolean planMode, boolean planModeSupported, List<Map<String, Object>> skills) {
+        if (!skills.isEmpty()) {
+            throw new UnsupportedOperationException("Session Skills are unavailable");
+        }
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
+                approvalSelectionSupported, planMode, planModeSupported);
+    }
+
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest);
 
@@ -361,6 +375,48 @@ public interface AgentStateStore {
         blockLifecycleOperation(tenantId, sessionId, operationId, owner,
                 generation, failureCode, availableAt);
     }
+
+    default OperationAdmission beginContextCompression(String tenantId, String sessionId,
+            String actorId, String actorDigest, String key, String digest,
+            long expectedCompactionRevision, boolean supported) {
+        throw new UnsupportedOperationException("Context compression is unavailable");
+    }
+
+    record ContextCompressionState(long compactionRevision, String operationId, boolean available) {
+        public ContextCompressionState(long compactionRevision, String operationId) {
+            this(compactionRevision, operationId, true);
+        }
+    }
+
+    default ContextCompressionState contextCompressionState(String tenantId, String sessionId) {
+        return new ContextCompressionState(0, null);
+    }
+
+    default Map<String, ContextCompressionState> contextCompressionStates(String tenantId, List<String> sessionIds) {
+        return Map.of();
+    }
+
+    default Map<String, Object> contextCompressionRequest(String tenantId, String sessionId,
+            String operationId) { return Map.of(); }
+
+    default List<OperationTarget> findContextCompressions(int limit) { return List.of(); }
+
+    default Optional<OperationRecord> claimContextCompression(String tenantId, String sessionId,
+            String operationId, String owner, Duration duration) { return Optional.empty(); }
+
+    default void requireContextCompressionCommit(String tenantId, String sessionId, String operationId) {}
+
+    default boolean markContextCompressionSubmitted(OperationRecord operation, String owner) {
+        return false;
+    }
+
+    default boolean settleContextCompression(OperationRecord operation, String owner,
+            String outcome, Long revision, String failureCode) { return false; }
+
+    default void retryContextCompressionPreparation(OperationRecord operation, String owner, long retryAt) {}
+
+    default void awaitContextCompression(OperationRecord operation, String owner,
+            boolean acceptanceKnown, String failureCode, long retryAt) {}
 
     /**
      * Admits a controlled same-Workspace cwd change (W2) on a bound Session,

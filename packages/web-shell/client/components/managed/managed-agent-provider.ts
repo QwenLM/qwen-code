@@ -31,11 +31,14 @@ export function isManagedApprovalMode(
   return value === 'default' || value === 'auto-edit' || value === 'yolo';
 }
 
+export type ManagedSessionSkill = components['schemas']['SessionCreationSkill'];
+
 export interface ManagedSessionOptions {
   approvalMode: ManagedApprovalMode;
   availableApprovalModes: ManagedApprovalMode[];
   planModeSupported?: boolean;
   inputAttachments?: boolean;
+  skillsSupported?: boolean;
 }
 
 export interface ManagedSessionApproval extends ManagedSessionOptions {
@@ -87,6 +90,8 @@ export interface ManagedAgentSessionSummary {
   planModeSupported?: boolean;
   modelContext?: ManagedModelContext;
   modelSelection?: ManagedModelSelection;
+  compactionRevision?: number;
+  contextCompressionOperationId?: string;
   activeTurnId?: string;
   title: string;
   workspaceCwd?: string;
@@ -105,6 +110,7 @@ export interface ManagedAgentSessionSummary {
   capabilities: {
     canSend: boolean;
     canCancel: boolean;
+    canRename?: boolean;
     actions?: boolean;
     tasks?: boolean;
     artifacts?: boolean;
@@ -112,6 +118,7 @@ export interface ManagedAgentSessionSummary {
     workspaceTurns?: boolean;
     cwdChange?: boolean;
     modelChange?: boolean;
+    contextCompression?: boolean;
     approvalModeChange?: boolean;
     inputAttachments?: boolean;
   };
@@ -175,6 +182,8 @@ export interface ManagedAgentCommandOptions extends ManagedAgentRequestOptions {
 }
 
 export type ManagedCwdOperation = components['schemas']['WebShellCwdOperation'];
+export type ManagedContextCompressionOperation =
+  components['schemas']['WebShellContextCompressionOperation'];
 export type ManagedTask = components['schemas']['WebShellTask'];
 export type ManagedTaskPage = components['schemas']['WebShellTaskPage'];
 export type ManagedTaskEvent = components['schemas']['WebShellTaskEvent'];
@@ -305,6 +314,18 @@ export interface ManagedAgentProvider {
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedCwdOperation>;
   };
+  readonly contextCompression?: {
+    submit(
+      sessionId: string,
+      request: { expectedCompactionRevision: number },
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedContextCompressionOperation>;
+    query(
+      sessionId: string,
+      operationId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedContextCompressionOperation>;
+  };
   readonly approvalChange?: {
     queryOptions(
       sessionId: string,
@@ -388,6 +409,7 @@ export interface ManagedAgentProvider {
         cwdRelative: string;
         approvalMode?: ManagedApprovalMode;
         planMode?: boolean;
+        skills?: ManagedSessionSkill[];
       },
       options: ManagedAgentCommandOptions,
     ): Promise<{ sessionId: string }>;
@@ -400,6 +422,7 @@ export interface ManagedAgentProvider {
         input?: ManagedInputBlock[];
         approvalMode?: ManagedApprovalMode;
         planMode?: boolean;
+        skills?: ManagedSessionSkill[];
       },
       options: ManagedAgentCommandOptions,
     ): Promise<{ sessionId: string }>;
@@ -418,6 +441,11 @@ export interface ManagedAgentProvider {
     sessionId: string,
     options: ManagedAgentRequestOptions,
   ): Promise<ManagedAgentSessionSummary>;
+  renameSession?(
+    sessionId: string,
+    displayName: string,
+    options: ManagedAgentCommandOptions,
+  ): Promise<{ displayName: string }>;
   getTranscript(
     sessionId: string,
     options: ManagedAgentRequestOptions & {

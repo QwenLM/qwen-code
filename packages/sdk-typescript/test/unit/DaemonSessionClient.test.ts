@@ -3681,6 +3681,179 @@ describe('DaemonSessionClient clientId self-heal', () => {
     });
   }
 
+  it.each([false, undefined])(
+    'refreshes or clears Generated UI state after reattachment: %s',
+    async (enabled) => {
+      let prompts = 0;
+      const generatedUi =
+        enabled === undefined ? undefined : { version: 1 as const, enabled };
+      const { fetch } = recordingFetch((req) => {
+        if (req.url.endsWith('/resume'))
+          return jsonResponse(200, {
+            sessionId: 's-1',
+            workspaceCwd: '/work/a',
+            attached: true,
+            clientId: 'client-2',
+            state: {},
+            ...(generatedUi ? { generatedUi } : {}),
+          });
+        if (req.url.endsWith('/prompt')) {
+          prompts++;
+          return prompts === 1
+            ? invalidClientIdResponse()
+            : jsonResponse(200, { stopReason: 'end_turn' });
+        }
+        return jsonResponse(500, { error: 'unexpected request' });
+      });
+      const session = newSession(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      );
+      session.session.generatedUi = { version: 1, enabled: true };
+      await session.prompt({ prompt: [{ type: 'text', text: 'hello' }] });
+      expect(session.clientId).toBe('client-2');
+      expect(session.session.generatedUi).toEqual(generatedUi);
+    },
+  );
+
+  it.each([
+    {
+      sessionId: 's-1',
+      generatedUi: { version: 1, enabled: false },
+      expected: { version: 1, enabled: false },
+    },
+    { sessionId: 's-1', generatedUi: undefined, expected: undefined },
+    {
+      sessionId: 'other',
+      generatedUi: { version: 1, enabled: true },
+      expected: undefined,
+    },
+    {
+      sessionId: 's-1',
+      generatedUi: { version: 2, enabled: true },
+      expected: undefined,
+    },
+    {
+      sessionId: 's-1',
+      generatedUi: { version: 1, enabled: 'true' },
+      expected: undefined,
+    },
+  ])(
+    'refreshes Generated UI from the current owner context: %j',
+    async ({ sessionId, generatedUi, expected }) => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          sessionId,
+          workspaceCwd: '/work/a',
+          state: { _meta: { generatedUi } },
+        }),
+      );
+      const session = newSession(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      );
+      session.session.generatedUi = { version: 1, enabled: true };
+      await session.context();
+      expect(session.session.generatedUi).toEqual(expected);
+    },
+  );
+
+  it('clears Generated UI if the owner context cannot be confirmed', async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(500, { error: 'unavailable' }),
+    );
+    const session = newSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+    session.session.generatedUi = { version: 1, enabled: true };
+    await expect(session.context()).rejects.toThrow('unavailable');
+    expect(session.session.generatedUi).toBeUndefined();
+  });
+
+  it('ignores an older Generated UI context response after a newer restriction', async () => {
+    let resolveOlder!: (response: Response) => void;
+    let calls = 0;
+    const older = new Promise<Response>((resolve) => {
+      resolveOlder = resolve;
+    });
+    const reply = (enabled: boolean) =>
+      jsonResponse(200, {
+        v: 1,
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        state: { _meta: { generatedUi: { version: 1, enabled } } },
+      });
+    const { fetch } = recordingFetch(() =>
+      ++calls === 1 ? older : reply(false),
+    );
+    const session = newSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+    const first = session.context();
+    await session.context();
+    expect(session.session.generatedUi?.enabled).toBe(false);
+    resolveOlder(reply(true));
+    await first;
+    expect(session.session.generatedUi?.enabled).toBe(false);
+  });
+
+  it('does not replace a newer Generated UI restriction with an older reattach response', async () => {
+    let resolveResume!: (response: Response) => void;
+    const resume = new Promise<Response>((resolve) => {
+      resolveResume = resolve;
+    });
+    let prompts = 0;
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/resume')) return resume;
+      if (req.url.endsWith('/context'))
+        return jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          state: {
+            _meta: {
+              generatedUi: {
+                version: 1,
+                enabled: false,
+                reason: 'policy-disabled',
+              },
+            },
+          },
+        });
+      if (req.url.endsWith('/prompt'))
+        return ++prompts === 1
+          ? invalidClientIdResponse()
+          : jsonResponse(200, { stopReason: 'end_turn' });
+      return jsonResponse(500, { error: 'unexpected request' });
+    });
+    const session = newSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+    const prompt = session.prompt({
+      prompt: [{ type: 'text', text: 'hello' }],
+    });
+    await vi.waitFor(() =>
+      expect(calls.some((req) => req.url.endsWith('/resume'))).toBe(true),
+    );
+    await session.context();
+    resolveResume(
+      jsonResponse(200, {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-2',
+        state: {},
+        generatedUi: { version: 1, enabled: true },
+      }),
+    );
+    await prompt;
+    expect(session.clientId).toBe('client-2');
+    expect(session.session.generatedUi).toEqual({
+      version: 1,
+      enabled: false,
+      reason: 'policy-disabled',
+    });
+  });
+
   it('checks the caller before the first admission request', async () => {
     const { fetch, calls } = recordingFetch(() =>
       jsonResponse(202, { promptId: 'p-1', lastEventId: 0 }),

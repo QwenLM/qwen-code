@@ -1073,7 +1073,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description:
-          'When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.',
+          'When true, human submissions containing `workflow` or `ultracode` no longer softly steer the current turn toward the Workflow tool. Applies across terminal, IDE, Web and explicitly human-origin SDK messages when workflows are enabled. Plain headless prompts and automated messages do not trigger this reminder.',
         showInDialog: true,
       },
       showStatusInTitle: {
@@ -1945,8 +1945,23 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. Daemon/ACP sessions run none of the other detectors; setting this to false also enables a global-duplicate tool-call halt there. Core-client sessions keep a minimal always-on guard regardless of this setting (consecutive identical tool calls, shell inspection-command stagnation, and a per-turn tool-call cap, see model.maxToolCallsPerTurn); daemon/ACP sessions keep the per-turn tool-call cap and an invalid-tool-params stagnation guard.',
+          'Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. Daemon/ACP sessions run none of the other detectors; setting this to false also enables a global-duplicate tool-call halt there. Core-client sessions keep a minimal always-on guard regardless of this setting (consecutive identical tool calls, shell inspection-command stagnation, and a per-turn tool-call cap, see model.maxToolCallsPerTurn); daemon/ACP sessions keep the per-turn tool-call cap and an invalid-tool-params stagnation guard. Whether these guards remind or stop is set by model.loopProtection.',
         showInDialog: false,
+      },
+      loopProtection: {
+        type: 'enum',
+        label: 'Loop Protection',
+        category: 'Model',
+        requiresRestart: true,
+        default: 'warn',
+        description:
+          'What a loop detector does when it fires. "warn" (default) reminds the model once and does not stop the turn, except for content and thought repetition, which happens mid-stream where no reminder can be delivered; "stop" keeps every stop point: the always-on guards (identical calls, shell inspection, invalid tool parameters, and stuck repetition past the adaptive cap) remind the model once when the turn reaches their reminder point before the stop, and the opt-in heuristics stop without a reminder; "off" neither reminds nor stops and only records telemetry. Budgets (an explicit model.maxToolCallsPerTurn and the 1000-call backstop of the adaptive default) and the duplicate provider tool-call id guard stop in every mode, so under "warn" and "off" a stuck turn runs until a budget stops it. Applies to the CLI, subagents and daemon/ACP sessions; model.skipLoopDetection still decides whether the heuristic detectors run.',
+        showInDialog: false,
+        options: [
+          { value: 'warn', label: 'Remind only' },
+          { value: 'stop', label: 'Stop after a reminder' },
+          { value: 'off', label: 'Off' },
+        ],
       },
       maxToolCallsPerTurn: {
         type: 'integer',
@@ -1955,7 +1970,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
         description:
-          'Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations and runtime-scheduled Goal turns each start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it halts only when the model keeps repeating the same call (a stuck loop); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to the interactive TUI, non-interactive (-p / JSON / stream-JSON) core-client runs, and daemon/ACP sessions alike. Daemon/ACP sessions evaluate the cap once per tool batch, before execution: a batch that would cross an explicit cap or the hard backstop is skipped whole, so a turn never executes past either (it can halt up to one batch short), while the adaptive soft cap is exceeded by design, up to the backstop. They also have no in-session disable. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.',
+          'Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations and runtime-scheduled Goal turns each start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it acts only when the model repeats the same call (a stuck loop; see model.loopProtection); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to the interactive TUI, non-interactive (-p / JSON / stream-JSON) core-client runs, and daemon/ACP sessions alike. Daemon/ACP sessions evaluate the cap once per tool batch, before execution: a batch that would cross an explicit cap or the hard backstop is skipped whole, so a turn never executes past either (it can halt up to one batch short), while the adaptive soft cap is exceeded by design, up to the backstop. They also have no in-session disable. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.',
         showInDialog: false,
       },
       skipStartupContext: {
@@ -4306,6 +4321,16 @@ const SETTINGS_SCHEMA = {
     description: 'Settings to enable experimental features.',
     showInDialog: false,
     properties: {
+      generatedUi: {
+        type: 'boolean',
+        label: 'Generated UI',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
+        showInDialog: true,
+      },
       mods: {
         type: 'boolean',
         label: 'Mods (Experimental)',

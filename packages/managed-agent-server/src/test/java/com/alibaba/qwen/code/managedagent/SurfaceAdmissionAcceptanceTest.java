@@ -447,7 +447,8 @@ class SurfaceAdmissionAcceptanceTest {
                 if (entry.capabilities().contains(Capability.ACTION_RESPOND)) {
                     expect(entry, OPERATOR, 202, "action_response");
                     expect(entry, OWNER_RANK, 202, "action_response");
-                } else if (entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)) {
+                } else if (entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)
+                        || entry.capabilities().contains(Capability.SESSION_CONTEXT_COMPRESSION)) {
                     expect(entry, OPERATOR, 409, "unsupported_feature");
                     expect(entry, OWNER_RANK, 409, "unsupported_feature");
                 } else {
@@ -459,7 +460,8 @@ class SurfaceAdmissionAcceptanceTest {
                 // stay invisible so an unauthenticated caller learns
                 // nothing about the bound Session.
                 boolean actorRequired = entry.capabilities().contains(Capability.SESSION_CWD_CHANGE)
-                        || entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE);
+                        || entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)
+                        || entry.capabilities().contains(Capability.SESSION_CONTEXT_COMPRESSION);
                 expect(entry, null, actorRequired ? 401 : 404,
                         actorRequired
                                 ? "actor_required" : "session_not_found");
@@ -1562,13 +1564,19 @@ class SurfaceAdmissionAcceptanceTest {
                             + "\",\"sessionId\":\"" + session
                             + "\",\"input\":[{\"type\":\"text\","
                             + "\"text\":\"probe\"}]}";
-            case SESSION_RENAME -> "{\"title\":\"probe\"}";
+            case SESSION_RENAME -> publicSurface ? "{\"title\":\"probe\"}"
+                    : "{\"sessionId\":\"" + session + "\",\"title\":\"probe\","
+                            + "\"idempotencyKey\":\"" + nextKey() + "\"}";
             case SESSION_CWD_CHANGE -> publicSurface
                     ? "{\"cwd_relative\":\"probe\","
                             + "\"expected_context_revision\":1}"
                     : "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\""
                             + nextKey() + "\",\"cwdRelative\":\"probe\","
                             + "\"expectedContextRevision\":1}";
+            case SESSION_CONTEXT_COMPRESSION -> publicSurface
+                    ? "{\"expected_compaction_revision\":0}"
+                    : "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\""
+                            + nextKey() + "\",\"expectedCompactionRevision\":0}";
             case SESSION_LIST -> "{}";
             case SESSION_GET -> "{\"sessionId\":\"" + session + "\"}";
             case TRANSCRIPT_QUERY -> "{\"sessionId\":\"" + session + "\"}";
