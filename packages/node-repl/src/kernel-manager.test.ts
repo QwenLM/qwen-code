@@ -1745,6 +1745,36 @@ describe('NodeReplKernelManager', () => {
     TEST_TIMEOUT,
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'kills a session process that ignores SIGTERM when the kernel exits on SIGTERM',
+    async () => {
+      // Cleanup outlasts the 2500 ms grace period, so the kernel gets the
+      // SIGTERM and exits during the 500 ms that follow.
+      createEsmPackage(
+        path.join(workDir, 'node_modules'),
+        'cua-slow-cleanup-fixture',
+        `export const cua = { async [Symbol.asyncDispose]() {
+          const until = Date.now() + 2750;
+          while (Date.now() < until);
+        } };`,
+      );
+      const child = await startSessionProcess(
+        "process.on('SIGTERM', () => {});",
+      );
+      try {
+        const install = await run(
+          `globalThis.cua = (await import('cua-slow-cleanup-fixture')).cua;`,
+        );
+        expect(install.status).toBe('ok');
+        await manager.reset();
+        await expect(child.exitedWithin(10_000)).resolves.toBe(true);
+      } finally {
+        child.stop();
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
   it(
     'disposes the process and temp directory and settles in-flight work',
     async () => {

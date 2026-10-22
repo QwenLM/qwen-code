@@ -1008,13 +1008,6 @@ export class NodeReplKernelManager {
     }
     let exited = await this.waitForExit(handle.child, TERMINATE_GRACE_MS);
     let hardKill = false;
-    if (exited && running && !IS_WINDOWS) {
-      // Processes the session started without detaching outlive a kernel
-      // that exits on its own. They are still in its process group, which
-      // keeps its ID while any of them lives, so stop them the way a
-      // signalled shutdown would have.
-      hardKill = await this.stopLeftoverProcessGroup(handle.pid);
-    }
     if (!exited) {
       this.signalProcessTree(handle, false);
       exited = await this.waitForExit(handle.child, 500);
@@ -1023,6 +1016,12 @@ export class NodeReplKernelManager {
       hardKill = true;
       this.signalProcessTree(handle, true);
       exited = await this.waitForExit(handle.child, TERMINATE_GRACE_MS);
+    } else if (running && !IS_WINDOWS) {
+      // Processes the session started without detaching outlive a kernel
+      // that exits before the hard stop, whether on its own or on SIGTERM
+      // they ignored. They are still in its process group, which keeps its
+      // ID while any of them lives, so stop them as the hard stop would.
+      hardKill = await this.stopLeftoverProcessGroup(handle.pid);
     }
     debugLogger.debug(
       `[node-repl] process tree termination completed (generation=${handle.generation}, pid=${handle.pid}, hardKill=${hardKill}, exited=${exited})`,
