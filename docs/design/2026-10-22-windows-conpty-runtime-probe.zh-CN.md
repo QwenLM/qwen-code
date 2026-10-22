@@ -70,3 +70,13 @@ Bun 压缩包为官方 release 资产 `bun-windows-x64.zip`，通过 `gh release
 运行 [39787064396](https://github.com/QwenLM/qwen-code/actions/runs/39787064396) 的源码为 `35300c37fe00adfe22c7236013b515ce14da28b8`，另三份原始 FAIL 完整保留。Node22 的控制器自身过滤 CIM 预热仍超出五秒，尚未启动 worker。Bun1.3.14 到达 ready，但没有输入确认。Bun1.4.3 确认输入后，在未变的八秒阶段内产生 79 份 nonce/PID/三个 TTY 正确的 size 帧，全部仍为 80x24，原首帧继续记录。两个 Bun 都未到达主动退出。独立审计 SHA 为 `6ea713e9a73cacfa544385b9b50c3b5f65d327d58290bf97454f0dd4fdf4d071`。这些观察不足以延长产品时限或升级 Bun。
 
 新的作者候选仅将 worker 前控制器自身 CIM 初始化改为独立有界 15 秒，并记录配置预算与成功或失败时的实际耗时。默认及其他查询仍五秒，worker 仍 45 秒，input/resize 仍八秒，SIZE 间隔仍 100ms，重试仍为零。失败继续抛出。前两份五秒失败保持原始证据；修正候选仍为 NOT_RUN，等待审查和一次新的 dispatch。
+
+## 第三轮后的实时原生尺寸判据
+
+运行 [39790195471](https://github.com/QwenLM/qwen-code/actions/runs/39790195471) 的源码为 `27efffaba0cf071a40f1bf1dcf1a15f73ec25410`，另三份原始 FAIL 保留。Node22 初始化耗时 5008.423ms，位于显式 15000ms 预算内，随后确认真实 ConPTY 加载、ready 与输入往返，但仍返回 64 份缓存 80x24 size 帧；Bun1.4.3 确认输入后返回 78 份同样的帧，Bun1.3.14 再次输入超时。没有案例到达主动退出。独立审计 SHA 为 `5ae3e4fe639208e3d9e2bd749725d4c5e3cb88c0ace37ac9df0222f8d21d23fd`。此前九份失败均保持不变。
+
+精确官方 Node `v22.23.2` 源码说明这些尺寸帧不足以证明原生 resize 缺陷：[`lib/tty.js:164`](https://github.com/nodejs/node/blob/v22.23.2/lib/tty.js#L164) 只返回缓存 columns/rows；[`src/tty_wrap.cc:90–110`](https://github.com/nodejs/node/blob/v22.23.2/src/tty_wrap.cc#L90) 要求数组参数，调用原生窗口查询，仅在返回码为零时填写 width/height，并返回数值状态码。Windows 的 [`deps/uv/src/win/tty.c:440–455`](https://github.com/nodejs/node/blob/v22.23.2/deps/uv/src/win/tty.c#L440) 对实际 TTY handle 调用 `GetConsoleScreenBufferInfo`，更新 virtual window 并返回尺寸；失败返回转换后的 Windows 错误码。这个内部 API 仅用于固定 Node22 诊断载荷，不新增生产接口。
+
+新的 NOT_RUN 候选保留所有原缓存帧及 nonce/PID/三个 TTY 断言。同一固定载荷另发短 `native-<kind>` 帧，包含 nonce、PID、原生返回码和实时尺寸，避免将两种观察塞进单行而超过原 80 列终端。初始 native ready 和 input 必须返回精确 80x24、状态码零。resize 必须由状态码零的原生查询返回实际 97x31，不能用缓存值或硬编码目标。并列保留 `firstResizeFrame`/全部缓存 `resizeFrames`，以及 `firstNativeResizeFrame`/全部 `nativeFrames`，失败也保留。缓存可能仍为 80x24、原生已是 97x31，两者按各自含义同时记录。
+
+不修改 runtime、原生包/后端、生产代码或预算。初始化 CIM15秒、后续查询5秒、worker45秒、协议8秒、SIZE100ms 和零重试不变。仍须独立审查和新的 Node 正控制，之后才能解释运行时差异。此候选不代表完整 Qwen Windows 验收通过，也不批准升级。

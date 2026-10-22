@@ -359,7 +359,7 @@ async function worker([runtime, owned, out, node, nonce]) {
     const payload = path.join(owned, 'payload.cjs');
     fs.writeFileSync(
       payload,
-      `const nonce=${JSON.stringify(nonce)};\nconst emit=(kind)=>process.stdout.write('PTY-PROBE-'+kind+':'+JSON.stringify([nonce,process.pid,process.stdin.isTTY,process.stdout.isTTY,process.stderr.isTTY,process.stdout.getWindowSize()])+'\\n');\nemit('ready');let input='';process.stdin.on('data',chunk=>{input+=chunk;let i;while((i=input.search(/[\\r\\n]/))>=0){const line=input.slice(0,i);input=input.slice(i+1);if(line==='INPUT '+nonce)emit('input');if(line==='SIZE '+nonce)emit('size');if(line==='QUIT '+nonce)process.stdout.write('PTY-PROBE-bye:'+nonce+'\\n',()=>process.exit(0));}});`,
+      `const nonce=${JSON.stringify(nonce)};\nconst emit=(kind)=>{const cached=process.stdout.getWindowSize();const actual=[0,0];const status=process.stdout._handle.getWindowSize(actual);process.stdout.write('PTY-PROBE-'+kind+':'+JSON.stringify([nonce,process.pid,process.stdin.isTTY,process.stdout.isTTY,process.stderr.isTTY,cached])+'\\n'+'PTY-PROBE-native-'+kind+':'+JSON.stringify([nonce,process.pid,status,actual])+'\\n');};\nemit('ready');let input='';process.stdin.on('data',chunk=>{input+=chunk;let i;while((i=input.search(/[\\r\\n]/))>=0){const line=input.slice(0,i);input=input.slice(i+1);if(line==='INPUT '+nonce)emit('input');if(line==='SIZE '+nonce)emit('size');if(line==='QUIT '+nonce)process.stdout.write('PTY-PROBE-bye:'+nonce+'\\n',()=>process.exit(0));}});`,
     );
     facts.payload = {
       path: payload,
@@ -405,7 +405,7 @@ async function worker([runtime, owned, out, node, nonce]) {
       );
       return match ? JSON.parse(match[1]) : null;
     };
-    await until(() => frame('ready'));
+    await until(() => frame('ready') && frame('native-ready'));
     assert.deepEqual(frame('ready'), [
       nonce,
       terminal.pid,
@@ -414,10 +414,12 @@ async function worker([runtime, owned, out, node, nonce]) {
       true,
       [80, 24],
     ]);
+    assert.deepEqual(frame('native-ready'), [nonce, terminal.pid, 0, [80, 24]]);
     facts.phase = 'input';
     terminal.write(`INPUT ${nonce}\r`);
-    await until(() => frame('input'));
+    await until(() => frame('input') && frame('native-input'));
     assert.equal(frame('input')[0], nonce);
+    assert.deepEqual(frame('native-input'), [nonce, terminal.pid, 0, [80, 24]]);
     facts.phase = 'resize';
     terminal.resize(97, 31);
     let nextSizeQuery = 0;
@@ -431,20 +433,21 @@ async function worker([runtime, owned, out, node, nonce]) {
           true,
           true,
         ]);
-      const latest = sizes.at(-1);
-      if (latest?.[5]?.[0] === 97 && latest[5][1] === 31) return true;
+      const actualSizes = frames('native-size');
+      for (const size of actualSizes)
+        assert.deepEqual(size.slice(0, 3), [nonce, terminal.pid, 0]);
+      const latest = actualSizes.at(-1);
+      if (latest?.[3]?.[0] === 97 && latest[3][1] === 31) return true;
       if (Date.now() >= nextSizeQuery) {
         terminal.write(`SIZE ${nonce}\r`);
         nextSizeQuery = Date.now() + 100;
       }
       return false;
     });
-    assert.deepEqual(frames('size').at(-1), [
+    assert.deepEqual(frames('native-size').at(-1), [
       nonce,
       terminal.pid,
-      true,
-      true,
-      true,
+      0,
       [97, 31],
     ]);
     facts.phase = 'natural-exit';
@@ -464,6 +467,12 @@ async function worker([runtime, owned, out, node, nonce]) {
   } finally {
     facts.resizeFrames = frames('size');
     facts.firstResizeFrame = facts.resizeFrames[0] ?? null;
+    facts.nativeFrames = {
+      ready: frames('native-ready'),
+      input: frames('native-input'),
+      size: frames('native-size'),
+    };
+    facts.firstNativeResizeFrame = facts.nativeFrames.size[0] ?? null;
     fs.writeFileSync(path.join(out, 'terminal.ansi'), output);
     save(path.join(out, 'worker.json'), facts);
   }
