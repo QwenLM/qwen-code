@@ -23,6 +23,7 @@ const editorMocks = vi.hoisted(() => ({
     | undefined,
   clear: vi.fn(),
   setText: vi.fn(),
+  getText: vi.fn(() => ''),
 }));
 
 vi.mock('../ChatEditor', async () => {
@@ -40,6 +41,7 @@ vi.mock('../ChatEditor', async () => {
           ({
             clear: editorMocks.clear,
             setText: editorMocks.setText,
+            getText: editorMocks.getText,
           }) as EditorHandle,
       );
       return (
@@ -171,6 +173,7 @@ describe('WorkspaceBindingCreator', () => {
     creationSkills = undefined;
     vi.clearAllMocks();
     editorMocks.props = undefined;
+    editorMocks.getText.mockReturnValue('');
     sessionStorage.clear();
     createEmpty = vi.fn();
     getSession = vi.fn();
@@ -219,6 +222,67 @@ describe('WorkspaceBindingCreator', () => {
     workspaceId: 'ws-remote',
     displayName: 'Remote project',
   };
+
+  it('prepares an editable handoff with the permitted Workspace, cwd and Agent without creating or sending', async () => {
+    const createSession = directCreation();
+    provider.workspaceBinding!.modelPresets = [
+      { agentId: 'agent-a', label: 'A' },
+      { agentId: 'agent-b', label: 'B' },
+    ];
+    await render(true, true, undefined, {
+      handoff: {
+        sourceSessionId: 'original',
+        workspaceId: 'ws-a',
+        cwdRelative: 'project',
+        agentId: 'agent-b',
+        text: 'Historical reference',
+        truncated: true,
+      },
+    });
+    expect(editorMocks.setText).toHaveBeenCalledTimes(1);
+    expect(editorMocks.setText).toHaveBeenCalledWith('Historical reference');
+    expect(editorMocks.props?.composerScopeKey).toContain(
+      ':new:handoff:original',
+    );
+    expect(provider.workspaceBinding!.get).toHaveBeenCalledWith(
+      'ws-a',
+      expect.anything(),
+    );
+    expect(container.textContent).toContain('Review and edit this handoff');
+    expect(container.textContent).toContain('32 KiB');
+    await expectWorkingDirectory('project');
+    expect(createSession).not.toHaveBeenCalled();
+    expect(createEmpty).not.toHaveBeenCalled();
+    expect(onCreated).not.toHaveBeenCalled();
+  });
+
+  it('keeps a lost Workspace grant behind the existing admission controls for handoff drafts', async () => {
+    const createSession = directCreation();
+    vi.mocked(provider.workspaceBinding!.get).mockRejectedValue(
+      new Error('access denied'),
+    );
+    await render(true, false, 'ws-private', {
+      handoff: {
+        sourceSessionId: 'original',
+        workspaceId: 'ws-private',
+        cwdRelative: '.',
+        text: 'Review this',
+        truncated: false,
+      },
+    });
+    expect(container.textContent).toContain('access denied');
+    await act(async () => {
+      editorMocks.props!.onSubmit(
+        'Attempt after lost grant',
+        undefined,
+        undefined,
+        vi.fn(),
+      );
+      await flush();
+    });
+    expect(createSession).not.toHaveBeenCalled();
+    expect(createEmpty).not.toHaveBeenCalled();
+  });
 
   function enableRegistration() {
     const registration = {

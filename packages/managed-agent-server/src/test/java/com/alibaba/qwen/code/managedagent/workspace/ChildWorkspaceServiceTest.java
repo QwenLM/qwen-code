@@ -1068,10 +1068,13 @@ class ChildWorkspaceServiceTest {
     void aSettledProjectionAndExpiredClaimCannotProveTheGitStepStopped() throws Exception {
         var parent = createSession("project");
         Row row = store.admit(parent.tenantId(), parent.sessionId(), "run-1", parent.workspace(), clock.get());
-        Row dead = store.claim(row, "dead-worker", clock.get(), 1_000);
+        clock.set(System.currentTimeMillis());
+        Row dead = store.claim(row, "dead-worker", clock.get(), ChildWorkspaceService.LEASE_MS);
         String step = leases.holdForMaintenance(parent.workspace(), dead.childWorkspaceId(), dead.claimGeneration());
         updateChild("UPDATE ma_workspace SET child_state = 'merged' WHERE child_workspace_id = ?", dead.childWorkspaceId());
-        clock.addAndGet(1_001);
+        jdbc.update("UPDATE ma_operation SET claim_until = 0 WHERE tenant_id = ?"
+                + " AND operation_kind = 'CHILD_WORKSPACE' AND operation_id = ?", parent.tenantId(), dead.childWorkspaceId());
+        clock.set(dead.claimedUntil() + 1);
         service.scan();
         assertThat(holder(parent.workspace())).isEqualTo(maintenanceHolder(dead));
         assertThat(leases.releaseStaleMaintenance(clock.get(), 0)).isZero();

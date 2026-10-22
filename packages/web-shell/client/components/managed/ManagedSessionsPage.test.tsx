@@ -306,6 +306,38 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
+  it.each(['closed', 'archived'])(
+    'keeps %s history read only when native recovery is ready',
+    async (lifecycleStatus) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          lifecycleStatus,
+          capabilities: { canSend: false, canCancel: false },
+          recovery: {
+            state: 'ready',
+            reasonCode: 'native_settled',
+            nextTurnAllowed: true,
+            actions: {
+              recheck: false,
+              cancel: false,
+              continueInNewSession: false,
+            },
+          },
+        }),
+      );
+
+      await render('s1');
+      expect(container.textContent).toContain('Persisted answer');
+      expect(container.querySelector('textarea')?.disabled).toBe(true);
+      await act(async () => {
+        await mocks.editorProps!.onSubmit('Another turn');
+        await flush();
+      });
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+      expect(mocks.client.createSession).not.toHaveBeenCalled();
+    },
+  );
+
   it('uses the shared rename dialog and synchronizes the confirmed title without submitting the composer', async () => {
     let resolve!: (value: { displayName: string }) => void;
     const renameSession = vi.fn().mockImplementation(
@@ -3877,6 +3909,39 @@ describe('ManagedSessionsPage', () => {
       random.mockRestore();
     }
   });
+
+  it.each([false, true])(
+    'announces a list failure once when interactive is %s',
+    async (interactive) => {
+      mocks.client.listSessions.mockRejectedValue(
+        new Error('History unavailable'),
+      );
+      await render('s1', 'en', provider, undefined, interactive);
+      expect(
+        [...container.querySelectorAll('[role="alert"]')].map(
+          (element) => element.textContent,
+        ),
+      ).toEqual(['History unavailable']);
+    },
+  );
+
+  it.each(['History unavailable', 'Not found'])(
+    'keeps distinct detail errors alongside an inactive navigation alert: %s',
+    async (detailError) => {
+      mocks.client.listSessions.mockRejectedValue(
+        new Error('History unavailable'),
+      );
+      mocks.client.getSession.mockRejectedValue(
+        new JavaManagedAgentHttpError(404, 'session_not_found', detailError),
+      );
+      await render('s1', 'en', provider, undefined, false);
+      expect(
+        [...container.querySelectorAll('[role="alert"]')]
+          .map((element) => element.textContent)
+          .sort(),
+      ).toEqual([...new Set(['History unavailable', detailError])].sort());
+    },
+  );
 
   it('shows a fresh action error alongside a sticky terminal stop', async () => {
     vi.useFakeTimers();
