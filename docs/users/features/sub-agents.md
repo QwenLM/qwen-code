@@ -358,7 +358,7 @@ If you omit this field, the subagent's permission mode is determined automatical
 
 - If the parent session is in **yolo** or **auto-edit** mode, the subagent inherits that mode. A permissive parent stays permissive.
 - If the parent session is in **plan** mode, the subagent stays in plan mode. An analyze-only session cannot mutate files through a delegated agent.
-- If the parent session is in **default** mode (in a trusted folder), the subagent gets **auto-edit** so it can work autonomously.
+- If the parent session is in **default** mode (in a trusted folder), the subagent gets **auto** (classifier-mediated) so it can work autonomously without silently becoming auto-edit under a restrictive parent.
 
 When you do set `approvalMode`, the parent's permissive modes still take priority. For example, if the parent is in yolo mode, a subagent with `approvalMode: plan` will still run in yolo mode.
 

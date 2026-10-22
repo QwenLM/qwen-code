@@ -88,6 +88,7 @@ import {
   SCHEDULED_TASK_RUN_SOURCE_TYPE,
 } from '../../runtime/scheduled-task-run.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import { resolveUnattendedAcpChildApprovalModeForWorkspace } from '../unattended-acp-child-approval-mode.js';
 
 // The per-file create cap, shared with the scheduler's MAX_JOBS. The scheduler
 // caps DURABLE loads against a durable-only budget of MAX_JOBS (independent of
@@ -111,6 +112,7 @@ export interface ScheduledTasksSessionBridge {
     parentSessionId?: string;
     sourceType?: string;
     sourceId?: string;
+    approvalMode?: string;
   }): Promise<{ sessionId: string; modelApplied?: boolean }>;
   sendPrompt?(
     sessionId: string,
@@ -593,6 +595,9 @@ async function dispatchTaskToFreshSession(
       parentSessionId: task.sessionId,
       sourceType: SCHEDULED_TASK_RUN_SOURCE_TYPE,
       sourceId: scheduledTaskRunSourceId(task.id),
+      approvalMode: resolveUnattendedAcpChildApprovalModeForWorkspace(
+        target.workspaceCwd,
+      ),
     }),
   );
   try {
@@ -1192,6 +1197,8 @@ function registerScheduledTaskCrudRoutes(
               sessionScope: 'thread',
               sourceType: 'scheduled_task',
               sourceId: taskId,
+              approvalMode:
+                resolveUnattendedAcpChildApprovalModeForWorkspace(workspaceCwd),
             }),
           );
           boundSessionId = session.sessionId;

@@ -870,6 +870,7 @@ export function createSubSessionLauncher(
             ...(info.sourceType ? { sourceType: info.sourceType } : {}),
             ...(info.sourceId ? { sourceId: info.sourceId } : {}),
             ...(info.model ? { modelServiceId: info.model } : {}),
+            ...(info.approvalMode ? { approvalMode: info.approvalMode } : {}),
           },
           info.prompt,
         );
@@ -886,6 +887,7 @@ export function createSubSessionLauncher(
           ...(info.sourceType ? { sourceType: info.sourceType } : {}),
           ...(info.sourceId ? { sourceId: info.sourceId } : {}),
           ...(info.model ? { modelServiceId: info.model } : {}),
+          ...(info.approvalMode ? { approvalMode: info.approvalMode } : {}),
         });
       }
       spawnedSession = sub;
