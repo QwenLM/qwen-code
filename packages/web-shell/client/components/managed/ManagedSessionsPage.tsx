@@ -8,6 +8,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useI18n } from '../../i18n';
+import { useManagedRecoveryText } from './managed-recovery-messages';
 import shellStyles from '../../App.module.css';
 import { MessageList } from '../MessageList';
 import {
@@ -38,9 +39,17 @@ import {
 import { useManagedFileReferences } from './use-managed-file-references';
 import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
 import { useManagedSession } from './use-managed-session';
+import { useManagedRecovery } from './use-managed-recovery';
+import { useManagedTurnCancel } from './use-managed-turn-cancel';
+import { ManagedRecoveryPanel } from './ManagedRecoveryPanel';
+import {
+  buildManagedRecoveryHandoff,
+  type ManagedRecoveryHandoff,
+} from './managed-recovery-handoff';
 import { useManagedSessionRename } from './use-managed-session-rename';
 import { useManagedActions } from './use-managed-actions';
 import { useManagedCwdChange } from './use-managed-cwd-change';
+import { useManagedContextCompression } from './use-managed-context-compression';
 import { useManagedModelChange } from './use-managed-model-change';
 import { useManagedApprovalChange } from './use-managed-approval-change';
 import { useManagedSkills } from './use-managed-skills';
@@ -255,6 +264,7 @@ function ManagedSessionsContent({
   navigationSearch: string;
 }) {
   const { t } = useI18n();
+  const recoveryText = useManagedRecoveryText();
   const home = navigationTarget !== undefined;
   const ContextContainer = home ? 'details' : 'div';
   const clientId = useMemo(
@@ -262,6 +272,22 @@ function ManagedSessionsContent({
     [provider.storageKey],
   );
   const detail = useManagedSession(provider, clientId, sessionId);
+  const recovery = useManagedRecovery(
+    provider,
+    clientId,
+    detail.summary,
+    interactive,
+    detail.refreshSummary,
+  );
+  const turnCancel = useManagedTurnCancel(
+    provider,
+    clientId,
+    sessionId,
+    detail.summary,
+    interactive,
+    detail.refreshSummary,
+  );
+  const [handoff, setHandoff] = useState<ManagedRecoveryHandoff>();
   const sessionWorkspaceId =
     sessionId && detail.summary?.sessionId === sessionId
       ? (detail.summary.workspace?.workspaceId ?? null)
@@ -466,6 +492,26 @@ function ManagedSessionsContent({
     detail.refreshSummary,
     interactive,
   );
+  const compression = useManagedContextCompression(
+    provider,
+    clientId,
+    sessionId,
+    detail.summary,
+    detail.refreshSummary,
+    () =>
+      interactive &&
+      !busy &&
+      !encoding.current &&
+      !detail.loading &&
+      !pendingRef.current &&
+      !pendingApproval &&
+      !cwd.isBlocked() &&
+      !modelChange.isBlocked() &&
+      !approvalChange.isBlocked() &&
+      ['created', 'completed', 'failed', 'cancelled'].includes(
+        detail.summary?.phase ?? '',
+      ),
+  );
   // The reason line below is mounted exactly when this holds, so the dialog can
   // point at it without ever leaving a dangling IDREF. A latch-only render has
   // no `alert` node and no operable option left, so this line is the only place
@@ -620,7 +666,8 @@ function ManagedSessionsContent({
       encoding.current ||
       cwd.isBlocked() ||
       modelChange.isBlocked() ||
-      approvalChange.isBlocked()
+      approvalChange.isBlocked() ||
+      compression.isBlocked()
     )
       return;
     setDiscarded(false);
@@ -628,7 +675,9 @@ function ManagedSessionsContent({
     if (!attempt) {
       if (
         (!submittedText.trim() && !images?.length && !files?.length) ||
-        (sessionId && !detail.summary?.capabilities.canSend)
+        (sessionId &&
+          (!detail.summary?.capabilities.canSend ||
+            recovery.value?.nextTurnAllowed === false))
       )
         return;
       let input: ManagedInputBlock[];
@@ -758,6 +807,7 @@ function ManagedSessionsContent({
   }
 
   const summary = detail.summary;
+  const { request: requestTurnCancel, busy: turnCancelBusy } = turnCancel;
   const cancel = useCallback(async () => {
     const abort = lifetime.current;
     if (
@@ -765,34 +815,46 @@ function ManagedSessionsContent({
       !summary.activeTurnId ||
       !cancellationEnabled ||
       busy ||
+      turnCancelBusy ||
       !abort ||
       abort.signal.aborted
     )
       return;
-    setBusy(true);
-    setError(undefined);
-    try {
-      await provider.cancel(summary.sessionId, summary.activeTurnId, {
-        clientId,
-        idempotencyKey: managedRequestId(),
-        signal: abort.signal,
-      });
-      if (!abort.signal.aborted && selection.current === summary.sessionId)
-        reloadSession();
-    } catch (failure) {
-      if (!abort.signal.aborted && selection.current === summary.sessionId)
-        setError(failure instanceof Error ? failure.message : String(failure));
-    } finally {
-      if (!abort.signal.aborted) setBusy(false);
-    }
-  }, [summary, reloadSession, cancellationEnabled, busy, provider, clientId]);
+    await requestTurnCancel();
+  }, [summary, cancellationEnabled, busy, turnCancelBusy, requestTurnCancel]);
 
   const currentSummary = summary?.sessionId === sessionId ? summary : undefined;
+  function prepareHandoff() {
+    if (
+      !currentSummary ||
+      !recovery.value?.actions.continueInNewSession ||
+      !provider.workspaceBinding?.createSession
+    )
+      return;
+    const draft = buildManagedRecoveryHandoff(
+      { ...currentSummary, recovery: recovery.value },
+      detail.events,
+      {
+        introduction: recoveryText('managed.recovery.handoff.introduction'),
+        source: recoveryText('managed.recovery.handoff.source'),
+        task: recoveryText('managed.recovery.handoff.task'),
+        confirmed: recoveryText('managed.recovery.handoff.confirmed'),
+        uncertain: recoveryText('managed.recovery.handoff.uncertain'),
+        truncated: recoveryText('managed.recovery.handoff.truncated'),
+      },
+      Boolean(detail.olderCursor) ||
+        detail.loading ||
+        detail.events.length === 0,
+    );
+    setHandoff(draft);
+    onSelectSession(undefined, draft.workspaceId);
+  }
   const modelContext = currentSummary?.modelContext;
   const selectedModel = currentSummary?.modelSelection?.modelId;
   const displayedModel =
     selectedModel ?? modelContext?.modelId ?? currentSummary?.agentId ?? '';
   const contextUsageKnown =
+    !compression.usageInvalidated &&
     (!selectedModel || modelContext?.modelId === selectedModel) &&
     modelContext?.inputTokens !== undefined &&
     Number.isSafeInteger(modelContext.inputTokens) &&
@@ -1232,6 +1294,7 @@ function ManagedSessionsContent({
                     pendingApproval ||
                     busy ||
                     modelChange.blocked ||
+                    compression.blocked ||
                     approvalChange.blocked ||
                     pending?.sessionId === sessionId
                       ? t('managed.cwd.busy')
@@ -1241,6 +1304,7 @@ function ManagedSessionsContent({
                     if (
                       pendingRef.current?.sessionId === sessionId ||
                       modelChange.isBlocked() ||
+                      compression.isBlocked() ||
                       approvalChange.isBlocked() ||
                       busy ||
                       active ||
@@ -1263,10 +1327,57 @@ function ManagedSessionsContent({
               {summary.failure.message}
             </p>
           )}
+          {recovery.value && (
+            <ManagedRecoveryPanel
+              recovery={recovery.value}
+              busy={!interactive || recovery.busy || turnCancel.busy}
+              error={recovery.error}
+              onRecheck={() => void recovery.recheck()}
+              onCancel={
+                cancellationEnabled && summary?.capabilities.canCancel
+                  ? () => void cancel()
+                  : undefined
+              }
+              onHandoff={
+                provider.workspaceBinding?.createSession
+                  ? prepareHandoff
+                  : undefined
+              }
+            />
+          )}
+          {turnCancel.status && (
+            <div role="status" className="flex items-center gap-2 text-sm">
+              <span>
+                {recoveryText(`managed.recovery.cancel.${turnCancel.status}`)}
+              </span>
+              {turnCancel.pending && turnCancel.status === 'unconfirmed' && (
+                <Button
+                  variant="outline"
+                  disabled={!interactive || turnCancel.busy}
+                  onClick={() => void turnCancel.retry()}
+                >
+                  {recoveryText('managed.recovery.recheck')}
+                </Button>
+              )}
+            </div>
+          )}
           {provider.workspaceBinding &&
             (!sessionId || workspaceCreationOpen) && (
               <WorkspaceBindingCreator
+                key={
+                  !sessionId ? (handoff?.sourceSessionId ?? 'new') : 'workspace'
+                }
                 provider={provider}
+                handoff={!sessionId ? handoff : undefined}
+                onOpenHandoffSource={
+                  handoff
+                    ? () =>
+                        onSelectSession(
+                          handoff.sourceSessionId,
+                          handoff.workspaceId,
+                        )
+                    : undefined
+                }
                 workspaceCreationOpen={workspaceCreationOpen}
                 onWorkspaceCreationOpenChange={onWorkspaceCreationOpenChange}
                 onOpenLocalWorkspace={onOpenLocalWorkspace}
@@ -1288,6 +1399,7 @@ function ManagedSessionsContent({
                   onWorkspaceCreated?.(id);
                 }}
                 onCreated={(createdId, createdWorkspaceId) => {
+                  setHandoff(undefined);
                   setListRevision((current) => current + 1);
                   onSelectSession(createdId, createdWorkspaceId);
                 }}
@@ -1335,7 +1447,7 @@ function ManagedSessionsContent({
               </p>
               <Button
                 size="sm"
-                disabled={busy || cwd.blocked}
+                disabled={busy || cwd.blocked || compression.blocked}
                 onClick={() => void submit()}
               >
                 {t('managed.retry')}
@@ -1400,7 +1512,7 @@ function ManagedSessionsContent({
                 // holds for every approval this Session raises — until an
                 // explicit retry re-probes, so the latch is scoped to the
                 // Session rather than the Action.
-                disabled={approvals.respondForbidden}
+                disabled={approvals.respondForbidden || compression.blocked}
                 extraDescriptionId={
                   [
                     pendingApproval.rawInput === undefined
@@ -1411,9 +1523,11 @@ function ManagedSessionsContent({
                     .filter(Boolean)
                     .join(' ') || undefined
                 }
-                onConfirm={(actionId, optionId) =>
-                  approvals.respond(actionId, optionId)
-                }
+                onConfirm={(actionId, optionId) => {
+                  if (!compression.isBlocked())
+                    return approvals.respond(actionId, optionId);
+                  return Promise.resolve();
+                }}
               />
               {pendingApproval.rawInput === undefined && (
                 <p
@@ -1568,6 +1682,7 @@ function ManagedSessionsContent({
                   approvalChange.busy ||
                   modelChange.blocked ||
                   approvalChange.blocked ||
+                  compression.blocked ||
                   busy ||
                   Boolean(active) ||
                   Boolean(pendingApproval) ||
@@ -1587,7 +1702,8 @@ function ManagedSessionsContent({
                           active ||
                           pendingApproval ||
                           cwd.isBlocked() ||
-                          approvalChange.isBlocked()
+                          approvalChange.isBlocked() ||
+                          compression.isBlocked()
                         )
                           return;
                         void modelChange.submit(modelId);
@@ -1600,6 +1716,9 @@ function ManagedSessionsContent({
                 }
                 contextUsageKnown={contextUsageKnown}
                 contextUsageAlwaysVisible={Boolean(sessionId)}
+                contextUsageControls={
+                  interactive ? compression.controls : undefined
+                }
                 currentMode={summary?.approvalMode ?? ''}
                 planMode={summary?.planMode === true}
                 planControlsDisabled={
@@ -1608,6 +1727,7 @@ function ManagedSessionsContent({
                   !approvalChange.options?.supported ||
                   approvalChange.optionsLoading ||
                   approvalChange.isBlocked() ||
+                  compression.isBlocked() ||
                   busy ||
                   Boolean(active) ||
                   Boolean(pendingApproval) ||
@@ -1627,7 +1747,8 @@ function ManagedSessionsContent({
                           !pendingApproval &&
                           !pendingRef.current &&
                           !cwd.isBlocked() &&
-                          !modelChange.isBlocked()
+                          !modelChange.isBlocked() &&
+                          !compression.isBlocked()
                         )
                           void approvalChange.submit(
                             summary.approvalMode!,
@@ -1647,6 +1768,7 @@ function ManagedSessionsContent({
                   approvalChange.optionsLoading ||
                   approvalChange.busy ||
                   approvalChange.blocked ||
+                  compression.blocked ||
                   busy ||
                   ((Boolean(active) || Boolean(pendingApproval)) &&
                     !approvalChange.options.liveSupported) ||
@@ -1670,7 +1792,8 @@ function ManagedSessionsContent({
                             !approvalChange.options?.liveSupported) ||
                           summary?.phase === 'cancelling' ||
                           cwd.isBlocked() ||
-                          modelChange.isBlocked()
+                          modelChange.isBlocked() ||
+                          compression.isBlocked()
                         )
                           return;
                         if (
@@ -1687,6 +1810,7 @@ function ManagedSessionsContent({
                   busy ||
                   fileReferences.busy ||
                   cwd.blocked ||
+                  compression.blocked ||
                   modelChange.busy ||
                   approvalChange.busy
                 }
@@ -1705,11 +1829,59 @@ function ManagedSessionsContent({
                   busy ||
                   Boolean(pending) ||
                   modelChange.blocked ||
+                  compression.blocked ||
                   approvalChange.blocked ||
-                  Boolean(sessionId && !summary?.capabilities.canSend)
+                  Boolean(
+                    sessionId &&
+                      (!summary?.capabilities.canSend ||
+                        recovery.value?.nextTurnAllowed === false),
+                  )
                 }
                 placeholderText={t('managed.prompt')}
               />
+              {interactive && compression.blocked && (
+                <div
+                  className="flex items-center gap-2 text-xs text-muted-foreground"
+                  role="status"
+                >
+                  <span>
+                    {t(
+                      compression.errorCode === 'recovery_blocked'
+                        ? 'managed.compression.recoveryBlocked'
+                        : compression.busy
+                          ? 'contextUsage.compressing'
+                          : 'managed.compression.unconfirmed',
+                    )}
+                  </span>
+                  {!compression.busy && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={!provider.contextCompression}
+                      onClick={() => void compression.confirm()}
+                    >
+                      {t('managed.compression.confirm')}
+                    </Button>
+                  )}
+                </div>
+              )}
+              {interactive && compression.errorCode && !compression.blocked && (
+                <p className="text-xs text-destructive" role="alert">
+                  {t(
+                    compression.errorCode === 'storage_unavailable'
+                      ? 'managed.compression.storage'
+                      : compression.errorCode === 'storage_update_failed'
+                        ? 'managed.compression.storageUpdate'
+                        : compression.errorCode ===
+                            'compaction_revision_conflict'
+                          ? 'managed.compression.conflict'
+                          : compression.errorCode === 'session_context_busy'
+                            ? 'managed.compression.busy'
+                            : 'contextUsage.compressFailed',
+                  )}
+                </p>
+              )}
               {interactive &&
                 (modelChange.supported || modelChange.blocked) && (
                   <div
