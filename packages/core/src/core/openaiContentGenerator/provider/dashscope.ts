@@ -544,6 +544,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ...result,
       ...(extraBody ? extraBody : {}),
     };
+    this.capHostedOutputTokens(merged, model);
     const reasoningEffort = merged['reasoning_effort'];
     const dropped = new Set<string>();
     if (selectedThinkingKnob?.field === 'thinking_budget') {
@@ -632,26 +633,20 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   /**
-   * Apply the shared output-limit policy, then clamp to the DashScope cap for
-   * hosted models whose endpoint limit is lower than the vendor's. The cap
-   * also bounds an explicit samplingParams value, since the server rejects
-   * anything above it.
+   * Clamp max_tokens to the DashScope cap for hosted models whose endpoint
+   * limit is lower than the vendor's. Runs on the final body, so the default,
+   * samplingParams and extra_body values are all bounded: the server rejects
+   * anything above the cap, whichever layer set it.
    */
-  protected override applyOutputTokenLimit<
-    T extends { max_tokens?: number | null; model: string },
-  >(request: T): T {
-    const limited = super.applyOutputTokenLimit(request);
-    const cap = DASHSCOPE_OUTPUT_TOKEN_CAPS.get(
-      this.resolveWireModel(request.model),
-    );
-    if (
-      cap === undefined ||
-      typeof limited.max_tokens !== 'number' ||
-      limited.max_tokens <= cap
-    ) {
-      return limited;
+  private capHostedOutputTokens(
+    merged: Record<string, unknown>,
+    model: string | undefined,
+  ): void {
+    const cap = DASHSCOPE_OUTPUT_TOKEN_CAPS.get(this.resolveWireModel(model));
+    const maxTokens = merged['max_tokens'];
+    if (cap !== undefined && typeof maxTokens === 'number' && maxTokens > cap) {
+      merged['max_tokens'] = cap;
     }
-    return { ...limited, max_tokens: cap };
   }
 
   /**
