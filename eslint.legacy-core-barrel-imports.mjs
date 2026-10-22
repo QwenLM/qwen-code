@@ -308,7 +308,6 @@ export const legacyCoreBarrelImports = [
   'packages/cli/src/ui/hooks/useShellHistory.ts',
   'packages/cli/src/ui/hooks/useShowMemoryCommand.ts',
   'packages/cli/src/ui/hooks/useSlashCompletion.ts',
-  'packages/cli/src/ui/hooks/useStatusLine.ts',
   'packages/cli/src/ui/hooks/useTurnDiffs.ts',
   'packages/cli/src/ui/hooks/useWelcomeBack.ts',
   'packages/cli/src/ui/models/availableModels.ts',
