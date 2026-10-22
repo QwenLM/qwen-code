@@ -90,6 +90,8 @@ export interface ManagedAgentSessionSummary {
   planModeSupported?: boolean;
   modelContext?: ManagedModelContext;
   modelSelection?: ManagedModelSelection;
+  compactionRevision?: number;
+  contextCompressionOperationId?: string;
   activeTurnId?: string;
   title: string;
   workspaceCwd?: string;
@@ -116,6 +118,7 @@ export interface ManagedAgentSessionSummary {
     workspaceTurns?: boolean;
     cwdChange?: boolean;
     modelChange?: boolean;
+    contextCompression?: boolean;
     approvalModeChange?: boolean;
     inputAttachments?: boolean;
   };
@@ -179,6 +182,8 @@ export interface ManagedAgentCommandOptions extends ManagedAgentRequestOptions {
 }
 
 export type ManagedCwdOperation = components['schemas']['WebShellCwdOperation'];
+export type ManagedContextCompressionOperation =
+  components['schemas']['WebShellContextCompressionOperation'];
 export type ManagedTask = components['schemas']['WebShellTask'];
 export type ManagedTaskPage = components['schemas']['WebShellTaskPage'];
 export type ManagedTaskEvent = components['schemas']['WebShellTaskEvent'];
@@ -308,6 +313,18 @@ export interface ManagedAgentProvider {
       operationId: string,
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedCwdOperation>;
+  };
+  readonly contextCompression?: {
+    submit(
+      sessionId: string,
+      request: { expectedCompactionRevision: number },
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedContextCompressionOperation>;
+    query(
+      sessionId: string,
+      operationId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedContextCompressionOperation>;
   };
   readonly approvalChange?: {
     queryOptions(
