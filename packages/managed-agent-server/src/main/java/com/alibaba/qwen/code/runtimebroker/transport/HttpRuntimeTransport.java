@@ -854,6 +854,15 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         return true;
     }
 
+    @Override
+    public CompletionStage<java.util.List<Map<String, Object>>> mcpDefinitions(RuntimeBindingRecord runtime) {
+        var scope = runtime.getRequest().getScope();
+        byte[] request = encodeToolRequest(Map.of("protocolVersion", 1,
+                "tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId()), TOOL_REQUEST_LIMIT_BYTES);
+        return post(runtime.getLease(), ManagedMcpProtocol.DEFINITIONS_PATH, request, TOOL_RESULT_LIMIT_BYTES)
+                .thenApply(ManagedMcpProtocol::definitions);
+    }
+
     /** Session acquisition is Broker-local until the provider is used. */
     @Override
     public CompletionStage<Void> acquire(RuntimeLease lease,

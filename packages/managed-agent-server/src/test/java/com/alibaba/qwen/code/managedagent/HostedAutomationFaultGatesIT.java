@@ -2187,6 +2187,51 @@ class HostedAutomationFaultGatesIT {
         request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-iso-retire", 202);
     }
 
+    // FG11d: the queued-input arm is reachable on the public surface, and this cell
+    // is the witness the design record cites for it. Under `queue_one` admission
+    // admits a second manual fire while the first run is active — the open-Turn arm
+    // reads only public `ma_turn` rows and the automation wake turn is journal-side,
+    // so it never fires — and the second run commits with its input waiting behind
+    // the parked turn: no prompt for its occurrence ever appears. Cancelling that
+    // queued run is a different matter: measured here, a task cancel is accepted and
+    // the run stays `running`, because the queue is settled by the turn, not by the
+    // cancel. That arm stays open in the record.
+    @Test
+    @Timeout(600)
+    void fg11dQueueOneAdmitsASecondFireOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("queue-one");
+        Map<String, Object> body = new java.util.LinkedHashMap<>(
+                definition(session, "FG11A_HOLD", "0 0 1 1 *"));
+        body.put("overlap", "queue_one");
+        String id = request("POST", "/v1/agent-automations", body, "fg11d-queue-base", 202)
+                .path("id").asText();
+        String active = request("POST", "/v1/agent-automations/" + id + "/runs", null,
+                "fg11d-queue-active", 202).path("id").asText();
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("manual:fg11d-queue-active")));
+        // queue_one admits at one active run, so this fire commits its own run whose
+        // input waits behind the parked turn: no second prompt may appear.
+        String queued = request("POST", "/v1/agent-automations/" + id + "/runs", null,
+                "fg11d-queue-second", 202).path("id").asText();
+        assertThat(queued).as("the queued fire commits its own run").isNotEqualTo(active);
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> runState(queued) != null);
+        assertThat(runState(queued)).as("the queued run is committed, not settled")
+                .isNotIn("cancelled", "completed", "failed");
+        // The parked turn, not the overlap arm, is what holds the queued input, so this
+        // is an observation over a dwell rather than an attribution to `queue_one`.
+        waiting().atMost(Duration.ofSeconds(2)).during(Duration.ofMillis(1500))
+                .until(() -> modelPrompts.stream().noneMatch(
+                        prompt -> prompt.contains("manual:fg11d-queue-second")));
+        assertThat(jdbc.queryForMap("SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                + " AND schedule_id = ? AND occurrence_key = ?", tenant, id, "manual:fg11d-queue-second"))
+                .as("the queued occurrence is recorded as fired").containsEntry("outcome", "fired");
+        assertThat(runState(active)).as("the active run is untouched")
+                .isNotIn("cancelled", "completed", "failed");
+        heldModel.countDown();
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-queue-retire", 202);
+    }
+
     private void boot(String letter) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("FG11 requires real MySQL").startsWith("jdbc:mysql:");
         this.letter = letter;
