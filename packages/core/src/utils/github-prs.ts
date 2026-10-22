@@ -60,9 +60,16 @@ const GH_FALLBACK_BINARIES = [
  * `cli_unavailable` handling; only "PATH is missing the package-manager bin
  * directory" falls back to a known absolute install. The per-user install
  * leads the fallback order: it is the most specific choice for this user.
+ *
+ * `cwd` is the directory the child runs in (execFile's `cwd`): a relative or
+ * empty PATH entry is resolved against the CHILD's directory, not this
+ * process's — `PATH=bin` names `<cwd>/bin`, and an empty entry names `<cwd>`
+ * itself. Probing them anywhere else reports "PATH cannot resolve gh" for a
+ * wrapper gh the spawn would have run.
  */
 export function resolveGhBinary(
   env?: Readonly<Record<string, string | undefined>>,
+  cwd: string = process.cwd(),
 ): string {
   const source = env ?? process.env;
   const pathValue = source['PATH'];
@@ -70,13 +77,20 @@ export function resolveGhBinary(
     pathValue &&
     pathValue
       .split(path.delimiter)
-      .some((dir) => dir !== '' && existsSync(path.join(dir, 'gh')))
+      .some((dir) =>
+        existsSync(path.join(path.resolve(cwd, dir === '' ? '.' : dir), 'gh')),
+      )
   ) {
     return 'gh';
   }
+  // A relative HOME would make the per-user candidate a relative path that
+  // this probe reads from the spawn directory; skip it rather than turn an
+  // odd env shape into a relative `.local/bin/gh`.
   const home = source['HOME'];
   const candidates = [
-    ...(home ? [path.join(home, '.local', 'bin', 'gh')] : []),
+    ...(home && path.isAbsolute(home)
+      ? [path.join(home, '.local', 'bin', 'gh')]
+      : []),
     ...GH_FALLBACK_BINARIES,
   ];
   return candidates.find((candidate) => existsSync(candidate)) ?? 'gh';
@@ -270,7 +284,7 @@ function runGhPrList(
   const childEnv = ghEnv(env);
   return new Promise((resolve, reject) => {
     execFile(
-      resolveGhBinary(childEnv),
+      resolveGhBinary(childEnv, gitRoot),
       [
         'pr',
         'list',
@@ -381,7 +395,7 @@ function runGhPrCreate(
   const childEnv = ghEnv(env);
   return new Promise((resolve, reject) => {
     execFile(
-      resolveGhBinary(childEnv),
+      resolveGhBinary(childEnv, gitRoot),
       args,
       {
         cwd: gitRoot,
@@ -602,7 +616,7 @@ export function fetchCurrentBranchPullRequest(
   const childEnv = ghEnv(env);
   return new Promise((resolve) => {
     execFile(
-      resolveGhBinary(childEnv),
+      resolveGhBinary(childEnv, gitRoot),
       ['pr', 'view', '--json', 'number,url,state,headRefName'],
       {
         cwd: gitRoot,
@@ -715,7 +729,7 @@ export function fetchAttributionRepoKeys(
   const childEnv = ghEnv(env);
   return new Promise((resolve) => {
     execFile(
-      resolveGhBinary(childEnv),
+      resolveGhBinary(childEnv, gitRoot),
       ['repo', 'view', '--json', 'url,parent'],
       {
         cwd: gitRoot,

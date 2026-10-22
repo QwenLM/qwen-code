@@ -192,7 +192,7 @@ function runGhGraphql(
   const childEnv = ghEnv(env);
   return new Promise((resolve, reject) => {
     execFile(
-      resolveGhBinary(childEnv),
+      resolveGhBinary(childEnv, gitRoot),
       [
         'api',
         'graphql',

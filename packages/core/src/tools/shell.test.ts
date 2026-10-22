@@ -841,6 +841,29 @@ describe('ShellTool', () => {
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
     });
 
+    it('names the post-run resolution status instead of paraphrasing a cause', async () => {
+      // `none` (gh proved the branch has no PR) and `error` (gh could not
+      // answer at all) are different facts; the log must not report the first
+      // when the second happened.
+      fetchCurrentBranchPullRequestMock
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ status: 'error' });
+      await runShell(CREATE_OR_VIEW, PR_42);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: post-run gh resolution',
+        { status: 'error' },
+      );
+
+      fetchCurrentBranchPullRequestMock
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ status: 'none' });
+      await runShell(CREATE_OR_VIEW, PR_42);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: post-run gh resolution',
+        { status: 'none' },
+      );
+    });
+
     it('does not re-emit when the resolved PR is already bound', async () => {
       // The pre-run snapshot missed the PR (a gh flake), so the resolution
       // reaches persistence; the write reports it alreadyBound, so nothing is

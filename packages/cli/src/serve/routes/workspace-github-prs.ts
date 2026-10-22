@@ -29,6 +29,19 @@ function sanitizeMessage(message: string, workspaceCwd: string): string {
   return message.split(workspaceCwd).join('<workspace>');
 }
 
+// The resolved gh binary can be an absolute install path (a launchd-shaped
+// daemon's PATH does not carry the package-manager bin dir), and Node's spawn
+// errors embed it — as can gh's own stderr. Sweep ANY surviving absolute-path
+// token, whatever sentence wraps it, AFTER the two known-path replacements so
+// they still label their payloads, and BEFORE the caller truncates: the
+// display cap must never cut a path before it is redacted.
+function sweepAbsolutePaths(message: string): string {
+  return message.replace(
+    /(^|[\s'"(<])(?:\/|[A-Za-z]:[\\/]|\\\\)[^\s'"<>]*/g,
+    '$1<path>',
+  );
+}
+
 export function registerWorkspaceQualifiedGitHubPrsRoutes(
   app: Application,
   deps: {
@@ -128,9 +141,11 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
         case 'failed': {
           // Sanitize workspace paths before truncating so a path straddling
           // the display boundary is redacted rather than cut mid-token.
-          const error = sanitizeMessage(
-            sanitizeMessage(result.message, runtime.workspaceCwd),
-            result.gitRoot,
+          const error = sweepAbsolutePaths(
+            sanitizeMessage(
+              sanitizeMessage(result.message, runtime.workspaceCwd),
+              result.gitRoot,
+            ),
           ).slice(0, GITHUB_PR_ERROR_MESSAGE_MAX);
           res.status(502).json({
             error,
@@ -223,9 +238,11 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
             // Sanitize both the workspace cwd and the git root (gh runs at the
             // git root, which may be a parent of the workspace) before truncating.
             res.status(502).json({
-              error: sanitizeMessage(
-                sanitizeMessage(result.message, runtime.workspaceCwd),
-                result.gitRoot,
+              error: sweepAbsolutePaths(
+                sanitizeMessage(
+                  sanitizeMessage(result.message, runtime.workspaceCwd),
+                  result.gitRoot,
+                ),
               ).slice(0, GITHUB_PR_ERROR_MESSAGE_MAX),
               code: 'github_pr_create_failed',
             });

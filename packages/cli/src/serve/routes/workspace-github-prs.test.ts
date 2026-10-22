@@ -205,6 +205,30 @@ describe('workspace GitHub PR routes', () => {
     expect(response.body.error).not.toContain('/work/main');
   });
 
+  it('sweeps an absolute gh binary path out of a spawn failure', async () => {
+    // The resolver can hand the child an absolute install path; Node embeds
+    // it in the spawn error, and this body is what remote clients read. Only
+    // a fail-closed absolute-path sweep keeps the host layout out.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'failed',
+      message: 'spawn /Users/alice/.local/bin/gh EACCES',
+      gitRoot: '/work/main',
+    });
+    const app = express();
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app).get('/workspaces/primary/github/prs');
+
+    expect(response.status).toBe(502);
+    expect(response.body.code).toBe('github_prs_failed');
+    expect(response.body.error).toBe('spawn <path> EACCES');
+    expect(response.body.error).not.toContain('/Users/alice');
+  });
+
   it('sanitizes a path straddling the display cap before truncating', async () => {
     const gitRoot = '/work/main';
     // Place the git root across the 512-char display boundary; the route must

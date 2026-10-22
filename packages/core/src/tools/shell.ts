@@ -3488,9 +3488,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // PR URL is what the output carries — backfill recovers the rest.
         const created = await fetchCurrentBranchPullRequest(cwd, ghCreateEnv);
         if (created.status !== 'pr' || created.state !== 'open') {
-          debugLogger.debug(
-            'gh pr create not bound: gh resolves no open PR for this branch',
-          );
+          // Keep the two facts distinct: `none` is gh's proved absence for
+          // this branch, while `error` means gh could not answer at all (or
+          // the PR is merged/closed). A paraphrase that names only one cause
+          // sends the operator hunting for a PR this gate already ruled on.
+          debugLogger.debug('gh pr create not bound: post-run gh resolution', {
+            status: created.status,
+            ...(created.status === 'pr' ? { state: created.state } : {}),
+          });
           return;
         }
         // The run resolved the branch's EXISTING PR — nothing was created
