@@ -107,12 +107,12 @@ class FakeExecutor {
     | ((failed: boolean, stopRequested?: boolean) => Promise<void> | void)
     | undefined;
   terminateCalls = 0;
-  onTerminate: (() => void) | undefined;
   /** Whether terminate answers with the worker's exit evidence. */
   provesStop = true;
   /** Holds each terminate open until the case answers it. */
   holdStop = false;
   private readonly heldStops: Array<(proven: boolean) => void> = [];
+  private readonly stopWaiters = new Map<number, () => void>();
   commands: Array<Readonly<Record<string, unknown>>> = [];
   failStart: Error | undefined;
 
@@ -129,7 +129,8 @@ class FakeExecutor {
       receipt: { watch: 'started' },
       terminate: async () => {
         this.terminateCalls += 1;
-        this.onTerminate?.();
+        this.stopWaiters.get(this.terminateCalls)?.();
+        this.stopWaiters.delete(this.terminateCalls);
         if (this.holdStop)
           return new Promise<boolean>((resolve) =>
             this.heldStops.push(resolve),
@@ -144,6 +145,12 @@ class FakeExecutor {
 
   answerStop(proven: boolean): void {
     this.heldStops.shift()?.(proven);
+  }
+
+  // A stop can follow durable I/O; wait for the request, not a polling deadline.
+  waitForStop(calls: number): Promise<void> {
+    if (this.terminateCalls >= calls) return Promise.resolve();
+    return new Promise((resolve) => this.stopWaiters.set(calls, resolve));
   }
 
   releaseStops(): void {
@@ -287,7 +294,8 @@ describe('HostedMonitorLoop', () => {
     await rig.loop.start(params({ maxEvents: 1 }));
     rig.executor.onLine?.('one');
     const fired = rig.clock.advance(1_000);
-    await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+    await rig.executor.waitForStop(1);
+    expect(rig.executor.terminateCalls).toBe(1);
 
     await cleanupFixtures();
     rig.executor.answerStop(false);
@@ -652,14 +660,11 @@ describe('HostedMonitorLoop', () => {
       const harness = await createHarness();
       const rig = await openLoop(harness);
       rig.executor.holdStop = true;
-      const terminating = new Promise<void>((resolve) => {
-        rig.executor.onTerminate = resolve;
-      });
       await rig.loop.start(params(bounds));
 
       if (reason === 'max_events') rig.executor.onLine?.('one');
       const fired = rig.clock.advance(firing);
-      await terminating;
+      await rig.executor.waitForStop(1);
       expect(rig.executor.terminateCalls).toBe(1);
       // The worker finalizes before it answers, so the exit is this stop's
       // own evidence: its stop marker does not override the loop's reason.
@@ -694,7 +699,8 @@ describe('HostedMonitorLoop', () => {
 
       rig.executor.onLine?.('one');
       const fired = rig.clock.advance(1_000);
-      await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+      await rig.executor.waitForStop(1);
+      expect(rig.executor.terminateCalls).toBe(1);
       const stopped = rig.loop.stop('stop_requested');
       // The close's stop issues nothing while the auto-stop still waits.
       expect(rig.executor.terminateCalls).toBe(1);
@@ -706,7 +712,8 @@ describe('HostedMonitorLoop', () => {
       if (!proven) {
         // Only the auto-stop's park leaves the record to the close's own
         // proven stop.
-        await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(2));
+        await rig.executor.waitForStop(2);
+        expect(rig.executor.terminateCalls).toBe(2);
         rig.executor.answerStop(true);
       }
       await stopped;
@@ -733,7 +740,8 @@ describe('HostedMonitorLoop', () => {
 
       if (reason === 'max_events') rig.executor.onLine?.('one');
       const fired = rig.clock.advance(firing);
-      await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+      await rig.executor.waitForStop(1);
+      expect(rig.executor.terminateCalls).toBe(1);
       // The worker proved the end, but the publisher refused the finalize
       // that carries it: the sealed output has not reached the record, and
       // a terminal record would refuse it.
@@ -766,7 +774,8 @@ describe('HostedMonitorLoop', () => {
 
     rig.executor.onLine?.('one');
     const fired = rig.clock.advance(1_000);
-    await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+    await rig.executor.waitForStop(1);
+    expect(rig.executor.terminateCalls).toBe(1);
     // An end without evidence proves no stop: it reports the failed watch,
     // never the stop's reason, and the answer that follows changes nothing.
     await rig.executor.fail();
@@ -819,6 +828,14 @@ describe('HostedMonitorLoop', () => {
   it('issues one auto-stop when the idle window fires inside the quota flush (#13896)', async () => {
     const harness = await createHarness();
     const rig = await openLoop(harness);
+    const observe = rig.session.observe.bind(rig.session);
+    const observed = new Promise<void>((resolve, reject) => {
+      vi.spyOn(rig.session, 'observe').mockImplementationOnce((...args) => {
+        const committed = observe(...args);
+        void committed.then(resolve, reject);
+        return committed;
+      });
+    });
     rig.executor.holdStop = true;
     await rig.loop.start(params({ maxEvents: 1, idleTimeoutMs: 1_000 }));
 
@@ -827,9 +844,8 @@ describe('HostedMonitorLoop', () => {
     // has nothing left to stop.
     rig.executor.onLine?.('one');
     const fired = rig.clock.fireTogether(1_000);
-    await vi.waitFor(() =>
-      expect(committed(rig.authority).observationSequence).toBe(1),
-    );
+    await observed;
+    expect(committed(rig.authority).observationSequence).toBe(1);
     expect(rig.executor.terminateCalls).toBe(1);
 
     await rig.executor.exitStopped();
