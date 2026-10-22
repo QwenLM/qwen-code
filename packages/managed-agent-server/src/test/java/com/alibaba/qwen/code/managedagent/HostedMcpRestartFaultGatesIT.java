@@ -693,16 +693,21 @@ class HostedMcpRestartFaultGatesIT {
 
     private void killHarness() throws Exception {
         Process dead = harness;
+        String deadWriter = bootId;
         dead.destroyForcibly();
         assertThat(dead.waitFor(10, TimeUnit.SECONDS))
                 .as("the Harness must die before the replacement starts")
                 .isTrue();
-        // A killed Harness cannot release its writer lease. Expiring it
-        // stands in for waiting the lease out, so the replacement can take
-        // over the dead writer at once.
-        jdbc.update("UPDATE ma_session_head SET writer_lease_until = "
-                + ManagedSchemaTime.SQL_NOW + " + -1000 WHERE tenant_id = ?"
-                + " AND writer_lease_until IS NOT NULL", tenant);
+        // A killed Harness cannot release its writer lease. Expiring the
+        // leases it held stands in for waiting them out, so the replacement
+        // can take over the dead writer at once; scoping the update to that
+        // writer leaves any other Session's lease alone.
+        int expired = jdbc.update("UPDATE ma_session_head SET"
+                + " writer_lease_until = " + ManagedSchemaTime.SQL_NOW
+                + " + -1000 WHERE tenant_id = ? AND writer_id = ? AND"
+                + " writer_lease_until IS NOT NULL", tenant, deadWriter);
+        assertThat(expired).as("the dead writer held a lease to expire")
+                .isPositive();
     }
 
     private void refuseNextControl(String kind) {
