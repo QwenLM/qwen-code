@@ -423,6 +423,8 @@ describe('collectSessionData', () => {
 
       expect(metadata?.contextUsagePercent).toBe(15);
       expect(metadata?.contextWindowSize).toBe(200_000);
+      // The compressed size changes the context reading, not the total spent.
+      expect(metadata?.totalTokens).toBe(185_000);
     });
 
     it('keeps the last reading when a compression reports no size', async () => {
