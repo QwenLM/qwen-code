@@ -3566,16 +3566,32 @@ const REQUESTED_TIMEOUT_MS = requestedWaitBudgetMs(
 it('keeps the requested() wait budget under the per-test ceiling', () => {
   expect(requestedWaitBudgetMs(true, 'ecs-qwen-64c-01')).toBe(20_000);
   expect(requestedWaitBudgetMs(true, 'ubuntu-latest')).toBe(12_000);
+  expect(requestedWaitBudgetMs(true, undefined)).toBe(12_000);
   expect(requestedWaitBudgetMs(false, undefined)).toBe(10_000);
   expect(requestedWaitBudgetMs(true, 'ecs-qwen-64c-01') * 2).toBeLessThan(
     60_000,
   );
 });
 
-it('pins REQUESTED_TIMEOUT_MS to the slow-host policy', () => {
-  expect(REQUESTED_TIMEOUT_MS).toBe(
-    requestedWaitBudgetMs(SLOW_HOST, BUDGET_RUNNER_NAME),
+it('passes REQUESTED_TIMEOUT_MS to the requested() wait', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
   );
+  const waitFor = vi.spyOn(vi, 'waitFor');
+  try {
+    const requestId = await requested();
+    expect(waitFor.mock.calls.at(-1)?.[1]).toEqual({
+      timeout: REQUESTED_TIMEOUT_MS,
+    });
+    await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  } finally {
+    waitFor.mockRestore();
+  }
+  await running;
 });
 
 async function requested(count = 1): Promise<string> {
