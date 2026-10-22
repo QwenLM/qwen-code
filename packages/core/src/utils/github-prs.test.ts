@@ -24,6 +24,7 @@ import {
   normalizeRemoteToWebUrl,
   parseGhPrList,
   repoKeyFromWebUrl,
+  resolveGhBinary,
   GITHUB_PR_LIST_LIMIT,
 } from './github-prs.js';
 
@@ -243,7 +244,7 @@ describe('fetchGitHubPullRequests', () => {
       pullRequests: [expect.objectContaining({ number: 1, state: 'open' })],
     });
     expect(mockExecFile).toHaveBeenCalledWith(
-      'gh',
+      expect.stringMatching(/(?:^|[/\\])gh$/),
       [
         'pr',
         'list',
@@ -277,7 +278,7 @@ describe('fetchGitHubPullRequests', () => {
       pullRequests: [expect.objectContaining({ number: 1, state: 'merged' })],
     });
     expect(mockExecFile).toHaveBeenCalledWith(
-      'gh',
+      expect.stringMatching(/(?:^|[/\\])gh$/),
       [
         'pr',
         'list',
@@ -576,8 +577,60 @@ describe('fetchRemoteWebUrl', () => {
   });
 });
 
+describe('resolveGhBinary', () => {
+  const tmp = useTmpDir('github-prs-gh-binary-');
+
+  /** Creates `<dir>/gh` and returns its path. */
+  function fakeGh(dir: string): string {
+    fs.mkdirSync(dir, { recursive: true });
+    const binary = path.join(dir, 'gh');
+    fs.writeFileSync(binary, '');
+    return binary;
+  }
+
+  it('executes the gh that PATH resolves', () => {
+    const binDir = path.join(tmp.dir, 'bin');
+    fakeGh(binDir);
+    expect(resolveGhBinary({ PATH: binDir, HOME: '/nonexistent' })).toBe('gh');
+  });
+
+  it('falls back to the per-user install when PATH cannot resolve gh', () => {
+    // A daemon launched by launchd inherits `/usr/bin:/bin:…` — no
+    // package-manager bin dir — so a bare name would fail with ENOENT and
+    // every gh consumer would silently degrade.
+    const binary = fakeGh(path.join(tmp.dir, 'home', '.local', 'bin'));
+    expect(
+      resolveGhBinary({
+        PATH: '/nonexistent',
+        HOME: path.join(tmp.dir, 'home'),
+      }),
+    ).toBe(binary);
+  });
+});
+
 describe('fetchCurrentBranchPullRequest', () => {
   const tmp = useTmpDir('github-prs-branch-pr-');
+
+  it('spawns the fallback gh when PATH cannot resolve it', async () => {
+    const dir = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    const binary = path.join(home, '.local', 'bin', 'gh');
+    fs.mkdirSync(path.dirname(binary), { recursive: true });
+    fs.writeFileSync(binary, '');
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      state: 'OPEN',
+      headRefName: 'feat/x',
+    });
+
+    await fetchCurrentBranchPullRequest(dir, {
+      PATH: '/nonexistent',
+      HOME: home,
+    });
+
+    expect(mockExecFile.mock.calls[0]?.[0]).toBe(binary);
+  });
 
   it('resolves number, url, state, and head branch from gh', async () => {
     mockGhSuccess(

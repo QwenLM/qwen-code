@@ -5,6 +5,7 @@
  */
 
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { findGitRoot } from './gitUtils.js';
@@ -36,6 +37,49 @@ export function ghEnv(
     if (source[key] !== undefined) env[key] = source[key];
   }
   return env;
+}
+
+/**
+ * Where gh lives when the process PATH does not carry the user's
+ * package-manager bin directory. A daemon started by launchd (macOS) or a
+ * desktop launcher inherits `/usr/bin:/bin:…`, so a bare `execFile('gh')`
+ * fails with ENOENT even though the user's own shell runs gh fine — and the
+ * failure is silent to every caller (PR binding declines, panels show no
+ * PRs). The home-relative entry follows the child environment's HOME,
+ * because that is the HOME the child runs under.
+ */
+const GH_FALLBACK_BINARIES = [
+  '/opt/homebrew/bin/gh',
+  '/usr/local/bin/gh',
+  '/home/linuxbrew/.linuxbrew/bin/gh',
+];
+
+/**
+ * The gh binary to execute. Returns `'gh'` whenever PATH resolves it, so a
+ * machine without gh keeps the pre-existing ENOENT path and its callers'
+ * `cli_unavailable` handling; only "PATH is missing the package-manager bin
+ * directory" falls back to a known absolute install. The per-user install
+ * leads the fallback order: it is the most specific choice for this user.
+ */
+export function resolveGhBinary(
+  env?: Readonly<Record<string, string | undefined>>,
+): string {
+  const source = env ?? process.env;
+  const pathValue = source['PATH'];
+  if (
+    pathValue &&
+    pathValue
+      .split(path.delimiter)
+      .some((dir) => dir !== '' && existsSync(path.join(dir, 'gh')))
+  ) {
+    return 'gh';
+  }
+  const home = source['HOME'];
+  const candidates = [
+    ...(home ? [path.join(home, '.local', 'bin', 'gh')] : []),
+    ...GH_FALLBACK_BINARIES,
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? 'gh';
 }
 
 /** Display cap applied by the route after path sanitization. */
@@ -223,9 +267,10 @@ function runGhPrList(
     Math.max(options.limit ?? GITHUB_PR_LIST_LIMIT, 1),
     1000,
   );
+  const childEnv = ghEnv(env);
   return new Promise((resolve, reject) => {
     execFile(
-      'gh',
+      resolveGhBinary(childEnv),
       [
         'pr',
         'list',
@@ -242,7 +287,7 @@ function runGhPrList(
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
-        env: ghEnv(env),
+        env: childEnv,
       },
       (error, stdout) => {
         if (error) reject(error);
@@ -333,9 +378,10 @@ function runGhPrCreate(
   args.push('--body', opts.body ?? '');
   if (opts.base) args.push('--base', opts.base);
   if (opts.head) args.push('--head', opts.head);
+  const childEnv = ghEnv(env);
   return new Promise((resolve, reject) => {
     execFile(
-      'gh',
+      resolveGhBinary(childEnv),
       args,
       {
         cwd: gitRoot,
@@ -343,7 +389,7 @@ function runGhPrCreate(
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
-        env: ghEnv(env),
+        env: childEnv,
       },
       (error, stdout) => {
         if (error) reject(error);
@@ -553,9 +599,10 @@ export function fetchCurrentBranchPullRequest(
   // the repo (clone into the working dir) — so this is an unproven
   // pre-state, not a proved absence; callers decline on `error`.
   if (!gitRoot) return Promise.resolve({ status: 'error' });
+  const childEnv = ghEnv(env);
   return new Promise((resolve) => {
     execFile(
-      'gh',
+      resolveGhBinary(childEnv),
       ['pr', 'view', '--json', 'number,url,state,headRefName'],
       {
         cwd: gitRoot,
@@ -563,7 +610,7 @@ export function fetchCurrentBranchPullRequest(
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
-        env: ghEnv(env),
+        env: childEnv,
       },
       (error, stdout, stderr) => {
         if (error) {
@@ -665,9 +712,10 @@ export function fetchAttributionRepoKeys(
 ): Promise<AttributionRepoKeys> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return Promise.resolve({});
+  const childEnv = ghEnv(env);
   return new Promise((resolve) => {
     execFile(
-      'gh',
+      resolveGhBinary(childEnv),
       ['repo', 'view', '--json', 'url,parent'],
       {
         cwd: gitRoot,
@@ -675,7 +723,7 @@ export function fetchAttributionRepoKeys(
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
-        env: ghEnv(env),
+        env: childEnv,
       },
       (error, stdout) => {
         if (error) {

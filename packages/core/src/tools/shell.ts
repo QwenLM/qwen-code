@@ -3476,13 +3476,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // An ERRORED pre-run fetch proved nothing about the branch's prior
         // PRs — decline instead of failing open, or a branch whose snapshot
         // flaked would bind its existing PR as this session's creation.
-        if (preRunPrSnapshot?.status === 'error') return;
+        if (preRunPrSnapshot?.status === 'error') {
+          debugLogger.debug(
+            'gh pr create not bound: pre-run PR snapshot unavailable',
+          );
+          return;
+        }
         // The launch directory (`directory` param, else target dir), not a
         // repo the command may have `cd`'d into: gh resolves THIS repo's
         // branch, so an internal-`cd` create binds only when this branch's
         // PR URL is what the output carries — backfill recovers the rest.
         const created = await fetchCurrentBranchPullRequest(cwd, ghCreateEnv);
-        if (created.status !== 'pr' || created.state !== 'open') return;
+        if (created.status !== 'pr' || created.state !== 'open') {
+          debugLogger.debug(
+            'gh pr create not bound: gh resolves no open PR for this branch',
+          );
+          return;
+        }
         // The run resolved the branch's EXISTING PR — nothing was created
         // (a retry's view segment exits 0 and prints the existing URL).
         // Binding would stamp this session as creator of a PR it did not

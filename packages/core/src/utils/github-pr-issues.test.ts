@@ -235,7 +235,7 @@ describe('fetchGitHubPullRequestIssues', () => {
       ]),
     });
     expect(mockExecFile).toHaveBeenCalledWith(
-      'gh',
+      expect.stringMatching(/(?:^|[/\\])gh$/),
       [
         'api',
         'graphql',
@@ -254,7 +254,7 @@ describe('fetchGitHubPullRequestIssues', () => {
       expect.any(Function),
     );
     expect(mockExecFile).toHaveBeenCalledWith(
-      'gh',
+      expect.stringMatching(/(?:^|[/\\])gh$/),
       expect.any(Array),
       expect.objectContaining({
         env: expect.not.objectContaining({ GH_REPO: 'other/repo' }),
