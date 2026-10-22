@@ -8,6 +8,9 @@ import type { Part } from '@google/genai';
 import type { GoalRecord, GoalTurnPermit } from './goal-protocol.js';
 import { escapeJsonTagCharacters } from '../utils/formatters.js';
 import { toolSearchBridgeSentence } from '../skills/bundled-reference.js';
+import { isDeferredToolBridgeAvailable } from '../tools/tool-search.js';
+import type { ToolRegistry } from '../tools/tool-registry.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 export type GoalContinuationUsage = Pick<
   GoalRecord,
@@ -70,8 +73,6 @@ const DATA_CLOSE_TAG = '</goal_runtime_data>';
 const SHARED_LINES = [
   'Continue working on the active Goal.',
   'Use get_goal for the authoritative objective, the budget figures, and any verifier feedback.',
-  `In Direct mode: ${toolSearchBridgeSentence('get_goal or update_goal')}`,
-  'In Code Mode, discover missing Goal tools with tool_search and invoke them through exec using the returned JavaScript name.',
   "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
   'If completion depends on content delivered in this turn, deliver only that content in this turn, before update_goal.',
 ];
@@ -156,7 +157,7 @@ function renderActiveMinutes(ms: number): string {
  * judgement itself, before it spends the turn.
  */
 const EVIDENCE_LINE =
-  "Treat the workspace and this turn's tool results as authoritative. Re-inspect state rather than relying on what earlier turns in this conversation reported. The verifier judges a proposal from the most recent records of this Goal's transcript, newest first, and older records drop out when the request is full, so run the decisive checks immediately before calling update_goal.";
+  "Treat the workspace and this turn's tool results as authoritative. Re-inspect state rather than relying on what earlier turns in this conversation reported. The verifier judges a proposal from the most recent records of this Goal's transcript, newest first, and older records drop out when the request is full, so run the decisive checks immediately before calling update_goal. A script's or an aggregate wrapper's summary (agent, advisor, workflow, thread_read) supports computation but attests no external fact, so run the decisive check as a direct tool call in this turn.";
 
 const FIDELITY_LINE =
   'Work toward the end state the objective asks for. Do not substitute a narrower or more easily reached result, and do not redefine success around what already exists.';
@@ -204,9 +205,34 @@ function serializeGoalData(input: GoalContinuationPromptInput): string {
 /** Renders the full continuation prompt text for one Goal turn. */
 export function renderGoalContinuationPrompt(
   input: GoalContinuationPromptInput,
+  registry?: ToolRegistry,
 ): string {
+  const toolNames = registry?.getAllToolNames() ?? [];
+  // CodeModeOnly hides and refuses tool_call, so the Direct-mode route would
+  // send the model to a dead end there. The registry knows the mode; a bare
+  // registry stub falls back to exec, which only that mode registers.
+  const codeModeOnly =
+    registry?.isCodeModeOnly?.() ?? toolNames.includes(ToolNames.EXEC);
+  const discoveryLines: string[] = [];
+  if (registry && !codeModeOnly && isDeferredToolBridgeAvailable(registry)) {
+    discoveryLines.push(
+      `In Direct mode: ${toolSearchBridgeSentence('get_goal or update_goal')}`,
+    );
+  }
+  // The sentence routes through exec, which a deny rule can unregister.
+  if (
+    codeModeOnly &&
+    toolNames.includes(ToolNames.TOOL_SEARCH) &&
+    toolNames.includes(ToolNames.EXEC)
+  ) {
+    discoveryLines.push(
+      'In Code Mode, discover missing Goal tools with tool_search and invoke them through exec using the returned JavaScript name.',
+    );
+  }
   const lines = [
-    ...SHARED_LINES,
+    ...SHARED_LINES.slice(0, 2),
+    ...discoveryLines,
+    ...SHARED_LINES.slice(2),
     ...SYNTHETIC_TURN_GUARD_LINES,
     DATA_BLOCK_FRAMING_LINE,
     DATA_OPEN_TAG,
@@ -250,19 +276,24 @@ export function renderGoalContinuationPrompt(
 /** Renders a runtime-scheduled Goal continuation turn. */
 export function renderGoalContinuationTurn(
   turn: { permit: GoalTurnPermit } & GoalContinuationTurn,
+  registry?: ToolRegistry,
 ): string {
   const { permit, continuationContext, ...hints } = turn;
-  return renderGoalContinuationPrompt({
-    goalId: permit.goalId,
-    revision: permit.revision,
-    objective: continuationContext,
-    ...hints,
-  });
+  return renderGoalContinuationPrompt(
+    {
+      goalId: permit.goalId,
+      revision: permit.revision,
+      objective: continuationContext,
+      ...hints,
+    },
+    registry,
+  );
 }
 
 /** Builds the sendable parts for a runtime-scheduled Goal continuation turn. */
 export function buildGoalContinuationParts(
   turn: { permit: GoalTurnPermit } & GoalContinuationTurn,
+  registry?: ToolRegistry,
 ): Part[] {
-  return [{ text: renderGoalContinuationTurn(turn) }];
+  return [{ text: renderGoalContinuationTurn(turn, registry) }];
 }

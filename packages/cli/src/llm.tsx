@@ -62,6 +62,7 @@ import {
   ENV_WAS_RECOVERED,
   createMinimalSettings,
   getSettingsWarnings,
+  getOperatorTrustSettings,
   loadSettings,
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
@@ -123,6 +124,7 @@ import {
   superviseInProcess,
 } from './utils/processUtils.js';
 import { getInstallationInfo } from './utils/installationInfo.js';
+import { createLocalWorkflowAncestorTrustProvider } from './config/trustedFolders.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -732,7 +734,14 @@ export async function main() {
         undefined,
         undefined,
         undefined,
-        undefined,
+        privateAcpParentCapability === undefined
+          ? {
+              workflowAncestorTrustProvider:
+                createLocalWorkflowAncestorTrustProvider(
+                  getOperatorTrustSettings(settings),
+                ),
+            }
+          : undefined,
         buildEnabledSkillNamesProvider(settings),
       );
 
@@ -1067,7 +1076,14 @@ export async function main() {
       undefined,
       settingsWatcher,
       undefined,
-      undefined,
+      privateAcpParentCapability === undefined
+        ? {
+            workflowAncestorTrustProvider:
+              createLocalWorkflowAncestorTrustProvider(
+                getOperatorTrustSettings(settings),
+              ),
+          }
+        : undefined,
       buildEnabledSkillNamesProvider(settings),
     );
     markAcpStartup('configConstructionEnd');
@@ -1087,6 +1103,13 @@ export async function main() {
     // reconnect / disconnect / restart without a session restart (#3696,
     // sub-task 3). Skipped in bare mode (no watcher).
     if (settingsWatcher && !config.getShellExecutionSandbox?.()) {
+      registerCleanup(
+        settingsWatcher.addChangeListener(() => {
+          config.setWorkflowKeywordTriggerEnabled(
+            settings.merged.ui?.disableWorkflowKeywordTrigger !== true,
+          );
+        }),
+      );
       const disposeMcpHotReload = registerMcpHotReload(
         settingsWatcher,
         settings,
@@ -1404,6 +1427,12 @@ export async function main() {
       // startInteractiveUI) and so the first paint uses the refined theme
       // when the probe finishes in time.
       await themeAutoDetectionComplete;
+      if (settings.merged.experimental?.mods) {
+        const { createInteractiveModSession } = await import(
+          './services/interactive-mod-session.js'
+        );
+        createInteractiveModSession(config, settings);
+      }
       // Renderer dispatch for the ink→OpenTUI migration: QWEN_TUI_RENDERER
       // selects the experimental backend only on a runtime that can drive it;
       // every other case — including a failed load or boot of the entry —

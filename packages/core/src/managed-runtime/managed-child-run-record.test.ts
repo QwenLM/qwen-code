@@ -13,10 +13,18 @@ import {
 import {
   CHILD_AGENT_STOP_REASONS,
   CHILD_RUN_STOP_REASONS,
+  isChildSessionRun,
   parseChildRun,
   parseChildShellRun,
+  type AnyChildRun,
 } from './managed-child-run-record.js';
-import { MANAGED_SESSION_ENABLED_DOMAINS } from './managed-session-records.js';
+import {
+  CHILD_NOTIFICATION_SOURCES,
+  MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS,
+  MANAGED_SESSION_ENABLED_DOMAINS,
+  assertManagedSessionChildRunKindEnabled,
+  isChildNotificationSource,
+} from './managed-session-records.js';
 
 interface Fixture {
   id: string;
@@ -88,9 +96,11 @@ function templateOf(fixture: {
 }
 
 describe('managed-child-run-record/1 shared contract', () => {
-  it('projects per-kind tasks and stays disabled for submission', () => {
-    // The body lands before its producers: enabling the domain is the
-    // enablement slice's own explicit step.
+  it('projects per-kind tasks behind a per-kind enablement gate', () => {
+    // H4b admitted the child_agent kind, H3's enablement (#13856) admitted
+    // shell and the workflow runtime slice (#13803) admits the workflow
+    // kind with its runtime in place; the domain itself still stays off the
+    // plain enabled list.
     const body = MANAGED_EXTENSION_RECORD_BODIES.child_run!;
     expect(
       body.taskKindOf(parseChildRun(fixtures.templates['child_run'])),
@@ -98,9 +108,34 @@ describe('managed-child-run-record/1 shared contract', () => {
     expect(
       body.taskKindOf(parseChildRun(fixtures.templates['child_agent'])),
     ).toBe('child_agent');
+    expect(body.taskKindOf(parseChildRun(fixtures.templates['workflow']))).toBe(
+      'workflow',
+    );
     expect(MANAGED_TASK_KINDS).toContain('background_shell');
     expect(MANAGED_TASK_KINDS).toContain('child_agent');
+    expect(MANAGED_TASK_KINDS).toContain('workflow');
     expect(MANAGED_SESSION_ENABLED_DOMAINS).not.toContain('child_run');
+    expect(MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS).toEqual([
+      'child_agent',
+      'shell',
+      'workflow',
+    ]);
+    expect(() =>
+      assertManagedSessionChildRunKindEnabled('child_agent'),
+    ).not.toThrow();
+    expect(() =>
+      assertManagedSessionChildRunKindEnabled('shell'),
+    ).not.toThrow();
+    expect(() =>
+      assertManagedSessionChildRunKindEnabled('workflow'),
+    ).not.toThrow();
+    expect(() => assertManagedSessionChildRunKindEnabled('unknown')).toThrow(
+      'domain child_run kind unknown is registered but not enabled for submission.',
+    );
+    // Only child Sessions post acceptance notifications: an enabled
+    // background shell run never rides the child wake predicates.
+    expect(CHILD_NOTIFICATION_SOURCES).toEqual(['child_agent', 'workflow']);
+    expect(isChildNotificationSource('shell')).toBe(false);
   });
 
   it('pins the closed keys and the closed stop-reason vocabulary', () => {
@@ -206,9 +241,32 @@ describe('managed-child-run-record/1 shared contract', () => {
     ).toBe(fixture.valid);
   });
 
-  it('refuses a child_agent body at the shell-only entry point', () => {
+  it('classifies each child Session kind by name', () => {
+    expect(
+      isChildSessionRun(parseChildRun(fixtures.templates['child_agent'])),
+    ).toBe(true);
+    expect(
+      isChildSessionRun(parseChildRun(fixtures.templates['workflow'])),
+    ).toBe(true);
+    expect(
+      isChildSessionRun(parseChildRun(fixtures.templates['child_run'])),
+    ).toBe(false);
+    // The parse refuses any other kind before this runs; past it, an
+    // unlisted kind still joins no child Session rule by default.
+    expect(
+      isChildSessionRun({
+        ...parseChildRun(fixtures.templates['child_agent']),
+        kind: 'unregistered',
+      } as unknown as AnyChildRun),
+    ).toBe(false);
+  });
+
+  it('refuses a child Session body at the shell-only entry point', () => {
     expect(() => parseChildShellRun(fixtures.templates['child_agent'])).toThrow(
       "Child run kind must be 'shell' for this consumer, got child_agent.",
+    );
+    expect(() => parseChildShellRun(fixtures.templates['workflow'])).toThrow(
+      "Child run kind must be 'shell' for this consumer, got workflow.",
     );
     expect(parseChildShellRun(fixtures.templates['child_run']).kind).toBe(
       'shell',

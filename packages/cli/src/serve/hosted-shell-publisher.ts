@@ -81,7 +81,11 @@ interface RegisteredCapture {
     redriveInFlight?: Promise<void>;
     observer?: {
       onLine: (line: string) => void;
-      onExit: (failed: boolean) => void;
+      // stopRequested marks a platform-driven stop (#13856 A8).
+      onExit: (
+        failed: boolean,
+        stopRequested?: boolean,
+      ) => Promise<void> | void;
     };
   };
 }
@@ -102,6 +106,7 @@ export class HostedShellPublisher {
   private server?: Server;
   private descriptor?: ShellPublisherDescriptor;
   private closing = false;
+  private lifecyclePrepared = false;
   private closePromise?: Promise<void>;
 
   constructor(
@@ -112,6 +117,10 @@ export class HostedShellPublisher {
     private readonly monitors?: HostedMonitorSession,
     private readonly onNotification?: () => void,
   ) {}
+
+  prepareLifecycle(): void {
+    this.lifecyclePrepared = true;
+  }
 
   async start(): Promise<ShellPublisherDescriptor> {
     if (this.closing) throw new Error('Shell publisher is closed.');
@@ -582,7 +591,10 @@ export class HostedShellPublisher {
     executionCallId: string,
     observer: {
       readonly onLine: (line: string) => void;
-      readonly onExit: (failed: boolean) => void;
+      readonly onExit: (
+        failed: boolean,
+        stopRequested?: boolean,
+      ) => Promise<void> | void;
     },
   ): void {
     const background = this.captures.get(executionCallId)?.background;
@@ -614,7 +626,10 @@ export class HostedShellPublisher {
       decoder: StringDecoder;
       observer?: {
         onLine: (line: string) => void;
-        onExit: (failed: boolean) => void;
+        onExit: (
+          failed: boolean,
+          stopRequested?: boolean,
+        ) => Promise<void> | void;
       };
     },
     chunk: Buffer,
@@ -707,12 +722,20 @@ export class HostedShellPublisher {
       readonly exitCode: number | null;
       readonly exitSignal: string | null;
     } | null = null;
+    // A8 (#13856): the platform asked for this stop (a drain's terminate,
+    // a Session close, a worker close) — never a natural exit.
+    let stopRequested = false;
     if (body['started']) {
-      const physical = publisherFields(body['process'], [
-        'exitCode',
-        'signal',
-        'previewBytes',
-      ]);
+      // The A8 marker rides the process block as the one optional key: the
+      // field set stays closed, but its absence is a natural exit (the
+      // worker always sends it; older fixtures may not).
+      const physical = publisherObject(body['process']);
+      for (const key of Object.keys(physical)) {
+        if (
+          !['exitCode', 'signal', 'previewBytes', 'stopRequested'].includes(key)
+        )
+          throw new Error('Invalid Shell physical result.');
+      }
       if (
         (physical['exitCode'] !== null &&
           !Number.isInteger(physical['exitCode'])) ||
@@ -720,6 +743,13 @@ export class HostedShellPublisher {
       ) {
         throw new Error('Invalid Shell physical result.');
       }
+      if (
+        physical['stopRequested'] !== undefined &&
+        typeof physical['stopRequested'] !== 'boolean'
+      ) {
+        throw new Error('Invalid Shell physical result.');
+      }
+      stopRequested = physical['stopRequested'] === true;
       evidence = {
         exitCode: physical['exitCode'] as number | null,
         exitSignal: physicalSignalName(physical['signal'] as number | null),
@@ -773,7 +803,7 @@ export class HostedShellPublisher {
       background.remainder = '';
     }
     if (background.recordDomain === 'monitor_run') {
-      const exit = observer?.onExit(evidence === null);
+      const exit = observer?.onExit(evidence === null, stopRequested);
       if (exit !== undefined) {
         // An observed capture's loop owns the terminal settle: flush →
         // settle lands inside this one chain, so the last window is
@@ -792,6 +822,24 @@ export class HostedShellPublisher {
             `The monitor_run record for ${executionCallId} is missing.`,
           );
         }
+        // A parked record's observation period already ended (its quota or
+        // idle window passed the stop unproven): the capture tail that
+        // follows is not a new observation, and committing it would be
+        // refused as an over-quota or illegal-successor revision ahead of the
+        // settle. The real exit evidence settles the parked record directly
+        // (#13856 R1-55).
+        if (record.run.state === 'recovery_blocked') {
+          if (evidence !== null) {
+            if (stopRequested) {
+              await this.monitors.settleStopRequested(executionCallId);
+            } else {
+              await this.monitors.settleQuiet(executionCallId, 'exited');
+            }
+          }
+          // An unproven end over a parked watch changes nothing: the park
+          // already recorded runtime_lost.
+          return envelope;
+        }
         const windowLines = background.remainder
           .split('\n')
           .filter((line) => line.length > 0);
@@ -808,36 +856,45 @@ export class HostedShellPublisher {
               : typeof args['command'] === 'string'
                 ? (args['command'] as string)
                 : executionCallId;
-          const input = await buildMonitorNotificationInput({
-            monitorId: executionCallId,
-            toolUseId: record.run.executionCallId,
-            description,
-            sequence: record.observationSequence + 1,
-            lines: windowLines,
-            resourceStore: this.monitors.resourceStore,
-          });
+          const input = this.lifecyclePrepared
+            ? undefined
+            : await buildMonitorNotificationInput({
+                monitorId: executionCallId,
+                toolUseId: record.run.executionCallId,
+                description,
+                sequence: record.observationSequence + 1,
+                lines: windowLines,
+                resourceStore: this.monitors.resourceStore,
+              });
           await this.monitors.observe(
             executionCallId,
             { lines: windowLines },
-            { input },
+            input && !this.lifecyclePrepared ? { input } : undefined,
           );
           // Consume the tail only once its observation committed: a refused
           // commit (the record is not attached yet) keeps the lines for the
           // retry that settles this watch after the start receipt lands.
           background.remainder = '';
-          this.onNotification?.();
+          if (input && !this.lifecyclePrepared) this.onNotification?.();
         }
         const last =
           windowLines.length > 0
             ? record.observationSequence + 1
             : record.observationSequence;
-        if (last >= record.maxEvents) {
-          await this.monitors.settleQuiet(executionCallId, 'max_events');
-        } else if (evidence === null) {
+        if (evidence === null) {
+          // An unproven end is a failure, marked or not — the marker can
+          // never mint a stop nobody proved (the shell lane's
+          // process_failed is the same rule).
           await this.monitors.settleFailed(executionCallId, {
             stopReason: 'watch_failed',
             started: true,
           });
+        } else if (stopRequested) {
+          // A platform stop is the fact the model needs, ahead of the
+          // quiet reasons the same end could also claim (#13856 A8).
+          await this.monitors.settleStopRequested(executionCallId);
+        } else if (last >= record.maxEvents) {
+          await this.monitors.settleQuiet(executionCallId, 'max_events');
         } else {
           await this.monitors.settleQuiet(executionCallId, 'exited');
         }
@@ -858,6 +915,11 @@ export class HostedShellPublisher {
         stopReason: 'process_failed',
         started: true,
       });
+    } else if (stopRequested) {
+      // A8 (#13856): a platform-driven stop projects as a requested stop,
+      // not a bare exit — the contract takes the request revision first.
+      await this.childRuns?.requestStop(executionCallId);
+      await this.childRuns?.settleStopRequested(executionCallId);
     } else {
       await this.childRuns?.settleExited(executionCallId, evidence);
     }

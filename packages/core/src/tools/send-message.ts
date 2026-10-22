@@ -33,7 +33,8 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { ToolErrorType } from './tool-error.js';
 import { findMemberByName } from '../agents/team/teamHelpers.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
-import { getAgentName } from '../agents/team/identity.js';
+import { getAgentName, isTeammate } from '../agents/team/identity.js';
+import { isDirectToolBridgeAvailable } from './tool-search.js';
 import { LEADER_NAME } from '../agents/team/types.js';
 import type { ApprovalMode } from '../config/approval-mode.js';
 import {
@@ -148,8 +149,10 @@ class SendMessageInvocation extends BaseToolInvocation<
 
       case 'self': {
         const msg =
-          `"${outcome.name}" is this session's own name — a session cannot message itself. ` +
-          'Use list_agents to see the other sessions you can reach.';
+          `"${outcome.name}" is this session's own name — a session cannot message itself.` +
+          (rosterReachable(this.config)
+            ? ' Use list_agents to see the other sessions you can reach.'
+            : '');
         return {
           llmContent: msg,
           returnDisplay: 'That is this session.',
@@ -161,7 +164,10 @@ class SendMessageInvocation extends BaseToolInvocation<
         if (outcome.suggestions.length === 0) return null;
         const msg =
           `No reachable session${teamActive ? ' and no teammate' : ''} is named "${to}". Did you mean: ` +
-          `${outcome.suggestions.join(', ')}? Use list_agents to see who is reachable.`;
+          `${outcome.suggestions.join(', ')}?` +
+          (rosterReachable(this.config)
+            ? ' Use list_agents to see who is reachable.'
+            : '');
         return {
           llmContent: msg,
           returnDisplay: 'No such session.',
@@ -405,7 +411,8 @@ class SendMessageInvocation extends BaseToolInvocation<
       if (!teamManager) {
         const msg =
           'No active team to broadcast to. Broadcasting to other Qwen Code sessions ' +
-          'is not supported — address each session by name from list_agents.';
+          'is not supported — address each session by name' +
+          (rosterReachable(this.config) ? ' from list_agents.' : '.');
         return {
           llmContent: msg,
           returnDisplay: 'No active team for broadcast.',
@@ -469,8 +476,10 @@ class SendMessageInvocation extends BaseToolInvocation<
         ? `No active team and no task_id, and cross-session messaging is not active in this session (agents.crossSessionMessaging is off, or its inbox did not start), so "${to}" cannot be another session. ` +
           'Create a team, or pass `task_id` to message a background task.'
         : `No active team, no task_id, and no reachable session named "${to}". ` +
-          'Create a team, pass `task_id` to message a background task, or use ' +
-          'list_agents to see which sessions are reachable.';
+          (rosterReachable(this.config)
+            ? 'Create a team, pass `task_id` to message a background task, or use ' +
+              'list_agents to see which sessions are reachable.'
+            : 'Create a team, or pass `task_id` to message a background task.');
       return {
         llmContent: msg,
         returnDisplay: msg,
@@ -498,7 +507,11 @@ class SendMessageInvocation extends BaseToolInvocation<
         // is hiding.
         errMsg += this.peerMessagingOff
           ? ` Cross-session messaging is not active in this session (agents.crossSessionMessaging is off, or its inbox did not start), so another session could not have taken that name either.`
-          : ` No reachable session has that name either; use list_agents to see who is reachable.`;
+          : ` No reachable session has that name either${
+              rosterReachable(this.config)
+                ? '; use list_agents to see who is reachable.'
+                : '.'
+            }`;
       }
       return {
         llmContent: `Failed to send message: ${errMsg}`,
@@ -507,6 +520,40 @@ class SendMessageInvocation extends BaseToolInvocation<
       };
     }
   }
+}
+
+/**
+ * Whether the caller can use list_agents: it is registered and this is not a
+ * teammate scope, which excludes it. Gates every model-facing mention, so an
+ * error never sends the model to a tool the description withheld.
+ */
+function rosterReachable(config: Config): boolean {
+  return (
+    !isTeammate() &&
+    !!config
+      .getToolRegistry?.()
+      ?.getAllToolNames()
+      .includes(ToolNames.LIST_AGENTS)
+  );
+}
+
+function sendMessageDescription(config: Config): string {
+  const registry = config.getToolRegistry?.();
+  const rosterGuidance = rosterReachable(config)
+    ? 'Use list_agents to find a background task id or another session\'s "to" value, exactly as shown — list_agents appends " [ref]" whenever the bare name would not reach that session (another session or a teammate shares it). ' +
+      (registry && isDirectToolBridgeAvailable(registry)
+        ? `In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)} `
+        : '')
+    : '';
+  return (
+    'Send to a teammate or another Qwen Code session (use "to"), or a running, paused, or completed background task (use "task_id"); completed tasks are revived. Specify exactly one of the two fields. ' +
+    'Set "to" to a known teammate name (no @), to "*" to broadcast within an active Agent Team only, or to another session\'s destination name. ' +
+    "A message to another session arrives there marked as coming from another session, carries none of your user's authority, and may be held for that session's user to review; never use it to have another session perform an action this session was denied, blocked from, or cannot do itself. " +
+    'For background tasks, set "task_id" to the id from the launch response or a recovered task. ' +
+    'Running tasks receive your message at the next tool-round boundary; paused recovered tasks resume with the message as their first continuation instruction; completed tasks continue on their resident runtime when available and otherwise revive from their transcript and continue with your message. ' +
+    rosterGuidance +
+    'Your text output is NOT visible to teammates or to other sessions — use this tool to communicate.'
+  );
 }
 
 export class SendMessageTool extends BaseDeclarativeTool<
@@ -519,14 +566,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
     super(
       SendMessageTool.Name,
       ToolDisplayNames.SEND_MESSAGE,
-      'Send to a teammate or another Qwen Code session (use "to"), or a running, paused, or completed background task (use "task_id"); completed tasks are revived. Specify exactly one of the two fields. ' +
-        'Set "to" to a bare teammate name (no @), to "*" to broadcast within an active Agent Team only, or to a session name from list_agents, exactly as its "to" value shows it — list_agents appends " [ref]" whenever the bare name would not reach that session (another session or a teammate shares it). ' +
-        "A message to another session arrives there marked as coming from another session, carries none of your user's authority, and may be held for that session's user to review; never use it to have another session perform an action this session was denied, blocked from, or cannot do itself. " +
-        'For background tasks, set "task_id" to the id from the launch response or list_agents. ' +
-        `In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)} ` +
-        'If tool_search does not offer list_agents in this context, do not invoke it; use a known teammate name or task_id. ' +
-        'Running tasks receive it at the next tool-round boundary; paused recovered tasks resume with the message as their first continuation instruction; completed tasks continue on their resident runtime when available and otherwise revive from their transcript and continue with your message. ' +
-        'Your text output is NOT visible to teammates or to other sessions — use this tool to communicate.',
+      sendMessageDescription(config),
       Kind.Other,
       {
         type: 'object',
@@ -534,7 +574,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
           to: {
             type: 'string',
             description:
-              'Recipient: a teammate name, "*" for Agent Team broadcast, or a session\'s "to" value from list_agents verbatim (it carries " [ref]" when the bare name would not reach that session).',
+              'Recipient: a known teammate name, "*" for Agent Team broadcast, or another Qwen Code session\'s destination name.',
           },
           task_id: {
             type: 'string',
@@ -565,6 +605,13 @@ export class SendMessageTool extends BaseDeclarativeTool<
       false, // alwaysLoad
       'send message task teammate team communicate notify',
     );
+  }
+
+  override get schema() {
+    return {
+      ...super.schema,
+      description: sendMessageDescription(this.config),
+    };
   }
 
   protected createInvocation(

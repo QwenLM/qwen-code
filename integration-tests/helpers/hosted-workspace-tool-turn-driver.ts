@@ -16,6 +16,8 @@ import {
   type FakeOpenAIHandler,
 } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
+import { relayUpstream } from './hosted-relay-headers.js';
+import { quotePosix } from './hosted-shell-quote.js';
 
 const config = JSON.parse(await readFile(process.argv[2], 'utf8')) as {
   tenantId: string;
@@ -57,26 +59,6 @@ async function bytes(req: import('node:http').IncomingMessage) {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(Buffer.from(chunk));
   return Buffer.concat(chunks);
-}
-// Hop-by-hop headers describe the upstream connection, not this proxy's.
-// Relaying Spring's `Keep-Alive: timeout=60` let the daemon's fetch pool reuse
-// a socket this server had just closed at its own 5 s idle timeout, and the
-// cold load's parallel resource reads failed with "other side closed".
-function endToEndHeaders(headers: Headers) {
-  const hop = new Set([
-    'connection',
-    'keep-alive',
-    'proxy-connection',
-    'te',
-    'trailer',
-    'transfer-encoding',
-    'upgrade',
-    ...(headers.get('connection') ?? '')
-      .split(',')
-      .map((name) => name.trim().toLowerCase())
-      .filter(Boolean),
-  ]);
-  return Object.fromEntries([...headers].filter(([name]) => !hop.has(name)));
 }
 const publisherRelay = createServer(async (req, res) => {
   try {
@@ -143,6 +125,13 @@ const storeProxy = createServer(async (req, res) => {
         'X-Qwen-Managed-Writer-Token': String(
           req.headers['x-qwen-managed-writer-token'],
         ),
+        ...(req.headers['x-qwen-managed-max-readable-storage-version']
+          ? {
+              'X-Qwen-Managed-Max-Readable-Storage-Version': String(
+                req.headers['x-qwen-managed-max-readable-storage-version'],
+              ),
+            }
+          : {}),
       },
       ...(payload.length ? { body: payload } : {}),
       signal: AbortSignal.timeout(30000),
@@ -174,7 +163,11 @@ const storeProxy = createServer(async (req, res) => {
         ),
       });
     }
-    if (response.ok && req.url?.endsWith('/transactions:commit')) {
+    if (
+      response.ok &&
+      (req.url?.endsWith('/transactions:commit') ||
+        req.url?.endsWith('/transactions:commit-v2'))
+    ) {
       for (const line of Buffer.from(body.recordBytesBase64, 'base64')
         .toString()
         .trim()
@@ -184,8 +177,7 @@ const storeProxy = createServer(async (req, res) => {
           durableReceipts.push(record.managedSession);
       }
     }
-    res.writeHead(response.status, endToEndHeaders(response.headers));
-    res.end(output);
+    relayUpstream(res, response, output);
   } catch (cause) {
     res.writeHead(503);
     res.end(String(cause));
@@ -247,11 +239,30 @@ let modelCalls = 0;
 const modelReply: FakeOpenAIHandler = ({ body }) => {
   modelCalls++;
   const tools = body['tools'] as Array<{ function: { name: string } }>;
+  // Since H4b, a depth-0 Shell-lane Session whose child kind gate is on
+  // advertises the Agent tool beside the Shell vocabulary, since H4d-b the
+  // parent form of send_message beside it, since the H4e-b1 enablement
+  // the lead's team tools with them, since H4e-b3a their shutdown
+  // request, and since #13803 (K4) the Workflow tool — its own kind
+  // reader gates the advertisement, so a child Session still hides it.
   assert.deepEqual(tools.map((tool) => tool.function.name).sort(), [
+    ...(shellProfile ? ['agent'] : []),
     'edit',
     ...(shellProfile ? ['monitor'] : []),
     'read_file',
-    ...(shellProfile ? ['run_shell_command'] : []),
+    ...(shellProfile
+      ? [
+          'request_shutdown',
+          'run_shell_command',
+          'send_message',
+          'task_create',
+          'task_list',
+          'task_update',
+          'team_create',
+          'team_delete',
+          'workflow',
+        ]
+      : []),
     'write_file',
   ]);
   const messages = body['messages'] as Array<{
@@ -284,14 +295,12 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
         : current === 'SHELL_CANCEL'
           ? "require('fs').appendFileSync('shell-once.txt','x'); setInterval(()=>process.stdout.write('running\\n'),20);"
           : "require('fs').appendFileSync('shell-once.txt','x'); (async()=>{await new Promise(r=>process.stdout.write(process.cwd()+'\\n',r)); const b=Buffer.alloc(1024*1024,0x91); for(let i=0;i<100;i++) await new Promise(r=>process.stdout.write(b,r)); await new Promise(r=>process.stdout.write('stdout-tail\\0',r)); process.stderr.write('stderr-tail\\0');})().catch(e=>{console.error(e);process.exitCode=1});";
-      const quote = (text: string) =>
-        "'" + text.replaceAll("'", "'\"'\"'") + "'";
       return {
         toolCalls: [
           fakeToolCall(
             'run_shell_command',
             {
-              command: `${quote(process.execPath)} -e ${quote(producer)}`,
+              command: `${quotePosix(process.execPath)} -e ${quotePosix(producer)}`,
               timeout: 180000,
             },
             callId,

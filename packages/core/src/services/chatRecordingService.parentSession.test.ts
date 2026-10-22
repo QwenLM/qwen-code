@@ -10,6 +10,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import {
   ChatRecordingService,
   type ChatRecord,
@@ -52,6 +53,8 @@ describe('ChatRecordingService - recordParentSession', () => {
           .mockReturnValue('/test/project/root/.qwen/projects/test-project'),
       },
       getModel: vi.fn().mockReturnValue('qwen-plus'),
+      getAuthType: vi.fn().mockReturnValue(undefined),
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getFastModel: vi.fn().mockReturnValue(undefined),
       isInteractive: vi.fn().mockReturnValue(false),
       getDebugMode: vi.fn().mockReturnValue(false),
