@@ -159,7 +159,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(integration.indexOf('-Pmysql-integration')).toBeLessThan(lockAt);
     expect(integration).toContain('mkdir -p "${HOME}/.m2/repository" 9>&-');
     expect(integration).toMatch(
-      /tar -C "\$\{RUNNER_TEMP\}\/m2-repo".* 9>&- \\\n\s*\| tar -C "\$\{HOME\}\/\.m2\/repository" --skip-old-files -xf - 9>&-/,
+      /timeout 300 find \..*-exec cp -ln --parents -t "\$\{HOME\}\/\.m2\/repository" \{\} \+ 9>&- \|\| write_back=\$\?/,
     );
   });
 
@@ -207,6 +207,94 @@ describe('SDK Java self-hosted workflow guards', () => {
           expect(result.status, command + result.stderr).toBe(0);
         }
       } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'releases the host lock when a write-back child survives the step',
+    () => {
+      const jobs = parse(workflow).jobs;
+      const integration = jobs['mysql-integration'].steps.find((s) =>
+        s.run?.includes('sdk-java-tests.lock'),
+      ).run;
+      const start = integration.indexOf('mkdir -p "${HOME}/.m2/repository"');
+      expect(start).toBeGreaterThan(-1);
+      const writeBack = integration.slice(start);
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-write-back-'));
+      const shims = join(dir, 'bin');
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const pidFile = join(dir, 'children.pid');
+      mkdirSync(shims);
+      mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
+      mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
+      // A child that outlives the step: if it inherits fd 9, the host lock
+      // stays held after the step shell exits. `mkdir` and `timeout` are the
+      // write-back's only children, so each gets one.
+      for (const name of ['mkdir', 'timeout']) {
+        writeFileSync(
+          join(shims, name),
+          '#!/bin/sh\n' +
+            'sleep 30 </dev/null >/dev/null 2>&1 &\n' +
+            'printf \'%s\\n\' "$!" >> "$CHILD_PID_FILE"\n' +
+            'exit 0\n',
+          { mode: 0o755 },
+        );
+      }
+      try {
+        const result = spawnSync(
+          'bash',
+          [
+            '-e',
+            '-c',
+            `
+            exec 9>"$LOCK_FILE"
+            flock --nonblock 9
+            ${writeBack}
+          `,
+          ],
+          {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: {
+              ...process.env,
+              PATH: `${shims}:${process.env.PATH}`,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              CHILD_PID_FILE: pidFile,
+              LOCK_FILE: join(dir, 'tests.lock'),
+            },
+          },
+        );
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stderr).toBe(0);
+        const children = readFileSync(pidFile, 'utf8')
+          .trim()
+          .split('\n')
+          .filter(Boolean);
+        expect(children.length).toBeGreaterThanOrEqual(2);
+        // The step shell has exited. A survivor that inherited fd 9 would
+        // still hold the lock; the closures are what keep it free.
+        const free = spawnSync(
+          'flock',
+          ['--nonblock', join(dir, 'tests.lock'), 'true'],
+          { encoding: 'utf8' },
+        );
+        expect(free.status, free.stderr).toBe(0);
+      } finally {
+        if (existsSync(pidFile)) {
+          for (const pid of readFileSync(pidFile, 'utf8').split('\n')) {
+            if (pid.trim()) {
+              try {
+                process.kill(Number(pid), 'SIGKILL');
+              } catch {
+                // Already gone.
+              }
+            }
+          }
+        }
         rmSync(dir, { recursive: true, force: true });
       }
     },
@@ -1021,7 +1109,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // verify it runs `clean verify` in the wrong module.
     const cdAt = step.run.indexOf('cd packages/managed-agent-server');
     const verifyAt = step.run.indexOf('-Pmysql-integration');
-    const writeBackAt = step.run.indexOf('tar -C "${RUNNER_TEMP}/m2-repo"');
+    const writeBackAt = step.run.indexOf('cd "${RUNNER_TEMP}/m2-repo"');
     expect(lockAt).toBeGreaterThan(-1);
     expect(installAt).toBeGreaterThan(-1);
     expect(installAt).toBeLessThan(lockAt);
@@ -1029,11 +1117,16 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(verifyAt).toBeGreaterThan(cdAt);
     expect(verifyAt).toBeLessThan(lockAt);
     expect(writeBackAt).toBeGreaterThan(lockAt);
-    // The ceiling must absorb one full lock wait plus the ~3-hour Maven run
-    // and ~30 minutes of uncapped setup.
+    // The ceiling must absorb one full lock wait, the ~3-hour Maven run,
+    // the write-back backstop and ~30 minutes of uncapped setup; 310 leaves
+    // a few minutes of margin.
+    const writeBackBound = Number(
+      step.run.match(/timeout (\d+) find \. /)?.[1],
+    );
+    expect(writeBackBound).toBe(300);
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
-    ).toBeGreaterThanOrEqual(seconds + 3 * 60 * 60 + 30 * 60);
+    ).toBeGreaterThanOrEqual(seconds + 3 * 60 * 60 + writeBackBound + 30 * 60);
     // The sibling test job shares the same per-host lock: its ceiling must
     // cover one full wait plus its own measured hold (the sdk-java suite plus
     // the managed-agent H2 suite, 925 s) and ~11 minutes of setup.
@@ -1063,20 +1156,25 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // thin entry that never recaptures the managed-agent-server tree. The
     // excludes name the two in-house fixed release coordinates, not the
     // whole com/alibaba group, so third-party artifacts under it (druid)
-    // still recapture. The pipeline is best-effort like the seed: the
-    // warning arm keeps a copy failure from reddening the gate after mvn
-    // has already passed, and pipefail keeps a failing left-hand tar from
-    // being masked by the extractor's exit 0.
-    expect(step.run).toContain('set -o pipefail');
+    // still recapture. The write-back is best-effort like the seed: its
+    // warning arms keep a copy failure from reddening the gate after mvn
+    // has already passed.
     expect(step.run).toContain('mkdir -p "${HOME}/.m2/repository"');
+    // Run 39563394993 spent 60 minutes streaming the whole seeded tree and
+    // was cancelled at the job ceiling. Only the nlink == 1 delta Maven
+    // fetched in this job is published, by per-file hardlinks that never
+    // replace a host file, so the 300 s backstop cannot leave a truncated
+    // artifact in the shared cache the next seed hardlinks from.
+    expect(step.run).toContain('cd "${RUNNER_TEMP}/m2-repo"');
     expect(step.run).toContain(
-      'tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - .',
+      'timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \\) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?',
+    );
+    expect(step.run).not.toMatch(/tar [^\n]*-xf/);
+    expect(step.run).toContain(
+      'if [ "${write_back}" -eq 124 ]; then\n  echo "::warning::Maven cache write-back stopped after 300 s;',
     );
     expect(step.run).toContain(
-      'tar -C "${HOME}/.m2/repository" --skip-old-files -xf -',
-    );
-    expect(step.run).toContain(
-      '|| echo "::warning::Maven cache write-back failed; the gate result above is unaffected"',
+      'elif [ "${write_back}" -ne 0 ]; then\n  echo "::warning::Maven cache write-back failed; the gate result above is unaffected"',
     );
     // One body replaced the two-step split, so only these positions still
     // order the phases: the write-back runs against a directory the seed has
@@ -1085,7 +1183,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     const seedAt = step.run.indexOf('cp -aln "${HOME}/.m2/repository"');
     const installAt = step.run.indexOf('-f packages/sdk-java/qwencode/pom.xml');
     const verifyAt = step.run.indexOf('-Pmysql-integration');
-    const writeBackAt = step.run.indexOf('tar -C "${RUNNER_TEMP}/m2-repo"');
+    const writeBackAt = step.run.indexOf('cd "${RUNNER_TEMP}/m2-repo"');
     expect(seedAt).toBeGreaterThan(-1);
     expect(installAt).toBeGreaterThan(seedAt);
     expect(verifyAt).toBeGreaterThan(installAt);

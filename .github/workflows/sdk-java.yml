@@ -458,10 +458,11 @@ jobs:
     # repository, so holding the lock across the whole integration suite
     # serialized the fast tier behind a multi-hour hold (run 39628985638 held
     # it 15:54-18:57 while run 39627609266's fast-tier job burned its full
-    # 90-minute wait). The ceiling absorbs that wait, the ~3-hour Maven run
-    # and 30 minutes of uncapped setup: 300. Hosted lanes never take the lock
-    # and inherit this ceiling as a bound, not as an expected duration.
-    timeout-minutes: 300
+    # 90-minute wait). The ceiling absorbs that wait, the ~3-hour Maven run,
+    # the 5-minute write-back backstop and 30 minutes of uncapped setup: 310.
+    # Hosted lanes never take the lock and inherit this ceiling as a bound,
+    # not as an expected duration.
+    timeout-minutes: 310
     env:
       MYSQL_CONTAINER: 'qwen-code-sdk-java-mysql-${{ github.run_id }}-${{ github.run_attempt }}'
     steps:
@@ -730,19 +731,29 @@ jobs:
           # key rotation. The excludes name the two in-house fixed release
           # coordinates rather than the whole com/alibaba group, so
           # third-party artifacts under it (druid) still recapture into the
-          # host-shared ~/.m2. Best-effort like the seed: the warning arm
-          # keeps a copy failure from reddening the gate after mvn has
-          # already passed, and pipefail keeps a failing left-hand tar from
-          # being masked by the extractor. On a fresh ECS host nothing
-          # creates ~/.m2/repository anymore (the hosted-only cache no longer
-          # restores it), so create it before the write-back or every job
-          # re-resolves through the egress proxy instead of bootstrapping the
-          # shared repository. No child inherits fd 9, or a cancelled job's
-          # survivor would hold the host lock until it exits.
+          # host-shared ~/.m2. Best-effort like the seed: the warning arms
+          # keep a copy failure from reddening the gate after mvn has already
+          # passed.
+          # On a fresh ECS host nothing creates ~/.m2/repository anymore
+          # (the hosted-only cache no longer restores it), so create it
+          # before the write-back or every job re-resolves through the
+          # egress proxy instead of bootstrapping the shared repository.
+          # Publish only this job's downloads: seeded files are hardlinks
+          # (nlink >= 2), so the delta is nlink == 1. Taring the whole tree
+          # took up to 61 minutes (run 39563394993). Each link is atomic and
+          # -n never replaces a host file, so the backstop can leave an
+          # artifact missing for the next job to re-resolve, never truncated.
+          # No write-back child inherits fd 9, or a cancelled job's survivor
+          # would hold the host lock until it exits.
           mkdir -p "${HOME}/.m2/repository" 9>&-
-          tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - . 9>&- \
-            | tar -C "${HOME}/.m2/repository" --skip-old-files -xf - 9>&- \
-            || echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
+          cd "${RUNNER_TEMP}/m2-repo"
+          write_back=0
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          if [ "${write_back}" -eq 124 ]; then
+            echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
+          elif [ "${write_back}" -ne 0 ]; then
+            echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
+          fi
 
       # Maven passes a selection narrowed by a profile, MAVEN_ARGS or
       # .mvn/maven.config, so compare what ran with the source tree.
@@ -827,14 +838,15 @@ jobs:
     # 11133 s and Verify to 196 minutes; the FG11e stream cells add 42 s,
     # moving the fork to 11175 s and Verify to 197 minutes; the FG11d
     # cancel-retry cell adds 12 s, moving the fork to 11187 s; the FG11d
-    # second-fire refusal cell adds 25 s, moving the fork to 11212 s,
-    # wrapping fork + 600 s plus margin (11812 s of fork plus wrap, 8 s of
-    # it);
+    # second-fire refusal cell adds 25 s, moving the fork to 11212 s; the FG11d
+    # cancel-isolation cell adds 11 s, moving the fork to 11223 s and raising
+    # Verify to 198 minutes, wrapping fork + 600 s plus margin (11823 s of fork
+    # plus wrap, 0 s left: the next cell must raise the step);
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 287 + 13. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 300
+    # checks): 288 + 13. The failover arms run in hosted-failover-e2e.
+    timeout-minutes: 301
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -934,9 +946,8 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 11212 s, so the step wraps to fork + 600 s plus margin (197 min,
-        # 8 s left before the step must move).
-        timeout-minutes: 197
+        # 11223 s, so the step wraps to fork + 600 s plus margin (198 min).
+        timeout-minutes: 198
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"

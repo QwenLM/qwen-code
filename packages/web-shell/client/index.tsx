@@ -370,6 +370,12 @@ export type {
 
 export type { WebShellModelManagementOptions } from './modelManagement';
 export type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipHandle,
+  WebShellUnavailableModelTooltipInfo,
+  WebShellUnavailableModelTooltipMount,
+} from './unavailableModels';
+export type {
   WebShellMessageNavigationRequest,
   WebShellMessageNavigationResult,
 } from './hooks/useMessageNavigation';

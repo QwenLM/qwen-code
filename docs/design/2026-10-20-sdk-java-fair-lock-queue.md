@@ -32,7 +32,7 @@ hold at a time — no constant budget bounds the queue.
 - Non-goal: reducing total occupancy. Sharding the lock by suite, capping
   registrations per host, or adding hosts are orthogonal and can follow;
   fairness makes their remaining work measurable instead of urgent.
-- Non-goal: changing the 5400 s budget or the 150/300-minute job ceilings.
+- Non-goal: changing the 5400 s budget or the 150/310-minute job ceilings.
 
 ## Design
 
@@ -96,7 +96,8 @@ Both Maven runs already resolve from a job-local repository, so they touch no
 host-shared state. Only the cache write-back mutates `~/.m2`, so only the
 write-back takes the lock. The seed (`cp -aln`) is read-only and best-effort
 and runs before the acquisition; the Maven runs run unlocked; the write-back
-holds one acquisition, and its `mkdir`/`tar` children drop fd 9 so a survivor
+holds one acquisition, and its `mkdir` and bounded `find`/`cp` children
+drop fd 9 so a survivor
 cannot retain the lock. A hold now measures the copy instead of the suite, and
 the fast tier's 90-minute budget is again far above one hold.
 
