@@ -524,8 +524,9 @@ public class AutomationScanner {
                         occurrence.occurrenceKey(),
                         AutomationLedgerStore.OUTCOME_SKIPPED, reason, detail,
                         owner, fence, now)) {
-                    store.recordGateOutcome(row, owner, fence, outcome, detail,
-                            now);
+                    store.recordGateOutcome(row,
+                            occurrence.definitionRevision(), owner, fence,
+                            outcome, detail, now);
                 }
                 return false;
             }
@@ -533,7 +534,8 @@ public class AutomationScanner {
                     row.scheduleId(), occurrence.occurrenceKey(),
                     AutomationLedgerStore.OUTCOME_FIRED, null, owner, fence, now);
             if (fired) {
-                store.recordGateOutcome(row, owner, fence, outcome, detail, now);
+                store.recordGateOutcome(row, occurrence.definitionRevision(),
+                        owner, fence, outcome, detail, now);
             }
             return fired;
         }

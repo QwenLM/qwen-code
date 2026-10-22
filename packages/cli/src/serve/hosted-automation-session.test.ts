@@ -44,9 +44,10 @@ import {
   HostedAutomationSession,
   type HostedAutomationSessionOptions,
 } from './hosted-automation-session.js';
-import type {
-  HostedAutomationGateRequest,
-  HostedAutomationGateResult,
+import {
+  HostedAutomationGateHeld,
+  type HostedAutomationGateRequest,
+  type HostedAutomationGateResult,
 } from './hosted-automation-gate.js';
 
 // The H6b gates are real: both domains are enabled and the persistent mode
@@ -148,6 +149,7 @@ async function withSession<T>(
       sessionKey,
       {
         ...(options.gate ? { gate: options.gate } : {}),
+        ...(options.releaseGate ? { releaseGate: options.releaseGate } : {}),
         ...(options.shellAvailable
           ? { shellAvailable: options.shellAvailable }
           : {}),
@@ -1302,11 +1304,91 @@ describe('hosted automation gates', () => {
         expect(gate.calls).toEqual([
           expect.objectContaining({
             automationRunId: automationRunId(SCHEDULE_ID, SLOT_KEY),
+            definitionRevision: 1,
             gate: './probe.sh --gate',
           }),
         ]);
       },
       { gate: gate.runner },
+    );
+  });
+
+  it('releases the probe Session of the pinned revision when the fire ends without probing it again', async () => {
+    // An attempt that could not release its probe Session left that to the
+    // next attempt; a revision since, a retire or a deletion means no next
+    // attempt probes under that revision.
+    const harness = await createHarness();
+    const released: Array<[string, number]> = [];
+    const runId = automationRunId(SCHEDULE_ID, SLOT_KEY);
+    await withSession(
+      harness,
+      async (automations) => {
+        await expect(automations.fire(fireParams(4))).rejects.toThrow(
+          AutomationNotFoundError,
+        );
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: { gate: null },
+        });
+        await expect(automations.fire(fireParams(1))).rejects.toThrow(
+          AutomationRevisionStaleError,
+        );
+        await automations.retire(SCHEDULE_ID, nextOperationId());
+        await expect(automations.fire(fireParams(2))).rejects.toThrow(
+          AutomationRetiredError,
+        );
+        expect(released).toEqual([
+          [runId, 4],
+          [runId, 1],
+          [runId, 2],
+        ]);
+      },
+      {
+        releaseGate: async (id, revision) => {
+          released.push([id, revision]);
+        },
+      },
+    );
+  });
+
+  it('retries a fire whose stale revision’s probe Session could not be released', async () => {
+    const harness = await createHarness();
+    let failing = true;
+    await withSession(
+      harness,
+      async (automations) => {
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: { gate: null },
+        });
+        await expect(automations.fire(fireParams(1))).rejects.toThrow(
+          HostedAutomationGateHeld,
+        );
+        failing = false;
+        await expect(automations.fire(fireParams(1))).rejects.toThrow(
+          AutomationRevisionStaleError,
+        );
+        // Only then does the ungated revision claim, unprobed.
+        const fired = await automations.fire(fireParams(2));
+        expect(fired.run?.run.execution).toBe('dispatch_started');
+      },
+      {
+        releaseGate: async () => {
+          if (failing) throw new Error('Broker unavailable');
+        },
+      },
     );
   });
 

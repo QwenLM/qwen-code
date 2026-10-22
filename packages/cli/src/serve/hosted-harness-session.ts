@@ -236,7 +236,11 @@ import {
   isAutomationScheduleId,
   isAutomationTrigger,
 } from './hosted-automation-session.js';
-import { createHostedAutomationGateRunner } from './hosted-automation-gate.js';
+import {
+  createHostedAutomationGateRelease,
+  createHostedAutomationGateRunner,
+  type HostedAutomationGateRunnerOptions,
+} from './hosted-automation-gate.js';
 import {
   AUTOMATION_INPUT_SOURCE,
   AutomationGateInvalidError,
@@ -1651,6 +1655,17 @@ function unsettledPromptId(session: HostedSession): string | undefined {
 // all: an upsert-only write leaves the previous pass's stale set behind,
 // and the next pass would journal a positively witnessed stop as
 // unobservable.
+/** A Session's gate runner and the release for probes it no longer asks. */
+function gateOptions(options: HostedAutomationGateRunnerOptions): {
+  gate: ReturnType<typeof createHostedAutomationGateRunner>;
+  releaseGate: ReturnType<typeof createHostedAutomationGateRelease>;
+} {
+  return {
+    gate: createHostedAutomationGateRunner(options),
+    releaseGate: createHostedAutomationGateRelease(options),
+  };
+}
+
 function persistRecoveryUnobserved(
   session: HostedSession,
   turnId: string,
@@ -5629,16 +5644,14 @@ export function registerHostedHarnessSessionRoutes(
           // The gate probe runs in the Workspace Runtime through the
           // Broker; a Harness without one blocks every gated fire.
           ...(brokerOptions
-            ? {
-                gate: createHostedAutomationGateRunner({
-                  broker: {
-                    ...brokerOptions,
-                    lifecycleAuthority: () => session.lifecycle,
-                  },
-                  sessionKey: managed.authority.sessionHeader.sessionKey,
-                  toolProfile: () => session.toolProfile,
-                }),
-              }
+            ? gateOptions({
+                broker: {
+                  ...brokerOptions,
+                  lifecycleAuthority: () => session.lifecycle,
+                },
+                sessionKey: managed.authority.sessionHeader.sessionKey,
+                toolProfile: () => session.toolProfile,
+              })
             : {}),
           shellAvailable: () =>
             isHostedWorkspaceShellProfile(session.toolProfile),

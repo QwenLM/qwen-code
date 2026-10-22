@@ -242,10 +242,17 @@ public final class AutomationHarnessFake {
                 Map<String, Object> existing = runs.get(sessionId + "|"
                         + runId);
                 if (existing != null) {
-                    result.put("run", new LinkedHashMap<>(existing));
+                    Map<String, Object> answered = new LinkedHashMap<>(existing);
+                    // Like the funnel, a run a gate admitted answers its
+                    // delivery again.
+                    boolean gated = Boolean.TRUE.equals(answered.remove("gated"));
+                    result.put("run", answered);
                     result.put("inputId", AutomationLedgerStore
                             .automationInputId(runId));
                     result.put("replayed", true);
+                    if (gated) {
+                        result.put("gate", Map.of("outcome", "delivered"));
+                    }
                     break;
                 }
                 Map<String, Object> schedule = schedules.get(key);
@@ -285,9 +292,13 @@ public final class AutomationHarnessFake {
                         break;
                     }
                 }
+                boolean gated = gate != null;
                 Map<String, Object> run = runs.computeIfAbsent(
                         sessionId + "|" + runId, ignored -> {
                             Map<String, Object> created = new LinkedHashMap<>();
+                            if (gated) {
+                                created.put("gated", true);
+                            }
                             created.put("automationRunId", runId);
                             created.put("scheduleId", scheduleId);
                             created.put("definitionRevision", offered);
@@ -301,7 +312,9 @@ public final class AutomationHarnessFake {
                     failAfterNextFireCommit = null;
                     throw lost;
                 }
-                result.put("run", new LinkedHashMap<>(run));
+                Map<String, Object> answered = new LinkedHashMap<>(run);
+                answered.remove("gated");
+                result.put("run", answered);
                 result.put("inputId", AutomationLedgerStore
                         .automationInputId(runId));
                 result.put("replayed", false);

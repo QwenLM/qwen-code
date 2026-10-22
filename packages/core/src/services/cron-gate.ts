@@ -104,13 +104,13 @@ async function unattendedVerdict(
   };
 }
 
-/** Longest gate command accepted by `cron_create`, the daemon routes and a
- * managed definition. */
+/** Longest gate command a managed definition and its probe tool accept. */
 export const MAX_CRON_GATE_CHARS = 2048;
 
 /**
- * Why `gate` cannot be a gate command, or null when it can. Shared by every
- * entry point so each refuses the same strings: empty or whitespace-only
+ * Why `gate` cannot be a gate command, or null when it can. The managed
+ * definition's admission and the worker's probe tool share it, so both
+ * refuse the same strings: empty or whitespace-only
  * commands, commands past the cap, and anything backgrounded with `&` — a
  * backgrounded gate returns at once with nothing on stdout, so every fire
  * would be quiet. `backgroundsAnyPart` also looks inside a wrapper's script,
@@ -160,7 +160,14 @@ export async function suggestedGateRule(gate: string): Promise<string> {
  */
 export function createCronGateRunner(
   config: Config,
-  options: { readonly timeoutMs?: number } = {},
+  options: {
+    readonly timeoutMs?: number;
+    /**
+     * Handed the command's process group as soon as it starts, for a host
+     * that stops or sweeps groups it tracks; a throw stops the command.
+     */
+    readonly onProcessGroup?: (pgid: number) => void;
+  } = {},
 ): CronGateRunner {
   const timeoutMs = options.timeoutMs ?? CRON_GATE_TIMEOUT_MS;
   return async (gate, { signal, approvedInProcess }) => {
@@ -182,7 +189,14 @@ export function createCronGateRunner(
     const startedAt = Date.now();
     const timeout = AbortSignal.timeout(timeoutMs);
     const binary = new AbortController();
-    const combined = AbortSignal.any([signal, timeout, binary.signal]);
+    const untracked = new AbortController();
+    const combined = AbortSignal.any([
+      signal,
+      timeout,
+      binary.signal,
+      untracked.signal,
+    ]);
+    let trackingError: unknown;
     let stdout = '';
     let stdoutBytes = 0;
     let truncated = false;
@@ -239,10 +253,21 @@ export function createCronGateRunner(
         },
         { streamStdout: true },
       );
+      if (options.onProcessGroup && handle.pid !== undefined) {
+        try {
+          options.onProcessGroup(handle.pid);
+        } catch (error) {
+          // A group its host cannot track must not run on: stop it, and
+          // fail the call rather than answer an outcome.
+          trackingError = error;
+          untracked.abort();
+        }
+      }
       result = await handle.result;
     } catch (error) {
       return failed(`could not start: ${getErrorMessage(error)}`);
     }
+    if (trackingError !== undefined) throw trackingError;
     if (result.error) return failed(`could not start: ${result.error.message}`);
     if (binary.signal.aborted) return failed('printed binary output');
     if (timeout.aborted) {

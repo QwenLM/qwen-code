@@ -251,6 +251,30 @@ class AutomationScannerTest {
     }
 
     @Test
+    void aReplayedDeliveryOfAnEarlierRevisionDoesNotCountForTheNewGate() {
+        // The probe delivered and the claim committed, but the answer was
+        // lost; the gate is revised before the re-drive, which replays the
+        // committed run: that delivery was the old command's.
+        PublicAutomation automation = defineGated("./probe.sh");
+        fake.failAfterNextFireCommit = new DaemonException("connection lost");
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        service.update(tenant, ACTOR, automation.id(),
+                "key-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(null, null, null, null, null,
+                        null, null, null, null, null,
+                        TextNode.valueOf("./other.sh")));
+        clock.addAndGet(11_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(occurrence(automation.id(), "schedule:2026-06-01T10:01:00Z")
+                .outcome()).isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(fake.probes).hasSize(1);
+        PublicAutomation revised = service.get(tenant, ACTOR, automation.id());
+        assertThat(revised.gate()).isEqualTo("./other.sh");
+        assertThat(revised.gateStatus()).isNull();
+    }
+
+    @Test
     void everySlotOfOneScanCountsInTheGateStatus() {
         // One scan hands every due slot the same schedule snapshot: the
         // counters must still move once per probe.

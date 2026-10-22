@@ -37,6 +37,8 @@ export type HostedAutomationGateResult =
 
 export interface HostedAutomationGateRequest {
   readonly automationRunId: string;
+  /** The definition revision the occurrence is pinned to. */
+  readonly definitionRevision: number;
   readonly gate: string;
   readonly signal: AbortSignal;
 }
@@ -48,33 +50,74 @@ export type HostedAutomationGateRunner = (
   request: HostedAutomationGateRequest,
 ) => Promise<HostedAutomationGateResult>;
 
-/** The derived call id of one occurrence's probe; path-safe for the Broker. */
-export function automationGateCallId(automationRunId: string): string {
-  return `${automationRunId}:gate`;
+/**
+ * The derived call id of one occurrence's probe under one definition
+ * revision; path-safe for the Broker. A revision gets its own Session and
+ * reservation, so an occurrence whose definition changed before it was
+ * answered probes the command the definition now names, and the attempt
+ * that finds its revision stale knows which Session to release.
+ */
+export function automationGateCallId(
+  automationRunId: string,
+  definitionRevision: number,
+): string {
+  return `${automationRunId}:gate:${definitionRevision}`;
+}
+
+export interface HostedAutomationGateRunnerOptions {
+  readonly broker: HostedWorkspaceBrokerOptions;
+  readonly sessionKey: ManagedSessionKey;
+  /** The Session's tool profile as it stands when the probe is asked for. */
+  readonly toolProfile: () => unknown;
+}
+
+function derivedBroker(
+  options: HostedAutomationGateRunnerOptions,
+  callId: string,
+): HostedWorkspaceBroker {
+  return new HostedWorkspaceBroker(
+    options.broker,
+    options.sessionKey,
+    hostedRuntimeSessionId(callId),
+  );
+}
+
+/**
+ * Releases the derived Runtime Session of an occurrence's probe under one
+ * revision, for a fire that ends without asking the runner again: the
+ * revision went stale, or the definition retired or is gone. A failed
+ * attempt left that release to the next attempt, which now never comes
+ * back through the runner. Throws when the release fails, so the fire is
+ * retried; a Session the Broker does not know is gone.
+ */
+export function createHostedAutomationGateRelease(
+  options: HostedAutomationGateRunnerOptions,
+): (automationRunId: string, definitionRevision: number) => Promise<void> {
+  return (automationRunId, definitionRevision) =>
+    releaseDerivedSession(
+      derivedBroker(
+        options,
+        automationGateCallId(automationRunId, definitionRevision),
+      ),
+      { notFoundIsFinal: true },
+    );
 }
 
 /** The observation window: the probe's own timeout plus Runtime slack. */
 const GATE_OBSERVATION_MS = MANAGED_AUTOMATION_GATE_TIMEOUT_MS + 40_000;
 
-export function createHostedAutomationGateRunner(options: {
-  readonly broker: HostedWorkspaceBrokerOptions;
-  readonly sessionKey: ManagedSessionKey;
-  /** The Session's tool profile as it stands when the probe is asked for. */
-  readonly toolProfile: () => unknown;
-}): HostedAutomationGateRunner {
-  return async ({ automationRunId, gate, signal }) => {
+export function createHostedAutomationGateRunner(
+  options: HostedAutomationGateRunnerOptions,
+): HostedAutomationGateRunner {
+  return async ({ automationRunId, definitionRevision, gate, signal }) => {
     if (!isHostedWorkspaceShellProfile(options.toolProfile())) {
       return {
         kind: 'blocked',
         reason: "the Session's tool profile declares no Shell",
       };
     }
-    const callId = automationGateCallId(automationRunId);
-    const broker = new HostedWorkspaceBroker(
-      options.broker,
-      options.sessionKey,
-      hostedRuntimeSessionId(callId),
-    );
+    const callId = automationGateCallId(automationRunId, definitionRevision);
+    const broker = derivedBroker(options, callId);
     const payloadJson = JSON.stringify({
       toolName: MANAGED_AUTOMATION_GATE_TOOL,
       input: { gate },
@@ -90,6 +133,7 @@ export function createHostedAutomationGateRunner(options: {
     let unconfirmed = false;
     let replayed = false;
     let started = false;
+    let executionCallId: string | undefined;
     let result: HostedAutomationGateResult;
     try {
       // The occurrence's receipt is asked for before anything is acquired:
@@ -97,29 +141,16 @@ export function createHostedAutomationGateRunner(options: {
       // the Runtime Session that ran the probe was released — a release is
       // final, so re-acquiring that Session would be refused — and only
       // the absence of a receipt costs an acquisition.
-      const answer = await replayableWithoutSession(broker, callId, digest);
-      if (answer === 'held') {
-        // The Session exists but is not ready: an attempt still running, or
-        // an acquisition whose answer was lost still being admitted. Neither
-        // outcome is known yet, and settling the occurrence now would leave
-        // a late acquisition with nobody to release it: retry instead.
-        throw new HostedAutomationGateHeld(
-          "the occurrence's Runtime Session is held by another attempt",
-        );
-      }
+      const answer = await reservationAnswer(broker, callId, digest);
+      if (answer === 'held') throw heldByAnotherAttempt();
       if (answer === 'unknown' || answer === 'superseded') {
         // The probe may have run under this Session and its outcome cannot
         // be read back; the Session is released before the answer.
         mayHold = true;
-        result = {
-          kind: 'unknown',
-          reason:
-            answer === 'unknown'
-              ? "the Runtime lost the occurrence's probe before it settled"
-              : 'this occurrence was already probed under an earlier gate command',
-        };
+        result = unreadable(answer);
       } else {
-        let prepared = answer;
+        let prepared: Reservation | 'unknown' | 'superseded' | undefined =
+          answer;
         // A live reservation means the Session exists: whatever this
         // attempt's own acquire answers, the Session is released at the end.
         if (prepared !== undefined && prepared.settled === undefined) {
@@ -143,16 +174,41 @@ export function createHostedAutomationGateRunner(options: {
             throw cause;
           }
           mayHold = true;
-          prepared ??= await broker.prepareReplayable(callId, digest);
+          if (prepared === undefined) {
+            // Asked again under the acquired Session, the key may now name
+            // an earlier attempt's execution (a Broker that restarted knew
+            // no Session at the first ask): read it like the first answer.
+            const again = await reservationAnswer(broker, callId, digest);
+            if (again === 'held') throw heldByAnotherAttempt();
+            if (again === undefined) {
+              throw new Error(
+                "the Broker knows no Runtime Session for the occurrence's probe after acquiring it",
+              );
+            }
+            prepared = again;
+          }
         } else {
           replayed = true;
         }
-        result = await settle(broker, prepared, payloadJson, signal, () => {
-          started = true;
-        });
+        if (prepared === 'unknown' || prepared === 'superseded') {
+          result = unreadable(prepared);
+        } else {
+          executionCallId = prepared.executionCallId;
+          result = await settle(broker, prepared, payloadJson, signal, () => {
+            started = true;
+          });
+        }
       }
     } catch (cause) {
       if (cause instanceof HostedAutomationGateHeld) throw cause;
+      if (started && executionCallId !== undefined) {
+        // This attempt stops watching what it started: cancel it, so a
+        // start that is still on its way, or a reservation it never
+        // reached, cannot run after the answer and does not keep the
+        // Session busy past the release. A refused cancel leaves both to
+        // the retried fire.
+        await broker.cancel(executionCallId).catch(() => undefined);
+      }
       const message = cause instanceof Error ? cause.message : String(cause);
       // Once the start left, the command may have run: only a settled
       // answer could say; everything else is unknown, never a second start.
@@ -252,17 +308,43 @@ async function releaseDerivedSession(
   }
 }
 
+type Reservation = Awaited<
+  ReturnType<HostedWorkspaceBroker['prepareReplayable']>
+>;
+
+function heldByAnotherAttempt(): HostedAutomationGateHeld {
+  // The Session exists but is not ready: an attempt still running, or an
+  // acquisition whose answer was lost still being admitted. Neither outcome
+  // is known yet, and settling the occurrence now would leave a late
+  // acquisition with nobody to release it: retry instead.
+  return new HostedAutomationGateHeld(
+    "the occurrence's Runtime Session is held by another attempt",
+  );
+}
+
+function unreadable(
+  answer: 'unknown' | 'superseded',
+): HostedAutomationGateResult {
+  return {
+    kind: 'unknown',
+    reason:
+      answer === 'unknown'
+        ? "the Runtime lost the occurrence's probe before it settled"
+        : 'this occurrence was already probed under another request',
+  };
+}
+
 /**
- * The occurrence's reservation as the Broker answers it without an acquired
- * Session: the settled receipt of an earlier attempt, a fresh reservation
- * when the derived Session is still live in the Broker, `undefined` when
- * the Session is not active there (the first attempt, or one whose
- * predecessor never reserved), `held` when the outcome is not known yet (a
- * Session not ready, an execution not settled, a Broker fault), `unknown`
- * when the Runtime lost an execution that may have run, or `superseded`
- * when the key holds an execution of an earlier gate command.
+ * The occurrence's reservation as the Broker answers it: the settled
+ * receipt of an earlier attempt, a fresh reservation when the derived
+ * Session is live in the Broker, `undefined` when the Session is not active
+ * there (the first attempt, or one whose predecessor never reserved),
+ * `held` when the outcome is not known yet (a Session not ready, an
+ * execution not settled, a Broker fault), `unknown` when the Runtime lost
+ * an execution that may have run, or `superseded` when the key holds
+ * another request's execution.
  */
-async function replayableWithoutSession(
+async function reservationAnswer(
   broker: HostedWorkspaceBroker,
   callId: string,
   digest: string,
@@ -296,8 +378,8 @@ async function replayableWithoutSession(
     ) {
       return 'unknown';
     }
-    // The key holds an execution of another request: a revision changed the
-    // gate after this occurrence was probed and its answer was lost.
+    // The key holds an execution of another request. Keys are per revision,
+    // so only a reservation reference that changed shape gets here.
     if (cause.status === 409 && cause.code === 'runtime_idempotency_conflict') {
       return 'superseded';
     }

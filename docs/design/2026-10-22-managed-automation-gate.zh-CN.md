@@ -76,7 +76,7 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 
 ### 5.1 契约
 
-- `managed-schedule` 第 1 版新增 `gate: string | null`，一个与 `cron` 同类的定义字段：非 null 时是有界文本（≤ 2048 UTF-8 字节，无控制字符）且不含 `&` 后台化。它参与 `automationDefinitionDigest` 和镜像行。封闭键集、夹具模板（`gate: null`）和新用例（`gate-null`、`gate-command`、`gate-empty`、`gate-background`、`gate-number`、`gate-oversize`）在两端锚定它。
+- `managed-schedule` 第 1 版新增 `gate: string | null`，一个与 `cron` 同类的定义字段：非 null 时是有界文本（≤ 2048 UTF-8 字节，无控制字符）。它参与 `automationDefinitionDigest` 和镜像行。封闭键集、夹具模板（`gate: null`）和新用例（`gate-null`、`gate-command`、`gate-empty`、`gate-control`、`gate-number`、`gate-oversize`）在两端锚定它。命令能做什么不归记录管：Harness 在准入定义时拒绝用 `&` 把任何部分放到后台的闸门（`gateCommandError`，即本地闸门的检查），worker 工具会再查一遍。
 - `managed-automation_run` 第 1 版新增固定键 `gateOutputRef: ManagedSessionDurableRef | null`：批准了这次运行的探针所发布的输出，资源类型 `managed-automation-gate-output`，无闸门定义为 null。它跨修订固定，因为 dispatch 要读它；两端存储都像对 `promptRef` 那样在提交时把它闭合到 Session 的资源上。
 - 这两个键都是第 1 版后来新增的：之前写下的记录没有它们，两端的读取方(包括后继校验)都把缺失读作 null。写入方在值为 null 时省略该键，所以无闸门定义的记录与闸门出现之前的主机写出的完全相同；只要还没有定义带闸门，任一侧的主机都可以先升级或先回滚。存储的探针输出与回合文本一样经过清洗，这限制了它编码后的大小。
 
@@ -85,23 +85,25 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 在 Harness 的 `fire_run` 里、认领之前——每个 `persistent` 定义的每次触发都必经的那一点，手里有活的定义，也有可以借以运行的 Session 身份。漏斗接受一个注入的运行器（`HostedAutomationSession` 的 `gate` 选项），所以它的测试可以编排结果，路由接上真实的那个：
 
 1. Session 的工具 profile 没有声明 Shell 时，Harness 直接拒绝探针（`blocked`，原因写明 profile）。
-2. 否则为派生的 Runtime Session `hostedRuntimeSessionId("<automationRunId>:gate")` 打开一个 `HostedWorkspaceBroker`，并在获取任何东西之前先向 Broker 要这个 occurrence 的预留：调用 id `<automationRunId>:gate`、负载 `{toolName: "managed_automation_gate", input: {gate}}`。预留的每一部分都从 occurrence 派生，所以 Broker 的幂等键与引用在每次尝试中都相同。
-3. Broker 在没有活动 Session 的情况下也会答出该键下的终结记录——释放是终态，运行过早先尝试的那个 Session 永远不能再被获取——Harness 读回其结算结果而不启动任何东西。Broker 不知道这个 occurrence 的任何 Session 时，Harness 才获取派生的 Session、重新预留执行、启动并观察到其结算。在 Broker 能说清这个 occurrence 如何结束之前，这次 fire 失败、由扫描器重驱：Broker 持有但报告未就绪的 Session、该键下尚未结算的执行、Broker 故障，都属于这种情况。Runtime 丢失的执行答 `unknown`；相同键下另一个请求的预留(修订在应答丢失后换了闸门)是冲突，永远不是第二次运行，也答 `unknown`。只要本次尝试可能持有派生 Session(获取了它、获取未确认，或 Broker 报告它存活),就先释放再作答，释放失败则让 fire 失败、等待重驱。
-4. Runtime worker 运行 worker 内部工具 `managed_automation_gate`——与模型工具并列被准入，但从不向模型声明——它用共享的 `createCronGateRunner` 在 worker 按调用构造的 `Config` 上运行命令：Session 上下文目录为 cwd、worker 的环境、stdout 与 stderr 分开、保留 16 KiB stdout、20 s 超时。结果（`quiet` / `output` / `failed`）作为一个 JSON 文本片段作答，由 Broker 存为该执行的结算结果。
+2. 否则为派生的 Runtime Session `hostedRuntimeSessionId("<automationRunId>:gate:<revision>")` 打开一个 `HostedWorkspaceBroker`（`<revision>` 是该 occurrence 钉住的定义修订号），并在获取任何东西之前先向 Broker 要这个 occurrence 的预留：调用 id `<automationRunId>:gate:<revision>`、负载 `{toolName: "managed_automation_gate", input: {gate}}`。预留的每一部分都从 occurrence 及其修订号派生，所以同一修订下每次尝试的 Broker 幂等键与引用都相同。
+3. Broker 在没有活动 Session 的情况下也会答出该键下的终结记录——释放是终态，运行过早先尝试的那个 Session 永远不能再被获取——Harness 读回其结算结果而不启动任何东西。Broker 不知道这个 occurrence 的任何 Session 时，Harness 才获取派生的 Session、重新预留执行、启动并观察到其结算。在 Broker 能说清这个 occurrence 如何结束之前，这次 fire 失败、由扫描器重驱：Broker 持有但报告未就绪的 Session、该键下尚未结算的执行、Broker 故障，都属于这种情况——无论是在获取之前还是之后问到的，因为重启过的 Broker 可能还不认识这个 Session，却仍保存着该键下的执行。Runtime 丢失的执行答 `unknown`；相同键下另一个请求的预留是冲突，永远不是第二次运行，也答 `unknown`。本次尝试启动了执行、却在其结算前停止观察时，先取消它，这样仍在路上的 start、或从未到达的预留，都不会在作答之后才运行，也不会让 Session 一直忙。只要本次尝试可能持有派生 Session(获取了它、获取未确认，或 Broker 报告它存活),就先释放再作答，释放失败则让 fire 失败、等待重驱。
+4. Runtime worker 运行 worker 内部工具 `managed_automation_gate`——与模型工具并列被准入，但从不向模型声明——它用共享的 `createCronGateRunner` 在 worker 按调用构造的 `Config` 上运行命令：Session 上下文目录为 cwd、worker 的环境、stdout 与 stderr 分开、保留 16 KiB stdout、20 s 超时。结果（`quiet` / `output` / `failed`）作为一个 JSON 文本片段作答，由 Broker 存为该执行的结算结果。命令的进程组一启动就像 Shell 调用那样进入 worker 的 ledger：SSH Runtime 在探针完成时停掉它留下的进程，重启后的 worker 会清扫它。
 5. Harness 释放 Runtime Session 并做决定：`quiet`、`failed`、`blocked`、`unknown` 以 `gate.outcome` 答复控制面且不带运行；`output` 把 stdout 发布为 `managed-automation-gate-output` 资源，带 `gateOutputRef` 提交 claim，并用拼好的文本派发运行。已提交 claim 的重放从存下的输出重建文本，永远不做第二次探测。
+
+不再按 occurrence 钉住的修订去探测的重驱——修订已过时、定义已退役或已不存在——会先释放那个修订的派生 Session：无法释放它的那次尝试把释放留给了下一次经过运行器的尝试，而这样的尝试再也不会来；释放失败同样让这次 fire 保持未结算。因此改了闸门的修订会用新命令、在它自己的身份下重新探测这个 occurrence：occurrence 的结果属于当前命令。如果第一次应答丢失且定义在重驱前变了，一个 occurrence 每个修订可能各运行一次探针；同一修订内仍只运行一次。
 
 超时取 20 s 而非本地闸门的 60 s，因为中继的请求超时是 30 s：一次 Runtime 获取加一次探测必须在其内作答。超出即视为回复丢失——扫描器重驱，Harness 在 Broker 回执结算后重放它，命令仍只运行一次。
 
 ### 5.3 扫描器与账本
 
-`AutomationScanner.fire` 从应答里读 `gate`。`delivered` 照旧结算为 `fired`。`quiet`、`failed`、`blocked`、`unknown` 结算为 `skipped`，原因分别为 `gate_quiet`、`gate_failed`、`gate_failed`、`gate_unknown`，细节写入 occurrence 的 `last_error`，且不碰 journal。每次结算都在租约下把闸门状态记到定义行：`gate_last_outcome`、`gate_last_at`、`gate_quiet_since_delivery`、`gate_failures`（连续的 failed、blocked、unknown）和 `gate_last_error`，由 `PublicAutomation.gate_status` 报告。水位线与租约的行为与任何已决定的槽相同。
+`AutomationScanner.fire` 从应答里读 `gate`。`delivered` 照旧结算为 `fired`。`quiet`、`failed`、`blocked`、`unknown` 结算为 `skipped`，原因分别为 `gate_quiet`、`gate_failed`、`gate_failed`、`gate_unknown`，细节写入 occurrence 的 `last_error`，且不碰 journal。每次结算都在租约下把闸门状态记到定义行：`gate_last_outcome`、`gate_last_at`、`gate_quiet_since_delivery`、`gate_failures`（连续的 failed、blocked、unknown）和 `gate_last_error`，由 `PublicAutomation.gate_status` 报告。只有定义行仍处在该 occurrence 钉住的修订时状态才会更新：此后的修订已为它自己的命令重置了状态，而更早修订下的应答——定义被修订时仍在运行的探针，或修订前已认领的运行的重放投递——都不属于那条命令。水位线与租约的行为与任何已决定的槽相同。
 
 `ma_schedule` 增加 `gate` 列和五个状态列（`V18__schedule_gate.sql`，追加到 `ManagedSchema` 的迁移列表）；`gate_last_at` 加入被锚定的纪元列。
 
 ### 5.4 审批与信任
 
 - **定义时。** 定义的作者是通过公开 API 行事的 Session 创建者，与可以在其中运行 Turn 的是同一权限。闸门在那里按定义自身的校验被准入，并以同样方式修订；Harness 另外拒绝 profile 没有 Shell 的 Session 上的闸门。没有分类器也没有 Action：worker 在 `yolo` 下执行已准入的工具，而 Harness 的逐调用审批是为模型的提议准备的，闸门不是模型的提议。
-- **触发时。** 探针在 Workspace Runtime 里以该 Session 每次 Shell 调用相同的身份、环境和隔离运行；它够不到别的 Workspace，也不能启动后台进程（`&` 在准入时拒绝，worker 只准入前台）。
+- **触发时。** 探针在 Workspace Runtime 里以该 Session 每次 Shell 调用相同的身份、环境和隔离运行；它够不到别的 Workspace。`&` 在准入时拒绝；脚本启动而不等待的进程都在探针的进程组里，worker 的 ledger 像跟踪 Shell 调用一样跟踪它：SSH Runtime 在探针完成时停掉它。
 - **输出是数据。** 与本地闸门完全相同的净化与框架，经由 Session 已经按通知处理的自动化输入投递。
 
 ### 5.5 预算
@@ -121,7 +123,7 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 ## 6. 决策
 
 1. **探针是 Broker 执行，不是 Harness 进程。** 副作用在 Tool Runtime 里运行；Broker 的回执是让重试的 `fire_run` 重放而非重跑的持久事实。Harness 侧生成进程会运行在一台可能根本没有 Workspace 的主机上。
-2. **身份从 occurrence 派生。** Runtime Session、调用 id 和引用全部来自 `automationRunId`，所以预留在每次尝试里都相同，由 Broker 的幂等规则去重，就像运行 id 已经为 claim 去重一样。
+2. **身份从 occurrence 及其修订派生。** Runtime Session、调用 id 和引用全部来自 `automationRunId` 与钉住的定义修订号，所以同一修订下预留在每次尝试里都相同，由 Broker 的幂等规则去重，就像运行 id 已经为 claim 去重一样。之所以按修订，是因为发现自己修订已过时的尝试必须能说出要释放哪个 Session，而 Harness 不保存更早修订的闸门。
 3. **worker 内部工具，而不是 `run_shell_command`。** shell 工具的结果是给模型看的文本；闸门需要 stdout 与 stderr 分离、退出码作为事实。`managed_automation_gate` 运行共享的闸门运行器并作答其结构化结果；它在 worker 上按名准入，永远不属于模型看到的 profile。
 4. **静默与失败在 journal 里不留痕迹。** occurrence 行和定义的闸门状态就是记录；每个静默槽做一次 journal 提交会让 Session 付出闸门本来要省下的代价。
 5. **输出随 claim 走。** 修订 1 上的 `gateOutputRef` 让 claim 与 dispatch 之间的崩溃能用探针产出的输出补完 dispatch，遵守"重放永不重跑探针"的规则。
@@ -132,13 +134,14 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 
 - `managed-automation-record.test.ts` 与 `ManagedAutomationRecordContractTest`：新键、模板字段和夹具用例在两端回放一致。
 - `managed-automation-operations.test.ts`：定义里的 `gate`、校验、摘要、预算与带闸门的回合文本。
-- `hosted-automation-session.test.ts`：编排的闸门运行器——静默时不答运行、不提交任何东西；有输出时发布资源、带 `gateOutputRef` 认领、派发拼好的文本；claim 的重放读取存下的输出；failed、blocked、unknown 各答其结果；无闸门定义从不调用运行器。
+- `hosted-automation-session.test.ts`：编排的闸门运行器——静默时不答运行、不提交任何东西；有输出时发布资源、带 `gateOutputRef` 认领、派发拼好的文本；claim 的重放读取存下的输出；failed、blocked、unknown 各答其结果；无闸门定义从不调用运行器；修订过时、已退役或不存在的定义先释放钉住修订的探针 Session，释放失败则重试这次 fire。
 - `hosted-workspace-broker.test.ts`：`prepareReplayable` 既答新预留也答终结重放，并拒绝冲突的预留。
-- `hosted-automation-gate.test.ts`：对一个编排好的 Broker，运行器不获取就读回已结算的回执；只在 Broker 不知道该 occurrence 的任何 Session 时才获取并重新预留；Session 被持有或执行未结算时让 fire 失败以便重试，执行丢失或预留冲突时答 `unknown` 并释放，获取不到的 Session 答 `failed`，没有 Shell 的 profile 在询问之前就答 `blocked`;释放失败和未确认的获取都让 fire 保持未结算。
+- `hosted-automation-gate.test.ts`：对一个编排好的 Broker，运行器不获取就读回已结算的回执；只在 Broker 不知道该 occurrence 的任何 Session 时才获取并重新预留；Session 被持有或执行未结算时让 fire 失败以便重试，执行丢失或预留冲突时答 `unknown` 并释放，获取之后才找到的预留按同样方式读取，停止观察的执行先取消再释放，获取不到的 Session 答 `failed`，没有 Shell 的 profile 在询问之前就答 `blocked`;释放失败和未确认的获取都让 fire 保持未结算。
 - `managed-automation-gate-tool.test.ts`：闸门工具被准入、校验输入并作答运行器结果。
-- `AutomationScannerTest`：每种闸门结果结算其 occurrence 并更新定义的闸门状态；投递型闸门与普通触发应答相同；手动运行暴露 `gate_quiet`。
+- `managed-runtime-tool-executor.test.ts`：探针的进程组进入 worker 的 ledger，SSH 前台停止能停掉它留下的子进程。
+- `AutomationScannerTest`：每种闸门结果结算其 occurrence 并更新定义的闸门状态；投递型闸门与普通触发应答相同；手动运行暴露 `gate_quiet`；更早修订下的应答(定义被修订时的探针、重放的投递)不动新命令的状态。
 - `ManagedAgentApiContractTest`：带 `gate` 的创建与修订、`409 automation_gate_unsupported` 拒绝、公开形状。
-- `HostedAutomationFaultGatesIT`：第 5.6 节的 FG11g 用例，在真实 MySQL、真实 Harness 与 Runtime worker 上。
+- `HostedAutomationFaultGatesIT`：第 5.6 节的 FG11g 用例，在真实 MySQL、真实 Harness 与 Runtime worker 上。它们覆盖回复丢失；Harness 重启或探针中途替换 worker(`gate_unknown`)只由上面编排的 Broker 覆盖，没有端到端覆盖。
 
 ## 8. 验收标准
 
@@ -153,10 +156,12 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 一个 PR，叠在 #15069 之上（复用 `cron-gate.ts`）：
 
 - core：`managed-automation-record.ts`、`managed-automation-operations.ts`、夹具、`managed-session-authority.ts`（资源闭合）、`cron-gate.ts`（可配置超时）。
-- cli：`hosted-automation-session.ts`、`hosted-automation-gate.ts`（新）、`hosted-workspace-broker.ts`（`prepareReplayable`、`settledResult`）、`hosted-harness-session.ts`（路由接线）、`managed-automation-gate-tool.ts`（新，worker 工具）、`managed-runtime-tool-executor.ts`（准入）。
+- cli：`hosted-automation-session.ts`、`hosted-automation-gate.ts`（新）、`hosted-workspace-broker.ts`（`prepareReplayable`、`settledResult`）、`hosted-harness-session.ts`（路由接线）、`managed-automation-gate-tool.ts`（新，worker 工具）、`managed-runtime-tool-executor.ts`（准入，以及把探针的进程组记入 ledger）。
 - managed-agent-server：`ManagedExtensionRecords`、`ManagedExtensionRecordStore`、`AutomationLedgerStore`、`ManagedSchemaProjection`、`V18__schedule_gate.sql`、`ManagedSchema`、`AutomationScanner`、`ManagedAutomationService`、`ApiModels`、OpenAPI 文档，以及上述测试。
 
 ## 10. 待定问题
+
+- 一次探针的 start 和 cancel 都丢失、且定义在重驱前被修订时，会留下一个永不结算的预留：释放它所在修订的 Session 会答 busy，于是 fire 一直重试，直到扫描器放弃(`answer_unobtainable`，约四小时退避),Session 则一直被持有到 Harness Session 排空。Broker 的冲突应答不给出执行 id,Harness 也不保存更早修订的闸门、无法按请求去问它;Broker 侧让从未启动的预留过期即可关闭这个缺口。
 
 - 失败连段超过某个上限时，是否应像时区无法解析那样把定义停放（`blocked_reason`）？今天只计数。
 - 为连段的第一次失败做一次 channel 投递，让操作者不必轮询 `gate_status` 就能知道凭据过期。

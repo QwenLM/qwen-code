@@ -40,9 +40,10 @@ import {
   type AutomationRunOutcome,
   type AutomationRunTrigger,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-operations.js';
-import type {
-  HostedAutomationGateResult,
-  HostedAutomationGateRunner,
+import {
+  HostedAutomationGateHeld,
+  type HostedAutomationGateResult,
+  type HostedAutomationGateRunner,
 } from './hosted-automation-gate.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
@@ -196,6 +197,14 @@ export class AutomationGateUnsupportedError extends Error {
 export interface HostedAutomationSessionOptions {
   /** Runs a definition's gate; absent, every gated fire is `blocked`. */
   readonly gate?: HostedAutomationGateRunner;
+  /**
+   * Releases the derived Session of an occurrence's probe under a revision,
+   * for a fire that ends without probing again; throws when it could not.
+   */
+  readonly releaseGate?: (
+    automationRunId: string,
+    definitionRevision: number,
+  ) => Promise<void>;
   /** Whether this Session's tool profile declares Shell, at define time. */
   readonly shellAvailable?: () => boolean;
 }
@@ -625,13 +634,27 @@ export class HostedAutomationSession {
         };
       }
       const schedule = this.schedule(params.scheduleId);
+      const ending =
+        schedule === undefined
+          ? new AutomationNotFoundError(params.scheduleId)
+          : isTerminalRunState(schedule.run.state)
+            ? new AutomationRetiredError(params.scheduleId)
+            : undefined;
+      const stale =
+        schedule !== undefined &&
+        schedule.definitionRevision !== params.definitionRevision;
+      if (ending !== undefined || stale) {
+        // This occurrence is not probed under its pinned revision again,
+        // so an earlier attempt's probe Session, which that attempt could
+        // not release, is released here; the scanner retries the fire
+        // until it is.
+        await this.releaseGateSession(runId, params.definitionRevision);
+      }
+      if (ending !== undefined) throw ending;
       if (schedule === undefined) {
         throw new AutomationNotFoundError(params.scheduleId);
       }
-      if (isTerminalRunState(schedule.run.state)) {
-        throw new AutomationRetiredError(params.scheduleId);
-      }
-      if (schedule.definitionRevision !== params.definitionRevision) {
+      if (stale) {
         throw new AutomationRevisionStaleError(
           params.scheduleId,
           schedule.definitionRevision,
@@ -641,7 +664,11 @@ export class HostedAutomationSession {
       let gateOutputRef: ManagedSessionDurableRef | null = null;
       let gate: AutomationGateSummary | undefined;
       if (schedule.gate !== undefined) {
-        const result = await this.probe(schedule.gate, runId);
+        const result = await this.probe(
+          schedule.gate,
+          runId,
+          params.definitionRevision,
+        );
         if (result.kind !== 'output') {
           return { inputId, replayed: false, gate: summarizeGate(result) };
         }
@@ -674,10 +701,29 @@ export class HostedAutomationSession {
     });
   }
 
+  /**
+   * Releases the probe Session of `automationRunId` under `revision`, if any;
+   * a failure asks the scanner to retry the fire.
+   */
+  private async releaseGateSession(
+    automationRunId: string,
+    revision: number,
+  ): Promise<void> {
+    if (this.options.releaseGate === undefined) return;
+    try {
+      await this.options.releaseGate(automationRunId, revision);
+    } catch (cause) {
+      throw new HostedAutomationGateHeld(
+        cause instanceof Error ? cause.message : String(cause),
+      );
+    }
+  }
+
   /** The gate probe of one occurrence; a funnel with no runner blocks it. */
   private probe(
     gate: string,
     automationRunId: string,
+    definitionRevision: number,
   ): Promise<HostedAutomationGateResult> {
     if (this.options.gate === undefined) {
       return Promise.resolve({
@@ -687,6 +733,7 @@ export class HostedAutomationSession {
     }
     return this.options.gate({
       automationRunId,
+      definitionRevision,
       gate,
       signal: new AbortController().signal,
     });

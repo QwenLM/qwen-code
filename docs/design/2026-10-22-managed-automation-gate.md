@@ -164,11 +164,14 @@ tag names defanged) and cut at 16 KiB with the cut noted.
 
 - `managed-schedule` version 1 gains `gate: string | null`, a definition
   field like `cron`: non-null is a bounded text (≤ 2048 UTF-8 bytes, no
-  control characters) with no `&` backgrounding. It is part of
-  `automationDefinitionDigest` and of the mirrored row. The closed key set,
-  the fixture template (`gate: null`) and new cases (`gate-null`,
-  `gate-command`, `gate-empty`, `gate-background`, `gate-number`,
-  `gate-oversize`) pin it on both hosts.
+  control characters). It is part of `automationDefinitionDigest` and of the
+  mirrored row. The closed key set, the fixture template (`gate: null`) and
+  new cases (`gate-null`, `gate-command`, `gate-empty`, `gate-control`,
+  `gate-number`, `gate-oversize`) pin it on both hosts. What a command may
+  do is not the record's business: the Harness refuses a gate that
+  backgrounds any part of itself with `&` when it admits the definition
+  (`gateCommandError`, the local gate's check), and the worker tool checks
+  it again.
 - `managed-automation_run` version 1 gains the fixed key
   `gateOutputRef: ManagedSessionDurableRef | null`: the published output of
   the probe that admitted this run, resource kind
@@ -194,12 +197,14 @@ the route wires the real one:
 1. The Harness refuses the probe outright when the Session's tool profile
    declares no Shell (`blocked`, the reason naming the profile).
 2. Otherwise it opens a `HostedWorkspaceBroker` for the derived Runtime
-   Session `hostedRuntimeSessionId("<automationRunId>:gate")` and asks the
-   Broker for the occurrence's reservation before acquiring anything: call
-   id `<automationRunId>:gate`, payload
+   Session `hostedRuntimeSessionId("<automationRunId>:gate:<revision>")`,
+   where `<revision>` is the definition revision the occurrence is pinned
+   to, and asks the Broker for the occurrence's reservation before
+   acquiring anything: call id `<automationRunId>:gate:<revision>`, payload
    `{toolName: "managed_automation_gate", input: {gate}}`. Every part of the
-   reservation is derived from the occurrence, so the Broker's idempotency
-   key and reference are the same on every attempt.
+   reservation is derived from the occurrence and its revision, so the
+   Broker's idempotency key and reference are the same on every attempt
+   under that revision.
 3. The Broker answers a terminal record under that key without an active
    Session — a release is final, so the Session that ran an earlier attempt
    can never be re-acquired — and the Harness reads its settled result back
@@ -208,13 +213,18 @@ the route wires the real one:
    execution afresh, starts it and observes it to its settlement. Until the
    Broker can say how the occurrence ended, the fire fails and the scanner
    re-drives it: a Session it holds but reports not ready, an execution under
-   the key that has not settled, a Broker fault. An execution the Runtime
-   lost answers `unknown`, and a reservation under the same key for another
-   request (a revision changed the gate after a lost answer) is a conflict,
-   never a second run: it answers `unknown` too. Whenever the attempt may
-   hold the derived Session (it acquired it, its acquisition was not
-   confirmed, or the Broker reports it live), it releases the Session before
-   answering, and a release that fails fails the fire for a re-drive.
+   the key that has not settled, a Broker fault — asked before or after the
+   acquisition alike, since a Broker that restarted may know no Session yet
+   still hold the key's execution. An execution the Runtime lost answers
+   `unknown`, and a reservation under the same key for another request is a
+   conflict, never a second run: it answers `unknown` too. An attempt that
+   started the execution and stops watching it before it settles cancels it
+   first, so a start still on its way, or a reservation it never reached,
+   cannot run after the answer or keep the Session busy. Whenever the
+   attempt may hold the derived Session (it acquired it, its acquisition was
+   not confirmed, or the Broker reports it live), it releases the Session
+   before answering, and a release that fails fails the fire for a
+   re-drive.
 4. The Runtime worker runs the worker-internal tool
    `managed_automation_gate` — admitted beside the model tools, never
    declared to a model — which runs the command with the shared
@@ -223,12 +233,26 @@ the route wires the real one:
    apart, 16 KiB of stdout kept, a 20 s timeout. The result
    (`quiet` / `output` / `failed`) is answered as one JSON text part and
    stored by the Broker as the execution's settled result.
+   The command's process group goes into the worker's ledger the moment it
+   starts, as a Shell call's does: an SSH Runtime stops what the probe left
+   running when it completes, and a restarted worker sweeps it.
 5. The Harness releases the Runtime Session and decides: `quiet`, `failed`,
    `blocked` or `unknown` answer the control plane with `gate.outcome` and
    no run; `output` publishes the stdout as a `managed-automation-gate-output`
    resource, commits the claim with `gateOutputRef`, and dispatches the run
    with the composed text. A replay of a committed claim rebuilds the text
    from the stored output, never from a second probe.
+
+A re-drive that no longer probes under the occurrence's pinned revision —
+the revision went stale, the definition retired or is gone — first releases
+that revision's derived Session, because the attempt that could not release
+it left the release to the next one through the runner, which now never
+comes; a release that fails keeps the fire unsettled the same way. A
+revision that changed the gate therefore probes the occurrence again with
+the new command under its own identities: the occurrence's answer is the
+current command's. When the first answer was lost and the definition moved
+before the re-drive, that can run a probe once per revision for one
+occurrence; within a revision it still runs once.
 
 The timeout is 20 s rather than the local gate's 60 s because the relay's
 request timeout is 30 s: a Runtime acquire plus a probe must answer inside
@@ -244,8 +268,13 @@ the detail in the occurrence's `last_error`, and never touch the journal.
 Every settlement records the gate's status on the definition row under the
 lease: `gate_last_outcome`, `gate_last_at`, `gate_quiet_since_delivery`,
 `gate_failures` (the consecutive failed, blocked and unknown outcomes) and
-`gate_last_error`, which `PublicAutomation.gate_status` reports. The
-watermark and the lease behave as for any decided slot.
+`gate_last_error`, which `PublicAutomation.gate_status` reports. The status
+moves only while the definition row is still at the revision the occurrence
+was pinned to: a revision since reset the status for its own command, and
+an answer under an earlier revision — a probe still running when the
+definition was revised, or a replayed delivery of a run claimed before it —
+is not that command's. The watermark and the lease behave as for any
+decided slot.
 
 `ma_schedule` gains the `gate` column and the five status columns
 (`V18__schedule_gate.sql`, appended to `ManagedSchema`'s migration list);
@@ -262,8 +291,10 @@ watermark and the lease behave as for any decided slot.
   approval exists for a model's proposal, which a gate is not.
 - **Fire time.** The probe runs in the Workspace Runtime with the identity,
   environment and containment every Shell call of that Session has; it
-  cannot reach another Workspace, and it cannot start a background process
-  (`&` is refused at admission, and the worker admits foreground only).
+  cannot reach another Workspace. `&` is refused at admission, and what a
+  script starts without waiting for is in the probe's process group, which
+  the worker's ledger tracks like a Shell call's: an SSH Runtime stops it
+  when the probe completes.
 - **Output is data.** Sanitized and framed exactly as the local gate frames
   it, delivered through the automation input the Session already treats as
   a notification.
@@ -303,10 +334,14 @@ file on every execution:
    run in the Tool Runtime; the Broker's receipt is the durable fact that
    makes a retried `fire_run` replay rather than re-run. A Harness-side
    spawn would run on a host that may not hold the Workspace at all.
-2. **The identities are derived from the occurrence.** Runtime Session,
-   call id and reference all come from `automationRunId`, so the reservation
-   is the same on every attempt and the Broker's idempotency rule does the
-   deduplication, the way the run id already deduplicates claims.
+2. **The identities are derived from the occurrence and its revision.**
+   Runtime Session, call id and reference all come from `automationRunId`
+   and the pinned definition revision, so the reservation is the same on
+   every attempt under that revision and the Broker's idempotency rule does
+   the deduplication, the way the run id already deduplicates claims. Per
+   revision, because the attempt that finds its revision stale must name
+   the Session to release, and the Harness keeps no earlier revision's
+   gate.
 3. **A worker-internal tool, not `run_shell_command`.** The shell tool's
    result is text for a model; the gate needs stdout apart from stderr and
    the exit code as a fact. `managed_automation_gate` runs the shared gate
@@ -339,7 +374,9 @@ file on every execution:
   answers no run and commits nothing; output publishes the resource, claims
   with `gateOutputRef`, dispatches the composed text; a replay of the claim
   reads the stored output; failed, blocked and unknown answer their outcome;
-  an ungated definition never calls the runner.
+  an ungated definition never calls the runner; a stale, retired or missing
+  definition releases the pinned revision's probe Session first, and a
+  failed release retries the fire.
 - `hosted-workspace-broker.test.ts`: `prepareReplayable` answers a fresh
   reservation and a terminal replay, and refuses a conflicting one.
 - `hosted-automation-gate.test.ts`: against a scripted Broker, the runner
@@ -347,18 +384,27 @@ file on every execution:
   only when the Broker knows no Session for the occurrence, fails the fire
   for a retry while a Session is held or an execution has not settled,
   answers `unknown` and releases for a lost execution or a conflicting
-  reservation, `failed` for a Session it cannot acquire, and `blocked` for a
-  profile without Shell before asking; release failures and unconfirmed
-  acquisitions keep the fire unsettled.
+  reservation, reads a reservation it finds only after acquiring the same
+  way, cancels an execution it stops watching before releasing, `failed`
+  for a Session it cannot acquire, and `blocked` for a profile without Shell
+  before asking; release failures and unconfirmed acquisitions keep the fire
+  unsettled.
+- `managed-runtime-tool-executor.test.ts`: a probe's process group reaches
+  the worker's ledger, and an SSH foreground stop reaches a child it left
+  running.
 - `managed-automation-gate-tool.test.ts`: the gate tool is admitted,
   validates its input and answers the runner's result.
 - `AutomationScannerTest`: each gate outcome settles its occurrence and
   updates the definition's gate status; a fired gate answers like a plain
-  fire; the manual run surfaces `gate_quiet`.
+  fire; the manual run surfaces `gate_quiet`; an answer under an earlier
+  revision (a probe the definition was revised under, a replayed delivery)
+  leaves the new command's status alone.
 - `ManagedAgentApiContractTest`: create and revise with `gate`, the
   `409 automation_gate_unsupported` refusal, the public shapes.
 - `HostedAutomationFaultGatesIT`: the FG11g cells of Section 5.6, on real
-  MySQL with a real Harness and Runtime worker.
+  MySQL with a real Harness and Runtime worker. They cover lost replies; a
+  Harness restart or a worker replaced mid-probe (`gate_unknown`) are
+  covered only against the scripted Broker above, not end to end.
 
 ## 8. Acceptance criteria
 
@@ -383,7 +429,8 @@ One PR, stacked on #15069 (it reuses `cron-gate.ts`):
 - cli: `hosted-automation-session.ts`, `hosted-automation-gate.ts` (new),
   `hosted-workspace-broker.ts` (`prepareReplayable`, `settledResult`),
   `hosted-harness-session.ts` (route wiring), `managed-automation-gate-tool.ts`
-  (new, worker tool), `managed-runtime-tool-executor.ts` (admission).
+  (new, worker tool), `managed-runtime-tool-executor.ts` (admission and the
+  probe's process group in the ledger).
 - managed-agent-server: `ManagedExtensionRecords`,
   `ManagedExtensionRecordStore`, `AutomationLedgerStore`,
   `ManagedSchemaProjection`, `V18__schedule_gate.sql`, `ManagedSchema`,
@@ -391,6 +438,15 @@ One PR, stacked on #15069 (it reuses `cron-gate.ts`):
   document, and the tests above.
 
 ## 10. Open questions
+
+- A probe whose start and whose cancel are both lost, on a definition
+  revised before the re-drive, leaves a reservation that never settles: the
+  release of its revision's Session answers busy, so the fire is retried
+  until the scanner gives up (`answer_unobtainable`, about four hours of
+  backoff) and the Session stays held until the Harness Session drains. The
+  Broker names no execution in its conflict answers, and the Harness keeps
+  no earlier revision's gate to ask for it by its request; a Broker-side
+  expiry of a reservation that never started would close it.
 
 - Should a failure streak past a bound park the definition (`blocked_reason`)
   the way an unresolvable timezone does? Today it only counts.

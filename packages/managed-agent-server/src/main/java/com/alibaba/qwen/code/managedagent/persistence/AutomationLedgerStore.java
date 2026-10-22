@@ -381,8 +381,8 @@ public class AutomationLedgerStore {
      * toward the next delivery, and a failed, blocked or unknown probe grows
      * the failure streak and keeps its detail.
      */
-    public boolean recordGateOutcome(ScheduleRow row, String owner,
-            long fence, String outcome, String detail, long now) {
+    public boolean recordGateOutcome(ScheduleRow row, long definitionRevision,
+            String owner, long fence, String outcome, String detail, long now) {
         boolean delivered = GATE_DELIVERED.equals(outcome);
         boolean quiet = GATE_QUIET.equals(outcome);
         // The counters move from the row as stored, not from `row`: one scan
@@ -401,13 +401,15 @@ public class AutomationLedgerStore {
                         + " gate_last_error = ?, gmt_modified = ?"
                         + " WHERE tenant_id = ? AND schedule_id = ?"
                         + " AND lease_owner = ? AND fence = ?"
-                        // Only the gate that was probed: a revision that
-                        // replaced or cleared it reset the status for its
-                        // own command.
-                        + " AND gate = ?",
+                        // Only under the revision the occurrence was pinned
+                        // to, whose gate is the one probed: a revision since
+                        // reset the status for its own command, and a
+                        // replayed answer of an earlier revision's run is
+                        // not this one's.
+                        + " AND definition_revision = ?",
                 outcome, now, error, now,
                 row.tenantId(), row.scheduleId(), owner, fence,
-                row.gate()) == 1;
+                definitionRevision) == 1;
     }
 
     /**

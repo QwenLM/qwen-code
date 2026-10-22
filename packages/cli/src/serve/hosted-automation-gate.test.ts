@@ -8,7 +8,9 @@ import { createServer, type Server } from 'node:http';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   automationGateCallId,
+  createHostedAutomationGateRelease,
   createHostedAutomationGateRunner,
+  HostedAutomationGateHeld,
 } from './hosted-automation-gate.js';
 import {
   HOSTED_WORKSPACE_SHELL_PROFILE,
@@ -18,7 +20,8 @@ import { hostedRuntimeSessionId } from './hosted-workspace-tool-turn.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 
 const RUN_ID = 'arun_fixture';
-const CALL_ID = automationGateCallId(RUN_ID);
+const REVISION = 3;
+const CALL_ID = automationGateCallId(RUN_ID, REVISION);
 const RUNTIME_SESSION_ID = hostedRuntimeSessionId(CALL_ID);
 const GATE = 'sh ./probe.sh';
 const PREFIX = '/internal/runtime-broker/v1';
@@ -80,7 +83,7 @@ async function rig(
   const address = server.address();
   if (!address || typeof address === 'string')
     throw new Error('No fixture listener');
-  const run = createHostedAutomationGateRunner({
+  const options = {
     broker: { baseUrl: `http://127.0.0.1:${address.port}`, token: 'test' },
     sessionKey: {
       tenantId: 'tenant',
@@ -88,15 +91,19 @@ async function rig(
       sessionId: 'session',
     },
     toolProfile: () => profile,
-  });
+  };
+  const run = createHostedAutomationGateRunner(options);
+  const release = createHostedAutomationGateRelease(options);
   return {
     calls,
     probe: () =>
       run({
         automationRunId: RUN_ID,
+        definitionRevision: REVISION,
         gate: GATE,
         signal: new AbortController().signal,
       }),
+    release: () => release(RUN_ID, REVISION),
   };
 }
 
@@ -288,7 +295,7 @@ describe('createHostedAutomationGateRunner', () => {
     ],
     [
       'runtime_idempotency_conflict',
-      'this occurrence was already probed under an earlier gate command',
+      'this occurrence was already probed under another request',
     ],
   ])('answers unknown and releases the Session on %s', async (code, reason) => {
     const { calls, probe } = await rig((path) =>
@@ -302,6 +309,145 @@ describe('createHostedAutomationGateRunner', () => {
       RELEASE,
     ]);
   });
+
+  it('derives a Session per definition revision of the occurrence', () => {
+    // A revision that changed the gate probes under fresh identities, and
+    // the attempt that finds its revision stale names the old Session.
+    expect(CALL_ID).toBe(`${RUN_ID}:gate:${REVISION}`);
+    expect(
+      hostedRuntimeSessionId(automationGateCallId(RUN_ID, REVISION + 1)),
+    ).not.toBe(RUNTIME_SESSION_ID);
+  });
+
+  it.each([
+    [
+      'an execution still running',
+      {
+        body: {
+          ...identity,
+          executionCallId: 'gate-execution',
+          status: { state: 'executing' },
+        },
+      },
+      'held',
+    ],
+    [
+      'an execution the Runtime lost',
+      rejection(409, 'runtime_broker_execution_unknown'),
+      'unknown',
+    ],
+  ] as const)(
+    'reads a reservation found only after acquiring like the first answer: %s',
+    async (_what, second, expected) => {
+      // A Broker that restarted knew no Session at the first ask; under the
+      // acquired Session the key names an earlier attempt's execution. That
+      // is not "could not start".
+      let prepares = 0;
+      const { calls, probe } = await rig((path) => {
+        if (path === '/executions:prepare') {
+          prepares++;
+          return prepares === 1
+            ? rejection(404, 'runtime_session_not_found')
+            : second;
+        }
+        if (path === '/tool-sessions:acquire') return { body: acquired };
+        if (path === RELEASE) return { body: { ...identity, released: true } };
+        throw new Error(`unexpected ${path}`);
+      });
+      if (expected === 'held') {
+        await expect(probe()).rejects.toBeInstanceOf(HostedAutomationGateHeld);
+        expect(calls.map((call) => call.path)).toEqual([
+          '/executions:prepare',
+          '/tool-sessions:acquire',
+          '/executions:prepare',
+        ]);
+      } else {
+        await expect(probe()).resolves.toEqual({
+          kind: 'unknown',
+          reason: "the Runtime lost the occurrence's probe before it settled",
+        });
+        expect(calls.map((call) => call.path)).toEqual([
+          '/executions:prepare',
+          '/tool-sessions:acquire',
+          '/executions:prepare',
+          RELEASE,
+        ]);
+      }
+    },
+  );
+
+  it('cancels what it started when it stops watching, before releasing', async () => {
+    // A start whose execution this attempt cannot follow to an answer: a
+    // reservation that never started would otherwise run later, or keep
+    // the Session busy past the release.
+    let prepares = 0;
+    const { calls, probe } = await rig((path) => {
+      switch (path) {
+        case '/executions:prepare':
+          prepares++;
+          return prepares === 1
+            ? rejection(404, 'runtime_session_not_found')
+            : {
+                body: {
+                  ...identity,
+                  executionCallId: 'gate-execution',
+                  status: { state: 'prepared' },
+                },
+              };
+        case '/tool-sessions:acquire':
+          return { body: acquired };
+        case '/executions/gate-execution:start':
+          return {
+            body: {
+              ...identity,
+              executionCallId: 'gate-execution',
+              status: { state: 'lapsed' },
+            },
+          };
+        case '/executions/gate-execution:cancel':
+          return {
+            body: {
+              ...identity,
+              executionCallId: 'gate-execution',
+              status: { state: 'cancel_requested' },
+            },
+          };
+        case RELEASE:
+          return { body: { ...identity, released: true } };
+        default:
+          throw new Error(`unexpected ${path}`);
+      }
+    });
+    await expect(probe()).resolves.toMatchObject({ kind: 'unknown' });
+    expect(calls.map((call) => call.path)).toEqual([
+      '/executions:prepare',
+      '/tool-sessions:acquire',
+      '/executions:prepare',
+      '/executions/gate-execution:start',
+      '/executions/gate-execution:cancel',
+      RELEASE,
+    ]);
+  });
+
+  it.each([
+    ['released', { body: { ...identity, released: true } }, true],
+    [
+      'unknown to the Broker',
+      rejection(404, 'runtime_session_not_found'),
+      true,
+    ],
+    ['busy', rejection(409, 'runtime_session_busy'), false],
+  ] as const)(
+    'releases the Session of a revision no fire probes again (%s)',
+    async (_what, answer, ok) => {
+      const { calls, release } = await rig((path) =>
+        path === RELEASE ? answer : rejection(500, 'unexpected'),
+      );
+      if (ok) await expect(release()).resolves.toBeUndefined();
+      else await expect(release()).rejects.toThrow(/was not released/);
+      expect(calls.map((call) => call.path)).toEqual([RELEASE]);
+    },
+  );
 
   it('keeps a not-found release after a lost acquisition from settling the fire', async () => {
     // The Broker may still be admitting the acquisition whose answer was

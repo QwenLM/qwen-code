@@ -42,6 +42,16 @@ export interface ManagedAutomationGateParams {
   gate: string;
 }
 
+/** A probe invocation as the worker runs it, with its group handed back. */
+export interface ManagedAutomationGateExecution {
+  execute(
+    signal: AbortSignal,
+    updateOutput?: undefined,
+    shellExecutionConfig?: undefined,
+    onProcessGroup?: (pgid: number) => void,
+  ): Promise<ToolResult>;
+}
+
 class ManagedAutomationGateInvocation extends BaseToolInvocation<
   ManagedAutomationGateParams,
   ToolResult
@@ -57,9 +67,20 @@ class ManagedAutomationGateInvocation extends BaseToolInvocation<
     return `Automation gate: ${this.params.gate}`;
   }
 
-  async execute(signal: AbortSignal): Promise<ToolResult> {
+  /**
+   * `onProcessGroup` gets the command's process group as it starts, in the
+   * same position as a Shell call's, so the worker stops and sweeps it the
+   * same way.
+   */
+  async execute(
+    signal: AbortSignal,
+    _updateOutput?: unknown,
+    _shellExecutionConfig?: unknown,
+    onProcessGroup?: (pgid: number) => void,
+  ): Promise<ToolResult> {
     const run = createCronGateRunner(this.config, {
       timeoutMs: MANAGED_AUTOMATION_GATE_TIMEOUT_MS,
+      ...(onProcessGroup ? { onProcessGroup } : {}),
     });
     // The definition's author approved the command when they wrote it; the
     // worker runs admitted tools under yolo, so this is the in-process mark.

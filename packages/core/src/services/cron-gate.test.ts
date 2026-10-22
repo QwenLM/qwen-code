@@ -116,6 +116,54 @@ describe('createCronGateRunner', () => {
     );
   });
 
+  it('hands the command’s process group to the host and stops one it cannot track', async () => {
+    const groups: number[] = [];
+    await expect(
+      createCronGateRunner(makeConfig({ mode: ApprovalMode.YOLO }), {
+        onProcessGroup: (pgid) => groups.push(pgid),
+      })('./probe.sh', { signal: signal(), approvedInProcess: false }),
+    ).resolves.toMatchObject({ kind: 'output' });
+    expect(groups).toEqual([4242]);
+
+    // The shell settles once the command is stopped; the call fails with
+    // the host's error instead of answering an outcome.
+    let stopped: AbortSignal | undefined;
+    mockRuntimeShell.mockImplementation(
+      async (
+        _config: unknown,
+        _command: string,
+        _cwd: string,
+        _onOutput: unknown,
+        abort: AbortSignal,
+      ) => {
+        stopped = abort;
+        return {
+          pid: 4343,
+          result: new Promise((resolve) =>
+            abort.addEventListener('abort', () =>
+              resolve({
+                rawOutput: Buffer.alloc(0),
+                output: '',
+                exitCode: null,
+                signal: 9,
+                error: null,
+                aborted: true,
+              }),
+            ),
+          ),
+        };
+      },
+    );
+    await expect(
+      createCronGateRunner(makeConfig({ mode: ApprovalMode.YOLO }), {
+        onProcessGroup: () => {
+          throw new Error('ledger write failed');
+        },
+      })('./probe.sh', { signal: signal(), approvedInProcess: false }),
+    ).rejects.toThrow('ledger write failed');
+    expect(stopped?.aborted).toBe(true);
+  });
+
   it('treats whitespace-only stdout as quiet', async () => {
     scriptShell({ stdout: ' \n\t\n' });
     const result = await createCronGateRunner(
