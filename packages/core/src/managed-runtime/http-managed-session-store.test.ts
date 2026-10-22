@@ -5846,13 +5846,19 @@ describe('HTTP Managed Session store', () => {
     },
   );
 
-  it.each(['unsupported_feature', 'turn_active', 'session_context_busy'])(
-    'keeps the MCP settings writer usable after the atomic %s guard refuses a commit',
-    async (code) => {
+  it.each(
+    ['unsupported_feature', 'turn_active', 'session_context_busy'].flatMap(
+      (code) =>
+        [0, 1].map((uncertainAttempts) => [code, uncertainAttempts] as const),
+    ),
+  )(
+    'keeps the MCP settings writer usable after atomic %s refusal following %i uncertain attempts',
+    async (code, uncertainAttempts) => {
       const server = new FakeManagedSessionStore();
       const { session } = await bootStoresAndSession(server);
       const originalFetch = server.fetch.getMockImplementation()!;
       let refused = false;
+      let attempts = 0;
       server.fetch.mockImplementation(async (input, init) => {
         if (/\/transactions:commit(?:-v2)?$/.test(requestUrl(input))) {
           const body = JSON.parse(String(init?.body)) as Record<
@@ -5860,6 +5866,11 @@ describe('HTTP Managed Session store', () => {
             unknown
           >;
           if (body['operation'] === 'manageMcp' && !refused) {
+            if (attempts++ < uncertainAttempts)
+              return jsonResponse(
+                { error: { code: 'unavailable', message: 'Not committed' } },
+                503,
+              );
             refused = true;
             return jsonResponse(
               { error: { code, message: 'Session admission changed' } },
@@ -5907,6 +5918,7 @@ describe('HTTP Managed Session store', () => {
           ManagedSessionCommitRejectedError,
         );
         expect(refused).toBe(true);
+        expect(attempts).toBe(uncertainAttempts + 1);
         expect(session.authority.writesStopped).toBe(false);
         expect(
           session.authority.domainRecord('config_install'),

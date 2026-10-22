@@ -145,10 +145,7 @@ export class HostedMcpSession {
             .map((entry) => parseHookExecution(entry.record).runtimeSessionId)
             .at(-1)
         : undefined;
-    this.acquired =
-      owners.size > 0 ||
-      sharedBroker?.acquired === true ||
-      hookOwner !== undefined;
+    this.acquired = owners.size > 0 || sharedBroker?.acquired === true;
     const previous = configurations.length
       ? digest(
           configurations.map((entry) => entry.configurationId).sort(),
@@ -1123,7 +1120,7 @@ export class HostedMcpSession {
       .map((entry) => parseMcpConfiguration(entry.record));
   }
 
-  private async acquireOwner(reuse = false): Promise<void> {
+  async acquireOwner(reuse = false): Promise<void> {
     if (reuse && this.ownerReady) return;
     const previouslyAcquired = this.acquired;
     this.acquired = true;

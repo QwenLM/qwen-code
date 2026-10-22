@@ -212,6 +212,73 @@ function invoke(
 }
 
 describe('Managed MCP Runtime', () => {
+  it('isolates pending Session lookups while preserving the Workspace drain total', async () => {
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(
+      path.join(directory, 'global'),
+    );
+    const otherRuntime = 'mcp:session-b';
+    const otherKey = { ...sessionKey, sessionId: 'session-b' };
+    let entered!: () => void;
+    let resume!: () => void;
+    const waiting = new Promise<void>((resolve) => (entered = resolve));
+    const gate = new Promise<void>((resolve) => (resume = resolve));
+    const instance = new ManagedMcpRuntime(
+      { ...sessionKey, workspaceGeneration: '1' },
+      async (id) => {
+        if (id === otherRuntime) {
+          entered();
+          await gate;
+          return undefined;
+        }
+        return directory;
+      },
+      { version: 1, servers: [stdioDefinition()] },
+    );
+    runtimes.push(instance);
+    const executor = new ManagedToolExecutor(
+      async () => ({
+        sessionId: runtimeSessionId,
+        directory,
+        admitsDirectory: () => true,
+        tools: new Map(),
+      }),
+      undefined,
+      instance,
+    );
+    await executor.controlFileHistory(sessionKey.sessionId, runtimeSessionId, {
+      kind: 'raw-file-history',
+      action: 'bind',
+      state: null,
+    });
+    const input = configure();
+    const pending = instance
+      .control(otherRuntime, {
+        ...input,
+        sessionKey: otherKey,
+        grant: { ...input.grant, sessionKey: otherKey },
+      })
+      .catch((cause: unknown) => cause);
+    await waiting;
+    try {
+      expect(instance.getDrainInspection().pendingStarts).toBe(1);
+      expect(instance.hasPendingWork(otherRuntime)).toBe(true);
+      expect(instance.hasPendingWork(runtimeSessionId)).toBe(false);
+      await expect(
+        executor.controlFileHistory(sessionKey.sessionId, runtimeSessionId, {
+          kind: 'raw-file-history',
+          action: 'snapshot',
+        }),
+      ).resolves.toMatchObject({ ownerSessionId: sessionKey.sessionId });
+    } finally {
+      resume();
+      expect(await pending).toMatchObject({
+        code: 'managed_mcp_session_unavailable',
+      });
+    }
+    expect(instance.getDrainInspection().pendingStarts).toBe(0);
+    expect(instance.hasPendingWork(otherRuntime)).toBe(false);
+  });
+
   it('refuses a parked configuration after sealing before any connection starts', async () => {
     let enter!: () => void;
     let resume!: () => void;

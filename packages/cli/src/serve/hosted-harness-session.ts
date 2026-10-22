@@ -10463,7 +10463,8 @@ export function registerHostedHarnessSessionRoutes(
         );
       try {
         await broker.warm();
-        if (session.hooks) await session.hooks.acquire();
+        if (session.mcp) await session.mcp.acquireOwner();
+        else if (session.hooks) await session.hooks.acquire();
         else await broker.acquire();
       } catch (cause) {
         if (isRetryableWorkspaceAcquisition(cause))

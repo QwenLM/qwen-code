@@ -1036,6 +1036,18 @@ class ManagedSessionStoreHttpClient {
         break;
       } catch (error) {
         await this.annotateWriterRefusal(error);
+        // The store replays committed commands before evaluating these atomic guards.
+        if (
+          descriptor.operation === 'manageMcp' &&
+          error instanceof ManagedSessionStoreHttpError &&
+          error.status === 409 &&
+          [
+            'unsupported_feature',
+            'turn_active',
+            'session_context_busy',
+          ].includes(error.remoteCode)
+        )
+          throw new ManagedSessionCommitRejectedError(error);
         if (
           attempt === 0 &&
           error instanceof ManagedSessionStoreHttpError &&
@@ -1057,13 +1069,7 @@ class ManagedSessionStoreHttpClient {
               error.remoteCode ===
                 'context_compression_authorization_revoked' ||
               (descriptor.operation === 'contextCompression' &&
-                error.remoteCode === 'workspace_unavailable') ||
-              (descriptor.operation === 'manageMcp' &&
-                [
-                  'unsupported_feature',
-                  'turn_active',
-                  'session_context_busy',
-                ].includes(error.remoteCode)))) ||
+                error.remoteCode === 'workspace_unavailable'))) ||
             (this.lifecycleAuthority &&
               (error.status === 403 ||
                 (error.status === 409 &&

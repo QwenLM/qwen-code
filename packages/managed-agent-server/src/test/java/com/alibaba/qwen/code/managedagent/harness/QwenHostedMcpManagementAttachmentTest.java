@@ -30,6 +30,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -68,6 +69,57 @@ class QwenHostedMcpManagementAttachmentTest {
         verify(fixture.client, never()).createSession(any());
         verify(fixture.client, never()).loadSession(any());
         verify(fixture.client, never()).submitTurn(any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void aManagementReadCannotSuppressTurnRecoveryOrCancellationTakeover(boolean cancellation) {
+        var fixture = new Fixture(BOOT);
+        fixture.connector.mcpManagement("tenant", SESSION);
+        assertThat(fixture.connector.attachedSessions()).isEmpty();
+
+        fixture.connector.recoverManagedRuntime("tenant", SESSION, cancellation);
+
+        var loads = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(fixture.client).loadSession(loads.capture());
+        Map<String, Object> request = ReflectionTestUtils.invokeMethod(loads.getValue(), "toJson");
+        assertThat(request).containsEntry(cancellation ? "cancellationTakeover" : "driveRuntimeRecovery", true);
+        verify(fixture.client).loadMcpManagementSession(any());
+        assertThat(fixture.connector.attachedSessions()).hasSize(1);
+    }
+
+    @Test
+    void anEmptySessionInitializedForManagementStillTakesTheOrdinaryRecoveryPath() {
+        var fixture = new Fixture(null);
+        fixture.connector.mcpManagement("tenant", SESSION);
+        fixture.connector.recoverManagedRuntime("tenant", SESSION, false);
+        verify(fixture.client).createSession(any());
+        verify(fixture.client).loadSession(any());
+    }
+
+    @Test
+    void theFirstTurnPassivelyAttachesAnEmptySessionInitializedForManagement() {
+        var fixture = new Fixture(null);
+        fixture.connector.mcpManagement("tenant", SESSION);
+        fixture.connector.createOrLoad("tenant", SESSION, false);
+        fixture.connector.createOrLoad("tenant", SESSION, false);
+        verify(fixture.client).createSession(any());
+        var loads = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(fixture.client).loadSession(loads.capture());
+        Map<String, Object> request = ReflectionTestUtils.invokeMethod(loads.getValue(), "toJson");
+        assertThat(request).containsEntry("passiveManagedRuntimeRecovery", true)
+                .doesNotContainKeys("driveRuntimeRecovery", "mcpManagementOnly");
+        assertThat(fixture.connector.attachedSessions()).hasSize(1);
+    }
+
+    @Test
+    void closingASessionEvictsItsManagementOnlyReference() {
+        var fixture = new Fixture(BOOT);
+        fixture.connector.mcpManagement("tenant", SESSION);
+        fixture.connector.closeSession("tenant", SESSION);
+        fixture.connector.mcpManagement("tenant", SESSION);
+        verify(fixture.client, times(2)).loadMcpManagementSession(any());
+        verify(fixture.client).closeSession(SESSION);
     }
 
     @ParameterizedTest
