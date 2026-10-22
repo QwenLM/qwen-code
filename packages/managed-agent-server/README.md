@@ -970,8 +970,20 @@ Local-process workers run model-directed tools, so the Broker starts them
 without any environment variable whose name begins, in any letter case, with
 `QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `SPRING_` or `OSS_`. Every other
 variable of the server process still reaches the worker and its tools. Keep
-unrelated secrets out of the service environment. This does not isolate files:
-a worker runs as the service account and can read whatever that account can.
+unrelated secrets out of the service environment. A worker that uses the
+artifact tool's `oss` publisher therefore needs its credentials under the
+`ALIBABA_CLOUD_ACCESS_KEY_ID`, `ALIBABA_CLOUD_ACCESS_KEY_SECRET` and
+`ALIBABA_CLOUD_SECURITY_TOKEN` names, which that publisher also accepts. Those
+names are not filtered: they reach every worker the Broker starts and every
+model-directed tool it runs. The Broker copies its environment into a worker
+once, at launch, and never refreshes it; a Broker restart does not refresh a
+durable worker that it adopts by pid. Give those names a long-lived RAM
+identity that can only write the artifact bucket and prefix, never the account
+key that the `OSS_` filter withholds. A short-lived STS token needs a rotation
+path that re-execs the Broker before it expires, and even then an adopted
+durable worker keeps its launch-time credentials. One credential set serves
+every tenant and workspace on the host. This does not isolate files: a worker
+runs as the service account and can read whatever that account can.
 
 After a credential-key rotation, keep each prior key in
 `previous-credential-keys` until no persisted Runtime binding references its
