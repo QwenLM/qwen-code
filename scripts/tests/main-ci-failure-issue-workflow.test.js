@@ -36,8 +36,7 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain('workflow_run:');
     // 'SDK Java' and 'Desktop Checks' joined when #14205 moved both suites
     // off pull_request/push onto a daily schedule: a red scheduled run is now
-    // their only failure signal, so both ride the same deduplicated issue and
-    // autofix route as the nightly CLI checks.
+    // their only failure signal, so both ride the same workflow issue as the nightly CLI checks.
     const watchedFiles = {
       'E2E Tests': 'e2e',
       'Managed Agent gate': 'managed-agent-gate',
@@ -420,45 +419,135 @@ printf '%s\\n' '${liveAttempt}'
     expect(desktop['run-name']).toBeDefined();
     expect(jobs.analyze.if).toContain('github.event.workflow.name');
     expect(jobs.analyze.if).not.toContain('github.event.workflow_run.name');
-    const plan = jobs.analyze.steps.find((step) => step.id === 'plan');
-    expect(plan.env.WORKFLOW_NAME).toBe('${{ github.event.workflow.name }}');
+    const writer = jobs.file_issue.steps.find((step) => step.id === 'issue');
+    expect(writer.env.WORKFLOW_NAME).toBe('${{ github.event.workflow.name }}');
   });
 
-  it('creates an issue that the existing autofix worker can pick up', () => {
-    expect(workflow).toContain("issues: 'write'");
-    expect(workflow).toContain('CI_DEV_BOT_PAT');
-    expect(workflow).toContain(
-      'AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || \'qwen-code-dev-bot\' }}"',
-    );
-    expect(workflow).toContain("BUG_LABEL: 'type/bug'");
-    expect(workflow).toContain(
-      "READY_FOR_AGENT_LABEL: 'status/ready-for-agent'",
-    );
-    expect(workflow).toContain("AUTOFIX_APPROVED_LABEL: 'autofix/approved'");
-    expect(workflow).toContain('gh issue edit "$1"');
-    expect(workflow).toContain(
-      '--add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}"',
-    );
-    expect(workflow).toContain('--add-assignee "${AUTOFIX_BOT}"');
-    expect(workflow).toContain('apply_autofix_route "${issue_url}"');
-  });
+  describe('workflow issue reuse', () => {
+    const writer = jobs.file_issue.steps.find((step) => step.id === 'issue');
+    const run = (issues, failLookup = false) => {
+      const tmp = mkdtempSync(join(tmpdir(), 'ci-issue-reuse-'));
+      try {
+        writeFileSync(join(tmp, 'issues.json'), JSON.stringify(issues));
+        writeFileSync(
+          join(tmp, 'gh'),
+          `#!/usr/bin/env bash
+set -eu
+printf '%s\\n' "$*" >> "${tmp}/calls"
+if [[ "$1" == api ]]; then
+  [[ "$*" == *'state=open&per_page=100'* && "$*" == *'--paginate'* ]] || exit 2
+  ${failLookup ? 'exit 1' : `cat '${tmp}/issues.json'`}
+elif [[ "$1 $2" == 'issue create' ]]; then
+  echo 'https://github.com/QwenLM/qwen-code/issues/999'
+fi
+`,
+        );
+        chmodSync(join(tmp, 'gh'), 0o755);
+        const result = spawnSync(
+          'bash',
+          ['-eo', 'pipefail', '-c', writer.run],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${tmp}:${process.env.PATH}`,
+              RUNNER_TEMP: tmp,
+              GITHUB_OUTPUT: join(tmp, 'output'),
+              REPO: 'QwenLM/qwen-code',
+              WORKFLOW_NAME: 'SDK Java',
+              ISSUE_BODY: 'Run 123 failed at commit abcdef123456',
+              RUN_ATTEMPT: '2',
+            },
+          },
+        );
+        return {
+          status: result.status,
+          calls: readFileSync(join(tmp, 'calls'), 'utf8'),
+          output: existsSync(join(tmp, 'output'))
+            ? readFileSync(join(tmp, 'output'), 'utf8')
+            : '',
+          body: existsSync(join(tmp, 'issue-body.md'))
+            ? readFileSync(join(tmp, 'issue-body.md'), 'utf8')
+            : '',
+        };
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    };
 
-  it('deduplicates by failing test and includes run context', () => {
-    // The dedupe key is the failing test, not the commit: a standing red used to
-    // open one issue per merge. The markers themselves live in the helper.
-    expect(workflow).toContain('main-failure-signature.mjs');
-    expect(workflow).toContain('searchMarkers');
-    // The failing tests are read from the triggering run's failed-job logs, so
-    // the dedupe key is recovered even when the run reported no test result.
-    expect(workflow).toContain(
-      'actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs',
+    it.each(['', ' on abcdef123456', ' — Foo.test'])(
+      'comments on an open workflow issue with suffix %s',
+      (suffix) => {
+        const result = run([
+          { number: 42, title: `Main CI failed: SDK Java${suffix}` },
+        ]);
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue comment 42');
+        expect(result.output).toContain(
+          'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
+        );
+        expect(result.calls).not.toContain('issue create');
+        expect(result.calls).toContain(
+          'issue edit 42 --repo QwenLM/qwen-code --remove-label status/ready-for-agent --remove-label autofix/approved',
+        );
+        expect(result.calls).not.toMatch(
+          /--add-label|--add-assignee|--remove-assignee|autofix\/in-progress/,
+        );
+        expect(result.body).toContain('Run 123 failed at commit abcdef123456');
+        expect(result.body).toContain('Run attempt: 2');
+      },
     );
-    expect(workflow).toContain('actions/jobs/${job_id}/logs');
-    expect(workflow).toContain('gh issue list');
-    expect(workflow).toContain('gh issue create');
-    expect(workflow).toContain('apply_autofix_route "${EXISTING_ISSUE}"');
-    expect(workflow).toContain('${WORKFLOW_RUN_URL}');
-    expect(workflow).toContain('${HEAD_SHA}');
+
+    it('creates a fixed-title triage issue when only other workflow issues or PRs exist', () => {
+      const result = run([
+        { number: 10, title: 'Main CI failed: SDK Java extra' },
+        { number: 11, title: 'Main CI failed: SDK Python on abc123' },
+        { number: 12, title: 'Main CI failed: SDK Java', pull_request: {} },
+      ]);
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain(
+        'issue create --repo QwenLM/qwen-code --title Main CI failed: SDK Java --body-file',
+      );
+      expect(result.calls).toContain('--label status/needs-triage');
+      expect(result.output).toContain(
+        'issue_url=https://github.com/QwenLM/qwen-code/issues/999',
+      );
+      expect(result.calls).not.toMatch(
+        /autofix|ready-for-agent|assignee|issue comment/,
+      );
+    });
+
+    it('chooses the oldest matching issue consistently', () => {
+      const result = run([
+        { number: 50, title: 'Main CI failed: SDK Java' },
+        { number: 42, title: 'Main CI failed: SDK Java on abc123' },
+      ]);
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.output).toContain(
+        'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
+      );
+    });
+
+    it('does not create an issue when lookup fails', () => {
+      const result = run([], true);
+      expect(result.status).not.toBe(0);
+      expect(result.calls).not.toMatch(/issue (create|comment)/);
+    });
+
+    it('serializes lookup and write per workflow and reuses the failure renderer', () => {
+      expect(jobs.file_issue.concurrency).toEqual({
+        group: 'main-ci-failure-issue-${{ github.event.workflow.id }}',
+        'cancel-in-progress': false,
+        queue: 'max',
+      });
+      expect(writer.env.ISSUE_BODY).toBe(
+        '${{ needs.analyze.outputs.comment_body }}',
+      );
+      expect(jobs.analyze.outputs.comment_body).toBe(
+        '${{ steps.summary.outputs.body }}',
+      );
+      expect(workflow).not.toContain('apply_autofix_route');
+    });
   });
 
   it('hands the helper the failed job and step of a run with no test result', () => {
@@ -591,11 +680,6 @@ printf '%s\\n' '{"jobs":[]}'
     expect(download).toContain(
       'echo "::warning::Could not download the log of job ${job_id}" rm -f "${log_dir}/${job_id}.log"',
     );
-  });
-
-  it('re-reads an existing issue so recorded recurrences survive the update', () => {
-    expect(workflow).toContain('gh issue view "${existing_issue}"');
-    expect(workflow).toContain('--existing "${existing_body}"');
   });
 
   it('uses a random heredoc delimiter for the multiline body output', () => {
@@ -881,12 +965,8 @@ printf '%s\\n' '{"jobs":[]}'
     );
   });
 
-  it('prepares the PR summary before a failed issue lookup and exports it to the writer', () => {
+  it('prepares the failure summary without looking up an issue', () => {
     const summary = jobs.analyze.steps.find((step) => step.id === 'summary');
-    const plan = jobs.analyze.steps.find((step) => step.id === 'plan');
-    expect(jobs.analyze.steps.indexOf(summary)).toBeLessThan(
-      jobs.analyze.steps.indexOf(plan),
-    );
     expect(jobs.analyze.outputs.comment_body).toBe(
       '${{ steps.summary.outputs.body }}',
     );
@@ -928,94 +1008,9 @@ printf '%s\\n' '{"jobs":[]}'
       expect(body.endsWith(`${delimiter}\n`)).toBe(true);
       expect(body).toContain('### `Managed Agent gate` failed');
       expect(body).toContain('GitHub runner infrastructure failed');
-      const planned = spawnSync('bash', ['-eo', 'pipefail', '-c', plan.run], {
-        env,
-        encoding: 'utf8',
-      });
-      expect(planned.status).toBe(1);
-      expect(readFileSync(output, 'utf8')).toBe(body);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
-  });
-
-  describe('file or update the autofix issue', () => {
-    const issueStep = jobs.file_issue.steps.find((step) => step.id === 'issue');
-    const runStep = (overrides, ghScript) => {
-      const tmp = mkdtempSync(join(tmpdir(), 'java-ci-issue-'));
-      try {
-        writeFileSync(join(tmp, 'gh'), ghScript);
-        chmodSync(join(tmp, 'gh'), 0o755);
-        const output = join(tmp, 'output');
-        writeFileSync(output, '');
-        const result = spawnSync(
-          'bash',
-          ['-eo', 'pipefail', '-c', issueStep.run],
-          {
-            encoding: 'utf8',
-            env: {
-              ...process.env,
-              PATH: `${tmp}:${process.env.PATH}`,
-              RUNNER_TEMP: tmp,
-              GITHUB_OUTPUT: output,
-              GH_TOKEN: 'fake',
-              REPO: 'QwenLM/qwen-code',
-              EXISTING_ISSUE: '',
-              ISSUE_TITLE: 'Main CI failed: SDK Java — FooTest.bar',
-              ISSUE_BODY: 'body',
-              AUTOFIX_BOT: 'qwen-code-dev-bot',
-              BUG_LABEL: 'type/bug',
-              READY_FOR_AGENT_LABEL: 'status/ready-for-agent',
-              AUTOFIX_APPROVED_LABEL: 'autofix/approved',
-              ...overrides,
-            },
-          },
-        );
-        return { result, output: readFileSync(output, 'utf8') };
-      } finally {
-        rmSync(tmp, { recursive: true, force: true });
-      }
-    };
-    // Only the route edit fails: a renamed label or a non-collaborator
-    // assignee makes gh issue edit exit non-zero while the create and the
-    // body edit succeed.
-    const routeEditFails = [
-      '#!/usr/bin/env bash',
-      'if [[ "$*" == *--add-label* ]]; then exit 1; fi',
-      'if [[ "$*" == *create* ]]; then',
-      '  echo "https://github.com/QwenLM/qwen-code/issues/14500"',
-      'fi',
-    ].join('\n');
-
-    it('publishes the issue url even when the autofix route edit fails', () => {
-      // bash -e aborts the step on the failed edit; the output must already
-      // be written, or report_pr posts its comment without the tracking
-      // link and nothing ever restores it.
-      const created = runStep({}, routeEditFails);
-      expect(created.result.status).toBe(1);
-      expect(created.output).toContain(
-        'issue_url=https://github.com/QwenLM/qwen-code/issues/14500',
-      );
-      const existing = runStep({ EXISTING_ISSUE: '14499' }, routeEditFails);
-      expect(existing.result.status).toBe(1);
-      expect(existing.output).toContain(
-        'issue_url=https://github.com/QwenLM/qwen-code/issues/14499',
-      );
-    });
-
-    it('creates, routes and publishes the url when nothing fails', () => {
-      const allSucceed = [
-        '#!/usr/bin/env bash',
-        'if [[ "$*" == *create* ]]; then',
-        '  echo "https://github.com/QwenLM/qwen-code/issues/14500"',
-        'fi',
-      ].join('\n');
-      const { result, output } = runStep({}, allSucceed);
-      expect(result.status, result.stderr).toBe(0);
-      expect(output).toContain(
-        'issue_url=https://github.com/QwenLM/qwen-code/issues/14500',
-      );
-    });
   });
 
   const privilegedJobs = Object.entries(jobs).filter(([, job]) =>
