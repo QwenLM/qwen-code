@@ -41,6 +41,17 @@ const DASHSCOPE_TIERED_EFFORTS: readonly ReasoningEffort[] = [
   'xhigh',
 ] as const;
 
+/**
+ * Output caps DashScope enforces on hosted third-party models that sit below
+ * the vendor's own limit (and so below the shared tokenLimits table, which
+ * describes the vendor API). Keys are lowercase wire model ids. A request
+ * above the cap is rejected with `400 Range of max_tokens should be [1, N]`
+ * on every DashScope endpoint (Standard, Token Plan); probe 2026-10-22.
+ */
+const DASHSCOPE_OUTPUT_TOKEN_CAPS: ReadonlyMap<string, number> = new Map([
+  ['minimax-m2.5', 32_768],
+]);
+
 export type DashScopeThinkingKnobSelection = {
   source: 'extra_body' | 'samplingParams' | 'reasoning';
   field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
@@ -618,6 +629,29 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       return { enable_thinking: true };
     }
     return {};
+  }
+
+  /**
+   * Apply the shared output-limit policy, then clamp to the DashScope cap for
+   * hosted models whose endpoint limit is lower than the vendor's. The cap
+   * also bounds an explicit samplingParams value, since the server rejects
+   * anything above it.
+   */
+  protected override applyOutputTokenLimit<
+    T extends { max_tokens?: number | null; model: string },
+  >(request: T): T {
+    const limited = super.applyOutputTokenLimit(request);
+    const cap = DASHSCOPE_OUTPUT_TOKEN_CAPS.get(
+      this.resolveWireModel(request.model),
+    );
+    if (
+      cap === undefined ||
+      typeof limited.max_tokens !== 'number' ||
+      limited.max_tokens <= cap
+    ) {
+      return limited;
+    }
+    return { ...limited, max_tokens: cap };
   }
 
   /**
