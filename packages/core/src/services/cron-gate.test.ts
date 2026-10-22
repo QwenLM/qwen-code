@@ -32,7 +32,7 @@ interface ShellScript {
   signal?: number | null;
   error?: Error | null;
   aborted?: boolean;
-  outputHeldAfterExit?: boolean;
+  stdoutHeldAfterExit?: boolean;
 }
 
 function scriptShell(script: ShellScript): void {
@@ -58,7 +58,7 @@ function scriptShell(script: ShellScript): void {
           signal: script.signal ?? null,
           error: script.error ?? null,
           aborted: script.aborted ?? false,
-          ...(script.outputHeldAfterExit ? { outputHeldAfterExit: true } : {}),
+          ...(script.stdoutHeldAfterExit ? { stdoutHeldAfterExit: true } : {}),
         }),
       };
     },
@@ -122,6 +122,17 @@ describe('createCronGateRunner', () => {
 
   it('treats whitespace-only stdout as quiet', async () => {
     scriptShell({ stdout: ' \n\t\n' });
+    expect(
+      (
+        await createCronGateRunner(makeConfig({ mode: ApprovalMode.AUTO }))(
+          './probe.sh',
+          { signal: signal(), approvedInProcess: false },
+        )
+      ).kind,
+    ).toBe('quiet');
+    // `tput sgr0` and friends: escape sequences alone would deliver an
+    // empty block.
+    scriptShell({ stdout: '\x1b(B\x1b[m\r\n' });
     const result = await createCronGateRunner(
       makeConfig({ mode: ApprovalMode.AUTO }),
     )('./probe.sh', { signal: signal(), approvedInProcess: false });
@@ -131,18 +142,24 @@ describe('createCronGateRunner', () => {
   it('fails a quiet gate whose background part still holds its output', async () => {
     // `eval './probe.sh &'` or `echo './probe.sh &' | sh` passes the
     // lexical check; the probe's output would be lost at every fire.
-    scriptShell({ stdout: '', outputHeldAfterExit: true });
+    scriptShell({ stdout: '', stdoutHeldAfterExit: true });
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
     const result = await createCronGateRunner(
       makeConfig({ mode: ApprovalMode.YOLO }),
     )('./probe.sh', { signal: signal(), approvedInProcess: false });
     expect(result).toMatchObject({
       kind: 'failed',
       detail: expect.stringContaining(
-        'something it started in the background still held its output open',
+        'something it started in the background still held its stdout open',
       ),
     });
+    // What it left on its stdout is stopped: each fire would add one more.
+    if (process.platform !== 'win32') {
+      expect(kill).toHaveBeenCalledWith(-4242, 'SIGKILL');
+    }
+    kill.mockRestore();
     // Output printed in the foreground is still delivered.
-    scriptShell({ stdout: 'event: comment\n', outputHeldAfterExit: true });
+    scriptShell({ stdout: 'event: comment\n', stdoutHeldAfterExit: true });
     expect(
       await createCronGateRunner(makeConfig({ mode: ApprovalMode.YOLO }))(
         './probe.sh',

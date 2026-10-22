@@ -204,11 +204,11 @@ Its exit code and stdout decide the outcome:
 
 | Gate result                          | Outcome     | What happens                                                                      |
 | ------------------------------------ | ----------- | --------------------------------------------------------------------------------- |
-| exit 0, stdout empty after trimming  | `quiet`     | Nothing is queued or recorded in the transcript.                                  |
+| exit 0, no visible stdout            | `quiet`     | Nothing is queued or recorded in the transcript.                                  |
 | exit 0, stdout non-empty             | `delivered` | The fire is delivered with the output (first 16 KiB; truncation is noted).        |
 | non-zero exit, timeout, cannot start | `failed`    | A notice is delivered for the first failure of a streak; later ones are counted.  |
 | binary output                        | `failed`    | The command is stopped; same as any other failure.                                |
-| exit 0, stdout empty, output held    | `failed`    | Something it started in the background still held its output 1 s after it exited. |
+| exit 0, stdout empty, stdout held    | `failed`    | Something it started in the background still held its stdout 1 s after it exited. |
 | not allowed to run unattended (5.4)  | `blocked`   | Same as `failed`, with the rule to add.                                           |
 
 A probe therefore keeps its own cursor and prints only transitions: a new
@@ -303,10 +303,16 @@ the command is proposed and checked again where it runs.
   handed to `eval`, piped into a shell, passed as `bash -c -- …` or put
   together from several quoted pieces (`bash -c './probe.sh '\&`,
   `bash -c $'./probe.sh &'`), or an `&` after a quote it misreads (inside
-  `"$(…)"` or `$'…'`), gets past it. The
-  runner backs it up: a gate that exits 0 with nothing on stdout while
-  something it started in the background still holds its output open is
-  `failed`, not `quiet` (the outcome table above). A gate of only comments
+  `"$(…)"` or `$'…'`), gets past it. The runner backs it up: a gate that
+  exits 0 with nothing on stdout while something it started in the
+  background still holds its stdout open is `failed`, not `quiet` (the
+  outcome table above), and the gate's process group is stopped, since the
+  gate is over and each fire would leave one more behind. A held stderr
+  alone is not lost output and changes nothing. Under the bwrap shell
+  execution sandbox (a TUI or headless session that enables it; a daemon
+  session cannot) the backstop never sees such a part: the sandbox's PID
+  namespace ends with the command and takes the part with it, so the gate
+  settles `quiet` and the lexical check is the only guard there. A gate of only comments
   is refused for the same reason: a shell runs it as nothing; `true` and `:`
   stay accepted as explicit no-ops. That check is best-effort too: a
   comment-only script behind a wrapper prefix (`nohup bash -c '# x'`) or

@@ -227,6 +227,7 @@ export function createCronGateRunner(config: Config): CronGateRunner {
     });
 
     let result: ShellExecutionResult;
+    let pid: number | undefined;
     try {
       const handle = await executeRuntimeShell(
         config,
@@ -241,9 +242,13 @@ export function createCronGateRunner(config: Config): CronGateRunner {
         },
         { streamStdout: true },
       );
+      pid = handle.pid;
       result = await handle.result;
     } catch (error) {
       return failed(`could not start: ${getErrorMessage(error)}`);
+    }
+    if (result.stdoutHeldAfterExit && pid !== undefined) {
+      stopLeftovers(pid);
     }
     if (result.error) return failed(`could not start: ${result.error.message}`);
     if (binary.signal.aborted) return failed('printed binary output');
@@ -259,20 +264,36 @@ export function createCronGateRunner(config: Config): CronGateRunner {
       );
     }
     const durationMs = Date.now() - startedAt;
-    if (stdout.trim().length === 0) {
+    // Judged as delivered: output of escape sequences alone would wake the
+    // session with an empty block.
+    if (sanitizeGateText(stdout).length === 0) {
       // A part the command put in the background outlived it with its
-      // output still open: whatever it prints is lost, so "quiet" would
+      // stdout still open: whatever it prints is lost, so "quiet" would
       // skip every fire. Catches what the lexical `&` check misses (`eval`,
       // a script piped into a shell, a quote it misreads).
-      if (result.outputHeldAfterExit) {
+      if (result.stdoutHeldAfterExit) {
         return failed(
-          'exited with nothing on stdout while something it started in the background still held its output open (a gate must finish in the foreground)',
+          'exited with nothing on stdout while something it started in the background still held its stdout open (a gate must finish in the foreground)',
         );
       }
       return { kind: 'quiet', durationMs };
     }
     return { kind: 'output', stdout, truncated, durationMs };
   };
+}
+
+/**
+ * Stops what a gate left running on its stdout: by contract the gate is
+ * finished, and every fire would leave one more behind. The group still has
+ * a member holding the pipe, so its id has not been reused.
+ */
+function stopLeftovers(pgid: number): void {
+  if (process.platform === 'win32') return;
+  try {
+    process.kill(-pgid, 'SIGKILL');
+  } catch {
+    // Gone already.
+  }
 }
 
 /**

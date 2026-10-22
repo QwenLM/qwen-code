@@ -609,7 +609,8 @@ nothing on stdout skips it, and a non-zero exit is reported once per streak.
   The `&` check is lexical and best-effort; where unsure it refuses (an `&` in
   a comment, a heredoc body or `(( … ))`), and a gate that gets past it is
   reported `failed` when it exits with nothing on stdout while a background
-  part still holds its output.
+  part still holds its stdout (outside the bwrap shell sandbox, whose PID
+  namespace ends that part with the command).
   On `PATCH`, `gate: null` or `gate: ""` clears the gate and its `condition`.
 - A legacy task guarded by a `condition` refuses any `gate` key in a `PATCH`
   with 409 `task_legacy_unsupported`, so a client sends `gate` only when it
