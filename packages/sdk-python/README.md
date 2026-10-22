@@ -23,6 +23,17 @@ pip install --pre qwen-code-sdk
 You can also point the SDK at an explicit CLI binary or script with
 `path_to_qwen_executable`.
 
+On Windows, command names are resolved only from the effective child `PATH`,
+including case-insensitive overrides in `QueryOptions.env`. Supported command
+extensions are `.com`, `.exe`, `.bat`, and `.cmd`; extensionless npm shell shims
+and unrelated `PATHEXT` associations are ignored. The current directory is searched
+only when explicitly included in `PATH`. Explicit Python or JavaScript file paths
+continue to use their corresponding runtime.
+
+Closing a running Windows command shim uses the system `taskkill /T /F` command to
+stop both the shim and its CLI descendants before the parent process exits. Exit
+and stderr cleanup waits are bounded so an inherited pipe cannot stall shutdown.
+
 Before using the SDK, verify that the CLI works in the same environment:
 
 ```bash

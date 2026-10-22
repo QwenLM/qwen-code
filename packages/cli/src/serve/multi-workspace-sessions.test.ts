@@ -53,6 +53,7 @@ import {
   workspaceTranscriptCursorExceedsLimitForTesting,
 } from './routes/session.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const PRIMARY_CWD = path.resolve(path.sep, 'work', 'primary');
 const SECONDARY_CWD = path.resolve(path.sep, 'work', 'secondary');
@@ -879,6 +880,15 @@ function makeBridge(
         ...(context ? { context } : {}),
       });
       return { v: 1 as const, sessionId, changes: [] };
+    },
+    async getMessageGroups() {
+      return {
+        snapshot: 'v1',
+        groups: [{ id: 'group', recordIds: ['group'] }],
+      };
+    },
+    async deleteMessageGroups() {
+      return { deletedGroupIds: ['group'], deletedPromptIds: ['prompt'] };
     },
     async getRewindSnapshots(sessionId: string) {
       rewindSnapshotCalls.push(sessionId);
@@ -3554,6 +3564,71 @@ describe('multi-workspace session dispatch', () => {
     expect(secondaryBridge.setApprovalModeCalls).toEqual([]);
   });
 
+  it('routes message group listing and deletion only to the live session owner', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+    const primaryGet = vi.spyOn(primaryBridge, 'getMessageGroups');
+    const primaryDelete = vi.spyOn(primaryBridge, 'deleteMessageGroups');
+    const secondaryGet = vi.spyOn(secondaryBridge, 'getMessageGroups');
+    const secondaryDelete = vi.spyOn(secondaryBridge, 'deleteMessageGroups');
+    const sessionId = '22222222-2222-4222-a222-222222222222';
+    const list = await request(app)
+      .get(`/session/${sessionId}/message-groups`)
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION);
+    expect(list.status).toBe(200);
+    expect(secondaryGet).toHaveBeenCalledWith(sessionId);
+    const deleted = await request(app)
+      .post(`/session/${sessionId}/messages/delete`)
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({ snapshot: 'v1', groupIds: ['group'] });
+    expect(deleted.status).toBe(200);
+    expect(secondaryDelete).toHaveBeenCalledWith(
+      sessionId,
+      { snapshot: 'v1', groupIds: ['group'] },
+      { clientId: 'secondary-client' },
+    );
+    expect(primaryGet).not.toHaveBeenCalled();
+    expect(primaryDelete).not.toHaveBeenCalled();
+    const invalid = await request(app)
+      .post(`/session/${sessionId}/messages/delete`)
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .send({ snapshot: 'v1', groupIds: ['group', 'group'] });
+    expect(invalid.status).toBe(400);
+    expect(secondaryDelete).toHaveBeenCalledTimes(1);
+    const missing = await request(app)
+      .post('/session/33333333-3333-4333-a333-333333333333/messages/delete')
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .send({ snapshot: 'v1', groupIds: ['group'] });
+    expect(missing.status).toBe(404);
+    expect(primaryDelete).not.toHaveBeenCalled();
+  });
+
+  it('maps stale message groups to conflict without falling back to primary', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+    const primaryDelete = vi.spyOn(primaryBridge, 'deleteMessageGroups');
+    vi.spyOn(secondaryBridge, 'deleteMessageGroups').mockRejectedValue(
+      Object.assign(new Error('History changed'), {
+        data: { errorKind: 'message_groups_conflict' },
+      }),
+    );
+    const response = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/messages/delete')
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .send({ snapshot: 'old', groupIds: ['group'] });
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('message_groups_conflict');
+    expect(primaryDelete).not.toHaveBeenCalled();
+  });
+
   it('routes owner-local actions to the owning non-primary workspace bridge', async () => {
     const { app, primaryBridge, secondaryBridge } = makeHarness({
       token: TEST_TOKEN,
@@ -5111,36 +5186,41 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
-  it('falls back to live-only listing when persisted probing fails', async () => {
-    await withRuntimeDir(async () => {
-      const chatsDir = path.join(
-        new Storage(SECONDARY_CWD).getProjectDir(),
-        'chats',
-      );
-      await fsp.mkdir(chatsDir, { recursive: true });
-      await fsp.chmod(chatsDir, 0o000);
-      try {
-        const { app } = makeHarness({
-          secondarySummaries: [
-            makeSummary('secondary-live-fallback', SECONDARY_CWD),
-          ],
-        });
+  // Where permission bits do not bind, the mode-000 chats directory stays
+  // readable and the fallback is never taken.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'falls back to live-only listing when persisted probing fails',
+    async () => {
+      await withRuntimeDir(async () => {
+        const chatsDir = path.join(
+          new Storage(SECONDARY_CWD).getProjectDir(),
+          'chats',
+        );
+        await fsp.mkdir(chatsDir, { recursive: true });
+        await fsp.chmod(chatsDir, 0o000);
+        try {
+          const { app } = makeHarness({
+            secondarySummaries: [
+              makeSummary('secondary-live-fallback', SECONDARY_CWD),
+            ],
+          });
 
-        const res = await request(app)
-          .get('/workspace/secondary-id/sessions')
-          .set('Host', host())
-          .expect(200);
-        expect(res.body.sessions).toEqual([
-          expect.objectContaining({
-            sessionId: 'secondary-live-fallback',
-            workspaceCwd: SECONDARY_CWD,
-          }),
-        ]);
-      } finally {
-        await fsp.chmod(chatsDir, 0o700);
-      }
-    });
-  });
+          const res = await request(app)
+            .get('/workspace/secondary-id/sessions')
+            .set('Host', host())
+            .expect(200);
+          expect(res.body.sessions).toEqual([
+            expect.objectContaining({
+              sessionId: 'secondary-live-fallback',
+              workspaceCwd: SECONDARY_CWD,
+            }),
+          ]);
+        } finally {
+          await fsp.chmod(chatsDir, 0o700);
+        }
+      });
+    },
+  );
 
   it('preserves the legacy invalid workspace selector message', async () => {
     const { app } = makeHarness();

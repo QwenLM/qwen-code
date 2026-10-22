@@ -852,6 +852,19 @@ describe('ReadFileTool', () => {
       );
     });
 
+    it('declares its raw size unknown once its own paging capped the body', async () => {
+      // Self-managed paging bounds read_file under its own line/char limits;
+      // the scheduler must not measure the capped body and certify it as the
+      // pre-reduction raw size (#13652 R5-1).
+      const whole = await read(await put('small.txt', 'short file'));
+      expect(whole.rawOutputSize).toBeUndefined();
+
+      const capped = await read(await put('big.txt', numberedLines(2000)));
+      expect(capped.rawOutputSize).toBeNull();
+      expect(capped.truncatedByProducer).toBe(true);
+      expect(whole.truncatedByProducer).toBeUndefined();
+    });
+
     it('returns image content without tool guidance before the registry is available', async () => {
       const result = await read(await putPng('image.png', 20, 10));
       expect(result.llmContent).toEqual([

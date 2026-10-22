@@ -1487,6 +1487,11 @@ describe('buildSpringRecipeLines', () => {
     const joined = lines.join('\n');
     expect(joined).toContain(`source "${envPath}"`);
     expect(joined).toContain('export SPRING_DATASOURCE_URL=');
+    expect(joined).toContain(
+      'cd packages/managed-agent-server && mvn spring-boot:run',
+    );
+    expect(joined).toContain('packages/sdk-java/qwencode/pom.xml');
+    expect(joined).not.toContain('runtime-broker/pom.xml');
     expect(joined).not.toContain('Set-ExecutionPolicy');
   });
 
@@ -1499,6 +1504,9 @@ describe('buildSpringRecipeLines', () => {
     const actionable = lines
       .map((line) => line.trim())
       .filter((line) => line !== '' && !line.startsWith('#'));
+    expect(actionable).toContain(
+      'Set-Location packages\\managed-agent-server; mvn spring-boot:run',
+    );
     const dotPointers = actionable.filter((line) => line.includes(ps1Path));
     expect(dotPointers).toHaveLength(1);
     expect(
@@ -1527,13 +1535,7 @@ describe('buildSpringRecipeLines', () => {
     }).join('\n');
     expect(posix).toContain(clause);
     const readme = readFileSync(
-      path.join(
-        root,
-        'packages',
-        'sdk-java',
-        'managed-agent-server',
-        'README.md',
-      ),
+      path.join(root, 'packages', 'managed-agent-server', 'README.md'),
       'utf8',
     );
     expect(readme).toContain(clause);
@@ -1562,13 +1564,7 @@ describe('buildSpringRecipeLines', () => {
     const exportedUrl = joined.match(/SPRING_DATASOURCE_URL='([^']+)'/)?.[1];
     expect(exportedUrl).toContain('127.0.0.1');
     const readme = readFileSync(
-      path.join(
-        root,
-        'packages',
-        'sdk-java',
-        'managed-agent-server',
-        'README.md',
-      ),
+      path.join(root, 'packages', 'managed-agent-server', 'README.md'),
       'utf8',
     );
     for (const creator of creators) {
@@ -1580,13 +1576,7 @@ describe('buildSpringRecipeLines', () => {
 
   it('prints the README MySQL one-liner verbatim, grants included', () => {
     const readme = readFileSync(
-      path.join(
-        root,
-        'packages',
-        'sdk-java',
-        'managed-agent-server',
-        'README.md',
-      ),
+      path.join(root, 'packages', 'managed-agent-server', 'README.md'),
       'utf8',
     );
     const oneLiner = readme.match(/mysql -u root -e "[^"]+"/)?.[0];

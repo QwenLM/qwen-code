@@ -136,10 +136,12 @@ describe('Hosted proxy header relay', () => {
     expect(callers).toEqual([
       'hosted-channel-fault-driver.ts',
       'hosted-latency-driver.ts',
+      'hosted-monitor-run-fault-driver.ts',
       'hosted-process-crash-driver.ts',
       'hosted-recovery-blocked-wedge-driver.ts',
       'hosted-shell-output-driver.ts',
       'hosted-store-failure-driver.ts',
+      'hosted-workflow-fault-driver.ts',
       'hosted-workspace-tool-turn-driver.ts',
     ]);
   });

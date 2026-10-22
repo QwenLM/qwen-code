@@ -138,6 +138,8 @@ export interface AgentMeta {
    * are never exposed as reusable background agents.
    */
   isBackgrounded?: boolean;
+  /** Workflow children have no background registry entry to attest liveness. */
+  workflowOwner?: { pid: number; hostname: string };
   /** Container launches use this legacy field so older readers refuse resume. */
   isolation?: 'worktree' | 'container';
   executionBackend?: 'container';

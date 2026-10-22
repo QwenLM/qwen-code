@@ -166,6 +166,20 @@ describe('pickNativeDirectory', () => {
     );
   });
 
+  it('treats a zenity 4 "Failed to open display" failure as unavailable on Linux', async () => {
+    setPlatform('linux');
+    execFileAsyncMock.mockRejectedValue(
+      pickerError({
+        code: 1,
+        stderr: '(zenity:167685): Gtk-WARNING **: Failed to open display',
+      }),
+    );
+
+    await expect(pickNativeDirectory()).rejects.toBeInstanceOf(
+      NativeDirectoryPickerUnavailableError,
+    );
+  });
+
   it('throws unavailable for a non-cancel zenity failure on Linux', async () => {
     setPlatform('linux');
     execFileAsyncMock.mockRejectedValue(pickerError({ code: 127 }));
