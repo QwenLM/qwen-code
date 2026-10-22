@@ -2939,9 +2939,11 @@ class HarnessCoordinatorTest {
                 .thenReturn(new Attachment("boot-new", blocked, 4L, "epoch-new"));
         when(store.parkTurnForRuntimeRecovery(eq("tenant"), eq("session"),
                 eq("turn"), anyString(), anyString(), anyLong())).thenReturn(true);
+        long expectedRetryAfter = 1_000 + OperationReconciler.RECHECK.toMillis();
         HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
                 new HarnessEventProjector(), runtimeWarmer, directExecutor(),
-                Clock.systemUTC(), new ManagedAgentProperties());
+                Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC),
+                new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "turn");
         } finally {
@@ -2950,7 +2952,7 @@ class HarnessCoordinatorTest {
         // The Turn stays active on its own park code; it is never terminally
         // failed and never enters the budget-exempt retry lane.
         verify(store).parkTurnForRuntimeRecovery(eq("tenant"), eq("session"),
-                eq("turn"), anyString(), anyString(), anyLong());
+                eq("turn"), anyString(), anyString(), eq(expectedRetryAfter));
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
                 anyString(), anyString(), anyLong(), anyBoolean());
         verify(store, never()).failRecoveryBlockedTurn(anyString(), anyString(),
