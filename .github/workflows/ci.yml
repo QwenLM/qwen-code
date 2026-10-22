@@ -1380,9 +1380,9 @@ jobs:
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
           {
             echo "DISKCONTEXT failure-dump $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            df -hT || true
+            df -hT || df -h || true
             df -i || true
-            grep -E 'MemTotal|MemAvailable' /proc/meminfo || true
+            grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo || true
           } 2>/dev/null | tee -a "$DISK_SAMPLES" || true
       # Collector for the #10035 telemetry, kept as the LAST step: failure()
       # is evaluated when the step is reached and never revisited, so at its

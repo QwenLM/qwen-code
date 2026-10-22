@@ -13,6 +13,12 @@ export type ManagedAgentSessionPhase =
   | 'failed'
   | 'cancelled';
 
+export function isManagedSessionRunning(
+  phase: ManagedAgentSessionPhase,
+): boolean {
+  return !['created', 'completed', 'failed', 'cancelled'].includes(phase);
+}
+
 export type ManagedAgentRuntimeState =
   | 'unknown'
   | 'starting'
@@ -32,6 +38,9 @@ export function isManagedApprovalMode(
 }
 
 export type ManagedSessionSkill = components['schemas']['SessionCreationSkill'];
+export type ManagedSessionRecovery = components['schemas']['SessionRecovery'];
+export type ManagedTurnCancelOperation =
+  components['schemas']['WebShellCommandOperation'];
 
 export interface ManagedSessionOptions {
   approvalMode: ManagedApprovalMode;
@@ -80,6 +89,16 @@ export interface ManagedModelChangeResult {
   replayed: boolean;
 }
 
+export type ManagedLifecycleKind = 'close' | 'archive' | 'delete';
+export type ManagedLifecycleAction =
+  | ManagedLifecycleKind
+  | 'unarchive'
+  | 'close_archive';
+export type ManagedLifecycleOperation =
+  components['schemas']['WebShellCommandOperation'];
+export type ManagedExportPage = components['schemas']['WebShellExportPage'];
+export type ManagedExportItem = components['schemas']['WebShellItem'];
+
 export interface ManagedAgentSessionSummary {
   sessionId: string;
   agentId?: string;
@@ -92,6 +111,9 @@ export interface ManagedAgentSessionSummary {
   modelSelection?: ManagedModelSelection;
   compactionRevision?: number;
   contextCompressionOperationId?: string;
+  lifecycleStatus?: string;
+  lastSequence?: number;
+  lifecycleOperation?: components['schemas']['WebShellLifecycleOperation'];
   activeTurnId?: string;
   title: string;
   workspaceCwd?: string;
@@ -111,6 +133,10 @@ export interface ManagedAgentSessionSummary {
     canSend: boolean;
     canCancel: boolean;
     canRename?: boolean;
+    sessionClose?: boolean;
+    sessionArchive?: boolean;
+    sessionUnarchive?: boolean;
+    sessionDelete?: boolean;
     actions?: boolean;
     tasks?: boolean;
     artifacts?: boolean;
@@ -121,8 +147,10 @@ export interface ManagedAgentSessionSummary {
     contextCompression?: boolean;
     approvalModeChange?: boolean;
     inputAttachments?: boolean;
+    durableOperations?: boolean;
   };
   failure?: { code: string; message: string };
+  recovery?: ManagedSessionRecovery;
 }
 
 export type ManagedAgentSessionEventType =
@@ -238,9 +266,45 @@ export interface ManagedAgentPendingAction {
 
 export interface ManagedAgentProvider {
   readonly kind: 'daemon' | 'java';
+  readonly lifecycle?: {
+    submit(
+      kind: ManagedLifecycleKind,
+      sessionId: string,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedLifecycleOperation>;
+    unarchive(
+      sessionId: string,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedAgentSessionSummary>;
+    query(
+      sessionId: string,
+      operationId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedLifecycleOperation>;
+  };
+  exportSnapshot?(
+    sessionId: string,
+    options: ManagedAgentRequestOptions & { cursor?: string },
+  ): Promise<ManagedExportPage>;
   readonly storageKey: string;
   readonly canCancel: boolean;
   readonly acceptsWorkspaceCwd: boolean;
+  readonly recovery?: {
+    query(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionRecovery>;
+    recheck(
+      sessionId: string,
+      turnId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionRecovery>;
+  };
+  queryCancelOperation?(
+    sessionId: string,
+    operationId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedTurnCancelOperation>;
   readonly skills?: {
     list(
       sessionId: string,
@@ -430,6 +494,7 @@ export interface ManagedAgentProvider {
   listSessions(
     options: ManagedAgentRequestOptions & {
       workspaceCwd?: string;
+      archiveState?: 'unarchived' | 'archived' | 'all';
       limit?: number;
       cursor?: string;
     },
@@ -469,8 +534,14 @@ export interface ManagedAgentProvider {
   cancel(
     sessionId: string,
     turnId: string,
-    options: ManagedAgentCommandOptions,
-  ): Promise<void>;
+    options: ManagedAgentCommandOptions & {
+      admissionProfile?: 'harness_confirmed' | 'java_durable';
+    },
+  ): Promise<void | {
+    sessionId: string;
+    turnId: string;
+    operationId?: string;
+  }>;
   subscribeEvents(
     sessionId: string,
     options: ManagedAgentRequestOptions & {
