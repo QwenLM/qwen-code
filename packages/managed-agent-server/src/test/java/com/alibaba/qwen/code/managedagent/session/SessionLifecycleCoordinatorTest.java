@@ -41,6 +41,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
@@ -220,6 +221,31 @@ class SessionLifecycleCoordinatorTest {
                 coordinator.stopRenewals();
             }
         }
+    }
+
+    @Test
+    void dispatchAfterShutdownDoesNotScheduleARenewal() {
+        var store = Mockito.mock(com.alibaba.qwen.code.managedagent.session.AgentStateStore.class);
+        var operation = new StoreModels.OperationRecord("tenant", "session", "operation", OperationKind.CLOSE,
+                "digest", "DELIVERING", "ACCEPTED", "DRAINING", "ACTIVE", "receipt", "server", 1, 1, null, 2);
+        Mockito.when(store.claimOperation(Mockito.eq("tenant"), Mockito.eq("session"), Mockito.eq("operation"),
+                Mockito.anyString(), Mockito.any()))
+                .thenReturn(java.util.Optional.of(operation));
+        var warmer = Mockito.mock(RuntimeWarmer.class);
+        var executor = Mockito.mock(java.util.concurrent.ExecutorService.class);
+        Mockito.doAnswer(call -> {
+            call.<Runnable>getArgument(0).run();
+            return null;
+        }).when(executor).execute(Mockito.any(Runnable.class));
+        var coordinator = new SessionLifecycleCoordinator(store, Mockito.mock(ManagedSessionStore.class),
+                Mockito.mock(HarnessConnector.class), warmer, Mockito.mock(ChildResultRelayStore.class),
+                new ObjectMapper(), admissions(store, warmer), noTurnCancels(), brokerProvider(null), executor,
+                Clock.systemUTC(), new ManagedAgentProperties());
+        coordinator.stopRenewals();
+        assertThatCode(() -> coordinator.dispatch("tenant", "session", "operation"))
+                .doesNotThrowAnyException();
+        Mockito.verify(store).claimOperation(Mockito.eq("tenant"), Mockito.eq("session"),
+                Mockito.eq("operation"), Mockito.anyString(), Mockito.any());
     }
 
     private static final class World {
