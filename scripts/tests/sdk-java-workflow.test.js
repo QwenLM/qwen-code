@@ -191,7 +191,10 @@ describe('SDK Java self-hosted workflow guards', () => {
               ${command}
               if flock --nonblock "$LOCK_FILE" true; then exit 91; fi
               exec 9>&-
-              flock --nonblock "$LOCK_FILE" true
+              # The stub's child can still be forked-but-not-exec'd here; its
+              # CLOEXEC save fd holds the flock for microseconds, unlike a real
+              # inherited fd 9, which holds it for the child's lifetime.
+              flock --wait 1 "$LOCK_FILE" true
               kill -0 "$child_pid"
             `,
             ],
