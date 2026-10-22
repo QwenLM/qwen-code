@@ -429,7 +429,7 @@ describe('model configuration manifest', () => {
     ['moonshot', 'kimi-k2.7-code-highspeed', ['default'], 'default'],
     ['moonshot', 'kimi-k2.6', ['none', 'default'], 'default'],
     ['deepseek', 'deepseek-v4-pro', ['none', 'low', 'high', 'max'], 'high'],
-    ['deepseek', 'deepseek-v4-flash', ['none', 'low', 'high', 'max'], 'high'],
+    ['deepseek', 'deepseek-flash', ['none', 'low', 'high', 'max'], 'high'],
     [
       'alibabaStandard',
       'qwen3.8-max',

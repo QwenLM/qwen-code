@@ -302,6 +302,7 @@ import {
   currentPidNamespace,
   daemonDiscoveryUrl,
   removeDaemonDiscovery,
+  removeDaemonToken,
   writeDaemonDiscovery,
 } from './daemon-discovery.js';
 
@@ -4709,6 +4710,7 @@ async function runQwenServeImpl(
     discoveryRecordPath = undefined;
     try {
       removeDaemonDiscovery(actualPort, { expectedPid: process.pid });
+      removeDaemonToken(actualPort, process.pid);
     } catch {
       // Best-effort: a stale record is pruned by `qwen daemon status`.
     }

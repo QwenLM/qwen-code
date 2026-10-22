@@ -160,6 +160,26 @@ export function createJavaManagedAgentProvider(
     },
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    recovery: {
+      query: (sessionId, request) =>
+        client.getRecovery(sessionId, request.signal),
+      recheck: (sessionId, turnId, request) =>
+        client.recheckRecovery(sessionId, turnId, request.signal),
+    },
+    async queryCancelOperation(sessionId, operationId, request) {
+      const operation = await client.queryOperation(
+        { sessionId, operationId },
+        request.signal,
+      );
+      if (
+        operation.type !== 'cancel' ||
+        operation.sessionId !== sessionId ||
+        operation.operationId !== operationId
+      ) {
+        throw new Error('Managed Turn cancellation identity mismatch');
+      }
+      return operation;
+    },
     async renameSession(sessionId, displayName, command) {
       const result = await client.renameSession(
         {
@@ -386,6 +406,36 @@ export function createJavaManagedAgentProvider(
               if (result.operationId !== operationId)
                 throw new Error('Cwd operation identity mismatch');
               return result;
+            },
+          },
+          contextCompression: {
+            async submit(sessionId, request, command) {
+              return requireContextCompressionOperation(
+                await client.compressContext(
+                  {
+                    ...request,
+                    sessionId,
+                    idempotencyKey: command.idempotencyKey,
+                    requestId: managedRequestId(),
+                  },
+                  command.signal,
+                ),
+                sessionId,
+              );
+            },
+            async query(sessionId, operationId, request) {
+              const operation = requireContextCompressionOperation(
+                await client.queryOperation(
+                  { sessionId, operationId },
+                  request.signal,
+                ),
+                sessionId,
+              );
+              if (operation.operationId !== operationId)
+                throw new Error(
+                  'Context compression operation identity mismatch',
+                );
+              return operation;
             },
           },
         }
@@ -643,15 +693,22 @@ export function createJavaManagedAgentProvider(
       return { sessionId: result.sessionId, turnId: result.turnId };
     },
     async cancel(sessionId, turnId, command) {
-      await client.cancelTurn(
+      const result = await client.cancelTurn(
         {
           requestId: managedRequestId(),
           idempotencyKey: command.idempotencyKey,
           sessionId,
           turnId,
+          ...(command.admissionProfile
+            ? { admissionProfile: command.admissionProfile }
+            : {}),
         },
         command.signal,
       );
+      if (result.sessionId !== sessionId || result.turnId !== turnId) {
+        throw new Error('Managed Turn cancellation identity mismatch');
+      }
+      return { sessionId, turnId, operationId: result.operationId };
     },
     async *subscribeEvents(sessionId, request) {
       for await (const event of client.streamEvents(
@@ -720,7 +777,12 @@ function toSessionSummary(
       : {}),
     ...(observation ? { modelContext: observation } : {}),
     ...(selectedModel ? { modelSelection: selectedModel } : {}),
+    compactionRevision: session.compactionRevision ?? 0,
+    ...(session.contextCompressionOperationId
+      ? { contextCompressionOperationId: session.contextCompressionOperationId }
+      : {}),
     activeTurnId: session.activeTurn?.turnId,
+    ...(session.recovery ? { recovery: session.recovery } : {}),
     title: session.title || session.sessionId,
     workspace: session.workspace,
     createdAt: toTimestamp(session.createdAt),
@@ -738,16 +800,28 @@ function toSessionSummary(
       canSend:
         sessionActive &&
         !active &&
+        !session.contextCompressionOperationId &&
+        session.recovery?.nextTurnAllowed !== false &&
         (!session.workspace ||
           (workspaceTurns && session.capabilities?.foregroundShell !== false)),
       // The creator may cancel a running bound Turn after the Workspace stops
       // admitting new work, so cancel is not tied to workspaceTurns; the
       // server refuses anyone else.
-      canCancel: sessionActive && active && turnStatus !== 'cancelling',
+      canCancel:
+        sessionActive &&
+        active &&
+        turnStatus !== 'cancelling' &&
+        session.recovery?.actions.cancel !== false,
+      ...(session.capabilities?.durableOperations === true
+        ? { durableOperations: true }
+        : {}),
       ...(workspaceTurns ? { workspaceTurns: true } : {}),
       ...(session.capabilities?.cwdChange === true ? { cwdChange: true } : {}),
       ...(session.capabilities?.modelChange === true
         ? { modelChange: true }
+        : {}),
+      ...(session.capabilities?.contextCompression === true
+        ? { contextCompression: true }
         : {}),
       ...(session.capabilities?.approvalModeChange === true
         ? { approvalModeChange: true }
@@ -829,6 +903,24 @@ function requireCwdOperation(
   ) {
     throw new Error('Cwd operation identity mismatch');
   }
+  return operation;
+}
+
+function requireContextCompressionOperation(
+  operation: Awaited<ReturnType<JavaManagedAgentClient['queryOperation']>>,
+  sessionId: string,
+) {
+  if (
+    operation.type !== 'context_compression' ||
+    operation.sessionId !== sessionId ||
+    !operation.operationId ||
+    !Number.isSafeInteger(operation.expectedCompactionRevision) ||
+    operation.expectedCompactionRevision < 0 ||
+    !['pending', 'running', 'recovery_blocked', 'completed', 'failed'].includes(
+      operation.status,
+    )
+  )
+    throw new Error('Context compression operation identity mismatch');
   return operation;
 }
 
