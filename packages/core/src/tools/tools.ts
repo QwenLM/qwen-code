@@ -848,6 +848,7 @@ export interface McpAppToolResult {
 /** A completed MCP tool call with an interactive MCP Apps resource. */
 export interface McpAppResultDisplay {
   type: 'mcp_app';
+  requiredFeature?: 'generated-ui';
   serverName: string;
   resourceUri: string;
   html: string;

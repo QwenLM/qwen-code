@@ -302,6 +302,7 @@ import {
   currentPidNamespace,
   daemonDiscoveryUrl,
   removeDaemonDiscovery,
+  removeDaemonToken,
   writeDaemonDiscovery,
 } from './daemon-discovery.js';
 
@@ -3849,6 +3850,19 @@ async function runQwenServeImpl(
           `origins instead of '*'.`,
       );
     }
+    if (
+      parsed.loopbackPortWildcards &&
+      parsed.loopbackPortWildcards.length > 0 &&
+      !token
+    ) {
+      throw new Error(
+        `Refusing to start with a loopback port wildcard in --allow-origin ` +
+          `but no bearer token configured. A port wildcard admits any page ` +
+          `served from that loopback host, on any port; without a token, any ` +
+          `local page can drive the daemon. Set ${QWEN_SERVER_TOKEN_ENV} or ` +
+          `pass --token, or list specific origins instead.`,
+      );
+    }
     const nonLoopbackHttpOrigin = findNonLoopbackHttpOrigin(parsed);
     if (nonLoopbackHttpOrigin && !token) {
       throw new Error(
@@ -3871,7 +3885,12 @@ async function runQwenServeImpl(
             ? ' (WARNING: these browser origins receive full API authority ' +
               'without a bearer token in trusted loopback mode and can ' +
               'execute code as the daemon user)'
-            : ''),
+            : parsed.loopbackPortWildcards &&
+                parsed.loopbackPortWildcards.length > 0
+              ? ' (WARNING: a loopback port wildcard admits any page served ' +
+                'from that loopback host, on any port; the bearer token still ' +
+                'gates API routes)'
+              : ''),
     );
   }
   if (opts.allowPrivateAuthBaseUrl) {
@@ -4691,6 +4710,7 @@ async function runQwenServeImpl(
     discoveryRecordPath = undefined;
     try {
       removeDaemonDiscovery(actualPort, { expectedPid: process.pid });
+      removeDaemonToken(actualPort, process.pid);
     } catch {
       // Best-effort: a stale record is pruned by `qwen daemon status`.
     }
@@ -10750,10 +10770,15 @@ async function runQwenServeImpl(
           hostname: opts.hostname,
           url: daemonDiscoveryUrl(url),
           workspaces: workspaceInputs.map((workspace) => workspace.cwd),
+          startupWorkspaces: workspaceInputs
+            .filter((workspace) => !workspace.removable)
+            .map((workspace) => workspace.cwd),
           primaryWorkspace: boundWorkspace,
           startedAt: new Date().toISOString(),
           auth: token ? 'bearer' : 'none',
           ...(generatedToken ? { tokenGenerated: true } : {}),
+          web: opts.serveWebShell !== false,
+          requireAuth: opts.requireAuth === true,
           ...(discoveryLogPath ? { logPath: discoveryLogPath } : {}),
           pidNamespace: currentPidNamespace(),
         });

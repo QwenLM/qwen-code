@@ -219,6 +219,14 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new IllegalArgumentException("request must not be null");
         }
         ensureOpen();
+        if (request.getRecoveryCleanupPromptId() != null
+                && !capabilities.getFeatures().contains("recovery-cleanup/1")) {
+            throw new DaemonProtocolException("Hosted cleanup-only load capability is required");
+        }
+        if (request.getCancellationPromptId() != null
+                && !capabilities.getFeatures().contains("targeted-cancel/1")) {
+            throw new DaemonProtocolException("Hosted targeted cancellation capability is required");
+        }
         String path = sessionPath(request.getHarnessSessionId()) + "/load";
         // Only a takeover load may settle parked executions and need the
         // longer ceiling; a plain attach stays on the steady-state one
@@ -680,6 +688,44 @@ public final class HostedHarnessClient implements AutoCloseable {
                 operation, "continuation");
     }
 
+    public Map<String, Object> compressContext(HarnessSessionRef session, Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        if (!capabilities().getFeatures().contains("context-compression/1")) {
+            throw new DaemonProtocolException("Hosted context compression capability is required");
+        }
+        String operation = "POST /session/:id/context/compress";
+        HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/context/compress",
+                body, ref.getHarnessSessionId(), ref.getHarnessClientId(), operation);
+        DaemonClient.requireStatus(response, 202, operation);
+        try {
+            return contextCompressionResponse(response, body.get("operationId"));
+        } catch (DaemonProtocolException error) {
+            throw new MutationOutcomeUnknownException(operation, error);
+        }
+    }
+
+    public Map<String, Object> readContextCompression(HarnessSessionRef session, String operationId) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String id = requireBoundedRecoveryText(operationId, "operationId");
+        String operation = "GET /session/:id/context/compressions/:operationId";
+        HttpSupport.Response response = sendRead(sessionPath(ref.getHarnessSessionId())
+                + "/context/compressions/" + java.net.URLEncoder.encode(id, StandardCharsets.UTF_8), ref, operation);
+        DaemonClient.requireStatus(response, 200, operation);
+        return contextCompressionResponse(response, id);
+    }
+
+    private static Map<String, Object> contextCompressionResponse(HttpSupport.Response response, Object operationId) {
+        Map<String, Object> json = JsonSupport.parseObject(response.getBody(), "context compression response");
+        if (!JsonSupport.requiredString(json, "operationId", "context compression").equals(operationId)) {
+            throw new DaemonProtocolException("Hosted Harness returned a different compression operation");
+        }
+        String status = JsonSupport.requiredString(json, "status", "context compression");
+        if (!List.of("pending", "running", "recovery_blocked", "completed", "failed").contains(status)) {
+            throw new DaemonProtocolException("Hosted Harness returned an invalid compression status");
+        }
+        return json;
+    }
+
     /**
      * H6b/H6c: one automation operation onto the Session's journal (the
      * control plane's verbs). The Hosted side commits through its funnel and
@@ -984,6 +1030,20 @@ public final class HostedHarnessClient implements AutoCloseable {
                 "POST /session/:id/cancel");
     }
 
+    public void cancelTurn(HarnessSessionRef session, String promptId) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String targetPromptId = requireUuid(promptId, "promptId");
+        if (!capabilities().getFeatures().contains("targeted-cancel/1")) {
+            throw new DaemonException("Hosted targeted cancellation is unavailable");
+        }
+        String operation = "POST /session/:id/cancel";
+        HttpSupport.Response response = sendMutation(
+                sessionPath(ref.getHarnessSessionId()) + "/cancel",
+                Map.of("promptId", targetPromptId), ref.getHarnessSessionId(),
+                ref.getHarnessClientId(), operation);
+        requireMutationStatus(response, 204, operation);
+    }
+
     public HarnessHeartbeat heartbeat(HarnessSessionRef session) {
         HarnessSessionRef ref = requireSessionRef(session);
         AttachmentState state = attachments.get(ref.getHarnessSessionId());
@@ -1009,7 +1069,13 @@ public final class HostedHarnessClient implements AutoCloseable {
     }
 
     public HarnessSessionStatus getStatus(HarnessSessionRef session) {
+        return getStatus(session, null);
+    }
+
+    /** Inspects one original input without submitting, loading or cancelling work. */
+    public HarnessSessionStatus getStatus(HarnessSessionRef session, String promptId) {
         HarnessSessionRef ref = requireSessionRef(session);
+        String targetPromptId = promptId == null ? null : requireUuid(promptId, "promptId");
         // Snapshot before the remote read: the response describes the point
         // in time when the server evaluated it, so it may only clear the
         // registration that was present when the request was sent. A marker
@@ -1027,7 +1093,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         boolean observedSettled = observed != null && observed.isSettled();
         String operation = "GET /session/:id/status";
         HttpSupport.Response response = sendRead(
-                sessionPath(ref.getHarnessSessionId()) + "/status", ref,
+                sessionPath(ref.getHarnessSessionId()) + "/status"
+                        + (targetPromptId == null ? "" : "?promptId=" + encodeQuery(targetPromptId)), ref,
                 operation);
         DaemonClient.requireStatus(response, 200, operation);
         Map<String, Object> json = JsonSupport.parseObject(response.getBody(),
@@ -1041,7 +1108,12 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         boolean active = JsonSupport.requiredBoolean(json,
                 "hasActivePrompt", "status");
-        if (!active && observedSettled) {
+        HarnessSessionStatus status = new HarnessSessionStatus(responseSessionId, active, json);
+        if (targetPromptId != null && status.getRecovery() != null
+                && !targetPromptId.equals(status.getRecovery().getPromptId())) {
+            throw new DaemonProtocolException("Hosted recovery promptId does not match");
+        }
+        if (targetPromptId == null && !active && observedSettled) {
             // Clear only the exact record the snapshot read, and only while
             // no send attempt has opened or closed since: the answer
             // describes the evaluation instant, so an attempt that
@@ -1052,7 +1124,24 @@ public final class HostedHarnessClient implements AutoCloseable {
                             && current.sendClock() == observedClock
                             ? null : current);
         }
-        return new HarnessSessionStatus(responseSessionId, active, json);
+        return status;
+    }
+
+    /** Retries only the original input's already-terminal cleanup. */
+    public void recheckRecoveryCleanup(HarnessSessionRef session, String promptId) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String targetPromptId = requireUuid(promptId, "promptId");
+        String operation = "POST /session/:id/recovery/recheck";
+        HttpSupport.Response response = sendMutation(
+                sessionPath(ref.getHarnessSessionId()) + "/recovery/recheck",
+                Map.of("promptId", targetPromptId), ref.getHarnessSessionId(),
+                ref.getHarnessClientId(), operation);
+        requireMutationStatus(response, 202, operation);
+        Map<String, Object> body = JsonSupport.parseObject(response.getBody(), "recovery recheck");
+        if (!JsonSupport.requiredBoolean(body, "accepted", "recovery recheck")
+                || !targetPromptId.equals(JsonSupport.requiredString(body, "promptId", "recovery recheck"))) {
+            throw new DaemonProtocolException("Hosted cleanup recheck identity does not match");
+        }
     }
 
     public HarnessTranscriptPage getTranscript(GetHarnessTranscript request) {
@@ -1814,7 +1903,9 @@ public final class HostedHarnessClient implements AutoCloseable {
                 runtimeRecovery,
                 lastEventId,
                 eventEpoch,
-                JsonSupport.optionalString(json, "approvalMode"));
+                JsonSupport.optionalString(json, "approvalMode"),
+                json.containsKey("recoveryCleanupOnly")
+                        && JsonSupport.requiredBoolean(json, "recoveryCleanupOnly", context));
     }
 
     private HarnessRuntimeRecovery parseRuntimeRecovery(

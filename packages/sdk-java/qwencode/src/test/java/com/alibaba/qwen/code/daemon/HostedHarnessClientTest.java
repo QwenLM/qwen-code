@@ -94,6 +94,180 @@ class HostedHarnessClientTest {
         }
     }
 
+    @Test
+    void inspectsOriginalRecoveryEvidenceAndTargetsCleanupWithoutSubmitting() {
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID + "/status", exchange -> {
+            assertEquals("GET", exchange.getRequestMethod());
+            assertEquals("promptId=" + PROMPT_ID, exchange.getRequestURI().getRawQuery());
+            sendSessionJson(exchange, 200, JsonSupport.encode(Map.of(
+                    "sessionId", SESSION_ID, "hasActivePrompt", false,
+                    "recovery", Map.of("state", "cleanup_pending", "reasonCode", "runtime_cleanup_pending",
+                            "promptId", PROMPT_ID, "inputSettled", true,
+                            "continuationReady", true, "nextTurnAllowed", false))));
+        });
+        AtomicInteger rechecks = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/recovery/recheck", exchange -> {
+            assertEquals("POST", exchange.getRequestMethod());
+            assertEquals(PROMPT_ID, JsonSupport.parseObject(new String(
+                    exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8), "request").get("promptId"));
+            rechecks.incrementAndGet();
+            sendSessionJson(exchange, 202, JsonSupport.encode(Map.of("accepted", true, "promptId", PROMPT_ID)));
+        });
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            HarnessRecoveryStatus recovery = client.getStatus(session, PROMPT_ID).getRecovery();
+            assertNotNull(recovery);
+            assertEquals("cleanup_pending", recovery.getState());
+            assertEquals(PROMPT_ID, recovery.getPromptId());
+            assertTrue(recovery.isInputSettled());
+            assertTrue(recovery.isContinuationReady());
+            assertFalse(recovery.isNextTurnAllowed());
+            client.recheckRecoveryCleanup(session, PROMPT_ID);
+        }
+        assertEquals(1, rechecks.get());
+    }
+
+    @Test
+    void oldHarnessStatusDoesNotProveOriginalRecoveryReady() {
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID + "/status", exchange ->
+                sendSessionJson(exchange, 200, JsonSupport.encode(Map.of(
+                        "sessionId", SESSION_ID, "hasActivePrompt", false))));
+        try (HostedHarnessClient client = newClient()) {
+            assertNull(client.getStatus(createSession(client), PROMPT_ID).getRecovery());
+        }
+    }
+
+    @Test
+    void refusesRecoveryEvidenceForAnotherInput() {
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID + "/status", exchange ->
+                sendSessionJson(exchange, 200, JsonSupport.encode(Map.of(
+                        "sessionId", SESSION_ID, "hasActivePrompt", false,
+                        "recovery", Map.of("state", "ready", "promptId", SECOND_PROMPT_ID,
+                                "inputSettled", true, "continuationReady", true, "nextTurnAllowed", true)))));
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(DaemonProtocolException.class, () -> client.getStatus(session, PROMPT_ID));
+        }
+    }
+
+    @Test
+    void refusesPartialOrContradictoryRecoveryEvidence() {
+        assertThrows(DaemonProtocolException.class, () -> new HarnessRecoveryStatus(Map.of(
+                "state", "ready", "promptId", PROMPT_ID, "inputSettled", true)));
+        assertThrows(DaemonProtocolException.class, () -> new HarnessRecoveryStatus(Map.of(
+                "state", "ready", "promptId", PROMPT_ID, "inputSettled", false,
+                "continuationReady", false, "nextTurnAllowed", true)));
+        assertEquals("monitor:wake:1", new HarnessRecoveryStatus(Map.of(
+                "state", "awaiting_evidence", "promptId", "monitor:wake:1", "inputSettled", false,
+                "continuationReady", false, "nextTurnAllowed", false)).getPromptId());
+    }
+
+    @Test
+    void refusesCleanupOnlyLoadWithoutNegotiatedCapability() {
+        AtomicInteger loads = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/load", exchange -> {
+            loads.incrementAndGet();
+            sendSessionJson(exchange, 200, sessionJson());
+        });
+        try (HostedHarnessClient client = newClient()) {
+            assertThrows(DaemonProtocolException.class, () -> client.loadSession(
+                    new LoadHarnessSession(SESSION_ID).forRecoveryCleanup(PROMPT_ID)));
+        }
+        assertEquals(0, loads.get());
+    }
+
+    @Test
+    void refusesTargetedCancellationLoadBeforeSendingToAnOlderHarness() {
+        AtomicInteger loads = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/load", exchange -> {
+            loads.incrementAndGet();
+            sendSessionJson(exchange, 200, sessionJson());
+        });
+        try (HostedHarnessClient client = newClient()) {
+            assertThrows(DaemonProtocolException.class, () -> client.loadSession(
+                    new LoadHarnessSession(SESSION_ID, null, true, null, false, true)
+                            .withCancellationPromptId(PROMPT_ID)));
+        }
+        assertEquals(0, loads.get());
+    }
+
+    @Test
+    void preservesOriginalCancellationTargetAcrossEveryLoadCopy() {
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                "\"hostedHarness\":{\"features\":[\"targeted-cancel/1\"],"));
+        AtomicReference<Map<String, Object>> sent = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/load", exchange -> {
+            sent.set(JsonSupport.parseObject(readBody(exchange), "load"));
+            sendSessionJson(exchange, 200, sessionJson());
+        });
+        LoadHarnessSession request = new LoadHarnessSession(SESSION_ID, null, true, null, false, true)
+                .withCancellationPromptId(PROMPT_ID)
+                .withAgentDefinition(Map.of("agentId", "test"))
+                .withSessionSkillsRef(Map.of("version", 1))
+                .withMcpServers(java.util.List.of(Map.of("serverId", "mcp")))
+                .withHookCatalog(Map.of("version", 1))
+                .withForegroundOnly(false)
+                .withChildWorkspaces(true, true)
+                .withStoppedMessages();
+        assertThrows(IllegalArgumentException.class, () -> request.forLifecycle("close", 1));
+        assertThrows(IllegalArgumentException.class, () -> request.forRecoveryCleanup(PROMPT_ID));
+        for (LoadHarnessSession invalid : java.util.List.of(new LoadHarnessSession(SESSION_ID),
+                new LoadHarnessSession(SESSION_ID, null, true),
+                new LoadHarnessSession(SESSION_ID, null, true, null, true, true))) {
+            assertThrows(IllegalArgumentException.class, () -> invalid.withCancellationPromptId(PROMPT_ID));
+        }
+        assertThrows(IllegalArgumentException.class, () ->
+                new LoadHarnessSession(SESSION_ID, null, true, null, false, true)
+                        .withCancellationPromptId("not-a-prompt"));
+        try (HostedHarnessClient client = newClient()) {
+            client.loadSession(request);
+        }
+        assertEquals(PROMPT_ID, sent.get().get("cancellationPromptId"));
+        assertEquals(true, sent.get().get("passiveManagedRuntimeRecovery"));
+        assertEquals(true, sent.get().get("cancellationTakeover"));
+        assertEquals(true, sent.get().get("childWorkspaces"));
+        assertEquals(true, sent.get().get("childSnapshots"));
+        assertEquals(true, sent.get().get("stopMessages"));
+        assertTrue(sent.get().containsKey("agentDefinition"));
+        assertTrue(sent.get().containsKey("sessionSkillsRef"));
+        assertTrue(sent.get().containsKey("mcpServers"));
+        assertTrue(sent.get().containsKey("hookCatalog"));
+        assertFalse(sent.get().containsKey("driveRuntimeRecovery"));
+        assertFalse(sent.get().containsKey("lifecycleAuthority"));
+    }
+
+    @Test
+    void preservesCleanupOnlyTargetAndRecognizesTheRestrictedAttachment() {
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                "\"hostedHarness\":{\"features\":[\"recovery-cleanup/1\"],"));
+        AtomicReference<Map<String, Object>> sent = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/load", exchange -> {
+            sent.set(JsonSupport.parseObject(readBody(exchange), "load"));
+            Map<String, Object> response = new LinkedHashMap<>(JsonSupport.parseObject(sessionJson(), "session"));
+            response.put("recoveryCleanupOnly", true);
+            sendSessionJson(exchange, 200, JsonSupport.encode(response));
+        });
+        LoadHarnessSession request = new LoadHarnessSession(SESSION_ID)
+                .forRecoveryCleanup(PROMPT_ID)
+                .withChildWorkspaces(true, true)
+                .withForegroundOnly(false)
+                .withStoppedMessages();
+        assertThrows(IllegalArgumentException.class, () -> request.forLifecycle("close", 1));
+        assertThrows(IllegalArgumentException.class, () -> new LoadHarnessSession(SESSION_ID, null, true)
+                .forRecoveryCleanup(PROMPT_ID));
+        try (HostedHarnessClient client = newClient()) {
+            assertTrue(client.loadSession(request).isRecoveryCleanupOnly());
+        }
+        assertEquals(PROMPT_ID, sent.get().get("recoveryCleanupPromptId"));
+        assertFalse(sent.get().containsKey("passiveManagedRuntimeRecovery"));
+        assertFalse(sent.get().containsKey("driveRuntimeRecovery"));
+        assertFalse(sent.get().containsKey("cancellationTakeover"));
+        assertFalse(sent.get().containsKey("lifecycleAuthority"));
+    }
+
     @ParameterizedTest
     @MethodSource("lifecycleDetachResponses")
     void lifecycleDetachStopsHeartbeatOnlyAfterConfirmedAbsence(boolean byId, int status, boolean sameBoot) throws Exception {
@@ -882,6 +1056,70 @@ class HostedHarnessClientTest {
             callers.shutdownNow();
             client.close();
         }
+    }
+
+    @Test
+    void cancelsOnlyTheNegotiatedOriginalPrompt() {
+        createSessionRoute();
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                "\"hostedHarness\":{\"features\":[\"targeted-cancel/1\"],"));
+        AtomicReference<Map<String, Object>> body = new AtomicReference<>();
+        AtomicInteger requests = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/cancel", exchange -> {
+            assertEquals("POST", exchange.getRequestMethod());
+            assertEquals(CLIENT_ID, exchange.getRequestHeaders().getFirst(HostedHarnessClient.CLIENT_ID_HEADER));
+            body.set(JsonSupport.parseObject(readBody(exchange), "cancel"));
+            requests.incrementAndGet();
+            sendSessionNoContent(exchange);
+        });
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            client.cancelTurn(session, PROMPT_ID);
+            assertThrows(IllegalArgumentException.class, () -> client.cancelTurn(session, "unknown"));
+        }
+        assertEquals(Map.of("promptId", PROMPT_ID), body.get());
+        assertEquals(1, requests.get());
+    }
+
+    @Test
+    void refusesTargetedCancelBeforeSendingToAnOlderHarness() {
+        createSessionRoute();
+        AtomicReference<Map<String, Object>> body = new AtomicReference<>();
+        AtomicInteger requests = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/cancel", exchange -> {
+            body.set(JsonSupport.parseObject(readBody(exchange), "cancel"));
+            requests.incrementAndGet();
+            sendSessionNoContent(exchange);
+        });
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            DaemonException unavailable = assertThrows(DaemonException.class,
+                    () -> client.cancelTurn(session, PROMPT_ID));
+            assertTrue(unavailable.getMessage().contains("targeted cancellation is unavailable"));
+            assertEquals(0, requests.get());
+            client.cancelTurn(session);
+        }
+        assertEquals(Map.of(), body.get());
+        assertEquals(1, requests.get());
+    }
+
+    @Test
+    void doesNotRetryATargetedCancelAsALegacyCancel() {
+        createSessionRoute();
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                "\"hostedHarness\":{\"features\":[\"targeted-cancel/1\"],"));
+        AtomicInteger requests = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/cancel", exchange -> {
+            assertEquals(Map.of("promptId", PROMPT_ID), JsonSupport.parseObject(readBody(exchange), "cancel"));
+            requests.incrementAndGet();
+            sendSessionJson(exchange, 409, "{\"error\":\"hosted_cancel_identity_mismatch\","
+                    + "\"code\":\"hosted_cancel_identity_mismatch\"}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(DaemonHttpException.class, () -> client.cancelTurn(session, PROMPT_ID));
+        }
+        assertEquals(1, requests.get());
     }
 
     @Test
@@ -9094,6 +9332,58 @@ class HostedHarnessClientTest {
                 + "\"protocolVersions\":{\"current\":1,"
                 + "\"supported\":[1]},\"bootId\":\"" + bootId
                 + "\",\"capabilityDigest\":\"" + digest + "\"}}";
+    }
+
+    @Test
+    void contextCompressionUsesItsOwnOperationRoutesWithoutPromptAdmission() {
+        server.createContext("/session", exchange -> sendSessionJson(exchange, 200, sessionJson()));
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                "\"hostedHarness\":{\"features\":[\"context-compression/1\"],"));
+        AtomicReference<String> sent = new AtomicReference<>();
+        AtomicInteger prompts = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/prompt", exchange -> {
+            prompts.incrementAndGet();
+            sendSessionJson(exchange, 500, "{}");
+        });
+        server.createContext("/session/" + SESSION_ID + "/context/compress", exchange -> {
+            sent.set(readBody(exchange));
+            sendSessionJson(exchange, 202, "{\"operationId\":\"op_context\",\"status\":\"running\"}");
+        });
+        server.createContext("/session/" + SESSION_ID + "/context/compressions/op_context", exchange ->
+                sendSessionJson(exchange, 200,
+                        "{\"operationId\":\"op_context\",\"status\":\"completed\",\"outcome\":\"compressed\",\"compactionRevision\":42}"));
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertEquals("running", client.compressContext(session,
+                    Map.of("operationId", "op_context", "expectedCompactionRevision", 0)).get("status"));
+            assertTrue(sent.get().contains("\"expectedCompactionRevision\":0"));
+            assertEquals("compressed", client.readContextCompression(session, "op_context").get("outcome"));
+            assertEquals(0, prompts.get());
+        }
+    }
+
+    @Test
+    void contextCompressionRejectsOldHarnessesBeforeSending() {
+        server.createContext("/session", exchange -> sendSessionJson(exchange, 200, sessionJson()));
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(DaemonProtocolException.class, () -> client.compressContext(session,
+                    Map.of("operationId", "op_context", "expectedCompactionRevision", 0)));
+        }
+    }
+
+    @Test
+    void contextCompressionTreatsAnInvalidSuccessReplyAsUnknownAcceptance() {
+        server.createContext("/session", exchange -> sendSessionJson(exchange, 200, sessionJson()));
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                "\"hostedHarness\":{\"features\":[\"context-compression/1\"],"));
+        server.createContext("/session/" + SESSION_ID + "/context/compress", exchange ->
+                sendSessionJson(exchange, 202, "{\"operationId\":\"other\",\"status\":\"completed\"}"));
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(MutationOutcomeUnknownException.class, () -> client.compressContext(session,
+                    Map.of("operationId", "op_context", "expectedCompactionRevision", 0)));
+        }
     }
 
     @Test

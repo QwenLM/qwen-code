@@ -10,6 +10,174 @@ function jsonResponse(value: unknown): Response {
 }
 
 describe('createJavaManagedAgentProvider', () => {
+  it('submits and reads a compression operation through the product routes', async () => {
+    const operation = {
+      operationId: 'compression-1',
+      sessionId: 's1',
+      type: 'context_compression',
+      status: 'running',
+      expectedCompactionRevision: 0,
+      replayed: false,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse(operation));
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: fetchImpl,
+    });
+    const signal = new AbortController().signal;
+    await expect(
+      provider.contextCompression!.submit(
+        's1',
+        { expectedCompactionRevision: 0 },
+        {
+          clientId: 'c',
+          idempotencyKey: 'original',
+          signal,
+        },
+      ),
+    ).resolves.toEqual(operation);
+    const [url, request] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      'https://product.example/api/agent/web-shell/v1/sessions/compress',
+    );
+    expect(JSON.parse(String(request?.body))).toEqual({
+      sessionId: 's1',
+      expectedCompactionRevision: 0,
+      idempotencyKey: 'original',
+      requestId: expect.any(String),
+    });
+    await expect(
+      provider.contextCompression!.query('s1', 'compression-1', {
+        clientId: 'c',
+        signal,
+      }),
+    ).resolves.toEqual(operation);
+    expect(fetchImpl.mock.calls[1][0]).toBe(
+      'https://product.example/api/agent/web-shell/v1/operations/query',
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      sessionId: 's1',
+      operationId: 'compression-1',
+    });
+    fetchImpl.mockResolvedValueOnce(
+      jsonResponse({ ...operation, operationId: 'other' }),
+    );
+    await expect(
+      provider.contextCompression!.query('s1', 'compression-1', {
+        clientId: 'c',
+      }),
+    ).rejects.toThrow('identity mismatch');
+    fetchImpl.mockResolvedValueOnce(
+      jsonResponse({ ...operation, sessionId: 'other' }),
+    );
+    await expect(
+      provider.contextCompression!.submit(
+        's1',
+        { expectedCompactionRevision: 0 },
+        {
+          clientId: 'c',
+          idempotencyKey: 'original',
+        },
+      ),
+    ).rejects.toThrow('identity mismatch');
+  });
+
+  it('projects compression revision and remote operation without allowing a Turn to race it', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        sessionId: 's1',
+        status: 'active',
+        title: 'Session',
+        createdAt: 1,
+        updatedAt: 2,
+        workspace: { workspaceId: 'ws', cwdRelative: '.', contextRevision: 1 },
+        compactionRevision: 15,
+        contextCompressionOperationId: 'op',
+        capabilities: { workspaceTurns: true, contextCompression: true },
+      }),
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: fetchImpl,
+    });
+    const session = await provider.getSession('s1', { clientId: 'c' });
+    expect(session.compactionRevision).toBe(15);
+    expect(session.contextCompressionOperationId).toBe('op');
+    expect(session.capabilities.contextCompression).toBe(true);
+    expect(session.capabilities.canSend).toBe(false);
+    fetchImpl.mockResolvedValue(
+      jsonResponse({
+        sessionId: 's1',
+        status: 'active',
+        createdAt: 1,
+        updatedAt: 2,
+      }),
+    );
+    expect(
+      (await provider.getSession('s1', { clientId: 'c' })).compactionRevision,
+    ).toBe(0);
+    expect(
+      createJavaManagedAgentProvider({ baseUrl: 'https://product.example' })
+        .contextCompression,
+    ).toBeUndefined();
+  });
+
+  it.each([true, false, undefined])(
+    'uses the advertised rename capability %s independently of a running Turn',
+    async (rename) => {
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: vi.fn<typeof fetch>().mockResolvedValue(
+          jsonResponse({
+            sessionId: 's1',
+            title: 'Running',
+            status: 'active',
+            createdAt: 1,
+            updatedAt: 2,
+            activeTurn: { turnId: 't1', status: 'running', submittedAt: 1 },
+            capabilities: { rename },
+          }),
+        ),
+      });
+      const summary = await provider.getSession('s1', { clientId: 'client' });
+      expect(summary.capabilities.canSend).toBe(false);
+      expect(summary.capabilities.canRename === true).toBe(rename === true);
+    },
+  );
+
+  it('returns the confirmed rename and rejects a different Session or missing title', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ sessionId: 's1', title: 'Stored name', replayed: true }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ sessionId: 's2', title: 'Other' }))
+      .mockResolvedValueOnce(jsonResponse({ sessionId: 's1' }));
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    const command = { clientId: 'c', idempotencyKey: 'original' };
+    expect(
+      await provider.renameSession!('s1', 'Requested name', command),
+    ).toEqual({ displayName: 'Stored name' });
+    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual({
+      sessionId: 's1',
+      title: 'Requested name',
+      idempotencyKey: 'original',
+    });
+    await expect(
+      provider.renameSession!('s1', 'Requested name', command),
+    ).rejects.toThrow('rename response is invalid');
+    await expect(
+      provider.renameSession!('s1', 'Requested name', command),
+    ).rejects.toThrow('rename response is invalid');
+  });
+
   it('reads tool details through the authenticated WebShell route and preserves empty output', async () => {
     const details = {
       input: { command: 'true' },
@@ -1292,6 +1460,69 @@ describe('createJavaManagedAgentProvider', () => {
     expect(JSON.parse(String(init?.body)).title).toBe(
       '[31mERROR [0m the build failed',
     );
+  });
+
+  it('preserves creation Skills and the prompt-derived title for a Workspace-bound create', async () => {
+    const skills = [
+      {
+        name: 'review',
+        description: 'Review the current change.',
+        body: 'Check the current change for regressions.',
+        userInvocable: true,
+        disableModelInvocation: false,
+      },
+    ];
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () =>
+      jsonResponse({
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        status: 'accepted',
+        replayed: false,
+      }),
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+      productScope: 'tenant:actor',
+      enableWorkspaceBinding: true,
+    });
+
+    // The bound create omitted the title, so the list and header showed a
+    // Session-ID prefix while the standard shell shows a prompt-derived title.
+    await provider.workspaceBinding!.createSession!(
+      {
+        agentId: 'qwen-code',
+        workspaceId: 'ws-default',
+        cwdRelative: 'services/api',
+        text: '\u001b[31mERROR\u001b[0m the build failed',
+        skills,
+      },
+      { clientId: 'client-1', idempotencyKey: 'key-1' },
+    );
+
+    const body = JSON.parse(String(fetchImpl.mock.calls[0]![1]?.body));
+    expect(body.title).toBe('[31mERROR [0m the build failed');
+    expect(body.skills).toEqual(skills);
+    expect(body.idempotencyKey).toBe('key-1');
+    expect(body.workspace).toEqual({
+      workspaceId: 'ws-default',
+      cwdRelative: 'services/api',
+    });
+
+    // The cap must slice by code point: a code-unit cut at 77 splits an astral
+    // character, sending a title that ends in a lone high surrogate, which no
+    // store column keeps, so the server would persist the tail as '?'.
+    await provider.workspaceBinding!.createSession!(
+      {
+        agentId: 'qwen-code',
+        workspaceId: 'ws-default',
+        cwdRelative: 'services/api',
+        text: `${'a'.repeat(76)}\u{1f600}${'b'.repeat(10)}`,
+      },
+      { clientId: 'client-1', idempotencyKey: 'key-2' },
+    );
+    const capped = JSON.parse(String(fetchImpl.mock.calls[1]![1]?.body)).title;
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(capped)).toBe(false);
   });
 
   it('scopes the storageKey by environmentId when no productScope is given', () => {

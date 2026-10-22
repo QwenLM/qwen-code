@@ -157,6 +157,40 @@ describe('PluginManagerPage Skills workspace selector', () => {
     ).toBe('/work/b');
   });
 
+  it.each([false, true])(
+    'reports the displayed Skills workspace (split runtime: %s)',
+    async (split) => {
+      workspaceState.capabilities.features = split
+        ? ['workspace_skills_config_runtime']
+        : [];
+      workspaceState.capabilities.workspaces[0]!.trusted = true;
+      const onSkillsWorkspaceChange = vi.fn();
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <PluginManagerPage
+              initialTab="skills"
+              skillsWorkspaceCwd="/work/b"
+              onSkillsWorkspaceChange={onSkillsWorkspaceChange}
+              managedSkills
+              onClose={vi.fn()}
+              onUseSkill={vi.fn()}
+            />
+          </I18nProvider>,
+        );
+      });
+      const expected = split ? '/work/b' : '/work/a';
+      expect(onSkillsWorkspaceChange).toHaveBeenLastCalledWith(expected);
+      const openSkill = [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'open skill',
+      );
+      await act(async () => openSkill!.click());
+      expect(
+        container.querySelector('[data-testid="workspace-cwd"]')?.textContent,
+      ).toBe(expected);
+    },
+  );
+
   it('keeps legacy Skills management on the primary workspace', async () => {
     workspaceState.capabilities.features = [];
     await act(async () => {
