@@ -2052,7 +2052,9 @@ export const AppContainer = (props: AppContainerProps) => {
   // Ref bridges: these callbacks are defined later, but slashCommandActions
   // needs them now. The refs let the useMemo capture stable function pointers
   // whose implementations are swapped in once the real callbacks exist.
-  const openRewindSelectorRef = useRef<() => void>(() => {});
+  const openRewindSelectorRef = useRef<(origin?: 'slash-command') => void>(
+    () => {},
+  );
   const cancelOngoingRequestRef = useRef<() => void>(() => {});
 
   // /diff opens a per-turn diff dialog. Unlike rewind, no double-press or
@@ -2203,7 +2205,8 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       openStatsDialog,
       openResumeDialog,
-      openRewindSelector: () => openRewindSelectorRef.current(),
+      openRewindSelector: (origin?: 'slash-command') =>
+        openRewindSelectorRef.current(origin),
       openDiffDialog,
       handleResume,
       handleBranch,
@@ -4471,23 +4474,35 @@ export const AppContainer = (props: AppContainerProps) => {
   // --- Rewind selector callbacks ---
   // IDE guard here is NOT redundant with the keyboard handler guard (line ~2375):
   // /rewind calls openRewindSelector directly, bypassing the keyboard handler.
-  const openRewindSelector = useCallback(() => {
-    if (streamingState !== StreamingState.Idle) return;
-    if (dialogsVisibleRef.current) return;
-    if (config.getIdeMode()) {
-      historyManager.addItem(
-        {
-          type: 'info',
-          text: 'Rewind is disabled in IDE mode.',
-        },
-        Date.now(),
+  const openRewindSelector = useCallback(
+    (origin?: 'slash-command') => {
+      if (
+        streamingState !== StreamingState.Idle &&
+        !(
+          origin === 'slash-command' &&
+          streamingState === StreamingState.Responding
+        )
+      )
+        return;
+      if (dialogsVisibleRef.current) return;
+      if (config.getIdeMode()) {
+        historyManager.addItem(
+          {
+            type: 'info',
+            text: 'Rewind is disabled in IDE mode.',
+          },
+          Date.now(),
+        );
+        return;
+      }
+      const hasUserTurns = historyManager.history.some(
+        (h) => h.type === 'user',
       );
-      return;
-    }
-    const hasUserTurns = historyManager.history.some((h) => h.type === 'user');
-    if (!hasUserTurns) return;
-    setIsRewindSelectorOpen(true);
-  }, [streamingState, config, historyManager]);
+      if (!hasUserTurns) return;
+      setIsRewindSelectorOpen(true);
+    },
+    [streamingState, config, historyManager],
+  );
   openRewindSelectorRef.current = openRewindSelector;
 
   const closeRewindSelector = useCallback(() => {

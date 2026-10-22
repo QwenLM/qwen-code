@@ -52,6 +52,7 @@ import {
   runWithRuntimeContentGenerator,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
+import { FinishReason } from '@google/genai';
 import type { CommandContext } from '../commands/types.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { HistoryItem, SlashCommandProcessorResult } from '../types.js';
@@ -1095,6 +1096,153 @@ describe('useLlmStream', () => {
     expect(mockSendMessageStream.mock.calls[0]?.[3]).not.toHaveProperty(
       'onWorkflowIntentApplied',
     );
+  });
+
+  it.each(['/rewind', '/model fake-model payload', '/slow-custom'])(
+    'keeps admitted %s preprocessing busy until its deferred recall write completes',
+    async (command) => {
+      let releaseLog!: () => void;
+      const heldLog = new Promise<void>((resolve) => {
+        releaseLog = resolve;
+      });
+      const logMessage = vi.fn().mockReturnValue(heldLog);
+      const { result } = renderTestHook([], undefined, undefined, undefined, {
+        logMessage,
+      } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+      mockHandleSlashCommand.mockImplementation(async () => {
+        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        return { type: 'handled' };
+      });
+      let request!: Promise<void>;
+      await act(async () => {
+        request = result.current.submitQuery(command);
+      });
+      await waitFor(() =>
+        expect(logMessage).toHaveBeenCalledWith(
+          MessageSenderType.USER,
+          command,
+        ),
+      );
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      expect(mockHandleSlashCommand).not.toHaveBeenCalled();
+      await act(async () => {
+        releaseLog();
+        await request;
+      });
+      expect(mockHandleSlashCommand).toHaveBeenCalledOnce();
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    },
+  );
+
+  it('does not dispatch a cancelled slash after its old logger resolves into a held successor', async () => {
+    let releaseOldLog!: () => void;
+    const oldLog = new Promise<void>((resolve) => {
+      releaseOldLog = resolve;
+    });
+    const logMessage = vi
+      .fn()
+      .mockImplementation((_sender, text) =>
+        text === '/rewind' ? oldLog : Promise.resolve(),
+      );
+    let releaseSuccessor!: () => void;
+    const heldSuccessor = new Promise<void>((resolve) => {
+      releaseSuccessor = resolve;
+    });
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield {
+          type: ServerLlmEventType.Content,
+          value: 'successor stays active',
+        };
+        await heldSuccessor;
+        yield {
+          type: ServerLlmEventType.Finished,
+          value: { reason: FinishReason.STOP, usageMetadata: undefined },
+        };
+      })(),
+    );
+    mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
+    const { result } = renderTestHook([], undefined, undefined, undefined, {
+      logMessage,
+    } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+    let oldRequest!: Promise<void>;
+    let successorRequest: Promise<void> | undefined;
+    await act(async () => {
+      oldRequest = result.current.submitQuery('/rewind');
+    });
+    await waitFor(() =>
+      expect(logMessage).toHaveBeenCalledWith(
+        MessageSenderType.USER,
+        '/rewind',
+      ),
+    );
+    act(() => result.current.cancelOngoingRequest());
+    await waitFor(() =>
+      expect(result.current.streamingState).toBe(StreamingState.Idle),
+    );
+    try {
+      await act(async () => {
+        successorRequest = result.current.submitQuery('successor prompt');
+      });
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledOnce());
+      const successorSignal = mockSendMessageStream.mock
+        .calls[0]?.[1] as AbortSignal;
+      expect(successorSignal.aborted).toBe(false);
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      await act(async () => {
+        releaseOldLog();
+        await oldRequest;
+      });
+      expect(mockHandleSlashCommand).not.toHaveBeenCalled();
+      expect(mockSendMessageStream).toHaveBeenCalledOnce();
+      expect(successorSignal.aborted).toBe(false);
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+    } finally {
+      releaseOldLog();
+      releaseSuccessor();
+      await act(async () => {
+        await oldRequest;
+        await successorRequest;
+      });
+    }
+  });
+
+  it('rejects slash rewind admission while a model response is held', async () => {
+    let releaseStream!: () => void;
+    const heldStream = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield { type: ServerLlmEventType.Content, value: 'working' };
+        await heldStream;
+        yield {
+          type: ServerLlmEventType.Finished,
+          value: { reason: FinishReason.STOP, usageMetadata: undefined },
+        };
+      })(),
+    );
+    const { result } = renderTestHook();
+    let request!: Promise<void>;
+    await act(async () => {
+      request = result.current.submitQuery('held model prompt');
+    });
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledOnce());
+    try {
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      await act(async () => {
+        await result.current.submitQuery('/rewind');
+      });
+      expect(mockHandleSlashCommand).not.toHaveBeenCalled();
+      expect(mockSendMessageStream).toHaveBeenCalledOnce();
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+    } finally {
+      releaseStream();
+      await act(async () => {
+        await request;
+      });
+    }
   });
 
   it('keeps display-only composer text intact in row, recall and cancel without creating hook provenance', async () => {
