@@ -20936,99 +20936,121 @@ describe('Hosted Harness no-tool session', () => {
     return { server, authorize, submit, status, idle, resident, owe };
   }
 
-  it('keeps a later active Turn safe from a delayed original cancellation', async () => {
-    const server = await app();
-    const created = await headers(supertest(server).post('/session'))
-      .send({
-        sessionId: SESSION_ID,
-        sessionScope: 'thread',
-        managedSessionStore: store(),
-      })
-      .expect(200);
-    const authorize = (request: supertest.Test) =>
-      headers(request).set('X-Qwen-Client-Id', created.body.clientId);
-    const idle = () =>
-      vi.waitFor(
-        async () => {
-          const status = await authorize(
-            supertest(server).get(`/session/${SESSION_ID}/status`),
-          ).expect(200);
-          expect(status.body.hasActivePrompt).toBe(false);
-        },
-        { timeout: SETTLE_TIMEOUT_MS },
+  it.each([false, true])(
+    'keeps a later active Turn safe from a delayed original cancellation (public children: %s)',
+    async (publicChildren) => {
+      if (publicChildren) mockBrokerBroker();
+      const server = await app(publicChildren);
+      const created = await headers(supertest(server).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          ...(publicChildren
+            ? {
+                toolProfile: 'hosted-workspace-shell/1',
+                approvalMode: 'yolo',
+                publicChildAgentsVersion: 1,
+              }
+            : {}),
+        })
+        .expect(200);
+      const authorize = (request: supertest.Test) =>
+        headers(request).set('X-Qwen-Client-Id', created.body.clientId);
+      const idle = () =>
+        vi.waitFor(
+          async () => {
+            const status = await authorize(
+              supertest(server).get(`/session/${SESSION_ID}/status`),
+            ).expect(200);
+            expect(status.body.hasActivePrompt).toBe(false);
+          },
+          { timeout: SETTLE_TIMEOUT_MS },
+        );
+      const prompt = [{ type: 'text', text: 'original' }];
+      const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .send({ prompt, promptId: PROMPT_ID, payloadDigest })
+        .expect(202);
+      await idle();
+      const attached = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({
+          managedSessionStore: store(),
+          passiveManagedRuntimeRecovery: true,
+          ...(publicChildren
+            ? {
+                toolProfile: 'hosted-workspace-shell/1',
+                publicChildAgentsVersion: 1,
+              }
+            : {}),
+        })
+        .expect(200);
+      expect(attached.body.clientId).toBe(created.body.clientId);
+      let laterSignal!: AbortSignal;
+      let finishLater!: () => void;
+      state.model.mockImplementationOnce(
+        ({ signal }) =>
+          new Promise((resolve) => {
+            laterSignal = signal;
+            finishLater = () => resolve({ text: 'later', model: 'test-model' });
+            signal.addEventListener('abort', finishLater, { once: true });
+          }),
       );
-    const prompt = [{ type: 'text', text: 'original' }];
-    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
-    await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
-      .send({ prompt, promptId: PROMPT_ID, payloadDigest })
-      .expect(202);
-    await idle();
-    const attached = await headers(
-      supertest(server).post(`/session/${SESSION_ID}/load`),
-    )
-      .send({
-        managedSessionStore: store(),
-        passiveManagedRuntimeRecovery: true,
-      })
-      .expect(200);
-    expect(attached.body.clientId).toBe(created.body.clientId);
-    let laterSignal!: AbortSignal;
-    let finishLater!: () => void;
-    state.model.mockImplementationOnce(
-      ({ signal }) =>
-        new Promise((resolve) => {
-          laterSignal = signal;
-          finishLater = () => resolve({ text: 'later', model: 'test-model' });
-          signal.addEventListener('abort', finishLater, { once: true });
-        }),
-    );
-    const later = randomUUID();
-    await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
-      .send({ prompt, promptId: later, payloadDigest })
-      .expect(202);
-    await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(2), {
-      timeout: SETTLE_TIMEOUT_MS,
-    });
-    const cancel = (promptId: unknown) =>
-      authorize(supertest(server).post(`/session/${SESSION_ID}/cancel`)).send({
-        promptId,
+      const later = randomUUID();
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .send({ prompt, promptId: later, payloadDigest })
+        .expect(202);
+      await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(2), {
+        timeout: SETTLE_TIMEOUT_MS,
       });
-    try {
+      const cancel = (promptId: unknown) =>
+        authorize(supertest(server).post(`/session/${SESSION_ID}/cancel`)).send(
+          {
+            promptId,
+          },
+        );
+      try {
+        await cancel(PROMPT_ID).expect(204);
+        expect(laterSignal.aborted).toBe(false);
+        await cancel(randomUUID()).expect(409);
+        await cancel(null).expect(400);
+        expect(laterSignal.aborted).toBe(false);
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).expect(200);
+        expect(status.body.hasActivePrompt).toBe(true);
+        await cancel(later).expect(204);
+        expect(laterSignal.aborted).toBe(true);
+      } finally {
+        finishLater();
+      }
+      await idle();
       await cancel(PROMPT_ID).expect(204);
-      expect(laterSignal.aborted).toBe(false);
-      await cancel(randomUUID()).expect(409);
-      await cancel(null).expect(400);
-      expect(laterSignal.aborted).toBe(false);
-      const status = await authorize(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).expect(200);
-      expect(status.body.hasActivePrompt).toBe(true);
       await cancel(later).expect(204);
-      expect(laterSignal.aborted).toBe(true);
-    } finally {
-      finishLater();
-    }
-    await idle();
-    await cancel(PROMPT_ID).expect(204);
-    await cancel(later).expect(204);
-    const saved = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      {
-        tenantId: 'tenant',
-        workspaceId: 'workspace',
-        sessionId: SESSION_ID,
-      },
-    );
-    expect(
-      saved.events
-        .filter((event) => event.kind === 'cancel.requested')
-        .map((event) => event.payload['target']),
-    ).toEqual([{ turnId: later }]);
-    expect(state.model).toHaveBeenCalledTimes(2);
-    await authorize(
-      supertest(server).post(`/session/${SESSION_ID}/detach`),
-    ).expect(204);
-  });
+      const saved = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      );
+      expect(
+        saved.events
+          .filter((event) => event.kind === 'cancel.requested')
+          .map((event) => event.payload['target']),
+      ).toEqual([
+        ...(publicChildren ? [{ turnId: PROMPT_ID }] : []),
+        { turnId: later },
+      ]);
+      expect(state.model).toHaveBeenCalledTimes(2);
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/detach`),
+      ).expect(204);
+    },
+  );
 
   it('refuses a targeted cancel for an original parked Turn without aborting or driving it', async () => {
     const f = await recoveryFileSession();
@@ -31781,6 +31803,149 @@ describe('Hosted Harness Runtime turn takeover', () => {
     ).expect(204);
     expect(release).toHaveBeenCalledTimes(1);
   });
+
+  it.each([false, true])(
+    'claims recovery cancellation once after concurrent child fences (first completed: %s)',
+    async (firstCompleted) => {
+      await parkToolTurn();
+      let stopped = false;
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
+        async () => ({
+          state: stopped ? 'settled' : 'prepared',
+        }),
+      );
+      const { server, loaded } = await loadReplacement(true);
+      expect(loaded.status).toBe(200);
+      const resident = (
+        wakeDeps.last as {
+          session: {
+            managed: Awaited<ReturnType<typeof openManagedSession>>;
+            publicChildAgentsVersion?: 1;
+            childAgents?: HostedChildAgentSession;
+          };
+        }
+      ).session;
+      resident.publicChildAgentsVersion = 1;
+      resident.childAgents = new HostedChildAgentSession(
+        {
+          authority: resident.managed.authority,
+          resources: resident.managed.resources,
+        },
+        resident.managed.authority.sessionHeader.sessionKey,
+      );
+      let releaseFirst!: () => void;
+      let releaseSecond!: () => void;
+      let releaseBroker!: () => void;
+      const gates = [
+        new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        }),
+        new Promise<void>((resolve) => {
+          releaseSecond = resolve;
+        }),
+      ];
+      const brokerGate = new Promise<void>((resolve) => {
+        releaseBroker = resolve;
+      });
+      const original = HostedChildAgentSession.prototype.cancelSourcePrompt;
+      let fenceCount = 0;
+      const fence = vi
+        .spyOn(HostedChildAgentSession.prototype, 'cancelSourcePrompt')
+        .mockImplementation(async function (
+          this: HostedChildAgentSession,
+          promptId,
+          commit,
+        ) {
+          await gates[fenceCount++];
+          await original.call(this, promptId, commit);
+        });
+      const cancel = vi
+        .mocked(HostedWorkspaceBroker.prototype.cancel)
+        .mockImplementation(async () => {
+          await brokerGate;
+          stopped = true;
+        });
+      cancel.mockClear();
+      const recovery = loaded.body._meta?.[
+        'qwen.daemon.managedRuntimeRecovery'
+      ] as {
+        checkpointId: string;
+        activationId: string;
+      };
+      const send = () =>
+        replacementHeaders(
+          supertest(server).post(
+            `/session/${SESSION_ID}/managed-runtime/cancel`,
+          ),
+        )
+          .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+          .send({
+            promptId: PROMPT_ID,
+            checkpointId: recovery.checkpointId,
+            activationId: recovery.activationId,
+          });
+      const completed: supertest.Response[] = [];
+      const record = (response: supertest.Response) => {
+        completed.push(response);
+        return response;
+      };
+      const first = send().then(record);
+      const second = send().then(record);
+      try {
+        await vi.waitFor(() => expect(fence).toHaveBeenCalledTimes(2), {
+          timeout: SETTLE_TIMEOUT_MS,
+        });
+        releaseFirst();
+        await vi.waitFor(() => expect(cancel).toHaveBeenCalledTimes(1), {
+          timeout: SETTLE_TIMEOUT_MS,
+        });
+        if (firstCompleted) {
+          releaseBroker();
+          await vi.waitFor(() => expect(completed).toHaveLength(1), {
+            timeout: SETTLE_TIMEOUT_MS,
+          });
+          expect(completed[0].status).toBe(200);
+        }
+        releaseSecond();
+        await vi.waitFor(
+          () =>
+            expect(
+              completed.length > (firstCompleted ? 1 : 0) ||
+                cancel.mock.calls.length > 1,
+            ).toBe(true),
+          {
+            timeout: SETTLE_TIMEOUT_MS,
+          },
+        );
+        expect(cancel).toHaveBeenCalledTimes(1);
+        releaseBroker();
+        const responses = await Promise.all([first, second]);
+        expect(responses.map((response) => response.status)).toEqual([
+          200, 200,
+        ]);
+        expect(responses[1].body.lastEventId).toBe(
+          responses[0].body.lastEventId,
+        );
+        const events = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+        expect(
+          events.body.events.filter(
+            (event: { type: string; promptId?: string }) =>
+              event.type === 'turn_complete' && event.promptId === PROMPT_ID,
+          ),
+        ).toHaveLength(1);
+      } finally {
+        releaseFirst();
+        releaseSecond();
+        releaseBroker();
+        await Promise.allSettled([first, second]);
+        await replacementHeaders(
+          supertest(server).delete(`/session/${SESSION_ID}`),
+        );
+      }
+    },
+  );
 
   it('answers a settled cancellation even when the final handback fails', async () => {
     await parkToolTurn();

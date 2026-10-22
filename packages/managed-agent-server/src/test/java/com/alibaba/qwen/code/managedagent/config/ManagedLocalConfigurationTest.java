@@ -54,7 +54,7 @@ class ManagedLocalConfigurationTest {
                     assertThat(context).hasNotFailed().hasSingleBean(DruidDataSource.class);
                     assertThat(context.getBean(DruidDataSource.class).getUrl())
                             .isEqualTo(ManagedLocalConfiguration.jdbcUrl(directory));
-                    assertThat(ManagedSchema.schemaVersion(context.getBean(DruidDataSource.class))).isEqualTo(16);
+                    assertThat(ManagedSchema.schemaVersion(context.getBean(DruidDataSource.class))).isEqualTo(17);
                     var managed = context.getBean(ManagedAgentProperties.class);
                     assertThat(managed.getRuntimeBroker().getWorkspaceId()).isEqualTo(workspaceId);
                     assertThat(managed.getSessionStore().getWorkspaceId()).isEqualTo(workspaceId);

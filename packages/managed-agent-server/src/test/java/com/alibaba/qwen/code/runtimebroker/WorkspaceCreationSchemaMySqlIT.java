@@ -53,7 +53,7 @@ class WorkspaceCreationSchemaMySqlIT {
             Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load().migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(16, ManagedSchema.schemaVersion(source));
+            assertEquals(17, ManagedSchema.schemaVersion(source));
             var upgradedHead = jdbc.queryForMap("SELECT * FROM ma_session_head");
             assertThat(upgradedHead).containsEntry("cleanup_head_revision", null);
             upgradedHead.remove("cleanup_head_revision");
@@ -97,9 +97,10 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(16, ManagedSchema.schemaVersion(source));
+            assertEquals(17, ManagedSchema.schemaVersion(source));
             var upgradedSession = jdbc.queryForMap("SELECT * FROM ma_session");
             assertThat(upgradedSession.remove("plan_enabled")).isEqualTo(false);
+            assertThat(upgradedSession.remove("public_child_agents_version")).isEqualTo(0);
             var upgradedTurn = jdbc.queryForMap("SELECT * FROM ma_turn");
             assertThat(upgradedTurn).containsKey("plan_enabled");
             assertThat(upgradedTurn.remove("plan_enabled")).isNull();
@@ -135,7 +136,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(16, ManagedSchema.schemaVersion(source));
+            assertEquals(17, ManagedSchema.schemaVersion(source));
             var upgraded = jdbc.queryForMap("SELECT * FROM ma_operation");
             assertThat(upgraded.keySet()).containsAll(existing.keySet());
             upgraded.keySet().retainAll(existing.keySet());
@@ -186,7 +187,7 @@ class WorkspaceCreationSchemaMySqlIT {
             assertEquals(4, ManagedSchema.schemaVersion(source));
             ManagedSchema.initialize(source);
             ManagedSchema.validate(source);
-            assertEquals(16, ManagedSchema.schemaVersion(source));
+            assertEquals(17, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
                 receipt(

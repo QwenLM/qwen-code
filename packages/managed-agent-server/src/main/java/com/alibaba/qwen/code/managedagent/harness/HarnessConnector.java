@@ -14,6 +14,8 @@ public interface HarnessConnector extends AutoCloseable {
         throw new UnsupportedOperationException("Hosted wake recovery is unavailable");
     }
 
+    default boolean supportsPublicChildAgents() { return false; }
+
     default boolean supportsApprovalSelection() { return false; }
 
     default boolean supportsLiveApprovalSelection() { return false; }

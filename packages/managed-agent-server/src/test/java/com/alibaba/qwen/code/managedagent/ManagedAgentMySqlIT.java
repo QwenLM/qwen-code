@@ -127,7 +127,7 @@ class ManagedAgentMySqlIT {
                     "digest-" + model, "qwen-code", null, null, input,
                     com.alibaba.qwen.code.daemon.SubmitHarnessTurn.computePayloadDigest(input),
                     new com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection("ws", "."),
-                    mode, true, null, false, List.of(), model));
+                    mode, true, null, false, List.of(), false, model));
             assertThat(jdbc.queryForMap("SELECT model_id,model_revision,approval_mode,approval_revision FROM ma_turn"
                     + " WHERE tenant_id=? AND session_id=?", tenant, admitted.sessionId()))
                     .containsEntry("model_id", model).containsEntry("model_revision", 1L)

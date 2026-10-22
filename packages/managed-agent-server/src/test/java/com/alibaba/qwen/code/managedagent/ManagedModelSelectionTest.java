@@ -108,6 +108,36 @@ class ManagedModelSelectionTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void initialModelSelectionPreservesPublicChildAdmission(boolean childrenSupported) {
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, "storage", "/tmp/model-selection")));
+        properties.setModelCatalog(List.of(option("model-a")));
+        var enabled = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, registry, properties);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.supportsApprovalSelection()).thenReturn(true);
+        when(harness.supportsPublicChildAgents()).thenReturn(childrenSupported);
+        var input = List.of(new InputBlock("input_text", "first"));
+        var admitted = transaction().execute(status -> service(enabled).createWorkspaceSession(tenant, "actor", "combined",
+                "qwen-code", null, null, null, input, new WorkspaceSelection("ws", "."), "auto-edit", null, null, "model-a"));
+        var created = enabled.requireSession(tenant, admitted.sessionId());
+        assertThat(created.publicChildAgentsVersion()).isEqualTo(childrenSupported ? 1 : 0);
+        assertThat(created.approvalMode()).isEqualTo("auto-edit");
+        var turn = enabled.findTurn(tenant, admitted.sessionId(), admitted.turnId()).orElseThrow();
+        assertThat(enabled.findTurnModelSelection(tenant, admitted.sessionId(), turn.promptId()))
+                .isEqualTo(new WebShellModelSelection("model-a", 1));
+        when(harness.supportsPublicChildAgents()).thenReturn(!childrenSupported);
+        assertThat(transaction().execute(status -> service(enabled).createWorkspaceSession(tenant, "actor", "combined",
+                "qwen-code", null, null, null, input, new WorkspaceSelection("ws", "."), "auto-edit", null, null, "model-a"))
+                .sessionId()).isEqualTo(admitted.sessionId());
+        assertThat(enabled.requireSession(tenant, admitted.sessionId()).publicChildAgentsVersion())
+                .isEqualTo(childrenSupported ? 1 : 0);
+    }
+
     @Test
     void initialModelRefusesUnsupportedCatalogCapabilityAndCustomAgentWithoutCreatingSession() {
         int before = jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=?", Integer.class, tenant);
