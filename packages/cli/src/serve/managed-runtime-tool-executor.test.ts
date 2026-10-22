@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import fs, { readdirSync, readFileSync, existsSync } from 'node:fs';
+import fs, { readFileSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { syncBuiltinESMExports } from 'node:module';
