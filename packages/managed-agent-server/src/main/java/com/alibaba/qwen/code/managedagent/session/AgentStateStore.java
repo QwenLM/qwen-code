@@ -816,6 +816,12 @@ public interface AgentStateStore {
     boolean parkTurnForRuntimeRecovery(String tenantId, String sessionId,
             String turnId, String owner, String message, long retryAfter);
 
+    boolean markTurnFailureRecovery(String tenantId, String sessionId,
+            String turnId, String owner, String message);
+
+    boolean requestRecoveryRecheck(String tenantId, String sessionId,
+            String turnId);
+
     void deferTurnRetry(String tenantId, String sessionId, String turnId,
             String owner, long retryAfter);
 
