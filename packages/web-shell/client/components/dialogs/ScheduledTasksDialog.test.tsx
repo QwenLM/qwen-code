@@ -178,9 +178,9 @@ function click(el: Element | null | undefined) {
   });
 }
 
-function input(el: HTMLInputElement, value: string) {
+function input(el: HTMLInputElement | HTMLTextAreaElement, value: string) {
   const setter = Object.getOwnPropertyDescriptor(
-    HTMLInputElement.prototype,
+    Object.getPrototypeOf(el) as object,
     'value',
   )?.set;
   act(() => {
@@ -292,7 +292,7 @@ describe('ScheduledTasksDialog editing', () => {
     await mount([], { currentSession });
     click(findButton('New scheduled task'));
     expect(
-      document.querySelector('input[aria-label="Gate command (optional)"]'),
+      document.querySelector('[aria-label="Gate command (optional)"]'),
     ).toBeNull();
     await enterPromptAndCreate('plain');
     expect(actions.createScheduledTask.mock.calls[0]?.[0]).not.toHaveProperty(
@@ -304,11 +304,13 @@ describe('ScheduledTasksDialog editing', () => {
     actions.createScheduledTask.mockResolvedValue(baseTask({}));
     await mount([], { currentSession, gateAvailable: true });
     click(findButton('New scheduled task'));
-    const gateField = document.querySelector<HTMLInputElement>(
-      'input[aria-label="Gate command (optional)"]',
+    const gateField = document.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Gate command (optional)"]',
     );
     expect(gateField).not.toBeNull();
-    expect(document.body.textContent).toContain('Runs before each fire');
+    expect(document.body.textContent).toContain(
+      'Runs from the project directory before each scheduled fire',
+    );
     input(gateField!, '  ./probe.sh --gate  ');
     await enterPromptAndCreate('handle the events below');
     expect(actions.createScheduledTask).toHaveBeenCalledWith(
@@ -323,8 +325,8 @@ describe('ScheduledTasksDialog editing', () => {
   it('prefills the gate on edit and clears it with null', async () => {
     await mount([baseTask({ gate: './probe.sh' })], { gateAvailable: true });
     click(document.querySelector('[aria-label="Edit"]'));
-    const gateField = document.querySelector<HTMLInputElement>(
-      'input[aria-label="Gate command (optional)"]',
+    const gateField = document.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Gate command (optional)"]',
     );
     expect(gateField?.value).toBe('./probe.sh');
 
@@ -338,26 +340,112 @@ describe('ScheduledTasksDialog editing', () => {
     );
   });
 
-  it('shows a gated task’s gate and its status on the card', async () => {
+  it('sends no gate when an edit leaves the field untouched', async () => {
+    // The route reads any `gate` key as a gate edit, which a legacy guarded
+    // task refuses: a save that did not touch the field must not send one.
+    await mount(
+      [baseTask({ gate: null }), baseTask({ id: 't2', gate: './probe.sh' })],
+      {
+        gateAvailable: true,
+      },
+    );
+    for (const button of Array.from(
+      document.querySelectorAll('[aria-label="Edit"]'),
+    )) {
+      click(button);
+      click(findButton('Save'));
+      await flush();
+    }
+    expect(actions.updateScheduledTask).toHaveBeenCalledTimes(2);
+    for (const [, patch] of actions.updateScheduledTask.mock.calls) {
+      expect(patch).not.toHaveProperty('gate');
+    }
+  });
+
+  it('offers no gate on a one-shot edit, which the daemon would refuse', async () => {
+    await mount([baseTask({ recurring: false, gate: null })], {
+      gateAvailable: true,
+    });
+    click(document.querySelector('[aria-label="Edit"]'));
+    expect(
+      document.querySelector('[aria-label="Gate command (optional)"]'),
+    ).toBeNull();
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask.mock.calls[0]?.[1]).not.toHaveProperty(
+      'gate',
+    );
+  });
+
+  it('keeps a multi-line gate intact through an edit', async () => {
+    const gate = 'for f in a b\ndo check "$f"\ndone';
+    await mount([baseTask({ gate })], { gateAvailable: true });
+    click(document.querySelector('[aria-label="Edit"]'));
+    const gateField = document.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Gate command (optional)"]',
+    );
+    expect(gateField?.value).toBe(gate);
+    input(gateField!, `${gate} | head`);
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({ gate: `${gate} | head` }),
+      undefined,
+    );
+  });
+
+  it('shows a gated task’s gate, its status and its gate runs on the card', async () => {
+    const delivered = 1_700_000_000_000;
     await mount([
       baseTask({
         gate: './probe.sh --gate',
         gateStatus: {
           lastAt: 1_700_000_300_000,
-          lastOutcome: 'quiet',
+          lastOutcome: 'failed',
           quietSinceDelivery: 41,
-          lastDeliveredAt: 1_700_000_000_000,
+          lastDeliveredAt: delivered,
           consecutiveFailures: 2,
           lastError: 'exited with code 1',
         },
-        runs: [{ at: 1_700_000_000_000, gate: 'failed' }],
+        runs: [
+          { at: 1_700_000_100_000, gate: 'failed' },
+          { at: 1_700_000_200_000, gate: 'blocked' },
+        ],
       }),
     ]);
     const text = document.body.textContent ?? '';
     expect(text).toContain('Gate: ./probe.sh --gate');
-    expect(text).toContain('quiet ×41');
-    expect(text).toContain('2 failures');
-    expect(text).toContain(new Date(1_700_000_000_000).toLocaleString());
+    // A failing gate leads with its outcome and reason.
+    expect(text).toContain(
+      `last run failed: exited with code 1 · quiet ×41 · last delivered ${new Date(delivered).toLocaleString()} · 2 failures`,
+    );
+    click(document.querySelector('button[aria-expanded]'));
+    const items = Array.from(document.querySelectorAll('li')).map(
+      (item) => item.textContent ?? '',
+    );
+    expect(items).toEqual([
+      expect.stringContaining('gate blocked'),
+      expect.stringContaining('gate failed'),
+    ]);
+  });
+
+  it('tells a blocked gate apart from a failing one, and a gate that never delivered', async () => {
+    await mount([
+      baseTask({
+        gate: './probe.sh',
+        gateStatus: {
+          lastAt: 1_700_000_300_000,
+          lastOutcome: 'blocked',
+          quietSinceDelivery: 0,
+          consecutiveFailures: 57,
+          lastError: 'this session cannot run shell commands',
+        },
+      }),
+    ]);
+    expect(document.body.textContent).toContain(
+      'blocked: this session cannot run shell commands · quiet ×0 · last delivered never · 57 failures',
+    );
   });
 
   it('says when a gate has not run yet', async () => {

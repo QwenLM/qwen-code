@@ -101,13 +101,15 @@ function describeRun(run: DaemonScheduledTaskRun, t: TranslateFn): string {
   return `${safeLocaleString(run.at)}${kind}${withheld}${gate}${dispatchFailed}`;
 }
 
-/** The card's gate line: "quiet ×41 · last delivered … · 0 failures". */
+/** The card's gate line: "quiet ×41 · last delivered … · 0 failures",
+ * led by the outcome and its reason while the gate fails or is blocked —
+ * a blocked gate does not clear by itself, a failing command may. */
 function describeGateStatus(
   status: DaemonScheduledTask['gateStatus'],
   t: TranslateFn,
 ): string {
   if (!status) return t('scheduledTasks.gate.notRunYet');
-  return t('scheduledTasks.gate.status', {
+  const counts = t('scheduledTasks.gate.status', {
     quiet: status.quietSinceDelivery,
     delivered:
       status.lastDeliveredAt !== undefined
@@ -115,6 +117,16 @@ function describeGateStatus(
         : t('scheduledTasks.gate.neverDelivered'),
     failures: status.consecutiveFailures,
   });
+  if (status.lastOutcome !== 'failed' && status.lastOutcome !== 'blocked') {
+    return counts;
+  }
+  const outcome = t(
+    status.lastOutcome === 'blocked'
+      ? 'scheduledTasks.gate.lastBlocked'
+      : 'scheduledTasks.gate.lastFailed',
+  );
+  const reason = status.lastError ? `: ${status.lastError}` : '';
+  return `${outcome}${reason} · ${counts}`;
 }
 
 /**
@@ -667,6 +679,11 @@ export function ScheduledTasksDialog({
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
   const [gate, setGate] = useState('');
+  // The edited task's gate and recurrence as loaded: a save sends `gate` only
+  // when the field changed it, and a one-shot (which refuses a gate) never
+  // shows the field.
+  const [editedGate, setEditedGate] = useState('');
+  const [editedRecurring, setEditedRecurring] = useState(true);
   const [runDestination, setRunDestination] = useState<
     'per_run' | 'dedicated' | 'current'
   >('per_run');
@@ -1113,6 +1130,8 @@ export function ScheduledTasksDialog({
     setName('');
     setPrompt('');
     setGate('');
+    setEditedGate('');
+    setEditedRecurring(true);
     setRunDestination('per_run');
     setModelServiceId('');
     setGroupChoice('');
@@ -1133,6 +1152,8 @@ export function ScheduledTasksDialog({
     setName('');
     setPrompt('');
     setGate('');
+    setEditedGate('');
+    setEditedRecurring(true);
     setRunDestination('per_run');
     setModelServiceId('');
     setGroupChoice('');
@@ -1152,6 +1173,8 @@ export function ScheduledTasksDialog({
       setName(task.name ?? '');
       setPrompt(task.prompt);
       setGate(task.gate ?? '');
+      setEditedGate(task.gate ?? '');
+      setEditedRecurring(task.recurring);
       setRunDestination(
         task.sessionMode === 'per_run' ? 'per_run' : 'dedicated',
       );
@@ -1239,9 +1262,15 @@ export function ScheduledTasksDialog({
               runDestination === 'per_run' ? modelServiceId || null : null,
             groupId:
               runDestination === 'per_run' ? resolvedGroupId || null : null,
-            // Only a daemon that advertises the gate accepts the field; an
-            // older one would drop it silently. Empty clears it.
-            ...(gateAvailable ? { gate: gate.trim() || null } : {}),
+            // Only a daemon that advertises the gate accepts the field (an
+            // older one would drop it silently), and only a changed field is
+            // sent: the route reads any `gate` key as a gate edit, which a
+            // legacy guarded task refuses. Empty clears it.
+            ...(gateAvailable &&
+            editedRecurring &&
+            gate.trim() !== editedGate.trim()
+              ? { gate: gate.trim() || null }
+              : {}),
           },
           formWorkspaceId,
         );
@@ -1287,6 +1316,8 @@ export function ScheduledTasksDialog({
     formWorkspaceCwd,
     formWorkspaceId,
     formWorkspaceMissing,
+    editedGate,
+    editedRecurring,
     gate,
     gateAvailable,
     groupChoice,
@@ -1612,14 +1643,16 @@ export function ScheduledTasksDialog({
               </div>
             </div>
 
-            {gateAvailable && (
+            {gateAvailable && (editingId === null || editedRecurring) && (
               <label className={styles.field}>
                 <span className={styles.fieldLabel}>
                   {t('scheduledTasks.gate')}
                 </span>
-                <input
-                  className={styles.input}
-                  type="text"
+                {/* A textarea: a text input strips newlines, which would
+                    rewrite a stored multi-line gate on the next save. */}
+                <textarea
+                  className={styles.textarea}
+                  rows={2}
                   value={gate}
                   maxLength={2048}
                   placeholder={t('scheduledTasks.gatePlaceholder')}

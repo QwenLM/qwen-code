@@ -293,7 +293,9 @@ the command is proposed and checked again where it runs.
   the schedule. A gate that backgrounds any part of itself with `&`, including
   the `&` that ends a wrapper's script (`bash -c './probe.sh &'`), also behind
   a prefix (`nohup`, `sudo`, `env`), is refused before the dialog: it would
-  return at once with nothing on stdout.
+  return at once with nothing on stdout. An escaped `\&` is a literal and
+  stays accepted. A gate of only comments is refused for the same reason: a
+  shell runs it as nothing; `true` and `:` stay accepted as explicit no-ops.
   "Always allow" therefore saves a `Monitor(...)` rule, not a `cron_create`
   rule. The classifier input for auto mode includes the gate. A bare
   `cron_create` allow rule saved before this change does not cover a gate.

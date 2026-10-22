@@ -528,7 +528,11 @@ describe('CronScheduler gate', () => {
       await script.release(quiet);
       expect(byGate).toEqual({ './probe.sh': true, './other.sh': false });
 
-      // A job already loaded takes the confirmation at once.
+      // A loaded job takes a confirmation at once, but only for its own
+      // command: one for a command another client has since swapped out
+      // must not approve the new one.
+      scheduler.approveGate('swapped', './probe.sh');
+      expect(approved('swapped')).toBe(false);
       scheduler.approveGate('swapped', './other.sh');
       expect(approved('swapped')).toBe(true);
     });

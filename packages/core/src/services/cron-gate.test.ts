@@ -16,6 +16,8 @@ import {
   createCronGateRunner,
   CRON_GATE_OUTPUT_CAP_BYTES,
   CRON_GATE_STDERR_LINES,
+  gateCommandError,
+  MAX_CRON_GATE_CHARS,
 } from './cron-gate.js';
 
 const mockRuntimeShell = vi.hoisted(() => vi.fn());
@@ -392,5 +394,51 @@ describe('gate fire text', () => {
         reason: 'the session is in plan mode',
       }),
     ).not.toContain('permission rule');
+  });
+});
+
+describe('gateCommandError', () => {
+  it.each([
+    // An escaped `&` is a literal ampersand, not a background operator.
+    ['an escaped trailing &', 'echo done \\&'],
+    ['an escaped & mid-command', 'echo \\& done'],
+    // Explicit no-ops run, and a trailing comment follows a real command.
+    ['true', 'true'],
+    [':', ':'],
+    ['a command with a trailing comment', 'echo hi # note'],
+    // An `&` inside a quoted argument backgrounds nothing.
+    ['a quoted &', "gh api 'repos/o/r/pulls?state=open&per_page=5'"],
+    ['&&', 'a && b'],
+    ['a command at the cap', 'x'.repeat(MAX_CRON_GATE_CHARS)],
+  ])('accepts %s', (_what, gate) => {
+    expect(gateCommandError(gate)).toBeNull();
+  });
+
+  it.each([
+    ['a trailing &', 'echo done &', 'must not background'],
+    // A literal backslash, then a backgrounding `&`.
+    [
+      'a backslash before a trailing &',
+      'echo done \\\\&',
+      'must not background',
+    ],
+    [
+      'a wrapper script ending in &',
+      "bash -c './probe.sh &'",
+      'must not background',
+    ],
+    // A shell runs a comment as nothing: every fire would be quiet.
+    ['a comment', '# waiting for the token', 'not only a comment'],
+    ['a bare #', '#', 'not only a comment'],
+    ['comment lines only', '# a\n  # b\n', 'not only a comment'],
+    ['a wrapper running a comment', "bash -c '# probe'", 'not only a comment'],
+    [
+      'a command past the cap',
+      'x'.repeat(MAX_CRON_GATE_CHARS + 1),
+      'must be at most 2048 characters',
+    ],
+    ['whitespace', '   ', 'must be a non-empty shell command'],
+  ])('refuses %s', (_what, gate, error) => {
+    expect(gateCommandError(gate)).toContain(error);
   });
 });

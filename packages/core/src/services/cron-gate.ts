@@ -111,10 +111,10 @@ export const MAX_CRON_GATE_CHARS = 2048;
  * Why `gate` cannot be a gate command, or null when it can. Shared by the
  * `cron_create` tool and the daemon's scheduled-task routes so every entry
  * point refuses the same strings: empty or whitespace-only commands, commands
- * past the cap, and anything backgrounded with `&` — a backgrounded gate
- * returns at once with nothing on stdout, so every fire would be quiet.
- * `backgroundsAnyPart` also looks inside a wrapper's script, behind a prefix
- * too (`nohup bash -c './probe.sh &'`).
+ * of only comments, commands past the cap, and anything backgrounded with
+ * `&`. The last two run nothing in the foreground, so every fire would be
+ * quiet. `backgroundsAnyPart` also looks inside a wrapper's script, behind a
+ * prefix too (`nohup bash -c './probe.sh &'`).
  */
 export function gateCommandError(gate: unknown): string | null {
   if (
@@ -127,10 +127,34 @@ export function gateCommandError(gate: unknown): string | null {
   if (gate.length > MAX_CRON_GATE_CHARS) {
     return `must be at most ${MAX_CRON_GATE_CHARS} characters`;
   }
-  if (backgroundsAnyPart(gate) || /(^|[^&])&\s*$/.test(gate.trim())) {
+  // A shell runs a comment as nothing: exit 0, no stdout. Explicit no-ops
+  // such as `true` and `:` stay accepted.
+  if (
+    normalizeMonitorCommand(gate)
+      .safetyCommand.split('\n')
+      .every((line) => /^\s*(#|$)/.test(line))
+  ) {
+    return 'must run a command, not only a comment';
+  }
+  if (backgroundsAnyPart(gate) || endsWithBackgroundAmp(gate)) {
     return 'must not background any part of the command with "&"';
   }
   return null;
+}
+
+/**
+ * Whether `command` ends with an `&` that backgrounds it: not the second half
+ * of `&&`, and not escaped by an odd run of backslashes (`\&` is a literal
+ * ampersand; `\\&` is a literal backslash, then a backgrounding `&`).
+ */
+function endsWithBackgroundAmp(command: string): boolean {
+  const text = command.trimEnd();
+  if (!text.endsWith('&') || text.endsWith('&&')) return false;
+  let backslashes = 0;
+  for (let at = text.length - 2; at >= 0 && text[at] === '\\'; at--) {
+    backslashes++;
+  }
+  return backslashes % 2 === 0;
 }
 
 /**

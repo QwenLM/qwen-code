@@ -512,6 +512,8 @@ describe('scheduled-tasks routes', () => {
       'sleep 5 &',
       "bash -c './probe.sh &'",
       "nohup bash -c './probe.sh &'",
+      '# waiting for the token',
+      'x'.repeat(2049),
       7,
     ]) {
       const res = await create({ cron: '0 9 * * *', prompt: 'p', gate });
@@ -1967,6 +1969,26 @@ describe('scheduled-tasks routes', () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('session_already_bound');
     expect(await readCronTasks(h.workspace)).toHaveLength(1);
+  });
+
+  it('carries a gate into a task bound to the caller session', async () => {
+    // The bound-session branch hands the body to the existing-session
+    // creator: the gate and its downgrade fuse must reach the stored task.
+    addLiveSession(h.bridge, CALLER_SESSION_ID, h.workspace);
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: CALLER_SESSION_ID,
+      gate: './probe.sh',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ gate: './probe.sh', gateStatus: null });
+    const [stored] = await readCronTasks(h.workspace);
+    expect(stored).toMatchObject({
+      sessionId: CALLER_SESSION_ID,
+      gate: './probe.sh',
+      condition: './probe.sh',
+    });
   });
 
   it('binds a caller session at most once across concurrent creates', async () => {

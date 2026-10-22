@@ -409,6 +409,17 @@ describe('CronCreateTool gate', () => {
     expect(() => tool.build({ ...params, gate })).toThrow(/gate/);
   });
 
+  it.each([
+    ['past the cap', 'x'.repeat(2049), 'must be at most 2048 characters'],
+    [
+      'of only a comment',
+      '# waiting for the token',
+      'must run a command, not only a comment',
+    ],
+  ])('rejects a gate %s with its own reason', (_what, gate, reason) => {
+    expect(() => tool.build({ ...params, gate })).toThrow(reason);
+  });
+
   it('forwards the gate to the auto-mode classifier', () => {
     expect(tool.toAutoClassifierInput(params)).toMatchObject({
       gate: './probe.sh',
