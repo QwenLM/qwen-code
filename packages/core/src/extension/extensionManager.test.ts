@@ -1420,26 +1420,20 @@ describe('extension tests', () => {
       );
       const prepared = await prepare(manager, archivePath);
       const committedGenerations: number[] = [];
-      const durableCommit = deferred();
       let settled = false;
 
       const committing = manager
         .commitPreparedExtension(prepared, (generation) => {
           committedGenerations.push(generation);
-          durableCommit.resolve();
         })
         .finally(() => {
           settled = true;
         });
 
-      try {
-        await Promise.race([durableCommit.promise, committing]);
-        expect(committedGenerations).toHaveLength(1);
-        expect(settled).toBe(false);
-      } finally {
-        refresh.resolve();
-        await committing;
-      }
+      await vi.waitFor(() => expect(committedGenerations).toHaveLength(1));
+      expect(settled).toBe(false);
+      refresh.resolve();
+      await committing;
     });
 
     it('fully validates the staged extension before commit', async () => {
