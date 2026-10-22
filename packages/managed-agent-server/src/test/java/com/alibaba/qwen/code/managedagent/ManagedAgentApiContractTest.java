@@ -184,6 +184,10 @@ class ManagedAgentApiContractTest {
                             List.of("SessionEventRequest")),
                     entry(UpdateSessionRequest.class,
                             List.of("UpdateSessionRequest")),
+                    entry(ApiModels.CompressSessionRequest.class, List.of("CompressSessionRequest")),
+                    entry(ApiModels.WebShellContextCompressionRequest.class, List.of("WebShellContextCompressionRequest")),
+                    entry(ApiModels.PublicContextCompressionOperation.class, List.of("PublicContextCompressionOperation")),
+                    entry(ApiModels.WebShellContextCompressionOperation.class, List.of("WebShellContextCompressionOperation")),
                     entry(ChangeCwdRequest.class, List.of("ChangeCwdRequest")),
                     entry(PublicCwdOperation.class,
                             List.of("PublicCwdOperation")),
@@ -1339,6 +1343,20 @@ class ManagedAgentApiContractTest {
         // workspace-files opt-in is disabled, so a bound Session answers
         // workspace_unavailable; the operation-level behavior is exercised
         // by the cwd integration tests.
+        exchange(drift, "compressSessionContext", 400,
+                post("/v1/agents/sessions/{id}/compress", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "compress-shape"), "{}");
+        exchange(drift, "compressSessionContext", 409,
+                post("/v1/agents/sessions/{id}/compress", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "compress-disabled"), "{\"expected_compaction_revision\":0}");
+        exchange(drift, "webShellCompressContext", 400,
+                post(WEB_SHELL + "/sessions/compress").header(TENANT, workspaceTenant).principal(actor), "{}");
+        exchange(drift, "webShellCompressContext", 409,
+                post(WEB_SHELL + "/sessions/compress").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\",\"idempotencyKey\":\"compress-web-disabled\","
+                        + "\"expectedCompactionRevision\":0}");
         String cwdBody = """
                 {"cwd_relative":"services/api","expected_context_revision":1}
                 """;
@@ -2711,7 +2729,7 @@ class ManagedAgentApiContractTest {
             JsonNode capabilities = json("""
                     {"items":true,"snapshots":true,"artifacts":false,
                      "resync":true,"session_lifecycle":true,"tasks":true,"actions":false,"session_close":true,
-                     "session_archive":true,"session_unarchive":true,"session_delete":true}
+                     "session_archive":true,"session_unarchive":true,"session_delete":true,"context_compression":false}
                     """);
             if (javaDurableAdmission != null) {
                 ((com.fasterxml.jackson.databind.node.ObjectNode) capabilities)
@@ -2733,7 +2751,7 @@ class ManagedAgentApiContractTest {
                         .isEqualTo(session.get("last_event_id").asLong());
                 JsonNode webCapabilities = json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true}
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false}
                                 """);
                 if (javaDurableAdmission != null) {
                     ((com.fasterxml.jackson.databind.node.ObjectNode) webCapabilities)
