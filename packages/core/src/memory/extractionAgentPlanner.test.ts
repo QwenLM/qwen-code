@@ -14,6 +14,7 @@ import {
   getUserAutoMemoryRoot,
 } from './paths.js';
 import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
+import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { formatDateForContext } from '../core/environmentContext.js';
 import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
@@ -53,6 +54,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
     getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
     getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
     getAutoMemoryPrompt: vi.fn().mockReturnValue('session routing contract'),
+    getEffectiveInputModalities: vi.fn().mockReturnValue({}),
   } as unknown as Config;
 
   // Runs extraction after a completed forked run that touched `files`; the run
@@ -577,6 +579,71 @@ describe('runAutoMemoryExtractionByAgent', () => {
       'turn 2',
       'reply 2',
     ]);
+  });
+
+  it('drops a parked slice whose captured copy was slimmed and curated', async () => {
+    // The tail is the curated, slimmed rendering of raw history: media became
+    // placeholder text and adjacent user entries merged. The slice is still
+    // covered, so it must neither come first again nor re-ship the media.
+    const image = { inlineData: { mimeType: 'image/png', data: 'AAAA' } };
+    const [placeholder] = slimCompactionInput([
+      { role: 'user', parts: [image] },
+    ]).slimmedHistory[0].parts!;
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        { role: 'user', parts: [{ text: 'turn 0' }] },
+        { role: 'model', parts: [{ text: 'reply 0' }] },
+        {
+          role: 'user',
+          parts: [{ text: 'Remember: target release/2.6.' }, placeholder],
+        },
+        { role: 'model', parts: [{ text: 'reply 1' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      { role: 'user', parts: [{ text: 'Remember: target release/2.6.' }] },
+      { role: 'user', parts: [image] },
+      { role: 'model', parts: [{ text: 'reply 1' }] },
+    ]);
+    const history = forkedCall()?.extraHistory ?? [];
+    expect(history[0]?.parts?.[0]?.text).toBe('turn 0');
+    expect(
+      history.flatMap((entry) => entry.parts ?? []).some((p) => p.inlineData),
+    ).toBe(false);
+    expect(
+      history
+        .flatMap((entry) => (entry.parts ?? []).map((part) => part.text))
+        .filter((text) => text === 'reply 1'),
+    ).toHaveLength(1);
+  });
+
+  it('ships a supported image once when the captured tail kept it', async () => {
+    const image = { inlineData: { mimeType: 'image/png', data: 'AAAA' } };
+    vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValueOnce({
+      image: true,
+    });
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        { role: 'user', parts: [{ text: 'turn 0' }] },
+        { role: 'model', parts: [{ text: 'reply 0' }] },
+        { role: 'user', parts: [image] },
+        { role: 'model', parts: [{ text: 'reply 1' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      { role: 'user', parts: [image] },
+      { role: 'model', parts: [{ text: 'reply 1' }] },
+    ]);
+    const parts = (forkedCall()?.extraHistory ?? []).flatMap(
+      (entry) => entry.parts ?? [],
+    );
+    expect(parts.filter((part) => part.inlineData)).toHaveLength(1);
   });
 
   it('forwards parked turns when the tail only shares their first entry', async () => {

@@ -28,6 +28,7 @@ import {
   type ScannedAutoMemoryDocument,
 } from './structured-scan.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
 import {
@@ -302,23 +303,21 @@ function touchedTopicsFromFilePaths(
  * #13004: the parked skipped slice and the captured tail both come from the
  * same live history, and the tail usually still holds the slice — the skip
  * window (≤ half the tail) makes that the common case, not the exception.
- * Concatenating both then forks those turns twice. Coverage cannot come from
- * raw offsets (the tail is curated and payload-slimmed), so it is proved by
- * value:
+ * Concatenating both then forks those turns twice. The slice is raw while the
+ * tail is curated and slimmed, so coverage cannot come from raw offsets or
+ * whole-entry equality. The caller slims the slice exactly as the capture
+ * does, and coverage is proved over each side's flattened part sequence —
+ * curation merges adjacent user entries but never rewrites their parts:
  *
- * - The tail may begin inside the slice: its first entry is then one of the
- *   slice's own entries, and the LAST slice entry equal to it starts the
- *   overlap; drop that entry and everything after it. The last match, never
- *   an earlier one: repeated content would otherwise cut turns the tail never
- *   held.
  * - The tail may begin before the slice (the close-flush shape, where the
  *   tail is the whole short history): the whole slice then appears as one
- *   contiguous run inside the tail, so drop it entirely. Whole-slice
- *   contiguity, not a single-entry match: one matching value cannot tell
- *   "fully covered" from "the same value repeated later".
+ *   contiguous run inside the tail, so drop it entirely.
+ * - The tail may begin inside the slice: a suffix of the slice, starting at
+ *   one of its entries, is then the tail's prefix; the whole overlap must
+ *   match, so a single repeated value cannot cut turns the tail never held.
  *
- * When curation or slimming rewrote an entry so neither proof holds, the
- * slice passes through whole — the pre-existing duplicate, never a loss.
+ * When neither proof holds (curation dropped an invalid model turn inside the
+ * slice), the slice passes through whole — a duplicate, never a loss.
  */
 function uncoveredParkedPrefix(
   skippedHistory: Content[],
@@ -327,9 +326,10 @@ function uncoveredParkedPrefix(
   if (skippedHistory.length === 0 || capturedTail.length === 0) {
     return skippedHistory;
   }
-  // Texts, tool names and tool arguments survive the capture's shallow copy
-  // unchanged; a part with none of them (media) has no stable key, so its
-  // entry never matches and fails safe toward a duplicate. Arguments keep the
+  // Texts, tool names, tool arguments and media payloads survive the
+  // capture's shallow copy unchanged. A part with none of them has no stable
+  // key and blocks every
+  // proof it falls in, failing safe toward a duplicate. Arguments keep the
   // key injective: two `read_file` calls on different paths are not the same
   // turn.
   const partKey = (part: NonNullable<Content['parts']>[number]): string => {
@@ -344,54 +344,44 @@ function uncoveredParkedPrefix(
         part.functionResponse.id ?? ''
       }`;
     }
+    if (part.inlineData) {
+      return `media:${part.inlineData.mimeType ?? ''}:${part.inlineData.data ?? ''}`;
+    }
+    if (part.fileData) {
+      return `file:${part.fileData.mimeType ?? ''}:${part.fileData.fileUri ?? ''}`;
+    }
     return '';
   };
-  // `null` marks an entry that cannot be compared: it never proves coverage.
-  const keysOf = (entry: Content): string[] | null => {
-    const keys = (entry.parts ?? []).map(partKey);
-    if (keys.length === 0 || keys.some((key) => key === '')) return null;
-    return [`role:${entry.role ?? ''}`, ...keys];
+  const flatten = (entries: Content[]) => {
+    const keys: string[] = [];
+    const entryStarts: number[] = [];
+    for (const entry of entries) {
+      entryStarts.push(keys.length);
+      for (const part of entry.parts ?? []) {
+        const key = partKey(part);
+        keys.push(key === '' ? '' : `${entry.role ?? ''}|${key}`);
+      }
+    }
+    return { keys, entryStarts };
   };
-  const sliceKeys = skippedHistory.map(keysOf);
-  const tailKeys = capturedTail.map(keysOf);
-  const runMatches = (
-    sliceStart: number,
-    tailStart: number,
-    count: number,
-  ): boolean => {
+  const slice = flatten(skippedHistory);
+  const tail = flatten(capturedTail).keys;
+  const runMatches = (from: number, tailStart: number, count: number) => {
     for (let k = 0; k < count; k++) {
-      const left = sliceKeys[sliceStart + k];
-      const right = tailKeys[tailStart + k];
-      if (
-        left === null ||
-        right === null ||
-        left === undefined ||
-        right === undefined ||
-        left.length !== right.length
-      ) {
-        return false;
-      }
-      for (let p = 0; p < left.length; p++) {
-        if (left[p] !== right[p]) return false;
-      }
+      const key = slice.keys[from + k];
+      if (key === '' || key !== tail[tailStart + k]) return false;
     }
     return true;
   };
 
-  // The tail may hold the slice whole (the close-flush shape, where the tail
-  // is the whole short history): drop it.
-  for (
-    let start = 0;
-    start + skippedHistory.length <= capturedTail.length;
-    start++
-  ) {
-    if (runMatches(0, start, skippedHistory.length)) return [];
+  const count = slice.keys.length;
+  for (let start = 0; count > 0 && start + count <= tail.length; start++) {
+    if (runMatches(0, start, count)) return [];
   }
-  // Or the tail may begin inside the slice: the slice's suffix is then the
-  // tail's prefix. Require the whole overlap to match, and take the longest
-  // one, so repeated content cannot cut turns the tail never held.
   for (let i = skippedHistory.length - 1; i >= 1; i--) {
-    if (runMatches(i, 0, skippedHistory.length - i)) {
+    const from = slice.entryStarts[i];
+    const overlap = count - from;
+    if (overlap > 0 && overlap <= tail.length && runMatches(from, 0, overlap)) {
       return skippedHistory.slice(0, i);
     }
   }
@@ -412,8 +402,15 @@ export async function runAutoMemoryExtractionByAgent(
         'extraction must run after a completed main turn.',
     );
   }
+  // Render the parked slice as the capture rendered the tail: the same
+  // placeholders keep stripped media from shipping again, and let media
+  // entries prove coverage.
+  const parked = slimCompactionInput(
+    skippedHistory,
+    config.getEffectiveInputModalities(),
+  ).slimmedHistory;
   const extraHistory = buildAgentHistory([
-    ...uncoveredParkedPrefix(skippedHistory, cacheSafe.history),
+    ...uncoveredParkedPrefix(parked, cacheSafe.history),
     ...cacheSafe.history,
   ]);
 
