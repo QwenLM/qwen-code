@@ -19,11 +19,13 @@ const repo = path.dirname(path.dirname(script));
 // subprocess probes run about twice as slowly there: in release run
 // 39621619809 the node worker passed at 294 s and the bun worker was
 // SIGTERM'd by the old 300 s per-worker cap at 301 s; the old 600 s outer
-// cap was never reached. The spawn allows both sequential workers plus setup.
-// Keep headroom inside quality_scripts' 30-minute job budget for its other
-// phases; release-workflow.test.js checks the declared budget's upper bound.
+// cap was never reached. The spawn allows both sequential workers, and each
+// process's setup shares one small cap so a slow download, tar or probe fails
+// on its own budget instead of consuming a worker's share of the outer cap.
+// release-workflow.test.js checks the closed budget against the job's total.
+const SETUP_TIMEOUT_MS = 60_000;
 const WORKER_TIMEOUT_MS = 540_000;
-const CI_TIMEOUT_MS = 2 * WORKER_TIMEOUT_MS + 60_000;
+const CI_TIMEOUT_MS = 2 * WORKER_TIMEOUT_MS + SETUP_TIMEOUT_MS;
 const sha = (file) =>
   createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const run = (bin, args, options = {}) => {
@@ -953,8 +955,12 @@ async function ci() {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), 'standalone-runtime-tools-'),
   );
+  const setupDeadline = Date.now() + SETUP_TIMEOUT_MS;
+  const remainingSetupMs = () => Math.max(1, setupDeadline - Date.now());
   const download = async (url) => {
-    const response = await fetch(url, { signal: AbortSignal.timeout(300_000) });
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(remainingSetupMs()),
+    });
     assert.equal(response.status, 200, `runtime download: ${url}`);
     return Buffer.from(await response.arrayBuffer());
   };
@@ -984,7 +990,9 @@ async function ci() {
       assert.equal(createHash('sha256').update(bytes).digest('hex'), expected);
       const archive = path.join(root, 'node.tgz');
       fs.writeFileSync(archive, bytes);
-      run('tar', ['-xzf', archive, '-C', root]);
+      run('tar', ['-xzf', archive, '-C', root], {
+        timeout: remainingSetupMs(),
+      });
       node = path.join(root, filename.slice(0, -7), 'bin/node');
     }
     if (!bun) {
@@ -1009,7 +1017,9 @@ async function ci() {
       fs.mkdirSync(dir);
       const archive = path.join(root, 'bun.tgz');
       fs.writeFileSync(archive, bytes);
-      run('tar', ['-xzf', archive, '-C', dir]);
+      run('tar', ['-xzf', archive, '-C', dir], {
+        timeout: remainingSetupMs(),
+      });
       bun = path.join(dir, 'package/bin/bun');
     }
     const result = spawnSync(node, [script], {
@@ -1035,13 +1045,24 @@ if (process.argv[2] === '--ci') {
     'win32',
     'This POSIX tar fixture does not cover Windows updates',
   );
-  const node = run(process.env.PINNED_NODE || process.execPath, [
-    '-p',
-    'process.execPath',
-  ]);
-  const bun = run(process.env.PINNED_BUN || 'bun', ['-p', 'process.execPath']);
-  assert.equal(run(node, ['--version']), 'v24.19.0');
-  assert.equal(run(bun, ['--version']), '1.3.14');
+  const setupDeadline = Date.now() + SETUP_TIMEOUT_MS;
+  const remainingSetupMs = () => Math.max(1, setupDeadline - Date.now());
+  const node = run(
+    process.env.PINNED_NODE || process.execPath,
+    ['-p', 'process.execPath'],
+    { timeout: remainingSetupMs() },
+  );
+  const bun = run(process.env.PINNED_BUN || 'bun', ['-p', 'process.execPath'], {
+    timeout: remainingSetupMs(),
+  });
+  assert.equal(
+    run(node, ['--version'], { timeout: remainingSetupMs() }),
+    'v24.19.0',
+  );
+  assert.equal(
+    run(bun, ['--version'], { timeout: remainingSetupMs() }),
+    '1.3.14',
+  );
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), 'standalone-runtime-test-'),
   );
@@ -1051,21 +1072,25 @@ if (process.argv[2] === '--ci') {
       config,
       '[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=localhost\n[ext]\nsubjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:TRUE\n',
     );
-    run('openssl', [
-      'req',
-      '-x509',
-      '-newkey',
-      'rsa:2048',
-      '-nodes',
-      '-days',
-      '1',
-      '-config',
-      config,
-      '-keyout',
-      path.join(root, 'key.pem'),
-      '-out',
-      path.join(root, 'cert.pem'),
-    ]);
+    run(
+      'openssl',
+      [
+        'req',
+        '-x509',
+        '-newkey',
+        'rsa:2048',
+        '-nodes',
+        '-days',
+        '1',
+        '-config',
+        config,
+        '-keyout',
+        path.join(root, 'key.pem'),
+        '-out',
+        path.join(root, 'cert.pem'),
+      ],
+      { timeout: remainingSetupMs() },
+    );
     const env = {
       ...process.env,
       NODE_EXTRA_CA_CERTS: path.join(root, 'cert.pem'),

@@ -3034,32 +3034,52 @@ exit 0`,
   it('keeps the standalone runtime spawn inside the quality_scripts budget', () => {
     const source = readFileSync('scripts/test-standalone-runtimes.mjs', 'utf8');
     const worker = /^const WORKER_TIMEOUT_MS = ([\d_]+);$/m.exec(source);
+    const setup = /^const SETUP_TIMEOUT_MS = ([\d_]+);$/m.exec(source);
     const derived =
-      /^const CI_TIMEOUT_MS = 2 \* WORKER_TIMEOUT_MS \+ ([\d_]+);$/m.exec(
+      /^const CI_TIMEOUT_MS = 2 \* WORKER_TIMEOUT_MS \+ SETUP_TIMEOUT_MS;$/m.exec(
         source,
       );
     expect(
       worker,
       'WORKER_TIMEOUT_MS must stay a plain constant',
     ).not.toBeNull();
+    expect(setup, 'SETUP_TIMEOUT_MS must stay a plain constant').not.toBeNull();
     expect(
       derived,
-      'CI_TIMEOUT_MS must derive from WORKER_TIMEOUT_MS',
+      'CI_TIMEOUT_MS must derive from the worker and setup caps',
     ).not.toBeNull();
-    // Pin the wiring, not just the declarations: these two constants exist to
-    // bound exactly two spawnSync options.
+    // Pin the wiring, not just the declarations: these constants exist to
+    // bound exactly two spawnSync options, and every setup phase must spend
+    // the shared setup budget instead of inheriting the 300 s run() default.
     expect(source.match(/timeout: WORKER_TIMEOUT_MS,/g)).toHaveLength(1);
     expect(source.match(/timeout: CI_TIMEOUT_MS,/g)).toHaveLength(1);
+    // Two tar extractions in the parent and five probes in the child; the
+    // four downloads spend the same budget through the fetch signal.
+    expect(source.match(/timeout: remainingSetupMs\(\)/g)).toHaveLength(7);
+    expect(
+      source.match(/AbortSignal\.timeout\(remainingSetupMs\(\)\)/g),
+    ).toHaveLength(1);
+    // spawnSync treats timeout 0 as "no timeout", so a spent setup budget
+    // must fail the next phase at 1 ms rather than disarm its cap.
+    expect(
+      source.match(/Math\.max\(1, setupDeadline - Date\.now\(\)\)/g),
+    ).toHaveLength(2);
     const workerMs = Number(worker[1].replaceAll('_', ''));
-    const spawnMs = 2 * workerMs + Number(derived[1].replaceAll('_', ''));
-    // The child runs four run() probes and an openssl rsa:2048 keygen before
-    // the first worker, all inside the outer cap but outside either worker's.
-    // A near-zero margin would let the outer cap fire first and lose the
-    // host-naming diagnostic.
+    const setupMs = Number(setup[1].replaceAll('_', ''));
+    const spawnMs = 2 * workerMs + setupMs;
+    // The child spends the same setup budget on its five pre-worker probes
+    // and keygen, so the outer cap must cover setup before either worker
+    // starts. A near-zero margin would let the outer cap fire first and lose
+    // the host-naming diagnostic.
     expect(
       spawnMs - 2 * workerMs,
       'outer cap must leave room for pre-worker probes and keygen',
     ).toBeGreaterThanOrEqual(60_000);
+    // That margin only matters while a worker killed at its cap still names
+    // the host: ci()'s own asserts carry no message, so pin the diagnostic.
+    expect(source).toMatch(
+      /console\.log\(\s*JSON\.stringify\(\{\s*host,\s*actualExitCode:/,
+    );
     // package.json is the only link that places this spawn inside the
     // quality_scripts job, and the budget counts vitest as running after it.
     const rootScripts = JSON.parse(
@@ -3068,10 +3088,17 @@ exit 0`,
     expect(rootScripts['test:scripts']).toMatch(
       /^npm run test:standalone:runtimes:ci && vitest run /,
     );
-    // Reserve an estimated 600 s for phases outside the spawn. This checks
-    // the declared upper budget, not a minimum cap or live execution time.
+    expect(rootScripts['test:standalone:runtimes:ci']).toBe(
+      'node scripts/test-standalone-runtimes.mjs --ci',
+    );
+    // Reserve the slow-pool measurements outside the spawn: ~295 s of job
+    // setup and the ~288 s scripts suite, rounded up to 600 s.
     const aroundTheSpawnSeconds = 600;
-    expect(spawnMs / 1000 + aroundTheSpawnSeconds).toBeLessThanOrEqual(
+    // Parent setup and the child spawn are separate caps; both plus the
+    // reserve must fit the job's declared 30-minute budget.
+    expect(
+      setupMs / 1000 + spawnMs / 1000 + aroundTheSpawnSeconds,
+    ).toBeLessThanOrEqual(
       releaseYaml.jobs.quality_scripts['timeout-minutes'] * 60,
     );
   });
