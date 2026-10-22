@@ -26,7 +26,6 @@ import static org.assertj.core.api.Assertions.assertThat;
  * </pre>
  */
 class ManagedSurfaceCaptureTest {
-
     private static final String CAPTURE_PROPERTY =
             "capability.parity.capture";
 

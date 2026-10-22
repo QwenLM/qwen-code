@@ -84,9 +84,11 @@ registry change fails on both sides.
   is mounted with no legacy tag and no exclusion appears in the column, which
   is the signal #15075 asked for. The remaining labels are pinned in
   `MANAGED_ONLY_REPORTED`, so an addition fails the suite until someone
-  records it. The column currently reports `SESSION_CONTEXT_COMPRESSION`: the
-  Managed path serves a Session context-compression route on both the public
-  and the WebShell surface, and the daemon advertises no compression tag.
+  records it. The column currently reports three labels, each a public and a
+  WebShell route pair: `SESSION_CONTEXT_COMPRESSION` compresses a Session's
+  context, `SESSION_RECOVERY_QUERY` reads its recovery state, and
+  `SESSION_RECOVERY_RECHECK` re-runs its recovery checks. The daemon
+  advertises no tag for any of the three.
 
 ## Acceptance
 
@@ -99,3 +101,5 @@ registry change fails on both sides.
 - Change a Managed evidence target: the TypeScript test fails and names the
   token.
 - Change `SurfaceRegistry` without re-capturing: the Java test fails.
+- The module's Checkstyle gate stays green:
+  `mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle`.

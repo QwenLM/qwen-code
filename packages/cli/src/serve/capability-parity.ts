@@ -272,16 +272,24 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     evidence: 'surface:TURN_GET',
   },
   mcp_guardrails: NO_MANAGED_EQUIVALENT('no Managed MCP client budget'),
-  workspace_mcp_manage: NO_MANAGED_EQUIVALENT(
-    'issue #14503: no Managed MCP server management route',
-  ),
+  // Managed manages a Session's MCP servers through the Harness, revision
+  // checked and idempotent (add, edit, remove, enable, disable, reload,
+  // restart). Two differences: the daemon's routes mutate workspace-level
+  // configuration, and Managed answers `supported: false` unless the Harness
+  // advertises `session-mcp-management/1`. The routes are mounted either way,
+  // so the row claims the surface and records both limits here.
+  workspace_mcp_manage: {
+    standing: 'managed',
+    evidence: 'surface:MCP_MANAGEMENT',
+  },
   mcp_guardrail_events: NO_MANAGED_EQUIVALENT('no Managed MCP client budget'),
   external_tool_guard: NO_MANAGED_EQUIVALENT(
     'no external per-tool policy provider on the Managed execution boundary',
   ),
-  mcp_server_runtime_mutation: NO_MANAGED_EQUIVALENT(
-    'issue #14503: no Managed MCP server management route',
-  ),
+  mcp_server_runtime_mutation: {
+    standing: 'managed',
+    evidence: 'surface:MCP_MANAGEMENT',
+  },
   workspace_file_read: {
     standing: 'managed',
     evidence: 'route:/api/agent/web-shell/v1/workspaces/files',
@@ -352,9 +360,10 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_git_worktrees: NO_MANAGED_EQUIVALENT(
     'no Managed worktree management route',
   ),
-  workspace_mcp_restart: NO_MANAGED_EQUIVALENT(
-    'issue #14503: no Managed MCP server management route',
-  ),
+  workspace_mcp_restart: {
+    standing: 'managed',
+    evidence: 'surface:MCP_MANAGEMENT',
+  },
   session_recap: NO_MANAGED_EQUIVALENT('no Managed recap route'),
   session_generation: NO_MANAGED_EQUIVALENT(
     'no Managed stateless generation route',
@@ -597,12 +606,16 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
  * column checked — a route added or removed without a decision fails the
  * suite — while the signal stays visible to whoever reads the matrix.
  *
- * `SESSION_CONTEXT_COMPRESSION` is a Session's context-compression route on
- * both the public and the WebShell surface; the daemon advertises no
- * compression tag.
+ * Each label is a route pair on the public and the WebShell surface:
+ * `SESSION_CONTEXT_COMPRESSION` compresses a Session's context,
+ * `SESSION_RECOVERY_QUERY` reads a Session's recovery state and
+ * `SESSION_RECOVERY_RECHECK` re-runs its recovery checks. The daemon
+ * advertises no tag for any of the three.
  */
 export const MANAGED_ONLY_REPORTED: readonly string[] = [
   'SESSION_CONTEXT_COMPRESSION',
+  'SESSION_RECOVERY_QUERY',
+  'SESSION_RECOVERY_RECHECK',
 ];
 
 /**

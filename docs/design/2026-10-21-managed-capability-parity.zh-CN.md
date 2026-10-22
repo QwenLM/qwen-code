@@ -55,7 +55,7 @@ TypeScript 测试也会解析 `SurfaceRegistry.java`，副本与枚举不一致�
 
 - 矩阵不判断某条路径是否应复制另一条路径。
 - internal writer 路由不在 OpenAPI 文档中。只有注册表列出它们。
-- `managed only` 列由推导得出：列出副本中没有任何 `managed` 行引用的路由标签。排除集合记录某个标签为何不算缺口，且其中每一项都必须指向副本真实记录的标签。新挂载且没有旧标签、也没有排除理由的路由会出现在该列，这正是 #15075 要求的信号。剩余标签由 `MANAGED_ONLY_REPORTED` 固定，因此新增项会使测试失败，直到有人记录其记账方式。该列目前报告 `SESSION_CONTEXT_COMPRESSION`：Managed 路径在 public 与 WebShell 两个 surface 上提供会话上下文压缩路由，而守护进程没有压缩标签。
+- `managed only` 列由推导得出：列出副本中没有任何 `managed` 行引用的路由标签。排除集合记录某个标签为何不算缺口，且其中每一项都必须指向副本真实记录的标签。新挂载且没有旧标签、也没有排除理由的路由会出现在该列，这正是 #15075 要求的信号。剩余标签由 `MANAGED_ONLY_REPORTED` 固定，因此新增项会使测试失败，直到有人记录其记账方式。该列目前报告三个标签，每个都对应 public 与 WebShell 一对路由：`SESSION_CONTEXT_COMPRESSION` 压缩会话上下文，`SESSION_RECOVERY_QUERY` 读取会话恢复状态，`SESSION_RECOVERY_RECHECK` 重跑会话恢复检查。守护进程对这三者都没有标签。
 
 ## 验收
 
@@ -64,3 +64,5 @@ TypeScript 测试也会解析 `SurfaceRegistry.java`，副本与枚举不一致�
 - 向 `SERVE_CAPABILITY_REGISTRY` 新增标签但不加行：TypeScript 测试编译失败。
 - 改动某 Managed 依据指向：TypeScript 测试失败并指出该标记。
 - 改动 `SurfaceRegistry` 但不重新生成：Java 测试失败。
+- 模块的 Checkstyle 门禁保持通过：
+  `mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle`。

@@ -16,7 +16,6 @@ import java.util.TreeMap;
  * which rewrites {@code src/test/resources/capability-parity/managed-surface.txt}.
  */
 final class ManagedSurfaceCapture {
-
     static final String FILE =
             "src/test/resources/capability-parity/managed-surface.txt";
 
