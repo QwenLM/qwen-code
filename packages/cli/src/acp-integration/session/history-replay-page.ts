@@ -210,7 +210,7 @@ export function blankReplayedMcpAppHtml(
   ) {
     return undefined;
   }
-  return {
+  const blanked = {
     ...record,
     rawOutput: {
       ...rawOutput,
@@ -219,7 +219,18 @@ export function blankReplayedMcpAppHtml(
         rawOutput['fallbackText'] ||
         'MCP App HTML omitted because the restored page exceeds its size limit.',
     },
-  } as unknown as SessionUpdate;
+  };
+  // A document shorter than the placeholder standing in for it cannot
+  // reclaim anything: substituting it would make the frame larger, and the
+  // reclaim loops apply that signed delta to their running total. Report no
+  // App html to lose instead, so callers leave such a frame alone.
+  if (
+    Buffer.byteLength(JSON.stringify(blanked), 'utf8') >=
+    Buffer.byteLength(JSON.stringify(record), 'utf8')
+  ) {
+    return undefined;
+  }
+  return blanked as unknown as SessionUpdate;
 }
 
 /**
