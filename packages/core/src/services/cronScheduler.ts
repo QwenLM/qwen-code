@@ -1383,11 +1383,13 @@ export class CronScheduler {
 
   /**
    * Installs a listener called after a gate settles without delivering a
-   * fire: a quiet gate, a failure or block past the first of its streak, or
-   * a result dropped because the job is gone. Such a settlement reaches no
-   * consumer, so a headless run re-checks its hold-open from here — a
-   * one-shot or final fire whose gate stays quiet would otherwise pin the
-   * process with no work left. Replaces any previous listener; null removes.
+   * fire: a quiet gate, a failure or block past the first of its streak, a
+   * result dropped because the job is gone, or a gate cancelled by delete()
+   * or a disk reload (not by stop()). Such a settlement reaches no consumer,
+   * so a headless run re-checks its hold-open from here — a one-shot or
+   * final fire whose gate stays quiet, or a durable catch-up whose task is
+   * deleted mid-gate, would otherwise pin the process with no work left.
+   * Replaces any previous listener; null removes.
    */
   setGateSkippedListener(listener: (() => void) | null): void {
     this.gateSkippedListener = listener;
@@ -1452,10 +1454,16 @@ export class CronScheduler {
         }),
       )
       .then((result) => {
-        // Superseded (delete/stop/reload aborted it, or a restart replaced it).
-        if (this.gatesInFlight.get(job.id)?.controller !== ac) return;
-        this.gatesInFlight.delete(job.id);
-        if (ac.signal.aborted) return;
+        // Superseded (delete/stop/reload aborted it, or a restart replaced it):
+        // deliver nothing. A delete or reload may have cancelled the last
+        // running gate while nothing else is due, so the settlement is still
+        // reported; stop() has already dropped the consumer and needs none.
+        const current = this.gatesInFlight.get(job.id)?.controller === ac;
+        if (current) this.gatesInFlight.delete(job.id);
+        if (!current || ac.signal.aborted) {
+          if (this.onFire) this.gateSkippedListener?.();
+          return;
+        }
         // The consumer current now, not the one the fire started with: ACP
         // installs a fresh callback through start() after every turn while
         // the timer keeps running, and a gate mid-run must not lose its

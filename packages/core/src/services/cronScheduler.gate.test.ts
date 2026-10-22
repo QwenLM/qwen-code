@@ -219,22 +219,32 @@ describe('CronScheduler gate', () => {
   });
 
   it('delivers nothing when the job is deleted while its gate runs', async () => {
+    // The cancelled settlement still reaches the listener: the deleted job's
+    // gate may have been the last work a headless run was waiting on.
+    const skipped = vi.fn();
+    scheduler.setGateSkippedListener(skipped);
     const job = createGated();
     scheduler.tick(at(10, 30, 59));
     expect(script.calls[0]!.options.signal.aborted).toBe(false);
     await scheduler.delete(job.id);
     expect(script.calls[0]!.options.signal.aborted).toBe(true);
+    expect(scheduler.hasGatesInFlight()).toBe(false);
     await script.release(output('too late\n'));
     expect(fired).toHaveLength(0);
+    expect(skipped).toHaveBeenCalledTimes(1);
   });
 
   it('delivers nothing when the scheduler stops while a gate runs', async () => {
+    const skipped = vi.fn();
+    scheduler.setGateSkippedListener(skipped);
     createGated();
     scheduler.tick(at(10, 30, 59));
     scheduler.stop();
     expect(script.calls[0]!.options.signal.aborted).toBe(true);
     await script.release(output('too late\n'));
     expect(fired).toHaveLength(0);
+    // stop() is the end of the run, not a settlement to re-check after.
+    expect(skipped).not.toHaveBeenCalled();
   });
 
   it('delivers to the consumer a later start() installed while the gate ran', async () => {
@@ -358,14 +368,20 @@ describe('CronScheduler gate', () => {
         await scheduler.createDurable('* * * * *', 'p', true, './probe.sh');
         await scheduler.enableDurable('session-1');
         scheduler.start((j) => fired.push(j));
+        const skipped = vi.fn();
+        scheduler.setGateSkippedListener(skipped);
         scheduler.tick(at(10, 30, 59));
         const { signal } = script.calls[0]!.options;
         expect(signal.aborted).toBe(false);
         await updateCronTasks(tmpDir, edit);
         await reload();
         expect(signal.aborted).toBe(true);
+        expect(scheduler.hasGatesInFlight()).toBe(false);
         await script.release(output('too late\n'));
         expect(fired).toHaveLength(0);
+        // Nothing reaches a consumer, so a headless run waiting on this gate
+        // re-checks from the listener.
+        expect(skipped).toHaveBeenCalledTimes(1);
       },
     );
 

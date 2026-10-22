@@ -162,7 +162,7 @@ Tell the user, and suggest a fix if the cause is clear (for example expired
 1. 写入 `lastFiredAt`，像今天一样处理一次性任务和过期任务的移除，并给任务打上 `gateInFlight` 标记。标记存在期间再匹配到的时间槽返回 `none`。
 2. 异步运行闸门。结束后清除标记，记录结果，要么返回（`quiet`、被抑制的 `failed`/`blocked`），要么以拼好的任务调用 `onFire`。投递给的是闸门结束时安装的消费方，而不是闸门开始时的那个：ACP 在每个回合结束后都会在计时器仍在运行的情况下通过 `start()` 重新安装回调，这不能把正在运行的闸门丢掉。
 3. 闸门运行期间的删除、停用或移除会中止它，无论走哪条路：`delete()`、`stop()`，或者一次任务文件重载发现任务不在了、被停用了、或换了另一条闸门（其他会话和 daemon 的任务控制走的就是这些路径）。安全删除的"删除立即生效"覆盖的是正在运行的命令，而不只是它的结果。没有运行器的调度器（无法执行 shell 命令的 `Config`）把每个带闸门的触发都视为 `blocked`。
-4. 没有投递任何内容的结束会报告给一个监听器（`setGateSkippedListener`）。无头运行据此重新检查它的保持打开条件：一次性任务和到期的循环任务在闸门运行之前就离开了任务表，`sessionSize` 在闸门结束前继续把这次触发计在内，所以安静的最后一次闸门会结束运行而不是把进程钉住。保持打开条件还会等待仍在运行的闸门（`hasGatesInFlight`），持久任务的也算：持久任务本身不钉住无头运行，但 `start()` 冲刷出的 catch-up 在闸门决定之前就已戳记，此时停止会中止闸门并丢掉这个时间槽。
+4. 没有投递任何内容的结束会报告给一个监听器（`setGateSkippedListener`）。无头运行据此重新检查它的保持打开条件：一次性任务和到期的循环任务在闸门运行之前就离开了任务表，`sessionSize` 在闸门结束前继续把这次触发计在内，所以安静的最后一次闸门会结束运行而不是把进程钉住。保持打开条件还会等待仍在运行的闸门（`hasGatesInFlight`），持久任务的也算：持久任务本身不钉住无头运行，但 `start()` 冲刷出的 catch-up 在闸门决定之前就已戳记，此时停止会中止闸门并丢掉这个时间槽。被 `delete()` 或磁盘重载取消的闸门不投递任何内容，但命令返回后仍会报告给监听器，因为它可能是这次运行等待的最后一项工作；被 `stop()` 取消的不报告，因为运行已经结束。
 
 错过任务的载体永远不运行闸门：它的提示词是一条通知，不是任务的命令。catch-up 触发、final 触发和 `forceFireJob` 都会运行闸门，所以 `QWEN_CODE_TEST_CRON_FAST` 集成钩子走的是同一条路径。带闸门的 catch-up 立即持久化它的 `lastFiredAt` 戳记，这样重启不会重放它；运行记录只在闸门投递时才记入，类型为 `catch-up`。
 
@@ -241,7 +241,7 @@ Tell the user, and suggest a fix if the cause is clear (for example expired
 - `cron-create.gate.test.ts`：`exec` 确认细节和 `Monitor(...)` 规则；分类器输入；裸 `cron_create` 规则在 default 模式和 auto 模式（它在那里绕过分类器）下都不覆盖闸门；持久创建携带闸门。`cron-list.test.ts`：闸门和状态行。
 - 闸门运行器（`cron-gate.test.ts`）：环境、cwd、超时、按字符边界截断的输出上限、二进制输出判为失败、净化、各审批模式下的 `monitor` 权限评估、拒绝规则在 yolo 和 auto 模式下阻止。
 - `use-llm-stream.test.tsx`：cron 触发永不路由到 shell 模式。
-- `nonInteractiveCli.test.ts`：带闸门任务的最后一次触发安静结束后，无头运行退出；持久的带闸门 catch-up 在闸门投递之前保持运行。
+- `nonInteractiveCli.test.ts`：带闸门任务的最后一次触发安静结束后，无头运行退出；持久的带闸门 catch-up 在闸门投递之前保持运行；闸门运行期间该 catch-up 的任务被删除或在磁盘上停用时，无头运行退出。
 - `scheduled-task-run.test.ts`、`scheduled-tasks.test.ts` 和 `ScheduledTasksDialog.test.tsx`：带闸门任务的手动运行要求模型先运行闸门，覆盖 `per_run` 任务（daemon 路由）和持久任务（Web Shell）；任务视图携带 `gate` 和 `gateStatus`。
 - Daemon（PR 1b）：REST 的接受、清除和能力；当前会话创建链路传递；Web Shell 字段和卡片行。
 

@@ -9024,6 +9024,112 @@ describe('runNonInteractive', () => {
     }
   });
 
+  it.each<[string, (scheduler: CronScheduler, root: string) => Promise<void>]>([
+    [
+      'deleted',
+      async (scheduler) => {
+        await scheduler.delete('cu1');
+      },
+    ],
+    [
+      'disabled on disk',
+      async (scheduler, root) => {
+        await updateCronTasks(root, (tasks) =>
+          tasks.map((t) => ({ ...t, enabled: false })),
+        );
+        // The reload the tasks-file watcher runs after its debounce.
+        await (
+          scheduler as unknown as {
+            loadFileTasks(handleMissed: boolean): Promise<void>;
+          }
+        ).loadFileTasks(false);
+      },
+    ],
+  ])(
+    'exits when the durable catch-up it holds open for is %s mid-gate',
+    async (_what, cancel) => {
+      // The hold-open waits on the running gate; cancelling it leaves nothing
+      // to wait for, and its settlement delivers nothing, so the run must
+      // re-check from there instead of pinning with an idle scheduler.
+      setupMetricsMock();
+      const tmpDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'headless-gated-cancel-'),
+      );
+      Storage.setRuntimeBaseDir(tmpDir);
+      const createdAt = Date.now() - 3 * 60 * 60_000;
+      await updateCronTasks(tmpDir, () => [
+        withTaskGate(
+          {
+            id: 'cu1',
+            cron: '0 * * * *',
+            prompt: 'overdue',
+            recurring: true,
+            createdAt,
+            lastFiredAt: createdAt,
+          },
+          './probe.sh',
+        ),
+      ]);
+      let gateSignal: AbortSignal | undefined;
+      // Like the real runner: a cancelled command settles as failed.
+      const scheduler = new CronScheduler(tmpDir, undefined, {
+        runGate: (_gate, { signal }) =>
+          new Promise((resolve) => {
+            gateSignal = signal;
+            signal.addEventListener('abort', () =>
+              resolve({
+                kind: 'failed',
+                detail: 'was cancelled',
+                stderr: '',
+                durationMs: 1,
+              }),
+            );
+          }),
+      });
+      try {
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockLlmClient.sendMessageStream.mockImplementation(() =>
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'ok' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        );
+
+        let finished = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'test',
+          'p-cron-gate-cancel',
+        ).then(() => {
+          finished = true;
+        });
+        await vi.waitFor(() => expect(gateSignal).toBeDefined());
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(finished).toBe(false);
+
+        await cancel(scheduler, tmpDir);
+        expect(gateSignal!.aborted).toBe(true);
+        await vi.waitFor(() => expect(finished).toBe(true), { timeout: 1000 });
+        await run;
+        expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(1);
+      } finally {
+        scheduler.destroy();
+        await (scheduler as unknown as { pendingRelease: Promise<unknown> })
+          .pendingRelease;
+        Storage.setRuntimeBaseDir(null);
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   describe('--json-schema structured output', () => {
     // Helper: walk an emitted event and extract the first tool_use_id when
     // it represents a tool_result block. Returns undefined for any other

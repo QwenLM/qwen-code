@@ -254,7 +254,10 @@ Sequence for a slot that matches:
    hold-open also waits for any gate still running (`hasGatesInFlight`),
    durable ones included: durable jobs do not pin a headless run, but a
    catch-up that `start()` flushes is stamped before its gate decides, so
-   stopping there would abort the gate and lose the slot.
+   stopping there would abort the gate and lose the slot. A gate cancelled
+   by `delete()` or a disk reload delivers nothing but is still reported
+   once its command returns, since it may have been the last thing the run
+   waited on; one cancelled by `stop()` is not, as the run is already over.
 
 Missed-task carriers never run a gate: their prompt is a notice, not the
 task's command. Catch-up fires, final fires and `forceFireJob` run it, so the
@@ -443,8 +446,9 @@ Unit tests:
   a deny rule blocking in yolo and auto mode.
 - `use-llm-stream.test.tsx`: cron fires are never routed to shell mode.
 - `nonInteractiveCli.test.ts`: a headless run exits once the final fire of a
-  gated job settles quietly, and holds open for a durable gated catch-up until
-  its gate delivers.
+  gated job settles quietly, holds open for a durable gated catch-up until
+  its gate delivers, and exits when that catch-up's task is deleted or
+  disabled on disk while its gate runs.
 - `scheduled-task-run.test.ts`, `scheduled-tasks.test.ts` and
   `ScheduledTasksDialog.test.tsx`: a manual run of a gated task asks the model
   to run the gate first, for `per_run` tasks (daemon route) and persistent
