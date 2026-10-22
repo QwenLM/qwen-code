@@ -1464,6 +1464,8 @@ it('keeps successful Managed Todo state through failed calls and clears it on su
   expect(getLatestSuccessfulTodos([first, failed, pending])).toEqual([
     expect.objectContaining({ id: 'a', status: 'pending' }),
   ]);
-  expect(getLatestSuccessfulTodos([first, todoWriteMessage('clear', [])])).toEqual([]);
+  expect(
+    getLatestSuccessfulTodos([first, todoWriteMessage('clear', [])]),
+  ).toEqual([]);
   expect(getLatestSuccessfulTodos([failed, pending])).toBeUndefined();
 });

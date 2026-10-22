@@ -40,7 +40,8 @@ export function parseTodoItemsFromEntries(
     const meta = getRecord(item?.['_meta']);
     const qwenTodo = getRecord(meta?.['qwenTodo']);
     const blockedBy =
-      getStringArray(qwenTodo, 'blockedBy') ?? getStringArray(item, 'blockedBy');
+      getStringArray(qwenTodo, 'blockedBy') ??
+      getStringArray(item, 'blockedBy');
     return [
       {
         id:

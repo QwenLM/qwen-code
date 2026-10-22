@@ -1959,7 +1959,9 @@ it('persists Todo without a Worker and restores the latest state after reopen', 
   expect(broker.acquire).not.toHaveBeenCalled();
   expect(broker.prepare).not.toHaveBeenCalled();
   expect(broker.execute).not.toHaveBeenCalled();
-  const latest = { todos: [{ id: 'a', content: 'first', status: 'completed' }] };
+  const latest = {
+    todos: [{ id: 'a', content: 'first', status: 'completed' }],
+  };
   await writeHostedTodos(session, 'prompt', 'next-call', latest);
   expect(await writeHostedTodos(session, 'prompt', call.callId, first)).toEqual(
     first.todos,
