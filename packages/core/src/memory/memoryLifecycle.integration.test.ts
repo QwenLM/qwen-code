@@ -222,6 +222,10 @@ describe('managed auto-memory lifecycle integration', () => {
   }
 
   afterEach(async () => {
+    // Let a trailing queued extraction settle before the temp dir is
+    // removed; otherwise its late writes race the removal and fail after
+    // teardown.
+    await mgr.drain();
     mgr.resetExtractStateForTests();
     if (originalMemoryBase === undefined) {
       delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
