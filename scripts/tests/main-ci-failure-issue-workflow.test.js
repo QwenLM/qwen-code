@@ -309,6 +309,7 @@ cat "\${RUNNER_TEMP}/pulls.json"
       overrides = {},
       ghScript,
       mainTip = 'tested-head',
+      newerRuns = '1',
     ) => {
       const tmp = mkdtempSync(join(tmpdir(), 'java-ci-live-'));
       try {
@@ -319,6 +320,8 @@ cat "\${RUNNER_TEMP}/pulls.json"
 printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/calls.log"
 if [[ "$*" == *commits/main* ]]; then
   printf '%s\\n' '${mainTip}'
+elif [[ "$*" == *actions/workflows/*/runs* ]]; then
+  printf '%s\\n' '${newerRuns}'
 else
   printf '%s\\n' "$@" > "\${RUNNER_TEMP}/lookup-args"
   printf '%s\\n' '${liveAttempt}'
@@ -327,6 +330,7 @@ fi
         );
         chmodSync(join(tmp, 'gh'), 0o755);
         const output = join(tmp, 'output');
+        const summary = join(tmp, 'summary');
         const result = spawnSync('bash', ['-eo', 'pipefail', '-c', live.run], {
           encoding: 'utf8',
           env: {
@@ -334,8 +338,10 @@ fi
             PATH: `${tmp}:${process.env.PATH}`,
             RUNNER_TEMP: tmp,
             GITHUB_OUTPUT: output,
+            GITHUB_STEP_SUMMARY: summary,
             REPO: 'QwenLM/qwen-code',
             WORKFLOW_RUN_ID: '39237270547',
+            WORKFLOW_ID: '12345',
             RUN_ATTEMPT: '1',
             EVENT_NAME: '',
             HEAD_BRANCH: '',
@@ -353,6 +359,7 @@ fi
           calls: existsSync(join(tmp, 'calls.log'))
             ? readFileSync(join(tmp, 'calls.log'), 'utf8')
             : '',
+          summary: existsSync(summary) ? readFileSync(summary, 'utf8') : '',
         };
       } finally {
         rmSync(tmp, { recursive: true, force: true });
@@ -363,9 +370,22 @@ fi
       // Measured on run 39237270547: attempt 1 failed on the host lock,
       // attempt 2 went green, and this job started hours later, read the green
       // attempt's empty failure list, and filed #14768 for the green head.
-      const resolved = detect('2');
+      // A moved tip must not add a second, contradictory suppression reason:
+      // this event is already stale whatever main's head is.
+      const resolved = detect(
+        '2',
+        {
+          EVENT_NAME: 'push',
+          HEAD_BRANCH: 'main',
+          HEAD_SHA: 'old-head',
+        },
+        undefined,
+        'new-head',
+      );
       expect(resolved.output).toBe('superseded=true\n');
       expect(resolved.stdout).toContain('::warning::');
+      expect(resolved.stdout).not.toContain('main is now');
+      expect(resolved.calls).not.toContain('commits/main');
       expect(resolved.args).toBe(
         'api\nrepos/QwenLM/qwen-code/actions/runs/39237270547\n--jq\n.run_attempt\n',
       );
@@ -376,6 +396,20 @@ fi
       );
       expect(live.env.RUN_ATTEMPT).toBe(
         '${{ github.event.workflow_run.run_attempt }}',
+      );
+      // The tip comparison reads the triggering run's event and head; the
+      // own-run spellings would compare this workflow's own commit.
+      expect(live.env.EVENT_NAME).toBe(
+        '${{ github.event.workflow_run.event }}',
+      );
+      expect(live.env.HEAD_BRANCH).toBe(
+        '${{ github.event.workflow_run.head_branch }}',
+      );
+      expect(live.env.HEAD_SHA).toBe(
+        '${{ github.event.workflow_run.head_sha }}',
+      );
+      expect(live.env.WORKFLOW_ID).toBe(
+        '${{ github.event.workflow_run.workflow_id }}',
       );
     });
     it('reports the attempt that is still the latest', () => {
@@ -405,6 +439,80 @@ fi
         'main is now 3d65e23cf62e00da033dccb8f60f9cfdd9c1b76e',
       );
       expect(resolved.calls).toContain('commits/main');
+      // A dropped report files no issue and fails no job; the run page is
+      // the only place a maintainer can see why the report is missing.
+      expect(resolved.summary).toContain(
+        'Superseded main-CI failure: run 39237270547 tested 06e59666dfaaaa0aaf78af45bc48b0405a8e7d44',
+      );
+      expect(resolved.summary).toContain(
+        'main is now 3d65e23cf62e00da033dccb8f60f9cfdd9c1b76e',
+      );
+    });
+    it('fails open when main moved but its workflow has no run there', () => {
+      // A path-filtered push arm (SDK Python) and a skipped tier leave no run
+      // of the same workflow at the new tip. Suppressing then would drop the
+      // only report of a real regression, so the successor must exist.
+      const resolved = detect(
+        '1',
+        {
+          EVENT_NAME: 'push',
+          HEAD_BRANCH: 'main',
+          HEAD_SHA: 'old-head',
+        },
+        undefined,
+        'new-head',
+        '0',
+      );
+      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.stdout).toContain('no newer push run');
+      expect(resolved.calls).toContain(
+        'actions/workflows/12345/runs?event=push&branch=main&head_sha=new-head&per_page=1',
+      );
+    });
+    it('fails open when the newer-run lookup cannot be read', () => {
+      const gh = `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/calls.log"
+if [[ "$*" == *commits/main* ]]; then
+  printf '%s\\n' 'new-head'
+elif [[ "$*" == *actions/workflows/*/runs* ]]; then
+  printf '%s' '{"message":"Bad credentials"}'
+  exit 1
+else
+  printf '%s\\n' "$@" > "\${RUNNER_TEMP}/lookup-args"
+  printf '%s\\n' '1'
+fi
+`;
+      const resolved = detect(
+        '1',
+        {
+          EVENT_NAME: 'push',
+          HEAD_BRANCH: 'main',
+          HEAD_SHA: 'old-head',
+        },
+        gh,
+      );
+      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.stdout).toContain(
+        'Could not list the newer runs of workflow 12345',
+      );
+    });
+    it('reports a recovery attempt even when main has advanced', () => {
+      // An infrastructure-only attempt 1 dispatches a rerun and files
+      // nothing; attempt 2 is that chain's only filing opportunity, and main
+      // can move while the rerun queues.
+      const resolved = detect(
+        '2',
+        {
+          RUN_ATTEMPT: '2',
+          EVENT_NAME: 'push',
+          HEAD_BRANCH: 'main',
+          HEAD_SHA: 'old-head',
+        },
+        undefined,
+        'new-head',
+      );
+      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.calls).not.toContain('commits/main');
     });
     it('reports a push run while its head is still the tip of main', () => {
       const resolved = detect(
