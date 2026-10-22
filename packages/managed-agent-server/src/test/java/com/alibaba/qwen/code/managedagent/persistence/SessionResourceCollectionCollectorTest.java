@@ -333,7 +333,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     }
 
     @Test
-    void activeReaderLeaseHoldsThenCollects() {
+    void activeReaderLeaseWaitsForItsOwnExpiryThenCollects() {
         initSession();
         head(session);
         publish("segment", CONTENT, new byte[64]);
@@ -343,9 +343,9 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThat(collector.runOnce()).isFalse();
         var blocked = ledger();
         assertThat(blocked.get("gc_blocker")).isEqualTo("reader_active");
-        long nowMillis = System.currentTimeMillis();
-        assertThat(((Number) blocked.get("gc_next_at")).longValue())
-                .isBetween(nowMillis + 50_000, nowMillis + 70_000);
+        long expiry = jdbc.queryForObject("SELECT expires_at FROM ma_read_lease WHERE tenant_key = ?",
+                Long.class, ToolPublicationRetentionStore.hash(tenant));
+        assertThat(((Number) blocked.get("gc_next_at")).longValue()).isEqualTo(expiry);
         assertThat(rows().getFirst().get("inline_bytes")).isNotNull();
         lease.close();
         jdbc.update("UPDATE ma_operation SET available_at = 0"

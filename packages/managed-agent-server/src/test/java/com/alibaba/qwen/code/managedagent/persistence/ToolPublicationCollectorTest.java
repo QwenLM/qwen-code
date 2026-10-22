@@ -311,19 +311,19 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
     }
 
     @Test
-    void activeReaderKeepsMinuteRetryAndCollectsAfterItsLeaseCloses() {
+    void activeReaderWaitsForItsOwnExpiryAndCollectsAfterTheLeaseCloses() {
         addObject("one", "reader/exact-key", null);
         var objects = new DeletingObjects();
         var gc = collector(objects);
         try (var lease = retention.read(key)) {
             lease.check();
             retire();
-            long before = ToolPublicationRetentionStore.now(jdbc);
             assertThat(gc.runOnce()).isFalse();
-            long after = ToolPublicationRetentionStore.now(jdbc);
             assertThat(blocker()).isEqualTo("reader_active");
+            long expiry = jdbc.queryForObject("SELECT expires_at FROM ma_read_lease WHERE tenant_key = ?",
+                    Long.class, ToolPublicationRetentionStore.hash(tenant));
             assertThat(jdbc.queryForObject("SELECT available_at FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?",
-                    Long.class, scope)).isBetween(before + 60000, after + 60000);
+                    Long.class, scope)).isEqualTo(expiry);
             assertThat(held()).isEqualTo(3000);
             assertThat(objects.deleted).isEmpty();
         }
@@ -332,6 +332,61 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         assertThat(state()).isEqualTo("COLLECTED");
         assertThat(held()).isZero();
         assertThat(objects.deleted).containsExactly("reader/exact-key");
+    }
+
+    @Test
+    void resourceHandoffRetriesWithinSecondsUntilTheSessionLedgerSettles() {
+        addObject("one", "handoff/exact-key", null);
+        String resourceScope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+                + " owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id,"
+                + " journal_revision, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, ?, 'workspace-1', ?,"
+                + " 'one', 1, " + ManagedSchemaTime.SQL_NOW + ")",
+                resourceScope, resourceScope, ManagedSchemaKeys.key(resourceScope, "one"), tenant,
+                session);
+        retire();
+        seedCaptureGc(scope, "pub-1", session);
+        jdbc.update("UPDATE ma_operation SET available_at = 1 WHERE operation_kind ="
+                + " 'CAPTURE_GC' AND scope_key = ?", scope);
+        var gc = collector(new DeletingObjects());
+        long before = ToolPublicationRetentionStore.now(jdbc);
+        assertThat(gc.runOnce()).isFalse();
+        long after = ToolPublicationRetentionStore.now(jdbc);
+        assertThat(blocker()).isEqualTo("resource_referenced");
+        assertThat(jdbc.queryForObject("SELECT available_at FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?",
+                Long.class, scope)).isBetween(before, after + 5_000);
+        jdbc.update("UPDATE ma_session SET resource_gc_completed = TRUE WHERE tenant_id = ? AND session_id = ?",
+                tenant, session);
+        retryNow();
+        assertThat(gc.runOnce()).isFalse();
+        assertThat(blocker()).isEqualTo("resource_referenced");
+        assertThat(jdbc.queryForObject("SELECT available_at FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?",
+                Long.class, scope)).isBetween(after + 59_000, after + 61_000);
+    }
+
+    @Test
+    void blockerTransitionLogsOncePerChange() {
+        addObject("one", "reader/exact-key", null);
+        var gc = collector(new DeletingObjects());
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                .getLogger(ToolPublicationCollector.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        try (var lease = retention.read(key)) {
+            retire();
+            assertThat(gc.runOnce()).isFalse();
+            assertThat(blocker()).isEqualTo("reader_active");
+            assertThat(appender.list).singleElement().satisfies(event -> assertThat(
+                    event.getFormattedMessage()).contains("blocker=reader_active"));
+            retryNow();
+            assertThat(gc.runOnce()).isFalse();
+            assertThat(blocker()).isEqualTo("reader_active");
+            assertThat(appender.list).hasSize(1);
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
     }
 
     @Test
