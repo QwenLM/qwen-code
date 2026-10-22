@@ -5,6 +5,7 @@
 import { spawn } from 'node:child_process';
 import {
   closeSync,
+  existsSync,
   fsyncSync,
   openSync,
   readFileSync,
@@ -43,6 +44,8 @@ function record(event, fields = {}) {
 const solo =
   signalMode === 'hook-solo' ||
   signalMode === 'hook-deny' ||
+  signalMode === 'hook-release' ||
+  signalMode === 'hook-suppress' ||
   signalMode === 'hook-fail';
 
 if (mode === 'child') {
@@ -63,6 +66,13 @@ if (mode === 'child') {
     value.hook_event_name,
   );
   record('hook.call', { eventName: value.hook_event_name, input: value });
+  // FG13f: a MessageDisplay answer. The reply is suppressed, but its input
+  // still has to be observable so the cell can prove the Hook ran.
+  if (signalMode === 'hook-suppress') {
+    record('hook.suppress', { eventName: value.hook_event_name });
+    process.stdout.write(JSON.stringify({ suppressOutput: true }));
+    process.exit(0);
+  }
   let child;
   if (!solo && !lifecycle) {
     child = spawn(
@@ -78,7 +88,15 @@ if (mode === 'child') {
     );
     record('hook.hold', { childPid: child.pid });
   }
-  if (Number.isFinite(holdMs) && holdMs >= 0) {
+  if (signalMode === 'hook-release') {
+    // FG13e: the caller releases the Hook only after both clients are cut,
+    // so the deny is guaranteed to land while neither is connected. A fixed
+    // sleep cannot order the cut against the deny.
+    const release = `${evidence}.release`;
+    while (!existsSync(release)) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  } else if (Number.isFinite(holdMs) && holdMs >= 0) {
     await new Promise((resolve) => setTimeout(resolve, holdMs));
   } else {
     // An indefinite hold must suspend this branch: setInterval alone keeps
@@ -91,7 +109,7 @@ if (mode === 'child') {
     child.kill('SIGKILL');
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  const deny = signalMode === 'hook-deny';
+  const deny = signalMode === 'hook-deny' || signalMode === 'hook-release';
   // FG13f: a failed evaluation is what failClosed wraps. The process exits
   // without a decision so the receipt is a failure, not a deny.
   if (signalMode === 'hook-fail') {

@@ -49,7 +49,8 @@ import type { LoopStop } from '../../utils/loop-detected-message.js';
  * segmentation and inline images.
  */
 export type OpenTuiStreamEvent =
-  | Exclude<StreamEvent, { type: 'text' }>
+  | Exclude<StreamEvent, { type: 'text' | 'user' }>
+  | (Extract<StreamEvent, { type: 'user' }> & { recallText?: string })
   /** Widened over the neutral `text` event: a replayed assistant record
    * carries its own recorded time, which ink stamps on the first display run
    * of that record. Live deltas leave it unset and fold as "now". */

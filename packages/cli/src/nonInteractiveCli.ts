@@ -5,6 +5,7 @@
  */
 
 import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import type {
@@ -410,6 +411,7 @@ async function emitNonInteractiveFinalMessage(params: {
  * @param controlService - Optional control service for future permission handling.
  */
 export interface RunNonInteractiveOptions {
+  humanInput?: HumanPromptInput;
   modSession?: ModSession;
   abortController?: AbortController;
   adapter?: JsonOutputAdapterInterface;
@@ -2569,6 +2571,15 @@ export async function runNonInteractive(
           {
             type: sendType,
             modelOverride,
+            ...(isFirstTurn &&
+              sendType === SendMessageType.UserQuery &&
+              !goalTurn &&
+              !options.continueInterrupted &&
+              !isSlashCommand(input) &&
+              options.humanInput &&
+              !isSlashCommand(options.humanInput.text) && {
+                humanInput: options.humanInput,
+              }),
             ...(isFirstTurn &&
               sendType === SendMessageType.UserQuery &&
               !options.continueInterrupted &&

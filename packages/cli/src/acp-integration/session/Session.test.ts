@@ -21,6 +21,11 @@ import {
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
+import {
+  getStartupContextLength,
+  markCompressedHistory,
+} from '@qwen-code/qwen-code-core/core/environmentContext.js';
+import { detectTurnInterruption } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import type { DaemonToolLoopState } from './Session.js';
 import type {
@@ -64,6 +69,7 @@ import {
   runWithAgentContext,
 } from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import { SettingScope } from '../../config/settings.js';
+import * as settingsModule from '../../config/settings.js';
 import type {
   AgentSideConnection,
   PermissionOption,
@@ -100,6 +106,7 @@ import { createRepeatedToolFailureGuardState } from './repeated-tool-failure-gua
 import type { DaemonTodoStopGuard } from './daemon-todo-stop-guard.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+const readActualSettingsSnapshot = settingsModule.readSettingsSnapshot;
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
 const bridgeToolResultImagesSpy = vi.hoisted(() => vi.fn());
@@ -111,6 +118,7 @@ const addToolArgumentsAttributesSpy = vi.hoisted(() => vi.fn());
 const addToolCallResultAttributesSpy = vi.hoisted(() => vi.fn());
 const logLoopDetectedSpy = vi.hoisted(() => vi.fn());
 const logRepeatedToolFailureGuardSpy = vi.hoisted(() => vi.fn());
+const logLoopProtectionSpy = vi.hoisted(() => vi.fn());
 const deleteWorkflowSnapshotSpy = vi.hoisted(() => vi.fn());
 const listWorkflowSnapshotsSpy = vi.hoisted(() => vi.fn());
 const agentTelemetry = vi.hoisted(() => ({
@@ -131,6 +139,26 @@ const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
 // Records every LoopTickResolver construction's deps so a test can assert what
 // Session computed (e.g. the home confinement root) without a private-field peek.
 const loopTickResolverDepsSpy = vi.hoisted(() => vi.fn());
+
+// Session imports logLoopProtection from the loggers module, not the barrel.
+vi.mock(
+  '@qwen-code/qwen-code-core/telemetry/loggers.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/telemetry/loggers.js')
+      >();
+    return {
+      ...actual,
+      logLoopProtection: (
+        ...args: Parameters<typeof actual.logLoopProtection>
+      ) => {
+        logLoopProtectionSpy(...args);
+        return actual.logLoopProtection(...args);
+      },
+    };
+  },
+);
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -788,6 +816,7 @@ describe('Session', () => {
     addToolCallResultAttributesSpy.mockClear();
     logLoopDetectedSpy.mockReset();
     logRepeatedToolFailureGuardSpy.mockReset();
+    logLoopProtectionSpy.mockReset();
     deleteWorkflowSnapshotSpy.mockReset();
     deleteWorkflowSnapshotSpy.mockResolvedValue(true);
     listWorkflowSnapshotsSpy.mockReset();
@@ -1124,6 +1153,7 @@ describe('Session', () => {
       // Mirrors the resolved settings default (cli/config.ts passes
       // `skipLoopDetection ?? true`): heuristics off unless a test opts in.
       getSkipLoopDetection: vi.fn().mockReturnValue(true),
+      getLoopProtection: vi.fn().mockReturnValue('stop'),
       getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
       getMemoryManager: vi.fn().mockReturnValue(mockMemoryManager),
@@ -1599,6 +1629,241 @@ describe('Session', () => {
     mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
+  });
+
+  describe('single-turn workflow intent', () => {
+    beforeEach(() => {
+      vi.spyOn(settingsModule, 'readSettingsSnapshot').mockReturnValue(
+        mockSettings,
+      );
+      mockConfig.isWorkflowsEnabled = vi.fn().mockReturnValue(true);
+      let keywordEnabled = true;
+      mockConfig.getWorkflowKeywordTriggerEnabled = vi.fn(() => keywordEnabled);
+      mockConfig.setWorkflowKeywordTriggerEnabled = vi.fn(
+        (enabled: boolean) => {
+          keywordEnabled = enabled;
+        },
+      );
+      mockConfig.storage.getProjectRoot = vi.fn().mockReturnValue('/repo');
+      mockConfig.isWorkflowNameOnly = vi.fn().mockReturnValue(true);
+      mockToolRegistry.getAllToolNames.mockReturnValue([
+        core.ToolNames.WORKFLOW,
+      ]);
+      vi.mocked(mockChat.sendMessageStream).mockImplementation(async () =>
+        createEmptyStream(),
+      );
+    });
+
+    function intentParts(parts: Part[]): string[] {
+      return textParts(parts).filter((text) =>
+        text.includes('This session runs named workflows only'),
+      );
+    }
+
+    it('injects one model-only reminder from declared raw text and does not inherit it', async () => {
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'expanded request without a keyword' }],
+        _meta: { 'qwen.daemon.submittedPrompt': 'ultracode workflow audit' },
+      });
+
+      expect(intentParts(firstSentMessage())).toHaveLength(1);
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        'expanded request without a keyword',
+        undefined,
+        undefined,
+        expect.any(String),
+        undefined,
+      );
+
+      vi.mocked(mockChat.sendMessageStream).mockClear();
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'ultracode unknown' }],
+      });
+
+      expect(intentParts(firstSentMessage())).toHaveLength(0);
+    });
+
+    it.each([
+      { name: 'missing declaration', meta: {} },
+      {
+        name: 'blank declaration',
+        meta: { 'qwen.daemon.submittedPrompt': '  ' },
+      },
+      {
+        name: 'invalid declaration',
+        meta: { 'qwen.daemon.submittedPrompt': { text: 'ultracode' } },
+      },
+      {
+        name: 'derived keyword',
+        meta: { 'qwen.daemon.submittedPrompt': 'inspect this file' },
+      },
+      {
+        name: 'slash declaration with expanded request',
+        meta: { 'qwen.daemon.submittedPrompt': '/summary workflow' },
+      },
+      {
+        name: 'retry',
+        meta: {
+          'qwen.daemon.submittedPrompt': 'ultracode',
+          'qwen.daemon.retry': true,
+        },
+      },
+      {
+        name: 'channel',
+        meta: {
+          'qwen.daemon.submittedPrompt': 'ultracode',
+          [CHANNEL_PROMPT_META_KEY]: true,
+        },
+      },
+    ])('does not inject for $name', async ({ meta }) => {
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'ultracode from expanded context' }],
+        _meta: meta,
+      });
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      expect(intentParts(firstSentMessage())).toHaveLength(0);
+    });
+
+    it('applies the live opt-out on the next declared turn', async () => {
+      mockSettings.merged.ui = { disableWorkflowKeywordTrigger: true };
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'ultracode' }],
+        _meta: { 'qwen.daemon.submittedPrompt': 'ultracode' },
+      });
+
+      expect(intentParts(firstSentMessage())).toHaveLength(0);
+    });
+
+    it('keeps ordinary prompting available when the setting snapshot cannot be read', async () => {
+      vi.mocked(settingsModule.readSettingsSnapshot).mockImplementation(() => {
+        throw new Error('unreadable workspace settings');
+      });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'ultracode' }],
+        _meta: { 'qwen.daemon.submittedPrompt': 'ultracode' },
+      });
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      expect(intentParts(firstSentMessage())).toHaveLength(0);
+      expect(mockConfig.getWorkflowKeywordTriggerEnabled()).toBe(false);
+    });
+
+    async function withLiveSettings(
+      test: (root: string, userFile: string) => Promise<void>,
+    ) {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dw03-settings-'));
+      const home = path.join(root, 'home');
+      const systemFile = path.join(root, 'system.json');
+      await fs.mkdir(home);
+      await fs.writeFile(systemFile, '{}');
+      vi.stubEnv('QWEN_HOME', home);
+      vi.stubEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', systemFile);
+      vi.stubEnv('QWEN_CODE_SYSTEM_DEFAULTS_PATH', systemFile);
+      vi.mocked(settingsModule.readSettingsSnapshot).mockImplementation(
+        readActualSettingsSnapshot,
+      );
+      try {
+        await test(root, path.join(home, 'settings.json'));
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }
+
+    async function currentIntentCount() {
+      vi.mocked(mockChat.sendMessageStream).mockClear();
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'ultracode' }],
+        _meta: { 'qwen.daemon.submittedPrompt': 'ultracode' },
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      return intentParts(firstSentMessage()).length;
+    }
+
+    it('reads normal persisted opt-out writes on the next turn without reloading the session', async () => {
+      await withLiveSettings(async (root, userFile) => {
+        const workspace = path.join(root, 'workspace');
+        await fs.mkdir(workspace);
+        vi.mocked(mockConfig.storage.getProjectRoot).mockReturnValue(workspace);
+        const counts = [];
+        for (const disabled of [false, true, false]) {
+          await fs.writeFile(
+            userFile,
+            JSON.stringify({ ui: { disableWorkflowKeywordTrigger: disabled } }),
+          );
+          counts.push(await currentIntentCount());
+        }
+        expect(counts).toEqual([1, 0, 1]);
+        expect(mockSettings.reloadScopeFromDisk).not.toHaveBeenCalled();
+      });
+    });
+
+    it('uses the admission workspace and its current trust rather than the live cwd', async () => {
+      await withLiveSettings(async (root, userFile) => {
+        const first = path.join(root, 'first');
+        const second = path.join(root, 'second');
+        await Promise.all(
+          [first, second].map((workspace) =>
+            fs.mkdir(path.join(workspace, '.qwen'), { recursive: true }),
+          ),
+        );
+        await fs.writeFile(
+          userFile,
+          JSON.stringify({ ui: { disableWorkflowKeywordTrigger: true } }),
+        );
+        await fs.writeFile(
+          path.join(first, '.qwen/settings.json'),
+          JSON.stringify({ ui: { disableWorkflowKeywordTrigger: false } }),
+        );
+        await fs.writeFile(
+          path.join(second, '.qwen/settings.json'),
+          JSON.stringify({ ui: { disableWorkflowKeywordTrigger: true } }),
+        );
+        vi.mocked(mockConfig.getProjectRoot).mockReturnValue(second);
+        vi.mocked(mockConfig.storage.getProjectRoot).mockReturnValue(first);
+        expect(await currentIntentCount()).toBe(1);
+        vi.mocked(mockConfig.storage.getProjectRoot).mockReturnValue(second);
+        expect(await currentIntentCount()).toBe(0);
+        vi.mocked(mockConfig.storage.getProjectRoot).mockReturnValue(first);
+        vi.mocked(mockConfig.isTrustedFolder).mockReturnValue(false);
+        expect(await currentIntentCount()).toBe(0);
+      });
+    });
+
+    it('does not create a model request when an eligible prompt is blocked by a hook', async () => {
+      const request = vi.fn().mockResolvedValue({
+        success: true,
+        output: { decision: 'block', reason: 'blocked' },
+      });
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({ request });
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi.fn(
+        (name) => name === 'UserPromptSubmit',
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'ultracode' }],
+        _meta: { 'qwen.daemon.submittedPrompt': 'ultracode' },
+      });
+
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventName: 'UserPromptSubmit',
+          input: { prompt: 'ultracode', submitted_prompt: 'ultracode' },
+        }),
+        expect.anything(),
+      );
+    });
   });
 
   it('captures the Session Workflow gate from settings at construction instead of tracking the live view', () => {
@@ -6643,6 +6908,22 @@ describe('Session', () => {
   });
 
   describe('continueLastTurn', () => {
+    it('uses classifiable recovery history before the bounded pre-check', async () => {
+      const getHistoryForRecovery = vi.fn(() => [
+        { role: 'model', parts: [{ text: 'Done.' }] },
+      ]);
+      Object.assign(mockChat, { getHistoryForRecovery });
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'restored context' }] },
+      ]);
+
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'clean',
+        canContinue: false,
+      });
+      expect(getHistoryForRecovery).toHaveBeenCalledWith(50);
+    });
+
     it.each(['user', 'unknown', 'interrupted'] as const)(
       'checks raw transcript cancellation before admission (%s)',
       async (reason) => {
@@ -9576,6 +9857,73 @@ describe('Session', () => {
       );
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
+
+    it.each([false, true])(
+      'preserves compressed context boundaries across edit rollback JSON (startup: %s)',
+      (startup) => {
+        const history: Content[] = [
+          ...(startup
+            ? [
+                {
+                  role: 'user',
+                  parts: [
+                    { text: '<system-reminder>\nStartup\n</system-reminder>' },
+                  ],
+                },
+              ]
+            : []),
+          {
+            role: 'user',
+            parts: [{ text: 'Summary. Resume the prior task...' }],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'Got it. Thanks for the additional context!' }],
+          },
+        ];
+        markCompressedHistory(history);
+        const input: Content = {
+          role: 'user',
+          parts: [
+            {
+              text: 'Recently accessed file (full current content embedded):\n\n## /tmp/a.ts\n\n```\nconst a = 1;\n```',
+            },
+          ],
+        };
+        history.push(input);
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+        const snapshot = session.captureHistorySnapshot();
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue(
+          history.slice(0, -1),
+        );
+        expect(session.getRewindableUserTurnCount()).toBe(0);
+        session.restoreHistory(JSON.parse(JSON.stringify(snapshot)));
+        const restored = vi.mocked(mockChat.setHistory).mock.calls.at(-1)![0];
+        expect(detectTurnInterruption(restored)).toEqual({
+          kind: 'interrupted_prompt',
+          parts: input.parts,
+        });
+        expect(JSON.stringify(restored)).toBe(JSON.stringify(snapshot));
+
+        const older: Content[] = JSON.parse(JSON.stringify(history));
+        older[older.length - 1] = {
+          role: 'user',
+          parts: [{ text: 'Real input.' }],
+        };
+        // A later capture detects the attachment shape as a longer prefix.
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue(
+          JSON.parse(JSON.stringify(history)),
+        );
+        session.captureHistorySnapshot();
+        session.restoreHistory(older);
+        expect(
+          getStartupContextLength(
+            vi.mocked(mockChat.setHistory).mock.calls.at(-1)![0],
+            { includeCompressed: true },
+          ),
+        ).toBe(startup ? 3 : 2);
+      },
+    );
 
     it('restores a captured history snapshot', () => {
       const history: Content[] = [
@@ -20122,6 +20470,21 @@ describe('Session', () => {
 
         expect(build).toHaveBeenCalledTimes(3);
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        // The 2nd invalid call's results carry the loop-protection reminder.
+        const remindersSent = (n: number) =>
+          (
+            vi.mocked(mockChat.sendMessageStream).mock.calls[n]?.[1] as {
+              message: Part[];
+            }
+          ).message.filter((part) =>
+            part.text?.includes('has rejected its arguments'),
+          );
+        expect(remindersSent(1)).toHaveLength(0);
+        expect(remindersSent(2)).toEqual([
+          {
+            text: "System: `ask_user_question` has rejected its arguments 2 times in this turn. Check the tool's parameter schema before calling it again, or use a different approach. Another invalid call stops this turn.",
+          },
+        ]);
         const stopHookCalls = messageBus.request.mock.calls.filter(
           ([request]) =>
             typeof request === 'object' &&
@@ -20157,6 +20520,71 @@ describe('Session', () => {
           ],
         });
       });
+
+      it.each([
+        { mode: 'warn', reminders: 1 },
+        { mode: 'off', reminders: 0 },
+      ])(
+        'keeps a $mode ACP prompt running past repeated invalid tool parameters',
+        async ({ mode, reminders }) => {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getLoopProtection = vi.fn().mockReturnValue(mode);
+          const build = vi.fn().mockImplementation(() => {
+            throw new Error('Parameter "questions" must be an array.');
+          });
+          mockToolRegistry.getTool.mockReturnValue({
+            name: 'ask_user_question',
+            kind: core.Kind.Other,
+            displayName: 'Ask User Question',
+            description: 'Ask user question',
+            build,
+            canUpdateOutput: false,
+            isOutputMarkdown: true,
+          });
+          const invalidCall = (n: number) =>
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: `ask_${n}`,
+                      name: 'ask_user_question',
+                      args: { questions: 'not an array' },
+                    },
+                  ],
+                },
+              },
+            ]);
+          const sendMessageStream = vi.fn();
+          for (let n = 1; n <= 5; n++) {
+            sendMessageStream.mockResolvedValueOnce(invalidCall(n));
+          }
+          sendMessageStream.mockResolvedValueOnce(createEmptyStream());
+          mockChat.sendMessageStream = sendMessageStream;
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'ask me before continuing' }],
+            }),
+          ).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+          expect(build).toHaveBeenCalledTimes(5);
+          const sent = vi
+            .mocked(mockChat.sendMessageStream)
+            .mock.calls.flatMap(
+              (call) => (call[1] as { message: Part[] }).message,
+            );
+          expect(
+            sent.filter((part) =>
+              part.text?.includes('has rejected its arguments'),
+            ),
+          ).toHaveLength(reminders);
+        },
+      );
 
       it.each([
         {
@@ -22388,6 +22816,58 @@ describe('Session', () => {
               );
             }),
           ).toBe(false);
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
+      it('does not log a loop reminder as reminded when the batch stops', async () => {
+        recreateSessionWithGuardMode('enforce');
+        try {
+          installFailingTool();
+          mockConfig.getLoopProtection = vi.fn().mockReturnValue('warn');
+          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(2);
+          mockConfig.isMaxToolCallsPerTurnExplicit = vi
+            .fn()
+            .mockReturnValue(false);
+          // The stopping batch also repeats one call past the soft cap,
+          // which queues a cap reminder in the same batch.
+          const repeatedBatch = createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: Array.from({ length: 4 }, (_, index) => ({
+                  id: `failure_3_${index}`,
+                  name: 'failing_tool',
+                  args: { attempt: 'same' },
+                })),
+              },
+            },
+          ]);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(streamForBatch(1, 4))
+            .mockResolvedValueOnce(streamForBatch(2, 4))
+            .mockResolvedValueOnce(repeatedBatch)
+            .mockResolvedValueOnce(createEmptyStream());
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).rejects.toMatchObject({
+            data: {
+              loopType: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+            },
+          });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+          expect(
+            logLoopProtectionSpy.mock.calls.filter(
+              ([, event]) => event.decision === 'reminded',
+            ),
+          ).toEqual([]);
         } finally {
           restoreGuardMode();
         }

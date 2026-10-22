@@ -58,15 +58,17 @@ const cuaReleaseWorkflow = readFileSync(
   '.github/workflows/cd-cua-driver.yml',
   'utf8',
 );
+const cuaReleaseJobs = parse(cuaReleaseWorkflow).jobs;
 const nodeReplPackage = JSON.parse(
   readFileSync('packages/node-repl/package.json', 'utf8'),
 );
 const cuaSdkPackage = JSON.parse(
   readFileSync('packages/cua-driver/typescript/package.json', 'utf8'),
 );
-const cuaSdkPackageLock = JSON.parse(
-  readFileSync('packages/cua-driver/typescript/package-lock.json', 'utf8'),
+const browserUsePackage = JSON.parse(
+  readFileSync('packages/browser-use/package.json', 'utf8'),
 );
+const workspaceLock = parse(readFileSync('pnpm-lock.yaml', 'utf8'));
 const cuaInstallScript = readFileSync(
   'packages/cua-driver/scripts/install.sh',
   'utf8',
@@ -97,17 +99,35 @@ const liveHostOssWorkflow = readFileSync(
 );
 
 describe('CUA release workflow', () => {
-  it('keeps the Node REPL package independently versioned', () => {
+  it('excludes the Computer Use distribution from the CLI release', () => {
+    for (const name of [
+      '@qwen-code/browser-use',
+      '@qwen-code/cua-sdk',
+      '@qwen-code/node-repl-mcp',
+    ]) {
+      expect(RELEASE_WORKSPACES).not.toContain(name);
+    }
+  });
+
+  it('keeps the Computer Use distribution on one version', () => {
     expect(nodeReplPackage.name).toBe('@qwen-code/node-repl-mcp');
-    expect(nodeReplPackage.version).toBe('0.1.7');
+    expect(nodeReplPackage.version).toBe(cuaSdkPackage.version);
+    expect(browserUsePackage.version).toBe(cuaSdkPackage.version);
+    expect(nodeReplPackage.dependencies['@qwen-code/cua-sdk']).toBe(
+      cuaSdkPackage.version,
+    );
+    expect(cuaSdkPackage.dependencies['@qwen-code/browser-use']).toBe(
+      cuaSdkPackage.version,
+    );
     expect(cuaReleaseWorkflow).toContain(
       "node_repl_version: '${{ steps.release.outputs.node_repl_version }}'",
     );
     expect(cuaReleaseWorkflow).not.toContain(
       'NODE_REPL_VERSION does not match release version',
     );
-    expect(cuaSdkPackageLock.version).toBe(cuaSdkPackage.version);
-    expect(cuaSdkPackageLock.packages[''].version).toBe(cuaSdkPackage.version);
+    expect(
+      workspaceLock.importers['packages/cua-driver/typescript'],
+    ).toBeDefined();
   });
 
   it('dry-runs and clean-installs the packed Node REPL MCP server', () => {
@@ -117,9 +137,15 @@ describe('CUA release workflow', () => {
   });
 
   it('publishes the verified Node REPL tarball immutably with provenance', () => {
-    expect(cuaReleaseWorkflow).toMatch(
-      /publish-node-repl:[\s\S]*?needs: \['validate-version', 'verify-node-repl-package', 'release'\][\s\S]*?npm view "@qwen-code\/node-repl-mcp@\$\{VERSION\}" dist\.integrity[\s\S]*?npm publish "\$TARBALL" --provenance --access public --tag "\$NPM_TAG"[\s\S]*?Verify npm registry integrity/,
+    const job = cuaReleaseJobs['publish-node-repl'];
+    expect(job.needs).toContain('publish-sdk');
+    const commands = job.steps.map((step) => step.run ?? '').join('\n');
+    expect(commands).toMatch(
+      /npm view "@qwen-code\/node-repl-mcp@\$\{VERSION\}" dist\.integrity[\s\S]*?npm publish "\$TARBALL" --provenance --access public --tag "\$NPM_TAG"/,
     );
+    expect(
+      job.steps.some((step) => step.name === 'Verify npm registry integrity'),
+    ).toBe(true);
   });
 
   it('keeps installer version changes in the feature PR', () => {
@@ -150,32 +176,30 @@ describe('CUA release workflow', () => {
     );
   });
 
-  it('pins exact Computer Use package versions across the skill and user guide', () => {
+  it('pins exact runtime registration and dependency versions', () => {
     expect(computerUseGuide).toContain(
       `@qwen-code/node-repl-mcp@${nodeReplPackage.version}`,
     );
     expect(computerUseGuide).toContain(
-      `@qwen-code/cua-sdk@${cuaSdkPackage.version}`,
+      'installs the matching SDK and browser SDK as dependencies',
     );
-    expect(cuaReleaseWorkflow).toContain('SKILL_NODE_REPL_VERSION=$(sed -nE');
+    expect(cuaReleaseWorkflow).not.toContain('SKILL_NODE_REPL_VERSION=');
     expect(cuaReleaseWorkflow).toContain(
       'USER_GUIDE_NODE_REPL_VERSION=$(sed -nE',
     );
-    expect(cuaReleaseWorkflow).toContain('SKILL_SDK_VERSION=$(sed -nE');
-    expect(cuaReleaseWorkflow).toContain('USER_GUIDE_SDK_VERSION=$(sed -nE');
+    expect(cuaReleaseWorkflow).not.toContain('SKILL_SDK_VERSION=');
+    expect(cuaReleaseWorkflow).toContain('SDK_BROWSER_VERSION=');
+    expect(cuaReleaseWorkflow).not.toContain('USER_GUIDE_SDK_VERSION=');
     expect(cuaReleaseWorkflow).not.toContain(
       'grep -Fq "@qwen-code/node-repl-mcp@',
     );
     expect(cuaReleaseWorkflow).not.toContain('grep -Fq "@qwen-code/cua-sdk@');
   });
 
-  it('bootstraps only Node REPL without replacing an existing CUA release', () => {
-    expect(cuaReleaseWorkflow).toMatch(
-      /node_repl_only:[\s\S]*?type: 'boolean'[\s\S]*?default: false/,
-    );
-    expect(cuaReleaseWorkflow).toMatch(
-      /publish-node-repl:[\s\S]*?needs\.release\.result == 'success'[\s\S]*?inputs\.node_repl_only == true[\s\S]*?inputs\.dry_run == false/,
-    );
+  it('releases dependencies before the same-version runtime', () => {
+    expect(cuaReleaseWorkflow).not.toContain('node_repl_only');
+    expect(cuaReleaseJobs['publish-sdk'].needs).toContain('publish-browser');
+    expect(cuaReleaseJobs['publish-node-repl'].needs).toContain('publish-sdk');
     expect(cuaReleaseWorkflow).toContain(
       'A production dispatch must run from protected main',
     );
@@ -454,8 +478,10 @@ describe('release workflow', () => {
         ref: '${{ github.workflow_sha }}',
         'fetch-depth': 1,
         'persist-credentials': false,
+        // The tarball gate rides this checkout too: run from the selected
+        // ref's own `scripts/`, it is missing on any ref that predates it.
         'sparse-checkout':
-          '/.github/scripts\n/scripts/assert-release-version.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
+          '/.github/scripts\n/scripts/assert-release-version.mjs\n/scripts/check-release-tarball-exec-bits.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
         'sparse-checkout-cone-mode': false,
         path: '.release-workflow',
       });
@@ -622,9 +648,15 @@ describe('release workflow', () => {
         join(directory, 'dist/package.json'),
         JSON.stringify({ name: '@qwen-code/qwen-code' }),
       );
-      writeFileSync(join(bin, 'npm'), '#!/bin/sh\nexit "$CLI_PUBLISHED"\n', {
-        mode: 0o755,
-      });
+      // `npm view` drives the already-published skip; `npm publish` is the
+      // generated CLI's own publish call, logged like the corepack one so the
+      // assertions below cover both. The CLI goes through npm because pnpm's
+      // packer drops the exec bit on `vendor/ripgrep/*/rg` (#12668).
+      writeFileSync(
+        join(bin, 'npm'),
+        '#!/bin/sh\nif [ "$1" = "view" ]; then exit "$CLI_PUBLISHED"; fi\nprintf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"\nexit "$PUBLISH_FAILURE"\n',
+        { mode: 0o755 },
+      );
       writeFileSync(
         join(bin, 'corepack'),
         '#!/bin/sh\nprintf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"\nexit "$PUBLISH_FAILURE"\n',
@@ -678,6 +710,14 @@ describe('release workflow', () => {
           ),
         );
         expect(publishCalls[0][1]).toContain('pnpm -r publish');
+        if (publishesCli) {
+          // The generated CLI is the only package carrying vendored binaries
+          // and the only one published with npm: pnpm's packer writes 0644 for
+          // every entry outside `bin`, which shipped an unspawnable
+          // `vendor/ripgrep/*/rg` from 0.24.4 on (#12668).
+          expect(publishCalls[1][1]).toMatch(/^publish --provenance /);
+          expect(publishCalls[1][1]).not.toContain('pnpm');
+        }
         for (const [cwd, args] of publishCalls) {
           expect(args, cwd).toContain('--access public');
           expect(args, cwd).toContain('--tag=preview');
