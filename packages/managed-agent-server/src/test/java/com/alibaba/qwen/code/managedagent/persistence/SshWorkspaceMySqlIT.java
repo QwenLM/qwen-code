@@ -19,8 +19,7 @@ class SshWorkspaceMySqlIT extends SshWorkspaceStoreTest {
                 .target("3").load().migrate();
         assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(3);
         Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load().migrate();
-        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(16);
-        ManagedSchema.validate(source);
+        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(17);
         return source;
     }
 

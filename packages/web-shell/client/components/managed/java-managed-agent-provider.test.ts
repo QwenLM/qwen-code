@@ -126,6 +126,50 @@ describe('createJavaManagedAgentProvider', () => {
     ).toBeUndefined();
   });
 
+  it.each([undefined, true, false])(
+    'keeps a recovery-blocked Turn parked with server cancel permission %s',
+    async (cancel) => {
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: vi.fn<typeof fetch>().mockResolvedValue(
+          jsonResponse({
+            sessionId: 's1',
+            title: 'Blocked',
+            status: 'active',
+            createdAt: 1,
+            updatedAt: 2,
+            ...(cancel === undefined
+              ? {}
+              : {
+                  recovery: {
+                    state: 'awaiting_evidence',
+                    reasonCode: 'recovery_evidence_unavailable',
+                    turnId: 't1',
+                    nextTurnAllowed: false,
+                    actions: {
+                      recheck: false,
+                      cancel,
+                      continueInNewSession: true,
+                    },
+                  },
+                }),
+            activeTurn: {
+              turnId: 't1',
+              status: 'recovery_blocked',
+              submittedAt: 1,
+              errorCode: 'hosted_harness_recovery_blocked',
+            },
+          }),
+        ),
+      });
+      const summary = await provider.getSession('s1', { clientId: 'client' });
+      expect(summary.phase).toBe('failed');
+      expect(summary.capabilities.canSend).toBe(false);
+      expect(summary.capabilities.canCancel).toBe(cancel !== false);
+      expect(summary.failure?.code).toBe('hosted_harness_recovery_blocked');
+    },
+  );
+
   it.each([true, false, undefined])(
     'uses the advertised rename capability %s independently of a running Turn',
     async (rename) => {
@@ -1045,6 +1089,43 @@ describe('createJavaManagedAgentProvider', () => {
         enableWorkspaceBinding: true,
       }),
     ).toThrow('productScope');
+  });
+
+  it('sends a catalog model with the built-in Agent on both creation paths', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () =>
+        jsonResponse({ sessionId: 's', turnId: 't' }),
+      );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      enableWorkspaceBinding: true,
+      fetch: fetchImpl,
+    });
+    const request = {
+      agentId: 'qwen-code',
+      modelId: 'model-b',
+      workspaceId: 'ws',
+      cwdRelative: '.',
+      approvalMode: 'yolo' as const,
+    };
+    const command = { clientId: 'client', idempotencyKey: 'frozen-key' };
+    await provider.workspaceBinding!.createEmpty(request, command);
+    await provider.workspaceBinding!.createSession!(
+      { ...request, text: 'First' },
+      command,
+    );
+    for (const [, init] of fetchImpl.mock.calls) {
+      expect(JSON.parse(String(init?.body))).toEqual(
+        expect.objectContaining({
+          agentId: 'qwen-code',
+          modelId: 'model-b',
+          approvalMode: 'yolo',
+          idempotencyKey: 'frozen-key',
+        }),
+      );
+    }
   });
 
   it('discovers policy selection, reads options and sends explicit policies for both bound creation paths', async () => {

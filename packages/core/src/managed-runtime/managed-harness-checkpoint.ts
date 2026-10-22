@@ -1445,7 +1445,7 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
   }
 }
 
-function parseHarnessCheckpointObject(
+export function parseHarnessCheckpointObject(
   value: ManagedSessionJsonValue,
 ): HarnessCheckpointV1 {
   const record = object(value, 'harness checkpoint');
