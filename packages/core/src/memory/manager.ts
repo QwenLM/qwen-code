@@ -223,6 +223,7 @@ export interface DreamScheduleResult {
     | 'min_hours'
     | 'min_sessions'
     | 'scan_throttled'
+    | 'failure_backoff'
     | 'locked'
     | 'running'
     | 'memory_pressure'
@@ -293,6 +294,7 @@ export const AUTO_SKILL_THRESHOLD = 20;
 
 export const DEFAULT_AUTO_DREAM_MIN_HOURS = 24;
 export const DEFAULT_AUTO_DREAM_MIN_SESSIONS = 5;
+export const DEFAULT_AUTO_DREAM_FAILURE_BACKOFF_HOURS = 1;
 
 const DREAM_LOCK_STALE_MS = 60 * 60 * 1000; // 1 hour
 
@@ -1566,6 +1568,13 @@ export class MemoryManager {
     if (elapsedHours !== null && elapsedHours < minHours) {
       return { status: 'skipped', skippedReason: 'min_hours' };
     }
+    const attemptElapsed = hoursSince(metadata.lastDreamAttemptAt, now);
+    if (
+      attemptElapsed !== null &&
+      attemptElapsed < DEFAULT_AUTO_DREAM_FAILURE_BACKOFF_HOURS
+    ) {
+      return { status: 'skipped', skippedReason: 'failure_backoff' };
+    }
 
     // Throttle the expensive session-count filesystem scan.
     // Return a distinct reason so callers can tell the difference between
@@ -2064,6 +2073,23 @@ export class MemoryManager {
             touched_topics: [],
             duration_ms: Date.now() - dreamStartMs,
           }),
+        );
+      }
+      // Record the failure time so scheduleDream backs off instead of
+      // relaunching the same failing dream on every later turn. Best-effort:
+      // a metadata error must not replace the original failure.
+      try {
+        const failedAt = new Date(
+          now.getTime() + Date.now() - dreamStartMs,
+        ).toISOString();
+        const failedMetadata = await readDreamMetadata(params.projectRoot);
+        failedMetadata.lastDreamAttemptAt = failedAt;
+        failedMetadata.updatedAt = failedAt;
+        await writeDreamMetadata(params.projectRoot, failedMetadata);
+      } catch (metaError) {
+        debugLogger.warn(
+          `Failed to record failed dream attempt for ${record.id}:`,
+          metaError,
         );
       }
     } finally {
