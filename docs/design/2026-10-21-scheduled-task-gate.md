@@ -293,11 +293,15 @@ the command is proposed and checked again where it runs.
   the schedule. A gate that backgrounds any part of itself with `&`, including
   the `&` that ends a wrapper's script (`bash -c './probe.sh &'`), also behind
   a prefix (`nohup`, `sudo`, `env`), is refused before the dialog: it would
-  return at once with nothing on stdout. An escaped `\&` is a literal and
-  stays accepted, and an `&` in a comment counts for nothing; the check is
-  lexical, so an `&` in a heredoc body or an arithmetic expression is still
-  refused (put such a command in a script). A gate of only comments is refused for the same reason: a
-  shell runs it as nothing; `true` and `:` stay accepted as explicit no-ops.
+  return at once with nothing on stdout. An escaped `\&` at the end
+  (`echo done \&`) is a literal and stays accepted, and so does `$(( 5 & 3
+))`. The check is lexical and errs toward refusing: an `&` in a comment, a
+  heredoc body, `(( … ))` or an escape inside a double-quoted wrapper script
+  (`bash -c "echo \\&"`) is refused too (put such a command in a script). A
+  gate of only comments is refused for the same reason: a shell runs it as
+  nothing; `true` and `:` stay accepted as explicit no-ops. That check is
+  best-effort: a comment-only script behind a wrapper prefix (`nohup bash -c
+'# x'`) is not caught, and only leaves a task that never fires.
   "Always allow" therefore saves a `Monitor(...)` rule, not a `cron_create`
   rule. The classifier input for auto mode includes the gate. A bare
   `cron_create` allow rule saved before this change does not cover a gate.

@@ -409,18 +409,7 @@ describe('gateCommandError', () => {
     // An `&` inside a quoted argument backgrounds nothing.
     ['a quoted &', "gh api 'repos/o/r/pulls?state=open&per_page=5'"],
     ['&&', 'a && b'],
-    // An `&` inside a comment backgrounds nothing.
-    [
-      'an & in a comment line',
-      '# check open & draft PRs\ngh pr list --json number',
-    ],
-    ['an & in a trailing comment', 'gh pr list --json number # open & draft'],
-    // A wrapper named only in a comment is not walked into.
-    ['a wrapper in a comment', "gh pr list # rerun with bash -c 'x &'"],
-    [
-      'an & in a wrapper script comment',
-      "bash -c '# check & report\ngh pr list'",
-    ],
+    ['an & in $(( ))', 'echo $(( 5 & 3 ))'],
     // The command after a wrapper runs: the wrapper's comment scope ends
     // with its script.
     [
@@ -462,11 +451,68 @@ describe('gateCommandError', () => {
       'bash -c "# don\'t\n./probe.sh &\ntrue"',
       'must not background',
     ],
+    // Each level is also read with its comments, so an `&` a misread `#`
+    // would hide still counts.
+    [
+      'an & after a # inside $( )',
+      './probe.sh "$(echo " #")" &',
+      'must not background',
+    ],
+    [
+      "an & after a # inside $' '",
+      "./probe.sh $'\\' #' &",
+      'must not background',
+    ],
+    [
+      'an & after a # glued to $( )',
+      './probe.sh $(true)# &',
+      'must not background',
+    ],
+    [
+      'an & after a # in an escaped wrapper quote',
+      'bash -c "echo \\" #\\"; ./probe.sh &"',
+      'must not background',
+    ],
+    [
+      'an & after a quoted comment and an escaped wrapper quote',
+      '# don\'t\nbash -c "x \\" #\\" ; y &"',
+      'must not background',
+    ],
+    // The cost of reading comments too: these never background, but the
+    // lexical check cannot tell.
+    [
+      'an & in a comment line',
+      '# check open & draft PRs\ngh pr list --json number',
+      'must not background',
+    ],
+    [
+      'an & in a trailing comment',
+      'gh pr list --json number # open & draft',
+      'must not background',
+    ],
+    [
+      'a wrapper in a comment',
+      "gh pr list # rerun with bash -c 'x &'",
+      'must not background',
+    ],
+    [
+      'an & in a wrapper script comment',
+      "bash -c '# check & report\ngh pr list'",
+      'must not background',
+    ],
+    ['an & in (( ))', '(( x = 5 & 3 )); echo $x', 'must not background'],
+    ['an & in a heredoc', 'cat <<EOF\na & b\nEOF', 'must not background'],
     // A shell runs a comment as nothing: every fire would be quiet.
     ['a comment', '# waiting for the token', 'not only a comment'],
     ['a bare #', '#', 'not only a comment'],
     ['comment lines only', '# a\n  # b\n', 'not only a comment'],
     ['a wrapper running a comment', "bash -c '# probe'", 'not only a comment'],
+    // Words after the script are its positional parameters.
+    [
+      'a wrapper running a comment with arguments',
+      "bash -c '# probe' arg0 arg1",
+      'not only a comment',
+    ],
     [
       'nested wrappers running a comment',
       `bash -c "sh -c '# probe'"`,

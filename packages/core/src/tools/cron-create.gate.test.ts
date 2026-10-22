@@ -425,6 +425,28 @@ describe('CronCreateTool gate', () => {
     expect(await readCronTasks(tmpDir)).toEqual([]);
   });
 
+  it('names the ungated task left behind when removing it fails', async () => {
+    config._scheduler.destroy();
+    config = makeConfig({
+      mode: ApprovalMode.YOLO,
+      creator: async (request) => ({ id: 'cron-old', cron: request.cron }),
+    });
+    vi.spyOn(config._scheduler, 'removeDurable').mockRejectedValue(
+      new Error('EACCES'),
+    );
+    tool = new CronCreateTool(config);
+    const result = await promptIdContext.run('prompt-1', () =>
+      tool
+        .build({ ...params, durable: true, sessionMode: 'current' })
+        .execute(signal()),
+    );
+    expect(result.error?.message).toContain('current_session_gate_unsupported');
+    expect(result.error?.message).toContain(
+      'stored task cron-old without its gate, and removing it failed (EACCES)',
+    );
+    expect(result.error?.message).toContain('until deleted with cron_delete');
+  });
+
   it('rejects a gate on a one-shot task, which a quiet gate would consume', async () => {
     const result = await tool
       .build({ ...params, cron: '30 14 28 2 *', recurring: false })

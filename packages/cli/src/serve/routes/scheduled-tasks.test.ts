@@ -617,6 +617,12 @@ describe('scheduled-tasks routes', () => {
       .patch('/scheduled-tasks/oneshot-gated')
       .send({ enabled: false });
     expect(disable.status).toBe(200);
+    // A client that re-sends fields it did not change makes no new one-shot
+    // gate either.
+    const resent = await request(h.app)
+      .patch('/scheduled-tasks/oneshot-gated')
+      .send({ prompt: 'p2', gate: './probe.sh', recurring: false });
+    expect(resent.status).toBe(200);
     const regate = await request(h.app)
       .patch('/scheduled-tasks/oneshot-gated')
       .send({ gate: './other.sh' });
@@ -629,7 +635,7 @@ describe('scheduled-tasks routes', () => {
     const [stored] = await readCronTasks(h.workspace);
     expect(stored).not.toHaveProperty('gate');
     expect(stored).not.toHaveProperty('condition');
-    expect(stored).toMatchObject({ enabled: false });
+    expect(stored).toMatchObject({ enabled: false, prompt: 'p2' });
   });
 
   it('refuses a gate edit on a legacy guarded task so its condition is never stripped', async () => {

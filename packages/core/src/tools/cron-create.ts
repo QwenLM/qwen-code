@@ -259,7 +259,13 @@ class CronCreateInvocation extends BaseToolInvocation<
         // A daemon that predates gated tasks stored the task without its
         // gate: left alone it would run the prompt at every slot.
         if (gate && created.gate !== gate) {
-          await scheduler.removeDurable(created.id);
+          try {
+            await scheduler.removeDurable(created.id);
+          } catch (error) {
+            throw new Error(
+              `current_session_gate_unsupported: The daemon stored task ${created.id} without its gate, and removing it failed (${getErrorMessage(error)}): it runs the prompt at every slot until deleted with cron_delete.`,
+            );
+          }
           throw new Error(
             'current_session_gate_unsupported: The daemon stored the task without its gate, so it was removed. Restart `qwen serve` on the current version, or schedule the gated task without sessionMode "current".',
           );

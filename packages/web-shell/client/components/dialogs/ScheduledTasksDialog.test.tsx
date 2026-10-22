@@ -377,6 +377,49 @@ describe('ScheduledTasksDialog editing', () => {
     );
   });
 
+  it('lets a one-shot gated task clear its gate', async () => {
+    // Such a task comes from an older daemon or a hand edit; the daemon
+    // still accepts clearing its gate.
+    await mount([baseTask({ recurring: false, gate: './probe.sh' })], {
+      gateAvailable: true,
+    });
+    click(document.querySelector('[aria-label="Edit"]'));
+    const gateField = document.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Gate command (optional)"]',
+    );
+    expect(gateField?.value).toBe('./probe.sh');
+    input(gateField!, '');
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({ gate: null }),
+      undefined,
+    );
+  });
+
+  it('refuses to drop a typed gate when the daemon stops advertising gates', async () => {
+    // Created without its gate, the task would run at every slot.
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    const { rerender } = await mount([], {
+      currentSession,
+      gateAvailable: true,
+    });
+    click(findButton('New scheduled task'));
+    input(
+      document.querySelector<HTMLTextAreaElement>(
+        'textarea[aria-label="Gate command (optional)"]',
+      )!,
+      './probe.sh',
+    );
+    await rerender({ currentSession, gateAvailable: false });
+    await enterPromptAndCreate('handle the events below');
+    expect(actions.createScheduledTask).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      'This daemon does not support gate commands',
+    );
+  });
+
   it('keeps a multi-line gate intact through an edit', async () => {
     const gate = 'for f in a b\ndo check "$f"\ndone';
     await mount([baseTask({ gate })], { gateAvailable: true });

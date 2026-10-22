@@ -306,7 +306,8 @@ export interface DaemonScheduledTask {
   enabled: boolean;
   /** Shell command the owning session runs at each fire outside the model;
    * silence skips the fire, output wakes the session. Null for an ungated task.
-   * Absent on a daemon without the `scheduled_task_gate` capability. */
+   * Views carry it whether or not the daemon advertises `scheduled_task_gate`;
+   * the capability says whether POST and PATCH accept it. */
   gate?: string | null;
   gateStatus?: DaemonScheduledTaskGateStatus | null;
   createdAt: number;

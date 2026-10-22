@@ -606,6 +606,8 @@ nothing on stdout skips it, and a non-zero exit is reported once per streak.
   `gate_requires_recurring`; a task already in that state keeps its other
   edits. A malformed gate (empty on `POST`, only a comment, over 2048
   characters, or any part backgrounded with `&`) answers 400 `invalid_gate`.
+  The `&` check is lexical and errs toward refusing: an `&` in a comment, a
+  heredoc body or `(( … ))` is refused too.
   On `PATCH`, `gate: null` or `gate: ""` clears the gate and its `condition`.
 - A legacy task guarded by a `condition` refuses any `gate` key in a `PATCH`
   with 409 `task_legacy_unsupported`, so a client sends `gate` only when it

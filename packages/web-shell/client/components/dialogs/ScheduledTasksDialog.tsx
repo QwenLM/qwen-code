@@ -1205,6 +1205,16 @@ export function ScheduledTasksDialog({
       setFormError(t('scheduledTasks.error.emptyPrompt'));
       return;
     }
+    // A gate typed before the daemon stopped advertising gates would be
+    // dropped silently, leaving a task that runs at every slot.
+    if (
+      !gateAvailable &&
+      gate.trim() !== '' &&
+      gate.trim() !== editedGate.trim()
+    ) {
+      setFormError(t('scheduledTasks.error.gateUnavailable'));
+      return;
+    }
     if (prompt.length > MAX_PROMPT_LENGTH) {
       setFormError(
         t('scheduledTasks.error.promptTooLong', {
@@ -1267,7 +1277,7 @@ export function ScheduledTasksDialog({
             // sent: the route reads any `gate` key as a gate edit, which a
             // legacy guarded task refuses. Empty clears it.
             ...(gateAvailable &&
-            editedRecurring &&
+            (editedRecurring || editedGate.trim() !== '') &&
             gate.trim() !== editedGate.trim()
               ? { gate: gate.trim() || null }
               : {}),
@@ -1643,27 +1653,29 @@ export function ScheduledTasksDialog({
               </div>
             </div>
 
-            {gateAvailable && (editingId === null || editedRecurring) && (
-              <label className={styles.field}>
-                <span className={styles.fieldLabel}>
-                  {t('scheduledTasks.gate')}
-                </span>
-                {/* A textarea: a text input strips newlines, which would
+            {gateAvailable &&
+              (editingId === null ||
+                editedRecurring ||
+                editedGate.trim() !== '') && (
+                <label className={styles.field}>
+                  <span className={styles.fieldLabel}>
+                    {t('scheduledTasks.gate')}
+                  </span>
+                  {/* A textarea: a text input strips newlines, which would
                     rewrite a stored multi-line gate on the next save. */}
-                <textarea
-                  className={styles.textarea}
-                  rows={2}
-                  value={gate}
-                  maxLength={2048}
-                  placeholder={t('scheduledTasks.gatePlaceholder')}
-                  aria-label={t('scheduledTasks.gate')}
-                  onChange={(e) => setGate(e.target.value)}
-                />
-                <span className={styles.fieldHint}>
-                  {t('scheduledTasks.gate.hint')}
-                </span>
-              </label>
-            )}
+                  <textarea
+                    className={styles.textarea}
+                    rows={2}
+                    value={gate}
+                    placeholder={t('scheduledTasks.gatePlaceholder')}
+                    aria-label={t('scheduledTasks.gate')}
+                    onChange={(e) => setGate(e.target.value)}
+                  />
+                  <span className={styles.fieldHint}>
+                    {t('scheduledTasks.gate.hint')}
+                  </span>
+                </label>
+              )}
 
             <label className={styles.field}>
               <span className={styles.fieldLabel}>

@@ -1686,7 +1686,8 @@ function registerScheduledTaskCrudRoutes(
               if (
                 next.gate !== undefined &&
                 !next.recurring &&
-                (patch.gate !== undefined || patch.recurring === false)
+                ((patch.gate !== undefined && patch.gate !== current.gate) ||
+                  (patch.recurring === false && current.recurring !== false))
               ) {
                 blockedGateOneShot = true;
                 return tasks;
