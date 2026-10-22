@@ -161,10 +161,10 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   }
   endLine();
 
-  const promptAbort = new AbortController();
+  const subscriptionAbort = new AbortController();
   let terminalClosed = false;
   let shuttingDown = false;
-  const iterator = session.events();
+  const iterator = session.events({ signal: subscriptionAbort.signal });
   const eventsDone = (async () => {
     try {
       while (true) {
@@ -193,7 +193,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     terminalClosed = true;
-    promptAbort.abort();
+    subscriptionAbort.abort();
     rl.close();
     void iterator.return(undefined).catch(() => {});
   };
@@ -208,7 +208,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
       return;
     }
     void session
-      .prompt({ prompt: [{ type: 'text', text }] }, promptAbort.signal)
+      .prompt({ prompt: [{ type: 'text', text }] })
       .catch((error: unknown) => {
         if (!terminalClosed) {
           writeStderrLine(
@@ -232,7 +232,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   } finally {
     shuttingDown = true;
     terminalClosed = true;
-    promptAbort.abort();
+    subscriptionAbort.abort();
     process.removeListener('SIGINT', shutdown);
     rl.close();
     void iterator.return(undefined).catch(() => {});

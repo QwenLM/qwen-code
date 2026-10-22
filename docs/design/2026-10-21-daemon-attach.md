@@ -24,7 +24,7 @@ qwen attach --session <session-id> [--port <port>] [--workspace <path>] [--token
 - Subscribe to `GET /session/:id/events` before accepting stdin, so model-switch, lifecycle, and prompt response events are not missed.
 - Render sanitized `assistant.text.delta` and `thought.text.delta` to stdout; `assistant.done` and prompt settlement end the line; normalized errors go to stderr.
 - Each non-empty stdin line is sent as a single text content block through `POST /session/:id/prompt`.
-- Ctrl+C or Ctrl+D closes the local subscription and exits without closing the daemon session.
+- Ctrl+C or Ctrl+D closes the local subscription and exits without closing the daemon session. Detaching does not cancel a prompt the daemon has already accepted; an in-flight turn continues server-side.
 
 ## Security
 

@@ -24,7 +24,7 @@ qwen attach --session <session-id> [--port <port>] [--workspace <path>] [--token
 - 在接收 stdin 前订阅 `GET /session/:id/events`，避免漏掉 model-switch、生命周期与 prompt 响应事件。
 - 将净化后的 `assistant.text.delta` 与 `thought.text.delta` 写到 stdout；`assistant.done` 或 prompt 结算时结束当前行；错误写 stderr。
 - stdin 的每个非空行作为单个 text content block，经 `POST /session/:id/prompt` 发送。
-- Ctrl+C 或 Ctrl+D 关闭本地订阅并退出，不关闭 daemon session。
+- Ctrl+C 或 Ctrl+D 关闭本地订阅并退出，不关闭 daemon session。脱离终端不会取消 daemon 已接受的 prompt；进行中的 turn 会在服务端继续执行。
 
 ## 安全
 
