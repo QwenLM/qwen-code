@@ -2079,6 +2079,10 @@ export class MemoryManager {
       // relaunching the same failing dream on every later turn. Best-effort:
       // a metadata error must not replace the original failure.
       try {
+        // Stamp the failure time in the injected `now` time base plus the real
+        // elapsed duration, so a dream that ran long is backed off from when
+        // it failed, not from when it started. (Success uses plain `now`: the
+        // duration is noise against the 24h gate but material against 1h.)
         const failedAt = new Date(
           now.getTime() + Date.now() - dreamStartMs,
         ).toISOString();
@@ -2087,10 +2091,12 @@ export class MemoryManager {
         failedMetadata.updatedAt = failedAt;
         await writeDreamMetadata(params.projectRoot, failedMetadata);
       } catch (metaError) {
+        const message =
+          metaError instanceof Error ? metaError.message : String(metaError);
         debugLogger.warn(
-          `Failed to record failed dream attempt for ${record.id}:`,
-          metaError,
+          `Failed to record failed dream attempt for ${record.id}: ${message}`,
         );
+        this.update(record, { metadata: { metadataWriteError: message } });
       }
     } finally {
       this.dreamInFlightByKey.delete(dedupeKey);

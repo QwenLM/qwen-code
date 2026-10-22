@@ -2766,6 +2766,47 @@ describe('MemoryManager', () => {
       }
     });
 
+    it('resolves with the failed record when the failure metadata write also throws', async () => {
+      const metaPath = getAutoMemoryMetadataPath(tmp.projectRoot);
+      vi.mocked(runManagedAutoMemoryDream).mockImplementationOnce(async () => {
+        await fs.rm(metaPath);
+        await fs.mkdir(metaPath);
+        throw new Error('dream agent failed');
+      });
+      const mgr = new MemoryManager(fiveSessions);
+
+      const first = await mgr.scheduleDream(
+        dreamParams('sess-a', APR1_10, 0, 1),
+      );
+      await expect(first.promise).resolves.toMatchObject({
+        status: 'failed',
+        error: 'dream agent failed',
+        metadata: { metadataWriteError: expect.any(String) },
+      });
+    });
+
+    it('keeps lastDreamAt and lastDreamSessionId when recording a failed dream', async () => {
+      const metaPath = getAutoMemoryMetadataPath(tmp.projectRoot);
+      const seeded = await readMeta(tmp.projectRoot);
+      seeded['lastDreamAt'] = '2026-03-30T10:00:00.000Z';
+      seeded['lastDreamSessionId'] = 'sess-old';
+      await fs.writeFile(metaPath, JSON.stringify(seeded, null, 2), 'utf-8');
+      vi.mocked(runManagedAutoMemoryDream).mockRejectedValueOnce(
+        new Error('dream agent failed'),
+      );
+      const mgr = new MemoryManager(fiveSessions);
+
+      const first = await mgr.scheduleDream(
+        dreamParams('sess-a', APR1_10, 0, 1),
+      );
+      await first.promise;
+
+      const meta = await readMeta(tmp.projectRoot);
+      expect(meta['lastDreamAt']).toBe('2026-03-30T10:00:00.000Z');
+      expect(meta['lastDreamSessionId']).toBe('sess-old');
+      expect(meta['lastDreamAttemptAt']).toEqual(expect.any(String));
+    });
+
     it('skips when session count is below threshold (via session scanner)', async () => {
       // Only 1 session — need 5
       const mgr = new MemoryManager(async () => ['sess-0']);
