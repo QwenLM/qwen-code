@@ -9,13 +9,16 @@
  * each class of host once every teammate has reported and terminated.
  *
  * It pins TODAY's behaviour and passes on current main. It is not a
- * statement of intended behaviour: the `afterM4` column records what the
- * issue asks for, so the diff that lands M4 is the diff that flips the
- * sinkless rows, at row level, instead of a reviewer re-deriving which host
- * class regressed.
+ * statement of intended behaviour. Scope: it builds a TeamManager directly,
+ * below tool registration. M4 as specified gates registration
+ * (`isAgentTeamEnabled()` behind `registerLazy(TEAM_CREATE)` in config.ts),
+ * which is upstream of this harness, so landing M4 flips no row here: the
+ * sinkless scenarios become unreachable and those rows get deleted, and the
+ * registration gate needs its own test against a Config.
  *
  * Host classes (A4 in the issue):
- *   wired         - leader sink attached (TUI, nonInteractiveCli)
+ *   wired         - leader sink attached (TUI, nonInteractiveCli); the row
+ *                   also runs nonInteractiveCli's final drainLeaderInbox()
  *   listener-only - a TEAMMATE_APPROVAL_REQUEST listener, no leader sink
  *   bare          - no listener, no sink: approval requests are void-emitted
  *                   (acp-integration, acp-bridge, serve, web-shell at the
@@ -25,8 +28,13 @@
  *   delivered  - teammate reports handed to the leader sink. `null` for a
  *                sinkless class: there is no sink to observe, so the cell
  *                has no value to pin (0 would be unfalsifiable there).
+ *   displayed  - the sink's second (on-screen) channel, which the TUI
+ *                renders as one notification line per batch; `null` when
+ *                sinkless
  *   unread     - reports still unread in the leader inbox afterwards
- *   terminated - ALL_TEAMMATES_TERMINATED events a subscribed host saw
+ *   terminated - ALL_TEAMMATES_TERMINATED events a subscribed host saw.
+ *                The wired row sees two: the poll emits once, and the final
+ *                drain re-enters the terminal branch and emits again.
  *   pollArmed  - whether the 500ms leader poll is still running
  *
  * `terminated` is probed with a subscription in every class. The single
@@ -43,6 +51,7 @@ import { TeamCoordinationHarness } from './test-utils/coordination-harness.js';
 import { Storage } from '../../config/storage.js';
 import { AgentStatus } from '../runtime/agent-types.js';
 import { TeamEventType } from './team-events.js';
+import { getInboxesDir } from './teamHelpers.js';
 
 vi.mock('../../config/storage.js', async (importOriginal) => {
   const original =
@@ -78,6 +87,7 @@ const REPORTS = ['report one', 'report two'];
 interface Observation {
   /** `null` = no sink attached, nothing to observe. */
   delivered: number | null;
+  displayed: string[] | null;
   unread: number;
   terminated: number;
   pollArmed: boolean;
@@ -85,36 +95,42 @@ interface Observation {
 
 type HostClass = 'wired' | 'listener-only' | 'bare';
 
-/**
- * #13785 acceptance for a sinkless host: it never sees team tools at all,
- * so there is no row to observe, rather than delivery parity with a wired
- * host.
- */
-const NOT_ADVERTISED = 'team tools not advertised' as const;
-
 interface Row {
   host: HostClass;
   today: Observation;
-  /** Asserted nowhere; `observe()` has no path to produce `NOT_ADVERTISED`. */
-  afterM4: Observation | typeof NOT_ADVERTISED;
 }
 
-/** Expectations, one row per host class. `afterM4` is not asserted. */
+/** Expectations, one row per host class. */
 const ROWS: Row[] = [
   {
     host: 'wired',
-    today: { delivered: 2, unread: 0, terminated: 1, pollArmed: false },
-    afterM4: { delivered: 2, unread: 0, terminated: 1, pollArmed: false },
+    today: {
+      delivered: 2,
+      displayed: ['**worker** reported back'],
+      unread: 0,
+      terminated: 2,
+      pollArmed: false,
+    },
   },
   {
     host: 'listener-only',
-    today: { delivered: null, unread: 2, terminated: 0, pollArmed: true },
-    afterM4: NOT_ADVERTISED,
+    today: {
+      delivered: null,
+      displayed: null,
+      unread: 2,
+      terminated: 0,
+      pollArmed: true,
+    },
   },
   {
     host: 'bare',
-    today: { delivered: null, unread: 2, terminated: 0, pollArmed: true },
-    afterM4: NOT_ADVERTISED,
+    today: {
+      delivered: null,
+      displayed: null,
+      unread: 2,
+      terminated: 0,
+      pollArmed: true,
+    },
   },
 ];
 
@@ -140,12 +156,16 @@ describe('host-class characterization of leader delivery and terminal state (#13
     const h = await TeamCoordinationHarness.create();
     setMockDir(h.tmpDir);
     harness = h;
+    // Pin the redirect through the real resolver: if the mailbox root ever
+    // stops flowing through the mocked static, fail here instead of
+    // reading and draining a real ~/.qwen/teams inbox.
+    expect(getInboxesDir(h.teamName).startsWith(h.tmpDir)).toBe(true);
     const manager = h.teamManager;
 
-    const sinkCalls: string[] = [];
+    const sinkCalls: Array<{ model: string; display: string }> = [];
     if (host === 'wired') {
-      manager.setLeaderMessageCallback((formatted) => {
-        sinkCalls.push(formatted);
+      manager.setLeaderMessageCallback((model, display) => {
+        sinkCalls.push({ model, display });
       });
     }
     if (host === 'listener-only') {
@@ -166,8 +186,9 @@ describe('host-class characterization of leader delivery and terminal state (#13
     agent.setStatus(AgentStatus.COMPLETED);
 
     const deliveredCount = () =>
-      REPORTS.filter((text) => sinkCalls.some((call) => call.includes(text)))
-        .length;
+      REPORTS.filter((text) =>
+        sinkCalls.some((call) => call.model.includes(text)),
+      ).length;
 
     // Poll 1 consumes the reports; poll 2 finds an empty inbox and, with
     // every teammate terminated, emits ALL_TEAMMATES_TERMINATED. A sinkless
@@ -183,6 +204,12 @@ describe('host-class characterization of leader delivery and terminal state (#13
     // One more tick: a sinkless host stays armed, a wired one is already
     // stopped, so this cannot flip any cell in the direction of a pass.
     await vi.advanceTimersByTimeAsync(POLL_MS);
+    // nonInteractiveCli awaits a final drain after its termination wait
+    // loop (a last report can land between polls). The terminal branch is
+    // not guarded by "polling was armed", so this emits a second time.
+    if (host === 'wired') {
+      await manager.drainLeaderInbox();
+    }
 
     const pollArmed =
       (manager as unknown as { pollingInterval: unknown }).pollingInterval !==
@@ -190,8 +217,15 @@ describe('host-class characterization of leader delivery and terminal state (#13
     // Draining here is the measurement of "left unread"; do it last.
     const unread = (await manager.getLeaderMessages()).length;
 
+    // Anything else on the sink is extra traffic the substring filter
+    // would hide, e.g. a fireAndForget `<team_error>` envelope.
+    expect(sinkCalls.filter((c) => c.model.includes('<team_error>'))).toEqual(
+      [],
+    );
+
     return {
       delivered: host === 'wired' ? deliveredCount() : null,
+      displayed: host === 'wired' ? sinkCalls.map((c) => c.display) : null,
       unread,
       terminated,
       pollArmed,
