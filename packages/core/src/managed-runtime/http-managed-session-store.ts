@@ -78,6 +78,8 @@ export const HTTP_MANAGED_SESSION_STORE_CONTRACT = {
 const MAX_ATTACHMENT_INPUT_BYTES = 8 * 1024 * 1024;
 
 export function managedSessionInlineResourceBytes(kind: string): number {
+  if (kind === 'managed-checkpoint')
+    return MANAGED_SESSION_LIMITS.maxEventBytes;
   if (kind === 'managed-input') return MAX_ATTACHMENT_INPUT_BYTES;
   if (kind === 'managed-agent-skills') return 2 * 1024 * 1024;
   if (kind === 'hosted-model-request') return HOSTED_MODEL_REQUEST_BYTES;
@@ -575,7 +577,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
     const maxBytes = managedSessionInlineResourceBytes(safeKind);
     if (source.byteLength > maxBytes) {
       throw new ManagedSessionRecordError(
-        `resource bytes exceed the ${maxBytes}-byte inline limit; OSS storage is not enabled.`,
+        `resource bytes exceed the ${maxBytes}-byte inline limit (kind=${safeKind}, bytes=${source.byteLength}); OSS storage is not enabled.`,
       );
     }
     const bytes = Buffer.from(source);
