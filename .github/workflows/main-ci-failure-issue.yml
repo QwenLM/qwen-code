@@ -339,7 +339,7 @@ jobs:
     concurrency:
       group: 'main-ci-failure-issue-${{ github.event.workflow.id }}'
       cancel-in-progress: false
-      queue: max
+      queue: 'max'
     permissions:
       issues: 'write'
     outputs:
