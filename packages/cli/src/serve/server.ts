@@ -110,6 +110,10 @@ import {
 } from './web-shell-static.js';
 import { mountMcpAppSandbox } from './mcp-app-sandbox.js';
 import {
+  mountManagedLocalWeb,
+  type ManagedLocalWebOptions,
+} from './managed-local-web.js';
+import {
   mountWorkspaceMemoryRoutes,
   mountWorkspaceQualifiedMemoryRoutes,
 } from './workspace-memory.js';
@@ -533,6 +537,7 @@ function getRuntimeEffectiveEnv(
 }
 
 export interface ServeAppDeps {
+  managedLocalWeb?: ManagedLocalWebOptions;
   restartForUpdate?: (launcher: string) => Promise<void>;
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
@@ -2371,6 +2376,7 @@ export function createServeApp(
       webShellDir,
       webShellFrameAncestors,
       opts.clientMcpOverWs === true,
+      deps.managedLocalWeb !== undefined,
     );
     (app.locals as { stopMcpAppSandbox?: () => void }).stopMcpAppSandbox =
       mountMcpAppSandbox(app, (origin, req) => {
@@ -2509,6 +2515,27 @@ export function createServeApp(
     // Otherwise unauthenticated callers can ping any reachable
     // address:port to confirm a daemon exists.
     healthRoutes.register(app);
+  }
+
+  if (deps.managedLocalWeb) {
+    if (
+      opts.hostname !== '127.0.0.1' ||
+      !opts.requireAuth ||
+      !opts.token ||
+      opts.profile === 'hosted-harness'
+    ) {
+      throw new Error(
+        'Managed local WebShell requires an authenticated loopback daemon.',
+      );
+    }
+    app.use(['/managed/boot', '/api/agent', '/v1/agents'], (req, res, next) => {
+      if (listenerIdentityOf(req).kind !== 'primary') {
+        res.status(403).json({ error: 'primary_listener_required' });
+        return;
+      }
+      next();
+    });
+    mountManagedLocalWeb(app, deps.managedLocalWeb);
   }
 
   installJsonBodyParser(app);
@@ -4173,6 +4200,7 @@ export function createServeApp(
     app,
     credentials,
     originAllowlist,
+    daemonLog,
     // Resolved through the ref on each call rather than captured so Local
     // Control cannot attach to a stale ACP mount.
     attachWebSocket: (server) => acpHandleRef.current?.attachServer(server),
@@ -4187,6 +4215,7 @@ export function createServeApp(
 
   registerWorkspaceLocalControlRoutes(app, {
     service: localControlService,
+    daemonLog,
     mutate,
     safeBody,
     isDaemonDraining: deps.isChannelControlDraining,
@@ -4206,6 +4235,7 @@ export function createServeApp(
       webShellDir,
       webShellFrameAncestors,
       opts.clientMcpOverWs === true,
+      deps.managedLocalWeb !== undefined,
     );
   }
 
