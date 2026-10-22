@@ -158,6 +158,8 @@ const EN: Messages = {
   'managed.empty': 'No managed tasks yet.',
   'managed.loading': 'Loading…',
   'managed.more': 'Load more',
+  'managed.titleSearch': 'Search session titles',
+  'managed.titleSearchPlaceholder': 'Filter by title…',
   'managed.prompt': 'Message the managed agent',
   'managed.runtime': 'Environment',
   'managed.unavailable': 'Managed Agents is unavailable on this daemon.',
@@ -3292,11 +3294,19 @@ const EN: Messages = {
   'skills.install.error.folderRequired': 'Enter a folder path.',
   'skills.install.error.githubRequired': 'Enter a GitHub SKILL.md URL.',
   'skills.install.error.invalidName':
-    'The skill name is missing or contains unsupported characters.',
+    'Enter a name such as my-skill using only ASCII letters, digits, dots, underscores, or hyphens.',
   'skills.install.error.manifestMissing':
     'The package must contain a SKILL.md file at its root.',
   'skills.install.error.invalidPackage':
-    'The skill package is invalid. Check its structure and SKILL.md content.',
+    'Correct the reported file or package structure, then upload the skill again.',
+  'skills.install.error.frontmatter':
+    'Put the opening --- on the first line of SKILL.md (remove any leading blank lines), and add a closing --- after the YAML fields.',
+  'skills.install.error.invalidManifest':
+    'Open SKILL.md, correct the field reported above, then upload the skill again.',
+  'skills.install.error.nameMismatch':
+    'Make the entered skill name match the name in SKILL.md, then upload the skill again.',
+  'skills.install.error.unsafePath':
+    'Use a regular skill directory and files instead of symbolic links, and check the reported installation path.',
   'skills.install.error.zipTooLarge': 'The ZIP file must not exceed 6 MB.',
   'skills.install.error.invalidFolder': 'Enter a valid local skill folder.',
   'skills.install.error.githubFailed':
@@ -4588,6 +4598,8 @@ const ZH: Messages = {
   'managed.empty': '暂无托管任务。',
   'managed.loading': '加载中…',
   'managed.more': '加载更多',
+  'managed.titleSearch': '搜索会话标题',
+  'managed.titleSearchPlaceholder': '按标题筛选…',
   'managed.prompt': '向托管 Agent 发送消息',
   'managed.runtime': '执行环境',
   'managed.unavailable': '当前 daemon 未启用托管 Agent。',
@@ -7555,11 +7567,20 @@ const ZH: Messages = {
   'skills.install.error.authentication': '上传技能需要身份认证。',
   'skills.install.error.folderRequired': '请输入文件夹路径。',
   'skills.install.error.githubRequired': '请输入 GitHub SKILL.md 地址。',
-  'skills.install.error.invalidName': '技能名称缺失或包含不支持的字符。',
+  'skills.install.error.invalidName':
+    '请输入仅含英文字母、数字、点、下划线或连字符的名称，例如 my-skill。',
   'skills.install.error.manifestMissing':
     '技能包根目录中必须包含 SKILL.md 文件。',
   'skills.install.error.invalidPackage':
-    '技能包无效，请检查目录结构和 SKILL.md 内容。',
+    '请修正上述文件或技能包目录结构，然后重新上传。',
+  'skills.install.error.frontmatter':
+    '请让 SKILL.md 第一行直接以 --- 开始（删除前面的空行），并在 YAML 字段后添加结束标记 ---。',
+  'skills.install.error.invalidManifest':
+    '请打开 SKILL.md，修正上述字段后重新上传。',
+  'skills.install.error.nameMismatch':
+    '请将输入的技能名称与 SKILL.md 中的 name 保持一致，然后重新上传。',
+  'skills.install.error.unsafePath':
+    '请使用普通技能目录和文件，避免符号链接，并检查上述安装路径。',
   'skills.install.error.zipTooLarge': 'ZIP 文件不能超过 6 MB。',
   'skills.install.error.invalidFolder': '请输入有效的本地技能文件夹路径。',
   'skills.install.error.githubFailed':
