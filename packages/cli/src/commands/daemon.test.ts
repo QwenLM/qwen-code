@@ -59,9 +59,11 @@ import {
   type DaemonRestartDeps,
   type DaemonRestartPlan,
 } from './daemon.js';
-import type {
-  DaemonDiscoveryEntry,
-  DaemonDiscoveryRecord,
+import {
+  readDaemonToken,
+  writeDaemonToken,
+  type DaemonDiscoveryEntry,
+  type DaemonDiscoveryRecord,
 } from '../serve/daemon-discovery.js';
 
 function entry(port: number): DaemonDiscoveryEntry {
@@ -88,7 +90,7 @@ describe('qwen daemon command', () => {
     expect(typeof daemonCommand.handler).toBe('function');
   });
 
-  it('registers start, status, logs, stop and restart subcommands', () => {
+  it('registers start, status, logs, stop, restart and token subcommands', () => {
     const mockYargs = {
       command: vi.fn().mockReturnThis(),
       demandCommand: vi.fn().mockReturnThis(),
@@ -101,7 +103,7 @@ describe('qwen daemon command', () => {
     builder(mockYargs as unknown as Argv);
 
     expect(mockYargs.command.mock.calls.map((call) => call[0].command)).toEqual(
-      ['start', 'status', 'logs', 'stop', 'restart'],
+      ['start', 'status', 'logs', 'stop', 'restart', 'token'],
     );
   });
 
@@ -442,6 +444,30 @@ describe('qwen daemon command', () => {
           'stop',
           'start',
         ]);
+      });
+
+      it('preserves a persisted token for the restarted pid', async () => {
+        const dir = await fsp.mkdtemp(
+          path.join(os.tmpdir(), 'qwen-restart-token-'),
+        );
+        const previous = process.env['QWEN_RUNTIME_DIR'];
+        process.env['QWEN_RUNTIME_DIR'] = dir;
+        try {
+          const record = recorded();
+          writeDaemonToken(record.port, record.pid, 'secret-token');
+          const h = harness();
+          await expect(restart(h, record)).resolves.toBe(0);
+          expect(readDaemonToken(record.port, restartedRecord.pid)).toBe(
+            'secret-token',
+          );
+        } finally {
+          if (previous === undefined) {
+            delete process.env['QWEN_RUNTIME_DIR'];
+          } else {
+            process.env['QWEN_RUNTIME_DIR'] = previous;
+          }
+          await fsp.rm(dir, { recursive: true, force: true });
+        }
       });
 
       it('refuses before stopping when this command runs inside the daemon', async () => {

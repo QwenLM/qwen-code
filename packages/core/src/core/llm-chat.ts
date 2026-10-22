@@ -98,7 +98,10 @@ import {
   logChatCompression,
 } from '../telemetry/loggers.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
-import { type ChatRecordingService } from '../services/chatRecordingService.js';
+import {
+  type ChatRecordingService,
+  type ChatCompressionRecordPayload,
+} from '../services/chatRecordingService.js';
 import {
   ChatCompressionService,
   computeThresholds,
@@ -175,6 +178,7 @@ import { InvalidStreamError } from './invalid-stream-error.js';
 import type { GoalTurnPermit } from '../goals/goal-protocol.js';
 import {
   markApiHistoryPrompt,
+  getApiHistoryPromptId,
   cloneApiHistory,
 } from '../services/session-api-history.js';
 import { isAgentEnvelopeContent } from '../agents/session-agents/envelope.js';
@@ -696,6 +700,13 @@ export interface LlmChatSendOptions {
    * public transcript (#13319).
    */
   retractDeliveredOutputOnRetry?: boolean;
+}
+
+export type ChatCompressionObserver = (
+  payload: ChatCompressionRecordPayload,
+) => Promise<void>;
+export interface ChatCompressionObserverOptions {
+  restoreRecentFiles?: boolean;
 }
 
 /** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
@@ -2425,6 +2436,36 @@ export class LlmChat {
   private userContentPushCount = 0;
   private manualPlanExitNoticesEnabled = false;
   private completedToolCallIds: string[] = [];
+  private compressionObserver?: ChatCompressionObserver;
+  private compressionObserverOptions?: ChatCompressionObserverOptions;
+
+  setCompressionObserver(
+    observer?: ChatCompressionObserver,
+    options?: ChatCompressionObserverOptions,
+  ): void {
+    this.compressionObserver = observer;
+    this.compressionObserverOptions = options;
+  }
+
+  private async recordCompression(
+    payload: ChatCompressionRecordPayload,
+  ): Promise<void> {
+    if (this.compressionObserver) {
+      const compressedHistory = [...payload.compressedHistory];
+      const promptIds = compressedHistory.map(
+        (content) => getApiHistoryPromptId(content) ?? null,
+      );
+      await this.compressionObserver({
+        ...payload,
+        compressedHistory,
+        contextPrefixLength: getStartupContextLength(compressedHistory, {
+          includeCompressed: true,
+        }),
+        ...(promptIds.some(Boolean) ? { promptIds } : {}),
+      });
+    }
+    this.chatRecordingService?.recordChatCompression(payload);
+  }
 
   setCompletedToolCallIds(toolCallIds: readonly string[] | undefined): void {
     this.completedToolCallIds = [...new Set(toolCallIds)].filter(
@@ -2886,6 +2927,7 @@ export class LlmChat {
       customInstructions: options?.customInstructions,
       requestPayloadTooLarge: options?.requestPayloadTooLarge,
       signal,
+      restoreRecentFiles: this.compressionObserverOptions?.restoreRecentFiles,
     });
     // The service owns the compression outcome; LlmChat owns the input
     // provenance. Expose it so UIs can mark estimated banner numbers
@@ -2909,7 +2951,7 @@ export class LlmChat {
       if (!options?.deferChatCompressionRecord) {
         // Resume replaces history with this snapshot, so include the pending
         // question and do not share the live array mutated later in the turn.
-        this.chatRecordingService?.recordChatCompression({
+        await this.recordCompression({
           info,
           compressedHistory: options?.pendingUserMessage
             ? [...newHistory, options.pendingUserMessage]
@@ -3548,7 +3590,7 @@ export class LlmChat {
           compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
         ) {
           // Keep the pending question with the compressed answer on resume.
-          this.chatRecordingService?.recordChatCompression({
+          await this.recordCompression({
             info: compressionInfo,
             compressedHistory: [...this.getHistoryShallow(), userContent],
             summaryPrefixLength: this.getHistoryShallow().length,

@@ -367,7 +367,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    * This method applies DashScope-specific configurations including:
    * - Cache control for the system message, last tool message (when tools are configured),
    *   and the latest history message — or, when a reattach region trails the
-   *   conversation, the last stable block before it
+   *   conversation, the last message lying entirely before it
    * - Output token limits based on model capabilities
    * - Vision model specific parameters (vl_high_resolution_images)
    * - Request metadata for session tracking
@@ -820,9 +820,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const lastIndex = messages.length - 1;
 
     // With a volatile reattach region trailing the conversation, the breakpoint
-    // must sit on the last STABLE block — before the reattached images — or the
-    // cached prefix shifts every turn (issue #11627). Otherwise keep the
-    // historical "last block of the last message" anchor.
+    // must sit on the last message lying entirely before that region — the
+    // gateway's cache boundary is message-level, and an anchor inside the
+    // message carrying the region restores no reuse (issue #11627). Otherwise
+    // keep the historical "last block of the last message" anchor.
     const stableBlock =
       reattachBlockCount > 0 && lastIndex >= 0
         ? this.lastStableBlock(messages, reattachBlockCount)
@@ -863,10 +864,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   /**
-   * Locate the last block that is not part of the trailing reattach region,
-   * walking back through messages as needed. Returns the owning message index
-   * plus how many trailing blocks of that message to skip when stamping the
-   * conversation `cache_control` breakpoint.
+   * Locate the last message lying entirely before the trailing reattach
+   * region, walking back through messages as needed. Returns the owning
+   * message index plus how many trailing blocks of that message to skip when
+   * stamping the conversation `cache_control` breakpoint.
    */
   private lastStableBlock(
     messages: OpenAI.Chat.ChatCompletionMessageParam[],
@@ -889,6 +890,14 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
             : 0;
       if (blockCount === 0) continue;
       if (blockCount > remaining) {
+        // The gateway's cache boundary is message-level: when this message
+        // itself carries the volatile region, a block-level anchor inside it
+        // restores no reuse. Keep walking to a message lying entirely before
+        // the region (issue #11627).
+        if (remaining > 0) {
+          remaining = 0;
+          continue;
+        }
         return { messageIndex: index, excludeTail: remaining };
       }
       remaining -= blockCount;

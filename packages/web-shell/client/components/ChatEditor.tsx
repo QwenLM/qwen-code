@@ -76,7 +76,7 @@ import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { getContextUsageLevel } from '../utils/contextUsage';
 import { pastedTextTitle } from '../utils/largePaste';
-import type { ContextUsageControls } from '../hooks/useContextUsageControls';
+import type { ContextCompressionControls } from '../hooks/useContextUsageControls';
 import { ContextUsagePopover } from './ContextUsagePopover';
 import { UnavailableModelTooltip } from './UnavailableModelTooltip';
 import type {
@@ -289,7 +289,7 @@ interface ChatEditorProps {
   /** Show the context-usage breakdown, exactly like typing /context. */
   onShowContextUsage?: () => void;
   onOpenContextUsage?: () => void;
-  contextUsageControls?: ContextUsageControls;
+  contextUsageControls?: ContextCompressionControls;
   modelRefresh?: ModelRefreshState;
   availableModels?: Array<{ id: string; label?: string }>;
   unavailableModels?: readonly WebShellUnavailableModel[];
