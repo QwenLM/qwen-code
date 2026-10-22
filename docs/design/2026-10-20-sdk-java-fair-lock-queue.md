@@ -55,19 +55,24 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
 - Tickets carry their owner's PID. A cancelled or killed step leaves an
   orphaned ticket; the next head-of-line check reaps a ticket whose owner
   PID is dead and whose mtime is older than 10 seconds. A waiter that is
-  still waiting its turn re-touches its ticket every two seconds, but the
-  head cannot touch while it is blocked in `flock`, so a second arm reaps
-  any ticket older than 1800 seconds — far above one full hold — which is
-  what keeps a ticket whose PID was recycled from wedging an idle lock.
+  still waiting its turn re-touches its ticket every two seconds, and a head
+  blocked in `flock` re-touches from a background keepalive at the same
+  cadence, so a second arm can reap any ticket older than 1800 seconds —
+  which is what keeps a ticket whose PID was recycled from wedging an idle
+  lock. The keepalive closes the lock fd, so it can never hold the lock, and
+  uses `touch -c`, so it cannot recreate a ticket that was already removed.
 - On success the ticket is removed immediately: a holder needs no place in
   line once the kernel holds the lock, and a trap cannot see the helper's
   local after `return`. The lock stays on fd 9 in the step shell, so it
   still releases automatically at the step boundary — the helper changes
   acquisition order, not release semantics.
 - On timeout the helper prints
-  `::error::sdk-java host lock not acquired within N minutes as queue ticket S; head of queue is H`
-  naming the ticket that blocked it when it was not the head, and returns 1,
-  keeping the existing error-message contract.
+  `::error::sdk-java host lock not acquired within N minutes as queue ticket S (CLASS); head of queue is H`
+  and returns 1. `CLASS` is `fast` or `normal`, as the ticket stood when it
+  gave up; `H` is the head of the queue at that moment, or
+  `(no other ticket queued)` when this ticket was the last one. The
+  `lock not acquired within` substring is the contract the rerun classifiers
+  match.
 - Wait observability: a non-blocking probe runs first, and only a waiter
   that actually has to wait prints its ticket number and the remaining
   budget — before it blocks, and at most once a minute after. A blocked head
@@ -93,7 +98,8 @@ otherwise share the host repository are deliberately outside the lock:
   burned its full 5400 s wait and failed before Maven started (issue
   #15108). The write-back acquisition is best-effort at this site: a timeout
   skips the copy with a warning rather than reddening a gate whose Maven
-  runs already passed.
+  runs already passed. It stays in the normal class, so fast PR legs
+  overtake it only while it waits in userspace.
 - `daemon-e2e` runs in both tiers with the same shared-repository
   `MAVEN_ARGS` form, but its Maven run is a single `test` goal measured at
   about a minute, against the fast tier's 925 s hold. It stays unlocked
@@ -107,6 +113,71 @@ integration lane's ceiling moves from 200 to 320 minutes so the post-Maven
 write-back wait, the measured 183-minute hold it used to take (seed, both
 Maven runs, and write-back), and 30 minutes of setup fit with margin. The
 lane no longer contributes a multi-hour hold to the queue.
+
+### Fast-tier priority
+
+The FIFO queue bounds a waiter by its position, but it still puts a fast-tier
+job behind every full-tier ticket already waiting. On 2026-10-21 run
+39562109470's `SDK Java (fast)` job spent its first 38 minutes as a non-head
+waiter behind other tickets before it became head (qwen-code#14566). That
+part of the wait is what this section removes. Two classes now share the one
+physical lock:
+
+- Tickets are named `rank-sequence-pid`. `fast` is rank 0 and `normal` is
+  rank 1; the head is the smallest live name, so every fast ticket precedes
+  every full-tier ticket that has not yet been promoted.
+- The test job passes its tier to the helper, so a fast-tier run enters the
+  fast class while approval, release, and MariaDB work stays normal.
+- A full-tier head already blocked in `flock(2)` keeps its kernel wait
+  position, and the smallest fast ticket that arrives behind it becomes the
+  new minimum and parks too. The Linux wake order measured for this queue is
+  insertion order (kernel 6.6, util-linux `flock` 2.38.1, six real waiters,
+  3/3 runs; the run is recorded in qwen-code#15035), so the parked head
+  still wins the next release. Later fast tickets are never the minimum
+  while that parked fast ticket stands, so they loop and are served in
+  ticket order.
+- A fast job therefore waits for the hold already running, at most one
+  parked full-tier head, and the fast-class tickets ahead of it — older fast
+  tickets and promoted ones, parked or not — never for the full-tier queue
+  still waiting in userspace. Only one full-tier head can be parked at a
+  time: a normal ticket parks only as the minimum, so only while no
+  fast-class ticket is queued, and while it is parked its keepalive keeps its
+  ticket ahead of every later normal ticket. More than two tickets can still
+  be parked at once — a full-tier head, the fast ticket that arrived behind
+  it, and an older normal ticket promoted after that — and the kernel serves
+  them in the order they parked.
+- A normal ticket that waits past `SDK_JAVA_LOCK_PROMOTE_AFTER` (default
+  1200 s) is renamed into the fast class. It keeps its sequence, so it
+  precedes fast tickets that arrived after it, and continuous fast traffic
+  cannot starve the full tier. Promotion protects waiting full-tier tickets,
+  not parked ones: a parked head never loops back to the promotion check, and
+  it does not need to, because it is already next.
+- The promotion window bounds the overtake, not a hold. A fast ticket that
+  arrived before the promotion and already parked in `flock` keeps its
+  earlier kernel position, so the promoted ticket waits one more hold behind
+  it; the cost is bounded by tickets already parked, not starvation. Under a
+  single hold longer than the window every waiting normal ticket crosses the
+  threshold together, the queue is plain sequence order, and a fast ticket
+  arriving afterwards has nothing left to overtake.
+
+The release semantics, the 5400 s budget, and the
+`lock not acquired within` substring the rerun classifiers match are
+unchanged; the timeout line now also names the ticket's class.
+
+Priority does not bound a single hold. The same 2026-10-21 job then waited
+its last 52 minutes as head behind one hold and timed out, and full-tier
+MariaDB holds of 7426 s and 8685 s have been measured on this lock; a hold
+like that exhausts a fast head's 5400 s budget whatever the ticket order.
+Naming the holder (a long ticketed hold, or a process that never took a
+ticket) is the diagnostic in qwen-code#15031, and bounding hold length stays
+with #14566.
+
+The head keepalive matters more with two classes. Without it, a head blocked
+past 1800 s loses its ticket to another waiter's reaper, and the next ticket
+in line — whatever its class — becomes head and parks in the kernel as well.
+Over a hold of two hours that lets several normal tickets take kernel
+positions ahead of fast tickets that arrive later, which is exactly the
+order this section exists to prevent.
 
 ### Why fairness over the alternatives
 
@@ -131,10 +202,10 @@ lane no longer contributes a multi-hour hold to the queue.
   rest of its budget. If a host is wedged anyway, the operator recovery is
   `rm -rf ~/.cache/qwen-code-ci/sdk-java-tests.lock.queue/`; nothing in the
   repo performs it.
-- The 1800 s arm can also reap a live head's ticket, because the head is
-  blocked in `flock` and cannot touch it. That is harmless: the head is
-  already ahead of later tickets in the kernel's wait queue and keeps that
-  position.
+- A head killed with SIGKILL leaves its keepalive running until the
+  keepalive's next two-second check finds the owner gone; the ticket is then
+  reaped by the dead-owner arm as before, and `touch -c` cannot bring it
+  back.
 - The counter is serialised by `flock` on the append-only `.seq` file, and
   the kernel releases that lock when the holder dies, so there is no aging
   path to clear; a kill inside the read-increment-write costs at most one
@@ -151,8 +222,16 @@ lane no longer contributes a multi-hour hold to the queue.
 
 - Unit behavior of the helper is pinned by
   `scripts/tests/sdk-java-lock.test.js` (POSIX-only): FIFO ordering across
-  two waiters, stale-owner reaping, timeout signature and ticket cleanup,
-  with `flock` stubbed on `PATH`.
+  two waiters, a fast ticket overtaking a waiting normal ticket behind a
+  parked head, promotion of a waiting normal ticket ahead of a later fast
+  ticket, a promoted ticket reporting the fast class when it times out, a
+  parked head's ticket surviving another waiter's reaper, a timed-out parked
+  head naming the ticket that displaced it, the keepalive stopping at
+  acquisition and after its owner dies, the keepalive holding no fd on the
+  lock (read from `/proc`, so Linux only), stale-owner reaping, timeout
+  signature and ticket cleanup, with `flock` stubbed on `PATH`. The
+  ordering stubs park `flock --wait` until release, as the kernel does, so a
+  head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` now pins the sourced helper and
   the `sdk_java_lock_acquire 5400` budget at each acquisition site, including
@@ -167,7 +246,8 @@ lane no longer contributes a multi-hour hold to the queue.
 - Both lock sites in `sdk-java.yml` acquire through the helper at 5400 s;
   the integration site does so only for its shared-cache write-back, after
   both Maven runs, and a timeout there skips the write-back instead of
-  failing the lane.
+  failing the lane. The test job passes its tier; the MariaDB site stays in
+  the default normal class.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.
