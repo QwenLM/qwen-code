@@ -11,23 +11,25 @@
 ## 命令
 
 ```bash
-qwen attach --session <session-id> [--port <port>] [--token <token>]
+qwen attach --session <session-id> [--port <port>] [--workspace <path>] [--token <token>]
 ```
 
-存在多个 discovery record 时用 `--port` 选择一个 daemon。bearer daemon 需要 `--token`、`QWEN_SERVER_TOKEN`，或 `daemon start --save-token` 写入的 sidecar。
+存在多个 discovery record 时用 `--port` 选择一个 daemon。`--workspace` 指定 session 所属的已注册 workspace；daemon 只服务一个 workspace 时会自动选择。bearer daemon 需要 `--token`、`QWEN_SERVER_TOKEN`，或 `daemon start --save-token` 写入的 sidecar。
 
 ## 行为
 
 - 只选择一个 discovery record；无 daemon 或多 daemon 未指定 `--port` 均报错。
-- 用 `DaemonSessionClient.load` 加载 session，从 daemon replay ring 起始订阅并恢复 transcript。
-- 先订阅 `GET /session/:id/events`，再发 prompt，避免漏掉 model-switch 与生命周期事件。
-- 将归一化后的 `assistant.text.delta` 与 `thought.text.delta` 写到 stdout；`assistant.done` 结束当前行；错误写 stderr。
+- 用 `DaemonSessionClient.load` 加载 session，已知目标 workspace 时一并传入。
+- 先渲染 load 返回的 `compactedReplay` 与 `liveJournal` 快照，再启动 SSE 订阅，确保 attach 前的历史与进行中的回复可见。
+- 在接收 stdin 前订阅 `GET /session/:id/events`，避免漏掉 model-switch、生命周期与 prompt 响应事件。
+- 将净化后的 `assistant.text.delta` 与 `thought.text.delta` 写到 stdout；`assistant.done` 或 prompt 结算时结束当前行；错误写 stderr。
 - stdin 的每个非空行作为单个 text content block，经 `POST /session/:id/prompt` 发送。
-- Ctrl+C 只关闭本地终端并退出，不关闭 daemon session。
+- Ctrl+C 或 Ctrl+D 关闭本地订阅并退出，不关闭 daemon session。
 
 ## 安全
 
 - token 依次来自显式 flag、环境变量、pid-scoped sidecar；不会打印。
+- assistant/thought/permission/error 文本在写终端前经过 `sanitizeTerminalText`，模型提供的转义序列不能清屏或改写剪贴板。
 - 命令复用 SDK 的 bearer-aware HTTP/SSE transport，重定向与 daemon 认证遵循既有客户端契约。
 
 ## 限制与后续

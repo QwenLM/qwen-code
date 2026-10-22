@@ -11,23 +11,25 @@ Status: implemented.
 ## Command
 
 ```bash
-qwen attach --session <session-id> [--port <port>] [--token <token>]
+qwen attach --session <session-id> [--port <port>] [--workspace <path>] [--token <token>]
 ```
 
-`--port` selects one daemon when more than one discovery record exists. A bearer daemon needs `--token`, `QWEN_SERVER_TOKEN`, or a sidecar written by `daemon start --save-token`.
+`--port` selects one daemon when more than one discovery record exists. `--workspace` names the registered workspace that owns the session; when the daemon serves one workspace, it is selected automatically. A bearer daemon needs `--token`, `QWEN_SERVER_TOKEN`, or a sidecar written by `daemon start --save-token`.
 
 ## Behavior
 
 - Select exactly one discovery record. No daemon or several daemons without `--port` is an error.
-- Load the session with `DaemonSessionClient.load`, which seeds the subscription from the daemon replay ring and restores the transcript.
-- Subscribe to `GET /session/:id/events` before sending any prompt, so model-switch and lifecycle events are not missed.
-- Render normalized `assistant.text.delta` and `thought.text.delta` to stdout; `assistant.done` ends the line; normalized errors go to stderr.
+- Load the session with `DaemonSessionClient.load`, passing the target workspace when it is known.
+- Render the load replay snapshot (`compactedReplay` and `liveJournal`) before starting the SSE subscription, so history and an in-flight turn are visible on attach.
+- Subscribe to `GET /session/:id/events` before accepting stdin, so model-switch, lifecycle, and prompt response events are not missed.
+- Render sanitized `assistant.text.delta` and `thought.text.delta` to stdout; `assistant.done` and prompt settlement end the line; normalized errors go to stderr.
 - Each non-empty stdin line is sent as a single text content block through `POST /session/:id/prompt`.
-- Ctrl+C closes the local terminal and exits without closing the daemon session.
+- Ctrl+C or Ctrl+D closes the local subscription and exits without closing the daemon session.
 
 ## Security
 
 - The token is resolved from the explicit flag, the environment, or the pid-scoped sidecar; it is never printed.
+- Assistant, thought, permission, and error text is passed through `sanitizeTerminalText` before terminal output, so model-provided escape sequences cannot clear the screen or write the clipboard.
 - The command uses the SDK's bearer-aware HTTP/SSE transport, so redirects and daemon auth follow the existing client contract.
 
 ## Limitations and follow-up

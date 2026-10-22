@@ -6,8 +6,15 @@
 
 import { createInterface } from 'node:readline/promises';
 import type { CommandModule, Argv } from 'yargs';
-import { DaemonClient, DaemonSessionClient } from '@qwen-code/sdk/daemon';
-import { normalizeDaemonEvent } from '@qwen-code/sdk/daemon/ui';
+import {
+  DaemonClient,
+  DaemonSessionClient,
+  type DaemonEvent,
+} from '@qwen-code/sdk/daemon';
+import {
+  normalizeDaemonEvent,
+  sanitizeTerminalText,
+} from '@qwen-code/sdk/daemon/ui';
 import {
   readDaemonDiscoveries,
   readDaemonToken,
@@ -20,6 +27,7 @@ interface AttachArgs {
   port?: number;
   session: string;
   token?: string;
+  workspace?: string;
 }
 
 export function selectAttachRecord(
@@ -60,6 +68,15 @@ export function resolveAttachToken(
       };
 }
 
+export function resolveAttachWorkspace(
+  record: DaemonDiscoveryRecord,
+  explicit: string | undefined,
+): string | undefined {
+  const requested = explicit?.trim();
+  if (requested) return requested;
+  return record.workspaces.length === 1 ? record.workspaces[0] : undefined;
+}
+
 async function handleAttach(argv: AttachArgs): Promise<void> {
   const target = selectAttachRecord(readDaemonDiscoveries().entries, argv.port);
   if (!target.record) {
@@ -73,6 +90,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  const workspaceCwd = resolveAttachWorkspace(target.record, argv.workspace);
 
   const client = new DaemonClient({
     baseUrl: target.record.url,
@@ -80,49 +98,89 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   });
   let session: DaemonSessionClient;
   try {
-    session = await DaemonSessionClient.load(client, argv.session);
+    session = await DaemonSessionClient.load(
+      client,
+      argv.session,
+      workspaceCwd ? { workspaceCwd } : {},
+    );
   } catch (error) {
+    const workspaceHint =
+      target.record.workspaces.length > 1 && !workspaceCwd
+        ? ' If the session belongs to another workspace, pass --workspace <path>.'
+        : '';
     writeStderrLine(
       `qwen attach: could not load session: ${
         error instanceof Error ? error.message : String(error)
-      }`,
+      }${workspaceHint}`,
     );
     process.exitCode = 1;
     return;
   }
+
+  let atLineStart = true;
+  const writeText = (text: string): void => {
+    const safe = sanitizeTerminalText(text);
+    if (safe.length === 0) return;
+    process.stdout.write(safe);
+    atLineStart = safe.endsWith('\n');
+  };
+  const endLine = (): void => {
+    if (atLineStart) return;
+    process.stdout.write('\n');
+    atLineStart = true;
+  };
+  const renderEvent = (event: DaemonEvent): void => {
+    for (const item of normalizeDaemonEvent(event, {
+      clientId: session.clientId,
+      suppressOwnUserEcho: true,
+    })) {
+      if (
+        item.type === 'assistant.text.delta' ||
+        item.type === 'thought.text.delta'
+      ) {
+        writeText(item.text);
+      } else if (item.type === 'assistant.done') {
+        endLine();
+      } else if (item.type === 'permission.request') {
+        const title = sanitizeTerminalText(item.title);
+        const options = item.options
+          .map((option) => sanitizeTerminalText(option.label))
+          .join(' / ');
+        writeStderrLine(
+          `qwen attach: approval required: ${title}. Approve in Web Shell.${options ? ` Options: ${options}` : ''}`,
+        );
+      } else if (item.type === 'error') {
+        writeStderrLine(`qwen attach: ${sanitizeTerminalText(item.text)}`);
+      }
+    }
+  };
+
+  const snapshot = session.consumeReplaySnapshot();
+  for (const event of [...snapshot.compactedReplay, ...snapshot.liveJournal]) {
+    renderEvent(event);
+  }
+  endLine();
+
+  const promptAbort = new AbortController();
+  let terminalClosed = false;
+  let shuttingDown = false;
+  const iterator = session.events();
   const eventsDone = (async () => {
     try {
-      for await (const event of session.events()) {
-        for (const item of normalizeDaemonEvent(event, {
-          clientId: session.clientId,
-          suppressOwnUserEcho: true,
-        })) {
-          if (
-            item.type === 'assistant.text.delta' ||
-            item.type === 'thought.text.delta'
-          ) {
-            process.stdout.write(item.text);
-          } else if (item.type === 'assistant.done') {
-            process.stdout.write('\n');
-          } else if (item.type === 'permission.request') {
-            const options = item.options
-              .map((option) => option.label)
-              .join(' / ');
-            writeStderrLine(
-              `qwen attach: approval required: ${item.title}. Approve in Web Shell.${options ? ` Options: ${options}` : ''}`,
-            );
-          } else if (item.type === 'error') {
-            writeStderrLine(`qwen attach: ${item.text}`);
-          }
-        }
+      while (true) {
+        const next = await iterator.next();
+        if (next.done) break;
+        renderEvent(next.value);
       }
     } catch (error) {
-      writeStderrLine(
-        `qwen attach: stream ended: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      process.exitCode = 1;
+      if (!shuttingDown) {
+        writeStderrLine(
+          `qwen attach: stream ended: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        process.exitCode = 1;
+      }
     }
   })();
 
@@ -131,30 +189,40 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
     output: process.stdout,
     terminal: true,
   });
-  let terminalClosed = false;
-  const onSigint = () => {
+  const shutdown = (): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     terminalClosed = true;
+    promptAbort.abort();
     rl.close();
-    process.exit(0);
+    void iterator.return(undefined).catch(() => {});
   };
-  process.once('SIGINT', onSigint);
+  rl.on('SIGINT', shutdown);
+  rl.on('close', shutdown);
+  process.once('SIGINT', shutdown);
   rl.on('line', (line) => {
+    atLineStart = true;
     const text = line.trim();
     if (text.length === 0) {
       rl.prompt();
       return;
     }
     void session
-      .prompt({ prompt: [{ type: 'text', text }] })
+      .prompt({ prompt: [{ type: 'text', text }] }, promptAbort.signal)
       .catch((error: unknown) => {
-        writeStderrLine(
-          `qwen attach: prompt failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
+        if (!terminalClosed) {
+          writeStderrLine(
+            `qwen attach: prompt failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
       })
       .finally(() => {
-        if (!terminalClosed) rl.prompt();
+        if (!terminalClosed) {
+          endLine();
+          rl.prompt();
+        }
       });
   });
   rl.prompt();
@@ -162,9 +230,12 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   try {
     await eventsDone;
   } finally {
+    shuttingDown = true;
     terminalClosed = true;
-    process.removeListener('SIGINT', onSigint);
+    promptAbort.abort();
+    process.removeListener('SIGINT', shutdown);
     rl.close();
+    void iterator.return(undefined).catch(() => {});
   }
 }
 
@@ -181,6 +252,11 @@ export const attachCommand: CommandModule<unknown, AttachArgs> = {
         type: 'string',
         demandOption: true,
         describe: 'Daemon session id to attach to',
+      })
+      .option('workspace', {
+        type: 'string',
+        describe:
+          'Workspace containing the session; required for a secondary workspace',
       })
       .option('token', {
         type: 'string',

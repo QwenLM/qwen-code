@@ -16,6 +16,7 @@ import { writeDaemonToken } from '../serve/daemon-discovery.js';
 import {
   attachCommand,
   resolveAttachToken,
+  resolveAttachWorkspace,
   selectAttachRecord,
 } from './attach.js';
 
@@ -120,6 +121,29 @@ describe('qwen attach token resolution', () => {
   });
 });
 
+describe('qwen attach workspace resolution', () => {
+  it('uses an explicit workspace', () => {
+    expect(resolveAttachWorkspace(entry(4170).record, '  /tmp/other  ')).toBe(
+      '/tmp/other',
+    );
+  });
+
+  it('defaults to the only registered workspace', () => {
+    expect(resolveAttachWorkspace(entry(4170).record, undefined)).toBe(
+      '/tmp/project-4170',
+    );
+  });
+
+  it('does not guess when several workspaces are registered', () => {
+    const record = {
+      ...entry(4170).record,
+      workspaces: ['/tmp/one', '/tmp/two'],
+      primaryWorkspace: '/tmp/one',
+    };
+    expect(resolveAttachWorkspace(record, undefined)).toBeUndefined();
+  });
+});
+
 describe('qwen attach command', () => {
   it('declares the attach command and required session option', () => {
     expect(attachCommand.command).toBe('attach');
@@ -135,6 +159,6 @@ describe('qwen attach command', () => {
     };
     builder(mockYargs as never);
     const options = mockYargs.option.mock.calls.map((call) => call[0]);
-    expect(options).toEqual(['port', 'session', 'token']);
+    expect(options).toEqual(['port', 'session', 'workspace', 'token']);
   });
 });
