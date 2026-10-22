@@ -22,9 +22,33 @@ public interface HarnessConnector extends AutoCloseable {
 
     default boolean supportsModelSelection() { return false; }
 
+    default boolean supportsContextCompression() { return false; }
+
+    @FunctionalInterface
+    interface ContextCompressionSubmission {
+        Map<String, Object> submit();
+    }
+
+    default ContextCompressionSubmission prepareContextCompression(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        return () -> runContextCompression(tenantId, sessionId, body);
+    }
+
+    default Map<String, Object> runContextCompression(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        throw new UnsupportedOperationException("Context compression is unavailable");
+    }
+
+    default Map<String, Object> readContextCompression(String tenantId, String sessionId,
+            String operationId) {
+        throw new UnsupportedOperationException("Context compression is unavailable");
+    }
+
     default boolean supportsPlanMode() { return false; }
 
     default boolean supportsInputAttachments() { return false; }
+
+    default boolean supportsSessionSkills() { return false; }
 
     default boolean isWorkspaceFilesAvailable() {
         return false;
@@ -73,6 +97,11 @@ public interface HarnessConnector extends AutoCloseable {
                 "Managed Runtime recovery is unavailable");
     }
 
+    default Attachment recoverManagedRuntime(String tenantId, String sessionId,
+            boolean cancellation, String promptId) {
+        throw new UnsupportedOperationException("Targeted Runtime recovery is unavailable");
+    }
+
     /**
      * Sends the cancellation takeover load even when this Harness already
      * serves the Session: a plain cancel the daemon refused with
@@ -86,10 +115,20 @@ public interface HarnessConnector extends AutoCloseable {
                 "Managed Runtime recovery is unavailable");
     }
 
+    default Attachment recoverManagedCancellation(String tenantId,
+            String sessionId, String promptId) {
+        throw new UnsupportedOperationException("Targeted Runtime recovery is unavailable");
+    }
+
     default Attachment recoverManagedFailureCancellation(String tenantId,
             String sessionId, String turnId, String dispatchOwner) {
         throw new UnsupportedOperationException(
                 "Managed Runtime recovery is unavailable");
+    }
+
+    default Attachment recoverManagedFailureCancellation(String tenantId,
+            String sessionId, String turnId, String dispatchOwner, String promptId) {
+        throw new UnsupportedOperationException("Targeted Runtime recovery is unavailable");
     }
 
     /**
@@ -98,6 +137,24 @@ public interface HarnessConnector extends AutoCloseable {
      * from a report already known to be stale.
      */
     default void discardManagedRecovery(String tenantId, String sessionId) {
+    }
+
+    record RecoveryStatus(String state, String reasonCode, String promptId,
+            boolean inputSettled, boolean continuationReady, boolean nextTurnAllowed) {}
+
+    /** Inspects an existing attachment without loading or acquiring anything. */
+    default RecoveryStatus inspectRecovery(String tenantId, String sessionId, String promptId) {
+        return null;
+    }
+
+    /** Returns only cached replay identity, without loading or acquiring anything. */
+    default Attachment cachedRecoveryAttachment(String tenantId, String sessionId) {
+        return null;
+    }
+
+    /** Returns false when the original terminal cleanup cannot safely be retried. */
+    default boolean recheckRecoveryCleanup(String tenantId, String sessionId, String promptId) {
+        return false;
     }
 
     Admission submit(String tenantId, String sessionId, String promptId,
@@ -128,6 +185,10 @@ public interface HarnessConnector extends AutoCloseable {
     }
 
     void cancel(String tenantId, String sessionId);
+
+    default void cancelOriginalTurn(String tenantId, String sessionId, String promptId) {
+        throw new UnsupportedOperationException("Targeted cancellation is unavailable");
+    }
 
     /**
      * H6b/H6c: one automation operation onto the Session's journal, from the
