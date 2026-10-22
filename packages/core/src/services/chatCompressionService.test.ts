@@ -20,7 +20,7 @@ import {
   PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
 } from './chatCompressionService.js';
 import type { CompressOptions } from './chatCompressionService.js';
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import { CompressionStatus } from '../core/turn.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { tokenLimit } from '../core/tokenLimits.js';
@@ -3292,6 +3292,20 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     expectCompressed(result);
   });
 
+  it('keeps a complete summary that mentions the snapshot tag after closing it', async () => {
+    // A trailing sentence that names the tag is not an open snapshot: the
+    // first one opened was closed.
+    mockVllmBackend(WINDOW, false, {
+      text:
+        '<state_snapshot><next_step>x</next_step></state_snapshot>\n' +
+        'As instructed, I produced the <state_snapshot> XML.',
+    });
+
+    const result = await compressChars(182_000, 45_000);
+
+    expectCompressed(result);
+  });
+
   it('keeps a complete summary that uses no snapshot tags', async () => {
     mockVllmBackend(WINDOW, false, { text: 'Goal: port the parser. Done.' });
 
@@ -3344,37 +3358,63 @@ describe('issue #9455: compression requests fit the receiving window', () => {
   /**
    * Counts each request at `ratio` times the local char/4 estimate (a real
    * tokenizer bills dense CJK text well above it) and rejects
-   * `prompt + max_tokens > window` with `rejection(prompt)`. `window` is the
-   * server's real window, which a self-hosted deployment can set below the
-   * configured one.
+   * `prompt + max_tokens > window` with `rejection(prompt, max_tokens)`.
+   * `userTextRatio`, when set, bills the text of user turns at its own rate,
+   * as a tokenizer does for CJK prose next to ASCII tool output. `window` is
+   * the server's real window, which a self-hosted deployment can set below
+   * the configured one.
    */
   function mockBackend(
     o: {
       ratio?: number;
+      userTextRatio?: number;
       window?: number;
       outputTokens?: number;
-      rejection?: (promptTokens: number) => Error;
+      /** A model output cap the transport applies to `max_tokens`. */
+      outputCap?: number;
+      rejection?: (promptTokens: number, maxOutputTokens: number) => Error;
       alwaysReject?: boolean;
     } = {},
   ) {
     const window = o.window ?? WINDOW;
+    const isUserText = (entry: Content, part: Part) =>
+      entry.role === 'user' && typeof part.text === 'string';
+    const split = (contents: Content[], userText: boolean) =>
+      contents.map((entry) => ({
+        ...entry,
+        parts: (entry.parts ?? []).filter(
+          (part) => isUserText(entry, part) === userText,
+        ),
+      }));
     const generateText = vi.fn(async (opts: GenerateTextOptions) => {
       const contents = opts.contents as Content[];
       const systemText =
         typeof opts.systemInstruction === 'string'
           ? opts.systemInstruction
           : '';
-      const promptTokens = Math.ceil(
-        (estimateContentTokens(contents) + Math.ceil(systemText.length / 4)) *
-          (o.ratio ?? 1),
-      );
-      const maxOutputTokens =
+      const ratio = o.ratio ?? 1;
+      const promptTokens =
+        o.userTextRatio === undefined
+          ? Math.ceil(
+              (estimateContentTokens(contents) +
+                Math.ceil(systemText.length / 4)) *
+                ratio,
+            )
+          : Math.ceil(
+              (estimateContentTokens(split(contents, false)) +
+                Math.ceil(systemText.length / 4)) *
+                ratio +
+                estimateContentTokens(split(contents, true)) * o.userTextRatio,
+            );
+      const maxOutputTokens = Math.min(
         (opts.config as { maxOutputTokens?: number } | undefined)
-          ?.maxOutputTokens ?? 0;
+          ?.maxOutputTokens ?? 0,
+        o.outputCap ?? Infinity,
+      );
       sent.push({ contents, promptTokens, maxOutputTokens });
       if (o.alwaysReject || promptTokens + maxOutputTokens > window) {
         throw (
-          o.rejection?.(promptTokens) ??
+          o.rejection?.(promptTokens, maxOutputTokens) ??
           new Error(
             `prompt is too long: ${promptTokens} tokens > ${window} maximum`,
           )
@@ -3429,6 +3469,39 @@ describe('issue #9455: compression requests fit the receiving window', () => {
         `your prompt contains ${promptTokens} input tokens, which exceeds ` +
         `this limit even without any output tokens.`,
     );
+
+  /**
+   * OpenAI's wording, shared by DeepSeek and older vLLM: the total counts
+   * the requested output budget, and the parenthesis breaks it out.
+   */
+  const openAiRejection =
+    (window: number) => (promptTokens: number, maxOutputTokens: number) =>
+      new Error(
+        `This model's maximum context length is ${window} tokens. However, ` +
+          `you requested ${promptTokens + maxOutputTokens} tokens ` +
+          `(${promptTokens} in the messages, ${maxOutputTokens} in the ` +
+          `completion). Please reduce the length of the messages or completion.`,
+      );
+
+  /** The same total with no breakdown. */
+  const requestedTotalRejection =
+    (window: number) => (promptTokens: number, maxOutputTokens: number) =>
+      new Error(
+        `This model's maximum context length is ${window} tokens. However, ` +
+          `you requested ${promptTokens + maxOutputTokens} tokens. Please ` +
+          `reduce the length of the messages or completion.`,
+      );
+
+  /** SGLang's wording: the prompt's size, beside a limit it states as "of N". */
+  const sglangRejection =
+    (window: number) => (promptTokens: number, maxOutputTokens: number) =>
+      new Error(
+        `Requested token count exceeds the model's maximum context length ` +
+          `of ${window} tokens. You requested a total of ` +
+          `${promptTokens + maxOutputTokens} tokens: ${promptTokens} tokens ` +
+          `from the input messages and ${maxOutputTokens} tokens for the ` +
+          `completion.`,
+      );
 
   function compressHistory(
     history: Content[],
@@ -3601,6 +3674,43 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     expectWellFormed(retry.contents);
   });
 
+  it('never accepts a retry that lost the first or newest user message (8K window)', async () => {
+    // The #14953 review trace: an 8K window billing 2.4x the estimate. The
+    // retry kept the newest turns whole and cut the quotes to fit what was
+    // left: 609 of the first message's 20,000 characters, the other two
+    // user messages gone, and the summary still persisted.
+    configureWindow(8_192);
+    mockBackend({ ratio: 2.4, window: 8_192 });
+    const first = 'first request: ' + 'F'.repeat(20_000);
+    const middle = 'round 10: keep the old API working';
+    const newest = 'round 20: also update the docs';
+    const history: Content[] = [userText(first)];
+    for (let i = 1; i <= 20; i++) {
+      history.push(content('model', fnCall('read_file', { i }, `c${i}`)));
+      history.push(
+        content(
+          'user',
+          fnResponse('read_file', { output: 'r'.repeat(1_500) }, `c${i}`),
+        ),
+      );
+      if (i === 10 || i === 20) {
+        history.push(modelText('noted'));
+        history.push(userText(i === 10 ? middle : newest));
+      }
+    }
+    history.push(modelText('done'));
+
+    const result = await compressHistory(history, 12_000);
+
+    expectCompressed(result);
+    const last = sent[sent.length - 1]!;
+    const text = textOf(last.contents);
+    expect(text).toContain(newest);
+    expect(text).toContain(middle);
+    expect(text).toContain('first request: ' + 'F'.repeat(900));
+    expect(last.promptTokens + last.maxOutputTokens).toBeLessThanOrEqual(8_192);
+  });
+
   it('sizes the retry for the window the rejection reports', async () => {
     // A self-hosted server whose real window is below the configured one:
     // the rejection is the first place that window appears.
@@ -3616,6 +3726,30 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     expect(textOf(sent[1]!.contents)).toContain(
       'original request: port the parser',
     );
+  });
+
+  it('sizes the retry for the limit a bare "N tokens > M" rejection exceeds', async () => {
+    // Anthropic's wording does not say whether M bounds the prompt or the
+    // window, but once the request's own count is past it the endpoint takes
+    // no more than M: here 200K, for a model configured with a 1M window.
+    // Pasted text survives the first reduction stage, so the fixed 60% step
+    // alone would still overrun it.
+    configureWindow(1_000_000);
+    mockBackend({ window: 200_000 });
+    const history: Content[] = [];
+    for (let i = 0; i < 52; i++) {
+      history.push(userText(`pasted log ${i}: ` + 'l'.repeat(30_000)));
+      history.push(modelText(`noted ${i}`));
+    }
+
+    const result = await compressHistory(history, 390_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    expect(
+      sent[1]!.promptTokens + sent[1]!.maxOutputTokens,
+    ).toBeLessThanOrEqual(200_000);
+    expect(textOf(sent[1]!.contents)).toContain('pasted log 0:');
   });
 
   it('refuses locally when the reported window cannot hold a retry', async () => {
@@ -3675,6 +3809,159 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     expect(sent[1]!.promptTokens).toBeLessThan(sent[0]!.promptTokens * 0.65);
   });
 
+  const SMALL_WINDOW = 40_000;
+
+  it('resends the same request with less output room when only the output overran', async () => {
+    // The estimate ran 60% low, so prompt plus the full output budget
+    // overran the window while the prompt alone left the summary its
+    // reserve. Only the output budget needs to shrink. A ratio taken from a
+    // total that counts the output budget would cut the input instead.
+    configureWindow(SMALL_WINDOW);
+    mockBackend({
+      ratio: 1.6,
+      window: SMALL_WINDOW,
+      rejection: openAiRejection(SMALL_WINDOW),
+    });
+    const history = toolSession(4, 12_000);
+
+    const result = await compressHistory(history, 20_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    expect(sent[0]!.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(sent[1]!.contents).toEqual(sent[0]!.contents);
+    expect(sent[1]!.maxOutputTokens).toBeLessThan(sent[0]!.maxOutputTokens);
+    expect(sent[1]!.maxOutputTokens).toBeGreaterThanOrEqual(
+      Math.floor(SMALL_WINDOW / 4),
+    );
+    expect(
+      sent[1]!.promptTokens + sent[1]!.maxOutputTokens,
+    ).toBeLessThanOrEqual(SMALL_WINDOW);
+  });
+
+  it('shrinks by the fixed step when the count says the request should have fit', async () => {
+    // SGLang states the prompt's size but not a limit this parser reads. By
+    // the configured window the prompt left room for the budget sent, so the
+    // server's window is smaller by an unknown amount.
+    configureWindow(262_144);
+    mockBackend({ window: 131_072, rejection: sglangRejection(131_072) });
+
+    const result = await compressHistory(toolSession(50, 12_000), 150_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.promptTokens).toBeLessThan(sent[0]!.promptTokens * 0.65);
+  });
+
+  it('takes a total with no breakdown as an upper bound on the prompt', async () => {
+    // The transport capped the output at the model's 8,192 tokens, so the
+    // total counts less output than the budget this service asked for.
+    // Subtracting that budget would undercount the prompt and resend a
+    // request that overruns again.
+    configureWindow(SMALL_WINDOW);
+    mockBackend({
+      ratio: 1.6,
+      window: SMALL_WINDOW,
+      outputCap: 8_192,
+      rejection: requestedTotalRejection(SMALL_WINDOW),
+    });
+
+    const result = await compressHistory(toolSession(6, 13_000), 30_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    expect(
+      sent[1]!.promptTokens + sent[1]!.maxOutputTokens,
+    ).toBeLessThanOrEqual(SMALL_WINDOW);
+  });
+
+  it('fits the retry when the user text it keeps is denser than the tool output it cuts', async () => {
+    // CJK user messages bill 2.4 tokens per estimated token, ASCII tool
+    // output 1. A single ratio for the whole request underrates what is left
+    // once the tool output is cut, and the retry overruns the window again.
+    mockBackend({ userTextRatio: 2.4 });
+    const cjk = (seed: string) =>
+      `${seed}：` + '请把解析器移植到新的接口上。'.repeat(1_400);
+    const history = toolSession(10, 12_000, [
+      modelText('noted'),
+      userText(cjk('第一条')),
+      modelText('ok'),
+      userText(cjk('第二条')),
+      modelText('ok'),
+      userText(cjk('第三条')),
+    ]);
+
+    const result = await compressHistory(history, 60_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    const retry = sent[1]!;
+    expect(retry.promptTokens + retry.maxOutputTokens).toBeLessThanOrEqual(
+      WINDOW,
+    );
+    expect(retry.maxOutputTokens).toBeGreaterThanOrEqual(
+      Math.floor(WINDOW / 4),
+    );
+    for (const seed of ['第一条', '第二条', '第三条']) {
+      expect(textOf(retry.contents)).toContain(cjk(seed));
+    }
+  });
+
+  it('fits the retry when the provider counts fewer tokens than the estimate', async () => {
+    // Sparse ASCII bills below char/4, so each estimated token cut takes less
+    // than one real token with it. Cut one for one, the overflow would
+    // overrun the 16K window the rejection reports a second time.
+    mockBackend({
+      ratio: 0.8,
+      window: 16_384,
+      rejection: vllmRejection(16_384),
+    });
+
+    const result = await compressHistory(toolSession(20, 6_000), 40_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    expect(
+      sent[1]!.promptTokens + sent[1]!.maxOutputTokens,
+    ).toBeLessThanOrEqual(16_384);
+  });
+
+  it('ignores a count far below the request’s own estimate', async () => {
+    // char/4 under-counts, so a count well under it describes some other
+    // request; the retry falls back to the fixed step.
+    mockBackend({
+      ratio: 2,
+      rejection: () =>
+        new Error('prompt is too long: 100 tokens > 200 maximum'),
+    });
+
+    const result = await compressHistory(toolSession(20, 6_000), 60_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.promptTokens).toBeLessThan(sent[0]!.promptTokens * 0.65);
+  });
+
+  it('ignores a count under which the rejected request would have fit', async () => {
+    // Read at face value, this count says only the output budget overran and
+    // the prompt could be resent unchanged. It cannot be this request's:
+    // prompt plus that budget is inside the limit the same message states.
+    mockBackend({
+      ratio: 1.2,
+      alwaysReject: true,
+      rejection: (promptTokens) =>
+        new Error(
+          `This model's maximum context length is 131072 tokens. However, ` +
+            `your messages resulted in ${promptTokens} tokens.`,
+        ),
+    });
+
+    await compressHistory(toolSession(20, 6_000), 40_000);
+
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.promptTokens).toBeLessThan(sent[0]!.promptTokens * 0.65);
+  });
+
   it('gives up after one retry', async () => {
     mockBackend({ alwaysReject: true });
 
@@ -3723,6 +4010,28 @@ describe('issue #9455: compression requests fit the receiving window', () => {
       }),
     ).rejects.toThrow('prompt is too long');
     expect(sent).toHaveLength(1);
+  });
+
+  it('compacts a session whose one user message is larger than the window', async () => {
+    // Text the user typed is kept whole only up to a cap: past it, no
+    // reduction could ever bring the request under the window, and every
+    // compaction would be refused locally.
+    mockBackend();
+    const history = toolSession(10, 12_000, [
+      modelText('noted'),
+      userText('BEGIN ' + 'u'.repeat(500_000) + ' END?'),
+    ]);
+
+    const result = await compressHistory(history, 200_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(1);
+    const text = textOf(sent[0]!.contents);
+    expect(text).toContain('BEGIN ');
+    expect(text).toContain(' END?');
+    expect(text).not.toContain(
+      'u'.repeat(slimmingModule.PRESERVED_USER_TEXT_MAX_CHARS),
+    );
   });
 
   it('condenses a payload-overflow (413) compaction from its already-capped input', async () => {
