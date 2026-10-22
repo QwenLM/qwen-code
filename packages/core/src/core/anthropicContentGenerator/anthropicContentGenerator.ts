@@ -1032,19 +1032,17 @@ export class AnthropicContentGenerator implements ContentGenerator {
     }
     if (this.getReasoningCapabilities()?.profile) return effort;
     if (isDeepSeekAnthropicHostname(this.contentGeneratorConfig)) {
-      // DeepSeek's anthropic-compatible output_config.effort accepts only
-      // high/max. Mirror the DeepSeek OpenAI adapter (deepseek.ts): low/medium
-      // lift to high and xhigh groups to max, so a low/medium request is not
-      // passed through verbatim (which the endpoint would 400 on). Warn once
-      // when the requested tier is remapped — mirroring the real-Anthropic
-      // clamp path below — so a `/effort low` silently running at `high` is
-      // visible in debug logs.
+      // DeepSeek's anthropic-compatible output_config.effort runs low, high
+      // and max, folding medium and xhigh into high. Map on the client too so
+      // the debug log names the tier that actually runs; warn once when the
+      // requested tier is remapped — mirroring the real-Anthropic clamp path
+      // below.
       const mapped: ReasoningEffort =
-        effort === 'xhigh' || effort === 'max' ? 'max' : 'high';
+        effort === 'low' || effort === 'max' ? effort : 'high';
       if (mapped !== effort && !this.effortClampWarned) {
         debugLogger.warn(
-          `reasoning.effort='${effort}' is not accepted by the DeepSeek ` +
-            `anthropic-compatible endpoint; using '${mapped}'.`,
+          `reasoning.effort='${effort}' runs as '${mapped}' on the DeepSeek ` +
+            `anthropic-compatible endpoint.`,
         );
         this.effortClampWarned = true;
       }

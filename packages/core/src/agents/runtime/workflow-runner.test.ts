@@ -619,6 +619,17 @@ describe('WorkflowRunner', () => {
     }
   });
 
+  it('hands the Workflow tool call id to the dispatch', async () => {
+    const { config } = configWithRegistry();
+    createProductionDispatchMock.mockReturnValue(async () => 'done');
+    const handle = await startRun(config, {
+      toolUseId: 'call_wf',
+      script: "return await agent('read');",
+    });
+    expect((await handle.completion).ok).toBe(true);
+    expect(createProductionDispatchMock.mock.calls[0]?.[6]).toBe('call_wf');
+  });
+
   it('keeps an ordinary workflow on generic dispatch bounds despite review metadata', async () => {
     const { config } = configWithRegistry();
     createProductionDispatchMock.mockReturnValue(async () => 'done');
