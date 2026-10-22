@@ -496,7 +496,7 @@ printf '%s\\n' '${liveAttempt}'
     // pass condition rather than a skip: absence of the receipt is a missing
     // receipt, not a licence to publish.
     expect(download).toContain(
-      '| jq -s \'{jobs: [ .[].jobs[]? ]} as $doc | ([.[].total_count] | max) as $total | if $total != null and ($doc.jobs | length) == $total then $doc else error("incomplete job list: merged \\($doc.jobs | length) of \\($total)") end\' > "${jobs_tmp}"; then mv "${jobs_tmp}" "${jobs_json}"',
+      'gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" --paginate | jq -s \'{jobs: [ .[].jobs[]? ]} as $doc | ([.[].total_count] | max) as $total | if $total != null and ($doc.jobs | length) == $total then $doc else error("incomplete job list: merged \\($doc.jobs | length) of \\($total)") end\' > "${jobs_tmp}"; then mv "${jobs_tmp}" "${jobs_json}"',
     );
     // A run whose pages cannot be read at all degrades the way the per-commit
     // body already tolerates: no stale staging file, an empty list, and a
@@ -572,6 +572,7 @@ printf '%s\\n' '{"jobs":[]}'
           REPO: 'QwenLM/qwen-code',
           WORKFLOW_RUN_ID: '39237270547',
           RUN_ATTEMPT: '1',
+          GITHUB_OUTPUT: join(tmp, 'output'),
         },
       });
       expect(result.status, result.stderr).toBe(0);
@@ -630,6 +631,7 @@ printf '%s\\n' '{"jobs":[]}'
             WORKFLOW_RUN_ID: '39045740099',
             RUN_ATTEMPT: '1',
             GH_TOKEN: 'fake',
+            GITHUB_OUTPUT: join(tmp, 'output'),
           },
         });
         expect(result.status, result.stderr).toBe(0);
@@ -638,6 +640,9 @@ printf '%s\\n' '{"jobs":[]}'
           jobs: JSON.parse(readFileSync(join(tmp, 'run-jobs.json'), 'utf8'))
             .jobs,
           staged: existsSync(join(tmp, 'run-jobs.json.tmp')),
+          complete: /jobs_complete=(\w+)/.exec(
+            readFileSync(join(tmp, 'output'), 'utf8'),
+          )?.[1],
         };
       } finally {
         rmSync(tmp, { recursive: true, force: true });
@@ -650,6 +655,7 @@ printf '%s\\n' '{"jobs":[]}'
     ]);
     expect(truncated.jobs).toEqual([]);
     expect(truncated.staged).toBe(false);
+    expect(truncated.complete).toBe('false');
     expect(truncated.stdout).toContain(
       '::warning::Could not read the whole job list of run',
     );
@@ -664,6 +670,7 @@ printf '%s\\n' '{"jobs":[]}'
     ]);
     expect(noReceipt.jobs).toEqual([]);
     expect(noReceipt.staged).toBe(false);
+    expect(noReceipt.complete).toBe('false');
     expect(noReceipt.stdout).toContain(
       '::warning::Could not read the whole job list of run',
     );
@@ -673,6 +680,10 @@ printf '%s\\n' '{"jobs":[]}'
     const complete = runPages([{ body: page([9001]) }, { body: page([9101]) }]);
     expect(complete.jobs.map((job) => job.id)).toEqual([9001, 9101]);
     expect(complete.staged).toBe(false);
+    // The readers downstream key their honest degradation line on this output,
+    // so a promotion that does not publish `true` would tell a complete report
+    // that its job list was short.
+    expect(complete.complete).toBe('true');
     expect(complete.stdout).not.toContain('::warning::');
   });
 
@@ -1022,6 +1033,7 @@ printf '%s\\n' '{"jobs":[]}'
           'https://github.com/QwenLM/qwen-code/actions/runs/39045740099',
         WORKFLOW_RUN_AT: '2026-10-18T00:00:00Z',
         HEAD_SHA: 'abc123456789',
+        JOBS_COMPLETE: 'true',
       };
       const prepared = spawnSync(
         'bash',
@@ -1034,6 +1046,73 @@ printf '%s\\n' '{"jobs":[]}'
       expect(body.endsWith(`${delimiter}\n`)).toBe(true);
       expect(body).toContain('### `Managed Agent gate` failed');
       expect(body).toContain('GitHub runner infrastructure failed');
+      // A complete job list must not carry the degradation line.
+      expect(body).not.toContain('could not be read in full');
+
+      // An unread list leaves the same body looking like a run with no
+      // identifiable failure, so the reader has to be told.
+      const degradedOut = join(tmp, 'output-degraded');
+      const degraded = spawnSync(
+        'bash',
+        ['-eo', 'pipefail', '-c', summary.run],
+        {
+          env: {
+            ...env,
+            GITHUB_OUTPUT: degradedOut,
+            JOBS_COMPLETE: 'false',
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(degraded.status, degraded.stderr).toBe(0);
+      expect(readFileSync(degradedOut, 'utf8')).toContain(
+        'The job list could not be read in full',
+      );
+
+      // The issue body carries the same signal, once: the second plan runs
+      // against a body that already holds the sentence and must not stack it.
+      writeFileSync(join(tmp, 'gh'), '#!/bin/sh\nexit 0\n');
+      const planOut = join(tmp, 'output-plan');
+      const planEnv = {
+        ...env,
+        GITHUB_OUTPUT: planOut,
+        JOBS_COMPLETE: 'false',
+      };
+      const plannedBody = spawnSync(
+        'bash',
+        ['-eo', 'pipefail', '-c', plan.run],
+        { env: planEnv, encoding: 'utf8' },
+      );
+      expect(plannedBody.status, plannedBody.stderr).toBe(0);
+      const firstPlan = readFileSync(planOut, 'utf8');
+      expect(firstPlan).toContain('The job list could not be read in full');
+      expect(firstPlan.split('could not be read in full')).toHaveLength(2);
+
+      // Re-plan against an issue whose body already carries the sentence: a
+      // recurrence must not stack a second copy.
+      const note =
+        'The job list could not be read in full, so this issue may name fewer failing jobs than the run had.';
+      writeFileSync(
+        join(tmp, 'gh'),
+        `#!/bin/sh
+if [ "$1" = "issue" ] && [ "$2" = "list" ]; then printf '5\\n'; exit 0; fi
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then printf '%s\\n' 'tracked body
+
+${note}'; exit 0; fi
+exit 0
+`,
+      );
+      const replanOut = join(tmp, 'output-replan');
+      const replanned = spawnSync('bash', ['-eo', 'pipefail', '-c', plan.run], {
+        env: { ...planEnv, GITHUB_OUTPUT: replanOut },
+        encoding: 'utf8',
+      });
+      expect(replanned.status, replanned.stderr).toBe(0);
+      expect(
+        readFileSync(replanOut, 'utf8').split('could not be read in full'),
+      ).toHaveLength(2);
+
+      writeFileSync(join(tmp, 'gh'), '#!/bin/sh\nexit 1\n');
       const planned = spawnSync('bash', ['-eo', 'pipefail', '-c', plan.run], {
         env,
         encoding: 'utf8',
