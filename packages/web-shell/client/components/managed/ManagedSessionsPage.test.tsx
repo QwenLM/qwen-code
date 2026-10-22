@@ -13,6 +13,7 @@ import type {
   ManagedAgentSessionSummary,
   ManagedAgentSessionEvent,
   ManagedAgentSessionTranscript,
+  ManagedContextCompressionOperation,
   ManagedTask,
 } from './managed-agent-provider';
 import type { EditorHandle } from '../../hooks/useComposerCore';
@@ -775,6 +776,147 @@ describe('ManagedSessionsPage', () => {
     };
     mocks.client.getSession.mockImplementation(async () => current());
   }
+
+  it('compresses without a Turn, preserves the draft, and excludes same-frame composer and settings changes', async () => {
+    let session = switchableSession({
+      compactionRevision: 0,
+      approvalMode: 'default',
+      approvalRevision: 0,
+      planModeSupported: true,
+      capabilities: {
+        canSend: true,
+        canCancel: false,
+        workspaceTurns: true,
+        modelChange: true,
+        cwdChange: true,
+        approvalModeChange: true,
+        contextCompression: true,
+      },
+    });
+    modelApi(() => session);
+    provider.cwdChange = { submit: vi.fn(), query: vi.fn() };
+    provider.approvalChange = {
+      queryOptions: vi.fn(async () => ({
+        supported: true,
+        approvalMode: 'default',
+        approvalRevision: 0,
+        availableApprovalModes: ['default', 'yolo'],
+        planModeSupported: true,
+      })),
+      submit: vi.fn(),
+    };
+    let finish!: (value: ManagedContextCompressionOperation) => void;
+    provider.contextCompression = {
+      submit: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      ),
+      query: vi.fn(),
+    };
+    await render('s1');
+    await input('Keep my draft');
+    const before = mocks.editorProps!;
+    expect(before.contextUsageControls?.canCompress).toBe(true);
+    await act(async () => {
+      void before.contextUsageControls!.compress();
+      before.onSubmit('Keep my draft', undefined, undefined, vi.fn());
+      before.onSelectModel!('B');
+      before.onSelectMode!('yolo');
+      before.onTogglePlan!();
+      await flush();
+    });
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    expect(provider.modelChange!.submit).not.toHaveBeenCalled();
+    expect(provider.approvalChange.submit).not.toHaveBeenCalled();
+    expect(mocks.editorProps?.disabled).toBe(true);
+    expect(mocks.editorProps?.modelControlsDisabled).toBe(true);
+    expect(mocks.editorProps?.modeControlsDisabled).toBe(true);
+    expect(mocks.editorProps?.planControlsDisabled).toBe(true);
+    expect(
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Change directory',
+      )?.disabled,
+    ).toBe(true);
+    session = { ...session, compactionRevision: 9, modelContext: undefined };
+    await act(async () => {
+      finish({
+        sessionId: 's1',
+        operationId: 'op',
+        type: 'context_compression',
+        status: 'completed',
+        expectedCompactionRevision: 0,
+        compactionRevision: 9,
+        outcome: 'compressed',
+        replayed: false,
+      });
+      await flush();
+    });
+    expect(mocks.editorProps?.contextUsageControls?.result).toEqual({
+      kind: 'compressed',
+    });
+    expect(mocks.editorProps?.contextUsageKnown).toBe(false);
+    expect(mocks.editorProps?.tokenCount).toBe(0);
+    expect(container.querySelector('textarea')?.value).toBe('Keep my draft');
+    expect(mocks.commitAccepted).not.toHaveBeenCalled();
+    expect(mocks.editorProps?.disabled).toBe(false);
+  });
+
+  it('does not race a model change that began in the same render frame', async () => {
+    const session = switchableSession({
+      capabilities: {
+        canSend: true,
+        canCancel: false,
+        workspaceTurns: true,
+        modelChange: true,
+        contextCompression: true,
+      },
+    });
+    modelApi(() => session);
+    vi.mocked(provider.modelChange!.submit).mockImplementation(
+      () => new Promise(() => {}),
+    );
+    provider.contextCompression = { submit: vi.fn(), query: vi.fn() };
+    await render('s1');
+    const before = mocks.editorProps!;
+    await act(async () => {
+      before.onSelectModel!('B');
+      await before.contextUsageControls!.compress();
+    });
+    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
+    expect(provider.contextCompression.submit).not.toHaveBeenCalled();
+  });
+
+  it('observes another tab compression and blocks sends before the first operation query returns', async () => {
+    const session = switchableSession({
+      compactionRevision: 0,
+      contextCompressionOperationId: 'other-tab-op',
+      capabilities: {
+        canSend: true,
+        canCancel: false,
+        workspaceTurns: true,
+        contextCompression: true,
+      },
+    });
+    mocks.client.getSession.mockResolvedValue(session);
+    provider.contextCompression = {
+      submit: vi.fn(),
+      query: vi.fn(() => new Promise(() => {})),
+    };
+    await render('s1');
+    expect(provider.contextCompression.query).toHaveBeenCalledWith(
+      's1',
+      'other-tab-op',
+      expect.anything(),
+    );
+    expect(mocks.editorProps?.disabled).toBe(true);
+    await act(async () => {
+      mocks.editorProps!.onSubmit('A prompt', undefined, undefined, vi.fn());
+    });
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    expect(provider.contextCompression.submit).not.toHaveBeenCalled();
+  });
 
   it.each(['qwen-code', `agent_${'a'.repeat(32)}`])(
     'switches approval for %s after readback while preserving the draft and excluding same-frame send and model changes',
