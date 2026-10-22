@@ -7,6 +7,8 @@ import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
@@ -17,14 +19,17 @@ import jakarta.servlet.DispatcherType;
 import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.Ordered;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.net.URI;
 import java.security.Principal;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -58,6 +63,20 @@ final class HostedGateTestSupport {
             }
         }
         return out.toString();
+    }
+
+    // Keep a newly admitted close invisible until the fixture owns its claim.
+    static OperationRecord admitAndClaimClose(TransactionTemplate transactions,
+            ManagedAgentStore store, String tenant, String sessionId,
+            String key, String owner) {
+        return transactions.execute(ignored -> {
+            var admission = store.beginWorkspaceLifecycle(tenant, sessionId,
+                    OperationKind.CLOSE, "actor", DigestUtils.sha256Hex("actor"),
+                    key, "sha256:" + DigestUtils.sha256Hex(key), true, 2);
+            return store.claimOperation(tenant, sessionId,
+                    admission.operation().operationId(), owner,
+                    Duration.ofMinutes(10)).orElseThrow();
+        });
     }
 
     // The tenant-pinned authentication filter (FG6e's and FG8's probes
