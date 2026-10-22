@@ -58,6 +58,8 @@ describe('Hosted Harness private contract', () => {
         'input-attachments/1',
         'session-skills/1',
         'session-skills/2',
+        'recovery-cleanup/1',
+        'targeted-cancel/1',
         'event-keepalive/1',
       ],
     });
