@@ -25,6 +25,10 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
     await page.route('**/api/agent/web-shell/v1/**', async (route) => {
+      if (
+        new URL(route.request().url()).pathname.endsWith('/runtime-nodes/query')
+      )
+        return route.fulfill({ json: { supported: false, data: [] } });
       const path = new URL(route.request().url()).pathname;
       const body = route.request().postDataJSON();
       if (path.endsWith('/sessions/query'))
@@ -85,7 +89,7 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
     });
     const choose = async (name: string) => {
       await page
-        .getByRole('button', { name: new RegExp(`Conversation ${name}`) })
+        .getByRole('button', { name: new RegExp(`^Conversation ${name}\\b`) })
         .click();
       await expect(editor).toBeVisible();
     };
@@ -113,7 +117,7 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
     await page.getByRole('button', { name: 'Retry the same request' }).click();
 
     await expect(
-      page.getByRole('button', { name: /Conversation A/ }),
+      page.getByRole('button', { name: /^Conversation A\b/ }),
     ).toHaveAttribute('aria-current', 'page');
     await expect(editor).toHaveAttribute('contenteditable', 'true');
     await expect(editor).not.toContainText('Accepted A input');

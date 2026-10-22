@@ -1,15 +1,10 @@
 package com.alibaba.qwen.code.runtimebroker.managedschema;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
+import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+
+import javax.sql.DataSource;
 
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -17,7 +12,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-import javax.sql.DataSource;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ManagedSchemaTest {
     @Test
@@ -36,7 +35,7 @@ class ManagedSchemaTest {
                     + "'prompt','[]','digest','COMPLETED',1,1)");
         }
         ManagedSchema.initialize(source);
-        assertEquals(6, ManagedSchema.schemaVersion(source));
+        assertEquals(17, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
             try (var row = statement.executeQuery("SELECT model_id,model_revision FROM ma_session")) {
                 assertTrue(row.next());
@@ -64,7 +63,7 @@ class ManagedSchemaTest {
         ManagedSchema.initialize(source);
         ManagedSchema.initialize(source);
         ManagedSchema.validate(source);
-        assertEquals(6, ManagedSchema.schemaVersion(source));
+        assertEquals(17, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection()) {
             assertEquals(
                     ManagedSchemaContract.TABLES, ManagedSchemaCatalog.tables(connection).keySet());
@@ -88,7 +87,7 @@ class ManagedSchemaTest {
                         () -> receipt(connection, "unsupported", "WORKSPACE_CREATE"));
             }
             ManagedSchema.initialize(source);
-            assertEquals(6, ManagedSchema.schemaVersion(source));
+            assertEquals(17, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
                 receipt(connection, "new", "WORKSPACE_CREATE");
@@ -481,6 +480,31 @@ class ManagedSchemaTest {
             assertThrows(
                     SQLException.class,
                     () -> statement.execute("UPDATE ma_operation SET claim_generation = -1"));
+        }
+    }
+
+    // Each migration re-adds ck_ma_operation_kind whole, so one built from a
+    // stale chain silently drops a kind a shipped route writes.
+    @Test
+    void theCurrentOperationKindCheckAdmitsEveryShippedKind() throws Exception {
+        DataSource migrated = source();
+        Flyway.configure()
+                .dataSource(migrated)
+                .locations(ManagedSchema.FLYWAY_LOCATION)
+                .load()
+                .migrate();
+        for (DataSource source : new DataSource[] {initialized(), migrated}) {
+            try (var connection = source.getConnection();
+                    var statement = connection.createStatement()) {
+                for (var kind : ManagedSchemaContract.OperationKind.values()) {
+                    operation(statement, kind.name(), kind.name(), kind.name(), null);
+                }
+                // SshWorkspaceStore writes this kind as a plain string.
+                operation(statement, "WORKSPACE_CREATE", "WORKSPACE_CREATE",
+                        "WORKSPACE_CREATE", null);
+                assertThrows(SQLException.class,
+                        () -> operation(statement, "unknown", "INPUT", "unknown", null));
+            }
         }
     }
 

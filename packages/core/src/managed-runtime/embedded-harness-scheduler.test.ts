@@ -1325,6 +1325,49 @@ describe('EmbeddedHarnessScheduler', () => {
     expect(store.get(item)?.status).toBe('queued');
   });
 
+  // The other half of the same guard: a created enqueue does write the
+  // journal, and that write succeeding proves the store healthy, so it
+  // resets the streak. Nine failing claims, a new activation enqueued while
+  // claims are held back, then nine more failing claims: 18 cumulative but
+  // never 10 consecutive, so the worker keeps running (review round 3,
+  // R3-5).
+  it('resets the failure streak on a created enqueue between failing claims', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const store = await FileManagedActivationStore.open(filePath);
+    let headroom = true;
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 60_000,
+      hasMemoryHeadroom: () => headroom,
+      handler: async () => {},
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(activation('a1'));
+    fsFault.failAppends = 9;
+    await scheduler.start();
+    await advanceTimersUntil(
+      () => fsFault.failAppends === 0 || scheduler.haltedError !== undefined,
+      1_000,
+    );
+    headroom = false;
+    expect(scheduler.haltedError).toBeUndefined();
+
+    const created = await scheduler.submit(activation('a2'));
+    expect(created.created).toBe(true);
+    fsFault.failAppends = 9;
+    headroom = true;
+    await advanceTimersUntil(
+      () => fsFault.failAppends === 0 || scheduler.haltedError !== undefined,
+      1_000,
+    );
+    headroom = false;
+    expect(scheduler.haltedError).toBeUndefined();
+  });
+
   // The per-activation bound: renewals that keep failing across re-runs
   // spend the activation's transient-failure budget; once spent, the
   // scheduler records the terminal outcome itself instead of re-queuing the
@@ -1581,7 +1624,8 @@ describe('EmbeddedHarnessScheduler', () => {
 
   // A disposal racing in-flight releases whose writes then all fail
   // transiently must not leave a bogus store-failure halt on the dead
-  // worker: the streak still counts, the escalation does not fire.
+  // worker. With ten slots the halt bound is 100, so these ten failures
+  // stay under it; the next test drives the streak to the bound itself.
   it('does not halt when disposal races a streak of transient release failures', async () => {
     const store = await FileManagedActivationStore.open(filePath);
     const releasesEntered: string[] = [];
@@ -1618,6 +1662,76 @@ describe('EmbeddedHarnessScheduler', () => {
     await expect(scheduler.submit(activation('a10'))).rejects.toThrow(
       'is disposed',
     );
+  });
+
+  // The escalation guard in noteStoreOutcome only matters when the failure
+  // that lands after the dispose is the one that reaches the halt bound, so
+  // the streak is driven to one short of it first. Two slots put the bound
+  // at 20: a1 runs with its handler held open (its lease is long enough that
+  // no renewal resets the streak) while a2's claim fails 19 times, then
+  // a1's release is held in flight across the dispose and fails as the 20th
+  // (review round 3, R3-7).
+  it('does not halt when disposal races the failure that reaches the bound', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const store = await FileManagedActivationStore.open(filePath);
+    const finishHandler = deferred();
+    const allowRelease = deferred();
+    let releaseEntered = false;
+    const originalRelease = store.release.bind(store);
+    vi.spyOn(store, 'release').mockImplementation(async (lease, outcome) => {
+      releaseEntered = true;
+      await allowRelease.promise;
+      return originalRelease(lease, outcome);
+    });
+    const claimSpy = vi.spyOn(store, 'claim');
+    let headroom = true;
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 2,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 3_600_000,
+      hasMemoryHeadroom: () => headroom,
+      handler: async () => {
+        await finishHandler.promise;
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(activation('a1'));
+    await scheduler.start();
+    await waitUntil(() => scheduler.activeSlotCount === 1);
+    // Queue a2 while claims are memory-blocked, so its enqueue write lands
+    // before the fault is armed.
+    headroom = false;
+    await scheduler.submit(activation('a2'));
+    await waitUntil(() => scheduler.isMemoryBlocked);
+    fsFault.failAppends = 20;
+    headroom = true;
+    // Drive one claim at a time without advancing the lease renewal timer:
+    // a renewal must not consume a fault intended for the claim streak.
+    for (let attempt = 2; attempt <= 20; attempt++) {
+      scheduler.notifyCapacityChanged();
+      await waitUntil(() => claimSpy.mock.calls.length === attempt);
+      await expect(claimSpy.mock.results.at(-1)!.value).rejects.toThrow(
+        'disk busy',
+      );
+    }
+    headroom = false;
+    expect(claimSpy).toHaveBeenCalledTimes(20);
+    expect(fsFault.failAppends).toBe(1);
+    expect(scheduler.haltedError).toBeUndefined();
+
+    finishHandler.resolve();
+    await waitUntil(() => releaseEntered);
+    scheduler.dispose();
+    allowRelease.resolve();
+    await waitUntil(() => scheduler.activeSlotCount === 0);
+
+    // The 20th fault was spent by the release after the dispose: the streak
+    // reached the bound, and the guard is what kept the halt from firing.
+    expect(fsFault.failAppends).toBe(0);
+    expect(scheduler.haltedError).toBeUndefined();
   });
 
   // One shared journal blip lands on every in-flight run at once: the

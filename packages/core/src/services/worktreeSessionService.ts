@@ -14,6 +14,7 @@ import { Storage } from '../config/storage.js';
 import { isNodeError } from '../utils/errors.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
+import { isZombie } from '../utils/process-liveness.js';
 import {
   readWorktreeSessionMarker,
   writeWorktreeSessionMarker,
@@ -657,14 +658,26 @@ async function getRuntimeStatusPathState(
 
   try {
     process.kill(status.pid, 0);
-    return 'active';
+    // A zombie answers `kill(pid, 0)` — the pid still occupies a process-table
+    // slot — but the process has exited and will never act again. Reporting
+    // it as 'active' keeps a dead session listed as live for as long as its
+    // parent stays around unreaped, which is how a 48-day-old `[node]
+    // <defunct>` was read back as an active session (#14288).
+    return isZombie(status.pid) ? 'dead' : 'active';
   } catch (error) {
     if (isNodeError(error) && error.code === 'ESRCH') {
       return 'dead';
     }
     if (isNodeError(error) && error.code === 'EPERM') {
-      return 'active';
+      // Owned by another user. The kernel permission-checks signal 0
+      // regardless of the target's state, so a cross-user zombie lands here
+      // too and needs the same exclusion.
+      return isZombie(status.pid) ? 'dead' : 'active';
     }
+    // Any other errno establishes nothing about the pid, and folding it into
+    // 'dead' would be the destructive direction: it feeds
+    // `sawDeadRuntimeStatus` and can flip the aggregate to 'inactive' for a
+    // session that is in fact alive.
     return 'unknown';
   }
 }

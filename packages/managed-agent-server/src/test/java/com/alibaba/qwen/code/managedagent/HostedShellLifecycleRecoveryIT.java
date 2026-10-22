@@ -1,11 +1,11 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
@@ -113,7 +113,7 @@ class HostedShellLifecycleRecoveryIT {
             Files.createDirectory(root.resolve("objects"));
             var source = new DriverManagerDataSource(required("mysql.url"), required("mysql.user"),
                     System.getProperty("mysql.password", ""));
-            jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+            jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
             jdbc.setQueryTimeout(10);
             bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("l4-fixture", new byte[32]));
         }
@@ -126,7 +126,7 @@ class HostedShellLifecycleRecoveryIT {
             storageRegistrationProperties.getRuntimeBroker().setWorkspaceMounts(List.of(
                     new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
                             tenant, "storage", root.resolve("workspace").toString())));
-            new com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard(jdbc,
+            new com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard(jdbc,
                     new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()), storageRegistrationProperties)
                     .register(tenant, "storage", UUID.randomUUID().toString());
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
@@ -471,6 +471,10 @@ class HostedShellLifecycleRecoveryIT {
             var properties = new LinkedHashMap<String, Object>();
             properties.put("server.address", "127.0.0.1");
             properties.put("server.port", springPort);
+            properties.put("spring.mvc.log-request-details", false);
+            properties.put("logging.level.org.springframework.web.servlet.DispatcherServlet", "DEBUG");
+            properties.put("logging.level.org.springframework.web.servlet.mvc.method.annotation."
+                    + "ExceptionHandlerExceptionResolver", "DEBUG");
             properties.put("spring.datasource.url", required("mysql.url"));
             properties.put("spring.datasource.driver-class-name", "com.mysql.cj.jdbc.Driver");
             properties.put("spring.datasource.username", required("mysql.user"));
@@ -646,9 +650,12 @@ class HostedShellLifecycleRecoveryIT {
             } finally {
                 Path evidence = Path.of("target/l4-shell-lifecycle", cut);
                 Files.createDirectories(evidence);
-                try (var files = Files.list(root)) {
-                    for (Path file : files.filter(file -> file.toString().endsWith(".log") || file.getFileName().toString().equals("evidence.json")).toList()) {
-                        Files.copy(file, evidence.resolve(file.getFileName()), StandardCopyOption.REPLACE_EXISTING);
+                // Walk, not list: the daemon log sits under runtime/debug/daemon/.
+                try (var files = Files.walk(root)) {
+                    for (Path file : files.filter(Files::isRegularFile).filter(file -> file.toString().endsWith(".log") || file.getFileName().toString().equals("evidence.json")).toList()) {
+                        Path target = evidence.resolve(root.relativize(file).toString());
+                        Files.createDirectories(target.getParent());
+                        Files.copy(file, target, StandardCopyOption.REPLACE_EXISTING);
                     }
                 }
             }

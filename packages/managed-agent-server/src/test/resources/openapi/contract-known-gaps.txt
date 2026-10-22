@@ -6,4 +6,4 @@
 # delete its line. Never delete a schema field to make a gap disappear.
 # D1 to D3 were tracked in https://github.com/QwenLM/qwen-code/issues/12793;
 # the remaining Stage D slices are tracked in
-# https://github.com/QwenLM/qwen-code/issues/12867.
+# https://github.com/QwenLM/qwen-code/issues/14122.

@@ -1,22 +1,26 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import com.alibaba.qwen.code.managedagent.artifact.ManagedArtifactPolicy;
+import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.store.ManagedToolResultProjector;
-import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationAdmissionStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
@@ -27,6 +31,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -34,6 +39,8 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DelegatingDataSource;
@@ -147,7 +154,7 @@ class ToolPublicationStoreTest {
     void localReservationWaitsForLifecyclePlacementBeforeLockingBrokerRows() throws Exception {
         try (var pool = Executors.newSingleThreadExecutor()) {
             var publisher = new TransactionTemplate(manager).execute(status -> {
-                com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.lockPlacement(jdbc, "tenant-1");
+                com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.lockPlacement(jdbc, "tenant-1");
                 String tenantKey = ToolPublicationContract.sha256("tenant-1".getBytes(StandardCharsets.UTF_8));
                 jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
                         + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, "tenant-1");
@@ -676,7 +683,7 @@ class ToolPublicationStoreTest {
                     } else {
                         replacement.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null);
                     }
-                }).isInstanceOfSatisfying(ApiException.class, error ->
+                }).isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_publication_operation_expired"));
                 var recoveryStarted = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW + "", java.sql.Timestamp.class);
                 assertThat(replacement.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "original")
@@ -725,7 +732,7 @@ class ToolPublicationStoreTest {
                         String.class)).isEqualTo("RETURNED");
                 release.countDown();
                 assertThatThrownBy(() -> old.get(10, java.util.concurrent.TimeUnit.SECONDS))
-                        .hasCauseInstanceOf(ApiException.class);
+                        .hasCauseInstanceOf(ManagedAgentException.class);
                 JsonNode receipt = terminal
                         ? replacement.finish(key, "pub-1", PUBLICATION_TOKEN, "original", bytes)
                         : replacement.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null);
@@ -825,8 +832,8 @@ class ToolPublicationStoreTest {
                 release.countDown();
                 assertThatThrownBy(() -> old.get(10, java.util.concurrent.TimeUnit.SECONDS))
                         .satisfies(error -> {
-                            assertThat(error.getCause()).isInstanceOf(ApiException.class);
-                            assertThat(((ApiException) error.getCause()).getCode()).isEqualTo(expired
+                            assertThat(error.getCause()).isInstanceOf(ManagedAgentException.class);
+                            assertThat(((ManagedAgentException) error.getCause()).getCode()).isEqualTo(expired
                                     ? "managed_tool_publication_operation_expired"
                                     : "managed_tool_publication_claim_expired");
                         });
@@ -1223,7 +1230,7 @@ class ToolPublicationStoreTest {
                 ToolPublicationContract.readJson(verification.toString().getBytes(StandardCharsets.UTF_8))))
                 .isEqualTo(committed);
         assertThatThrownBy(() -> admissions.verifyReceipt(key, "wrong-writer-token", verification))
-                .isInstanceOf(ApiException.class);
+                .isInstanceOf(ManagedAgentException.class);
         ObjectNode wrongSequence = verification.deepCopy().put("historyRevision", receiptSequence + 1);
         assertThatThrownBy(() -> admissions.verifyReceipt(key, WRITER_TOKEN, wrongSequence))
                 .hasMessageContaining("sequence conflicts");
@@ -1234,7 +1241,7 @@ class ToolPublicationStoreTest {
             return;
         }
         if ("intact".equals(damage) || large) {
-            com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryReaderAssertions.verifyOriginalPublication(
+            com.alibaba.qwen.code.managedagent.persistence.WorkspaceRecoveryReaderAssertions.verifyOriginalPublication(
                     jdbc, bucket, key, admission, manifestRef, receiptSequence, firstSegment.getBytes(StandardCharsets.UTF_8));
         }
         if (!"intact".equals(damage) && !large) {
@@ -1471,7 +1478,7 @@ class ToolPublicationStoreTest {
         byte[] abc = "abc".getBytes(StandardCharsets.UTF_8);
         assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "bad-digest", "stdout", 0, abc, digest("other")))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_result_digest_mismatch"));
         data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment-0", "stdout", 0, abc, digest("abc"));
         data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment-1", "stderr", 0, abc, digest("abc"));
@@ -1480,20 +1487,20 @@ class ToolPublicationStoreTest {
                 .hasMessageContaining("operation conflicts");
         assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "other-segment", "stdout", 0, "abd".getBytes(StandardCharsets.UTF_8), null))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_result_conflict"));
         assertThatThrownBy(() -> data.seal(key, "pub-1", PUBLICATION_TOKEN,
                 "missing-segment", "stdout", 2, 3, digest("abc")))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_result_conflict"));
         assertThatThrownBy(() -> data.seal(key, "pub-1", PUBLICATION_TOKEN,
                 "wrong-length", "stdout", 1, 4, digest("abc")))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_result_digest_mismatch"));
         data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal-correct", "stdout", 1, 3, digest("abc"));
         assertThatThrownBy(() -> data.seal(key, "pub-1", PUBLICATION_TOKEN,
                 "seal-conflict", "stdout", 1, 3, digest("abd")))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_result_conflict"));
     }
 
@@ -1624,7 +1631,7 @@ class ToolPublicationStoreTest {
         verificationTime[0] = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW + "", java.sql.Timestamp.class)
                 .getTime() / 1000 * 1000;
         // Advance verification time with fixture reads, excluding JDBC latency.
-        JdbcTemplate verificationJdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
+        JdbcTemplate verificationJdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
             @Override
             public <T> T queryForObject(String sql, Class<T> type) {
                 if (("SELECT " + ManagedSchemaTime.SQL_NOW).equals(sql) && type == java.sql.Timestamp.class) {
@@ -1667,7 +1674,7 @@ class ToolPublicationStoreTest {
         store.apply(request("reserve").put("captureBytes", captureBytes), WRITER_TOKEN, PUBLICATION_TOKEN);
         boolean[] slow = {false};
         int[] metadataQueries = {0};
-        JdbcTemplate metadataJdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
+        JdbcTemplate metadataJdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
             @Override
             public <T> List<T> query(String sql, org.springframework.jdbc.core.RowMapper<T> mapper,
                     Object... arguments) {
@@ -2136,7 +2143,7 @@ class ToolPublicationStoreTest {
         jdbc.update("DELETE FROM ma_session_journal_tx WHERE tenant_id = X'74656e616e742d31'"
                 + " AND session_id = X'73657373696f6e2d31' AND journal_revision = 3");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getCode())
                             .isEqualTo("managed_session_journal_corrupt");
                     assertThat(error.getStatus().is5xxServerError()).isTrue();
@@ -2160,7 +2167,7 @@ class ToolPublicationStoreTest {
                         + " X'74656e616e742d31' AND session_id = X'73657373696f6e2d31' AND"
                         + " journal_revision = 3");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getCode())
                             .isEqualTo("managed_session_journal_corrupt");
                     assertThat(error.getStatus().is5xxServerError()).isTrue();
@@ -2177,7 +2184,7 @@ class ToolPublicationStoreTest {
                         + " X'74656e616e742d31' AND session_id = X'73657373696f6e2d31' AND"
                         + " journal_revision = 1");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getCode())
                             .isEqualTo("managed_session_journal_corrupt");
                     assertThat(error.getStatus().is5xxServerError()).isTrue();
@@ -2389,9 +2396,334 @@ class ToolPublicationStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture", Integer.class)).isEqualTo(1);
         jdbc.update("DELETE FROM ma_output_capture");
         store = newStore(ALLOCATION - 1, 1);
-        assertThatThrownBy(this::reserve).hasMessageContaining("capacity exhausted");
+        assertRefused(this::reserve, true, "tenant_bytes");
         store = newStore(ALLOCATION, 1);
         assertThat(reserve().path("captureBytes").asLong()).isEqualTo(CAPTURE_BYTES);
+    }
+
+    @Test
+    void refusesEachExhaustedLimitWithItsOwnCode() {
+        ObjectNode second = addSecondExecution();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, ALLOCATION - 1, 10));
+        assertRefused(this::reserve, true, "tenant_bytes");
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, ALLOCATION - 1, 10 * ALLOCATION, 10));
+        assertRefused(this::reserve, true, "session_bytes");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture", Integer.class)).isZero();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 1));
+        reserve();
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "active_captures");
+        // A fenced capture stops counting, so the refused reservation now fits.
+        store.apply(request("fence"), WRITER_TOKEN, null);
+        assertThat(store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN).path("state").asText())
+                .isEqualTo("OPEN");
+    }
+
+    @Test
+    void namesTheByteLimitWhenTheCaptureSlotsAreFullToo() {
+        ObjectNode second = addSecondExecution();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, ALLOCATION, 10 * ALLOCATION, 1));
+        reserve();
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        // The Session's bytes and its one slot are both taken by an open
+        // capture: the byte limit is named, and it is retryable, because the
+        // capture gives both back when it ends.
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "session_bytes");
+        store.apply(request("fence"), WRITER_TOKEN, null);
+        assertThat(store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN).path("state").asText())
+                .isEqualTo("OPEN");
+    }
+
+    @Test
+    void refusesWithoutRetryOnlyWhenUsedBytesAloneFillTheLimit() {
+        ObjectNode second = addSecondExecution();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, ALLOCATION, 10 * ALLOCATION, 10));
+        reserve();
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        // One byte of the open capture is used: only that byte outlives it.
+        jdbc.update("UPDATE ma_output_capture SET capture_used_bytes = 1");
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, ALLOCATION + 1, 10 * ALLOCATION, 10));
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "session_bytes");
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, ALLOCATION, 10 * ALLOCATION, 10));
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), true, "session_bytes");
+        // A finished capture keeps everything it used until its Session is
+        // collected: nothing about it frees on its own.
+        jdbc.update("UPDATE ma_output_capture SET state = 'FENCED', expires_at = NULL,"
+                + " capture_used_bytes = capture_held_bytes, producer_used_bytes = producer_held_bytes,"
+                + " admission_used_bytes = admission_held_bytes");
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 2 * ALLOCATION - 1, 10 * ALLOCATION, 10));
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), true, "session_bytes");
+    }
+
+    @Test
+    void anotherSessionsOpenCaptureDoesNotFreeThisSessionsRetainedBytes() {
+        ObjectNode second = addSecondExecution();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 10));
+        reserve();
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN);
+        // The first capture finished here with everything used; the second
+        // is still open but now belongs to another Session of the tenant.
+        jdbc.update("UPDATE ma_output_capture SET state = 'FENCED', expires_at = NULL,"
+                + " capture_used_bytes = capture_held_bytes, producer_used_bytes = producer_held_bytes,"
+                + " admission_used_bytes = admission_held_bytes WHERE publication_id = ?",
+                "pub-1".getBytes(StandardCharsets.UTF_8));
+        jdbc.update("UPDATE ma_output_capture SET scope_key = ? WHERE publication_id = ?", "f".repeat(64),
+                "pub-2".getBytes(StandardCharsets.UTF_8));
+        // The tenant fails first, and its open capture could make room
+        // there; the Session's used bytes still leave none.
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 2 * ALLOCATION - 1, 3 * ALLOCATION - 1, 10));
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), true, "session_bytes");
+    }
+
+    @Test
+    void anotherSessionsUsedBytesDoNotFillThisSessionsLimit() {
+        ObjectNode second = addSecondExecution();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 10));
+        ObjectNode firstRequest = request("reserve");
+        reserve();
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN);
+        // The first capture finished with everything used, in another Session
+        // of the tenant; this Session holds only the second, still open.
+        jdbc.update("UPDATE ma_output_capture SET state = 'FENCED', expires_at = NULL, scope_key = ?,"
+                + " capture_used_bytes = capture_held_bytes, producer_used_bytes = producer_held_bytes,"
+                + " admission_used_bytes = admission_held_bytes WHERE publication_id = ?", "f".repeat(64),
+                "pub-1".getBytes(StandardCharsets.UTF_8));
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 2 * ALLOCATION - 1, 10 * ALLOCATION, 10));
+        assertRefused(() -> store.apply(firstRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "session_bytes");
+    }
+
+    @Test
+    void anUnreferencedAdmissionDoesNotCountAsRetained() {
+        ObjectNode second = addSecondExecution();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 10));
+        reserve();
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        // Finished and fenced with its output fully used, but not yet
+        // referenced: the receipt still gives back the admission it did not use.
+        jdbc.update("UPDATE ma_output_capture SET state = 'FENCED', expires_at = NULL, producer_phase = 'FINISHED',"
+                + " capture_used_bytes = capture_held_bytes, producer_used_bytes = producer_held_bytes,"
+                + " admission_used_bytes = 100");
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 2 * ALLOCATION - 1, 10 * ALLOCATION, 10));
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "session_bytes");
+        jdbc.update("UPDATE ma_output_capture SET producer_phase = 'REFERENCED',"
+                + " admission_held_bytes = admission_used_bytes");
+        assertThat(store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN).path("state").asText())
+                .isEqualTo("OPEN");
+    }
+
+    @Test
+    void logsEachRefusalWithWhatItWeighed() {
+        Logger log = (Logger) LoggerFactory.getLogger(ToolPublicationStore.class);
+        ListAppender<ILoggingEvent> logged = new ListAppender<>();
+        logged.start();
+        log.addAppender(logged);
+        try {
+            ObjectNode second = addSecondExecution();
+            store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                    new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 10));
+            reserve();
+            Map<String, Object> keys = jdbc.queryForMap("SELECT tenant_key, scope_key FROM ma_output_capture");
+            // Distinct numbers: the capture holds 10 bytes less than an
+            // allocation, has used 3, and now belongs to another Session.
+            jdbc.update("UPDATE ma_output_capture SET capture_held_bytes = capture_held_bytes - 10,"
+                    + " capture_used_bytes = 3, scope_key = ?", "f".repeat(64));
+            ObjectNode secondRequest = request("reserve");
+            secondRequest.set("binding", second);
+            store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                    new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, ALLOCATION + 5, 10));
+            assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "tenant_bytes");
+            store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                    new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, ALLOCATION + 2, 10));
+            assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), true, "tenant_bytes");
+            store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                    new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 1));
+            assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "active_captures");
+            String identity = " tenant=" + keys.get("tenant_key") + " scope=" + keys.get("scope_key");
+            String held = " held=" + (ALLOCATION - 10) + " used=3 requested=" + ALLOCATION;
+            assertThat(logged.list).extracting(ILoggingEvent::getFormattedMessage).containsExactly(
+                    "Tool publication reservation refused limit=tenant_bytes retained=false" + identity + held
+                            + " allowed=" + (ALLOCATION + 5) + " admits=1",
+                    "Tool publication reservation refused limit=tenant_bytes retained=true" + identity + held
+                            + " allowed=" + (ALLOCATION + 2) + " admits=1",
+                    "Tool publication reservation refused limit=active_captures retained=false" + identity
+                            + " held=1 used=0 requested=1 allowed=1 admits=1");
+            assertThat(logged.list).extracting(ILoggingEvent::getLevel).containsOnly(Level.WARN);
+        } finally {
+            log.detachAppender(logged);
+        }
+    }
+
+    @Test
+    void eachByteLimitChargesItsOwnSum() {
+        ObjectNode second = addSecondExecution();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 10));
+        reserve();
+        // Hand the first capture to another Session of the same tenant: the
+        // tenant still carries its bytes, this Session no longer does.
+        jdbc.update("UPDATE ma_output_capture SET scope_key = ?", "f".repeat(64));
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, ALLOCATION, 10));
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "tenant_bytes");
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, ALLOCATION, 10 * ALLOCATION, 10));
+        assertThat(store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN).path("state").asText())
+                .isEqualTo("OPEN");
+    }
+
+    private static void assertRefused(ThrowingCallable reservation, boolean retained, String limit) {
+        assertThatThrownBy(reservation).isInstanceOfSatisfying(ManagedAgentException.class,
+                error -> assertRefusal(error, retained, limit));
+    }
+
+    // A refusal that used bytes alone cause is a 409; any other is a 429.
+    private static void assertRefusal(ManagedAgentException error, boolean retained, String limit) {
+        assertThat(error.getStatus()).isEqualTo(retained ? HttpStatus.CONFLICT : HttpStatus.TOO_MANY_REQUESTS);
+        assertThat(error.getCode()).isEqualTo(retained ? "managed_tool_publication_retention_exhausted"
+                : "managed_tool_publication_capacity_exhausted");
+        assertThat(error.getMessage()).isEqualTo("Tool publication reservation refused at the " + limit + " limit");
+        assertThat(error.getDetails()).containsEntry("limit", limit).containsOnlyKeys("limit", "admits");
+    }
+
+    @Test
+    void saysHowManyReservationsTheSessionCouldEverHoldAtOnce() {
+        ObjectNode second = addSecondExecution();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 10));
+        reserve();
+        // Three open captures of this Session hold three allocations.
+        copyCapture("pub-1", "pub-3");
+        copyCapture("pub-1", "pub-4");
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        // Open captures end, so what they hold does not count against a
+        // batch: each limit admits as many as it could hold (#14518).
+        assertAdmits(secondRequest, new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION,
+                4 * ALLOCATION - 1, 10), "tenant_bytes", 3);
+        assertAdmits(secondRequest, new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 4 * ALLOCATION - 1,
+                10 * ALLOCATION, 10), "session_bytes", 3);
+        assertAdmits(secondRequest, new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION,
+                10 * ALLOCATION, 3), "active_captures", 3);
+        // The tightest limit decides, whichever one refused.
+        assertAdmits(secondRequest, new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 5 * ALLOCATION / 2,
+                39 * ALLOCATION / 10, 10), "tenant_bytes", 2);
+        assertAdmits(secondRequest, new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION,
+                39 * ALLOCATION / 10, 2), "tenant_bytes", 2);
+        // This Session's used bytes stay charged while it lives, so they
+        // come off what it could hold.
+        jdbc.update("UPDATE ma_output_capture SET capture_used_bytes = capture_held_bytes,"
+                + " producer_used_bytes = producer_held_bytes, admission_used_bytes = admission_held_bytes"
+                + " WHERE publication_id = ?", "pub-1".getBytes(StandardCharsets.UTF_8));
+        assertAdmits(secondRequest, new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 4 * ALLOCATION - 1,
+                10 * ALLOCATION, 10), "session_bytes", 2);
+        // A refusal that used bytes alone cause says it too.
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 2 * ALLOCATION - 1, 10 * ALLOCATION, 10));
+        assertThatThrownBy(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertRefusal(error, true, "session_bytes");
+                    assertThat(error.getDetails()).containsEntry("admits", 0L);
+                });
+        // Used bytes past the limit still leave none, not fewer than none.
+        jdbc.update("UPDATE ma_output_capture SET capture_used_bytes = capture_held_bytes,"
+                + " producer_used_bytes = producer_held_bytes, admission_used_bytes = admission_held_bytes"
+                + " WHERE publication_id = ?", "pub-3".getBytes(StandardCharsets.UTF_8));
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, ALLOCATION, 10 * ALLOCATION, 10));
+        assertThatThrownBy(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertRefusal(error, true, "session_bytes");
+                    assertThat(error.getDetails()).containsEntry("admits", 0L);
+                });
+        // Another Session's used bytes free when it retires, so they do not.
+        jdbc.update("UPDATE ma_output_capture SET scope_key = ? WHERE publication_id = ?", "f".repeat(64),
+                "pub-1".getBytes(StandardCharsets.UTF_8));
+        assertAdmits(secondRequest, new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION,
+                4 * ALLOCATION - 1, 10), "tenant_bytes", 2);
+    }
+
+    @Test
+    void countsOnlyTheSessionsOwnRetainedOutputWhenTheCaptureSlotsRefuse() {
+        ObjectNode second = addSecondExecution();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 10));
+        reserve();
+        copyCapture("pub-1", "pub-3");
+        copyCapture("pub-1", "pub-4");
+        copyCapture("pub-1", "pub-5");
+        // This Session keeps one finished, fully used capture and one open,
+        // unused one; another Session has two open captures, one fully used.
+        // The three open captures take every slot.
+        jdbc.update("UPDATE ma_output_capture SET state = 'FENCED', expires_at = NULL,"
+                + " capture_used_bytes = capture_held_bytes, producer_used_bytes = producer_held_bytes,"
+                + " admission_used_bytes = admission_held_bytes WHERE publication_id = ?",
+                "pub-1".getBytes(StandardCharsets.UTF_8));
+        jdbc.update("UPDATE ma_output_capture SET scope_key = ? WHERE publication_id IN (?, ?)", "f".repeat(64),
+                "pub-3".getBytes(StandardCharsets.UTF_8), "pub-4".getBytes(StandardCharsets.UTF_8));
+        jdbc.update("UPDATE ma_output_capture SET capture_used_bytes = capture_held_bytes,"
+                + " producer_used_bytes = producer_held_bytes, admission_used_bytes = admission_held_bytes"
+                + " WHERE publication_id = ?", "pub-3".getBytes(StandardCharsets.UTF_8));
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        ToolPublicationStore.Capacity capacity = new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2,
+                3 * ALLOCATION, 10 * ALLOCATION, 3);
+        // Only this Session's used bytes come off: not what its open capture
+        // holds, nor what the other Session used.
+        assertAdmits(secondRequest, capacity, "active_captures", 2);
+        // A pending finish can still give its terminal back, so its used
+        // bytes do not come off either.
+        jdbc.update("UPDATE ma_output_capture SET producer_phase = 'FINISHING',"
+                + " capture_used_bytes = capture_held_bytes, producer_used_bytes = producer_held_bytes,"
+                + " admission_used_bytes = admission_held_bytes WHERE publication_id = ?",
+                "pub-5".getBytes(StandardCharsets.UTF_8));
+        assertAdmits(secondRequest, capacity, "active_captures", 2);
+    }
+
+    private void assertAdmits(ObjectNode request, ToolPublicationStore.Capacity capacity, String limit,
+            long admits) {
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings, capacity);
+        assertThatThrownBy(() -> store.apply(request, WRITER_TOKEN, PUBLICATION_TOKEN)).isInstanceOfSatisfying(
+                ManagedAgentException.class, error -> {
+                    assertRefusal(error, false, limit);
+                    assertThat(error.getDetails()).containsEntry("admits", admits);
+                });
+    }
+
+    // Another open capture of the same Session, as a reservation leaves it.
+    private void copyCapture(String from, String to) {
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+                + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
+                + " expires_at, capture_bytes, producer_bytes, admission_bytes, capture_held_bytes,"
+                + " producer_held_bytes, admission_held_bytes, write_evidence) SELECT scope_key, tenant_key,"
+                + " tenant_id, workspace_id, session_id, ?, ?, ?, binding_json, binding_digest, token_hash, state,"
+                + " expires_at, capture_bytes, producer_bytes, admission_bytes, capture_held_bytes,"
+                + " producer_held_bytes, admission_held_bytes, write_evidence FROM ma_output_capture"
+                + " WHERE publication_id = ?", to.getBytes(StandardCharsets.UTF_8), digest(to),
+                to.getBytes(StandardCharsets.UTF_8), from.getBytes(StandardCharsets.UTF_8));
     }
 
     @Test
@@ -2417,6 +2749,29 @@ class ToolPublicationStoreTest {
         assertThat(reserve()).isEqualTo(original);
         assertThat(store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN).path("bindingDigest"))
                 .isEqualTo(original.path("bindingDigest"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void acceptsLargeCurrentCheckpointsWithFreshOrOriginalBindings(boolean freshBinding) {
+        ObjectNode next = checkpoint.deepCopy();
+        var items = (com.fasterxml.jackson.databind.node.ArrayNode) next.path("tools").path("items");
+        ObjectNode first = (ObjectNode) items.get(0);
+        for (int i = 2; i <= 400; i++) {
+            items.add(first.deepCopy().put("executionCallId", "execution-" + i)
+                    .put("functionCallId", "model-" + i));
+        }
+        JsonNode nextRef = ref("checkpoint-2", "managed-checkpoint", next);
+        assertThat(nextRef.path("byteLength").asLong()).isBetween(65_537L, 1_048_576L);
+        ObjectNode payload = checkpointPayload("checkpoint-2");
+        payload.put("previousCheckpointId", "checkpoint-1");
+        payload.set("stateRef", nextRef);
+        append("checkpoint.commit", event(3, "checkpoint.committed", payload) + MARKER, 1,
+                List.of(resource(nextRef, next)), "checkpoint-2");
+        if (freshBinding) {
+            binding.set("checkpointRef", nextRef);
+        }
+        assertThat(reserve().path("state").asText()).isEqualTo("OPEN");
     }
 
     @Test
@@ -2468,7 +2823,8 @@ class ToolPublicationStoreTest {
             outcomes = List.of(one.get(), two.get());
         }
         assertThat(outcomes.stream().filter(JsonNode.class::isInstance).count()).isEqualTo(1);
-        assertThat(outcomes.stream().filter(IllegalArgumentException.class::isInstance).count()).isEqualTo(1);
+        assertThat(outcomes).filteredOn(ManagedAgentException.class::isInstance).singleElement()
+                .satisfies(error -> assertRefusal((ManagedAgentException) error, false, "tenant_bytes"));
         String winner = jdbc.queryForObject("SELECT publication_id FROM ma_output_capture", String.class);
         ObjectNode loser = "pub-1".equals(winner) ? secondRequest : firstRequest;
         ObjectNode fence = request("fence").put("publicationId", winner);
@@ -2487,7 +2843,7 @@ class ToolPublicationStoreTest {
         start.await();
         try {
             return store.apply(request, WRITER_TOKEN, PUBLICATION_TOKEN);
-        } catch (IllegalArgumentException error) {
+        } catch (ManagedAgentException error) {
             return error;
         }
     }
@@ -2923,9 +3279,9 @@ class ToolPublicationStoreTest {
                                 + " FALSE WHERE tenant_id = X'74656e616e742d31' AND session_id ="
                                 + " X'73657373696f6e2d31'");
         fixture.jdbc().update("UPDATE ma_output_capture SET retention_state = 'RETIRING'");
-        var retention = new com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore(fixture.jdbc(), fixture.manager());
+        var retention = new com.alibaba.qwen.code.managedagent.persistence.ToolPublicationRetentionStore(fixture.jdbc(), fixture.manager());
         assertThat(retention.observe(Duration.ZERO)).singleElement()
-                .extracting(com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore.Candidate::blocker).isEqualTo("resource_referenced");
+                .extracting(com.alibaba.qwen.code.managedagent.persistence.ToolPublicationRetentionStore.Candidate::blocker).isEqualTo("resource_referenced");
     }
 
     @Test
@@ -3112,7 +3468,7 @@ class ToolPublicationStoreTest {
         fixture.jdbc().update(
                         "UPDATE ma_operation SET state='PENDING', available_at=0 WHERE"
                                 + " operation_kind = 'TOOL_RESULT_PROJECTION'");
-        JdbcTemplate projectionJdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(fixture.jdbc().getDataSource()) {
+        JdbcTemplate projectionJdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(fixture.jdbc().getDataSource()) {
             @Override
             public <T> T queryForObject(String sql, Class<T> type) {
                 if (("SELECT " + ManagedSchemaTime.SQL_NOW).equals(sql) && type == java.sql.Timestamp.class) {

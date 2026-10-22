@@ -2385,6 +2385,90 @@ describe('SessionWriterLease', () => {
       await replacement.release();
     });
 
+    // A sealed Managed record whose commit proof fails validation is not a
+    // seal at all: isLockRecord rejects the whole record, so acquire fails
+    // closed on a malformed lock rather than handing a certified takeover a
+    // corrupt proof. Every case corrupts only the commit proof, leaving the
+    // owner fields, schema version and transcript proof valid, so the clause
+    // under test is the only thing that can reject the record.
+    it.each<[string, string, Record<string, unknown>]>([
+      ['a fractional sequence', 'fractional', { last_commit_sequence: 6.5 }],
+      ['a non-numeric sequence', 'textual', { last_commit_sequence: '7' }],
+      ['a negative sequence', 'negative', { last_commit_sequence: -1 }],
+      ['an absent sequence', 'absent', { last_commit_sequence: undefined }],
+      [
+        'a 63-character hash',
+        'short-hash',
+        { committed_prefix_hash: 'a'.repeat(63) },
+      ],
+      [
+        'an uppercase hash',
+        'uppercase-hash',
+        { committed_prefix_hash: 'A'.repeat(64) },
+      ],
+      [
+        'a non-hex hash',
+        'non-hex-hash',
+        { committed_prefix_hash: 'g'.repeat(64) },
+      ],
+      // Only the typeof guard rejects this one: an array stringifies to the
+      // same 64 hex characters the pattern accepts.
+      [
+        'an array-wrapped hash',
+        'array-hash',
+        { committed_prefix_hash: ['a'.repeat(64)] },
+      ],
+    ])(
+      'fails closed on a sealed managed lock with %s',
+      async (_label, slug, patch) => {
+        const fixture = await createFixture(`managed-corrupt-proof-${slug}`);
+        const lease = await SessionWriterLease.acquire({
+          ...fixture.options,
+          lockSchema: managedSchema,
+        });
+        await lease.appendJsonLine({ record: 'managed' });
+        await lease.sealForHandoff(commitProof);
+        const sealed = await readJson(fixture.lockPath);
+        const corruptRaw = JSON.stringify({ ...sealed, ...patch });
+        await fs.writeFile(fixture.lockPath, corruptRaw);
+
+        await expectUnavailable(acquire(fixture.options));
+        // Failing closed leaves the corrupt seal in place for diagnosis.
+        await expect(fs.readFile(fixture.lockPath, 'utf8')).resolves.toBe(
+          corruptRaw,
+        );
+      },
+    );
+
+    it('keeps a zero commit sequence a genuine seal', async () => {
+      const fixture = await createFixture('managed-zero-sequence-proof');
+      const lease = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      await lease.appendJsonLine({ record: 'managed' });
+      await lease.sealForHandoff(commitProof);
+      const sealed = await readJson(fixture.lockPath);
+      // The bound is >= 0, not > 0: sequence 0 stays a real seal, so a plain
+      // acquire conflicts and a certified one is handed the proof.
+      await fs.writeFile(
+        fixture.lockPath,
+        JSON.stringify({ ...sealed, last_commit_sequence: 0 }),
+      );
+
+      await expectConflict(acquire(fixture.options));
+      const replacement = await acquire({
+        ...fixture.options,
+        takeoverPolicy: 'certified',
+        lockSchema: managedSchema,
+      });
+      expect(replacement.takeoverCommitProof).toEqual({
+        ...commitProof,
+        last_commit_sequence: 0,
+      });
+      await replacement.release();
+    });
+
     it('refuses an unsupported managed lock format version at acquire', async () => {
       const fixture = await createFixture('managed-format-guard-session');
       await expect(

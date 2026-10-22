@@ -1,5 +1,10 @@
 # Linux support completion plan
 
+> Historical record, superseded by the 2026-10 X11-only upgrade. Native Wayland
+> implementations, helpers, dependencies and validation lanes described below
+> have been removed; these historical results do not describe current support.
+
+
 **Status:** Historical implementation plan. Current outcomes live in
 `action-support.md`; remaining work lives in the
 [public platform roadmap](https://cua.ai/docs/reference/cua-driver/platform-roadmap).

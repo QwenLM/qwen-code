@@ -22,9 +22,33 @@ public final class ManagedSchema {
     public static final String WORKSPACE_CREATION = "/db/managed-schema/V4__workspace_creation.sql";
     public static final String MODEL_SELECTION = "/db/managed-schema/V5__session_model_selection.sql";
     public static final String APPROVAL_SELECTION = "/db/managed-schema/V6__session_approval_selection.sql";
+    public static final String RUNTIME_SESSION_HARNESS = "/db/managed-schema/V9__runtime_session_harness.sql";
+    public static final String PLAN_MODE = "/db/managed-schema/V10__session_plan_mode.sql";
+    public static final String CSI_APPLICATION_RETIREMENT =
+            "/db/managed-schema/V12__csi_application_retirement.sql";
+    public static final String WAKE_RECOVERY = "/db/managed-schema/V11__wake_recovery.sql";
+    public static final String HOSTED_CLEANUP = "/db/managed-schema/V13__hosted_cleanup_debt.sql";
+    public static final String RESIDENT_RETIREMENT = "/db/managed-schema/V14__resident_workspace_retirement.sql";
+    public static final String WORKSPACE_EXECUTION_MEMBERS = "/db/managed-schema/V15__workspace_execution_members.sql";
+    public static final String CONTEXT_COMPRESSION = "/db/managed-schema/V16__context_compression.sql";
     // Additive migrations over the published V1 baseline, in version order.
-    private static final List<String> EXTENSIONS = List.of(PRIVATE_AUTHORITY, SESSION_LIST, WORKSPACE_CREATION, MODEL_SELECTION, APPROVAL_SELECTION);
-    private static final int CURRENT = EXTENSIONS.size() + 1;
+    public static final String SSH_WORKSPACE =
+            "/db/managed-schema/V7__ssh_workspace_registration.sql";
+    public static final String TURN_COMMAND_OPERATIONS =
+            "/db/managed-schema/V8__turn_command_operations.sql";
+    private static final List<Migration> EXTENSIONS = List.of(new Migration(2, PRIVATE_AUTHORITY),
+            new Migration(3, SESSION_LIST), new Migration(4, WORKSPACE_CREATION),
+            new Migration(5, MODEL_SELECTION), new Migration(6, APPROVAL_SELECTION),
+            new Migration(7, SSH_WORKSPACE), new Migration(8, TURN_COMMAND_OPERATIONS),
+            new Migration(9, RUNTIME_SESSION_HARNESS), new Migration(10, PLAN_MODE),
+            new Migration(11, WAKE_RECOVERY), new Migration(12, CSI_APPLICATION_RETIREMENT),
+            new Migration(13, HOSTED_CLEANUP), new Migration(14, RESIDENT_RETIREMENT),
+            new Migration(15, WORKSPACE_EXECUTION_MEMBERS), new Migration(16, CONTEXT_COMPRESSION),
+            new Migration(17, "/db/managed-schema/V17__public_child_agents.sql"));
+    private static final int CURRENT = EXTENSIONS.getLast().version();
+
+    private record Migration(int version, String resource) {
+    }
 
     private ManagedSchema() {}
 
@@ -45,11 +69,14 @@ public final class ManagedSchema {
                                 "The canonical V"
                                         + version
                                         + " catalog requires the application's V"
-                                        + (version + 1)
+                                        + EXTENSIONS.stream().filter(extension -> extension.version() > version)
+                                                .findFirst().orElseThrow().version()
                                         + " migration");
                     }
-                    for (String extension : EXTENSIONS.subList(version - 1, EXTENSIONS.size())) {
-                        execute(connection, read(extension));
+                    for (Migration extension : EXTENSIONS) {
+                        if (extension.version() > version) {
+                            execute(connection, read(extension.resource()));
+                        }
                     }
                     ManagedSchemaCatalog.validate(connection, ddl);
                 }
@@ -75,30 +102,38 @@ public final class ManagedSchema {
         }
     }
 
+    public static void validate(Connection connection) throws SQLException {
+        ManagedSchemaCatalog.validate(Objects.requireNonNull(connection, "connection"), ddl());
+    }
+
     public static String ddl() {
         return ddl(CURRENT);
     }
 
     private static String ddl(int version) {
         String ddl = read(RESOURCE);
-        for (String extension : EXTENSIONS.subList(0, version - 1)) {
-            ddl = extend(ddl, read(extension));
+        for (Migration extension : EXTENSIONS) {
+            if (extension.version() <= version) {
+                ddl = extend(ddl, read(extension.resource()));
+            }
         }
         return ddl;
     }
 
     private static String extend(String ddl, String extension) {
-        var namespace = Pattern.compile("ALTER TABLE ma_request_receipt ADD (CONSTRAINT"
-                + " ck_ma_request_namespace CHECK[^;]+);").matcher(extension);
-        if (namespace.find()) {
-            var previous = Pattern.compile("CONSTRAINT ck_ma_request_namespace CHECK[^\\n]+")
-                    .matcher(ddl);
-            if (!previous.find()) {
-                throw new IllegalStateException("Receipt namespace constraint is absent from the baseline");
+        var checks = Pattern.compile("ALTER TABLE (ma_[a-z_]+) DROP CONSTRAINT ([a-z_]+);\\s*"
+                + "ALTER TABLE \\1 ADD CONSTRAINT \\2 CHECK ([^;]+);").matcher(extension);
+        while (checks.find()) {
+            String name = checks.group(2);
+            var original = Pattern.compile("(?m)CONSTRAINT " + name + " CHECK [^\\n]+").matcher(ddl);
+            if (!original.find()) {
+                throw new IllegalStateException("Changed check is absent from the canonical baseline");
             }
-            ddl = previous.replaceFirst(java.util.regex.Matcher.quoteReplacement(namespace.group(1) + ","));
-            extension = extension.replace(namespace.group(), "");
+            ddl = original.replaceFirst(java.util.regex.Matcher.quoteReplacement(
+                    "CONSTRAINT " + name + " CHECK " + checks.group(3)
+                            + (original.group().endsWith(",") ? "," : "")));
         }
+        extension = checks.replaceAll("");
         var columns =
                 Pattern.compile("ALTER TABLE (ma_[a-z_]+) ADD (?:COLUMN )?([^;]+);").matcher(extension);
         while (columns.find()) {
@@ -154,7 +189,8 @@ public final class ManagedSchema {
 
     private static int schemaVersion(Connection connection) throws SQLException {
         SQLException current = null;
-        for (int version = CURRENT; version >= 1; version--) {
+        for (int index = EXTENSIONS.size(); index >= 0; index--) {
+            int version = index == 0 ? 1 : EXTENSIONS.get(index - 1).version();
             try {
                 ManagedSchemaCatalog.validate(connection, ddl(version));
                 return version;

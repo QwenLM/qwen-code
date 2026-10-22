@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.api.ApiExceptionHandler;
-import com.alibaba.qwen.code.managedagent.api.PublicSurface;
+import com.alibaba.qwen.code.managedagent.security.PublicSurface;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -108,8 +108,7 @@ public class InternalSurfaceConfiguration
             boolean internal = request.getLocalPort() == internalPort;
             // Classify on the routed path: raw-URI spellings such as
             // /%69nternal/... or /internal;/... map to internal handlers.
-            if (internal != PublicSurface.pathWithinApplication(request)
-                    .startsWith("/internal/")) {
+            if (internal != PublicSurface.internal(request)) {
                 response.setStatus(HttpServletResponse.SC_NOT_FOUND);
                 response.setContentType(MediaType.APPLICATION_JSON_VALUE);
                 objectMapper.writeValue(response.getOutputStream(),

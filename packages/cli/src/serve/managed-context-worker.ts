@@ -35,6 +35,7 @@ import {
 import { ManagedChildRunSupervisor } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
 import { RemoteShellResultPublisher } from './remote-shell-result-publication.js';
 import type { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
+import type { ManagedRuntimeLedger } from './managed-runtime-ledger.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 import { registerManagedRuntimeToolV3Routes } from './managed-runtime-tool-v3-routes.js';
 import {
@@ -63,6 +64,7 @@ import {
 } from './managed-mcp-runtime.js';
 import {
   MANAGED_MCP_WORKER_ROUTE,
+  MANAGED_MCP_DEFINITIONS_WORKER_ROUTE,
   registerManagedMcpRoutes,
 } from './managed-mcp-routes.js';
 import { ManagedBackgroundShellRegistry } from './managed-background-shell-registry.js';
@@ -86,6 +88,7 @@ export const MANAGED_CONTEXT_WORKER_ROUTES = Object.freeze([
   ...MANAGED_CONTEXT_ROUTES,
   WORKSPACE_ACTIVATION_ROUTE,
   MANAGED_MCP_WORKER_ROUTE,
+  MANAGED_MCP_DEFINITIONS_WORKER_ROUTE,
   MANAGED_HOOK_WORKER_ROUTE,
   MANAGED_SHELL_WORKER_ROUTE,
   MANAGED_MONITOR_WORKER_ROUTE,
@@ -113,7 +116,10 @@ export class ManagedContextMount {
   readonly #mountRoot: string;
   #root: { readonly dev: bigint; readonly ino: bigint } | undefined;
 
-  constructor(mountRoot: string) {
+  constructor(
+    mountRoot: string,
+    private readonly verifyStorage?: () => Promise<void>,
+  ) {
     this.#mountRoot = mountRoot;
   }
 
@@ -133,6 +139,7 @@ export class ManagedContextMount {
     let rootStats: BigIntStats;
     let directory: string;
     try {
+      await this.verifyStorage?.();
       const root = await fs.realpath(this.#mountRoot);
       rootStats = await fs.stat(root, { bigint: true });
       directory = path.join(root, ...cwdRelative.split('/'));
@@ -166,6 +173,7 @@ export class ManagedContextMount {
       return undefined;
     }
     try {
+      await this.verifyStorage?.();
       const root = await fs.realpath(this.#mountRoot);
       const stats = await fs.stat(root, { bigint: true });
       const pinned = this.#root;
@@ -281,6 +289,8 @@ export function registerManagedContextRoutes(
   capturePublisher?: ManagedShellCapturePublisher,
   remotePublishers?: ManagedShellPublisherRegistry,
   mount = new ManagedContextMount(bootDocument.mountRoot),
+  ledger?: ManagedRuntimeLedger,
+  sshForegroundOnly = false,
 ): ManagedToolExecutor {
   const boot = parseManagedContextBoot(bootDocument);
   if (boot.capabilityDigest === CSI_FILES_RETIREMENT_CAPABILITY_DIGEST)
@@ -335,63 +345,70 @@ export function registerManagedContextRoutes(
     handleManagedRuntimeJsonError,
   );
 
-  const mcp = new ManagedMcpRuntime(
-    boot,
-    async (runtimeSessionId) => {
-      if (
-        !admissionOpen() ||
-        !mount.isAvailable ||
-        resident ||
-        !requiresActivation ||
-        !activations.isActive(runtimeSessionId)
-      )
-        return undefined;
-      const binding = installations.installed(runtimeSessionId);
-      const directory = binding && (await mount.resolve(binding.cwdRelative));
-      return admissionOpen() &&
-        mount.isAvailable &&
-        activations.isActive(runtimeSessionId)
-        ? directory
-        : undefined;
-    },
-    loadManagedMcpManifest(
-      resident ? undefined : process.env['QWEN_MANAGED_MCP_CONFIG'],
-    ),
-  );
-  registerManagedMcpRoutes(app, boot, mcp);
-  const hooks = new ManagedHookRuntime(
-    boot,
-    async (runtimeSessionId) => {
-      if (
-        !admissionOpen() ||
-        !mount.isAvailable ||
-        resident ||
-        !requiresActivation ||
-        !activations.isActive(runtimeSessionId)
-      )
-        return undefined;
-      const binding = installations.installed(runtimeSessionId);
-      const directory = binding && (await mount.resolve(binding.cwdRelative));
-      return admissionOpen() &&
-        mount.isAvailable &&
-        activations.isActive(runtimeSessionId)
-        ? directory
-        : undefined;
-    },
-    loadManagedHookManifest(
-      resident ? undefined : process.env['QWEN_MANAGED_HOOK_CONFIG'],
-    ),
-  );
-  registerManagedHookRoutes(app, boot, hooks);
+  const mcp = sshForegroundOnly
+    ? undefined
+    : new ManagedMcpRuntime(
+        boot,
+        async (runtimeSessionId) => {
+          if (
+            !admissionOpen() ||
+            !mount.isAvailable ||
+            resident ||
+            !requiresActivation ||
+            !activations.isActive(runtimeSessionId)
+          )
+            return undefined;
+          const binding = installations.installed(runtimeSessionId);
+          const directory =
+            binding && (await mount.resolve(binding.cwdRelative));
+          return admissionOpen() &&
+            mount.isAvailable &&
+            activations.isActive(runtimeSessionId)
+            ? directory
+            : undefined;
+        },
+        loadManagedMcpManifest(
+          resident ? undefined : process.env['QWEN_MANAGED_MCP_CONFIG'],
+        ),
+      );
+  if (mcp) registerManagedMcpRoutes(app, boot, mcp);
+  const hooks = sshForegroundOnly
+    ? undefined
+    : new ManagedHookRuntime(
+        boot,
+        async (runtimeSessionId) => {
+          if (
+            !admissionOpen() ||
+            !mount.isAvailable ||
+            resident ||
+            !requiresActivation ||
+            !activations.isActive(runtimeSessionId)
+          )
+            return undefined;
+          const binding = installations.installed(runtimeSessionId);
+          const directory =
+            binding && (await mount.resolve(binding.cwdRelative));
+          return admissionOpen() &&
+            mount.isAvailable &&
+            activations.isActive(runtimeSessionId)
+            ? directory
+            : undefined;
+        },
+        loadManagedHookManifest(
+          resident ? undefined : process.env['QWEN_MANAGED_HOOK_CONFIG'],
+        ),
+      );
+  if (hooks) registerManagedHookRoutes(app, boot, hooks);
   // H3 background Shells share the delegation the Hook commands already use;
   // unset or empty both mean no delegation, and the executor keeps its
   // committed refusal then.
   const cgroupRoot = resident
     ? undefined
     : process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'];
-  const backgroundSupervisor = cgroupRoot
-    ? ManagedChildRunSupervisor.create({ cgroupRoot })
-    : undefined;
+  const backgroundSupervisor =
+    !sshForegroundOnly && cgroupRoot
+      ? ManagedChildRunSupervisor.create({ cgroupRoot })
+      : undefined;
   const backgroundRegistry = new ManagedBackgroundShellRegistry();
   // One monitor registry shared by executor and maintenance routes: a
   // private second instance could only ever answer unknown.
@@ -496,17 +513,37 @@ export function registerManagedContextRoutes(
     backgroundSupervisor,
     backgroundRegistry,
     monitorRegistry,
+    { ledger, sshForegroundOnly },
   );
-  registerManagedShellRoutes(
-    app,
-    boot,
-    new ManagedShellRuntime(backgroundRegistry),
-  );
-  registerManagedMonitorRoutes(
-    app,
-    boot,
-    new ManagedMonitorRuntime(monitorRegistry),
-  );
+  if (!sshForegroundOnly) {
+    registerManagedShellRoutes(
+      app,
+      boot,
+      new ManagedShellRuntime(backgroundRegistry),
+    );
+    registerManagedMonitorRoutes(
+      app,
+      boot,
+      new ManagedMonitorRuntime(monitorRegistry),
+    );
+  } else {
+    for (const route of [
+      MANAGED_MCP_WORKER_ROUTE,
+      MANAGED_MCP_DEFINITIONS_WORKER_ROUTE,
+      MANAGED_HOOK_WORKER_ROUTE,
+      MANAGED_SHELL_WORKER_ROUTE,
+      MANAGED_MONITOR_WORKER_ROUTE,
+    ]) {
+      app.post(
+        route.path,
+        managedRuntimeNoStore,
+        authorizeManagedRuntime(boot),
+        (_req, res) => {
+          res.status(501).json({ code: 'managed_runtime_profile_unsupported' });
+        },
+      );
+    }
+  }
   registerManagedRuntimeProviderRoute(
     app,
     boot,
@@ -540,6 +577,7 @@ export function registerManagedContextRoutes(
             isActive,
           };
     },
+    sshForegroundOnly,
   );
   activations.register(app, boot, installations, executor);
   registerManagedRuntimeToolRoutes(app, boot, executor);

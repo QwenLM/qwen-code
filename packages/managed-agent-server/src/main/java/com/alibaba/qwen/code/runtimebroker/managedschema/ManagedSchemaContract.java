@@ -48,6 +48,7 @@ public final class ManagedSchemaContract {
         UNARCHIVE,
         RENAME,
         CWD_CHANGE,
+        CONTEXT_COMPRESSION,
         ACTION_RESPONSE,
         TASK_CANCEL,
         CHILD_SESSION_START,
@@ -64,7 +65,10 @@ public final class ManagedSchemaContract {
         WORKSPACE_RECOVERY,
         STORAGE_MIGRATION,
         CSI_RETIREMENT,
-        CHANNEL_INGRESS
+        WORKSPACE_RETIREMENT,
+        CHANNEL_INGRESS,
+        SUBMIT_INPUT,
+        CANCEL
     }
 
     public enum ReceiptNamespace {
@@ -91,7 +95,8 @@ public final class ManagedSchemaContract {
         EXECUTION_ACK,
         RUNTIME_BINDING,
         CSI_WORKER_ACK,
-        RECOVERY_EVIDENCE
+        RECOVERY_EVIDENCE,
+        POD_DELETE_ATTEMPT
     }
 
     public enum ResourceOwnerKind {
@@ -104,7 +109,8 @@ public final class ManagedSchemaContract {
         EVENT_STREAM,
         OPERATION,
         OPERATION_WORK,
-        RECOVERY
+        RECOVERY,
+        HOSTED_CLEANUP
     }
 
     public enum DeliveryKind {

@@ -96,6 +96,7 @@ vi.mock(
         toolResultResources: resourceStore,
         assertWritable: state.assertWritable,
         authorizeOrdinary: async () => undefined,
+        approvalSelection: async () => ({ mode: 'yolo', revision: 0 }),
         publication: {
           owner: async () => ({ writerId: BOOT_ID, writerGeneration: 1 }),
           request: (route: string, body: unknown, token?: string) =>
@@ -107,7 +108,8 @@ vi.mock(
     },
   }),
 );
-vi.mock('./hosted-harness-model.js', () => ({
+vi.mock('./hosted-harness-model.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./hosted-harness-model.js')>()),
   runHostedHarnessTextTurn: state.model,
 }));
 

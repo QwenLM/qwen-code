@@ -17,7 +17,10 @@ import {
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { managedExtensionRecordKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
-import { MANAGED_CHILD_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+import {
+  MANAGED_CHILD_LIMITS,
+  decodeChildLaunchEnvelope,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
   HookEventName,
@@ -36,6 +39,7 @@ import {
   HOSTED_TEAM_AGENT_SNAPSHOT_TOOL,
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { HostedApprovalWaiters } from './hosted-tool-approval.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import {
   hostedShellLaneAttachesChildAgents,
@@ -128,6 +132,8 @@ function createTurn(
   hooksSession?: HostedHookSession,
   profile: HostedWorkspaceToolProfile = 'hosted-workspace-team-lead/1',
   childSnapshots = false,
+  publicChildren = false,
+  launchEnabled: () => boolean = () => true,
 ): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -166,6 +172,18 @@ function createTurn(
         ? {
             childAgents: {
               funnel: children,
+              publicChildren,
+              launchEnabled,
+              snapshot: async (sourcePromptId, modelId, modelRoute) => ({
+                version: 1,
+                sourcePromptId,
+                modelId,
+                modelRoute,
+                approvalMode: 'auto-edit',
+                approvalRevision: 2,
+                modelRevision: 1,
+                skillsRef: null,
+              }),
               depth,
               childWorkspaces,
               childSnapshots,
@@ -309,6 +327,53 @@ it('hides the agent tool when public shell admission attaches no child orchestra
     'hosted-workspace-shell/1',
   ).declarations(new AbortController().signal);
   expect(tools.some((tool) => tool.name === 'agent')).toBe(false);
+});
+
+it('public scope exposes only agent orchestration and rechecks the live deployment gate', async () => {
+  let enabled = true;
+  const turn = createTurn(
+    0,
+    undefined,
+    'prompt',
+    false,
+    false,
+    true,
+    undefined,
+    'hosted-workspace-shell/1',
+    false,
+    true,
+    () => enabled,
+  );
+  turn.setChildModelRoute('model', {
+    authType: 'openai',
+    endpointDigest: 'a'.repeat(64),
+    providerPin: 'b'.repeat(64),
+  });
+  const names = (await turn.declarations(new AbortController().signal)).map(
+    (tool) => tool.name,
+  );
+  expect(names).toContain('agent');
+  for (const name of [
+    'workflow',
+    'send_message',
+    'team_create',
+    'task_create',
+    'request_shutdown',
+  ])
+    expect(names).not.toContain(name);
+  const isolated = await executeAgent(
+    turn,
+    call({ description: 'audit', prompt: 'review', isolation: 'worktree' }),
+  );
+  expect(JSON.stringify(isolated)).toContain('isolation');
+  expect(children.launchedChildRunsOf(sessionKey.sessionId)).toEqual([]);
+  enabled = false;
+  const refused = await executeAgent(
+    turn,
+    call({ description: 'audit', prompt: 'review' }, 'call-disabled'),
+  );
+  expect(JSON.stringify(refused)).toContain('error');
+  expect(children.launchedChildRunsOf(sessionKey.sessionId)).toEqual([]);
 });
 
 it('declares the agent tool at the root and hides it from a child Session', async () => {
@@ -2144,11 +2209,103 @@ it('refuses a foreground agent call whose PreToolUse Hook took the mount', async
   );
 });
 
+// A PermissionRequest Hook runs after the call's PreToolUse and may take
+// the mount there: the admission after the last Hook still refuses.
+it('refuses a foreground agent call whose PermissionRequest Hook took the mount', async () => {
+  const fireEvents: string[] = [];
+  const turn = createTurnWithOwnerMount(
+    'hooks',
+    false,
+    (hook, eventName) => {
+      if (eventName === HookEventName.PermissionRequest) hook.mountHeld = true;
+    },
+    fireEvents,
+    defaultApproval(),
+  );
+  const refused = await executeAgent(
+    turn,
+    call({
+      description: 'audit the diff',
+      prompt: 'review the change',
+      run_in_background: false,
+    }),
+  );
+  expect(fireEvents.slice(0, 2)).toEqual([
+    HookEventName.PreToolUse,
+    HookEventName.PermissionRequest,
+  ]);
+  expect(JSON.stringify(refused)).toContain(mountRefusal);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
+// The launch reads the input the Hooks left: its envelope carries the final
+// prompt and description, and the final run_in_background picks how its
+// result returns. An agent-only batch still binds no parent mount.
+it('launches a child agent from the input its Hooks left', async () => {
+  const model = {
+    description: 'model task',
+    prompt: 'model prompt',
+    run_in_background: false,
+  };
+  const pre = { ...model, description: 'pre task', prompt: 'pre prompt' };
+  const final = {
+    description: 'final task',
+    prompt: 'final prompt',
+    run_in_background: true,
+  };
+  const inputs: unknown[] = [];
+  const turn = createTurnWithOwnerMount(
+    'hooks',
+    false,
+    (_hook, eventName, fields) => {
+      inputs.push(fields['tool_input']);
+      if (eventName === HookEventName.PreToolUse)
+        return { hookSpecificOutput: { updatedInput: pre } };
+      if (eventName === HookEventName.PermissionRequest)
+        return {
+          hookSpecificOutput: {
+            decision: { behavior: 'allow', updatedInput: final },
+          },
+        };
+      return undefined;
+    },
+    undefined,
+    defaultApproval(),
+  );
+  const responses = await executeAgent(turn, call(model));
+  expect(inputs.slice(0, 2)).toEqual([model, pre]);
+  const record = children.record('prompt:call-1')!;
+  expect(record.completion).toBe('sent');
+  expect(
+    decodeChildLaunchEnvelope(await session.resources.read(record.inputRef)),
+  ).toMatchObject({ description: 'final task', prompt: 'final prompt' });
+  expect(JSON.stringify(responses)).toContain('started in the background');
+  // The Turn's own acquisition binds its file history; none happened.
+  expect(broker.fileHistory).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+});
+
+function defaultApproval(): ConstructorParameters<
+  typeof HostedWorkspaceToolTurn
+>[8] {
+  return {
+    settings: { mode: 'default', timeoutMs: 60_000 },
+    waiters: new HostedApprovalWaiters(),
+  };
+}
+
 function createTurnWithOwnerMount(
   owner: 'hooks' | 'mcp',
   held: boolean,
-  onFire?: (sessionOwner: { mountHeld: boolean }) => void,
+  onFire?: (
+    sessionOwner: { mountHeld: boolean },
+    eventName: string,
+    fields: Record<string, unknown>,
+  ) => unknown,
   fireEvents?: string[],
+  approval?: ConstructorParameters<typeof HostedWorkspaceToolTurn>[8],
 ): HostedWorkspaceToolTurn {
   const ownerBroker = new (HostedWorkspaceBroker as unknown as new (
     ...args: unknown[]
@@ -2165,10 +2322,13 @@ function createTurnWithOwnerMount(
     refresh: () => Promise.resolve(),
     tools: () => [],
     toolInput: () => undefined,
-    fire: (eventName: string) => {
+    fire: (
+      eventName: string,
+      _occurrenceId: string,
+      fields: Record<string, unknown>,
+    ) => {
       fireEvents?.push(eventName);
-      onFire?.(sessionOwner);
-      return Promise.resolve([]);
+      return Promise.resolve(onFire?.(sessionOwner, eventName, fields) ?? []);
     },
     close: () => Promise.resolve(),
   };
@@ -2184,7 +2344,7 @@ function createTurnWithOwnerMount(
       resources: session.resources,
       assertWritable: async () => undefined,
     },
-    undefined,
+    approval,
     {
       profile: 'hosted-workspace-shell/1',
       childAgents: {

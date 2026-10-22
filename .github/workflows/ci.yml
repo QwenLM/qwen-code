@@ -392,13 +392,14 @@ jobs:
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     # Shared ECS hosts can stretch the normally 25-minute lane beyond an hour
-    # while tests are still making progress. Keep a finite ceiling without
-    # turning host contention into a false cancellation. The extension is
-    # scoped to the pool that shows the contention: fork PRs from untrusted
-    # authors and MAINTAINER_ECS_RUNNER_DISABLED=true fall back to
-    # GitHub-hosted runners (see classify_pr), which keep the pre-contention
-    # ceiling so a genuine hang there does not burn the extra 60 minutes.
-    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''120'' || ''60'') }}'
+    # while tests are still making progress. The full suite no longer fits
+    # 60 minutes on GitHub-hosted runners either. Those runners take fork PRs
+    # from untrusted authors and everything when
+    # MAINTAINER_ECS_RUNNER_DISABLED=true. On 2026-10-17, 13 hosted runs
+    # passed in 45-59 minutes, and 17 were cancelled at 60 while still
+    # passing tests. Both pools get the same finite ceiling. The test step's
+    # own 110-minute cap still bounds a genuine hang.
+    timeout-minutes: 120
     outputs:
       ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     permissions:
@@ -1379,9 +1380,9 @@ jobs:
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
           {
             echo "DISKCONTEXT failure-dump $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            df -hT || true
+            df -hT || df -h || true
             df -i || true
-            grep -E 'MemTotal|MemAvailable' /proc/meminfo || true
+            grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo || true
           } 2>/dev/null | tee -a "$DISK_SAMPLES" || true
       # Collector for the #10035 telemetry, kept as the LAST step: failure()
       # is evaluated when the step is reached and never revisited, so at its
@@ -1415,20 +1416,23 @@ jobs:
         needs.classify_pr.outputs.skip_ci != 'true' &&
         needs.test.outputs.ci_profile == 'full'
       }}
-    # The same commit repeatedly lost browser resources or exceeded the
-    # document performance budget on ECS, while both gates passed on hosted.
-    # Keep this browser job hosted without relaxing its test assertions.
-    runs-on: 'ubuntu-latest'
+    # Routed like test's: trusted runs use the ECS pool, untrusted fork PRs
+    # stay hosted. #11250 moved it hosted after four pool attempts failed
+    # (run 34081409590). Three ran the smoke unpinned at 8 workers, half the
+    # host's 16 cores, against hosted's 2, and timed out broadly on
+    # visibility and clock waits. The fourth's transcript gate took 73 s
+    # against its 60 s budget while npm install alone took 28 min on that
+    # host. The smoke step pins the hosted worker count.
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     # Slow hosted mirrors kept downloading past 23 min; reserve time for
     # the 208 smoke tests and artifact cleanup after installation.
     timeout-minutes: 60
     permissions:
       contents: 'read'
     steps:
-      # Retain the shared-pool recovery steps so rerouting needs only a runner
-      # change. Hosted workspaces are fresh; on a reused workspace a prior
-      # containerised job can leave root-owned, read-only files. Restore them
-      # unconditionally before checkout, as in the test job.
+      # On a reused pool workspace a prior containerised job can leave
+      # root-owned, read-only files. Restore them unconditionally before
+      # checkout, as in the test job.
       - name: 'Restore workspace ownership'
         run: |-
           set -uo pipefail
@@ -1447,9 +1451,9 @@ jobs:
           # gitconfig from accumulating a duplicate entry per job.
           git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
 
-      # Keep this retained sweep pinned to the test job's hardened recovery
-      # recipe, even while hosted. The `.qwen.root-orig` name's provenance
-      # (an external recovery tool) is documented on the test job's copy.
+      # Keep this sweep pinned to the test job's hardened recovery recipe.
+      # The `.qwen.root-orig` name's provenance (an external recovery tool)
+      # is documented on the test job's copy.
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
@@ -1533,6 +1537,11 @@ jobs:
                 done || true
           fi
 
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
@@ -1578,8 +1587,8 @@ jobs:
           npm config set fetch-retries 5
           npm config set fetch-timeout 300000
 
-      # Retained for a future shared-pool reroute: apply the test job's
-      # pre-install admission check (#10035) before dependency installation.
+      # The test job's pre-install admission check (#10035), before
+      # dependency installation.
       - name: 'Disk floor gate (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
@@ -1601,12 +1610,24 @@ jobs:
 
       - name: 'Install Playwright Chromium and WebKit (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
-        # Self-hosted ECS runners already include system deps; --with-deps can race apt locks.
+        # Pool hosts carry Chromium's system libraries but not WebKit's: the
+        # first pool run of this job lacked GTK 4, GStreamer, libwoff2 and
+        # about 40 more. Install them only when Playwright's own host
+        # validation reports them missing, so each host installs them once and
+        # later jobs skip apt. sudo -n fails fast instead of prompting, and the
+        # lock timeout waits out another job's apt run on the same host.
+        timeout-minutes: 30
         run: |-
-          node node_modules/playwright/cli.js install chromium webkit
+          install_log="${RUNNER_TEMP}/playwright-install.log"
+          node node_modules/playwright/cli.js install chromium webkit 2>&1 | tee "${install_log}"
           nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
           if [ -f "${nested_cli}" ]; then
-            node "${nested_cli}" install chromium webkit
+            node "${nested_cli}" install chromium webkit 2>&1 | tee -a "${install_log}"
+          fi
+          if grep -q 'Host system is missing dependencies' "${install_log}"; then
+            apt_config="${RUNNER_TEMP}/apt-playwright.conf"
+            printf '%s\n' 'DPkg::Lock::Timeout "300";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' > "${apt_config}"
+            sudo -n env APT_CONFIG="${apt_config}" "$(command -v node)" node_modules/playwright/cli.js install-deps chromium webkit
           fi
 
       - name: 'Choose web-shell Playwright port'
@@ -1619,7 +1640,10 @@ jobs:
         run: 'npx vitest run --root ./integration-tests ./chat-transcript-document.test.ts --retry=0'
 
       - name: 'Run web-shell browser smoke'
-        run: 'npm run test:e2e:smoke --workspace=packages/web-shell'
+        # Two workers is the hosted default (half of 4 vCPUs). Unpinned, a pool
+        # job would start browsers for half the host's cores while the host
+        # runs its other jobs.
+        run: 'npm run test:e2e:smoke --workspace=packages/web-shell -- --workers=2'
 
       - name: 'Upload web-shell Playwright artifacts'
         if: '${{ always() }}'

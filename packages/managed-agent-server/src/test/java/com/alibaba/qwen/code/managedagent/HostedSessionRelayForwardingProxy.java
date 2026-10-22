@@ -28,6 +28,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Predicate;
 
 /**
  * The FG9 lose-once/hold reverse proxy. One instance fronts one HTTP
@@ -36,9 +37,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  * matches its method+path+body; a
  * matched rule then drops the reply after the upstream already committed
  * (the lose-once shape fault rounds live on), or holds it until the IT
- * releases the named latch (the controlled-ambiguity shape). The armed
- * occurrence N means a DROP rule fires on the first N matching requests
- * while a HOLD rule fires only on the Nth matching one; everything else
+ * releases the named latch (the controlled-ambiguity shape), or swallows
+ * the request without ever forwarding it (a writer that dies before its
+ * commit leaves the wire). The armed occurrence N means a DROP rule fires
+ * on the first N matching requests while a HOLD or SWALLOW rule fires
+ * only on the Nth matching one; everything else
  * passes through and is logged. Every observation lands in the per-case
  * proxy log; those lines are the fault-fired witness the gate asserts on.
  */
@@ -56,6 +59,8 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
         DROP,
         /** Forward, consume, then answer only once released by name. */
         HOLD,
+        /** Never forward; once released by name, answer 503. */
+        SWALLOW,
     }
 
     /** One arming rule with its firing counter. */
@@ -64,22 +69,37 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
         private final Disposition disposition;
         private final String name;
         private final int occurrences;
+        private final Predicate<String> responseMatcher;
         private final AtomicInteger seen = new AtomicInteger();
 
         private Rule(Matcher matcher, Disposition disposition, String name,
-                int occurrences) {
+                int occurrences, Predicate<String> responseMatcher) {
             this.matcher = matcher;
             this.disposition = disposition;
             this.name = name;
             this.occurrences = occurrences;
+            this.responseMatcher = responseMatcher;
         }
 
         static Rule drop(Matcher matcher, String name) {
-            return new Rule(matcher, Disposition.DROP, name, 1);
+            return new Rule(matcher, Disposition.DROP, name, 1, null);
+        }
+
+        /** Drops the first reply whose body satisfies {@code responseMatcher}.
+         * A reply that does not match passes through without consuming the
+         * occurrence, so a running receipt cannot spend the settled drop. */
+        static Rule dropResponse(Matcher matcher,
+                Predicate<String> responseMatcher, String name) {
+            return new Rule(matcher, Disposition.DROP, name, 1,
+                    responseMatcher);
         }
 
         static Rule hold(Matcher matcher, String name, int occurrence) {
-            return new Rule(matcher, Disposition.HOLD, name, occurrence);
+            return new Rule(matcher, Disposition.HOLD, name, occurrence, null);
+        }
+
+        static Rule swallow(Matcher matcher, String name) {
+            return new Rule(matcher, Disposition.SWALLOW, name, 1, null);
         }
 
         /** Whether this request takes the armed disposition. */
@@ -88,10 +108,22 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
                 return false;
             }
             int index = seen.incrementAndGet();
-            if (disposition == Disposition.HOLD) {
+            if (disposition != Disposition.DROP) {
                 return index == occurrences;
             }
             return index <= occurrences;
+        }
+
+        boolean matchesRequest(String method, String path, String body) {
+            return matcher.test(method, path, body);
+        }
+
+        boolean matchesResponse(String reply) {
+            return responseMatcher != null && responseMatcher.test(reply);
+        }
+
+        boolean consume() {
+            return seen.incrementAndGet() <= occurrences;
         }
     }
 
@@ -174,21 +206,30 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
             return;
         }
         String text = new String(body, StandardCharsets.UTF_8);
-        String kind = kindOf(text);
+        String kind = tagOf(text);
         Rule armed = null;
+        Rule responseRule = null;
         for (Rule rule : rules) {
-            if (rule.fires(method, path, text)) {
-                armed = rule;
-                break;
+            if (rule.responseMatcher == null) {
+                if (rule.fires(method, path, text)) {
+                    armed = rule;
+                    break;
+                }
+            } else if (responseRule == null
+                    && rule.matchesRequest(method, path, text)) {
+                responseRule = rule;
             }
         }
         CompletableFuture<Void> holdLatch = null;
-        if (armed != null && armed.disposition == Disposition.HOLD) {
+        if (armed != null && armed.disposition != Disposition.DROP) {
             holdLatch = new CompletableFuture<>();
             latches.put(armed.name, holdLatch);
         }
-        String tag = method + " " + path
-                + (kind.isEmpty() ? "" : " kind=" + kind);
+        String tag = method + " " + path + kind;
+        if (armed != null && armed.disposition == Disposition.SWALLOW) {
+            swallow(exchange, armed.name, tag, holdLatch);
+            return;
+        }
         try {
             HttpRequest.Builder forward = HttpRequest.newBuilder(upstream
                             .resolve(exchange.getRequestURI().toString()))
@@ -199,13 +240,20 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
                             : HttpRequest.BodyPublishers.ofByteArray(body));
             HttpResponse<byte[]> response = client.send(forward.build(),
                     HttpResponse.BodyHandlers.ofByteArray());
+            if (armed == null && responseRule != null
+                    && responseRule.matchesResponse(
+                            new String(response.body(), StandardCharsets.UTF_8))
+                    && responseRule.consume()) {
+                armed = responseRule;
+            }
+            String status = " status=" + response.statusCode();
             if (armed == null) {
-                record("PROXY passthru " + tag);
+                record("PROXY passthru " + tag + status);
             } else if (armed.disposition == Disposition.DROP) {
-                record("PROXY dropped " + armed.name + " " + tag);
+                record("PROXY dropped " + armed.name + " " + tag + status);
                 return;
             } else {
-                record("PROXY holding " + armed.name + " " + tag);
+                record("PROXY holding " + armed.name + " " + tag + status);
                 try {
                     holdLatch.get(90, TimeUnit.SECONDS);
                 } catch (Exception interrupted) {
@@ -242,11 +290,43 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
         }
     }
 
-    private String kindOf(String text) {
+    /** The SWALLOW disposition: the request never reaches the upstream.
+     * Its sender is meant to die while it waits, so the 503 it gets on
+     * release normally meets a closed connection. */
+    private void swallow(HttpExchange exchange, String name, String tag,
+            CompletableFuture<Void> latch) throws IOException {
+        record("PROXY swallowing " + name + " " + tag);
+        try {
+            latch.get(90, TimeUnit.SECONDS);
+        } catch (Exception interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        record("PROXY swallowed " + name + " " + tag);
+        try {
+            byte[] message = "swallowed".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(503, message.length);
+            exchange.getResponseBody().write(message);
+        } catch (IOException gone) {
+            // the sender is gone, as intended
+        } finally {
+            exchange.close();
+        }
+    }
+
+    /** The relay verb (`kind`), journal commit (`operation`) and its
+     * command id a body names, so the log tells one commit from another
+     * and a replay from a new step. */
+    private String tagOf(String text) {
         try {
             JsonNode parsed = json.readTree(text);
             JsonNode kind = parsed.path("kind");
-            return kind.isTextual() ? kind.asText() : "";
+            JsonNode operation = parsed.path("operation");
+            JsonNode command = parsed.path("commandId");
+            return (kind.isTextual() ? " kind=" + kind.asText() : "")
+                    + (operation.isTextual() ? " op=" + operation.asText()
+                            : "")
+                    + (operation.isTextual() && command.isTextual()
+                            ? " cmd=" + command.asText() : "");
         } catch (IOException ignored) {
             return "";
         }
