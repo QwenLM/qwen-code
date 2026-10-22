@@ -77,6 +77,8 @@ const debugLogger = createDebugLogger('CLIENT');
 // Core modules
 import {
   LlmChat,
+  type ChatCompressionObserver,
+  type ChatCompressionObserverOptions,
   type RepairOrphanedToolUseOptions,
   userContentPushSnapshotKey,
 } from './llm-chat.js';
@@ -653,6 +655,18 @@ export class LlmClient {
 
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
+  }
+
+  private compressionObserver?: ChatCompressionObserver;
+  private compressionObserverOptions?: ChatCompressionObserverOptions;
+
+  setCompressionObserver(
+    observer?: ChatCompressionObserver,
+    options?: ChatCompressionObserverOptions,
+  ): void {
+    this.compressionObserver = observer;
+    this.compressionObserverOptions = options;
+    this.chat?.setCompressionObserver(observer, options);
   }
 
   async initialize(
@@ -2866,6 +2880,10 @@ export class LlmClient {
           ),
       );
       chat.enableManualPlanExitNotices();
+      chat.setCompressionObserver(
+        this.compressionObserver,
+        this.compressionObserverOptions,
+      );
       this.chat = chat;
 
       // Repair any dangling `model[functionCall]` whose `functionResponse`

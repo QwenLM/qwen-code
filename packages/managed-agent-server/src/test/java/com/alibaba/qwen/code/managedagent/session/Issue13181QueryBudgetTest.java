@@ -698,13 +698,14 @@ class Issue13181QueryBudgetTest {
         System.out.println("[issue-13181] listPublicSessions(20 workspace"
                 + " rows): " + fixture.ledger.summary());
         // Page + active turns + covered sequences + the workspace-close
-        // batch; the approval mode rides on the page's own SELECT *.
-        assertThat(fixture.ledger.total()).isEqualTo(4);
+        // batch; compression adds its projection, missing-head and active-operation
+        // batches. The approval mode rides on the page's own SELECT *.
+        assertThat(fixture.ledger.total()).isEqualTo(7);
         assertThat(fixture.ledger.count(
                 "approval_mode from ma_session"))
                 .isZero();
         assertThat(fixture.ledger.count("from ma_operation"))
-                .isEqualTo(1);
+                .isEqualTo(2);
         for (var row : boundPublic) {
             int index = boundIds.indexOf(row.id());
             assertThat(row.metadata()).containsEntry("title", "w-" + index);
@@ -722,8 +723,9 @@ class Issue13181QueryBudgetTest {
         // Page + the latest-turn read + the workspace-close batch; without
         // turns the environment-event read is skipped, and the approval mode
         // rides on the page's own SELECT *. Model selection, context, approval
-        // selection and approval ownership add one bounded query each.
-        assertThat(fixture.ledger.total()).isEqualTo(7);
+        // selection and approval ownership add one bounded query each;
+        // compression adds three page-wide batches.
+        assertThat(fixture.ledger.total()).isEqualTo(10);
         assertThat(fixture.ledger.count("coalesce(selected_approval_mode, approval_mode)")).isEqualTo(1);
         assertThat(fixture.ledger.count("coalesce(owner_actor_key, creator_actor_key)")).isEqualTo(1);
         assertThat(fixture.ledger.count("select session_id, model_id, model_revision from ma_session")).isEqualTo(1);
@@ -825,8 +827,9 @@ class Issue13181QueryBudgetTest {
         // Page + latest turns + the close batch + the grant batch across
         // both workspaces + the execution-facts batch over the
         // submit-shaped sessions, plus model/context and approval/owner batches:
+        // compression projection, missing-head and operation batches remain
         // constant, not per row.
-        assertThat(fixture.ledger.total()).isEqualTo(9);
+        assertThat(fixture.ledger.total()).isEqualTo(12);
         assertThat(fixture.ledger.count("coalesce(selected_approval_mode, approval_mode)")).isEqualTo(1);
         assertThat(fixture.ledger.count("coalesce(owner_actor_key, creator_actor_key)")).isEqualTo(1);
         assertThat(fixture.ledger.count("select session_id, model_id, model_revision from ma_session")).isEqualTo(1);
@@ -871,7 +874,10 @@ class Issue13181QueryBudgetTest {
             var page = fixture.service.listWebShellSessions(tenant, "actor", null, 20).data();
             assertThat(page).hasSize(size);
             assertThat(page).allSatisfy(row -> assertThat(JSON.valueToTree(row).path("capabilities").path("cwdChange").asBoolean()).isTrue());
-            assertThat(fixture.ledger.total()).isEqualTo(9);
+            assertThat(fixture.ledger.total()).isEqualTo(12);
+            assertThat(fixture.ledger.count("select session_id, revision from ma_session_record")).isEqualTo(1);
+            assertThat(fixture.ledger.count("head_kind = 'managed_session'")).isEqualTo(1);
+            assertThat(fixture.ledger.count("operation_kind = 'context_compression'")).isEqualTo(1);
             assertThat(fixture.ledger.count("coalesce(selected_approval_mode, approval_mode)")).isEqualTo(1);
             assertThat(fixture.ledger.count("coalesce(owner_actor_key, creator_actor_key)")).isEqualTo(1);
             assertThat(fixture.ledger.count("select session_id, model_id, model_revision from ma_session")).isEqualTo(1);
@@ -1159,7 +1165,7 @@ class Issue13181QueryBudgetTest {
     void asynchronousVerificationHeartbeatsAndStatusAvoidJournalBodyReads() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        byte[] bytes = new byte[] {1, 2, 3, 4};
+        byte[] bytes = new byte[16];
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
             public void putIfAbsent(String key, byte[] input) {}
@@ -1190,7 +1196,7 @@ class Issue13181QueryBudgetTest {
             public void validateConfiguration() {}
         };
         ToolPublicationDataStore data = new ToolPublicationDataStore(fixture.jdbc, fixture.manager,
-                publication.store(), publication.sessions(), bucket, Duration.ofSeconds(10), Duration.ofMillis(300),
+                publication.store(), publication.sessions(), bucket, Duration.ofSeconds(10), Duration.ofSeconds(2),
                 new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
         data.publishSegment(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-heartbeat",
                 "stdout", 0, bytes, null, true);

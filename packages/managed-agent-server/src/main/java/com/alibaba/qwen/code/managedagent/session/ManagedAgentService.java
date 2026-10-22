@@ -1096,11 +1096,14 @@ public class ManagedAgentService {
         Map<String, Long> coveredSequences = store
                 .findSnapshotCoveredSequences(tenantId, ids);
         Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
+        var compressions = store.contextCompressionStates(tenantId, sessions.stream()
+                .filter(session -> session.workspace() != null).map(SessionRecord::sessionId).toList());
         return sessions.stream()
                 .map(session -> publicSession(session,
                         activeTurns.get(session.sessionId()),
                         coveredSequences.getOrDefault(session.sessionId(), 0L),
-                        retention(session, closed)))
+                        retention(session, closed), compressions.getOrDefault(session.sessionId(),
+                                new AgentStateStore.ContextCompressionState(0, null))))
                 .toList();
     }
 
@@ -1129,7 +1132,7 @@ public class ManagedAgentService {
 
     private PublicSession publicSession(SessionRecord session,
             TurnSummary activeTurn, long snapshotCoveredSequence,
-            boolean retention) {
+            boolean retention, AgentStateStore.ContextCompressionState compression) {
         Map<String, Object> metadata = session.title() == null ? Map.of()
                 : Map.of("title", session.title());
         // Every route these capabilities gate reads through
@@ -1168,8 +1171,10 @@ public class ManagedAgentService {
                         hasActions(session), close, keep, keep,
                         visible && supportsDelete(session, retention),
                         foregroundShell(session),
-                        javaDurableAdmission == null ? null : visible),
-                publicWorkspace(session));
+                        javaDurableAdmission == null ? null : visible,
+                        visible && "ACTIVE".equals(session.status()) && session.workspace() != null
+                                && store.workspaceFilesEnabled() && compression.available() && harness.supportsContextCompression()),
+                publicWorkspace(session), compression.available() ? compression.compactionRevision() : null, compression.operationId());
     }
 
     /** A page assembled from grouped batch reads instead of per-row ones. */
@@ -1196,10 +1201,12 @@ public class ManagedAgentService {
                 && sessions.stream().anyMatch(session -> session.agentDefinitionDigest() != null)
                 && harness.supportsAgentDefinitionApprovalSelection();
         Map<String, WebShellModelSelection> modelSelections = store.findModelSelections(tenantId, boundIds);
+        var compressions = store.contextCompressionStates(tenantId, boundIds);
         Map<String, WebShellModelContext> modelContexts = store.findModelContexts(tenantId, boundIds);
         boolean modelSelectionSupported = !store.modelOptions().isEmpty() && harness.supportsModelSelection();
         boolean renameSupported = harness.isAvailable() && harness.supportsFencedTitles();
         Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
+        boolean compressionSupported = harness.supportsContextCompression();
         // Cwd admission has no Turn execution-profile restriction. One role
         // grant read covers the workspaces of both shapes; the executable
         // facts read covers both id sets, retaining each capability's gates.
@@ -1211,6 +1218,7 @@ public class ManagedAgentService {
                 .collect(java.util.stream.Collectors.toSet());
         Set<String> candidateIds = new java.util.HashSet<>(shaped);
         candidateIds.addAll(cwdShaped);
+        sessions.stream().filter(this::mayCompressShape).map(SessionRecord::sessionId).forEach(candidateIds::add);
         Set<String> grantWorkspaces = candidateIds.isEmpty() ? Set.of()
                 : sessions.stream()
                         .filter(session -> candidateIds.contains(
@@ -1241,6 +1249,9 @@ public class ManagedAgentService {
                         mayChangeCwd(session, grants, executable),
                         modelContexts.get(session.sessionId()),
                         modelSelections.get(session.sessionId()), modelSelectionSupported, renameSupported,
+                        compressionSupported && mayCompressContext(session, grants, executable),
+                        compressions.getOrDefault(session.sessionId(),
+                                new AgentStateStore.ContextCompressionState(0, null)),
                         approvalSelections.get(session.sessionId()), approvalSupported
                                 && (session.agentDefinitionDigest() == null || definitionApprovalSupported)
                                 && approvalOwners.contains(session.sessionId())))
@@ -1269,6 +1280,7 @@ public class ManagedAgentService {
             boolean retention, boolean maySubmit, boolean mayChangeCwd,
             WebShellModelContext modelContext, WebShellModelSelection modelSelection,
             boolean modelSelectionSupported, boolean renameSupported,
+            boolean compressionSupported, AgentStateStore.ContextCompressionState compression,
             WebShellApprovalSelection approvalSelection, boolean approvalSupported) {
         boolean visible = session.deletedAt() == null;
         boolean close = visible && supportsClose(session);
@@ -1302,13 +1314,15 @@ public class ManagedAgentService {
                         javaDurableAdmission == null ? null : visible,
                         visible && maySubmit && harness.supportsInputAttachments(),
                         visible && "ACTIVE".equals(session.status()) && renameSupported
-                                && (session.workspace() == null || maySubmit)),
+                                && (session.workspace() == null || maySubmit),
+                        visible && approvalExecutable && compressionSupported && compression.available()),
                 session.workspace() != null || session.agentDefinitionDigest() != null
                         ? approvalSelection == null ? session.approvalMode() : approvalSelection.mode() : null,
                 modelContext, modelSelection, approvalSelection == null ? null : approvalSelection.revision(),
                 session.workspace() != null || session.agentDefinitionDigest() != null ? session.approvalMode() : null,
                 approvalSelection != null && approvalSelection.planMode(), visible && approvalSupported
-                        && mayChangeCwd && harness.supportsPlanMode() && store.supportsPlanMode(session));
+                        && mayChangeCwd && harness.supportsPlanMode() && store.supportsPlanMode(session),
+                compression.available() ? compression.compactionRevision() : null, compression.operationId());
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
@@ -1662,6 +1676,20 @@ public class ManagedAgentService {
                         || session.agentDefinitionDigest() != null)
                 && WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
                         session.workspace().getContextConfigRef());
+    }
+
+    private boolean mayCompressShape(SessionRecord session) {
+        return session.workspace() != null && "ACTIVE".equals(session.status())
+                && session.deletedAt() == null && store.workspaceFilesEnabled();
+    }
+
+    private boolean mayCompressContext(SessionRecord session,
+            Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants, Set<String> executable) {
+        if (!mayCompressShape(session)) {
+            return false;
+        }
+        var grant = grants.get(session.workspace().getWorkspaceId());
+        return grant != null && grant.canCreateSession() && executable.contains(session.sessionId());
     }
 
     private boolean mayChangeCwdShape(SessionRecord session) {

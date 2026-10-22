@@ -37,6 +37,7 @@ import {
 } from './client.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
+import { ChatCompressionService } from '../services/chatCompressionService.js';
 import {
   AuthType,
   createContentGenerator,
@@ -5337,6 +5338,24 @@ describe('Gemini Client (client.ts)', () => {
       // The top-level beforeEach stubs tryCompressChat to NOOP for unrelated
       // tests; restore the real implementation here so we can observe it.
       vi.mocked(client.tryCompressChat).mockRestore();
+    });
+
+    it('keeps the Managed compression observer on a replacement chat', async () => {
+      const observer = vi.fn(async () => {});
+      const options = { restoreRecentFiles: false };
+      client.setCompressionObserver(observer, options);
+      const previous = client.getChat();
+      await client.startChat([userText('summary'), modelText('ok')]);
+      expect(client.getChat()).not.toBe(previous);
+      const compressedHistory = [userText('compressed again'), modelText('ok')];
+      vi.spyOn(ChatCompressionService.prototype, 'compress').mockResolvedValue({
+        newHistory: compressedHistory,
+        info: compressionInfo(CompressionStatus.COMPRESSED, 1000, 200),
+      });
+      await client.getChat().tryCompress('replacement', true);
+      expect(observer).toHaveBeenCalledWith(
+        expect.objectContaining({ compressedHistory }),
+      );
     });
     /** A chat whose tryCompress NOOPs; returns the tryCompress spy. */
     const noopCompressChat = () => {
