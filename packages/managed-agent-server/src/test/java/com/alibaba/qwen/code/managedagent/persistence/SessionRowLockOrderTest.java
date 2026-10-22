@@ -191,7 +191,8 @@ class SessionRowLockOrderTest {
                                     "ManagedArtifactReader.readRange/3",
                                     "ManagedArtifactReader.readRange/5")),
                     Map.entry("ManagedExtensionRecordStore.java",
-                            Set.of("ManagedExtensionRecordStore.sha256/1",
+                            Set.of("ManagedExtensionRecordStore.parse/1",
+                                    "ManagedExtensionRecordStore.sha256/1",
                                     "ManagedExtensionRecordStore.storedRow/2")),
                     Map.entry("ManagedExtensionRecords.java",
                             Set.of("ManagedExtensionRecords.require/2")),
@@ -390,6 +391,7 @@ class SessionRowLockOrderTest {
                 "beginTaskCancelOperation", "completeSessionMutation",
                 "beginOperation",
                 "beginWorkspaceClose", "beginWorkspaceLifecycle",
+                "beginContextCompression", "markContextCompressionSubmitted",
                 "unarchiveWorkspaceSession", "beginCwdChangeOperation",
                 "completeCwdChangeOperation", "completeOperation",
                 "advanceReplayFloor", "materializeNextBatch", "bindHarness",
@@ -424,6 +426,7 @@ class SessionRowLockOrderTest {
                         "appendPublicEventIfAbsent", "beginSessionMutation",
                         "beginTaskCancelOperation", "completeOperation",
                         "completeSessionMutation", "unarchiveWorkspaceSession",
+                        "markContextCompressionSubmitted",
                         "beginSessionRename", "completeSessionRename",
                         "abandonSessionRename", "claimRename",
                         "settleParkedRename",
@@ -434,7 +437,7 @@ class SessionRowLockOrderTest {
         // check — is what fails loudly when one appears.
         assertThat(audit.turnRowAccessors())
                 .containsExactlyInAnyOrder("advanceReplayFloor",
-                        "beginChildClose", "beginCwdChangeOperation",
+                        "beginChildClose", "beginContextCompression", "beginCwdChangeOperation",
                         "beginLifecycle", "beginOperation",
                         "beginWorkspaceClose", "beginWorkspaceLifecycle",
                         "bindHarness", "bindRecoveredHarness",
@@ -485,6 +488,7 @@ class SessionRowLockOrderTest {
         // the day the call is typed or moved.
         assertThat(audit.exemptions())
                 .containsExactly("ItemRow.toRecord/0",
+                        "ManagedAgentStore.readMap/1",
                         "ManagedAgentStore.renameDelivery/2");
         // The harvest is asserted against the bytecode's own enumeration,
         // recursively over nested types and as a multiset: a member the
@@ -503,7 +507,8 @@ class SessionRowLockOrderTest {
     @Test
     void theOrderPinnedEntriesKeepTheirTransactionalBoundary() {
         for (String name : List.of("recordAdmission", "failTurn", "failRecoveryBlockedTurn",
-                "cancelUnadmittedTurn", "cancelBeforeAdmission")) {
+                "cancelUnadmittedTurn", "cancelBeforeAdmission",
+                "beginContextCompression", "markContextCompressionSubmitted")) {
             List<Method> entries = Arrays.stream(ManagedAgentStore.class
                     .getDeclaredMethods())
                     .filter(method -> method.getName().equals(name))
