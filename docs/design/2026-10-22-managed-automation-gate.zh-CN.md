@@ -95,7 +95,7 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 
 `AutomationScanner.fire` 从应答里读 `gate`。`delivered` 照旧结算为 `fired`。`quiet`、`failed`、`blocked`、`unknown` 结算为 `skipped`，原因分别为 `gate_quiet`、`gate_failed`、`gate_failed`、`gate_unknown`，细节写入 occurrence 的 `last_error`，且不碰 journal。每次结算都在租约下把闸门状态记到定义行：`gate_last_outcome`、`gate_last_at`、`gate_quiet_since_delivery`、`gate_failures`（连续的 failed、blocked、unknown）和 `gate_last_error`，由 `PublicAutomation.gate_status` 报告。水位线与租约的行为与任何已决定的槽相同。
 
-`ma_schedule` 增加 `gate` 列和五个状态列（`V17__schedule_gate.sql`，追加到 `ManagedSchema` 的迁移列表）；`gate_last_at` 加入被锚定的纪元列。
+`ma_schedule` 增加 `gate` 列和五个状态列（`V18__schedule_gate.sql`，追加到 `ManagedSchema` 的迁移列表）；`gate_last_at` 加入被锚定的纪元列。
 
 ### 5.4 审批与信任
 
@@ -153,7 +153,7 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 
 - core：`managed-automation-record.ts`、`managed-automation-operations.ts`、夹具、`managed-session-authority.ts`（资源闭合）、`cron-gate.ts`（可配置超时）。
 - cli：`hosted-automation-session.ts`、`hosted-automation-gate.ts`（新）、`hosted-workspace-broker.ts`（`prepareReplayable`、`settledResult`）、`hosted-harness-session.ts`（路由接线）、`managed-automation-gate-tool.ts`（新，worker 工具）、`managed-runtime-tool-executor.ts`（准入）。
-- managed-agent-server：`ManagedExtensionRecords`、`ManagedExtensionRecordStore`、`AutomationLedgerStore`、`ManagedSchemaProjection`、`V17__schedule_gate.sql`、`ManagedSchema`、`AutomationScanner`、`ManagedAutomationService`、`ApiModels`、OpenAPI 文档，以及上述测试。
+- managed-agent-server：`ManagedExtensionRecords`、`ManagedExtensionRecordStore`、`AutomationLedgerStore`、`ManagedSchemaProjection`、`V18__schedule_gate.sql`、`ManagedSchema`、`AutomationScanner`、`ManagedAutomationService`、`ApiModels`、OpenAPI 文档，以及上述测试。
 
 ## 10. 待定问题
 

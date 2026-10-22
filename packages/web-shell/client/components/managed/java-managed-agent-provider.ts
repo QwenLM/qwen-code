@@ -531,13 +531,33 @@ export function createJavaManagedAgentProvider(
       : {}),
     actions: {
       async listPending(sessionId, request) {
-        // The service lists only requested Actions, newest first, so one page
-        // holds every pending one unless more than 20 wait at once.
-        const page = await client.queryActions(
-          { sessionId, limit: 20 },
-          request.signal,
-        );
-        return page.data.flatMap(toPendingAction);
+        const actions: ManagedAgentPendingAction[] = [];
+        const cursors = new Set<string>();
+        let cursor: string | undefined;
+        do {
+          const page = await client.queryActions(
+            {
+              sessionId,
+              limit: 20,
+              ...(cursor ? { cursor } : {}),
+              ...(request.includeChildren ? { includeChildren: true } : {}),
+            },
+            request.signal,
+          );
+          actions.push(...page.data.flatMap(toPendingAction));
+          cursor = page.hasMore ? (page.nextCursor ?? undefined) : undefined;
+          if (cursor && cursors.has(cursor))
+            throw new Error('Action cursor repeated');
+          if (cursor) cursors.add(cursor);
+        } while (cursor && !request.signal?.aborted);
+        return [
+          ...new Map(
+            actions.map((action) => [
+              `${action.sessionId}:${action.actionId}`,
+              action,
+            ]),
+          ).values(),
+        ];
       },
       async respond(action, optionId, command) {
         const accepted = await client.respondAction(
@@ -938,6 +958,9 @@ function toSessionSummary(
         ? { approvalModeChange: true }
         : {}),
       ...(session.capabilities?.actions === true ? { actions: true } : {}),
+      ...(session.capabilities?.childAgents === true
+        ? { childAgents: true }
+        : {}),
       ...(session.capabilities?.inputAttachments === true
         ? { inputAttachments: true }
         : {}),

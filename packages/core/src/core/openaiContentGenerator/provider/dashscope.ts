@@ -41,6 +41,17 @@ const DASHSCOPE_TIERED_EFFORTS: readonly ReasoningEffort[] = [
   'xhigh',
 ] as const;
 
+/**
+ * Output caps DashScope enforces on hosted third-party models that sit below
+ * the vendor's own limit (and so below the shared tokenLimits table, which
+ * describes the vendor API). Keys are lowercase wire model ids. A request
+ * above the cap is rejected with `400 Range of max_tokens should be [1, N]`
+ * on every DashScope endpoint (Standard, Token Plan); probe 2026-10-22.
+ */
+const DASHSCOPE_OUTPUT_TOKEN_CAPS: ReadonlyMap<string, number> = new Map([
+  ['minimax-m2.5', 32_768],
+]);
+
 export type DashScopeThinkingKnobSelection = {
   source: 'extra_body' | 'samplingParams' | 'reasoning';
   field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
@@ -533,6 +544,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ...result,
       ...(extraBody ? extraBody : {}),
     };
+    this.capHostedOutputTokens(merged, model);
     const reasoningEffort = merged['reasoning_effort'];
     const dropped = new Set<string>();
     if (selectedThinkingKnob?.field === 'thinking_budget') {
@@ -618,6 +630,23 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       return { enable_thinking: true };
     }
     return {};
+  }
+
+  /**
+   * Clamp max_tokens to the DashScope cap for hosted models whose endpoint
+   * limit is lower than the vendor's. Runs on the final body, so the default,
+   * samplingParams and extra_body values are all bounded: the server rejects
+   * anything above the cap, whichever layer set it.
+   */
+  private capHostedOutputTokens(
+    merged: Record<string, unknown>,
+    model: string | undefined,
+  ): void {
+    const cap = DASHSCOPE_OUTPUT_TOKEN_CAPS.get(this.resolveWireModel(model));
+    const maxTokens = merged['max_tokens'];
+    if (cap !== undefined && typeof maxTokens === 'number' && maxTokens > cap) {
+      merged['max_tokens'] = cap;
+    }
   }
 
   /**

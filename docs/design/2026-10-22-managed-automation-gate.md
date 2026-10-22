@@ -234,7 +234,7 @@ lease: `gate_last_outcome`, `gate_last_at`, `gate_quiet_since_delivery`,
 watermark and the lease behave as for any decided slot.
 
 `ma_schedule` gains the `gate` column and the five status columns
-(`V17__schedule_gate.sql`, appended to `ManagedSchema`'s migration list);
+(`V18__schedule_gate.sql`, appended to `ManagedSchema`'s migration list);
 `gate_last_at` joins the pinned epoch columns.
 
 ### 5.4 Approval and trust
@@ -369,7 +369,7 @@ One PR, stacked on #15069 (it reuses `cron-gate.ts`):
   (new, worker tool), `managed-runtime-tool-executor.ts` (admission).
 - managed-agent-server: `ManagedExtensionRecords`,
   `ManagedExtensionRecordStore`, `AutomationLedgerStore`,
-  `ManagedSchemaProjection`, `V17__schedule_gate.sql`, `ManagedSchema`,
+  `ManagedSchemaProjection`, `V18__schedule_gate.sql`, `ManagedSchema`,
   `AutomationScanner`, `ManagedAutomationService`, `ApiModels`, the OpenAPI
   document, and the tests above.
 

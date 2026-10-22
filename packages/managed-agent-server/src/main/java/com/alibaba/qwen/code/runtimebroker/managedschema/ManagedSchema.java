@@ -31,7 +31,8 @@ public final class ManagedSchema {
     public static final String RESIDENT_RETIREMENT = "/db/managed-schema/V14__resident_workspace_retirement.sql";
     public static final String WORKSPACE_EXECUTION_MEMBERS = "/db/managed-schema/V15__workspace_execution_members.sql";
     public static final String CONTEXT_COMPRESSION = "/db/managed-schema/V16__context_compression.sql";
-    public static final String SCHEDULE_GATE = "/db/managed-schema/V17__schedule_gate.sql";
+    public static final String PUBLIC_CHILD_AGENTS = "/db/managed-schema/V17__public_child_agents.sql";
+    public static final String SCHEDULE_GATE = "/db/managed-schema/V18__schedule_gate.sql";
     // Additive migrations over the published V1 baseline, in version order.
     public static final String SSH_WORKSPACE =
             "/db/managed-schema/V7__ssh_workspace_registration.sql";
@@ -45,7 +46,8 @@ public final class ManagedSchema {
             new Migration(11, WAKE_RECOVERY), new Migration(12, CSI_APPLICATION_RETIREMENT),
             new Migration(13, HOSTED_CLEANUP), new Migration(14, RESIDENT_RETIREMENT),
             new Migration(15, WORKSPACE_EXECUTION_MEMBERS), new Migration(16, CONTEXT_COMPRESSION),
-            new Migration(17, SCHEDULE_GATE));
+            new Migration(17, PUBLIC_CHILD_AGENTS),
+            new Migration(18, SCHEDULE_GATE));
     private static final int CURRENT = EXTENSIONS.getLast().version();
 
     private record Migration(int version, String resource) {

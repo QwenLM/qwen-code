@@ -20,6 +20,8 @@ public final class LoadHarnessSession {
     private Map<String, Object> sessionSkillsRef;
     private List<Map<String, Object>> mcpServers;
     private Map<String, Object> hookCatalog;
+    private int publicChildAgentsVersion;
+    private Map<String, Object> publicChildModelRoute;
     private boolean stopMessages;
     private boolean foregroundOnly;
     private String recoveryCleanupPromptId;
@@ -60,6 +62,19 @@ public final class LoadHarnessSession {
     private boolean childWorkspaces;
     /** #13753 I3: with child Workspaces, the control plane serves snapshots too. */
     private boolean childSnapshots;
+
+    public LoadHarnessSession withPublicChildModelRoute(Map<String, Object> value) {
+        this.publicChildModelRoute = value == null ? null : Map.copyOf(value);
+        return this;
+    }
+
+    public LoadHarnessSession withPublicChildAgentsVersion(int value) {
+        if (value != 0 && value != 1) {
+            throw new IllegalArgumentException("Invalid public child agents version");
+        }
+        this.publicChildAgentsVersion = value;
+        return this;
+    }
 
     public LoadHarnessSession withAgentDefinition(Map<String, Object> value) {
         this.agentDefinition = value == null ? null : Map.copyOf(value);
@@ -110,6 +125,8 @@ public final class LoadHarnessSession {
         copy.foregroundOnly = foregroundOnly;
         copy.recoveryCleanupPromptId = recoveryCleanupPromptId;
         copy.cancellationPromptId = cancellationPromptId;
+        copy.publicChildAgentsVersion = publicChildAgentsVersion;
+        copy.publicChildModelRoute = publicChildModelRoute;
         return copy;
     }
 
@@ -130,6 +147,8 @@ public final class LoadHarnessSession {
         copy.foregroundOnly = value;
         copy.recoveryCleanupPromptId = recoveryCleanupPromptId;
         copy.cancellationPromptId = cancellationPromptId;
+        copy.publicChildAgentsVersion = publicChildAgentsVersion;
+        copy.publicChildModelRoute = publicChildModelRoute;
         return copy;
     }
 
@@ -162,6 +181,8 @@ public final class LoadHarnessSession {
         copy.foregroundOnly = foregroundOnly;
         copy.recoveryCleanupPromptId = recoveryCleanupPromptId;
         copy.cancellationPromptId = cancellationPromptId;
+        copy.publicChildAgentsVersion = publicChildAgentsVersion;
+        copy.publicChildModelRoute = publicChildModelRoute;
         return copy;
     }
 
@@ -183,6 +204,8 @@ public final class LoadHarnessSession {
         copy.foregroundOnly = foregroundOnly;
         copy.recoveryCleanupPromptId = recoveryCleanupPromptId;
         copy.cancellationPromptId = cancellationPromptId;
+        copy.publicChildAgentsVersion = publicChildAgentsVersion;
+        copy.publicChildModelRoute = publicChildModelRoute;
         return copy;
     }
 
@@ -269,6 +292,12 @@ public final class LoadHarnessSession {
         }
         if (toolProfile != null) {
             result.put("toolProfile", toolProfile);
+        }
+        if (publicChildModelRoute != null) {
+            result.put("publicChildModelRoute", publicChildModelRoute);
+        }
+        if (publicChildAgentsVersion != 0) {
+            result.put("publicChildAgentsVersion", publicChildAgentsVersion);
         }
         if (suppressChildAgents) {
             result.put("suppressChildAgents", true);
