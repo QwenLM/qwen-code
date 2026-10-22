@@ -627,8 +627,11 @@
                                  adds 13 s (2x its measured 6.5 s): healthy 10636 s, fork 11236 s,
                                  Verify 198 minutes. The FG12e Runtime connection replacement cell
                                  adds 28 s (2x its measured 13.8 s): healthy 10664 s, fork 11264 s,
-                                 Verify 198 minutes. -->
-                            <forkedProcessTimeoutInSeconds>11264</forkedProcessTimeoutInSeconds>
+                                 Verify 198 minutes. The pool fixture provisionally reserves 180 s
+                                 (its 120 s method ceiling plus 60 s for process/context cleanup),
+                                 pending CI measurement: healthy 10844 s, fork 11444 s,
+                                 Verify 201 minutes. -->
+                            <forkedProcessTimeoutInSeconds>11444</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
