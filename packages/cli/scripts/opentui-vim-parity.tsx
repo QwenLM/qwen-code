@@ -744,6 +744,168 @@ try {
   }
   await composerInput('Z');
   assert.equal(native.plainText, '甲🙂e\u0301'.repeat(20) + 'Z');
+
+  const pasted = 'y'.repeat(1500);
+  const placeholder = '[Pasted Content 1500 chars]';
+  const rawBackspace = () =>
+    change(() => {
+      ui!.renderer.stdin.emit('data', Buffer.from('\x7f'));
+    });
+  for (const vimEnabled of [false, true]) {
+    if (vimEnabled) {
+      await change(async () => assert.equal(await toggleVim(), true));
+      await composerInput('i');
+      assert.equal(getComposerMode(), 'INSERT');
+    }
+    await change(() => getComposerHandle()!.setText('甲🙂Z'));
+    await rawBackspace();
+    assert.equal(native.plainText, '甲🙂', 'ordinary Backspace deletes once');
+    await change(() => getComposerHandle()!.setText('甲🙂'));
+    await change(() => ui!.mockInput.pasteBracketedText(pasted));
+    assert.equal(native.plainText, '甲🙂' + placeholder);
+    await rawBackspace();
+    assert.equal(
+      native.plainText,
+      '甲🙂',
+      'paste discard keeps Unicode prefix',
+    );
+    await change(() => getComposerHandle()!.setText(''));
+    await change(() => ui!.mockInput.pasteBracketedText(pasted));
+    await change(() => ui!.mockInput.pasteBracketedText('z'.repeat(1500)));
+    assert.equal(native.plainText, placeholder + placeholder + ' #2');
+    await rawBackspace();
+    assert.equal(
+      native.plainText,
+      placeholder,
+      'discard only the second paste',
+    );
+    await change(() => ui!.mockInput.pasteBracketedText('w'.repeat(1500)));
+    assert.equal(
+      native.plainText,
+      placeholder + placeholder + ' #2',
+      'freed second ID is reused',
+    );
+    await rawBackspace();
+    await rawBackspace();
+    assert.equal(native.plainText, '', 'both tokens discarded whole');
+    const beforeEmptySubmit = accepted.length;
+    await composerInput('\r');
+    assert.equal(
+      accepted.length,
+      beforeEmptySubmit,
+      'discarded paste does not submit',
+    );
+    await change(() => getComposerHandle()!.setText('甲🙂'));
+    await change(() => ui!.mockInput.pasteBracketedText(pasted));
+    assert.equal(
+      native.plainText,
+      '甲🙂' + placeholder,
+      'first ID is reusable',
+    );
+    const selectionEnd = native.cursorOffset;
+    await change(() =>
+      ui!.mockMouse.drag(native.x, native.y, native.x + selectionEnd, native.y),
+    );
+    assert.equal(native.getSelectedText(), '甲🙂' + placeholder);
+    await rawBackspace();
+    assert.equal(
+      native.plainText,
+      '',
+      'selection wins over trailing placeholder',
+    );
+    if (vimEnabled) {
+      await change(() => getComposerHandle()!.setText('keep'));
+      await composerInput('\x1b');
+      assert.equal(getComposerMode(), 'NORMAL');
+      await rawBackspace();
+      assert.equal(native.plainText, 'keep', 'NORMAL still owns Backspace');
+    }
+  }
+  admit = false;
+  for (const expected of ['a', 'b']) {
+    if (getComposerMode() !== 'NORMAL') await composerInput('\x1b');
+    await change(() => getComposerHandle()!.setText(''));
+    await composerInput('i');
+    await change(() => ui!.mockInput.pasteBracketedText('a'.repeat(1500)));
+    await rawBackspace();
+    assert.equal(native.plainText, '');
+    await change(() => ui!.mockInput.pasteBracketedText('b'.repeat(1500)));
+    assert.equal(
+      native.plainText,
+      placeholder,
+      'new body reuses the exact first token',
+    );
+    await composerInput('\x1b');
+    await composerInput('u');
+    assert.equal(
+      native.plainText,
+      '',
+      'undo new paste synchronously restores empty',
+    );
+    await composerInput('u');
+    assert.equal(
+      native.plainText,
+      placeholder,
+      'undo discard restores the first paste',
+    );
+    if (expected === 'b') {
+      await change(async () => assert.equal(await toggleVim(), false));
+      for (const text of ['', placeholder]) {
+        await change(() => {
+          ui!.renderer.stdin.emit('data', Buffer.from('\x1b[122;6u'));
+        });
+        assert.equal(
+          native.plainText,
+          text,
+          'real ordinary redo restores each snapshot',
+        );
+      }
+    } else {
+      await composerInput('i');
+    }
+    const before = accepted.length;
+    await composerInput('\r');
+    assert.deepEqual(
+      accepted.slice(before),
+      [expected.repeat(1500)],
+      'actual submission uses this history version, not the reused token',
+    );
+  }
+  await change(() => getComposerHandle()!.setText(''));
+  await change(() => ui!.mockInput.pasteBracketedText('c'.repeat(1500)));
+  await change(() => ui!.mockInput.pressKey('c', { ctrl: true }));
+  assert.equal(native.plainText, '', 'real clear remains clear');
+  await change(() => ui!.mockInput.pressKey('z', { ctrl: true }));
+  assert.equal(
+    native.plainText,
+    placeholder,
+    'existing undo of clear keeps its text',
+  );
+  const beforeClearUndo = accepted.length;
+  await composerInput('\r');
+  assert.deepEqual(
+    accepted.slice(beforeClearUndo),
+    ['c'.repeat(1500)],
+    'undo clear restores matching payload',
+  );
+  admit = true;
+  await change(() => getComposerHandle()!.setText(''));
+  await change(() => ui!.mockInput.pasteBracketedText('d'.repeat(1500)));
+  const beforeSubmitUndo = accepted.length;
+  await composerInput('\r');
+  assert.equal(native.plainText, '', 'accepted submit clears the draft');
+  await change(() => ui!.mockInput.pressKey('z', { ctrl: true }));
+  assert.equal(
+    native.plainText,
+    placeholder,
+    'existing undo restores submitted text',
+  );
+  await composerInput('\r');
+  assert.deepEqual(
+    accepted.slice(beforeSubmitUndo),
+    ['d'.repeat(1500), 'd'.repeat(1500)],
+    'explicit undo of accepted submit restores its exact payload',
+  );
 } catch (error) {
   if (ui) console.error(ui.captureCharFrame());
   failure = error;

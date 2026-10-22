@@ -141,3 +141,25 @@ decoder、剪贴板、native 所有权或 HTTP 行为。冻结完整 source/dist
 身份，保留首败并核实 owned cleanup。构建/typecheck、受影响门禁及两次全 diff
 干净自审完成后再独立验收。当前检查点及 source/artifact 映射见上文。统一 R3+B 安装产物、真实 middleware
 和未执行平台仍是独立门禁。
+
+## Vim INSERT 中丢弃折叠粘贴
+
+已审 5f916 的真实 native composer 复现：在折叠的 1500 字符粘贴末尾退格，产生残缺占位符字面量；两个非 Vim 正控通过。另一次真实 Ink 基线也复现同样 INSERT 缺陷（一个正控通过、一个失败，另 272 案精确未选中）。这是对共有基线缺陷的有限改善，不是迁移独有回归。退格表示丢弃折叠粘贴，不是恢复或暗中提交其载荷。两份原始失败均保留。
+
+仅 OpenTUI 的候选将既有精确占位符移除、pending map 删除和同长度 ID 释放搬入已有 backspace 回调。先消费 native selection，否则原子移除 code-point 光标前的完整 token，再回退到普通单字符删除。raw 的 focus/Vim gate 和附件顺序不变，NORMAL 保留按键所有权；真实共享 Vim INSERT 通过现有注入 buffer 到达该回调。带修饰键的按词删除和共享 Ink/Vim 实现不改。反斜线 Enter 续行同样调用该回调，但光标前的反斜线不可能匹配粘贴 token。
+
+既有 native Vim 脚本增加普通/INSERT 用例，覆盖单字符删除、Unicode 前缀、两份同尺寸粘贴、释放 ID 复用、清空后不提交、完整 native selection 优先和 NORMAL 退格所有权。未改的原 native 复现作为 postfix oracle。作者冻结时，候选 build/typecheck、unit/native 和安装产物验收均为 NOT_RUN；旧绿灯继续只归属原 source/artifact。本修复留在完整 #15067 批次内。
+
+## 真实 undo 历史中的粘贴数据
+
+首个原子丢弃候选引入了真实 Vim 回归：未改的 native delete→undo→submit oracle 在旧 5f916 上严格提交原始 1500 字符正文并通过，候选却只恢复可见 token，实际提交该字面 token。这份后续失败独立保留；共有 Ink/非 Vim 基线缺陷不能豁免此回归。
+
+修订候选为已有 text-buffer hook 增加可选、粘贴专用的 capture/restore 回调。现有有界 undo/redo 条目在文本/光标快照旁携带克隆的 paste map。dispatch 在 mutation 前捕获真实 outgoing map，仅在真实 undo/redo 时恢复实际 incoming snapshot；不创建第二历史栈、按文本查表、owner 屏障或清历史。未配置调用者的 state 和 snapshot 对象结构保持原样。仅 OpenTUI composer 启用；AppContainer、shared TextInput、AgentComposer 和 native 对比 harness 均不配置。共享 Vim 与 forwarding API 不改。
+
+粘贴改为在同步插入文本后登记新载荷，使插入前快照不包含新正文。队列/搜索替换同样先保留 outgoing 文本/map 的对应关系，再切换 map。恢复时从 map 重建 active placeholder IDs；既有空 buffer effect 仍可清当前 map，不会删除真实旧快照。复用同一 placeholder 的不同正文绑定到各自真实历史版本。显式撤销 clear 或提交保留既有文本历史语义，并恢复匹配粘贴数据；session rotation 仍保留可见草稿。
+
+Hook 测试覆盖克隆隔离、真实 undo/redo、同 token 不同正文复用、no-op/移动、撤销 clear、既有显式 clearUndoHistory 行为与默认快照结构。真实 native composer 额外核对 undo/普通 redo 两个方向分别实际提交对应完整正文，并覆盖 clear→undo→提交与已接受提交→undo→精确重提。不增加 Vim redo 快捷键：真实 redo 正控使用普通模式 Ctrl+Shift+Z。作者冻结时，修订源码/native/build/type/安装产物门禁全部 NOT_RUN；旧候选及基线结果仍严格归属原源码。
+
+### V2 源码验证检查点（2026-10-22）
+
+在精确 5f916 加冻结补丁 `8592e8b4c0d5d78d201cb36d8aa1a603d9ff850d7d3fcc9d4e2b086dd32d0eed` 上，两份未改原始 native oracle 均通过：原子丢弃保留两个普通正控，未产生残缺提交；delete→undo→submit 恢复并严格提交原始 1500 字符正文。三个完整受影响源码测试文件共 459 案通过（input prompt 220、text buffer 165、Vim buffer actions 74），包含全部六个新增 hook 用例，无失败、跳过或 todo。原始安全失败及 V1 undo 回归仍保留。结果仅证明此源码组合；完整扩展 native 脚本、全新 build/typecheck、最新 main 整合及安装产物/平台验收仍为 NOT_RUN。前文 NOT_RUN 描述各自作者冻结时的检查点。
