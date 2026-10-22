@@ -20708,7 +20708,7 @@ describe('Hosted Harness no-tool session', () => {
     ).session;
   }
 
-  async function recoveryFileSession() {
+  async function recoveryFileSession(toolProfile = 'hosted-workspace-files/1') {
     mockBrokerBroker();
     const server = await app(true);
     const created = await headers(supertest(server).post('/session'))
@@ -20716,7 +20716,7 @@ describe('Hosted Harness no-tool session', () => {
         sessionId: SESSION_ID,
         sessionScope: 'thread',
         managedSessionStore: store(),
-        toolProfile: 'hosted-workspace-files/1',
+        toolProfile,
         approvalMode: 'yolo',
       })
       .expect(200);
@@ -21618,6 +21618,82 @@ describe('Hosted Harness no-tool session', () => {
       ).expect(204);
     },
   );
+
+  it('requires an ordinary load before managing MCP on a cleanup-only Session', async () => {
+    const f = await recoveryFileSession('hosted-workspace-shell/1');
+    await f.submit();
+    await f.idle();
+    f.resident.monitorWake?.close();
+    await f.resident.managed.close();
+    const replacement = await app(true);
+    const loaded = await headers(
+      supertest(replacement).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({
+        managedSessionStore: store(),
+        recoveryCleanupPromptId: PROMPT_ID,
+      })
+      .expect(200);
+    expect(loaded.body.recoveryCleanupOnly).toBe(true);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId);
+    const journal = () =>
+      LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+      );
+    const before = await journal();
+    const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+    acquire.mockClear();
+    const control = vi.spyOn(HostedWorkspaceBroker.prototype, 'control');
+    const definitions = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'mcpDefinitions')
+      .mockResolvedValue([]);
+    const route = `/session/${SESSION_ID}/mcp/management`;
+    for (const request of [
+      authorize(supertest(replacement).get(route)),
+      authorize(
+        supertest(replacement).get(`${route}/operations/${randomUUID()}`),
+      ),
+      authorize(supertest(replacement).post(route)).send({
+        operationId: randomUUID(),
+        actorKey: 'c'.repeat(64),
+        action: 'add',
+        serverId: 'demo',
+        expectedRevision: 0,
+        server: {
+          serverId: 'demo',
+          serverRevision: 1,
+          definitionDigest: 'a'.repeat(64),
+        },
+      }),
+      headers(supertest(replacement).post(`/session/${SESSION_ID}/load`)).send({
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        mcpManagementOnly: true,
+      }),
+    ]) {
+      const refused = await request.expect(409);
+      expect(refused.body.code).toBe('hosted_mcp_session_load_required');
+    }
+    expect(await journal()).toEqual(before);
+    expect(acquire).not.toHaveBeenCalled();
+    expect(control).not.toHaveBeenCalled();
+    expect(definitions).not.toHaveBeenCalled();
+    expect(state.model).toHaveBeenCalledOnce();
+    const upgraded = await headers(
+      supertest(replacement).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+      .expect(200);
+    expect(upgraded.body.recoveryCleanupOnly).not.toBe(true);
+    await headers(supertest(replacement).get(route))
+      .set('X-Qwen-Client-Id', upgraded.body.clientId)
+      .expect(200);
+    await headers(supertest(replacement).post(`/session/${SESSION_ID}/detach`))
+      .set('X-Qwen-Client-Id', upgraded.body.clientId)
+      .expect(204);
+  });
 
   it('refuses cold cleanup before the original input is durably settled', async () => {
     const f = await recoveryFileSession();

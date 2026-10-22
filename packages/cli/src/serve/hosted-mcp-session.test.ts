@@ -1714,6 +1714,51 @@ it('blocks replacement while an original release is unknown and resumes the same
   ).toHaveLength(2);
 });
 
+it('commits settings after a queued activation renewal without duplicating the command', async () => {
+  const prototype = LocalJsonlManagedSessionJournalHandle.prototype;
+  const append = prototype.appendTransaction;
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const held = vi
+    .spyOn(prototype, 'appendTransaction')
+    .mockImplementationOnce(async function (
+      this: LocalJsonlManagedSessionJournalHandle,
+      records,
+    ) {
+      entered();
+      await gate;
+      return append.call(this, records);
+    });
+  try {
+    const before = session.authority.committedSequence;
+    const renewal = session.authority.renewActivation({
+      leaseDurationMs: 60_000,
+    });
+    await started;
+    const command = managementCommand('add', 'demo', 0, pin);
+    const servers = selectedMcpServers([], command);
+    const commit = commitHostedMcpSettings(session, command, servers);
+    release();
+    const [, receipt] = await Promise.all([renewal, commit]);
+    expect(receipt.revision).toBe(1);
+    expect(receipt.sequence).toBe(before + 2);
+    expect(await commitHostedMcpSettings(session, command, servers)).toEqual(
+      receipt,
+    );
+    expect(await readHostedMcpSettings(session)).toHaveLength(1);
+    expect(requests).toEqual([]);
+  } finally {
+    release();
+    held.mockRestore();
+  }
+});
+
 it('rejects competing settings revisions atomically before creating another physical effect', async () => {
   const first = managementCommand('add', 'demo', 0, pin);
   const second = managementCommand('add', 'second', 0, {

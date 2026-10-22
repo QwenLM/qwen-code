@@ -4168,7 +4168,8 @@ export function registerHostedHarnessSessionRoutes(
         cleanupPromptId !== undefined
       )
         return error(res, 400, 'invalid_mcp_management_attachment');
-      if (!resident) return error(res, 409, 'hosted_mcp_session_load_required');
+      if (!resident || resident.recoveryCleanupOnly)
+        return error(res, 409, 'hosted_mcp_session_load_required');
       const key = resident.managed.authority.sessionHeader.sessionKey;
       if (
         key.tenantId !== store.tenantId ||
@@ -7833,6 +7834,8 @@ export function registerHostedHarnessSessionRoutes(
   app.get('/session/:id/mcp/management', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.recoveryCleanupOnly)
+      return error(res, 409, 'hosted_mcp_session_load_required');
     void (async () => {
       const manager = mcpManager(session);
       await manager.open();
@@ -7843,6 +7846,8 @@ export function registerHostedHarnessSessionRoutes(
   app.get('/session/:id/mcp/management/operations/:operationId', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.recoveryCleanupOnly)
+      return error(res, 409, 'hosted_mcp_session_load_required');
     void (async () => {
       const manager = mcpManager(session);
       await manager.open();
@@ -7855,6 +7860,8 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/mcp/management', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.recoveryCleanupOnly)
+      return error(res, 409, 'hosted_mcp_session_load_required');
     if (
       session.active ||
       session.hooksBusy ||
