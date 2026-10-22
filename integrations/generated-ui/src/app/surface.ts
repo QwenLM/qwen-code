@@ -39,6 +39,11 @@ const FRAME_DOCUMENT =
 
 type Control = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
 
+export type ApplyOutcome =
+  | { kind: 'applied'; inputs: InputValues }
+  | { kind: 'superseded'; inputs: InputValues }
+  | { kind: 'stopped' };
+
 export class ViewSurface {
   private readonly purify;
   private content?: Document;
@@ -209,8 +214,8 @@ export class ViewSurface {
     return inputs;
   }
 
-  apply(patches: UiPatch[], inflightInputs?: InputValues): void {
-    if (this.stopped) return;
+  apply(patches: UiPatch[], inflightInputs?: InputValues): ApplyOutcome {
+    if (this.stopped) return { kind: 'stopped' };
     if (
       !Array.isArray(patches) ||
       patches.length > 64 ||
@@ -249,9 +254,10 @@ export class ViewSurface {
             next[id]?.checked !== now.checked)
         );
       });
-      if (superseded) return;
+      if (superseded) return { kind: 'superseded', inputs: current };
     }
     this.applyTo(body, patches);
+    return { kind: 'applied', inputs: this.inputs() };
   }
 
   private applyTo(body: HTMLElement, patches: UiPatch[]): void {
