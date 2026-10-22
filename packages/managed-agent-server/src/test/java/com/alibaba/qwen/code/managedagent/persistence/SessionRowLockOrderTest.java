@@ -181,6 +181,10 @@ class SessionRowLockOrderTest {
                             Set.of("ChildWorkspaceStore.find/3",
                                     "ChildWorkspaceStore.row/2",
                                     "Row.snapshot/0")),
+                    // Same-package lifecycle refusals share this local name;
+                    // both factories only construct an exception.
+                    Map.entry("HarnessPlacementStore.java",
+                            Set.of("HarnessPlacementStore.blocked/1")),
                     Map.entry("JdbcChannelRouteRepository.java",
                             Set.of("JdbcChannelRouteRepository.row/2")),
                     Map.entry("ManagedAgentDefinitionStore.java",
