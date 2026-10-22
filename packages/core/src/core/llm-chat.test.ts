@@ -13149,7 +13149,9 @@ describe('LlmChat', async () => {
       expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
       expect(chat.getLastCachedContentTokenCount()).toBe(0);
       expect(cachedMirror()).toHaveBeenLastCalledWith(0);
+    });
 
+    it('clears cached-content mirror when seedResumeTokenCounts replaces prompt counts', async () => {
       await recordTokenUsage(chat, {
         promptTokenCount: 65_267,
         totalTokenCount: 65_267,
