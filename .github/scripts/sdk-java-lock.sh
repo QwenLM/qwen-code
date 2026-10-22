@@ -38,8 +38,9 @@ sdk_java_lock_acquire() {
   if [[ ${class} == 'fast' ]]; then
     rank=0
   fi
-  # 1200 s sits well inside the 5400 s write-back budget, the shorter of the
-  # two acquisition budgets, enough for four 925 s holds. At or above a
+  # 1200 s sits well inside the 5400 s write-back budget, the shorter of
+  # the two acquisition budgets, and leaves 4200 s of it — enough for four
+  # 925 s holds (8400 s at the test lane's 9600 s). At or above a
   # budget promotion would rename a ticket in the same iteration whose
   # timeout arm deletes it; sdk-java-workflow.test.js pins the default below
   # both budgets.
