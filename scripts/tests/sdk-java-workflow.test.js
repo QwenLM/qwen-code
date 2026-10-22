@@ -140,15 +140,17 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
     // The ticketed queue makes the wake order deterministic and the fast
     // class puts this tier's ticket ahead of waiting full-tier tickets, so
-    // the pin is the sourced helper, its budget, and the tier argument.
+    // the pin is the sourced helper, its budget, and the tier argument. The
+    // budget outlasts the longest hold measured on the lock: run 39754359013
+    // burned the old 5400 s while three lanes queued behind such a hold.
     expect(block).toContain(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
-    expect(block).toContain('sdk_java_lock_acquire 5400 "${TIER}"');
+    expect(block).toContain('sdk_java_lock_acquire 9600 "${TIER}"');
     // release-sdk-java.yml resumes an existing tag by checking out that
     // immutable commit, which may predate this helper; the guarded bare-lock
     // fallback keeps acquisition independent of the checkout's ref.
-    expect(block).toContain('flock --wait 5400 9');
+    expect(block).toContain('flock --wait 9600 9');
     expect(block).toContain('::error::sdk-java host lock not acquired within');
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
@@ -1273,11 +1275,22 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
     ).toBeGreaterThanOrEqual(seconds + 3 * 60 * 60 + writeBackBound + 30 * 60);
-    // The sibling test job shares the same per-host lock: its ceiling must
-    // cover one full wait plus its own measured hold (the sdk-java suite plus
-    // the managed-agent H2 suite, 925 s) and ~11 minutes of setup.
+    // The sibling test job shares the same per-host lock but carries a longer
+    // budget, because a waiting test leg can queue behind several holds. Its
+    // ceiling must cover that full wait plus its own measured hold (the
+    // sdk-java suite plus the managed-agent H2 suite, 925 s) and ~11 minutes
+    // of setup.
+    const testBudget = Number(
+      parsed.jobs.test.steps
+        .map(
+          (s) => s.run?.match(/sdk_java_lock_acquire (\d+) "\$\{TIER\}"/)?.[1],
+        )
+        .find(Boolean),
+    );
+    expect(testBudget).toBe(9600);
+    expect(testBudget).toBeGreaterThan(seconds);
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      seconds + 925 + 11 * 60,
+      testBudget + 925 + 11 * 60,
     );
   });
 
