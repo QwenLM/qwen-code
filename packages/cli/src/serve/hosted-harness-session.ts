@@ -46,6 +46,7 @@ import {
   reconcileHostedTurnCleanup,
   hasHostedCleanupDebt,
 } from './hosted-turn-cleanup.js';
+import { inspectHostedRecovery } from './hosted-recovery-status.js';
 import {
   readHostedActionOptions,
   hostedActionAllowed,
@@ -561,6 +562,7 @@ interface HostedSession {
   lifecycle?: ManagedSessionLifecycleAuthority;
   lifecycleKind?: 'close' | 'delete';
   cleanupBlocked?: boolean;
+  recoveryCleanupOnly?: boolean;
   lifecycleProtocolVersion?: 1 | 2;
   /** Fetched Workspace instructions; undefined until the first fetch. */
   workspaceContext?: string;
@@ -3753,6 +3755,7 @@ export function registerHostedHarnessSessionRoutes(
       eventEpoch: epoch,
       // A Harness older than approvals omits this, so a caller can tell.
       ...(session.approval ? { approvalMode: session.approval.mode } : {}),
+      ...(session.recoveryCleanupOnly ? { recoveryCleanupOnly: true } : {}),
       ...(session.blocked || session.hooks?.hasPendingOperations
         ? { recoveryRequired: true }
         : {}),
@@ -3815,12 +3818,116 @@ export function registerHostedHarnessSessionRoutes(
       runSettleProjection(resident, sessionId, settle, brokerOptions);
   };
 
+  const cleanupOriginalRecovery = async (
+    session: HostedSession,
+    promptId: string,
+  ): Promise<void> => {
+    const history = await readHostedFileHistory(session.managed);
+    if (
+      history?.pendingUndo ||
+      (history?.pendingTurn && history.pendingTurn !== promptId)
+    )
+      throw new Error('Original file history cleanup cannot be verified.');
+    await dropPendingHostedFileHistoryTurn(session.managed, promptId);
+    if (session.fileHistoryOwed === promptId)
+      session.fileHistoryOwed = undefined;
+    if (brokerOptions) {
+      await reconcileHostedTurnCleanup(
+        session.managed,
+        brokerOptions,
+        promptId,
+      );
+      const lease = session.runtimeLeaseHeld;
+      if (
+        lease?.promptId === promptId &&
+        session.runtimeLeaseOwedByTerminalRoute &&
+        (await releaseHeldRuntime(session, brokerOptions, lease)) &&
+        session.runtimeLeaseHeld === lease
+      ) {
+        session.runtimeLeaseHeld = undefined;
+        session.runtimeLeaseOwedByTerminalRoute = false;
+      }
+    }
+    if (
+      session.cleanupBlocked &&
+      session.managed.authority
+        .eventsInSequenceRange(1, session.managed.authority.committedSequence)
+        .findLast((event) => event.kind === 'input.accepted')?.payload[
+        'turnId'
+      ] === promptId &&
+      !hasHostedCleanupDebt(session.managed) &&
+      !session.fileHistoryOwed &&
+      !session.runtimeLeaseOwedByTerminalRoute
+    )
+      liftRecoveryBlock(session);
+  };
+
+  const cancellationTargetState = (
+    managed: ManagedSession,
+    promptId: string,
+  ): 'pending' | 'settled' | undefined => {
+    const events = managed.authority.eventsInSequenceRange(
+      1,
+      managed.authority.committedSequence,
+    );
+    if (
+      !events.some(
+        (event) =>
+          event.kind === 'input.accepted' &&
+          event.payload['turnId'] === promptId,
+      )
+    )
+      return undefined;
+    if (
+      !events.some(
+        (event) =>
+          event.kind === 'turn.settled' && event.payload['turnId'] === promptId,
+      )
+    )
+      return 'pending';
+    return events.findLast((event) => event.kind === 'input.accepted')?.payload[
+      'turnId'
+    ] === promptId
+      ? 'settled'
+      : undefined;
+  };
+
   const open = async (
     req: Request,
     res: Response,
     create: boolean,
+    holdCancellation?: (session: HostedSession) => void,
   ): Promise<void> => {
     const body = object(req.body);
+    let cleanupPromptId = body?.['recoveryCleanupPromptId'];
+    const cancellationPromptId = body?.['cancellationPromptId'];
+    if (
+      cancellationPromptId !== undefined &&
+      (create ||
+        typeof cancellationPromptId !== 'string' ||
+        !HOSTED_UUID.test(cancellationPromptId) ||
+        body?.['cancellationTakeover'] !== true ||
+        body?.['passiveManagedRuntimeRecovery'] !== true ||
+        body?.['driveRuntimeRecovery'] === true ||
+        cleanupPromptId !== undefined ||
+        body?.['lifecycleAuthority'] !== undefined)
+    ) {
+      error(res, 400, 'invalid_managed_runtime_recovery');
+      return;
+    }
+    if (
+      cleanupPromptId !== undefined &&
+      (create ||
+        typeof cleanupPromptId !== 'string' ||
+        !HOSTED_UUID.test(cleanupPromptId) ||
+        body?.['driveRuntimeRecovery'] === true ||
+        body?.['passiveManagedRuntimeRecovery'] === true ||
+        body?.['cancellationTakeover'] === true ||
+        body?.['lifecycleAuthority'] !== undefined)
+    ) {
+      error(res, 400, 'invalid_managed_runtime_recovery');
+      return;
+    }
     const sessionId = create ? body?.['sessionId'] : req.params['id'];
     let agentDefinition: HostedAgentDefinition | undefined;
     let sessionSkillsRef: ManagedSessionDurableRef | undefined;
@@ -3978,7 +4085,7 @@ export function registerHostedHarnessSessionRoutes(
     ) {
       return error(res, 409, 'hosted_lifecycle_profile_unavailable');
     }
-    const resident = sessions.get(sessionId);
+    let resident = sessions.get(sessionId);
     // H4f × H4d-b: the load of a stopped run's child carries the stop, so
     // its wake pump starts none of its message inputs, not even the first
     // pass this load kicks before the stop itself arrives.
@@ -4024,6 +4131,140 @@ export function registerHostedHarnessSessionRoutes(
     const passiveRecovery = body?.['passiveManagedRuntimeRecovery'] === true;
     const driveRecovery = body?.['driveRuntimeRecovery'] === true;
     const takeoverFlags = passiveRecovery || driveRecovery;
+    if (resident && typeof cancellationPromptId === 'string') {
+      const key = resident.managed.authority.sessionHeader.sessionKey;
+      const definition = resident.definition;
+      if (
+        key.tenantId !== store.tenantId ||
+        key.workspaceId !== store.workspaceId ||
+        resident.storeBaseUrl !== store.baseUrl ||
+        (toolProfile !== undefined && toolProfile !== resident.toolProfile) ||
+        JSON.stringify(definition?.['mcpServers']) !==
+          JSON.stringify(mcpServers) ||
+        !isDeepStrictEqual(
+          definition?.['hookCatalog'],
+          hookCatalog ?? definition?.['hookCatalog'],
+        ) ||
+        (isHostedWorkspaceShellProfile(resident.toolProfile) &&
+          captureBytes !== undefined &&
+          definition?.['captureBytes'] !== captureBytes) ||
+        resident.lifecycle ||
+        resident.mcpClosing ||
+        opening.has(sessionId)
+      ) {
+        error(res, 409, 'hosted_session_already_attached');
+        return;
+      }
+      const target = cancellationTargetState(
+        resident.managed,
+        cancellationPromptId,
+      );
+      if (
+        target === undefined ||
+        (resident.active && resident.active.promptId !== cancellationPromptId)
+      ) {
+        error(res, 409, 'hosted_cancel_identity_mismatch');
+        return;
+      }
+      if (
+        target === 'settled' ||
+        resident.active?.promptId === cancellationPromptId
+      ) {
+        sendAttachment(res, sessionId, resident);
+        return;
+      }
+      if (
+        resident.hooksBusy ||
+        resident.mcpBusy ||
+        resident.mcpRecovering ||
+        unsettledPromptId(resident) !== cancellationPromptId
+      ) {
+        error(res, 409, 'hosted_turn_recovery_required');
+        return;
+      }
+      resident.hooksBusy = true;
+      holdCancellation?.(resident);
+    }
+    if (
+      resident &&
+      (cleanupPromptId !== undefined || resident.recoveryCleanupOnly)
+    ) {
+      const key = resident.managed.authority.sessionHeader.sessionKey;
+      if (
+        key.tenantId !== store.tenantId ||
+        key.workspaceId !== store.workspaceId ||
+        resident.storeBaseUrl !== store.baseUrl ||
+        resident.active ||
+        resident.hooksBusy ||
+        resident.mcpBusy ||
+        resident.mcpRecovering ||
+        resident.mcpClosing ||
+        opening.has(sessionId)
+      ) {
+        error(res, 409, 'hosted_turn_recovery_required');
+        return;
+      }
+      if (cleanupPromptId !== undefined) {
+        const sequence = resident.managed.authority.committedSequence;
+        const status = await inspectHostedRecovery(resident, cleanupPromptId);
+        if (
+          sessions.get(sessionId) !== resident ||
+          opening.has(sessionId) ||
+          resident.managed.authority.committedSequence !== sequence ||
+          resident.active ||
+          resident.recoveredTurn ||
+          resident.hooksBusy ||
+          resident.mcpBusy ||
+          resident.mcpRecovering ||
+          resident.mcpClosing ||
+          !status.inputSettled ||
+          !status.continuationReady ||
+          !['ready', 'cleanup_pending'].includes(status.state)
+        ) {
+          error(res, 409, 'hosted_turn_recovery_required');
+          return;
+        }
+        resident.hooksBusy = true;
+        try {
+          await cleanupOriginalRecovery(resident, cleanupPromptId);
+          sendAttachment(res, sessionId, resident);
+        } catch {
+          error(res, 503, 'hosted_turn_recovery_required');
+        } finally {
+          resident.hooksBusy = false;
+        }
+        return;
+      }
+      if (passiveRecovery) {
+        if (
+          (toolProfile !== undefined && toolProfile !== resident.toolProfile) ||
+          mcpServers !== undefined ||
+          hookCatalog !== undefined ||
+          (isHostedWorkspaceShellProfile(resident.toolProfile) &&
+            captureBytes !== undefined &&
+            captureBytes !== resident.definition?.['captureBytes'])
+        ) {
+          error(res, 409, 'hosted_tool_profile_conflict');
+          return;
+        }
+        sendAttachment(res, sessionId, resident);
+        return;
+      }
+      opening.add(sessionId);
+      resident.mcpClosing = true;
+      try {
+        await resident.managed.close();
+        await resident.stores!.close();
+        for (const stop of resident.streams) stop();
+        sessions.delete(sessionId);
+        resident = undefined;
+      } catch {
+        error(res, 503, 'hosted_turn_recovery_required');
+        return;
+      } finally {
+        opening.delete(sessionId);
+      }
+    }
     // H4b: a child Session arrives with its ancestry; the definition
     // document persists it so a later load answers the same depth.
     let lineage:
@@ -4180,6 +4421,24 @@ export function registerHostedHarnessSessionRoutes(
           if (resident.active !== undefined) {
             error(res, 409, 'hosted_session_already_attached');
             return;
+          }
+          if (typeof cancellationPromptId === 'string') {
+            const target = cancellationTargetState(
+              resident.managed,
+              cancellationPromptId,
+            );
+            if (target === 'settled') {
+              sendAttachment(res, sessionId, resident);
+              return;
+            }
+            if (
+              target !== 'pending' ||
+              parkedForCancellation !== cancellationPromptId ||
+              unsettledPromptId(resident) !== cancellationPromptId
+            ) {
+              error(res, 409, 'hosted_cancel_identity_mismatch');
+              return;
+            }
           }
           try {
             await settleCancelledHarnessTurn(
@@ -4687,6 +4946,15 @@ export function registerHostedHarnessSessionRoutes(
           ? { create: refs, requireNew: true }
           : { retainVerifiedResources: true }),
       });
+      if (typeof cancellationPromptId === 'string') {
+        const target = cancellationTargetState(managed, cancellationPromptId);
+        if (target === undefined) {
+          await managed.close();
+          error(res, 409, 'hosted_cancel_identity_mismatch');
+          return;
+        }
+        if (target === 'settled') cleanupPromptId = cancellationPromptId;
+      }
       // Taken now, so the authority keeps none of it for the Session's
       // lifetime; a cold Workspace load reuses it below.
       const preverified =
@@ -4884,6 +5152,41 @@ export function registerHostedHarnessSessionRoutes(
       ) {
         await managed.close();
         error(res, 409, 'hosted_tool_profile_conflict');
+        return;
+      }
+      if (
+        typeof cancellationPromptId === 'string' &&
+        cleanupPromptId === undefined &&
+        unsettledPromptId(session) !== cancellationPromptId
+      ) {
+        await managed.close();
+        error(res, 409, 'hosted_cancel_identity_mismatch');
+        return;
+      }
+      if (typeof cleanupPromptId === 'string') {
+        const status = await inspectHostedRecovery(session, cleanupPromptId);
+        if (
+          !workspaceProfile ||
+          hookCatalog ||
+          mcpServers ||
+          !status.inputSettled ||
+          !status.continuationReady ||
+          !['ready', 'cleanup_pending'].includes(status.state)
+        ) {
+          await managed.close();
+          error(res, 409, 'hosted_turn_recovery_required');
+          return;
+        }
+        session.recoveryCleanupOnly = true;
+        if (pinned) session.approval = pinned;
+        try {
+          await cleanupOriginalRecovery(session, cleanupPromptId);
+        } catch {
+          session.cleanupBlocked = true;
+          session.blocked = true;
+        }
+        sessions.set(sessionId, session);
+        sendAttachment(res, sessionId, session);
         return;
       }
       if (mcpServers && brokerOptions)
@@ -5839,6 +6142,17 @@ export function registerHostedHarnessSessionRoutes(
             !brokerOptions ||
             (await parkNeedsNoRuntimeSettlement(managed)))
         ) {
+          if (
+            typeof cancellationPromptId === 'string' &&
+            (unsettled !== cancellationPromptId ||
+              cancellationTargetState(managed, cancellationPromptId) !==
+                'pending' ||
+              unsettledPromptId(session) !== cancellationPromptId)
+          ) {
+            await managed.close();
+            error(res, 409, 'hosted_cancel_identity_mismatch');
+            return;
+          }
           try {
             await settleCancelledHarnessTurn(
               managed,
@@ -6296,7 +6610,12 @@ export function registerHostedHarnessSessionRoutes(
     void open(req, res, true);
   });
   app.post('/session/:id/load', (req, res) => {
-    void open(req, res, false);
+    let held: HostedSession | undefined;
+    void open(req, res, false, (session) => {
+      held = session;
+    }).finally(() => {
+      if (held) held.hooksBusy = false;
+    });
   });
 
   app.use('/session/:id', async (req, res, next) => {
@@ -6652,6 +6971,8 @@ export function registerHostedHarnessSessionRoutes(
   ): Promise<void> => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.recoveryCleanupOnly)
+      return error(res, 409, 'hosted_turn_recovery_required');
     if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
     if (session.hooksBusy)
       return error(res, 409, 'hosted_hook_operation_active');
@@ -8738,7 +9059,8 @@ export function registerHostedHarnessSessionRoutes(
     const recoveryDigest = `recovery:${checkpointId}:${activationId}`;
     const admittedRecovery = session.admissions.get(promptId);
     if (admittedRecovery?.digest === recoveryDigest) {
-      if (!session.active) releaseRecoveredRuntime(session);
+      if (!session.active && session.runtimeLeaseHeld?.promptId === promptId)
+        releaseRecoveredRuntime(session);
       res.status(200).json({
         accepted: true,
         promptId,
@@ -8759,7 +9081,8 @@ export function registerHostedHarnessSessionRoutes(
     }
     if (!matchesRecovery(session, promptId, checkpointId, activationId)) {
       if (settledReplay(session, promptId, res)) {
-        releaseRecoveredRuntime(session);
+        if (session.runtimeLeaseHeld?.promptId === promptId)
+          releaseRecoveredRuntime(session);
         return;
       }
       releaseRecoveredRuntime(session);
@@ -9450,7 +9773,8 @@ export function registerHostedHarnessSessionRoutes(
     const recoveryDigest = `recovery:${checkpointId}:${activationId}`;
     const admittedCancel = session.admissions.get(promptId);
     if (admittedCancel?.digest === recoveryDigest) {
-      if (!session.active) releaseRecoveredRuntime(session);
+      if (!session.active && session.runtimeLeaseHeld?.promptId === promptId)
+        releaseRecoveredRuntime(session);
       res.status(200).json({
         accepted: true,
         promptId,
@@ -9471,7 +9795,8 @@ export function registerHostedHarnessSessionRoutes(
       unsettledPromptId(session) === promptId;
     if (!attachedToUnsettled) {
       if (settledReplay(session, promptId, res)) {
-        releaseRecoveredRuntime(session);
+        if (session.runtimeLeaseHeld?.promptId === promptId)
+          releaseRecoveredRuntime(session);
         return;
       }
       // A foreign-epoch cancel against a stranger's or settled Turn is not a
@@ -10026,9 +10351,18 @@ export function registerHostedHarnessSessionRoutes(
     void pump();
   });
 
-  app.get('/session/:id/status', (req, res) => {
+  app.get('/session/:id/status', async (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    const promptId = req.query['promptId'];
+    if (
+      promptId !== undefined &&
+      (typeof promptId !== 'string' || !HOSTED_UUID.test(promptId))
+    )
+      return error(res, 400, 'invalid_managed_runtime_recovery');
+    const recovery = await inspectHostedRecovery(session, promptId);
+    if (identity(req, sessions) !== session)
+      return error(res, 404, 'hosted_session_not_found');
     res.json({
       sessionId: req.params['id'],
       hasActivePrompt: !!session.active || session.recoveredTurn !== undefined,
@@ -10039,7 +10373,67 @@ export function registerHostedHarnessSessionRoutes(
       ...(session.recoveryReason === undefined
         ? {}
         : { recoveryReason: session.recoveryReason }),
+      recovery,
     });
+  });
+  const recoveryCleanups = new Map<
+    string,
+    { promptId: string; pending: Promise<void> }
+  >();
+  app.post('/session/:id/recovery/recheck', async (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    const promptId = object(req.body)?.['promptId'];
+    if (typeof promptId !== 'string' || !HOSTED_UUID.test(promptId))
+      return error(res, 400, 'invalid_managed_runtime_recovery');
+    const sessionId = req.params['id'];
+    let cleanup = recoveryCleanups.get(sessionId);
+    if (!cleanup) {
+      const sequence = session.managed.authority.committedSequence;
+      const recovery = await inspectHostedRecovery(session, promptId);
+      cleanup = recoveryCleanups.get(sessionId);
+      if (!cleanup) {
+        if (
+          identity(req, sessions) === session &&
+          session.managed.authority.committedSequence === sequence &&
+          recovery.nextTurnAllowed
+        ) {
+          res.status(202).json({ accepted: true, promptId });
+          return;
+        }
+        if (
+          identity(req, sessions) !== session ||
+          session.managed.authority.committedSequence !== sequence ||
+          session.active ||
+          session.recoveredTurn ||
+          session.hooksBusy ||
+          session.mcpBusy ||
+          session.mcpRecovering ||
+          session.mcpClosing ||
+          !recovery.inputSettled ||
+          !recovery.continuationReady ||
+          recovery.state !== 'cleanup_pending'
+        )
+          return error(res, 409, 'hosted_turn_recovery_required');
+        session.hooksBusy = true;
+        const pending = cleanupOriginalRecovery(session, promptId).finally(
+          () => {
+            session.hooksBusy = false;
+            recoveryCleanups.delete(sessionId);
+          },
+        );
+        cleanup = { promptId, pending };
+        recoveryCleanups.set(sessionId, cleanup);
+      }
+    }
+    if (cleanup.promptId !== promptId)
+      return error(res, 409, 'hosted_recovery_identity_mismatch');
+    try {
+      await cleanup.pending;
+      res.status(202).json({ accepted: true, promptId });
+    } catch {
+      error(res, 503, 'hosted_turn_recovery_required');
+    }
   });
   app.get('/session/:id/transcript', (req, res) => {
     const session = identity(req, sessions);
@@ -10096,6 +10490,44 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/cancel', async (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    const targetPromptId = object(req.body)?.['promptId'];
+    if (targetPromptId !== undefined) {
+      if (
+        typeof targetPromptId !== 'string' ||
+        !HOSTED_UUID.test(targetPromptId)
+      )
+        return error(res, 400, 'invalid_hosted_cancel');
+      const authority = session.managed.authority;
+      const events = authority.eventsInSequenceRange(
+        1,
+        authority.committedSequence,
+      );
+      if (
+        !events.some(
+          (event) =>
+            event.kind === 'input.accepted' &&
+            event.payload['turnId'] === targetPromptId,
+        )
+      )
+        return error(res, 409, 'hosted_cancel_identity_mismatch');
+      if (
+        events.some(
+          (event) =>
+            event.kind === 'turn.settled' &&
+            event.payload['turnId'] === targetPromptId,
+        )
+      ) {
+        res.sendStatus(204);
+        return;
+      }
+      if (session.active?.promptId !== targetPromptId)
+        return error(
+          res,
+          409,
+          'hosted_turn_recovery_required',
+          'inputs_unsettled',
+        );
+    }
     // Honest refusal instead of a silent no-op 204 (R10-3): with no live
     // Turn in this process, nothing aborts here, while the journal still
     // holds an input unsettled — a recovered-but-undriven Turn's parked

@@ -22,6 +22,10 @@ import type {
 } from '../hooks/useComposerCore';
 import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from '../unavailableModels';
 import { WebShellPortalRootContext } from '../portalRoot';
 import { PASTE_TITLE_MAX_CHARS } from '../utils/largePaste';
 
@@ -439,6 +443,8 @@ interface ChatEditorRenderProps
   currentModel?: string;
   modelControlsDisabled?: boolean;
   availableModels?: Array<{ id: string; label?: string }>;
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   sessionWorkflowEnabled?: boolean;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
@@ -4123,6 +4129,156 @@ describe('ChatEditor toolbar popovers', () => {
     ).find((button) => button.textContent?.includes(modelLabel));
     expect(option).not.toBeUndefined();
     expect(option?.title).toBe(modelLabel);
+  });
+
+  it('renders host-injected models as disabled and ignores their selection', () => {
+    const onSelectModel = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'qwen-plus',
+      availableModels: [{ id: 'qwen-plus', label: 'Qwen Plus' }],
+      unavailableModels: [
+        { id: 'qwen-max', label: 'Qwen Max', tooltip: 'Need Pro' },
+      ],
+      onSelectModel,
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+
+    const disabled = document.querySelector<HTMLButtonElement>(
+      '[data-web-shell-unavailable-model][data-model-id="qwen-max"]',
+    );
+    expect(disabled?.getAttribute('aria-disabled')).toBe('true');
+    expect(disabled?.textContent).toContain('Qwen Max');
+    expect(
+      disabled?.querySelector('[data-web-shell-unavailable-model-lock]'),
+    ).not.toBeNull();
+    act(() => disabled?.click());
+    expect(onSelectModel).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).not.toBeNull();
+
+    const available = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    ).find((button) => button.textContent?.includes('Qwen Plus'));
+    act(() => available?.click());
+    expect(onSelectModel).toHaveBeenCalledWith('qwen-plus');
+  });
+
+  it('shows a host string tooltip on focus of a disabled model', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'qwen-plus',
+      availableModels: [{ id: 'qwen-plus', label: 'Qwen Plus' }],
+      unavailableModels: [
+        { id: 'qwen-max', label: 'Qwen Max', tooltip: 'Need Pro' },
+      ],
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+    const disabled = document.querySelector<HTMLButtonElement>(
+      '[data-web-shell-unavailable-model][data-model-id="qwen-max"]',
+    );
+    act(() => disabled?.focus());
+    const hint = document.querySelector(
+      '[data-web-shell-unavailable-model-tooltip]',
+    );
+    expect(
+      hint?.querySelector('[data-web-shell-unavailable-model-title]')
+        ?.textContent,
+    ).toBe('Qwen Max');
+    expect(hint?.textContent).toContain('Need Pro');
+  });
+
+  it('mounts host tooltip content and keeps the picker open when a button is clicked', () => {
+    const onSelectModel = vi.fn();
+    const authorize = vi.fn();
+    const mount: WebShellUnavailableModelTooltipMount = (container, info) => {
+      const button = container.ownerDocument.createElement('button');
+      button.type = 'button';
+      button.textContent = `Authorize ${info.model.id}`;
+      button.addEventListener('click', () => authorize(info.model.id));
+      container.append(button);
+      return {
+        update() {},
+        dispose() {
+          container.replaceChildren();
+        },
+      };
+    };
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'qwen-plus',
+      availableModels: [{ id: 'qwen-plus', label: 'Qwen Plus' }],
+      unavailableModels: [{ id: 'qwen-max', label: 'Qwen Max' }],
+      mountUnavailableModelTooltip: mount,
+      onSelectModel,
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+    const disabled = document.querySelector<HTMLButtonElement>(
+      '[data-web-shell-unavailable-model][data-model-id="qwen-max"]',
+    );
+    act(() => disabled?.focus());
+    const authorizeButton = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-unavailable-model-tooltip] button',
+      ),
+    ).find((button) => button.textContent === 'Authorize qwen-max');
+    expect(authorizeButton).toBeDefined();
+    act(() => authorizeButton?.click());
+    expect(authorize).toHaveBeenCalledWith('qwen-max');
+    expect(onSelectModel).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps disabled models visible in search results', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'qwen-plus',
+      availableModels: [{ id: 'qwen-plus', label: 'Qwen Plus' }],
+      unavailableModels: [{ id: 'qwen-max', label: 'Qwen Max' }],
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+    const search = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-toolbar-popover] input[type="search"]',
+    );
+    act(() => {
+      if (!search) return;
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      valueSetter?.call(search, 'Max');
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(
+      document.querySelector(
+        '[data-web-shell-unavailable-model][data-model-id="qwen-max"]',
+      ),
+    ).not.toBeNull();
   });
 
   it('switches between sibling toolbar popovers without dismissing the target', async () => {
