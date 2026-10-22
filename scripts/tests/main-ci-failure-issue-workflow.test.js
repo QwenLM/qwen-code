@@ -168,6 +168,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
               // and the fork cases below keep passing it to document that.
               HEAD_REPO: 'QwenLM/qwen-code',
               HEAD_SHA: 'tested-head',
+              // Before the merged fixtures' 16:15:57Z merge, so the default
+              // path is the run that was already in flight at merge time.
+              RUN_STARTED_AT: '2026-10-17T16:00:00Z',
               ...overrides,
             },
           },
@@ -215,10 +218,39 @@ cat "\${RUNNER_TEMP}/pulls.json"
       ]);
       expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
     });
+    it('passes the attempt start to the destination guard', () => {
+      // Without this wiring the guard reads an empty timestamp and every
+      // post-merge rerun files exactly as before.
+      expect(destination.env.RUN_STARTED_AT).toBe(
+        '${{ github.event.workflow_run.run_started_at }}',
+      );
+    });
     it('also files an issue when the failed PR already merged', () => {
       expect(resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })]).output).toBe(
         'pr_number=14472\nfile_issue=true\n',
       );
+    });
+    it('does not file for a rerun that starts after the PR merged', () => {
+      // Run 39768204855's attempt 2 started 96 minutes after its PR merged
+      // and re-ran the PR's pre-merge workflow; the lock timeout it hit could
+      // not describe main, and filing it created #15239. The post-merge push
+      // run owns that signal.
+      const resolved = resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })], {
+        RUN_STARTED_AT: '2026-10-17T16:30:00Z',
+      });
+      expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
+      expect(resolved.stdout).toContain(
+        'after the PR merged at 2026-10-17T16:15:57Z',
+      );
+    });
+    it('falls back to filing when the run start is unreadable', () => {
+      // The guard must not turn a missing payload field into silence: before
+      // this change every merged-PR failure filed, and an unreadable
+      // timestamp keeps that direction.
+      const resolved = resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })], {
+        RUN_STARTED_AT: '',
+      });
+      expect(resolved.output).toBe('pr_number=14472\nfile_issue=true\n');
     });
     it('does not report a superseded head, wherever the same-named branch lives', () => {
       // The exact head SHA qualifies the PR: a branch whose head is another

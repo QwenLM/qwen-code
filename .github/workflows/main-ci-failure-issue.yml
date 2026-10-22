@@ -113,6 +113,7 @@ jobs:
           EVENT_NAME: '${{ github.event.workflow_run.event }}'
           HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+          RUN_STARTED_AT: '${{ github.event.workflow_run.run_started_at }}'
         run: |-
           set -euo pipefail
           pr_number=''
@@ -141,6 +142,15 @@ jobs:
             fi
             pr_number="$(jq -r '.number // empty' <<< "${pr}")"
             file_issue="$(jq -r '.merged_at != null' <<< "${pr}")"
+            merged_at="$(jq -r '.merged_at // empty' <<< "${pr}")"
+            # A rerun starts the PR's pre-merge workflow again, so a failure
+            # that begins after the merge describes a head main has already
+            # replaced. Run 39768204855's attempt 2 filed #15239 that way.
+            # An unreadable timestamp keeps the old fail-open reporting.
+            if [[ "${file_issue}" == 'true' && -n "${RUN_STARTED_AT}" && -n "${merged_at}" && "${RUN_STARTED_AT}" > "${merged_at}" ]]; then
+              file_issue=false
+              echo "::warning::Run started at ${RUN_STARTED_AT}, after the PR merged at ${merged_at}; not filing a main-regression issue for an already-merged head."
+            fi
           fi
           if [[ -z "${pr_number}" && "${file_issue}" != 'true' ]]; then
             echo "::warning::The admitted ${EVENT_NAME} run on ${HEAD_BRANCH} resolved to no PR and no issue; nothing will be reported."
