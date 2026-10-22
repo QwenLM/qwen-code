@@ -341,7 +341,7 @@ export class ManagedMcpRuntime {
   private closing = false;
   private admissionSealed = false;
   private grantInstalled = false;
-  private pendingStarts = 0;
+  private readonly pendingStarts = new Map<string, number>();
 
   constructor(
     private readonly workspace: {
@@ -397,7 +397,10 @@ export class ManagedMcpRuntime {
     hasActivity: boolean;
   } {
     return {
-      pendingStarts: this.pendingStarts,
+      pendingStarts: [...this.pendingStarts.values()].reduce(
+        (total, pending) => total + pending,
+        0,
+      ),
       pendingInvocations: [...this.operations.values()].filter(
         (operation) =>
           operation.view.state === 'running' ||
@@ -490,11 +493,16 @@ export class ManagedMcpRuntime {
       throw new ManagedMcpError('managed_mcp_grant_invalid');
     let directory: string | undefined;
     if (control.kind !== 'mcp-release') {
-      this.pendingStarts++;
+      this.pendingStarts.set(
+        runtimeSessionId,
+        (this.pendingStarts.get(runtimeSessionId) ?? 0) + 1,
+      );
       try {
         directory = await this.sessionDirectory(runtimeSessionId);
       } finally {
-        this.pendingStarts--;
+        const pending = this.pendingStarts.get(runtimeSessionId)! - 1;
+        if (pending === 0) this.pendingStarts.delete(runtimeSessionId);
+        else this.pendingStarts.set(runtimeSessionId, pending);
       }
     }
     if (!directory && control.kind !== 'mcp-release')
@@ -570,7 +578,7 @@ export class ManagedMcpRuntime {
 
   hasPendingWork(runtimeSessionId: string): boolean {
     return (
-      this.pendingStarts > 0 ||
+      (this.pendingStarts.get(runtimeSessionId) ?? 0) > 0 ||
       [...this.operations.values()].some(
         (operation) =>
           operation.runtimeSessionId === runtimeSessionId &&

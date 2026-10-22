@@ -247,6 +247,7 @@ describe('Managed MCP Runtime', () => {
       pendingInvocations: 0,
       hasActivity: true,
     });
+    expect(instance.hasPendingWork('mcp:session-b')).toBe(false);
     resume();
     expect(await refusal).toMatchObject({ code: 'managed_mcp_closed' });
     expect(connect).not.toHaveBeenCalled();
