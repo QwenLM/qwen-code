@@ -3913,8 +3913,8 @@ class QwenHostedHarnessConnectorTest {
         QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties(), sessions(),
                 mock(WorkspaceExecutionStore.class), actions, definitions, resources);
         ReflectionTestUtils.setField(connector, "client", client);
-        ReflectionTestUtils.invokeMethod(connector, "create", session, false);
-        ReflectionTestUtils.invokeMethod(connector, "load", session, false);
+        ReflectionTestUtils.invokeMethod(connector, "create", session, false, false);
+        ReflectionTestUtils.invokeMethod(connector, "load", session, false, false, false);
         ArgumentCaptor<CreateHarnessSession> creates = ArgumentCaptor.forClass(CreateHarnessSession.class);
         verify(client).createSession(creates.capture());
         ArgumentCaptor<LoadHarnessSession> loads = ArgumentCaptor.forClass(LoadHarnessSession.class);
