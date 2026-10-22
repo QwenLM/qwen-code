@@ -159,6 +159,8 @@ import {
 import {
   HostedModelRoundLimitError,
   HostedImageInputUnsupportedError,
+  HostedModelApiError,
+  HOSTED_MODEL_API_ERROR_MESSAGES,
   runHostedHarnessTextTurn,
   hostedToolOutputBudget,
 } from './hosted-harness-model.js';
@@ -2989,6 +2991,12 @@ async function eventEnvelope(
     const roundLimit = event.payload['stopReason'] === 'model_round_limit';
     const imageUnsupported =
       event.payload['stopReason'] === 'image_input_unsupported';
+    const stopReason = event.payload['stopReason'];
+    const modelApiFailure =
+      typeof stopReason === 'string' &&
+      Object.hasOwn(HOSTED_MODEL_API_ERROR_MESSAGES, stopReason)
+        ? (stopReason as keyof typeof HOSTED_MODEL_API_ERROR_MESSAGES)
+        : undefined;
     return {
       v: 1,
       id: event.sequence,
@@ -2997,24 +3005,28 @@ async function eventEnvelope(
       data: {
         sessionId,
         promptId,
-        code: expired
-          ? 'hosted_turn_deadline_exceeded'
-          : modelUnavailable
-            ? 'model_unavailable'
-            : storeUnavailable
-              ? 'managed_session_store_unavailable'
-              : imageUnsupported
-                ? 'image_input_unsupported'
-                : roundLimit
-                  ? 'hosted_turn_limit_exceeded'
-                  : 'hosted_turn_failed',
-        message: expired
-          ? 'The Hosted Harness Turn exceeded its deadline.'
-          : imageUnsupported
-            ? 'The selected model does not support image input. Choose a model with image support or remove the image.'
-            : roundLimit
-              ? 'The Hosted Harness Turn reached its configured model round limit.'
-              : 'Hosted Harness turn failed.',
+        code:
+          modelApiFailure ??
+          (expired
+            ? 'hosted_turn_deadline_exceeded'
+            : modelUnavailable
+              ? 'model_unavailable'
+              : storeUnavailable
+                ? 'managed_session_store_unavailable'
+                : imageUnsupported
+                  ? 'image_input_unsupported'
+                  : roundLimit
+                    ? 'hosted_turn_limit_exceeded'
+                    : 'hosted_turn_failed'),
+        message: modelApiFailure
+          ? HOSTED_MODEL_API_ERROR_MESSAGES[modelApiFailure]
+          : expired
+            ? 'The Hosted Harness Turn exceeded its deadline.'
+            : imageUnsupported
+              ? 'The selected model does not support image input. Choose a model with image support or remove the image.'
+              : roundLimit
+                ? 'The Hosted Harness Turn reached its configured model round limit.'
+                : 'Hosted Harness turn failed.',
       },
     };
   }
@@ -3611,6 +3623,8 @@ async function executeHostedTurn(
             cause instanceof HostedModelRoundLimitError
           )
             stopReason = 'model_round_limit';
+          if (stopReason === 'error' && cause instanceof HostedModelApiError)
+            stopReason = cause.code;
           if (
             stopReason === 'error' &&
             cause instanceof WorkflowStartCancelledError
@@ -9582,6 +9596,8 @@ export function registerHostedHarnessSessionRoutes(
             failureReason = 'image_input_unsupported';
           if (state === 'error' && cause instanceof HostedModelUnavailableError)
             failureReason = 'model_unavailable';
+          if (state === 'error' && cause instanceof HostedModelApiError)
+            failureReason = cause.code;
           if (state === 'error') {
             const storeFailure = namedStoreFailure(cause);
             if (storeFailure !== undefined) failureReason = storeFailure;

@@ -221,6 +221,45 @@ export function ManagedSessionsPage({
   return <p role="status">{t('managed.unavailable')}</p>;
 }
 
+const FAILURE_MESSAGES: Record<string, readonly [string, string]> = {
+  model_payment_required: [
+    'Model API payment required (HTTP 402). Check the provider account balance and billing before retrying.',
+    '模型接口要求支付（HTTP 402），可能是余额不足或计费受限。请检查供应商账户余额与计费状态后重试。',
+  ],
+  model_authentication_failed: [
+    'Model API authentication failed (HTTP 401). Check the configured provider credentials.',
+    '模型接口鉴权失败（HTTP 401）。请检查供应商凭据配置。',
+  ],
+  model_access_denied: [
+    'Model API access denied (HTTP 403). Check the provider account and model permissions.',
+    '模型接口拒绝访问（HTTP 403）。请检查供应商账户与模型访问权限。',
+  ],
+  model_request_timeout: [
+    'The model API request timed out. Try again later.',
+    '模型接口请求超时，请稍后重试。',
+  ],
+  model_rate_limited: [
+    'Model API rate limit exceeded (HTTP 429). Wait and try again later.',
+    '模型接口触发限流（HTTP 429），请稍后重试。',
+  ],
+  model_request_rejected: [
+    'The model API rejected the request. Check the model configuration and input.',
+    '模型接口拒绝了请求，请检查模型配置与输入内容。',
+  ],
+  model_service_unavailable: [
+    'The model API service is unavailable. Try again later.',
+    '模型接口服务暂不可用，请稍后重试。',
+  ],
+  model_request_failed: [
+    'Model API request failed. Check the server logs for this session before retrying.',
+    '模型接口请求失败，请根据当前会话检查服务日志后再重试。',
+  ],
+  hosted_turn_failed: [
+    'The turn failed. Check the server logs for this session to identify the cause.',
+    '本轮执行失败，请根据当前会话检查服务日志以定位具体原因。',
+  ],
+};
+
 function ManagedSessionsContent({
   sessionId,
   workspaceCreationOpen,
@@ -271,7 +310,7 @@ function ManagedSessionsContent({
   navigationActive: boolean;
   navigationSearch: string;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const recoveryText = useManagedRecoveryText();
   const home = navigationTarget !== undefined;
   const ContextContainer = home ? 'details' : 'div';
@@ -927,6 +966,10 @@ function ManagedSessionsContent({
 
   const summary = detail.summary;
   const { request: requestTurnCancel, busy: turnCancelBusy } = turnCancel;
+  const failureMessage = summary?.failure
+    ? (FAILURE_MESSAGES[summary.failure.code]?.[language === 'zh-CN' ? 1 : 0] ??
+      summary.failure.message)
+    : undefined;
   const cancel = useCallback(async () => {
     const abort = lifetime.current;
     if (
@@ -1562,9 +1605,7 @@ function ManagedSessionsContent({
             </ContextContainer>
           )}
           {summary?.failure && (
-            <p className="text-sm text-destructive">
-              {summary.failure.message}
-            </p>
+            <p className="text-sm text-destructive">{failureMessage}</p>
           )}
           {recovery.value && (
             <ManagedRecoveryPanel

@@ -338,6 +338,45 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
+  it.each([
+    ['en', 'billing'],
+    ['zh-CN', '余额'],
+  ] as const)(
+    'explains a payment failure in %s without submitting another prompt',
+    async (language, guidance) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          phase: 'failed',
+          failure: {
+            code: 'model_payment_required',
+            message: 'model_payment_required',
+          },
+        }),
+      );
+      await render('s1', language);
+      expect(container.textContent).toContain('HTTP 402');
+      expect(container.textContent).toContain(guidance);
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it('preserves an unknown failure message rather than showing a translation key', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        phase: 'failed',
+        failure: {
+          code: 'custom_failure',
+          message: 'A product-specific failure',
+        },
+      }),
+    );
+    await render('s1');
+    expect(container.textContent).toContain('A product-specific failure');
+    expect(container.textContent).not.toContain(
+      'managed.failure.custom_failure',
+    );
+  });
+
   it('uses the shared rename dialog and synchronizes the confirmed title without submitting the composer', async () => {
     let resolve!: (value: { displayName: string }) => void;
     const renameSession = vi.fn().mockImplementation(

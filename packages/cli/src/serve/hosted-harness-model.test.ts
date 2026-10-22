@@ -1191,6 +1191,32 @@ describe('Hosted Harness model boundary', () => {
     expect(model.requests[0]).toEqual([{ text: 'rewritten +10k' }]);
   });
 
+  it.each([
+    [401, 'model_authentication_failed'],
+    [402, 'model_payment_required'],
+    [403, 'model_access_denied'],
+    [408, 'model_request_timeout'],
+    [429, 'model_rate_limited'],
+    [400, 'model_request_rejected'],
+    [503, 'model_service_unavailable'],
+    [504, 'model_request_timeout'],
+    [undefined, 'model_request_failed'],
+  ])(
+    'preserves a safe model API failure code for HTTP %s',
+    async (status, code) => {
+      config([
+        {
+          type: LlmEventType.Error,
+          value: { error: { message: 'provider diagnostic', status } },
+        },
+      ]);
+      await expect(runHostedHarnessTextTurn(input)).rejects.toMatchObject({
+        code,
+        message: expect.stringContaining('[API Error: provider diagnostic]'),
+      });
+    },
+  );
+
   it('carries the provider request id into the rejection and StopFailure error_details', async () => {
     const requestId = 'a30a1854-1925-4da8-8803-73fee2865116';
     config([

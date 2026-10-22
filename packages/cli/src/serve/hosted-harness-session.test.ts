@@ -19819,6 +19819,75 @@ describe('Hosted Harness no-tool session', () => {
     }
   });
 
+  it('persists a safe model API failure across cold transcript replay', async () => {
+    const { HostedModelApiError } = await import('./hosted-harness-model.js');
+    state.model.mockRejectedValueOnce(
+      new HostedModelApiError({
+        status: 402,
+        message: 'Insufficient Balance token=private-provider-secret',
+      }),
+    );
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const prompt = [{ type: 'text', text: 'hello' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    const expectFailure = async (
+      target: Awaited<ReturnType<typeof app>>,
+      clientId: string,
+    ) => {
+      const transcript = await headers(
+        supertest(target).get(`/session/${SESSION_ID}/transcript`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(transcript.status).toBe(200);
+      expect(transcript.body.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'turn_error',
+            data: expect.objectContaining({
+              code: 'model_payment_required',
+              message:
+                'Model API payment required (HTTP 402). Check the provider account balance and billing before retrying.',
+            }),
+          }),
+        ]),
+      );
+      expect(JSON.stringify(transcript.body)).not.toContain(
+        'private-provider-secret',
+      );
+    };
+    await vi.waitFor(
+      () => expectFailure(server, created.body.clientId as string),
+      {
+        timeout: SETTLE_TIMEOUT_MS,
+      },
+    );
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+      204,
+    );
+    const restarted = await app();
+    const loaded = await headers(
+      supertest(restarted).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    await expectFailure(restarted, loaded.body.clientId as string);
+    expect(state.model).toHaveBeenCalledOnce();
+    await headers(supertest(restarted).delete(`/session/${SESSION_ID}`)).expect(
+      204,
+    );
+  });
+
   it('logs the failure cause while keeping the public turn error generic', async () => {
     const log = vi
       .spyOn(stdio, 'writeStderrLineSafe')
