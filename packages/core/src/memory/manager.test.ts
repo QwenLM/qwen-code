@@ -37,6 +37,12 @@ const telemetryMocks = vi.hoisted(() => ({
   logMemoryMigration: vi.fn(),
 }));
 
+// Pass-through wrapper so a test can observe state when the dream lock is released.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, rm: vi.fn(actual.rm) };
+});
+
 vi.mock('../telemetry/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../telemetry/index.js')>()),
   logMemoryExtract: telemetryMocks.logMemoryExtract,
@@ -2763,6 +2769,37 @@ describe('MemoryManager', () => {
         expect(runManagedAutoMemoryDream).toHaveBeenCalledTimes(2);
       } finally {
         vi.useRealTimers();
+      }
+    });
+
+    it('persists the failure marker before releasing the dream lock', async () => {
+      const lockPath = getAutoMemoryConsolidationLockPath(tmp.projectRoot);
+      const realRm = (
+        await vi.importActual<typeof import('node:fs/promises')>(
+          'node:fs/promises',
+        )
+      ).rm;
+      let markerAtRelease: unknown = 'not-released';
+      vi.mocked(fs.rm).mockImplementation(async (p, o) => {
+        if (p === lockPath) {
+          markerAtRelease = (await readMeta(tmp.projectRoot))[
+            'lastDreamAttemptAt'
+          ];
+        }
+        return realRm(p, o);
+      });
+      try {
+        vi.mocked(runManagedAutoMemoryDream).mockRejectedValueOnce(
+          new Error('dream agent failed'),
+        );
+        const mgr = new MemoryManager(fiveSessions);
+        const first = await mgr.scheduleDream(
+          dreamParams('sess-a', APR1_10, 0, 1),
+        );
+        await first.promise;
+        expect(markerAtRelease).toEqual(expect.any(String));
+      } finally {
+        vi.mocked(fs.rm).mockImplementation(realRm);
       }
     });
 

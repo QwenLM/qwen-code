@@ -1891,6 +1891,33 @@ export class MemoryManager {
     abortSignal: AbortSignal,
   ): Promise<MemoryTaskRecord> {
     const dreamStartMs = Date.now();
+    let failureRecorded = false;
+    // Record the failure time so scheduleDream backs off instead of
+    // relaunching the same failing dream on every later turn. Best-effort:
+    // a metadata error must not replace the original failure.
+    const recordFailure = async (): Promise<void> => {
+      failureRecorded = true;
+      try {
+        // Stamp the failure time in the injected `now` time base plus the real
+        // elapsed duration, so a dream that ran long is backed off from when
+        // it failed, not from when it started. (Success uses plain `now`: the
+        // duration is noise against the 24h gate but material against 1h.)
+        const failedAt = new Date(
+          now.getTime() + Date.now() - dreamStartMs,
+        ).toISOString();
+        const failedMetadata = await readDreamMetadata(params.projectRoot);
+        failedMetadata.lastDreamAttemptAt = failedAt;
+        failedMetadata.updatedAt = failedAt;
+        await writeDreamMetadata(params.projectRoot, failedMetadata);
+      } catch (metaError) {
+        const message =
+          metaError instanceof Error ? metaError.message : String(metaError);
+        debugLogger.warn(
+          `Failed to record failed dream attempt for ${record.id}: ${message}`,
+        );
+        this.update(record, { metadata: { metadataWriteError: message } });
+      }
+    };
     try {
       try {
         await acquireDreamLock(params.projectRoot);
@@ -2012,6 +2039,14 @@ export class MemoryManager {
             metadata: { metadataWriteError: message },
           });
         }
+      } catch (runError) {
+        // Persist the failure marker BEFORE the lock is released: once the
+        // lock is gone another process can pass scheduleDream's gates, and it
+        // must already see the backoff. A user cancel is not a failure.
+        if (!(abortSignal.aborted && record.status === 'cancelled')) {
+          await recordFailure();
+        }
+        throw runError;
       } finally {
         // Lock release errors are logged AND surfaced on the record's
         // metadata so the user can see why subsequent dreams may be
@@ -2075,28 +2110,10 @@ export class MemoryManager {
           }),
         );
       }
-      // Record the failure time so scheduleDream backs off instead of
-      // relaunching the same failing dream on every later turn. Best-effort:
-      // a metadata error must not replace the original failure.
-      try {
-        // Stamp the failure time in the injected `now` time base plus the real
-        // elapsed duration, so a dream that ran long is backed off from when
-        // it failed, not from when it started. (Success uses plain `now`: the
-        // duration is noise against the 24h gate but material against 1h.)
-        const failedAt = new Date(
-          now.getTime() + Date.now() - dreamStartMs,
-        ).toISOString();
-        const failedMetadata = await readDreamMetadata(params.projectRoot);
-        failedMetadata.lastDreamAttemptAt = failedAt;
-        failedMetadata.updatedAt = failedAt;
-        await writeDreamMetadata(params.projectRoot, failedMetadata);
-      } catch (metaError) {
-        const message =
-          metaError instanceof Error ? metaError.message : String(metaError);
-        debugLogger.warn(
-          `Failed to record failed dream attempt for ${record.id}: ${message}`,
-        );
-        this.update(record, { metadata: { metadataWriteError: message } });
+      // Normally already recorded before the lock release (see the inner
+      // catch); this covers failures that happen before the lock is held.
+      if (!failureRecorded) {
+        await recordFailure();
       }
     } finally {
       this.dreamInFlightByKey.delete(dedupeKey);
