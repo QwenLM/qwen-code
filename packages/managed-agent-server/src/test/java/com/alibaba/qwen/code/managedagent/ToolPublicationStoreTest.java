@@ -2751,6 +2751,29 @@ class ToolPublicationStoreTest {
                 .isEqualTo(original.path("bindingDigest"));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void acceptsLargeCurrentCheckpointsWithFreshOrOriginalBindings(boolean freshBinding) {
+        ObjectNode next = checkpoint.deepCopy();
+        var items = (com.fasterxml.jackson.databind.node.ArrayNode) next.path("tools").path("items");
+        ObjectNode first = (ObjectNode) items.get(0);
+        for (int i = 2; i <= 400; i++) {
+            items.add(first.deepCopy().put("executionCallId", "execution-" + i)
+                    .put("functionCallId", "model-" + i));
+        }
+        JsonNode nextRef = ref("checkpoint-2", "managed-checkpoint", next);
+        assertThat(nextRef.path("byteLength").asLong()).isBetween(65_537L, 1_048_576L);
+        ObjectNode payload = checkpointPayload("checkpoint-2");
+        payload.put("previousCheckpointId", "checkpoint-1");
+        payload.set("stateRef", nextRef);
+        append("checkpoint.commit", event(3, "checkpoint.committed", payload) + MARKER, 1,
+                List.of(resource(nextRef, next)), "checkpoint-2");
+        if (freshBinding) {
+            binding.set("checkpointRef", nextRef);
+        }
+        assertThat(reserve().path("state").asText()).isEqualTo("OPEN");
+    }
+
     @Test
     void renewsOriginalBindingWhenAnotherToolAdvancesTheWaitCheckpoint() {
         JsonNode original = reserve();
