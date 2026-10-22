@@ -388,6 +388,36 @@ export function createJavaManagedAgentProvider(
               return result;
             },
           },
+          contextCompression: {
+            async submit(sessionId, request, command) {
+              return requireContextCompressionOperation(
+                await client.compressContext(
+                  {
+                    ...request,
+                    sessionId,
+                    idempotencyKey: command.idempotencyKey,
+                    requestId: managedRequestId(),
+                  },
+                  command.signal,
+                ),
+                sessionId,
+              );
+            },
+            async query(sessionId, operationId, request) {
+              const operation = requireContextCompressionOperation(
+                await client.queryOperation(
+                  { sessionId, operationId },
+                  request.signal,
+                ),
+                sessionId,
+              );
+              if (operation.operationId !== operationId)
+                throw new Error(
+                  'Context compression operation identity mismatch',
+                );
+              return operation;
+            },
+          },
         }
       : {}),
     actions: {
@@ -720,6 +750,10 @@ function toSessionSummary(
       : {}),
     ...(observation ? { modelContext: observation } : {}),
     ...(selectedModel ? { modelSelection: selectedModel } : {}),
+    compactionRevision: session.compactionRevision ?? 0,
+    ...(session.contextCompressionOperationId
+      ? { contextCompressionOperationId: session.contextCompressionOperationId }
+      : {}),
     activeTurnId: session.activeTurn?.turnId,
     title: session.title || session.sessionId,
     workspace: session.workspace,
@@ -738,6 +772,7 @@ function toSessionSummary(
       canSend:
         sessionActive &&
         !active &&
+        !session.contextCompressionOperationId &&
         (!session.workspace ||
           (workspaceTurns && session.capabilities?.foregroundShell !== false)),
       // The creator may cancel a running bound Turn after the Workspace stops
@@ -748,6 +783,9 @@ function toSessionSummary(
       ...(session.capabilities?.cwdChange === true ? { cwdChange: true } : {}),
       ...(session.capabilities?.modelChange === true
         ? { modelChange: true }
+        : {}),
+      ...(session.capabilities?.contextCompression === true
+        ? { contextCompression: true }
         : {}),
       ...(session.capabilities?.approvalModeChange === true
         ? { approvalModeChange: true }
@@ -829,6 +867,24 @@ function requireCwdOperation(
   ) {
     throw new Error('Cwd operation identity mismatch');
   }
+  return operation;
+}
+
+function requireContextCompressionOperation(
+  operation: Awaited<ReturnType<JavaManagedAgentClient['queryOperation']>>,
+  sessionId: string,
+) {
+  if (
+    operation.type !== 'context_compression' ||
+    operation.sessionId !== sessionId ||
+    !operation.operationId ||
+    !Number.isSafeInteger(operation.expectedCompactionRevision) ||
+    operation.expectedCompactionRevision < 0 ||
+    !['pending', 'running', 'recovery_blocked', 'completed', 'failed'].includes(
+      operation.status,
+    )
+  )
+    throw new Error('Context compression operation identity mismatch');
   return operation;
 }
 
