@@ -202,6 +202,7 @@ import {
 } from './hosted-harness-contract.js';
 import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
 import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
+import { registerHostedCsiSessionRoutes } from './hosted-csi-session.js';
 import {
   registerWorkspacePermissionsRoutes,
   registerWorkspaceQualifiedPermissionsRoutes,
@@ -1501,8 +1502,10 @@ export function createServeApp(
       invokeWorkspaceCommand: (method, params, invokeOpts) =>
         bridge.invokeWorkspaceCommand(method, params, invokeOpts),
       preheatAcpChild: () => bridge.preheat(),
-      refreshExtensionsForAllSessions: () =>
-        bridge.refreshExtensionsForAllSessions(),
+      refreshExtensionsForAllSessions: (sessionIds) =>
+        sessionIds === undefined
+          ? bridge.refreshExtensionsForAllSessions()
+          : bridge.refreshExtensionsForAllSessions(undefined, { sessionIds }),
       ...(deps.persistSetting ? { persistSetting: deps.persistSetting } : {}),
       ...(deps.persistSettings
         ? { persistSettings: deps.persistSettings }
@@ -2235,6 +2238,19 @@ export function createServeApp(
         `token or list specific origins instead of '*'.`,
     );
   }
+  if (
+    parsedAllowOrigins.loopbackPortWildcards &&
+    parsedAllowOrigins.loopbackPortWildcards.length > 0 &&
+    !opts.token
+  ) {
+    throw new Error(
+      `Refusing to start with a loopback port wildcard in --allow-origin ` +
+        `but no bearer token configured. A port wildcard admits any page ` +
+        `served from that loopback host, on any port; without a token, any ` +
+        `local page can drive the daemon. Set a token or list specific ` +
+        `origins instead.`,
+    );
+  }
   const nonLoopbackHttpOrigin = findNonLoopbackHttpOrigin(parsedAllowOrigins);
   if (nonLoopbackHttpOrigin && !opts.token) {
     throw new Error(
@@ -2500,17 +2516,31 @@ export function createServeApp(
       ? createHostedHarnessContract(opts.hostedHarnessCapabilityDigest!)
       : undefined;
   installHostedHarnessContractMiddleware(app, hostedHarness);
+  let stopHostedCsiSessions: (() => Promise<void>) | undefined;
   if (hostedHarness) {
-    registerHostedHarnessSessionRoutes(
-      app,
-      hostedHarness,
-      primaryBoundWorkspace,
+    const broker =
       opts.managedRuntimeBrokerUrl && opts.managedRuntimeBrokerToken
         ? {
             baseUrl: opts.managedRuntimeBrokerUrl,
             token: opts.managedRuntimeBrokerToken,
           }
-        : undefined,
+        : undefined;
+    if (opts.hostedCsiSessionStoreUrl && broker) {
+      const privateSessions = registerHostedCsiSessionRoutes(
+        app,
+        hostedHarness,
+        opts.hostedCsiSessionStoreUrl,
+        broker,
+        (id) => ordinary.owns(id),
+      );
+      stopHostedCsiSessions = privateSessions.stopLocal;
+      app.locals['stopHostedCsiSessions'] = stopHostedCsiSessions;
+    }
+    const ordinary = registerHostedHarnessSessionRoutes(
+      app,
+      hostedHarness,
+      primaryBoundWorkspace,
+      broker,
     );
     app.use((req, res, next) => {
       if (req.path === '/capabilities' || req.path === '/health') next();
@@ -3443,7 +3473,9 @@ export function createServeApp(
   const liveConversationWorkspaceForRoutes = deps.liveConversationWorkspace;
 
   registerSessionCatalogRoutes(app, workspaceRegistry);
-  registerSessionRoutes(app, {
+  const { resolveSubagentSessionRuntime } = registerSessionRoutes(app, {
+    sessionArtifactsPersistenceAvailable:
+      deps.sessionArtifactsPersistenceAvailable !== false,
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     workspaceRegistry,
@@ -3638,6 +3670,8 @@ export function createServeApp(
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
   registerWorkspaceQualifiedSkillsRoutes(app, {
+    getSkillsSnapshot: (workspaceCwd) =>
+      trustedSkillsConfigStatus.snapshot(workspaceCwd),
     workspaceRegistry,
     mutate,
     safeBody,
@@ -3923,6 +3957,7 @@ export function createServeApp(
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
     sendBridgeError,
     virtualSubagentSessions,
+    resolveSubagentSessionRuntime,
     conversationRuntimeActivity,
   });
 
@@ -4182,6 +4217,7 @@ export function createServeApp(
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
       const pendingDrains = [
+        stopHostedCsiSessions?.() ?? Promise.resolve(),
         (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)(),
         workspaceManagementHandle.sealAndWait(),
         (
@@ -4206,12 +4242,14 @@ export function createServeApp(
         stopWorkspaceGitState?: () => void;
         stopExtensionGenerationReconciler?: () => void;
         stopSessionAgentOrchestrators?: () => void;
+        stopHostedMountHandbacks?: () => void;
       };
       stopAppResource(locals.stopMcpAppSandbox);
       stopAppResource(locals.stopScheduledTaskKeepalive);
       stopAppResource(locals.stopWorkspaceGitState);
       stopAppResource(locals.stopExtensionGenerationReconciler);
       stopAppResource(locals.stopSessionAgentOrchestrators);
+      stopAppResource(locals.stopHostedMountHandbacks);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());

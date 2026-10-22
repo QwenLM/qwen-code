@@ -13,7 +13,6 @@ const projectRoot = path.resolve(
   path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..'),
 );
 const packagePath = path.join(projectRoot, 'packages', 'vscode-ide-companion');
-const noticeFilePath = path.join(packagePath, 'NOTICES.txt');
 
 /**
  * Standard MIT license text used when a package declares MIT but ships no
@@ -415,7 +414,13 @@ export async function collectDependencies(
     }
   }
 
-  for (const depName of Object.keys(manifest.dependencies ?? {})) {
+  const bundled = dir.split(path.sep).includes('node_modules')
+    ? []
+    : (manifest.bundledDevDependencies ?? []);
+  for (const depName of [
+    ...Object.keys(manifest.dependencies ?? {}),
+    ...bundled,
+  ]) {
     // Web Shell uses ExcelJS's prebuilt browser entry. These Node-only branches
     // are not in that bundle; its actual embedded packages are inventoried below.
     if (
@@ -452,77 +457,84 @@ export async function getExceljsBrowserNotices(packageDir) {
   return inventory.packages;
 }
 
-async function main() {
-  try {
-    const packageJsonPath = path.join(packagePath, 'package.json');
-    const packageJsonContent = await fs.readFile(packageJsonPath, 'utf-8');
-    const packageJson = JSON.parse(packageJsonContent);
+async function main({ packageDir = packagePath, bundledOnly = false } = {}) {
+  const packageJsonPath = path.join(packageDir, 'package.json');
+  const packageJsonContent = await fs.readFile(packageJsonPath, 'utf-8');
+  const packageJson = JSON.parse(packageJsonContent);
 
-    const allDependencies = new Map();
-    const visitedDirs = new Set();
-    const directDependencies = Object.keys(packageJson.dependencies);
+  const allDependencies = new Map();
+  const visitedDirs = new Set();
+  const directDependencies = bundledOnly
+    ? (packageJson.bundledDevDependencies ?? [])
+    : Object.keys(packageJson.dependencies);
 
-    // Sequential on purpose: the traversal order is the file's order, and it
-    // must not depend on which filesystem read finishes first.
-    for (const depName of directDependencies) {
-      await collectDependencies(
-        depName,
-        packagePath,
-        allDependencies,
-        visitedDirs,
-      );
+  if (bundledOnly) {
+    if (directDependencies.length === 0)
+      throw new Error('No bundled dependency seeds declared');
+    for (const name of directDependencies) {
+      if (!(await resolveInstalled(name, packageDir)))
+        throw new Error(`Bundled dependency ${name} is not installed`);
     }
-
-    const dependencyEntries = Array.from(allDependencies.values());
-
-    const exceljs = dependencyEntries.find(({ name }) => name === 'exceljs');
-    const browserLicenses = exceljs
-      ? await getExceljsBrowserNotices(exceljs.dir)
-      : [];
-    const bundledLicenses = new Map(
-      browserLicenses.map((license) => [
-        `${license.name}@${license.version}`,
-        license,
-      ]),
-    );
-    const licensePromises = dependencyEntries.map(
-      ({ name, version, dir }) =>
-        bundledLicenses.get(`${name}@${version}`) ??
-        getDependencyLicense(name, version, dir),
-    );
-    const dependencyLicenses = [
-      ...(await Promise.all(licensePromises)),
-      ...browserLicenses.filter(
-        ({ name, version }) => !allDependencies.has(`${name}@${version}`),
-      ),
-    ];
-
-    let noticeText =
-      'This file contains third-party software notices and license terms.\n\n';
-
-    for (const dep of dependencyLicenses) {
-      noticeText +=
-        '============================================================\n';
-      noticeText += `${dep.name}@${dep.version}\n`;
-      noticeText += `(${dep.repository})\n\n`;
-      noticeText += `${dep.license}\n\n`;
-    }
-
-    // Normalize line endings to LF. Third-party license files may use CRLF,
-    // which would otherwise be embedded verbatim and produce spurious diffs
-    // (the file is declared `eol=lf` in .gitattributes).
-    noticeText = noticeText.replace(/\r\n/g, '\n');
-
-    await fs.writeFile(noticeFilePath, noticeText);
-    console.log(`NOTICES.txt generated at ${noticeFilePath}`);
-    console.log(`Total dependencies: ${dependencyLicenses.length}`);
-  } catch (error) {
-    console.error('Error generating NOTICES.txt:', error);
-    process.exit(1);
   }
+
+  // Sequential on purpose: the traversal order is the file's order, and it
+  // must not depend on which filesystem read finishes first.
+  for (const depName of directDependencies) {
+    await collectDependencies(
+      depName,
+      packageDir,
+      allDependencies,
+      visitedDirs,
+    );
+  }
+
+  const dependencyEntries = Array.from(allDependencies.values());
+
+  const exceljs = dependencyEntries.find(({ name }) => name === 'exceljs');
+  const browserLicenses = exceljs
+    ? await getExceljsBrowserNotices(exceljs.dir)
+    : [];
+  const bundledLicenses = new Map(
+    browserLicenses.map((license) => [
+      `${license.name}@${license.version}`,
+      license,
+    ]),
+  );
+  const licensePromises = dependencyEntries.map(
+    ({ name, version, dir }) =>
+      bundledLicenses.get(`${name}@${version}`) ??
+      getDependencyLicense(name, version, dir),
+  );
+  const dependencyLicenses = [
+    ...(await Promise.all(licensePromises)),
+    ...browserLicenses.filter(
+      ({ name, version }) => !allDependencies.has(`${name}@${version}`),
+    ),
+  ];
+
+  let noticeText =
+    'This file contains third-party software notices and license terms.\n\n';
+
+  for (const dep of dependencyLicenses) {
+    noticeText +=
+      '============================================================\n';
+    noticeText += `${dep.name}@${dep.version}\n`;
+    noticeText += `(${dep.repository})\n\n`;
+    noticeText += `${dep.license}\n\n`;
+  }
+
+  // Normalize line endings to LF. Third-party license files may use CRLF,
+  // which would otherwise be embedded verbatim and produce spurious diffs
+  // (the file is declared `eol=lf` in .gitattributes).
+  noticeText = noticeText.replace(/\r\n/g, '\n');
+
+  const noticeFilePath = path.join(packageDir, 'NOTICES.txt');
+  await fs.writeFile(noticeFilePath, noticeText);
+  console.log(`NOTICES.txt generated at ${noticeFilePath}`);
+  console.log(`Total dependencies: ${dependencyLicenses.length}`);
 }
 
-export async function runNoticeGeneration(env = process.env) {
+export async function runNoticeGeneration(env = process.env, options) {
   const skipGeneration = ['1', 'true'].includes(
     (env.QWEN_SKIP_NOTICE_GENERATION ?? '').toLowerCase(),
   );
@@ -534,7 +546,7 @@ export async function runNoticeGeneration(env = process.env) {
     return;
   }
 
-  await main();
+  await main(options);
 }
 
 // Only run when executed directly (e.g. `npm run generate:notices`), not when
@@ -543,5 +555,12 @@ if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  runNoticeGeneration().catch(console.error);
+  const options =
+    process.argv[2] === '--bundled'
+      ? { packageDir: path.resolve(process.argv[3]), bundledOnly: true }
+      : undefined;
+  runNoticeGeneration(process.env, options).catch((error) => {
+    console.error('Error generating NOTICES.txt:', error);
+    process.exitCode = 1;
+  });
 }

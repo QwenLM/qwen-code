@@ -38,7 +38,13 @@ import {
   type CliRenderer,
   type KeyEvent,
 } from '@opentui/core';
-import { createRoot, useKeyboard, useTerminalDimensions } from '@opentui/react';
+import {
+  createRoot,
+  useKeyboard,
+  useTerminalDimensions,
+  useRenderer,
+} from '@opentui/react';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import type { PartListUnion } from '@google/genai';
 import {
   createDebugLogger,
@@ -87,6 +93,7 @@ import { consumeLastRenderError } from './opentui-error-boundary.js';
 import { createExitGuard, exitGuardHint } from './exit-guard.js';
 import { EXIT_CODE_INTERRUPT, exitSession } from './exit-lifecycle.js';
 import { Command, matchesCommand } from './key-map.js';
+import type { OpenTuiComposerHandle } from './input-submission.js';
 import { resumeEventsFromConfig } from './resume-session.js';
 import {
   armCapturedInputInjection,
@@ -123,6 +130,13 @@ function OpenTuiEntryApp({
   initialDialog,
 }: OpenTuiEntryAppProps) {
   const { width, height } = useTerminalDimensions();
+  const renderer = useRenderer();
+  useEffect(() => {
+    getInteractiveModSession(config)?.setPresentation({
+      isFullscreen: renderer.screenMode === 'alternate-screen',
+      columns: width,
+    });
+  }, [config, renderer, width]);
   const { stats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, config.getSessionId());
   const live = useOpenTuiLiveTurn({ config });
@@ -183,10 +197,7 @@ function OpenTuiEntryApp({
   const getSessionStats = useCallback(() => statsRef.current, []);
 
   // --- early-input injection (ink initialCapturedInput parity) -------------
-  const composerHandle = useRef<{
-    getText: () => string;
-    setText: (text: string) => void;
-  } | null>(null);
+  const composerHandle = useRef<OpenTuiComposerHandle | null>(null);
   useEffect(
     () => armCapturedInputInjection(() => composerHandle.current, capturedText),
     [capturedText],
@@ -199,6 +210,9 @@ function OpenTuiEntryApp({
     for (const warning of startupWarnings) {
       applyEvent({ type: 'warning', text: warning });
     }
+    return getInteractiveModSession(config)?.subscribe((text) => {
+      applyEvent({ type: 'info', text });
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -251,27 +265,36 @@ function OpenTuiEntryApp({
     setThoughtsExpanded((prev) => !prev);
   });
   useKeyboard((key: KeyEvent) => {
-    if (!key.ctrl || (key.name !== 'c' && key.name !== 'd')) return;
-    // ink handleExit cascade parity: a parked confirmation closes first
-    // (settled as Cancel), then an in-flight turn interrupts, and only a
-    // fully idle session arms the two-press exit window.
+    if (
+      key.eventType === 'release' ||
+      !key.ctrl ||
+      (key.name !== 'c' && key.name !== 'd')
+    )
+      return;
+    if (key.name === 'd' && composerHandle.current?.getText()) return;
+    const guardKey = key.name === 'd' ? 'ctrl-d' : 'ctrl-c';
     const parked = waitingCallsRef.current[0];
+    // Ink pre-arms C before cleanup; D only arms at an idle/confirmation boundary.
+    if (key.name === 'c' || parked || !streamingRef.current) {
+      if (exitGuard.press(guardKey) === 'exit') {
+        void exitSession(config, EXIT_CODE_INTERRUPT);
+        return;
+      }
+      setExitHint(exitGuardHint(guardKey));
+    }
     if (parked) {
-      void parked.confirmationDetails
-        .onConfirm(ToolConfirmationOutcome.Cancel)
-        .catch(() => {});
-      settleWaitingCall(parked.callId);
+      if (key.name === 'c') {
+        void parked.confirmationDetails
+          .onConfirm(ToolConfirmationOutcome.Cancel)
+          .catch(() => {});
+        settleWaitingCall(parked.callId);
+      }
       return;
     }
     if (streamingRef.current) {
-      interrupt();
-      return;
-    }
-    const guardKey = key.name === 'd' ? 'ctrl-d' : 'ctrl-c';
-    if (exitGuard.press(guardKey) === 'exit') {
-      void exitSession(config, EXIT_CODE_INTERRUPT);
-    } else {
-      setExitHint(exitGuardHint(guardKey));
+      if (composerHandle.current?.cancelTurn)
+        composerHandle.current.cancelTurn();
+      else interrupt();
     }
   });
 
@@ -337,10 +360,14 @@ function OpenTuiEntryApp({
       settings={settings}
       logger={logger}
       getSessionStats={getSessionStats}
+      sessionStats={stats}
       runtime={runtime}
       extensionRefreshState={extensionRefreshState}
       initialDialog={initialDialog}
       renderMain={renderMain}
+      userMessages={live.items.flatMap((item) =>
+        item.kind === 'user' ? [item.recallText ?? item.text] : [],
+      )}
       onSubmitPrompt={handleSubmitPrompt}
       onQuit={handleQuit}
       onTranscriptReset={resetTranscript}

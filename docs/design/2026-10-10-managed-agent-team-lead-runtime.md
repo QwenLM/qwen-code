@@ -103,7 +103,7 @@ A member launched with `isolation: "worktree"` (#13841) also has its child Works
   - `hosted-child-agent-session.ts`: the `<teammate>` label in the notification, and `sendToChild`'s refusal to continue a member of an open team.
   - `hosted-harness-session.ts`: the funnel wiring and the reopen whitelist.
   - `hosted-tool-approval.ts`: `task_list` pre-approved.
-- `packages/sdk-java/managed-agent-server`: `ManagedActionService.PREVIEW_TOOLS`, a coordinator test proving that a lead close with an open team cancels its members and writes no team record, and a lifecycle-gate test that keeps team records refused under a close claim.
+- `packages/managed-agent-server`: `ManagedActionService.PREVIEW_TOOLS`, a coordinator test proving that a lead close with an open team cancels its members and writes no team record, and a lifecycle-gate test that keeps team records refused under a close claim.
 - Tests beside each file, and the E2E plan in `.qwen/e2e-tests/`.
 
 ## Validation plan

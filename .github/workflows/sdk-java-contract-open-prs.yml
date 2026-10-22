@@ -21,7 +21,7 @@ on:
     branches:
       - 'main'
     paths:
-      - 'packages/sdk-java/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json'
+      - 'packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json'
       - 'scripts/check-contract-open-prs.js'
       - 'scripts/contract-version-utils.js'
       - '.github/workflows/sdk-java-contract-open-prs.yml'

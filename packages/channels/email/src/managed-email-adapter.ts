@@ -117,6 +117,33 @@ export interface ManagedEmailAdapterOptions {
 const CLAIM_BATCH = 16;
 const SUBMIT_RETRY_MS = 5_000;
 
+// The control plane's verdict for a missing channel-instance row — the
+// only 404 that is a poll-level registration claim. Its other 404s (a
+// route session or workspace gone under a live instance) are
+// per-message refusals, so the predicate keys on the code, never the
+// bare status.
+const CHANNEL_NOT_FOUND = 'channel_not_found';
+
+// The instance-scoped refusals the workspace registry answers
+// submitInbound with from the channel instance row alone: the bound
+// workspace gone (404 workspace_not_found) or no longer ACTIVE (409
+// workspace_unavailable), the actor's scope invalid (403
+// actor_scope_mismatch) or demoted past create (403 workspace_forbidden).
+// Every determinant of each comes from the instance row, not the message,
+// so every inbound meets the verdict identically and no retry heals it:
+// consecutive drops indict the instance's binding rather than the mail,
+// and submit() bounds them with a poll stall (R5-1, R6-1).
+const INSTANCE_SCOPED_REFUSALS = new Set([
+  'workspace_not_found',
+  'workspace_forbidden',
+  'actor_scope_mismatch',
+  'workspace_unavailable',
+]);
+
+// One drop is the poison message the verdict may be about (R3-1); a
+// second consecutive one proves the instance's binding itself is broken.
+const INSTANCE_REFUSAL_DROP_LIMIT = 1;
+
 /**
  * The control plane carries an attachment as one base64 string bounded at
  * 2,000,000 characters — 1,500,000 decoded bytes — so an upload beyond
@@ -162,6 +189,17 @@ export class ManagedEmailAdapter {
    * claim — re-register, then re-drive — never a per-message drop.
    */
   private registeredGeneration?: number;
+  /**
+   * Set when the persisted refusal streak passes the limit; gates the
+   * search in poll(). In-memory only: a restart re-derives it from a
+   * persisted held claim, so an epoch change that emptied pending
+   * starts the new generation clean. True only while a held claim is
+   * still pending: the claim can also leave without proving the
+   * binding — dropped on a per-message verdict, settled by a replayed
+   * answer, or un-rebuildable after a restart — and a stall that
+   * outlived it would have no probe left to lift it.
+   */
+  private instanceStalled = false;
 
   constructor(options: ManagedEmailAdapterOptions) {
     this.settings = emailSettings(options.config);
@@ -219,6 +257,26 @@ export class ManagedEmailAdapter {
     }
     try {
       this.state = this.store.load();
+      // The stall flag is in-memory, so a restart zeroes it: derive the
+      // stall from a persisted held claim, or the search re-opens behind
+      // it and the mail the stall promised to keep is admitted to its
+      // destruction. Keyed on a claim still pending, never a persisted
+      // flag, so an epoch change that emptied pending starts the new
+      // generation's stall clean.
+      if (this.state?.pending.some((entry) => entry.held)) {
+        this.instanceStalled = true;
+        // A state file written before the streak persisted can hold a
+        // claim with no count behind it: floor the streak past the
+        // limit so the next verdict re-holds instead of dropping a
+        // fresh message as a first occurrence.
+        this.state.instanceRefusals = Math.max(
+          this.state.instanceRefusals ?? 0,
+          INSTANCE_REFUSAL_DROP_LIMIT + 1,
+        );
+        this.log(
+          `Managed email stopped admitting for ${this.settings.address}: the instance's workspace binding is broken. Held mail is kept; check the instance's --workspace and --actor flags.`,
+        );
+      }
       this.parse = await this.deps.parse();
       this.smtp = await this.deps.createSmtp(this.settings);
       this.abort = new AbortController();
@@ -303,10 +361,15 @@ export class ManagedEmailAdapter {
         uidValidity,
         generation: this.state.generation + 1,
         lastUid: mailbox.uidNext - 1,
+        instanceRefusals: 0,
         pending: [],
         recent: [],
       };
       this.persist();
+      // The epoch change dropped every claim the stall held, so a stall
+      // that kept gating the new epoch's search would wedge the mailbox
+      // with nothing left to re-probe it: the streak starts clean.
+      this.instanceStalled = false;
       await this.ensureRegistered(this.state);
     }
   }
@@ -395,7 +458,19 @@ export class ManagedEmailAdapter {
     // re-driven before any new mail, so the journal sees them in order.
     await this.resubmitPending();
     const upper = mailbox.uidNext - 1;
-    if (upper <= state.lastUid || state.pending.length >= MANAGED_PENDING_LIMIT)
+    // A stalled instance binding leaves the search at lastUid while it
+    // holds a claim: the mail above it is re-searched once the held
+    // claim's re-drive proves the binding answers again, never admitted
+    // to its destruction meanwhile. The flag is true only while a held
+    // claim is still pending — liftStallWhenNothingHeld clears it the
+    // moment the claim leaves without proving the binding — and the
+    // streak, still above the limit, re-holds the next instance-scoped
+    // refusal without an extra drop.
+    if (
+      upper <= state.lastUid ||
+      state.pending.length >= MANAGED_PENDING_LIMIT ||
+      this.instanceStalled
+    )
       return;
     const found = await client.search(
       { uid: `${state.lastUid + 1}:${upper}` },
@@ -415,6 +490,11 @@ export class ManagedEmailAdapter {
         return;
       if (message.uid <= state.lastUid || message.uid > upper) continue;
       await this.admit(message.uid, message.size);
+      // A registration refusal reset the generation, or the instance
+      // stall engaged: no further submit converges this tick. Return —
+      // never break: lastUid must stay at the last admitted message so
+      // the next poll re-searches the rest.
+      if (this.registeredGeneration === 0 || this.instanceStalled) return;
     }
     if (this.running) {
       state.lastUid = batchEnd;
@@ -604,11 +684,48 @@ export class ManagedEmailAdapter {
     await this.submit(uid, event);
   }
 
+  private isRegistrationRefusal(error: unknown): boolean {
+    const status = (error as { status?: unknown }).status;
+    const code = (error as { code?: unknown }).code;
+    return (
+      (status === 404 && code === CHANNEL_NOT_FOUND) ||
+      (status === 409 &&
+        (code === 'channel_generation_unregistered' ||
+          code === 'channel_disconnected'))
+    );
+  }
+
   private async submit(uid: number, event: ManagedInboundEvent): Promise<void> {
     const state = this.state!;
     try {
       const admitted = await this.controlPlane.submitInbound(event);
+      // The marker of the settling claim, captured before it leaves
+      // pending: the held claim's fresh admission is the one proof the
+      // instance's workspace binding answers again, so only it resets
+      // the drop streak and lifts the stall, and the next poll's search
+      // resumes above lastUid. Any other fresh admission resolves its
+      // workspace through an existing binding row, which the broken
+      // binding never decided, and a replayed answer is the idempotent
+      // echo of an earlier admission: neither proves the binding, so
+      // neither re-grants the episode's sacrifice (R10-1). A replay can
+      // still settle the held claim itself — the admission whose own
+      // answer was lost — and with nothing held the stall lifts, while
+      // the streak stands.
+      const wasHeld = state.pending.some(
+        (entry) => entry.uid === uid && entry.held === true,
+      );
       state.pending = state.pending.filter((entry) => entry.uid !== uid);
+      if (!admitted.replayed && wasHeld) {
+        state.instanceRefusals = 0;
+        if (this.instanceStalled) {
+          this.instanceStalled = false;
+          this.log(
+            `Managed email admission for ${this.settings.address} resumed; the instance's workspace answers again.`,
+          );
+        }
+      } else {
+        this.liftStallWhenNothingHeld();
+      }
       this.persist();
       if (admitted.replayed) {
         this.log(
@@ -618,29 +735,79 @@ export class ManagedEmailAdapter {
     } catch (error) {
       const status = (error as { status?: unknown }).status;
       const code = (error as { code?: unknown }).code;
-      if (
-        status === 404 ||
-        (status === 409 && code === 'channel_generation_unregistered')
-      ) {
-        // The server lost our registration (a restart, a wipe): that is a
+      if (this.isRegistrationRefusal(error)) {
+        // The server lost our registration (a restart, a wipe) or an
+        // unfenced disconnect flipped the instance under this adapter: a
+        // fresh register is the only heal of `connected`, so that is a
         // poll-level claim — re-register before the next drive, never a
-        // per-message drop.
+        // per-message drop. It is a refusal, not an unanswered answer:
+        // say so, and keep the event so the re-drive never rebuilds it.
         this.registeredGeneration = 0;
-      } else if (
+        this.log(
+          `Managed email admission of ${event.platformEventId} was refused as not registered (${String(status)} ${String(code)}); the next poll re-registers and re-drives it.`,
+        );
+        this.pendingEvents.set(uid, event);
+        return;
+      }
+      if (
         typeof status === 'number' &&
-        (status === 400 || status === 403 || status === 409)
+        (status === 400 ||
+          status === 403 ||
+          status === 409 ||
+          (status === 404 && INSTANCE_SCOPED_REFUSALS.has(String(code))))
       ) {
+        if (INSTANCE_SCOPED_REFUSALS.has(String(code))) {
+          state.instanceRefusals = (state.instanceRefusals ?? 0) + 1;
+          const entry = state.pending.find((pending) => pending.uid === uid);
+          if (
+            entry?.held ||
+            state.instanceRefusals > INSTANCE_REFUSAL_DROP_LIMIT
+          ) {
+            // Instance-scoped, so every message meets the verdict
+            // identically and no retry heals it: the claim is held and
+            // the poll stalls — the mail above lastUid stays
+            // re-searchable — instead of dropping every inbound message
+            // behind one routine log line while the channel reports
+            // connected. The held claim's re-drive is the probe that
+            // lifts the stall once the binding answers again.
+            this.pendingEvents.set(uid, event);
+            if (!entry?.held) {
+              // Persist the hold with the claim: the marker re-arms the
+              // in-memory stall flag after a restart, and the claim
+              // itself never drops while it is set — the mail the stall
+              // promised to keep.
+              state.pending = state.pending.map((pendingEntry) =>
+                pendingEntry.uid === uid
+                  ? { ...pendingEntry, held: true }
+                  : pendingEntry,
+              );
+              this.persist();
+            }
+            if (!this.instanceStalled) {
+              this.instanceStalled = true;
+              this.log(
+                `Managed email stopped admitting for ${this.settings.address}: every message is refused with ${status} ${String(code)}, so the workspace this channel instance binds to is gone, drained, or unreadable by its actor; check the instance's --workspace and --actor flags. Held mail is kept and admission resumes once the workspace answers.`,
+              );
+            }
+            return;
+          }
+        }
         // A deterministic refusal (a failing body, a closed actor scope, a
-        // dead route or generation): re-driving the identical event can
+        // dead route or generation, a route session or workspace gone
+        // under a live instance): re-driving the identical event can
         // never converge, and a claim that outlives the pending limit
         // would stall the whole mailbox, so the event is dropped visibly
-        // instead. Everything else — a lost answer, a reset listener — is
-        // re-driven.
+        // instead. A 404 drops only on a classified code: the
+        // instance-gone one is the registration claim above, and an
+        // unrecognized one says nothing about the mail, so it falls
+        // through to the re-drive like a lost answer or a reset
+        // listener.
         this.log(
           `Managed email admission of ${event.platformEventId} was refused (${status}); the message is skipped.`,
         );
         state.pending = state.pending.filter((entry) => entry.uid !== uid);
         this.pendingEvents.delete(uid);
+        this.liftStallWhenNothingHeld();
         this.persist();
         return;
       }
@@ -654,9 +821,40 @@ export class ManagedEmailAdapter {
 
   private readonly pendingEvents = new Map<number, ManagedInboundEvent>();
 
+  /**
+   * The stall exists to be lifted by the held claim's probe: when the
+   * last held claim leaves without proving the binding — dropped on a
+   * per-message verdict, settled by a replayed answer, or un-rebuildable
+   * after a restart — no probe remains, and a flag kept armed would gate
+   * every later poll to a single admit and pin settled events in the
+   * cache behind resubmitPending's stall return. The refusal streak is
+   * NOT reset here: only the held claim's fresh admission proves the
+   * binding (R10-1), so the next instance-scoped refusal re-holds
+   * without paying a new first-occurrence drop (R7-1).
+   */
+  private liftStallWhenNothingHeld(): void {
+    if (
+      this.instanceStalled &&
+      !this.state!.pending.some((entry) => entry.held === true)
+    ) {
+      this.instanceStalled = false;
+      this.log(
+        `Managed email admission for ${this.settings.address} resumed; no claim remains held, and the refusal streak still stands for the next instance-scoped refusal.`,
+      );
+    }
+  }
+
   private async resubmitPending(): Promise<void> {
     const state = this.state!;
-    for (const entry of [...state.pending]) {
+    // Probe held claims first: the stall lifts only on a held claim's
+    // fresh admission, and the held entry is always the last push (the
+    // admit that armed the stall), so push order lets an earlier claim
+    // whose answer never comes shadow the one probe per poll — wedging
+    // the mailbox across restarts (R9-1). The sort is stable: unheld
+    // claims keep their uid order.
+    for (const entry of [...state.pending].sort(
+      (a, b) => Number(b.held === true) - Number(a.held === true),
+    )) {
       if (!this.running) return;
       let event = this.pendingEvents.get(entry.uid);
       if (event === undefined) {
@@ -670,11 +868,17 @@ export class ManagedEmailAdapter {
           state.pending = state.pending.filter(
             (pending) => pending.uid !== entry.uid,
           );
+          this.liftStallWhenNothingHeld();
           this.persist();
           continue;
         }
       }
       await this.submit(entry.uid, event);
+      // A registration refusal reset the generation, or the instance
+      // stall engaged: no further submit converges this tick — the next
+      // poll re-registers or re-probes, then re-drives. The stall also
+      // skips the retry delay: one probe per poll is what lifts it.
+      if (this.registeredGeneration === 0 || this.instanceStalled) return;
       if (state.pending.some((pending) => pending.uid === entry.uid)) {
         await delay(SUBMIT_RETRY_MS, undefined, {
           signal: this.abort.signal,
@@ -803,6 +1007,18 @@ export class ManagedEmailAdapter {
       } catch (error) {
         const status = (error as { status?: unknown }).status;
         const code = (error as { code?: unknown }).code;
+        // The instance row is gone — the same poll-level registration
+        // claim the submit and claim routes arm. Keep the entry and reset
+        // the generation: the next poll re-registers first, the re-driven
+        // receipt then settles or meets the deterministic drop below, and
+        // this tick's pull still runs.
+        if (this.isRegistrationRefusal(error)) {
+          this.registeredGeneration = 0;
+          this.log(
+            `Managed email receipt for ${entry.deliveryId} was refused as not registered (${String(status)} ${String(code)}); it re-drives after the next poll re-registers.`,
+          );
+          return;
+        }
         // A deterministic refusal (the route Session closed, the delivery
         // is unknown to the control plane) never converges on re-drive, and
         // a held entry runs before every outbox pull: it would stall every
@@ -831,7 +1047,27 @@ export class ManagedEmailAdapter {
 
   private async pullOutbox(): Promise<void> {
     if (!this.running || !this.state) return;
-    const claimed = await this.controlPlane.claimDeliveries(CLAIM_BATCH);
+    let claimed: ManagedClaimedDelivery[];
+    try {
+      claimed = await this.controlPlane.claimDeliveries(CLAIM_BATCH);
+    } catch (error) {
+      // The claim answers with the same poll-level refusal shape as an
+      // inbound submit: an unfenced disconnect flips the instance under
+      // this adapter, and only a fresh register heals `connected`. Skip
+      // this pull — the next poll's ensureRegistered re-registers and the
+      // claim resumes with it; the claim lease keeps this tick alive
+      // either way (R3-3's outbound half).
+      const status = (error as { status?: unknown }).status;
+      const code = (error as { code?: unknown }).code;
+      if (this.isRegistrationRefusal(error)) {
+        this.registeredGeneration = 0;
+        this.log(
+          `Managed email outbox claim was refused (${String(status)} ${String(code)}); the next poll re-registers first.`,
+        );
+        return;
+      }
+      throw error;
+    }
     for (const delivery of claimed) {
       if (!this.running) return;
       await this.send(delivery);

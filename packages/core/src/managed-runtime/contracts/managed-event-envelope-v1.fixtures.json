@@ -24,7 +24,7 @@
     "hosted.batch.planned",
     "hosted.cleanup"
   ],
-  "streams": ["authoritative_journal"],
+  "streams": ["authoritative_journal", "public_event"],
   "forbiddenFields": [
     "absolutePath",
     "localPath",
@@ -37,6 +37,8 @@
   ],
   "limits": {
     "maxIdBytes": 512,
+    "maxJsonDepth": 64,
+    "maxPublicKindBytes": 128,
     "maxTimeMs": 8640000000000000
   },
   "envelope": {
@@ -1515,7 +1517,7 @@
     },
     {
       "id": "stream-public-event",
-      "valid": false,
+      "valid": true,
       "envelope": {
         "v": 1,
         "sessionId": "session-1",
@@ -1598,6 +1600,222 @@
         "eventId": "evt-000119",
         "kind": "hosted.cleanup",
         "occurredAt": 1760000000016,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "stream-unknown",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "session_mirror",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "public-event-turn-accepted",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "public_event",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "turn.accepted",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "public-event-nested-type",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "public_event",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "item.output_text.delta",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "public-event-kind-exactly-128-chars",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "public_event",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "public-event-kind-over-128-chars",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "public_event",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "public-event-kind-uppercase",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "public_event",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "Turn.accepted",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "public-event-kind-empty",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "public_event",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "public-event-kind-empty-segment",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "public_event",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "turn..accepted",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "public-event-kind-leading-digit",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "public_event",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "turn.1accepted",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "public-event-kind-hyphen",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "public_event",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "turn.cancel-requested",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "public-event-kind-not-string",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "public_event",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": 42,
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "journal-stream-public-kind",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "item.output_text.delta",
+        "occurredAt": 1760000000000,
         "payloadRef": {
           "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
         }
@@ -1830,6 +2048,72 @@
           "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
         }
       }
+    },
+    {
+      "id": "same-sequence-different-stream",
+      "same": false,
+      "parseable": [true, true],
+      "first": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      },
+      "second": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "public_event",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "turn.accepted",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "public-event-same-key",
+      "same": true,
+      "parseable": [true, true],
+      "first": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "public_event",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "turn.accepted",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      },
+      "second": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "public_event",
+        "sequence": 42,
+        "eventId": "evt-other",
+        "kind": "turn.started",
+        "occurredAt": 1760000000999,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
     }
   ],
   "fromEventCases": [
@@ -1913,6 +2197,75 @@
         "occurredAt": 1760000000123,
         "payloadRef": {
           "digest": "059ea699791df6b2407e3b2298fb012ded39cb2e98d2689a72670d250a2b0f2f"
+        }
+      }
+    }
+  ],
+  "fromPublicEventCases": [
+    {
+      "id": "from-public-turn-accepted",
+      "row": {
+        "tenantId": "tenant-1",
+        "sessionId": "session-1",
+        "sequence": 7,
+        "eventId": "evt-public-7",
+        "turnId": "turn-1",
+        "type": "turn.accepted",
+        "data": { "input": [{ "type": "text", "text": "hello" }] },
+        "terminal": false,
+        "createdAt": 1760000000123
+      },
+      "workspaceId": "workspace-1",
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "public_event",
+        "sequence": 7,
+        "eventId": "evt-public-7",
+        "kind": "turn.accepted",
+        "occurredAt": 1760000000123,
+        "payloadRef": {
+          "digest": "f82b7a3502a4b97b7d047e28cde51e9b8474cb86a7c103f5398861e3b9a15400"
+        }
+      }
+    },
+    {
+      "id": "from-public-session-level",
+      "row": {
+        "tenantId": "tenant-1",
+        "sessionId": "session-1",
+        "sequence": 8,
+        "eventId": "evt-public-8",
+        "turnId": null,
+        "type": "session.updated",
+        "data": {
+          "title": "Café 会话",
+          "usage": {
+            "inputTokens": 12,
+            "ratio": 0.5,
+            "huge": 1e21,
+            "tiny": 1e-7
+          },
+          "tags": ["a", true, null]
+        },
+        "terminal": true,
+        "createdAt": 1760000000456
+      },
+      "workspaceId": "workspace-2",
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-2",
+        "stream": "public_event",
+        "sequence": 8,
+        "eventId": "evt-public-8",
+        "kind": "session.updated",
+        "occurredAt": 1760000000456,
+        "payloadRef": {
+          "digest": "2e62349ea65e91b91515289d68b14e7780895a205afd6a57f701768584fbf2c6"
         }
       }
     }

@@ -12,6 +12,7 @@ import {
 } from 'quickjs-emscripten-core';
 import { MOD_GUEST_FACTORY } from './guest.js';
 import { compileModModules } from './module-loader.js';
+import { modToolInputView } from './tool-dialect.js';
 import type { ModToolCallInput, ModToolCheckResult } from './tool-events.js';
 import {
   MOD_MAX_BYTES,
@@ -60,6 +61,8 @@ let busy = false;
 let logChars = 0;
 let operations = 0;
 let pumping = false;
+let builtinTool: string | undefined;
+let surface: 'terminal' | null = null;
 const send = (reply: ModReply) => port.postMessage(reply);
 const abandoned = () =>
   Atomics.load(cancelled, 0) !== 0 || Date.now() >= deadline;
@@ -347,12 +350,16 @@ async function dispatch(
     dispatch(event, e, origin, nested, bottom, index + 1, owner);
   if (!realm.patterns.some((pattern) => patternMatches(pattern, event)))
     return next(input, frames);
-  const active = frames.filter((frame) => frame.plugin === index);
-  const lastFrame = frames.at(-1);
-  const leftOut = lastFrame?.plugin === index ? [lastFrame.registration] : [];
-  const told = active
-    .map((frame) => frame.registration)
-    .filter((id) => !leftOut.includes(id));
+  const view = modToolInputView(
+    event,
+    input,
+    realm.plugin.toolDialect,
+    builtinTool,
+  );
+  if (!view) return next(input, frames);
+  const leftOut = frames
+    .filter((frame) => frame.plugin === index)
+    .map((frame) => frame.registration);
   const call: ModInvocation = {
     id: ++serial,
     epoch,
@@ -360,10 +367,11 @@ async function dispatch(
     closed: false,
     plugin: index,
     event,
-    input,
+    input: view.input,
+    toNativeInput: view.toNativeInput,
     origin,
     frames,
-    budget: new ModBudget(told.length ? 1000 : MOD_TIMEOUT_MS),
+    budget: new ModBudget(MOD_TIMEOUT_MS),
     live: true,
     recovering: false,
     aborted: false,
@@ -378,10 +386,9 @@ async function dispatch(
         realm.invoke('run', {
           id: call.id,
           event,
-          input,
+          input: call.input,
           origin,
           leftOut,
-          told,
         }),
       );
       validateResult(event, value);
@@ -472,7 +479,8 @@ async function hostCall(
   if (method === 'next') {
     if (call.recovering && call.last) return call.budget.lend(() => call.last!);
     validateInput(call.event, value, call.input);
-    const task = call.budget.lend(() => call.next(value, frames));
+    const nativeInput = call.toNativeInput(value);
+    const task = call.budget.lend(() => call.next(nativeInput, frames));
     call.last = task;
     void task.catch(() => {});
     return task;
@@ -599,6 +607,7 @@ port.on('message', async (request: ModRequest) => {
     return;
   }
   busy = true;
+  builtinTool = request.type === 'tool' ? request.builtinTool : undefined;
   epoch++;
   logChars = 0;
   operations = 0;
@@ -608,6 +617,7 @@ port.on('message', async (request: ModRequest) => {
     let result: unknown;
     if (request.type === 'load') {
       if (realms.length) throw new Error('Mods already loaded.');
+      surface = request.surface;
       for (const plugin of request.plugins) {
         assertLive();
         const realm = new Realm(plugin, realms.length);
@@ -621,7 +631,7 @@ port.on('message', async (request: ModRequest) => {
       starting = true;
       await dispatch(
         'session.start',
-        { cwd: request.cwd, surface: null, isInteractive: false },
+        { cwd: request.cwd, surface, isInteractive: surface === 'terminal' },
         engineOrigin,
         [],
         async (e) => ({ cwd: e['cwd'] }),
@@ -644,8 +654,11 @@ port.on('message', async (request: ModRequest) => {
         {
           command: request.command,
           args: request.args,
-          origin: { kind: 'sdk' },
-          presentation: { isFullscreen: false, columns: 80 },
+          origin: { kind: surface === 'terminal' ? 'composer' : 'sdk' },
+          presentation:
+            surface === 'terminal' && request.presentation
+              ? request.presentation
+              : { isFullscreen: false, columns: 80 },
         },
         engineOrigin,
         [],
@@ -695,6 +708,7 @@ port.on('message', async (request: ModRequest) => {
     }
     hostOperations.clear();
     starting = false;
+    builtinTool = undefined;
     deadline = Infinity;
     busy = false;
   }

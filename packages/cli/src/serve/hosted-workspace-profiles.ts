@@ -14,13 +14,18 @@ export const HOSTED_WORKSPACE_FILE_PROFILE_V2 = 'hosted-workspace-files/2';
 export const HOSTED_WORKSPACE_SHELL_PROFILE_V2 = 'hosted-workspace-shell/2';
 export const HOSTED_WORKSPACE_TEAM_LEAD_PROFILE =
   'hosted-workspace-team-lead/1';
+// #13753 I3: a snapshot child's profile, `read_file` and `glob` only. The
+// control plane gives it to a child bound to a read-only snapshot copy, so
+// nothing the child declares writes.
+export const HOSTED_WORKSPACE_READ_PROFILE = 'hosted-workspace-read/1';
 
 export type HostedWorkspaceToolProfile =
   | typeof HOSTED_WORKSPACE_FILE_PROFILE
   | typeof HOSTED_WORKSPACE_SHELL_PROFILE
   | typeof HOSTED_WORKSPACE_FILE_PROFILE_V2
   | typeof HOSTED_WORKSPACE_SHELL_PROFILE_V2
-  | typeof HOSTED_WORKSPACE_TEAM_LEAD_PROFILE;
+  | typeof HOSTED_WORKSPACE_TEAM_LEAD_PROFILE
+  | typeof HOSTED_WORKSPACE_READ_PROFILE;
 
 export function isHostedWorkspaceProfile(
   profile: unknown,
@@ -30,7 +35,8 @@ export function isHostedWorkspaceProfile(
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2 ||
-    profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE
+    profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE ||
+    profile === HOSTED_WORKSPACE_READ_PROFILE
   );
 }
 
@@ -50,9 +56,25 @@ export function hostedShellLaneAttachesChildAgents(
   return shellLane && !suppressChildAgents;
 }
 
+/** The `/2` profiles; the read profile is not one (see the glob predicate). */
 export function isHostedWorkspaceSearchProfile(profile: unknown): boolean {
   return (
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2
   );
+}
+
+/**
+ * The profiles that declare `glob`, so approval pre-approves it: the `/2`
+ * search profiles and the read profile (#13753 I3).
+ */
+export function isHostedWorkspaceGlobProfile(profile: unknown): boolean {
+  return (
+    isHostedWorkspaceSearchProfile(profile) ||
+    profile === HOSTED_WORKSPACE_READ_PROFILE
+  );
+}
+
+export function isHostedWorkspaceReadProfile(profile: unknown): boolean {
+  return profile === HOSTED_WORKSPACE_READ_PROFILE;
 }

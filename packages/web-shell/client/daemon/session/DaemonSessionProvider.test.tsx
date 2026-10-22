@@ -14,7 +14,14 @@ import {
   type ContextType,
   type ReactNode,
 } from 'react';
-import { McpAppToolsContext } from '../../mcpAppHostContext.js';
+import {
+  TrajectoryLiveContext,
+  useTrajectoryLiveSnapshot,
+} from '../../trajectory/trajectory-live-context.js';
+import {
+  McpAppToolsContext,
+  McpAppGeneratedUiContext,
+} from '../../mcpAppHostContext.js';
 import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 import { I18nProvider } from '../../i18n.js';
 import { SessionRecoveryBanner } from '../../components/SessionRecoveryBanner.js';
@@ -156,6 +163,8 @@ interface MockSession {
   replaySnapshot: {
     compactedReplay: DaemonEvent[];
     liveJournal: DaemonEvent[];
+    lifecycleReplay?: DaemonEvent[];
+    lifecycleReplayIncomplete?: boolean;
   };
   consumeReplaySnapshot: () => {
     compactedReplay: DaemonEvent[];
@@ -601,6 +610,346 @@ vi.mock('@qwen-code/sdk/daemon', async (importOriginal) => {
 });
 
 describe('DaemonSessionProvider', () => {
+  const lifecycleFrame = (
+    id: number,
+    phase: 'started' | 'ended',
+    executionId = 'tool-1',
+    kind: 'request' | 'tool' = 'tool',
+  ): DaemonEvent => ({
+    id,
+    v: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate:
+          kind === 'tool' ? 'tool_call_update' : 'agent_message_chunk',
+        ...(kind === 'tool'
+          ? { toolCallId: 'call-1' }
+          : { content: { type: 'text', text: '' } }),
+        _meta: {
+          [kind === 'tool' ? 'toolLifecycle' : 'executionLifecycle']: {
+            v: 1,
+            kind,
+            executionId,
+            sessionId: 'session-1',
+            ...(kind === 'tool'
+              ? { callId: 'call-1', toolName: 'read_file' }
+              : { promptId: 'prompt-1', model: 'qwen-test' }),
+            phase,
+            startedAt: 100,
+            ...(phase === 'ended'
+              ? {
+                  executionStatus: 'success',
+                  endedAt: 120,
+                  executionDurationMs: 20,
+                  durationMs: 20,
+                  outcome: 'success',
+                }
+              : { executionStatus: 'running' }),
+          },
+        },
+      },
+    },
+  });
+  const replayComplete: DaemonEvent = {
+    v: 1,
+    type: 'replay_complete',
+    data: {},
+  };
+  const untilAborted = (signal?: AbortSignal) =>
+    new Promise<void>((resolve) => {
+      if (signal?.aborted) resolve();
+      else signal?.addEventListener('abort', () => resolve(), { once: true });
+    });
+
+  it.each(['request', 'tool'] as const)(
+    'bridges trajectory replay and metadata-only events on the existing subscription (%s)',
+    async (kind) => {
+      const frame = (
+        id: number,
+        phase: 'started' | 'ended',
+        executionId = 'tool-1',
+      ) => lifecycleFrame(id, phase, executionId, kind);
+      const release = createDeferred<void>();
+      const seen = createDeferred<void>();
+      const events = vi.fn(async function* (
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await release.promise;
+        yield frame(2, 'ended');
+        yield replayComplete;
+        yield frame(3, 'started', 'tool-2');
+        seen.resolve();
+        await untilAborted(opts.signal);
+      });
+      sdkMocks.sessions.push(
+        createMockSession({
+          lastEventId: 1,
+          replaySnapshot: {
+            compactedReplay: [frame(1, 'started')],
+            liveJournal: [],
+          },
+          events,
+        }),
+      );
+      let snapshot: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+      function Harness() {
+        snapshot = useTrajectoryLiveSnapshot();
+        blocks = useDaemonTranscriptBlocks();
+        return null;
+      }
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      expect(snapshot?.status).toBe('catching-up');
+      expect(
+        [
+          ...snapshot![kind === 'tool' ? 'tools' : 'requests'].entries.values(),
+        ].map((entry) => entry.status),
+      ).toEqual(['unknown']);
+      await act(async () => {
+        release.resolve();
+        await seen.promise;
+        await flushPromises();
+      });
+      expect(events).toHaveBeenCalledTimes(1);
+      expect(snapshot).toMatchObject({
+        status: 'live',
+        epoch: 'epoch-1',
+        lastEventId: 3,
+      });
+      expect(
+        [
+          ...snapshot![kind === 'tool' ? 'tools' : 'requests'].entries.values(),
+        ].map((entry) => entry.status),
+      ).toEqual(['success', 'running']);
+      expect(blocks).toEqual([]);
+    },
+  );
+
+  it.each(['request', 'tool'] as const)(
+    'seeds trajectory from the memory supplement while paged history is not yet persisted (%s)',
+    async (kind) => {
+      const frame = (
+        id: number,
+        phase: 'started' | 'ended',
+        executionId = 'tool-1',
+      ) => lifecycleFrame(id, phase, executionId, kind);
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: ['session_transcript_pagination'],
+      });
+      sdkMocks.sessions.push(
+        createMockSession({
+          lastEventId: 2,
+          replaySnapshot: {
+            compactedReplay: [frame(1, 'started')],
+            liveJournal: [],
+            lifecycleReplay: [frame(1, 'started'), frame(2, 'ended')],
+            lifecycleReplayIncomplete: true,
+          },
+          async *events(opts = {}) {
+            yield replayComplete;
+            await untilAborted(opts.signal);
+          },
+        }),
+      );
+      let snapshot: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+      function Harness() {
+        snapshot = useTrajectoryLiveSnapshot();
+        blocks = useDaemonTranscriptBlocks();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        historyPageSize: 100,
+      });
+      expect(snapshot).toMatchObject({
+        status: 'live',
+        lastEventId: 2,
+        incomplete: true,
+      });
+      expect(
+        [
+          ...snapshot![kind === 'tool' ? 'tools' : 'requests'].entries.values(),
+        ].map((entry) => entry.status),
+      ).toEqual(['success']);
+      expect(blocks).toEqual([]);
+    },
+  );
+
+  it('tracks live lifecycle events on a cursorless attachment without replay_complete', async () => {
+    const session = createMockSession({
+      lastEventId: undefined,
+      async *events(opts = {}) {
+        session.eventEpoch = 'learned-epoch';
+        yield lifecycleFrame(1, 'started', 'request-1', 'request');
+        await untilAborted(opts.signal);
+      },
+    });
+    session.eventEpoch = undefined;
+    sdkMocks.sessions.push(session);
+    let snapshot: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
+    function Harness() {
+      snapshot = useTrajectoryLiveSnapshot();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    expect(snapshot).toMatchObject({ status: 'live', epoch: 'learned-epoch' });
+    expect([...snapshot!.requests.entries.values()]).toEqual([
+      expect.objectContaining({ status: 'running' }),
+    ]);
+  });
+
+  it('retains trajectory terminals and recovers a short disconnect on the same session', async () => {
+    const drop = createDeferred<void>();
+    const connected = createDeferred<void>();
+    const resumed = createDeferred<void>();
+    let subscriptions = 0;
+    sdkMocks.sessions.push(
+      createMockSession({
+        lastEventId: 0,
+        async *events(opts = {}) {
+          subscriptions++;
+          if (subscriptions === 1) {
+            yield replayComplete;
+            yield lifecycleFrame(1, 'started');
+            connected.resolve();
+            await drop.promise;
+            return;
+          }
+          yield lifecycleFrame(2, 'ended');
+          yield replayComplete;
+          resumed.resolve();
+          await untilAborted(opts.signal);
+        },
+      }),
+    );
+    let snapshot: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
+    function Harness() {
+      snapshot = useTrajectoryLiveSnapshot();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await connected.promise;
+    expect([...snapshot!.tools.entries.values()][0]?.status).toBe('running');
+    await act(async () => {
+      drop.resolve();
+      await resumed.promise;
+      await flushPromises();
+    });
+    expect(subscriptions).toBe(2);
+    expect(snapshot?.status).toBe('live');
+    expect(
+      [...snapshot!.tools.entries.values()].map((entry) => entry.status),
+    ).toEqual(['success']);
+  });
+
+  it('invalidates the previous trajectory while a same-id workspace switch is loading', async () => {
+    sdkMocks.sessions.push(
+      createMockSession({
+        async *events(opts = {}) {
+          yield replayComplete;
+          yield lifecycleFrame(1, 'started');
+          await untilAborted(opts.signal);
+        },
+      }),
+    );
+    let snapshot: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      snapshot = useTrajectoryLiveSnapshot();
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    expect([...snapshot!.tools.entries.values()][0]?.status).toBe('running');
+    const pendingLoad = createDeferred<MockSession>();
+    sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+      async () => pendingLoad.promise,
+    );
+    let switched!: Promise<void>;
+    await act(async () => {
+      switched = requireActions(actions).loadSession('session-1', {
+        workspaceCwd: '/other-workspace',
+      });
+      await flushPromises();
+    });
+    expect(snapshot).toMatchObject({ status: 'stale' });
+    expect([...snapshot!.tools.entries.values()]).toEqual([
+      expect.objectContaining({
+        event: expect.objectContaining({ executionId: 'tool-1' }),
+        status: 'unknown',
+      }),
+    ]);
+    await act(async () => {
+      pendingLoad.resolve(
+        createMockSession({
+          workspaceCwd: '/other-workspace',
+          events: createIdleEvents(),
+        }),
+      );
+      await switched;
+      await flushPromises();
+    });
+    expect(snapshot?.scope).toContain('/other-workspace');
+  });
+
+  it('rebuilds trajectory from a fresh snapshot after ring eviction', async () => {
+    const gap = createDeferred<void>();
+    const loaded = createDeferred<void>();
+    sdkMocks.sessions.push(
+      createMockSession({
+        lastEventId: 0,
+        async *events() {
+          yield replayComplete;
+          yield lifecycleFrame(1, 'started');
+          await gap.promise;
+          yield {
+            v: 1,
+            type: 'state_resync_required',
+            data: { reason: 'ring_evicted' },
+          };
+        },
+      }),
+      createMockSession({
+        lastEventId: 10,
+        replaySnapshot: {
+          compactedReplay: [lifecycleFrame(10, 'ended')],
+          liveJournal: [],
+        },
+        async *events(opts = {}) {
+          yield replayComplete;
+          loaded.resolve();
+          await untilAborted(opts.signal);
+        },
+      }),
+    );
+    let snapshot: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
+    function Harness() {
+      snapshot = useTrajectoryLiveSnapshot();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      gap.resolve();
+      await loaded.promise;
+      await flushPromises();
+    });
+    expect(snapshot).toMatchObject({ status: 'live', lastEventId: 10 });
+    expect(
+      [...snapshot!.tools.entries.values()].map((entry) => entry.status),
+    ).toEqual(['success']);
+  });
+
   it('retains a persisted viewport boundary after the legacy live window reaches capacity', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',
@@ -1023,6 +1372,7 @@ describe('DaemonSessionProvider', () => {
         block.kind === 'user' && block.text === 'Exact optimistic prompt',
     );
     expect(optimistic).toBeDefined();
+    expect(optimistic?.promptId).toBe('prompt-1');
     expect(navigation?.provisionalTurns).toMatchObject([
       { promptId: 'prompt-1', blockId: optimistic!.id },
     ]);
@@ -1660,10 +2010,12 @@ describe('DaemonSessionProvider', () => {
       events: createIdleEvents(),
     });
     sdkMocks.sessions.push(activeSession);
+    let trajectoryStore: ContextType<typeof TrajectoryLiveContext>;
     let actions: DaemonSessionActions | undefined;
     let connection: DaemonConnectionState | undefined;
 
     function Harness() {
+      trajectoryStore = useContext(TrajectoryLiveContext);
       actions = useDaemonActions();
       connection = useDaemonConnection();
       return null;
@@ -1677,6 +2029,7 @@ describe('DaemonSessionProvider', () => {
     await act(async () => {
       await vi.waitFor(() => expect(connection?.status).toBe('connected'));
     });
+    const invalidation = vi.spyOn(trajectoryStore!, 'invalidate');
     sdkMocks.MockDaemonSessionClient.load.mockClear();
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal('fetch', fetchMock);
@@ -1696,6 +2049,11 @@ describe('DaemonSessionProvider', () => {
     });
     await act(async () => flushPromises());
 
+    expect(
+      invalidation.mock.calls.filter(
+        ([, reason]) => reason === 'stream_closed',
+      ),
+    ).toHaveLength(2);
     expect(connection).toMatchObject({
       status: 'error',
       error: 'standalone session context cannot include workspaceCwd',
@@ -15855,13 +16213,19 @@ describe('DaemonSessionProvider', () => {
       sdkMocks.sessions.push(
         createMockSession({
           heartbeat,
-          events: createIdleEvents(),
+          async *events(opts = {}) {
+            yield replayComplete;
+            yield lifecycleFrame(1, 'started');
+            await untilAborted(opts.signal);
+          },
         }),
       );
       let connection: DaemonConnectionState | undefined;
+      let trajectory: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
 
       function Harness() {
         connection = useDaemonConnection();
+        trajectory = useTrajectoryLiveSnapshot();
         return null;
       }
 
@@ -15880,6 +16244,13 @@ describe('DaemonSessionProvider', () => {
       });
 
       expect(heartbeat).toHaveBeenCalled();
+      expect(trajectory).toMatchObject({
+        status: 'stale',
+        reason: 'auth_failure',
+      });
+      expect([...trajectory!.tools.entries.values()][0]?.status).toBe(
+        'unknown',
+      );
       expect(connection).toMatchObject({
         status: 'error',
         error: 'Unauthorized',
@@ -16063,6 +16434,80 @@ describe('DaemonSessionProvider', () => {
       { workspaceCwd: '/mock-workspace', timeoutMs: 70_000 },
       expect.any(String),
     );
+  });
+
+  it('keeps a refreshed model catalog when an older same-session load settles', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+    const catalog = (modelId: string): DaemonSessionContextStatus => ({
+      v: 1,
+      sessionId: 'session-a',
+      workspaceCwd: '/mock-workspace',
+      state: {
+        models: { currentModelId: modelId, availableModels: [{ modelId }] },
+      },
+    });
+    const initial = createMockSession({
+      sessionId: 'session-a',
+      context: vi.fn(async () => catalog('catalog-a0')),
+    });
+    sdkMocks.sessions.push(initial);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    expect(connection?.models?.map((m) => m.id)).toEqual(['catalog-a0']);
+    const goal = createDeferred<GoalStateResponse>();
+    const subscribed = createDeferred<void>();
+    const context = vi
+      .fn()
+      .mockResolvedValueOnce(catalog('catalog-a'))
+      .mockResolvedValue(catalog('catalog-b'));
+    const replacement = createMockSession({
+      sessionId: 'session-a',
+      context,
+      goal: vi.fn(() => goal.promise),
+      events: createPendingEvents(subscribed),
+    });
+    replacement.client = initial.client;
+    sdkMocks.MockDaemonSessionClient.load.mockResolvedValueOnce(replacement);
+    const originalWorkspace = sdkMocks.workspaceByCwd.getMockImplementation()!;
+    const reloadModelProviders = vi.fn(async () => ({
+      status: 'applied' as const,
+    }));
+    sdkMocks.workspaceByCwd.mockImplementation((cwd) => ({
+      ...originalWorkspace(cwd),
+      reloadModelProviders,
+      workspaceProviders: sdkMocks.workspaceProviders,
+    }));
+    let reload: Promise<void> | undefined;
+    act(() => {
+      reload = requireActions(actions).reloadSession(
+        new AbortController().signal,
+      );
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(context).toHaveBeenCalledOnce();
+    await act(async () => {
+      await requireActions(actions).refreshModels();
+    });
+    expect(connection?.models?.map((m) => m.id)).toEqual(['catalog-b']);
+    await act(async () => {
+      goal.resolve({ snapshot: { v: 2, goal: null, activity: 'idle' } });
+      await reload;
+      await subscribed.promise;
+      await flushPromises();
+    });
+    expect(connection?.models?.map((m) => m.id)).toEqual(['catalog-b']);
+    expect(connection?.currentModel).toBe('catalog-a0');
   });
 
   it('keeps the current transcript when a same-session reload is aborted', async () => {
@@ -17896,6 +18341,290 @@ describe('DaemonSessionProvider', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('exposes Generated UI only from the attached session and clears it with the owner', async () => {
+    const session = createMockSession({
+      session: { generatedUi: { version: 1, enabled: true } },
+    });
+    sdkMocks.sessions.push(session);
+    let capability: ContextType<typeof McpAppGeneratedUiContext>;
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      capability = useContext(McpAppGeneratedUiContext);
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    expect(capability).toEqual({
+      sessionId: session.sessionId,
+      status: { version: 1, enabled: true },
+    });
+    await act(async () => {
+      await requireActions(actions).clearSession();
+    });
+    expect(capability).toBeUndefined();
+  });
+
+  it.each(['success', 'failure', 'wrong owner'] as const)(
+    'clears Generated UI after a %s context refresh loses its receipt',
+    async (outcome) => {
+      const start = createDeferred<void>();
+      const refresh = createDeferred<DaemonSessionContextStatus>();
+      const initial = {
+        v: 1 as const,
+        sessionId: 'session-1',
+        workspaceCwd: '/mock-workspace',
+        state: {},
+        recovery: { kind: 'clean' as const, canContinue: false },
+      };
+      const context = vi
+        .fn()
+        .mockResolvedValueOnce(initial)
+        .mockImplementation(async () => {
+          try {
+            return await refresh.promise;
+          } finally {
+            // Match DaemonSessionClient.context()'s receipt invalidation.
+            session.session!['generatedUi'] = undefined;
+          }
+        });
+      const session = createMockSession({
+        session: { generatedUi: { version: 1, enabled: true } },
+        context,
+        lastEventId: 10,
+        async *events(opts) {
+          await start.promise;
+          yield {
+            v: 1,
+            id: 11,
+            type: 'turn_complete',
+            data: { promptId: 'observed', stopReason: 'end_turn' },
+          };
+          yield* createIdleEvents()(opts);
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let capability: ContextType<typeof McpAppGeneratedUiContext>;
+      function Harness() {
+        capability = useContext(McpAppGeneratedUiContext);
+        return null;
+      }
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      expect(capability?.status.enabled).toBe(true);
+      await act(async () => {
+        start.resolve();
+        await flushPromises();
+      });
+      expect(context).toHaveBeenCalledTimes(2);
+      expect(capability?.status.enabled).toBe(true);
+      await act(async () => {
+        if (outcome === 'failure') refresh.reject(new Error('context failed'));
+        else
+          refresh.resolve({
+            ...initial,
+            sessionId:
+              outcome === 'wrong owner' ? 'other-session' : initial.sessionId,
+          });
+        await flushPromises();
+      });
+      expect(capability).toBeUndefined();
+    },
+  );
+
+  describe('idle Generated UI policy refresh', () => {
+    const reply = (enabled: boolean, sessionId = 'session-1') =>
+      new Response(
+        JSON.stringify({
+          v: 1,
+          sessionId,
+          workspaceCwd: '/mock-workspace',
+          state: { _meta: { generatedUi: { version: 1, enabled } } },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+
+    const policyEvent = {
+      v: 1,
+      type: 'settings_changed',
+      data: { key: 'mcp.allowed', scope: 'workspace', value: [] },
+    } satisfies DaemonEvent;
+
+    async function setupPolicySession(eventCount = 1) {
+      const sdk = await vi.importActual<typeof import('@qwen-code/sdk/daemon')>(
+        '@qwen-code/sdk/daemon',
+      );
+      const responses = Array.from({ length: eventCount }, () =>
+        createDeferred<Response>(),
+      );
+      const changes = Array.from({ length: eventCount }, () =>
+        createDeferred<DaemonEvent>(),
+      );
+      let reads = 0;
+      const owner = new sdk.DaemonSessionClient({
+        client: new sdk.DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch: async () =>
+            reads++ === 0 ? reply(true) : responses[reads - 2]!.promise,
+        }),
+        session: {
+          sessionId: 'session-1',
+          workspaceCwd: '/mock-workspace',
+          attached: false,
+          clientId: 'client-1',
+          generatedUi: { version: 1, enabled: true },
+        },
+      });
+      const context = vi.fn(() => owner.context());
+      sdkMocks.sessions.push(
+        createMockSession({
+          session: owner.session as unknown as Record<string, unknown>,
+          context,
+          async *events(opts) {
+            for (const change of changes) {
+              const event = await change.promise;
+              if (opts?.signal?.aborted) return;
+              yield event;
+            }
+            yield* createIdleEvents()(opts);
+          },
+        }),
+      );
+      let capability: ContextType<typeof McpAppGeneratedUiContext>;
+      let actions: DaemonSessionActions | undefined;
+      function Harness() {
+        capability = useContext(McpAppGeneratedUiContext);
+        actions = useDaemonActions();
+        return null;
+      }
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      expect(capability?.status.enabled).toBe(true);
+      expect(context).toHaveBeenCalledOnce();
+      return {
+        context,
+        responses,
+        changes,
+        capability: () => capability,
+        actions: () => requireActions(actions),
+      };
+    }
+
+    it.each([
+      policyEvent,
+      {
+        ...policyEvent,
+        data: {
+          key: 'tools.disabled',
+          scope: 'workspace',
+          value: ['generated_ui_show'],
+        },
+      },
+      { v: 1, type: 'settings_reloaded', data: {} },
+      {
+        v: 1,
+        type: 'mcp_server_changed',
+        data: { serverName: 'generated-ui', action: 'disable' },
+      },
+      {
+        v: 1,
+        type: 'mcp_server_restarted',
+        data: { serverName: 'generated-ui', durationMs: 1 },
+      },
+      {
+        v: 1,
+        type: 'tool_toggled',
+        data: { toolName: 'generated_ui_show', enabled: false },
+      },
+      { v: 1, type: 'extensions_changed', data: { refreshed: 1, failed: 0 } },
+    ] satisfies DaemonEvent[])(
+      'withholds the cached capability until the idle owner confirms a policy event: %j',
+      async (event) => {
+        const fixture = await setupPolicySession();
+        await act(async () => {
+          fixture.changes[0]!.resolve(event);
+          await flushPromises();
+        });
+        expect(fixture.context).toHaveBeenCalledTimes(2);
+        expect(fixture.capability()).toBeUndefined();
+        await act(async () => {
+          fixture.responses[0]!.resolve(reply(false));
+          await flushPromises();
+        });
+        expect(fixture.capability()?.status.enabled).toBe(false);
+      },
+    );
+
+    it.each(['ui.theme', 'experimental.generatedUi'])(
+      'does not invalidate the live owner for a non-policy setting: %s',
+      async (key) => {
+        const fixture = await setupPolicySession();
+        await act(async () => {
+          fixture.changes[0]!.resolve({
+            ...policyEvent,
+            data: { key, scope: 'workspace', value: false },
+          });
+          await flushPromises();
+        });
+        expect(fixture.context).toHaveBeenCalledOnce();
+        expect(fixture.capability()?.status.enabled).toBe(true);
+      },
+    );
+
+    it('ignores an older enabled read after a newer policy disables the idle owner', async () => {
+      const fixture = await setupPolicySession(2);
+      await act(async () => {
+        fixture.changes[0]!.resolve(policyEvent);
+        await flushPromises();
+        fixture.changes[1]!.resolve(policyEvent);
+        await flushPromises();
+      });
+      expect(fixture.context).toHaveBeenCalledTimes(3);
+      expect(fixture.capability()).toBeUndefined();
+      await act(async () => {
+        fixture.responses[1]!.resolve(reply(false));
+        await flushPromises();
+      });
+      expect(fixture.capability()?.status.enabled).toBe(false);
+      await act(async () => {
+        fixture.responses[0]!.resolve(reply(true));
+        await flushPromises();
+      });
+      expect(fixture.capability()?.status.enabled).toBe(false);
+    });
+
+    it('does not publish an idle policy read after switching to a different owner', async () => {
+      const fixture = await setupPolicySession();
+      await act(async () => {
+        fixture.changes[0]!.resolve(policyEvent);
+        await flushPromises();
+      });
+      sdkMocks.sessions.push(
+        createMockSession({
+          sessionId: 'next-owner',
+          session: { generatedUi: { version: 1, enabled: false } },
+        }),
+      );
+      let switched!: Promise<void>;
+      act(() => {
+        switched = fixture.actions().loadSession('next-owner');
+      });
+      await act(async () => {
+        await switched;
+        await flushPromises();
+      });
+      expect(fixture.capability()).toMatchObject({
+        sessionId: 'next-owner',
+        status: { enabled: false },
+      });
+      await act(async () => {
+        fixture.responses[0]!.resolve(reply(true));
+        await flushPromises();
+      });
+      expect(fixture.capability()).toMatchObject({
+        sessionId: 'next-owner',
+        status: { enabled: false },
+      });
+    });
   });
 
   it('uses the current client id after an in-place session reattach', async () => {
@@ -22145,7 +22874,7 @@ describe('DaemonSessionProvider', () => {
       expect(
         store?.getSnapshot().blocks.find((block) => block.kind === 'user')
           ?.promptId,
-      ).toBeUndefined();
+      ).toBe('live');
       await act(async () => {
         go.resolve();
         await flushPromises();

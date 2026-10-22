@@ -18,6 +18,11 @@ import {
   HARNESS_TURN_COMPLETE_BOUNDARY,
 } from './managed-harness-checkpoint.js';
 import { ManagedSessionMessageProjection } from './managed-session-message-projection.js';
+import { buildSessionHistoryFromConversation } from '../services/session-api-history.js';
+import {
+  MANAGED_MESSAGE_INLINE_BYTES,
+  publishManagedMessageBody,
+} from './managed-message-chunks.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
 
 /**
@@ -34,6 +39,7 @@ const CARRIED_SYSTEM_SUBTYPES = new Set([
   'at_command',
   'ui_telemetry',
   'attribution_snapshot',
+  'turn_attempt',
 ]);
 
 /**
@@ -428,10 +434,11 @@ export class ManagedSessionRecordSink {
       .eventsInSequenceRange(fromSequence, toSequence)
       .filter((event) => event.kind === 'message.committed')
       .map((event) => event.payload['messageId'] as string);
-    const summaryRef = await this.resources.publish(
-      'managed-compaction-summary',
-      Buffer.from(JSON.stringify(record), 'utf8'),
-    );
+    const bytes = Buffer.from(JSON.stringify(record), 'utf8');
+    const summaryRef =
+      bytes.byteLength <= MANAGED_MESSAGE_INLINE_BYTES
+        ? await this.resources.publish('managed-compaction-summary', bytes)
+        : await publishManagedMessageBody(this.resources, bytes);
     const actor = this.actor();
     const held = actor.activation;
     await this.authority.appendExecutionEvent(
@@ -493,5 +500,27 @@ export class ManagedSessionRecordSink {
   /** Reader-facing records rebuilt from the authoritative log. */
   project(throughSequence?: number): Promise<ChatRecord[]> {
     return this.projection.project(throughSequence);
+  }
+
+  projectModelRecords(throughSequence?: number): Promise<ChatRecord[]> {
+    return this.projection.projectModelRecords(throughSequence);
+  }
+
+  async projectModelHistory(
+    options: {
+      throughSequence?: number;
+      includeRecord?: (record: ChatRecord) => boolean;
+    } = {},
+  ) {
+    const records = await this.projectModelRecords(options.throughSequence);
+    return buildSessionHistoryFromConversation({
+      messages: options.includeRecord
+        ? records.filter(
+            (record) =>
+              record.subtype === 'chat_compression' ||
+              options.includeRecord!(record),
+          )
+        : records,
+    });
   }
 }

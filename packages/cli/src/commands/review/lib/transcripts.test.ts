@@ -33,6 +33,7 @@ import {
   serializedArgsNamePath,
 } from './transcripts.js';
 import { appendRunSession, recordResume } from './run-ledger.js';
+import { arePermissionBitsEnforced } from '../../../test-utils/permission-bits.js';
 
 let dir: string;
 let ENV: NodeJS.ProcessEnv;
@@ -654,7 +655,7 @@ describe('readRunTranscripts — containment and fault handling', () => {
     expect(priorSessionDirs(plan, ENV)).toEqual([]);
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'still throws when the current dir is unreadable, not merely absent',
     () => {
       // EACCES on an EXISTING directory is a live fault; absorbing it would

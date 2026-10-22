@@ -430,6 +430,9 @@ export interface SlashCommand {
    */
   canRunDuringStreaming?: boolean;
 
+  /** Whether Esc may abandon a running action. Defaults to true. */
+  canCancel?: boolean;
+
   // ── Phase 1: visibility ────────────────────────────────────────────────
   /**
    * Whether users can invoke this command via a slash command.

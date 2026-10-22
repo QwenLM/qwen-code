@@ -18,6 +18,7 @@ import {
 import { BrowserTurnNotifications } from './browser-turn-notifications';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
+import { managedDevelopmentOptions } from './components/managed/managed-development-options';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import { StandaloneAuth } from './components/StandaloneAuth';
 import { RootErrorFallback } from './components/RootErrorFallback';
@@ -191,11 +192,19 @@ function getDevelopmentManagedAgentProvider():
   if (!import.meta.env.DEV) return undefined;
   const params = new URLSearchParams(window.location.search);
   if (params.get('managedProvider') !== 'java') return undefined;
-  const tenantId = params.get('tenant')?.trim() || 'local-java-demo';
   return createJavaManagedAgentProvider({
     baseUrl: window.location.origin,
-    getHeaders: () => ({ 'X-Qwen-Tenant-Id': tenantId }),
-    productScope: tenantId,
+    ...managedDevelopmentOptions(params, {
+      VITE_MANAGED_AGENT_ACTOR_ID: import.meta.env[
+        'VITE_MANAGED_AGENT_ACTOR_ID'
+      ],
+      VITE_MANAGED_AGENT_MODEL_PRESETS: import.meta.env[
+        'VITE_MANAGED_AGENT_MODEL_PRESETS'
+      ],
+      VITE_MANAGED_AGENT_WORKSPACE_BINDING: import.meta.env[
+        'VITE_MANAGED_AGENT_WORKSPACE_BINDING'
+      ],
+    }),
   });
 }
 
@@ -418,6 +427,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
                     },
                     rightPanel: {
                       items: [
+                        'files',
                         'review',
                         'sideTask',
                         'terminal',

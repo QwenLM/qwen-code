@@ -24,6 +24,8 @@ import type {
   DaemonBackgroundTurn,
   DaemonForkSessionResult,
   DaemonEvent,
+  DaemonMessageGroupsSnapshot,
+  DaemonDeleteMessageGroupsResult,
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
@@ -63,6 +65,7 @@ import type {
   DaemonSession,
   DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
@@ -89,6 +92,8 @@ import type {
 export interface DaemonReplaySnapshot {
   compactedReplay: DaemonEvent[];
   liveJournal: DaemonEvent[];
+  lifecycleReplay?: DaemonEvent[];
+  lifecycleReplayIncomplete?: boolean;
 }
 
 export interface DaemonSessionClientOptions {
@@ -198,6 +203,8 @@ function createStandaloneRestoredClient(
     hasActivePrompt,
     compactedReplay,
     liveJournal,
+    lifecycleReplay,
+    lifecycleReplayIncomplete,
     historyHasMore,
     historyAnchorRecordId,
     replayDegraded,
@@ -219,6 +226,10 @@ function createStandaloneRestoredClient(
           replaySnapshot: {
             compactedReplay: compactedReplay ?? [],
             liveJournal: liveJournal ?? [],
+            ...(lifecycleReplay !== undefined ? { lifecycleReplay } : {}),
+            ...(lifecycleReplayIncomplete !== undefined
+              ? { lifecycleReplayIncomplete }
+              : {}),
           },
           replaySnapshotComplete:
             Array.isArray(compactedReplay) && Array.isArray(liveJournal),
@@ -288,6 +299,7 @@ export class DaemonSessionClient {
   private subscriptionActive = false;
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
   private reattaching?: Promise<void>;
+  private generatedUiReadGeneration = 0;
   private cancelling?: Promise<void>;
   private readonly promptLimit: number;
   private readonly attachmentCache = new Map<
@@ -407,6 +419,8 @@ export class DaemonSessionClient {
       hasActivePrompt,
       compactedReplay,
       liveJournal,
+      lifecycleReplay,
+      lifecycleReplayIncomplete,
       historyHasMore,
       historyAnchorRecordId,
       replayDegraded,
@@ -426,6 +440,10 @@ export class DaemonSessionClient {
       replaySnapshot: {
         compactedReplay: compactedReplay ?? [],
         liveJournal: liveJournal ?? [],
+        ...(lifecycleReplay !== undefined ? { lifecycleReplay } : {}),
+        ...(lifecycleReplayIncomplete !== undefined
+          ? { lifecycleReplayIncomplete }
+          : {}),
       },
       replaySnapshotComplete,
       replayPartial: partial === true,
@@ -656,7 +674,11 @@ export class DaemonSessionClient {
       const onAbort = () => {
         const pending = this._pendingPrompts.get(accepted.promptId);
         if (pending && this._pendingPrompts.delete(accepted.promptId)) {
-          this.cancel().catch(() => {});
+          this.client
+            .cancel(this.sessionId, this.clientId, {
+              cancelReason: 'interrupted',
+            })
+            .catch(() => {});
           pending.reject(
             signal!.reason ?? new DOMException('Aborted', 'AbortError'),
           );
@@ -690,15 +712,24 @@ export class DaemonSessionClient {
    * register the prompt in `_pendingPrompts`, or wait for the matching
    * `turn_complete` / `turn_error` SSE event. Callers that need final turn
    * results should use `prompt()` or manage SSE terminal events themselves.
+   * `beforeDispatch` can reject a stale caller before each HTTP attempt,
+   * including the retry after client registration recovery.
    */
   async submitPrompt(
     req: PromptRequest,
     signal?: AbortSignal,
+    beforeDispatch?: (clientId: string | undefined) => void,
   ): Promise<NonBlockingPromptAccepted> {
-    signal?.throwIfAborted();
-    const accepted = await this.withClientIdSelfHeal(() =>
-      this.client.promptNonBlocking(this.sessionId, req, signal, this.clientId),
-    );
+    const accepted = await this.withClientIdSelfHeal(() => {
+      signal?.throwIfAborted();
+      beforeDispatch?.(this.clientId);
+      return this.client.promptNonBlocking(
+        this.sessionId,
+        req,
+        signal,
+        this.clientId,
+      );
+    });
     if (!isNonBlockingAccepted(accepted)) {
       throw new Error('Expected non-blocking prompt acceptance');
     }
@@ -708,12 +739,14 @@ export class DaemonSessionClient {
   /** Return continuation admission; terminal results arrive on the event stream. */
   async continueSession(
     signal?: AbortSignal,
+    options: { confirmCancellation?: string } = {},
   ): Promise<DaemonContinueSessionResult> {
     signal?.throwIfAborted();
     return await this.withClientIdSelfHeal(() =>
       this.client.continueSession(this.sessionId, {
         clientId: this.clientId,
         signal,
+        confirmCancellation: options.confirmCancellation,
       }),
     );
   }
@@ -807,6 +840,7 @@ export class DaemonSessionClient {
    */
   private async reattach(): Promise<void> {
     if (this.reattaching) return this.reattaching;
+    const generatedUiGeneration = ++this.generatedUiReadGeneration;
     // Send no clientId so the bridge issues a fresh registration rather than
     // validating the stale one. Keep the original context explicit: workspace
     // restore resolves by cwd, while standalone restore must use its dedicated
@@ -851,7 +885,10 @@ export class DaemonSessionClient {
           this.session.worktreeState = session.worktreeState;
         }
       }
-      // Refresh only the client identity; leave the SSE cursor and ACP state intact.
+      // Refresh attachment identity and capabilities without moving the SSE cursor.
+      if (generatedUiGeneration === this.generatedUiReadGeneration) {
+        this.session.generatedUi = session.generatedUi;
+      }
       this.session.clientId = session.clientId;
     });
     try {
@@ -859,6 +896,13 @@ export class DaemonSessionClient {
     } finally {
       this.reattaching = undefined;
     }
+  }
+
+  /** Stop lifecycle work while preserving recovery; use cancel() for a user stop. */
+  async interrupt(): Promise<void> {
+    await this.client.cancel(this.sessionId, this.clientId, {
+      cancelReason: 'interrupted',
+    });
   }
 
   async cancel(): Promise<void> {
@@ -942,6 +986,22 @@ export class DaemonSessionClient {
       clientId: this.clientId,
       persist: opts?.persist,
     });
+  }
+
+  getMessageGroups(): Promise<DaemonMessageGroupsSnapshot> {
+    return this.client.getMessageGroups(this.sessionId);
+  }
+
+  deleteMessageGroups(
+    snapshot: string,
+    groupIds: string[],
+  ): Promise<DaemonDeleteMessageGroupsResult> {
+    return this.client.deleteMessageGroups(
+      this.sessionId,
+      snapshot,
+      groupIds,
+      this.clientId,
+    );
   }
 
   getRewindSnapshots(): Promise<{
@@ -1142,8 +1202,42 @@ export class DaemonSessionClient {
     });
   }
 
-  context(): Promise<DaemonSessionContextStatus> {
-    return this.client.sessionContext(this.sessionId, this.clientId);
+  async context(): Promise<DaemonSessionContextStatus> {
+    const generation = ++this.generatedUiReadGeneration;
+    try {
+      const status = await this.client.sessionContext(
+        this.sessionId,
+        this.clientId,
+      );
+      if (generation === this.generatedUiReadGeneration) {
+        const value = status.state._meta?.['generatedUi'];
+        this.session.generatedUi = undefined;
+        if (
+          status.v === 1 &&
+          status.sessionId === this.sessionId &&
+          value &&
+          typeof value === 'object' &&
+          !Array.isArray(value) &&
+          'version' in value &&
+          value.version === 1 &&
+          'enabled' in value &&
+          typeof value.enabled === 'boolean'
+        ) {
+          this.session.generatedUi = {
+            version: 1,
+            enabled: value.enabled,
+            ...('reason' in value && typeof value.reason === 'string'
+              ? { reason: value.reason }
+              : {}),
+          };
+        }
+      }
+      return status;
+    } catch (error) {
+      if (generation === this.generatedUiReadGeneration)
+        this.session.generatedUi = undefined;
+      throw error;
+    }
   }
 
   status(): Promise<DaemonSessionSummary> {
@@ -1162,6 +1256,14 @@ export class DaemonSessionClient {
 
   tasks(): Promise<DaemonSessionTasksStatus> {
     return this.client.sessionTasks(this.sessionId, this.clientId);
+  }
+
+  taskRuntime(taskId: string): Promise<DaemonSessionTaskRuntimeStatus> {
+    return this.client.sessionTaskRuntime(
+      this.sessionId,
+      taskId,
+      this.clientId,
+    );
   }
 
   agents(signal?: AbortSignal): Promise<DaemonSessionAgentsStatus> {
