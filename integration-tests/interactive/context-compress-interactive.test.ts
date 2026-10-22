@@ -82,14 +82,14 @@ describe('Interactive Mode', () => {
     );
   }
 
-  it('answers seed and compression requests by shape, not request order', () => {
-    const seed = fakeModelResponse({
+  it('answers seed and compression requests by shape, not request order', async () => {
+    const seed = await fakeModelResponse({
       body: { messages: [{ role: 'user', content: 'seed prompt' }] },
       requestIndex: 3,
     });
     expect(seed.content).toContain('history history');
 
-    const compression = fakeModelResponse({
+    const compression = await fakeModelResponse({
       body: {
         messages: [{ role: 'system', content: getCompressionPrompt() }],
       },
