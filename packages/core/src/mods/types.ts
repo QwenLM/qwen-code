@@ -23,7 +23,11 @@ export interface ModSource {
 
 export type ModOption = string | number | boolean | string[];
 export type ModOptions = Record<string, ModOption>;
-export type ModPluginConfigs = Record<string, { options?: ModOptions }>;
+export type ModToolDialect = 'native' | 'claude';
+export type ModPluginConfigs = Record<
+  string,
+  { options?: ModOptions; toolDialect?: ModToolDialect }
+>;
 
 export interface ModDependency {
   name: string;
@@ -42,11 +46,17 @@ export interface ModCommand {
   argumentHint?: string;
 }
 
+export interface ModCommandPresentation {
+  isFullscreen: boolean;
+  columns: number;
+}
+
 export interface ModPlugin {
   id: string;
   name: string;
   source: ModSource;
   options: ModOptions;
+  toolDialect?: ModToolDialect;
 }
 
 export interface ModLog {
@@ -55,9 +65,20 @@ export interface ModLog {
 }
 
 export type ModRequest =
-  | { type: 'load'; plugins: ModPlugin[]; cwd: string }
-  | { type: 'command'; command: string; args: string }
-  | { type: 'tool'; input: ModToolCallInput }
+  | {
+      type: 'load';
+      plugins: ModPlugin[];
+      cwd: string;
+      surface: 'terminal' | null;
+    }
+  | {
+      type: 'command';
+      command: string;
+      args: string;
+      presentation?: ModCommandPresentation;
+    }
+  | { type: 'tool'; input: ModToolCallInput; builtinTool?: string }
+  | { type: 'native'; id: number }
   | { type: 'host-result'; id: number; result?: ModToolResult; error?: string }
   | {
       type: 'tool-check';
@@ -73,6 +94,7 @@ export type ModReply =
   | { type: 'error'; message: string }
   | { type: 'host-call'; id: number; input: ModToolCallInput }
   | { type: 'host-cancel'; ids: number[] }
+  | { type: 'activity'; revision: number; operation?: number }
   | {
       type: 'check-result';
       id: number;
@@ -80,3 +102,6 @@ export type ModReply =
       error?: string;
     }
   | ({ type: 'log'; plugin: string } & ModLog);
+
+export type ModWorkerRequest = ModRequest & { root: number; phase: number };
+export type ModWorkerReply = ModReply & { root: number; phase: number };

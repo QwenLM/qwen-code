@@ -25,6 +25,7 @@ import {
 } from '../copy_bundle_assets.js';
 import { copyFiles } from '../copy_files.js';
 import { preparePackage } from '../prepare-package.js';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const realReadFileSync = fs.readFileSync;
 const realReaddirSync = fs.readdirSync;
@@ -569,12 +570,12 @@ describe('package asset scripts', () => {
     ).toBe(false);
   });
 
-  // chmod is the only lever this case has: on Windows it is a no-op, and a
-  // root user reads through it, so the branch under test is unreachable
-  // there. The case skips rather than running into the other branch — a
-  // readable tree, stamped as usual — and failing red against the no-stamp
-  // assertion.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  // chmod is the only lever this case has: on Windows it is a no-op, and
+  // root with its DAC capabilities reads through it, so the branch under
+  // test is unreachable there. The case skips rather than running into the
+  // other branch — a readable tree, stamped as usual — and failing red
+  // against the no-stamp assertion.
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses when a digest root exists but cannot be listed',
     () => {
       // The root-level arm of the unlistable-directory refusal: with the
@@ -675,6 +676,7 @@ describe('package asset scripts', () => {
     expect(distPackageJson.files).toContain('export-transcript-document.css');
     expect(distPackageJson.files).toContain('execution-worker.js');
     expect(distPackageJson.files).toContain('mem0');
+    expect(distPackageJson.files).toContain('generated-ui');
   });
 
   it('names the missing stylesheet when only the renderer JS was built', () => {
@@ -717,6 +719,10 @@ describe('package asset scripts', () => {
     'execution-worker.js',
     'mem0/main.js',
     'mem0/write-confirmation.js',
+    'generated-ui/main.js',
+    'generated-ui/app.html',
+    'generated-ui/skills/generated-ui/SKILL.md',
+    'generated-ui/THIRD_PARTY_NOTICES.txt',
     'sandboxBwrapRelay.js',
     'sandboxLandlockRelay.js',
     'sandboxFileWorker.js',
@@ -791,7 +797,7 @@ describe('package asset scripts', () => {
     },
   );
 
-  it('copies Computer Use platform references to both CLI and core distributions', () => {
+  it('copies bundled skill references to both CLI and core distributions', () => {
     const rootDir = createFixtureRoot();
     const coreDir = path.join(rootDir, 'packages', 'core');
     const resources = [
@@ -802,7 +808,7 @@ describe('package asset scripts', () => {
     for (const resource of resources) {
       writeFile(
         rootDir,
-        `packages/core/src/skills/bundled/computer-use/${resource}`,
+        `packages/core/src/skills/bundled/fixture-skill/${resource}`,
         resource,
       );
     }
@@ -812,13 +818,13 @@ describe('package asset scripts', () => {
     for (const resource of resources) {
       expect(
         readFileSync(
-          path.join(rootDir, 'dist/bundled/computer-use', resource),
+          path.join(rootDir, 'dist/bundled/fixture-skill', resource),
           'utf8',
         ),
       ).toBe(resource);
       expect(
         readFileSync(
-          path.join(coreDir, 'dist/src/skills/bundled/computer-use', resource),
+          path.join(coreDir, 'dist/src/skills/bundled/fixture-skill', resource),
           'utf8',
         ),
       ).toBe(resource);
@@ -1587,6 +1593,14 @@ describe('package asset scripts', () => {
   function createBundleArtifacts(rootDir) {
     writeFile(rootDir, 'dist/mem0/main.js', '');
     writeFile(rootDir, 'dist/mem0/write-confirmation.js', '');
+    for (const file of [
+      'main.js',
+      'app.html',
+      'skills/generated-ui/SKILL.md',
+      'THIRD_PARTY_NOTICES.txt',
+    ]) {
+      writeFile(rootDir, `dist/generated-ui/${file}`, 'generated-ui asset\n');
+    }
     writeFile(rootDir, 'dist/cli.js', '');
     writeFile(rootDir, 'dist/execution-worker.js', '');
     writeFile(rootDir, 'dist/sandboxBwrapRelay.js', '');

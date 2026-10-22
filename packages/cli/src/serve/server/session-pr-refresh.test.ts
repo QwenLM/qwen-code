@@ -43,6 +43,7 @@ import {
   resolveSessionPrRefreshIntervalMs,
   startSessionPrRefreshTimer,
 } from './session-pr-refresh.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 // dispose() stops the next tick but does not await the sweep already in
 // flight, so a sweep can still be writing under the temp tree while teardown
@@ -1605,7 +1606,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
     expect((await readSessionPrs(prPathB))?.[0]?.state).toBe('merged');
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'keeps sweeping archived sessions when a sidecar write fails',
     async () => {
       await seedSession(SESSION_A);

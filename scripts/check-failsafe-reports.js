@@ -5,7 +5,8 @@
  */
 
 // The Java integration-test jobs split `*IT.java` by name: `Hosted*IT` runs
-// only in the Hosted MySQL job, every other `*IT` only in the MariaDB job.
+// only in the Hosted MySQL job, and every other `*IT` runs in both engines'
+// legs of the mysql-integration job (MySQL 8.4 and MariaDB 10.11).
 // Maven still passes when a profile's <includes>, or -Dit.test in MAVEN_ARGS
 // or .mvn/maven.config, narrows that selection, so after a job's tests this
 // compares the failsafe reports with the source tree of each module: every
@@ -22,17 +23,26 @@ import path from 'node:path';
 const isHosted = (className) => /^Hosted.*IT$/.test(className);
 const isGate = (className) => /^Hosted.*Gate$/.test(className);
 const [family, ...modules] = process.argv.slice(2);
-const optIn = family === 'o4-mysql' || family === 'o4-oss';
+const optIn =
+  family === 'o4-mysql' ||
+  family === 'o4-oss' ||
+  family === 'event-transport' ||
+  family === 'event-transport-multi-node';
 const inFamily = new Map([
   ['hosted', isHosted],
   ['non-hosted', (className) => /IT$/.test(className) && !isHosted(className)],
   ['hosted-gates', isGate],
   ['o4-mysql', (className) => className === 'O4MySqlGate'],
   ['o4-oss', (className) => className === 'O4OssGate'],
+  ['event-transport', (className) => className === 'EventTransportBrokerGate'],
+  [
+    'event-transport-multi-node',
+    (className) => className === 'EventTransportMultiNodeGate',
+  ],
 ]).get(family);
 if (!inFamily || modules.length === 0) {
   console.error(
-    'usage: node scripts/check-failsafe-reports.js hosted|non-hosted|hosted-gates|o4-mysql|o4-oss <maven-module-dir>...',
+    'usage: node scripts/check-failsafe-reports.js hosted|non-hosted|hosted-gates|o4-mysql|o4-oss|event-transport|event-transport-multi-node <maven-module-dir>...',
   );
   process.exit(2);
 }

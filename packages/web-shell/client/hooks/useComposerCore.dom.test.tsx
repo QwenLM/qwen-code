@@ -8,6 +8,7 @@ import { I18nProvider } from '../i18n';
 import { WebShellPortalRootContext } from '../portalRoot';
 import {
   type ComposerSubmitCommit,
+  getInlineComposerTags,
   useComposerCore,
   type UseComposerCoreOptions,
   type UseComposerCoreReturn,
@@ -46,6 +47,7 @@ function Harness({
   workspaceUploadBusy,
   fileDragEnabled,
   attachmentsEnabled,
+  persistFileReferences,
   disabled,
 }: {
   composerInput?: WebShellComposerInput;
@@ -73,6 +75,7 @@ function Harness({
   workspaceUploadBusy?: boolean;
   fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
   attachmentsEnabled?: UseComposerCoreOptions['attachmentsEnabled'];
+  persistFileReferences?: boolean;
   disabled?: UseComposerCoreOptions['disabled'];
 }) {
   const composer = useComposerCore({
@@ -99,6 +102,7 @@ function Harness({
     workspaceUploadBusy,
     fileDragEnabled,
     attachmentsEnabled,
+    persistFileReferences,
     disabled,
   });
   latest = composer;
@@ -133,6 +137,7 @@ async function mount({
   workspaceUploadBusy,
   fileDragEnabled,
   attachmentsEnabled,
+  persistFileReferences,
   disabled,
 }: {
   composerInput?: WebShellComposerInput;
@@ -160,6 +165,7 @@ async function mount({
   workspaceUploadBusy?: boolean;
   fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
   attachmentsEnabled?: UseComposerCoreOptions['attachmentsEnabled'];
+  persistFileReferences?: boolean;
   disabled?: UseComposerCoreOptions['disabled'];
 } = {}) {
   container = document.createElement('div');
@@ -198,6 +204,7 @@ async function mount({
             workspaceUploadBusy={workspaceUploadBusy}
             fileDragEnabled={fileDragEnabled}
             attachmentsEnabled={currentAttachmentsEnabled}
+            persistFileReferences={persistFileReferences}
             disabled={disabled}
           />
         </I18nProvider>
@@ -715,6 +722,116 @@ describe('useComposerCore history and drafts', () => {
     expect(localStorage.getItem(getSessionDraftKey('session-b'))).toBeNull();
   });
 
+  it.each(['inline', 'top'] as const)(
+    'persists complete selected-file metadata through a real %s draft remount',
+    async (placement) => {
+      const tag = {
+        id: 'file:a.ts',
+        kind: 'file' as const,
+        value: 'a.ts',
+        serialized: '@a.ts',
+        metadata: {
+          managedFile: {
+            text: '\uFEFF你好\r\noriginal bytes',
+            sha256: 'frozen',
+            source: 'session-a',
+          },
+        },
+      };
+      await mount({ sessionId: 'session-a', persistFileReferences: true });
+      act(() => {
+        latest!.setText('explain');
+        latest!.addTags([tag], { placement, position: 'end' });
+        window.dispatchEvent(new Event('pagehide'));
+      });
+      act(() => root!.unmount());
+      root = null;
+      container?.remove();
+      container = null;
+      const { onSubmit } = await mount({
+        sessionId: 'session-a',
+        persistFileReferences: true,
+      });
+      if (placement === 'inline')
+        expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([tag]);
+      else expect(latest!.composerTags).toEqual([tag]);
+      act(() => latest!.submitText());
+      expect(onSubmit.mock.calls[0]?.[4]).toMatchObject({
+        inputAnnotations: [
+          expect.objectContaining({
+            reference: expect.objectContaining({ metadata: tag.metadata }),
+          }),
+        ],
+      });
+      expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBeNull();
+    },
+  );
+
+  it.each(['submit', 'clear', 'clearTags'] as const)(
+    'does not resurrect selected-file metadata after %s and immediate unmount',
+    async (action) => {
+      await mount({ sessionId: 'session-a', persistFileReferences: true });
+      act(() => {
+        latest!.setText('explain');
+        latest!.addTags(
+          [
+            {
+              id: 'file:a',
+              kind: 'file',
+              serialized: '@a',
+              metadata: { managedFile: { text: 'selected bytes' } },
+            },
+          ],
+          { placement: 'top' },
+        );
+      });
+      act(() => window.dispatchEvent(new Event('pagehide')));
+      act(() => {
+        if (action === 'submit') latest!.submitText();
+        else
+          latest!.clear(
+            action === 'clearTags' ? { text: false, tags: true } : undefined,
+          );
+        root!.unmount();
+        root = null;
+      });
+      expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+        action === 'clearTags' ? 'explain' : null,
+      );
+    },
+  );
+
+  it('clears a reloaded snapshot draft after an accepted pending replay', async () => {
+    await mount({ sessionId: 'session-a', persistFileReferences: true });
+    act(() => {
+      latest!.setText('explain');
+      latest!.addTags(
+        [
+          {
+            id: 'file:a',
+            kind: 'file',
+            serialized: '@a',
+            metadata: { managedFile: { text: 'frozen bytes' } },
+          },
+        ],
+        { placement: 'top' },
+      );
+    });
+    act(() => window.dispatchEvent(new Event('pagehide')));
+    act(() => root!.unmount());
+    root = null;
+    container?.remove();
+    container = null;
+    await mount({ sessionId: 'session-a', persistFileReferences: true });
+    expect(latest!.composerTags).toHaveLength(1);
+    act(() => {
+      latest!.handle.clear();
+      root!.unmount();
+      root = null;
+    });
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBeNull();
+  });
+
   it('restores an unsent new-task draft after leaving and returning', async () => {
     vi.useFakeTimers();
     const workspaceCwd = '/workspace/shared';
@@ -1047,6 +1164,54 @@ describe('useComposerCore history and drafts', () => {
     mounted.switchSession('session-b', '/workspace/b');
     expect(latest!.searchState.searchMode).toBe(false);
     expect(latest!.searchState.searchMatches).toEqual([]);
+  });
+
+  it('keeps submitted slash commands out of desktop history search matches', async () => {
+    const workspaceCwd = '/workspace/desktop-slash-filter';
+    localStorage.setItem(
+      getPromptHistoryStorageKey(workspaceCwd),
+      JSON.stringify(['/theme dark', 'plain prompt']),
+    );
+    await mount({
+      sessionId: 'session-desktop-slash',
+      atWorkspaceCwd: workspaceCwd,
+    });
+
+    act(() => latest!.searchState.openHistorySearch());
+    // The desktop panel hides slash entries because the slash completion
+    // menu re-offers them; only the touch backend lists them (pinned by the
+    // mobile suite).
+    expect(latest!.searchState.searchMatches).toEqual(['plain prompt']);
+  });
+
+  it('keeps the stored draft when a history panel recall is followed by a session switch', async () => {
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/panel-recall',
+    });
+    act(() => {
+      latest!.setText('older saved input');
+      latest!.submitText();
+      latest!.setText('my draft');
+    });
+    act(() => blurEditor());
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    act(() => latest!.searchState.openHistorySearch());
+    act(() => latest!.searchState.restoreSearchMatch!('older saved input'));
+    expect(latest!.getText()).toBe('older saved input');
+    // The panel click flow closes without restoring the pre-search draft.
+    act(() => latest!.searchState.closeSearch(false));
+
+    mounted.switchSession('session-b', '/workspace/panel-recall');
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    mounted.switchSession('session-a', '/workspace/panel-recall');
+    expect(latest!.getText()).toBe('my draft');
   });
 
   it('flushes the draft to localStorage on visibilitychange and pagehide', async () => {

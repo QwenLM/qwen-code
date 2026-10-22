@@ -1375,6 +1375,12 @@ button.livePendingSession:hover {
     min-width: var(--session-actions-width, 78px);
   }
 
+  /* Rows with a PR badge hold the overlay's width at rest, so revealing the
+     actions never moves the badge out from under the pointer. */
+  .sessionMetaSlotReserved {
+    min-width: var(--session-actions-width, 78px);
+  }
+
   .sessionRow:hover:not(.runningSession) .sessionGitIcon,
   .sessionRow:hover:not(.runningSession) .sessionAttention,
   .sessionMetaSlot:hover .sessionGitIcon,
@@ -2398,4 +2404,25 @@ button.livePendingSession:hover {
   margin: -12px 0 12px;
   padding: 10px 4px;
   border-bottom: 1px solid var(--sidebar-border);
+}
+
+.homePopoverAnchor {
+  display: contents;
+}
+
+.homePopover {
+  width: min(
+    var(--collapsed-session-popover-width, 300px),
+    var(--radix-popover-content-available-width)
+  );
+  min-width: 0;
+  height: var(--radix-popover-content-available-height);
+  gap: 0;
+  border: 0;
+  transition: none;
+}
+
+.homePopover .homeColumn {
+  padding: 12px;
+  border-right: 0;
 }

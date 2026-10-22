@@ -289,6 +289,34 @@ describe('broadcast ids (H4e-b2 decision 4)', () => {
     expect(hostedPromptKey(wake)).toMatch(/^[0-9a-f]{16}$/);
     expect(broadcastRunId(wake, 'c', 1)).toBe(broadcastRunId(wake, 'c', 1));
   });
+
+  it('collapses a blocked notification turn as a child acceptance is collapsed', () => {
+    // #14387: the blocked notification's wake turn embeds the run it
+    // settled (`<run>:blocked:notify`) exactly as an acceptance does.
+    // Keyed verbatim, each blocked hop appends a whole run id to the next
+    // launch — 66, 111, 156 chars for a 36-char Turn id and a 29-char
+    // call id — and the third create meets the 128-char lineage bound.
+    const callId = 'call-0123456789abcdef01234567';
+    const promptId = 'b3f0c1a2-4d5e-4f60-8a91-b2c3d4e5f607';
+    const run = hostedCallKey(promptId, callId);
+    expect(run).toHaveLength(66);
+    const blocked = `${run}:blocked:notify`;
+    expect(hostedPromptKey(blocked)).toMatch(/^[0-9a-f]{16}$/);
+    const hops = [hostedCallKey(blocked, callId)];
+    hops.push(hostedCallKey(`${hops[0]}:blocked:notify`, callId));
+    hops.push(hostedCallKey(`${hops[1]}:blocked:notify`, callId));
+    // Every blocked hop stays at the acceptance's bounded length.
+    expect(hops.map((hop) => hop.length)).toEqual([46, 46, 46]);
+    expect(hostedCallKey(`${run}:accept:notify`, callId)).toHaveLength(46);
+  });
+
+  it('keeps child calls from a crash continuation inside the lineage bound', () => {
+    const turnId = `wake-recovery:${'a'.repeat(64)}`;
+    expect(hostedPromptKey(turnId)).toMatch(/^[0-9a-f]{16}$/);
+    expect(hostedCallKey(turnId, 'call-0123456789abcdef01234567')).toHaveLength(
+      46,
+    );
+  });
 });
 
 describe('member-message ids (H4e-b3 decision 8, b3c)', () => {

@@ -49,6 +49,7 @@ export function snapshotToTask(s: WorkflowSnapshot): WorkflowTask {
     id: s.runId,
     kind: 'workflow',
     runId: s.runId,
+    ...(s.parentSessionId ? { parentSessionId: s.parentSessionId } : {}),
     ...(s.toolUseId ? { toolUseId: s.toolUseId } : {}),
     ...(s.sourceRef ? { sourceRef: { ...s.sourceRef } } : {}),
     ...(s.workflowCalls

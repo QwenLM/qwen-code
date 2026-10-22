@@ -25,12 +25,130 @@ import {
   failureSignature,
   renderIssueBody,
   renderIssueTitle,
+  renderFailureComment,
   runCli,
   shortenForTitle,
   testKey,
 } from './main-failure-signature.mjs';
 
 const ESC = '\u001B';
+
+test('reports failed jobs, steps and tests directly on a PR', () => {
+  const comment = renderFailureComment({
+    analysis: {
+      workflow: 'Managed Agent gate',
+      tests: [{ id: 'com.example.HostedExtensionsIT.closes' }],
+    },
+    occurrence: {
+      sha: 'abc123456789abcdef',
+      runId: '39042781121',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/39042781121',
+    },
+    jobs: [
+      {
+        name: 'SDK Java (full) / Hosted processes',
+        conclusion: 'failure',
+        html_url:
+          'https://github.com/QwenLM/qwen-code/actions/runs/39042781121/job/123',
+        steps: [{ name: 'Verify Hosted processes', conclusion: 'failure' }],
+      },
+      { name: 'Windows', conclusion: 'success', steps: [] },
+    ],
+  });
+  assert.match(comment, /qwen-managed-agent-ci-failure:39042781121/);
+  assert.match(comment, /### `Managed Agent gate` failed/);
+  assert.match(comment, /Hosted processes.*\/job\/123/);
+  assert.match(comment, /Verify Hosted processes/);
+  assert.match(comment, /com\.example\.HostedExtensionsIT\.closes/);
+  assert.doesNotMatch(comment, /Windows/);
+});
+
+test('keeps contributor text on one line and reports cancelled steps and test overflow', () => {
+  const hostile = 'name`\r\n[link](https://example.com)';
+  const comment = renderFailureComment({
+    analysis: {
+      workflow: 'Managed Agent gate',
+      tests: Array.from({ length: MAX_BODY_TESTS + 1 }, () => ({
+        id: hostile,
+      })),
+    },
+    occurrence: {
+      sha: 'abc123456789',
+      runId: '1',
+      runUrl: 'https://example.com/run',
+    },
+    jobs: [
+      {
+        name: hostile,
+        conclusion: 'failure',
+        html_url: 'https://example.com/job',
+        steps: [
+          { name: hostile, conclusion: 'cancelled' },
+          { name: 'Checkout', conclusion: 'success' },
+        ],
+      },
+    ],
+  });
+  assert.ok(
+    comment.includes(
+      '- [`name   [link](https://example.com)`](https://example.com/job): `name   [link](https://example.com)`',
+    ),
+  );
+  assert.equal(
+    comment
+      .split('\n')
+      .filter((line) => line === '- `name   [link](https://example.com)`')
+      .length,
+    MAX_BODY_TESTS,
+  );
+  assert.match(comment, /…and 1 more/);
+  assert.doesNotMatch(comment, /\r|Checkout/);
+});
+
+test('runCli comment tolerates a missing or empty jobs listing', () => {
+  // The workflow truncates run-jobs.json with its redirect before `gh api`
+  // writes, so an API death can leave it empty. Both the issue path and the
+  // comment must degrade to naming no job; a throw here would fail the
+  // analyze job and lose the PR comment AND the issue for a real failure.
+  const dir = mkdtempSync(join(tmpdir(), 'sig-comment-'));
+  try {
+    const analysisPath = join(dir, 'analysis.json');
+    writeFileSync(analysisPath, JSON.stringify({ tests: [] }));
+    const occurrence = [
+      '--sha',
+      'abc123456789',
+      '--run-id',
+      '39042781121',
+      '--run-url',
+      'https://github.com/QwenLM/qwen-code/actions/runs/39042781121',
+    ];
+    for (const [name, content] of [
+      ['empty.json', ''],
+      ['missing.json', undefined],
+      ['error.json', '{"message": "Bad credentials"}'],
+    ]) {
+      if (content !== undefined) {
+        writeFileSync(join(dir, name), content);
+      }
+      const comment = captureStdout([
+        'comment',
+        '--analysis',
+        analysisPath,
+        '--jobs-json',
+        join(dir, name),
+        ...occurrence,
+      ]);
+      assert.ok(comment.length > 0, name);
+      assert.ok(comment.includes('No test identifier was available'), name);
+      assert.ok(
+        comment.includes('qwen-managed-agent-ci-failure:39042781121'),
+        name,
+      );
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 // Verbatim shape of the lines Actions stored for E2E run 3354 (timestamp
 // prefix + SGR escapes + the failure printed once inline and twice in the
@@ -758,10 +876,52 @@ test('falls back to a per-commit issue when no test can be identified', () => {
 
   assert.equal(title, 'Main CI failed: E2E Tests on af7a9ec12722');
   assert.ok(body.includes(`<!-- ${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha} -->`));
+  // Merged-PR failures reach this path too; the body must not claim the run
+  // failed on `main`.
+  assert.ok(!body.includes('main-branch'));
   assert.ok(body.includes('tracked per commit'));
   assert.ok(body.includes(`- Run: ${OCCURRENCE.runUrl}`));
   // No recurrence machinery on this path: each commit gets its own issue.
   assert.ok(!body.includes(OCCURRENCE_MARKER));
+});
+
+test('deduplicates recurring Desktop packaging failures across commits', () => {
+  const jobs = [{ name: 'Package / Build Windows x64', steps: ['Package'] }];
+  const analysis = analyzeLogs('Desktop Checks', ['ParserError'], jobs);
+  const first = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  const next = { ...OCCURRENCE, sha: 'next-commit', runId: 'next-run' };
+  const merged = renderIssueBody({
+    analysis: analyzeLogs('Desktop Checks', ['ParserError'], jobs),
+    occurrence: next,
+    existingBody: first,
+  });
+  assert.equal(analysis.searchMarkers.length, 1);
+  assert.ok(first.includes(analysis.searchMarkers[0]));
+  assert.ok(merged.includes(OCCURRENCE.sha.slice(0, 12)));
+  assert.ok(merged.includes(next.sha));
+  assert.ok(!merged.includes(LEGACY_MARKER_PREFIX));
+});
+
+test('keeps Desktop platforms and failed steps distinct', () => {
+  const markers = [
+    { name: 'Package / Build Windows x64', steps: ['Package'] },
+    { name: 'Package / Build macOS arm64', steps: ['Package'] },
+    { name: 'Package / Build Windows x64', steps: ['Install'] },
+  ].map((job) => analyzeLogs('Desktop Checks', [], [job]).searchMarkers[0]);
+  assert.equal(new Set(markers).size, 3);
+});
+
+test('limits job-step fallback to Desktop failures without test IDs', () => {
+  const jobs = [{ name: 'Desktop Shell (windows-2022)', steps: [] }];
+  assert.equal(analyzeLogs('Desktop Checks', [], jobs).tests.length, 1);
+  assert.equal(analyzeLogs('Desktop Checks', []).tests.length, 0);
+  assert.equal(analyzeLogs('SDK Java', [], jobs).tests.length, 0);
+  assert.deepEqual(
+    analyzeLogs('Desktop Checks', [VITEST_LOG], jobs).tests.map(
+      (entry) => entry.id,
+    ),
+    [VITEST_TEST_ID],
+  );
 });
 
 test('the per-commit path leaves an already-filed body untouched', () => {

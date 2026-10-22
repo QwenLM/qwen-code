@@ -35,6 +35,11 @@ const hasGnuRealpath =
     0;
 
 const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
+const audioPrebuildsWorkflow = readFileSync(
+  '.github/workflows/audio-capture-prebuilds.yml',
+  'utf8',
+);
+const audioPrebuildsYaml = parse(audioPrebuildsWorkflow);
 const releaseYaml = parse(workflow);
 const releaseStepScriptPath = '.github/scripts/run-release-step.sh';
 const releaseStepScriptAbsolutePath = join(
@@ -53,15 +58,17 @@ const cuaReleaseWorkflow = readFileSync(
   '.github/workflows/cd-cua-driver.yml',
   'utf8',
 );
+const cuaReleaseJobs = parse(cuaReleaseWorkflow).jobs;
 const nodeReplPackage = JSON.parse(
   readFileSync('packages/node-repl/package.json', 'utf8'),
 );
 const cuaSdkPackage = JSON.parse(
   readFileSync('packages/cua-driver/typescript/package.json', 'utf8'),
 );
-const cuaSdkPackageLock = JSON.parse(
-  readFileSync('packages/cua-driver/typescript/package-lock.json', 'utf8'),
+const browserUsePackage = JSON.parse(
+  readFileSync('packages/browser-use/package.json', 'utf8'),
 );
+const workspaceLock = parse(readFileSync('pnpm-lock.yaml', 'utf8'));
 const cuaInstallScript = readFileSync(
   'packages/cua-driver/scripts/install.sh',
   'utf8',
@@ -92,17 +99,35 @@ const liveHostOssWorkflow = readFileSync(
 );
 
 describe('CUA release workflow', () => {
-  it('keeps the Node REPL package independently versioned', () => {
+  it('excludes the Computer Use distribution from the CLI release', () => {
+    for (const name of [
+      '@qwen-code/browser-use',
+      '@qwen-code/cua-sdk',
+      '@qwen-code/node-repl-mcp',
+    ]) {
+      expect(RELEASE_WORKSPACES).not.toContain(name);
+    }
+  });
+
+  it('keeps the Computer Use distribution on one version', () => {
     expect(nodeReplPackage.name).toBe('@qwen-code/node-repl-mcp');
-    expect(nodeReplPackage.version).toBe('0.1.7');
+    expect(nodeReplPackage.version).toBe(cuaSdkPackage.version);
+    expect(browserUsePackage.version).toBe(cuaSdkPackage.version);
+    expect(nodeReplPackage.dependencies['@qwen-code/cua-sdk']).toBe(
+      cuaSdkPackage.version,
+    );
+    expect(cuaSdkPackage.dependencies['@qwen-code/browser-use']).toBe(
+      cuaSdkPackage.version,
+    );
     expect(cuaReleaseWorkflow).toContain(
       "node_repl_version: '${{ steps.release.outputs.node_repl_version }}'",
     );
     expect(cuaReleaseWorkflow).not.toContain(
       'NODE_REPL_VERSION does not match release version',
     );
-    expect(cuaSdkPackageLock.version).toBe(cuaSdkPackage.version);
-    expect(cuaSdkPackageLock.packages[''].version).toBe(cuaSdkPackage.version);
+    expect(
+      workspaceLock.importers['packages/cua-driver/typescript'],
+    ).toBeDefined();
   });
 
   it('dry-runs and clean-installs the packed Node REPL MCP server', () => {
@@ -112,9 +137,15 @@ describe('CUA release workflow', () => {
   });
 
   it('publishes the verified Node REPL tarball immutably with provenance', () => {
-    expect(cuaReleaseWorkflow).toMatch(
-      /publish-node-repl:[\s\S]*?needs: \['validate-version', 'verify-node-repl-package', 'release'\][\s\S]*?npm view "@qwen-code\/node-repl-mcp@\$\{VERSION\}" dist\.integrity[\s\S]*?npm publish "\$TARBALL" --provenance --access public --tag "\$NPM_TAG"[\s\S]*?Verify npm registry integrity/,
+    const job = cuaReleaseJobs['publish-node-repl'];
+    expect(job.needs).toContain('publish-sdk');
+    const commands = job.steps.map((step) => step.run ?? '').join('\n');
+    expect(commands).toMatch(
+      /npm view "@qwen-code\/node-repl-mcp@\$\{VERSION\}" dist\.integrity[\s\S]*?npm publish "\$TARBALL" --provenance --access public --tag "\$NPM_TAG"/,
     );
+    expect(
+      job.steps.some((step) => step.name === 'Verify npm registry integrity'),
+    ).toBe(true);
   });
 
   it('keeps installer version changes in the feature PR', () => {
@@ -145,32 +176,30 @@ describe('CUA release workflow', () => {
     );
   });
 
-  it('pins exact Computer Use package versions across the skill and user guide', () => {
+  it('pins exact runtime registration and dependency versions', () => {
     expect(computerUseGuide).toContain(
       `@qwen-code/node-repl-mcp@${nodeReplPackage.version}`,
     );
     expect(computerUseGuide).toContain(
-      `@qwen-code/cua-sdk@${cuaSdkPackage.version}`,
+      'installs the matching SDK and browser SDK as dependencies',
     );
-    expect(cuaReleaseWorkflow).toContain('SKILL_NODE_REPL_VERSION=$(sed -nE');
+    expect(cuaReleaseWorkflow).not.toContain('SKILL_NODE_REPL_VERSION=');
     expect(cuaReleaseWorkflow).toContain(
       'USER_GUIDE_NODE_REPL_VERSION=$(sed -nE',
     );
-    expect(cuaReleaseWorkflow).toContain('SKILL_SDK_VERSION=$(sed -nE');
-    expect(cuaReleaseWorkflow).toContain('USER_GUIDE_SDK_VERSION=$(sed -nE');
+    expect(cuaReleaseWorkflow).not.toContain('SKILL_SDK_VERSION=');
+    expect(cuaReleaseWorkflow).toContain('SDK_BROWSER_VERSION=');
+    expect(cuaReleaseWorkflow).not.toContain('USER_GUIDE_SDK_VERSION=');
     expect(cuaReleaseWorkflow).not.toContain(
       'grep -Fq "@qwen-code/node-repl-mcp@',
     );
     expect(cuaReleaseWorkflow).not.toContain('grep -Fq "@qwen-code/cua-sdk@');
   });
 
-  it('bootstraps only Node REPL without replacing an existing CUA release', () => {
-    expect(cuaReleaseWorkflow).toMatch(
-      /node_repl_only:[\s\S]*?type: 'boolean'[\s\S]*?default: false/,
-    );
-    expect(cuaReleaseWorkflow).toMatch(
-      /publish-node-repl:[\s\S]*?needs\.release\.result == 'success'[\s\S]*?inputs\.node_repl_only == true[\s\S]*?inputs\.dry_run == false/,
-    );
+  it('releases dependencies before the same-version runtime', () => {
+    expect(cuaReleaseWorkflow).not.toContain('node_repl_only');
+    expect(cuaReleaseJobs['publish-sdk'].needs).toContain('publish-browser');
+    expect(cuaReleaseJobs['publish-node-repl'].needs).toContain('publish-sdk');
     expect(cuaReleaseWorkflow).toContain(
       'A production dispatch must run from protected main',
     );
@@ -290,7 +319,7 @@ describe('release workflow', () => {
     // it cannot be swapped for the hosted label because every pool-routed
     // runs-on expression names 'ubuntu-latest' as its fallback branch.
     const isPoolRouted = (job) =>
-      String(job['runs-on'] ?? '').includes('ecs-qwen-hk4-host');
+      /ecs-qwen-(?:hk4-host|release-host)/.test(String(job['runs-on'] ?? ''));
     const wipesWorkspace = (job) =>
       (job.steps ?? []).some(
         (step) => step.name === 'Restore workspace ownership',
@@ -351,12 +380,21 @@ describe('release workflow', () => {
     // without until a saturated instance died on ENOSPC mid-step — no log,
     // no annotation — and took the release with it (runs 34998771277 and
     // 35024357480). The gate fails the job fast instead, and a re-run lands
-    // on an instance with headroom. publish is hosted-only and stays ungated.
+    // on an instance with headroom. Jobs without a checkout are exempt: the
+    // gate rides a checkout, and the only such pool-routed job (quality) is
+    // a workspace-free three-second aggregation with nothing heavy to lose.
     const isPoolRouted = (job) =>
-      String(job['runs-on'] ?? '').includes('ecs-qwen-hk4-host');
+      /ecs-qwen-(?:hk4-host|release-host)/.test(String(job['runs-on'] ?? ''));
     const gated = [];
     for (const [id, job] of Object.entries(releaseYaml.jobs)) {
       if (!isPoolRouted(job)) continue;
+      if (
+        !(job.steps ?? []).some((step) =>
+          String(step.uses ?? '').includes('actions/checkout'),
+        )
+      ) {
+        continue;
+      }
       gated.push(id);
       const steps = job.steps ?? [];
       const gateIndex = steps.findIndex(
@@ -388,6 +426,7 @@ describe('release workflow', () => {
       'integration_docker',
       'integration_none',
       'prepare',
+      'publish',
       'quality_build',
       'quality_scripts',
       'quality_static',
@@ -439,8 +478,10 @@ describe('release workflow', () => {
         ref: '${{ github.workflow_sha }}',
         'fetch-depth': 1,
         'persist-credentials': false,
+        // The tarball gate rides this checkout too: run from the selected
+        // ref's own `scripts/`, it is missing on any ref that predates it.
         'sparse-checkout':
-          '/.github/scripts\n/scripts/assert-release-version.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
+          '/.github/scripts\n/scripts/assert-release-version.mjs\n/scripts/check-release-tarball-exec-bits.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
         'sparse-checkout-cone-mode': false,
         path: '.release-workflow',
       });
@@ -533,7 +574,12 @@ describe('release workflow', () => {
   });
 
   it('keeps the workflow focused on orchestration', () => {
-    // 850, raised from 830 for the pool-wide disk-floor gate: one anchored
+    // 870, raised from 850 for moving publish/collect onto the opt-in
+    // ecs-qwen-release-host lane and quality onto the pool its checks already
+    // use: the added lines are two runs-on expressions, two anchored steps,
+    // and their comments — orchestration, not logic (2026-10-15 hosted-pool
+    // saturation queued publish for 64 minutes behind PR automation).
+    // 850 was raised from 830 for the pool-wide disk-floor gate: one anchored
     // step plus one alias per pool-routed job is still orchestration — the
     // gate's logic lives in .github/scripts/check-disk-floor.sh (#10035).
     // 830 was raised from 800 for the notify_failure fallback: that job may
@@ -541,7 +587,7 @@ describe('release workflow', () => {
     // is the job that reports their failure, so its last-resort issue filing
     // is deliberately inline. Every other step stays under the per-step cap
     // below, which is the rule that actually keeps logic out of the YAML.
-    expect(workflow.split('\n').length).toBeLessThan(850);
+    expect(workflow.split('\n').length).toBeLessThan(870);
     for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
       for (const step of job.steps ?? []) {
         if (step.name === 'Restore workspace ownership' || !step.run) continue;
@@ -602,9 +648,15 @@ describe('release workflow', () => {
         join(directory, 'dist/package.json'),
         JSON.stringify({ name: '@qwen-code/qwen-code' }),
       );
-      writeFileSync(join(bin, 'npm'), '#!/bin/sh\nexit "$CLI_PUBLISHED"\n', {
-        mode: 0o755,
-      });
+      // `npm view` drives the already-published skip; `npm publish` is the
+      // generated CLI's own publish call, logged like the corepack one so the
+      // assertions below cover both. The CLI goes through npm because pnpm's
+      // packer drops the exec bit on `vendor/ripgrep/*/rg` (#12668).
+      writeFileSync(
+        join(bin, 'npm'),
+        '#!/bin/sh\nif [ "$1" = "view" ]; then exit "$CLI_PUBLISHED"; fi\nprintf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"\nexit "$PUBLISH_FAILURE"\n',
+        { mode: 0o755 },
+      );
       writeFileSync(
         join(bin, 'corepack'),
         '#!/bin/sh\nprintf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"\nexit "$PUBLISH_FAILURE"\n',
@@ -658,6 +710,14 @@ describe('release workflow', () => {
           ),
         );
         expect(publishCalls[0][1]).toContain('pnpm -r publish');
+        if (publishesCli) {
+          // The generated CLI is the only package carrying vendored binaries
+          // and the only one published with npm: pnpm's packer writes 0644 for
+          // every entry outside `bin`, which shipped an unspawnable
+          // `vendor/ripgrep/*/rg` from 0.24.4 on (#12668).
+          expect(publishCalls[1][1]).toMatch(/^publish --provenance /);
+          expect(publishCalls[1][1]).not.toContain('pnpm');
+        }
         for (const [cwd, args] of publishCalls) {
           expect(args, cwd).toContain('--access public');
           expect(args, cwd).toContain('--tag=preview');
@@ -1520,13 +1580,16 @@ describe('release workflow', () => {
     expect(quality.if).toBe(
       "${{ !cancelled() && needs.prepare.result == 'success' && github.event.inputs.force_skip_tests != 'true' }}",
     );
-    expect(quality.steps[0].run).toContain(
-      'if [[ "${result}" != \'success\' ]]',
+    // The wipe anchor precedes the verify step once quality is pool-routed;
+    // locate the aggregation by name so the pool hygiene cannot shadow it.
+    const verify = quality.steps.find(
+      (step) => step.name === 'Verify quality results',
     );
+    expect(verify.run).toContain('if [[ "${result}" != \'success\' ]]');
     // Pin the full result mapping, not just the loop's shape: dropping one
     // loop entry or remapping an env var to another job's result must fail
     // here instead of letting a failed component publish.
-    expect(quality.steps[0].env).toEqual({
+    expect(verify.env).toEqual({
       STATIC_RESULT: '${{ needs.quality_static.result }}',
       BUILD_RESULT: '${{ needs.quality_build.result }}',
       TYPECHECK_RESULT: '${{ needs.quality_typecheck.result }}',
@@ -1540,7 +1603,7 @@ describe('release workflow', () => {
       'WORKSPACE_TEST_RESULT',
       'SCRIPT_TEST_RESULT',
     ]) {
-      expect(quality.steps[0].run, name).toContain('"${' + name + '}"');
+      expect(verify.run, name).toContain('"${' + name + '}"');
     }
     expect(releaseYaml.jobs.notify_failure.if).toContain(
       "needs.quality.result == 'failure'",
@@ -3344,14 +3407,58 @@ describe('release lane runner routing', () => {
     }
   });
 
-  it('keeps publishing and failure notification on hosted runners', () => {
-    expect(releaseYaml.jobs.quality['runs-on']).toBe('ubuntu-latest');
-    expect(releaseYaml.jobs.quality['runs-on']).not.toContain('ecs-qwen');
-    expect(releaseYaml.jobs.publish['runs-on']).toBe('ubuntu-latest');
-    expect(releaseYaml.jobs.publish['runs-on']).not.toContain('ecs-qwen');
+  it('keeps release credentials off PR-shared machines and failure reporting hosted', () => {
+    // quality aggregates five pool-routed checks, so it rides the same
+    // hk4-host pool they do; on 2026-10-15 it queued 53 minutes on the
+    // hosted pool while every machine it depended on sat idle.
+    expect(releaseYaml.jobs.quality['runs-on']).toContain('ecs-qwen-hk4-host');
+    expect(releaseYaml.jobs.quality['runs-on']).toContain('ubuntu-latest');
+    // publish carries CI_BOT_PAT and npm OIDC publishing. ecs-qwen-hk4-host
+    // machines are dual-labelled onto the ecs-qwen PR CI pool, so publish may
+    // only reach a release-only machine set — and only when explicitly
+    // opted in, which keeps the lane hosted until ops provisions it.
+    expect(releaseYaml.jobs.publish['runs-on']).toContain(
+      'ecs-qwen-release-host',
+    );
+    expect(releaseYaml.jobs.publish['runs-on']).not.toContain(
+      'ecs-qwen-hk4-host',
+    );
+    expect(releaseYaml.jobs.publish['runs-on']).toContain(
+      "vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true'",
+    );
+    expect(releaseYaml.jobs.publish['runs-on']).toContain('ubuntu-latest');
+    // Failure reporting must survive whatever broke the pool it reports on.
     expect(releaseYaml.jobs.notify_failure['runs-on']).toBe('ubuntu-latest');
     expect(releaseYaml.jobs.notify_failure['runs-on']).not.toContain(
       'ecs-qwen',
     );
+  });
+
+  it('keeps prebuild collection fail-closed on the release-only pool', () => {
+    // collect rides the same opt-in ecs-qwen-release-host lane as publish,
+    // so the runs-on expression must keep the repository condition and the
+    // hosted fallback that keep forks and the unset default on ubuntu-latest.
+    expect(audioPrebuildsYaml.jobs.collect['runs-on']).toContain(
+      "github.repository == 'QwenLM/qwen-code'",
+    );
+    expect(audioPrebuildsYaml.jobs.collect['runs-on']).toContain(
+      "vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true'",
+    );
+    expect(audioPrebuildsYaml.jobs.collect['runs-on']).toContain(
+      'ecs-qwen-release-host',
+    );
+    expect(audioPrebuildsYaml.jobs.collect['runs-on']).toContain(
+      'ubuntu-latest',
+    );
+    // On the persistent release-host workspace, download-artifact's
+    // merge-multiple merges into existing paths, so a stale prebuilds/ tree
+    // from a previous release would leak into the merged artifact. The wipe
+    // must stay first and self-hosted-only; dropping it (or reordering it
+    // after the merge) re-opens that leak.
+    const [wipe, ...rest] = audioPrebuildsYaml.jobs.collect.steps;
+    expect(wipe.name).toBe('Clear stale prebuilds (self-hosted)');
+    expect(wipe.if).toBe("${{ runner.environment == 'self-hosted' }}");
+    expect(wipe.run).toBe('rm -rf prebuilds');
+    expect(rest[0].name).toBe('Merge per-platform prebuilds');
   });
 });

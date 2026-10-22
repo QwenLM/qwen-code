@@ -30,6 +30,7 @@ import type {
   SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings, SettingScope } from '../../config/settings.js';
+import type { StatusLineState } from '../hooks/useStatusLine.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
@@ -92,10 +93,8 @@ import {
 import { OpenTuiPermissionsDialog } from './dialogs-permissions.js';
 import { OpenTuiAuthDialog } from './dialogs-auth.js';
 import { OpenTuiArenaDialog } from './dialogs-arena.js';
-import {
-  OpenTuiMemoryDialog,
-  OpenTuiStatusLineDialog,
-} from './dialogs-memory-status.js';
+import { OpenTuiMemoryDialog } from './dialogs-memory-status.js';
+import { OpenTuiStatusLineDialog } from './dialogs-statusline.js';
 import {
   OpenTuiApprovalModeDialog,
   OpenTuiEffortDialog,
@@ -130,8 +129,10 @@ export interface OpenTuiDialogMountProps {
   fillInput?: (text: string) => void;
   /** Applies a setting chosen in the settings dialog (shell-owned). */
   onSelectSetting?: (name: string, scope: SettingScope) => void;
+  onRestartRequest?: () => void;
   /** Notifies the shell that the approval mode changed (spinner/prompt sync). */
   onApprovalModeChanged?: (mode: ApprovalMode) => void;
+  statusLineState?: StatusLineState;
   /** Row budget of the popup region, handed to every dialog leg — the legs
    * that window a body (model, theme, approval mode, settings, effort,
    * output style, the permission rule and directory lists, the hooks and
@@ -382,6 +383,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
         <OpenTuiSettingsDialog
           settings={settings}
           config={config}
+          onRestartRequest={props.onRestartRequest}
           availableTerminalHeight={props.availableTerminalHeight}
           onSelect={(name, scope) => {
             if (name === undefined) {
@@ -404,6 +406,9 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       return (
         <OpenTuiStatusLineDialog
           settings={settings}
+          config={config}
+          state={props.statusLineState}
+          addItem={host.addItem}
           onClose={onClose}
           availableTerminalHeight={props.availableTerminalHeight}
         />

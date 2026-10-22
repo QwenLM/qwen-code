@@ -9,6 +9,7 @@ import { isDeepStrictEqual } from 'node:util';
 import {
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
+  MANAGED_SESSION_LIMITS,
   parseManagedSessionRecordJson,
   type ManagedSessionDurableRef,
   type ManagedSessionJsonValue,
@@ -431,7 +432,10 @@ function ref(value: unknown, kind: string): ManagedSessionDurableRef {
     result.kind === kind &&
       result.schemaVersion === 1 &&
       result.byteLength > 0 &&
-      result.byteLength <= 64 * 1024,
+      result.byteLength <=
+        (kind === 'managed-checkpoint'
+          ? MANAGED_SESSION_LIMITS.maxEventBytes
+          : 64 * 1024),
   );
   return result;
 }
@@ -490,7 +494,7 @@ export async function readCurrentCsiNative(
   action: CsiNativeReadbackRequest['action'],
   subject: CsiNativeReadbackRequest['subject'],
 ): Promise<CsiNativeReadbackResponse> {
-  if (boot.version !== 5) throw invalid();
+  if (boot.version !== 5 && boot.version !== 6) throw invalid();
   const request = readCsiNativeRequest({
     protocolVersion: 1,
     requestId: randomUUID(),

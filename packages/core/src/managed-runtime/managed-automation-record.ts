@@ -28,7 +28,7 @@ import {
 // (docs/design/2026-10-04-managed-automation.md, decisions 1, 2, 6 and 7).
 // The shared fixtures in contracts/managed-automation-record-v1.fixtures.json
 // pin both bodies, and ManagedExtensionRecords in
-// packages/sdk-java/managed-agent-server replays the same cases.
+// packages/managed-agent-server replays the same cases.
 
 export const SCHEDULE_KIND = 'schedule';
 export const AUTOMATION_RUN_KIND = 'automation_run';
