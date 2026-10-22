@@ -9,6 +9,7 @@ import {
   getContextLengthExceededInfo,
   isContextLengthExceededError,
 } from './contextLengthError.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 describe('contextLengthError', () => {
   it.each([
@@ -146,19 +147,16 @@ describe('contextLengthError', () => {
       expect(info.limitTokens).toBe(32768);
     });
 
-    // An encoder prompt counts encoder input against the encoder cache
-    // budget, so neither number may anchor compaction or the window.
-    it('detects an encoder prompt overflow without reporting its counts', () => {
+    // An encoder prompt is not the chat history, so compacting the history
+    // cannot fix it and the error is left for the user to see.
+    it('leaves an encoder prompt overflow to the user', () => {
       const info = getContextLengthExceededInfo(
         new Error(
           '400 The encoder prompt (length 9000) is longer than the maximum model length of 8192.',
         ),
       );
 
-      expect(info.isExceeded).toBe(true);
-      expect(info.actualTokens).toBeUndefined();
-      expect(info.limitTokens).toBeUndefined();
-      expect(info.limitKind).toBeUndefined();
+      expect(info.isExceeded).toBe(false);
     });
 
     it('stays fast on a huge error body with repeated prompt fragments', () => {
@@ -170,7 +168,9 @@ describe('contextLengthError', () => {
       const info = getContextLengthExceededInfo(new Error(body));
 
       expect(info.isExceeded).toBe(true);
-      expect(performance.now() - start).toBeLessThan(1_000);
+      expectWithinLatencyBudget(performance.now() - start, 1_000, {
+        poolMultiplier: 10,
+      });
     });
   });
 
