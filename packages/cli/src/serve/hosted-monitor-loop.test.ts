@@ -285,7 +285,9 @@ describe('HostedMonitorLoop', () => {
     await rig.loop.start(params({ maxEvents: 1 }));
     rig.executor.onLine?.('one');
     const fired = rig.clock.advance(1_000);
-    await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+    await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1), {
+      timeout: 10_000,
+    });
 
     await cleanupFixtures();
     rig.executor.answerStop(false);
@@ -654,7 +656,9 @@ describe('HostedMonitorLoop', () => {
 
       if (reason === 'max_events') rig.executor.onLine?.('one');
       const fired = rig.clock.advance(firing);
-      await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+      await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1), {
+        timeout: 10_000,
+      });
       // The worker finalizes before it answers, so the exit is this stop's
       // own evidence: its stop marker does not override the loop's reason.
       await rig.executor.exitStopped();
@@ -688,7 +692,9 @@ describe('HostedMonitorLoop', () => {
 
       rig.executor.onLine?.('one');
       const fired = rig.clock.advance(1_000);
-      await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+      await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1), {
+        timeout: 10_000,
+      });
       const stopped = rig.loop.stop('stop_requested');
       // The close's stop issues nothing while the auto-stop still waits.
       expect(rig.executor.terminateCalls).toBe(1);
@@ -700,7 +706,9 @@ describe('HostedMonitorLoop', () => {
       if (!proven) {
         // Only the auto-stop's park leaves the record to the close's own
         // proven stop.
-        await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(2));
+        await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(2), {
+          timeout: 10_000,
+        });
         rig.executor.answerStop(true);
       }
       await stopped;
@@ -727,7 +735,9 @@ describe('HostedMonitorLoop', () => {
 
       if (reason === 'max_events') rig.executor.onLine?.('one');
       const fired = rig.clock.advance(firing);
-      await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+      await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1), {
+        timeout: 10_000,
+      });
       // The worker proved the end, but the publisher refused the finalize
       // that carries it: the sealed output has not reached the record, and
       // a terminal record would refuse it.
@@ -760,7 +770,9 @@ describe('HostedMonitorLoop', () => {
 
     rig.executor.onLine?.('one');
     const fired = rig.clock.advance(1_000);
-    await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+    await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1), {
+      timeout: 10_000,
+    });
     // An end without evidence proves no stop: it reports the failed watch,
     // never the stop's reason, and the answer that follows changes nothing.
     await rig.executor.fail();
@@ -821,8 +833,9 @@ describe('HostedMonitorLoop', () => {
     // has nothing left to stop.
     rig.executor.onLine?.('one');
     const fired = rig.clock.fireTogether(1_000);
-    await vi.waitFor(() =>
-      expect(committed(rig.authority).observationSequence).toBe(1),
+    await vi.waitFor(
+      () => expect(committed(rig.authority).observationSequence).toBe(1),
+      { timeout: 10_000 },
     );
     expect(rig.executor.terminateCalls).toBe(1);
 

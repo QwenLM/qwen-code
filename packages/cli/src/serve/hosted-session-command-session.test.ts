@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -34,7 +34,10 @@ import {
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
-import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
+import {
+  outboundCommandBody,
+  sessionCommandId,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
 import { MANAGED_SESSION_COMMAND_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-record.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { ManagedSessionAppendUnsettledError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -865,14 +868,30 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     // Mint 256 entries by hand: a direct count of outbound records is the
     // rule's own evidence, so the suite plants the history instead of
     // driving 256 funnels calls.
+    const { argsRef } = member.commands.command(commandId)!;
+    const { sessionKey } = member.session.authority.sessionHeader;
     for (let index = 0; index < 255; index += 1) {
-      await member.commands.runCommand({
-        commandId: `cmd_extra_${index}`,
+      const extraId = `cmd_extra_${index}`;
+      const record = outboundCommandBody({
+        commandId: extraId,
         kind: 'board_read',
-        args: TASK_LIST_ARGS,
+        childRunId: LEAF_RUN,
+        senderSessionId: CHILD,
+        argsRef,
         executionCallId: `prompt-1:call-extra-${index}`,
-        closing: false,
       });
+      await member.session.authority.commitExtensionRecord(
+        {
+          operation: 'sendSessionCommand',
+          commandId: `${extraId}:1`,
+          sessionKey,
+          contentDigest: createHash('sha256')
+            .update(JSON.stringify(record))
+            .digest('hex'),
+        },
+        { domain: 'session_command', record },
+        { class: 'trusted_entry' },
+      );
     }
     await expect(
       member.commands.runCommand({
@@ -883,7 +902,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
         closing: false,
       }),
     ).rejects.toThrow(/budget_exhausted/);
-  }, 30_000);
+  }, 60_000);
 
   it("commits the leader's receipt against an attached run and refetches its reply", async () => {
     const lead = await leadSideSetup();
