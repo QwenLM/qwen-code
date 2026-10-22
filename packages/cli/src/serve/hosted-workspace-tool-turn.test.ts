@@ -3502,9 +3502,11 @@ function requestedWaitBudgetMs(
   return Math.min(20_000, ceiling - 3_000);
 }
 
+const SLOW_HOST = isSlowTestHost();
+const BUDGET_RUNNER_NAME = process.env['RUNNER_NAME'];
 const REQUESTED_TIMEOUT_MS = requestedWaitBudgetMs(
-  isSlowTestHost(),
-  process.env['RUNNER_NAME'],
+  SLOW_HOST,
+  BUDGET_RUNNER_NAME,
 );
 
 it('keeps the requested() wait budget under the per-test ceiling', () => {
@@ -3513,6 +3515,12 @@ it('keeps the requested() wait budget under the per-test ceiling', () => {
   expect(requestedWaitBudgetMs(false, undefined)).toBe(10_000);
   expect(requestedWaitBudgetMs(true, 'ecs-qwen-64c-01') * 2).toBeLessThan(
     60_000,
+  );
+});
+
+it('pins REQUESTED_TIMEOUT_MS to the slow-host policy', () => {
+  expect(REQUESTED_TIMEOUT_MS).toBe(
+    requestedWaitBudgetMs(SLOW_HOST, BUDGET_RUNNER_NAME),
   );
 });
 
