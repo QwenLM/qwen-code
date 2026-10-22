@@ -334,6 +334,40 @@ test('replaces clicked details when hovering another entry @smoke', async ({
   ).toBeFocused();
 });
 
+test('keeps footer Archive clickable when canceling a rename @smoke', async ({
+  page,
+}) => {
+  const panel = page.locator('[data-web-shell-session-panel]');
+  const row = panel.getByRole('row').filter({
+    has: page.getByRole('checkbox', {
+      name: 'Select Idle fixture',
+      exact: true,
+    }),
+  });
+  await row.getByRole('checkbox').click();
+  const archive = panel
+    .locator('[data-web-shell-session-footer] button')
+    .filter({ hasText: /^Archive$/ });
+  await expect(archive).toBeEnabled();
+
+  for (const edge of ['bottom', 'top']) {
+    await row.getByRole('button', { name: 'Rename', exact: true }).click();
+    const editor = panel.locator('input[aria-label="Rename: Idle fixture"]');
+    await editor.fill('Unsaved rename');
+    await expect(editor).toBeFocused();
+    const bounds = await archive.boundingBox();
+    expect(bounds).not.toBeNull();
+    await page.mouse.click(
+      bounds!.x + bounds!.width / 2,
+      edge === 'bottom' ? bounds!.y + bounds!.height - 1 : bounds!.y + 4,
+    );
+    await expect(editor).toHaveCount(0);
+    const confirmation = page.getByRole('alertdialog');
+    await expect(confirmation).toBeVisible();
+    await confirmation.getByRole('button', { name: /^cancel$/i }).click();
+  }
+});
+
 for (const count of [4, 11]) {
   test(`sorting during rename preserves keyboard navigation with ${count} sessions @smoke`, async ({
     page,
