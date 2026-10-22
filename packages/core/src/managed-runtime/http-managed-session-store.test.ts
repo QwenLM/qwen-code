@@ -29,6 +29,7 @@ import type { HookExecution, HookRegistration } from './managed-hook-record.js';
 import {
   MANAGED_SESSION_EVENT_SUBTYPE,
   MANAGED_SESSION_HEADER_SUBTYPE,
+  MANAGED_SESSION_LIMITS,
   ManagedSessionAppendUnsettledError,
   managedSessionEventRefs,
   managedSessionEventsDigest,
@@ -1023,10 +1024,11 @@ describe('HTTP Managed Session store', () => {
     session: Awaited<ReturnType<typeof openManagedSession>>,
     index: number,
     contentRef: ManagedSessionDurableRef,
+    operation = 'message.commit',
   ): Promise<void> {
     await session.authority.appendExecutionEvent(
       {
-        operation: 'message.commit',
+        operation,
         commandId: `m-${index}`,
         sessionKey: SESSION_KEY,
         contentDigest: 'e'.repeat(64),
@@ -1333,6 +1335,69 @@ describe('HTTP Managed Session store', () => {
     },
   );
 
+  it('renews under a newly set claim when the in-flight ordinary renewal is fenced', async () => {
+    const server = new FakeManagedSessionStore();
+    const claims: Array<string | null> = [];
+    const authorized: Array<string | null> = [];
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'https://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        if (requestUrl(input).endsWith('/writers:renew')) {
+          const headers = new Headers(init?.headers);
+          claims.push(headers.get('X-Qwen-Lifecycle-Claim-Generation'));
+          if (claims.length === 1) {
+            await barrier;
+            // The close was admitted while this ordinary renewal was in
+            // flight, so the store fences it on arrival.
+            return jsonResponse(
+              {
+                error: {
+                  code: 'workspace_lifecycle_claim_fenced',
+                  message: 'Workspace lifecycle recovery is blocked.',
+                },
+              },
+              409,
+            );
+          }
+        }
+        if (requestUrl(input).endsWith('/lifecycle:authorize')) {
+          const headers = new Headers(init?.headers);
+          authorized.push(headers.get('X-Qwen-Lifecycle-Claim-Generation'));
+          return jsonResponse({});
+        }
+        return server.fetch(input, init);
+      },
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      const ordinary = stores.assertWritable();
+      await vi.waitFor(() => expect(claims).toHaveLength(1));
+      stores.setLifecycleAuthority({
+        operationId: 'close',
+        claimGeneration: 1,
+      });
+      const lifecycle = stores.authorizeLifecycle('close');
+      release();
+      await expect(ordinary).rejects.toMatchObject({
+        status: 409,
+        remoteCode: 'workspace_lifecycle_claim_fenced',
+      });
+      await lifecycle;
+      expect(claims).toEqual([null, '1']);
+      expect(authorized).toEqual(['1']);
+    } finally {
+      release();
+      await stores.close();
+    }
+  });
+
   it('publishes bounded tool output immediately under the original writer grant', async () => {
     const server = new FakeManagedSessionStore();
     let publication: Record<string, unknown> | undefined;
@@ -1380,6 +1445,19 @@ describe('HTTP Managed Session store', () => {
       await expect(
         stores.resourceStore.publish('ordinary', bytes),
       ).rejects.toThrow('inline limit');
+      const checkpoint = await stores.resourceStore.publish(
+        'managed-checkpoint',
+        Buffer.alloc(MANAGED_SESSION_LIMITS.maxEventBytes, 0x61),
+      );
+      expect((await stores.resourceStore.read(checkpoint)).byteLength).toBe(
+        MANAGED_SESSION_LIMITS.maxEventBytes,
+      );
+      await expect(
+        stores.resourceStore.publish(
+          'managed-checkpoint',
+          Buffer.alloc(MANAGED_SESSION_LIMITS.maxEventBytes + 1),
+        ),
+      ).rejects.toThrow('kind=managed-checkpoint, bytes=1048577');
       const attachment = await stores.resourceStore.publish(
         'managed-input',
         Buffer.alloc(7 * 1024 * 1024, 0x61),
@@ -3606,61 +3684,72 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
-  it('keeps writer renewal after a rollbackable append rejection', async () => {
-    vi.useFakeTimers({ now: 1_790_000_000_000 });
-    const server = new FakeManagedSessionStore();
-    const { stores, session } = await bootStoresAndSession(server);
-    const originalFetch = server.fetch.getMockImplementation()!;
-    let refused = false;
-    server.fetch.mockImplementation(async (input, init) => {
-      if (/\/transactions:commit(?:-v2)?$/.test(requestUrl(input))) {
-        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        if (body['operation'] === 'message.commit' && !refused) {
-          refused = true;
-          return jsonResponse(
-            {
-              error: {
-                code: 'workspace_lifecycle_admission_closed',
-                message: 'temporarily held by lifecycle',
+  // A claim fenced refusal reaches an ordinary write that was sent before
+  // the Harness set the lifecycle claim; it is a non-commit either way.
+  it.each([
+    ['workspace_lifecycle_admission_closed', 'message.commit'],
+    ['workspace_lifecycle_claim_fenced', 'message.commit'],
+    ['context_compression_authorization_revoked', 'contextCompression'],
+    ['workspace_unavailable', 'contextCompression'],
+  ])(
+    'keeps writer renewal after a rollbackable %s append rejection (%s)',
+    async (code, operation) => {
+      vi.useFakeTimers({ now: 1_790_000_000_000 });
+      const server = new FakeManagedSessionStore();
+      const { stores, session } = await bootStoresAndSession(server);
+      const originalFetch = server.fetch.getMockImplementation()!;
+      let refused = false;
+      server.fetch.mockImplementation(async (input, init) => {
+        if (/\/transactions:commit(?:-v2)?$/.test(requestUrl(input))) {
+          const body = JSON.parse(String(init?.body)) as Record<
+            string,
+            unknown
+          >;
+          if (body['operation'] === operation && !refused) {
+            refused = true;
+            return jsonResponse(
+              {
+                error: {
+                  code,
+                  message: 'temporarily held by lifecycle',
+                },
               },
-            },
-            409,
-          );
+              409,
+            );
+          }
         }
+        return originalFetch(input, init);
+      });
+      try {
+        const messageRef = await stores.resourceStore.publish(
+          'managed-message',
+          MESSAGE_BODY,
+        );
+        await expect(
+          appendMessage(session, 1, messageRef, operation),
+        ).rejects.toThrow(ManagedSessionCommitRejectedError);
+        expect(session.authority.writesStopped).toBe(false);
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(server.renewCount).toBe(1);
+        await appendMessage(session, 2, messageRef, operation);
+        expect(session.authority.writesStopped).toBe(false);
+        expect(
+          server.commits.filter((commit) => commit['operation'] === operation),
+        ).toHaveLength(1);
+        expect(
+          server.fetch.mock.calls.filter(([input]) =>
+            requestUrl(input).endsWith('/writers:acquire'),
+          ),
+        ).toHaveLength(1);
+        expect(server.sealCount).toBe(0);
+      } finally {
+        await session.close().catch(() => undefined);
+        await stores.close().catch(() => undefined);
+        vi.clearAllTimers();
+        vi.useRealTimers();
       }
-      return originalFetch(input, init);
-    });
-    try {
-      const messageRef = await stores.resourceStore.publish(
-        'managed-message',
-        MESSAGE_BODY,
-      );
-      await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
-        ManagedSessionCommitRejectedError,
-      );
-      expect(session.authority.writesStopped).toBe(false);
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(server.renewCount).toBe(1);
-      await appendMessage(session, 2, messageRef);
-      expect(session.authority.writesStopped).toBe(false);
-      expect(
-        server.commits.filter(
-          (commit) => commit['operation'] === 'message.commit',
-        ),
-      ).toHaveLength(1);
-      expect(
-        server.fetch.mock.calls.filter(([input]) =>
-          requestUrl(input).endsWith('/writers:acquire'),
-        ),
-      ).toHaveLength(1);
-      expect(server.sealCount).toBe(0);
-    } finally {
-      await session.close().catch(() => undefined);
-      await stores.close().catch(() => undefined);
-      vi.clearAllTimers();
-      vi.useRealTimers();
-    }
-  });
+    },
+  );
 
   it('stops activation retries when its writer is explicitly sealed', async () => {
     vi.useFakeTimers({ now: 1_790_000_000_000 });
@@ -5770,6 +5859,120 @@ describe('HTTP Managed Session store', () => {
       await session.close();
     },
   );
+
+  it.each(
+    ['unsupported_feature', 'turn_active', 'session_context_busy'].flatMap(
+      (code) =>
+        [0, 1].map((uncertainAttempts) => [code, uncertainAttempts] as const),
+    ),
+  )(
+    'keeps the MCP settings writer usable after atomic %s refusal following %i uncertain attempts',
+    async (code, uncertainAttempts) => {
+      const server = new FakeManagedSessionStore();
+      const { session } = await bootStoresAndSession(server);
+      const originalFetch = server.fetch.getMockImplementation()!;
+      let refused = false;
+      let attempts = 0;
+      server.fetch.mockImplementation(async (input, init) => {
+        if (/\/transactions:commit(?:-v2)?$/.test(requestUrl(input))) {
+          const body = JSON.parse(String(init?.body)) as Record<
+            string,
+            unknown
+          >;
+          if (body['operation'] === 'manageMcp' && !refused) {
+            if (attempts++ < uncertainAttempts)
+              return jsonResponse(
+                { error: { code: 'unavailable', message: 'Not committed' } },
+                503,
+              );
+            refused = true;
+            return jsonResponse(
+              { error: { code, message: 'Session admission changed' } },
+              409,
+            );
+          }
+        }
+        return originalFetch(input, init);
+      });
+      const commit = () => {
+        const operationId = randomUUID();
+        const pin = {
+          serverId: 'docs',
+          serverRevision: 1,
+          definitionDigest: 'a'.repeat(64),
+        };
+        return session.authority.commitDomainRecord(
+          {
+            operation: 'manageMcp',
+            commandId: operationId,
+            sessionKey: SESSION_KEY,
+            contentDigest: 'c'.repeat(64),
+          },
+          {
+            domain: 'config_install',
+            content: {
+              kind: 'hosted-mcp-settings',
+              schemaVersion: 1,
+              servers: [{ ...pin, state: 'enabled' }],
+              command: {
+                operationId,
+                actorKey: 'b'.repeat(64),
+                action: 'add',
+                serverId: 'docs',
+                expectedRevision: 0,
+                server: pin,
+              },
+            },
+          },
+          { class: 'trusted_entry' },
+        );
+      };
+      try {
+        await expect(commit()).rejects.toThrow(
+          ManagedSessionCommitRejectedError,
+        );
+        expect(refused).toBe(true);
+        expect(attempts).toBe(uncertainAttempts + 1);
+        expect(session.authority.writesStopped).toBe(false);
+        expect(
+          session.authority.domainRecord('config_install'),
+        ).toBeUndefined();
+        await expect(commit()).resolves.toMatchObject({ revision: 1 });
+        expect(session.authority.writesStopped).toBe(false);
+      } finally {
+        await session.close().catch(() => undefined);
+      }
+    },
+  );
+
+  it('keeps the permanent refusal behavior for non-MCP commits with the same guard code', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const originalFetch = server.fetch.getMockImplementation()!;
+    server.fetch.mockImplementation(async (input, init) => {
+      if (
+        /\/transactions:commit(?:-v2)?$/.test(requestUrl(input)) &&
+        JSON.parse(String(init?.body)).operation === 'message.commit'
+      )
+        return jsonResponse(
+          { error: { code: 'unsupported_feature', message: 'Refused' } },
+          409,
+        );
+      return originalFetch(input, init);
+    });
+    try {
+      const messageRef = await stores.resourceStore.publish(
+        'managed-message',
+        MESSAGE_BODY,
+      );
+      await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
+        ManagedSessionStoreHttpError,
+      );
+      expect(session.authority.writesStopped).toBe(true);
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  });
 
   it('spends one contention budget across the commit retries', async () => {
     const server = new FakeManagedSessionStore();

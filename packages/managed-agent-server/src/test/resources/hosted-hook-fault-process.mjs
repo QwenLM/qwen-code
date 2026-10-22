@@ -45,6 +45,7 @@ const solo =
   signalMode === 'hook-solo' ||
   signalMode === 'hook-deny' ||
   signalMode === 'hook-release' ||
+  signalMode === 'hook-suppress' ||
   signalMode === 'hook-fail';
 
 if (mode === 'child') {
@@ -65,6 +66,13 @@ if (mode === 'child') {
     value.hook_event_name,
   );
   record('hook.call', { eventName: value.hook_event_name, input: value });
+  // FG13f: a MessageDisplay answer. The reply is suppressed, but its input
+  // still has to be observable so the cell can prove the Hook ran.
+  if (signalMode === 'hook-suppress') {
+    record('hook.suppress', { eventName: value.hook_event_name });
+    process.stdout.write(JSON.stringify({ suppressOutput: true }));
+    process.exit(0);
+  }
   let child;
   if (!solo && !lifecycle) {
     child = spawn(

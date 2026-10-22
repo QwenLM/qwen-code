@@ -9,16 +9,41 @@ pub struct ListWindowsTool;
 
 static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
 
-fn resolve_app_window(pid: i32) -> Option<crate::windows::WindowInfo> {
+fn resolve_app_window(
+    pid: i32,
+    readiness_deadline: Option<std::time::Instant>,
+) -> Option<crate::windows::WindowInfo> {
     if let Some(window) =
-        crate::ax::bindings::app_window_id_of_pid(pid).and_then(crate::windows::window_info_by_id)
+        crate::ax::bindings::app_window_id_of_pid_with_readiness(pid, readiness_deadline)
+            .and_then(crate::windows::window_info_by_id)
     {
         return Some(window);
     }
 
-    crate::apps::with_app_observation(pid, || {
-        crate::ax::bindings::app_window_id_of_pid(pid).and_then(crate::windows::window_info_by_id)
-    })
+    if let Some(window) = crate::apps::with_app_observation(pid, readiness_deadline, || {
+        crate::ax::bindings::app_window_id_of_pid_with_readiness(pid, readiness_deadline)
+            .and_then(crate::windows::window_info_by_id)
+    }) {
+        return Some(window);
+    }
+
+    let mut candidates = crate::windows::all_windows()
+        .into_iter()
+        .filter(|window| window.pid == pid && window.layer == 0);
+    let candidate = candidates.next()?;
+    if candidates.next().is_some() {
+        return None;
+    }
+    let window_id = unsafe {
+        let root = crate::ax::bindings::copy_remote_window_for_id(pid, candidate.window_id, None)?;
+        let selected = crate::ax::bindings::app_target_window_id_with_proven_root(
+            root,
+            Some((pid, candidate.window_id)),
+        );
+        core_foundation::base::CFRelease(root as core_foundation::base::CFTypeRef);
+        selected?
+    };
+    crate::windows::window_info_by_id(window_id).filter(|window| window.pid == pid)
 }
 
 fn def() -> &'static ToolDef {
@@ -73,6 +98,7 @@ impl Tool for ListWindowsTool {
         let pid_filter: Option<i32> = args.opt_i64("pid").map(|v| v as i32);
         let on_screen_only = args.bool_or("on_screen_only", false);
         let app_context = args.bool_or("app_context", false);
+        let readiness_deadline = cua_driver_core::tool::current_ax_readiness_deadline();
         if app_context && pid_filter.is_none() {
             return ToolResult::error("app_context requires pid");
         }
@@ -104,7 +130,9 @@ impl Tool for ListWindowsTool {
 
         let app_target = if app_context {
             let pid = pid_filter.expect("validated above");
-            match tokio::task::spawn_blocking(move || resolve_app_window(pid)).await {
+            match tokio::task::spawn_blocking(move || resolve_app_window(pid, readiness_deadline))
+                .await
+            {
                 Ok(target) => target,
                 Err(error) => {
                     return ToolResult::error(format!("Could not resolve app window: {error}"))

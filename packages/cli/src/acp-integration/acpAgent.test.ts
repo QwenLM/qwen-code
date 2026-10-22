@@ -5844,6 +5844,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       isWorkflowsEnabled: vi.fn().mockReturnValue(false),
       setWorkflowsEnabled: vi.fn(),
+      setWorkflowKeywordTriggerEnabled: vi.fn(),
       isSafeMode: vi.fn().mockReturnValue(false),
       getBareMode: vi.fn().mockReturnValue(false),
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
@@ -34671,6 +34672,7 @@ describe('sessionLanguage multi-session propagation', () => {
       getDebugMode: vi.fn().mockReturnValue(false),
       isWorkflowsEnabled: vi.fn().mockReturnValue(false),
       setWorkflowsEnabled: vi.fn(),
+      setWorkflowKeywordTriggerEnabled: vi.fn(),
       ...overrides,
     };
   }
@@ -36766,9 +36768,11 @@ describe('sessionLanguage multi-session propagation', () => {
     // capabilities advertisement said the opposite.
     let mergedSettings: Record<string, unknown> = {
       tools: { workflowsEnabled: true },
+      ui: { disableWorkflowKeywordTrigger: false },
     };
     let reloadedSettings: Record<string, unknown> = {
       tools: { workflowsEnabled: false },
+      ui: { disableWorkflowKeywordTrigger: true },
     };
     const settings = {
       get merged() {
@@ -36872,6 +36876,10 @@ describe('sessionLanguage multi-session propagation', () => {
         .setWorkflowsEnabled,
     ).toHaveBeenLastCalledWith(undefined);
     expect(workflowsEnabled).toBeUndefined();
+    expect(cfg.setWorkflowKeywordTriggerEnabled.mock.calls).toEqual([
+      [false],
+      [true],
+    ]);
 
     mockConnectionState.resolve();
     await agentPromise;

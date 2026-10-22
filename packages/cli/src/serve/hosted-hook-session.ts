@@ -349,7 +349,7 @@ export function parseHostedHookPin(value: unknown): ManagedHookCatalogPin {
 
 export class HostedHookSession {
   readonly broker: HostedWorkspaceBroker;
-  private readonly ownsBroker: boolean;
+  private ownsBroker: boolean;
   private acquired = false;
   private acquiring?: Promise<void>;
   private readonly aggregator = new HookAggregator();
@@ -623,6 +623,11 @@ export class HostedHookSession {
     return this.acquired || this.broker.acquired;
   }
 
+  delegateBrokerToMcp(): void {
+    if (this.mountWorkUnproven()) throw new HostedHookRecoveryRequiredError();
+    this.ownsBroker = false;
+  }
+
   /**
    * The recovery-blocked turn's handback of this Session-scoped mount
    * (#13800), under the claim of the acquire that holds it now. Only Hook
@@ -634,6 +639,7 @@ export class HostedHookSession {
     const claim = this.broker.mountClaim();
     if (!this.ownsBroker || claim === undefined) return undefined;
     return async () => {
+      if (!this.ownsBroker) return;
       if (this.mountWorkUnproven())
         throw new Error('Hook work on the Workspace mount is unproven.');
       await this.broker.releaseMount(claim);

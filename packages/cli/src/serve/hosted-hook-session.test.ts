@@ -43,6 +43,11 @@ import {
   type HostedToolInputOrder,
 } from './hosted-hook-session.js';
 import { ManagedHookRuntime } from './managed-hook-runtime.js';
+import { HostedMcpSession } from './hosted-mcp-session.js';
+import {
+  commitHostedMcpSettings,
+  selectedMcpServers,
+} from './hosted-mcp-settings.js';
 import * as stdio from '../utils/stdioHelpers.js';
 import { HttpHookRunner } from '@qwen-code/qwen-code-core/hooks/httpHookRunner.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
@@ -88,6 +93,7 @@ const pin = {
   definitionDigest: 'a'.repeat(64),
 };
 const options = { baseUrl: 'http://127.0.0.1:9999', token: 'test' };
+
 const signal = () => new AbortController().signal;
 
 beforeEach(async () => {
@@ -3875,3 +3881,54 @@ it.each(['none', 'hook', 'borrowed'] as const)(
     }
   },
 );
+
+it('retains historical Hook ownership for cleanup without claiming a live MCP mount', async () => {
+  await hooks.fire(
+    HookEventName.PreToolUse,
+    'historical-hook',
+    { tool_name: 'read_file' },
+    signal(),
+  );
+  await hooks.close();
+  expect(hooks.mountHeld).toBe(false);
+  expect(hooks.broker.acquired).toBe(false);
+  expect(
+    session.authority
+      .extensionRecordsInDomain('hook_execution')
+      .some((entry) => entry.run.runtime !== null),
+  ).toBe(true);
+  const mcpPin = {
+    serverId: 'demo',
+    serverRevision: 1,
+    definitionDigest: 'a'.repeat(64),
+  };
+  const command = {
+    operationId: randomUUID(),
+    actorKey: 'b'.repeat(64),
+    action: 'remove' as const,
+    serverId: 'demo',
+    expectedRevision: 0,
+  };
+  const settings = await commitHostedMcpSettings(
+    session,
+    command,
+    selectedMcpServers([{ ...mcpPin, state: 'enabled' }], command),
+  );
+  const restored = new HostedMcpSession(
+    options,
+    session,
+    [mcpPin],
+    settings,
+    hooks.broker,
+  );
+  expect(restored.mountHeld).toBe(false);
+  expect(restored.broker.runtimeSessionId).toBe(hooks.broker.runtimeSessionId);
+  expect(
+    session.authority.extensionRecordsInDomain('mcp_configuration'),
+  ).toHaveLength(0);
+  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+  release.mockClear();
+  await restored.closeResources();
+  expect(release).toHaveBeenCalledOnce();
+  expect(restored.mountHeld).toBe(false);
+});

@@ -23,7 +23,17 @@ public final class StoreModels {
             long replayFloorSequence, long createdAt, long updatedAt,
             Long deletedAt, long version, ContextBinding workspace,
             String approvalMode, String toolProfile,
-            String agentDefinitionDigest) {
+            String agentDefinitionDigest, int publicChildAgentsVersion) {
+        public SessionRecord(String tenantId, String sessionId, String agentId, String agentRevision,
+                String title, String status, String harnessBootId, String harnessEventEpoch,
+                long harnessLastEventId, long lastSequence, long replayFloorSequence,
+                long createdAt, long updatedAt, Long deletedAt, long version, ContextBinding workspace,
+                String approvalMode, String toolProfile, String agentDefinitionDigest) {
+            this(tenantId, sessionId, agentId, agentRevision, title, status, harnessBootId,
+                    harnessEventEpoch, harnessLastEventId, lastSequence, replayFloorSequence,
+                    createdAt, updatedAt, deletedAt, version, workspace, approvalMode, toolProfile,
+                    agentDefinitionDigest, 0);
+        }
         public SessionRecord(String tenantId, String sessionId,
                 String agentId, String agentRevision, String title,
                 String status, String harnessBootId, String harnessEventEpoch,
@@ -54,7 +64,7 @@ public final class StoreModels {
                     harnessEventEpoch, harnessLastEventId, lastSequence,
                     replayFloorSequence, createdAt, updatedAt, deletedAt,
                     version, workspace, approvalMode, toolProfile,
-                    agentDefinitionDigest);
+                    agentDefinitionDigest, publicChildAgentsVersion);
         }
     }
 
@@ -164,6 +174,7 @@ public final class StoreModels {
         DELETE,
         ACTION_RESPONSE,
         CWD_CHANGE,
+        CONTEXT_COMPRESSION,
         TASK_CANCEL,
         SUBMIT_INPUT,
         CANCEL
