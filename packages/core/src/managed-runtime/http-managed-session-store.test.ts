@@ -29,6 +29,7 @@ import type { HookExecution, HookRegistration } from './managed-hook-record.js';
 import {
   MANAGED_SESSION_EVENT_SUBTYPE,
   MANAGED_SESSION_HEADER_SUBTYPE,
+  MANAGED_SESSION_LIMITS,
   ManagedSessionAppendUnsettledError,
   managedSessionEventRefs,
   managedSessionEventsDigest,
@@ -1444,6 +1445,19 @@ describe('HTTP Managed Session store', () => {
       await expect(
         stores.resourceStore.publish('ordinary', bytes),
       ).rejects.toThrow('inline limit');
+      const checkpoint = await stores.resourceStore.publish(
+        'managed-checkpoint',
+        Buffer.alloc(MANAGED_SESSION_LIMITS.maxEventBytes, 0x61),
+      );
+      expect((await stores.resourceStore.read(checkpoint)).byteLength).toBe(
+        MANAGED_SESSION_LIMITS.maxEventBytes,
+      );
+      await expect(
+        stores.resourceStore.publish(
+          'managed-checkpoint',
+          Buffer.alloc(MANAGED_SESSION_LIMITS.maxEventBytes + 1),
+        ),
+      ).rejects.toThrow('kind=managed-checkpoint, bytes=1048577');
       const attachment = await stores.resourceStore.publish(
         'managed-input',
         Buffer.alloc(7 * 1024 * 1024, 0x61),

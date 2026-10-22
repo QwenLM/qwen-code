@@ -199,6 +199,7 @@ export function createJavaManagedAgentProvider(
     },
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    titleSearch: true,
     recovery: {
       query: (sessionId, request) =>
         client.getRecovery(sessionId, request.signal),
@@ -665,6 +666,7 @@ export function createJavaManagedAgentProvider(
           cursor: request.cursor,
           limit: request.limit,
           archiveState: request.archiveState,
+          titleQuery: request.titleQuery,
         },
         request.signal,
       );
@@ -783,6 +785,7 @@ function toSessionSummary(
   session: JavaAgentSession,
 ): ManagedAgentSessionSummary {
   const turnStatus = session.activeTurn?.status.toLowerCase();
+  const recoveryBlocked = turnStatus === 'recovery_blocked';
   const runtimeState = toRuntimeState(session.environment?.state);
   const phase = toPhase(turnStatus, runtimeState);
   const active =
@@ -859,6 +862,7 @@ function toSessionSummary(
         sessionActive &&
         !active &&
         !session.contextCompressionOperationId &&
+        !recoveryBlocked &&
         session.recovery?.nextTurnAllowed !== false &&
         (!session.workspace ||
           (workspaceTurns && session.capabilities?.foregroundShell !== false)),
@@ -867,7 +871,7 @@ function toSessionSummary(
       // server refuses anyone else.
       canCancel:
         sessionActive &&
-        active &&
+        (active || recoveryBlocked) &&
         turnStatus !== 'cancelling' &&
         session.recovery?.actions.cancel !== false,
       ...(session.capabilities?.durableOperations === true
