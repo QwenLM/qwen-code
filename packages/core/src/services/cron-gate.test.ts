@@ -198,7 +198,12 @@ describe('createCronGateRunner', () => {
           './probe.sh',
           { signal: signal(), approvedInProcess: false },
         ),
-      ).toMatchObject({ kind: 'failed' });
+      ).toMatchObject({
+        kind: 'failed',
+        detail: expect.stringContaining(
+          'the first 16 KiB it printed showed nothing',
+        ),
+      });
       vi.advanceTimersByTime(200);
     } finally {
       vi.useRealTimers();

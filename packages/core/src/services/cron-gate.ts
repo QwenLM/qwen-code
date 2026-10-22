@@ -279,7 +279,9 @@ export function createCronGateRunner(config: Config): CronGateRunner {
       // a script piped into a shell, a quote it misreads).
       if (result.stdoutHeldAfterExit) {
         return failed(
-          'exited with nothing on stdout while something it started in the background still held its stdout open (a gate must finish in the foreground)',
+          truncated
+            ? `exited while something it started in the background still held its stdout open, and the first ${CRON_GATE_OUTPUT_CAP_BYTES / 1024} KiB it printed showed nothing (a gate must finish in the foreground)`
+            : 'exited with nothing on stdout while something it started in the background still held its stdout open (a gate must finish in the foreground)',
         );
       }
       // A cut output is never quiet: what was kept may be noise in front

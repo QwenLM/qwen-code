@@ -1369,6 +1369,19 @@ describe('sanitizeMonitorLine', () => {
       '<\u200Btask-notification id="x">',
     );
     expect(sanitizeMonitorLine('<gate-outputs>')).toBe('<gate-outputs>');
+    expect(sanitizeMonitorLine('<result/>')).toBe('<\u200Bresult/>');
+  });
+
+  it('leaves text that only looks like the start of a tag alone', () => {
+    // Monitored code and logs: an invisible character copied from here
+    // into an edit would break it.
+    for (const line of [
+      'Promise<Result | null>',
+      'if (a <result && b) return;',
+      'Map<status, number>',
+    ]) {
+      expect(sanitizeMonitorLine(line)).toBe(line);
+    }
   });
 
   it('does not defang non-structural tags', () => {

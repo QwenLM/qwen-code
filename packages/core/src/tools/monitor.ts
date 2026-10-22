@@ -102,10 +102,13 @@ const STRUCTURAL_ENVELOPE_TAGS = new Set([
   'gate-stderr',
 ]);
 
-// A tag name right after `<` or `</`, however the tag goes on: `>`, white
-// space before it or attributes (`</gate-output >` still closes in XML), or
-// the end of the line, where the tag may finish on the next one.
-const STRUCTURAL_TAG_REGEX = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)(?=[\s/>]|$)/g;
+// A tag name right after `<` or `</` that a parser would read as a tag:
+// followed by `>` or `/>` (white space allowed before them; `</gate-output >`
+// still closes in XML), by an attribute, or by the end of the line, where the
+// tag may finish on the next one. Text such as `Promise<Result | null>` or
+// `a <result && b` is left as it is.
+const STRUCTURAL_TAG_REGEX =
+  /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)(?=\s*\/?>|\s+[a-zA-Z_:][-a-zA-Z0-9_:.]*\s*=|\s*$)/g;
 
 /**
  * Sanitize a single monitor output line before it is forwarded to the model.
