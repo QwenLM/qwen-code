@@ -322,14 +322,14 @@ test('abandoning an unconfirmed first input warns about execution and refreshes 
     page.getByText('may repeat its effects', { exact: false }),
   ).toBeVisible();
   await expect(
-    page.getByRole('button', { name: /Possibly admitted task/ }),
+    page.getByRole('button', { name: /^Possibly admitted task\b/ }),
   ).toHaveCount(0);
   const before = queries;
   await page
     .getByRole('button', { name: 'Abandon local confirmation' })
     .click();
   await expect(
-    page.getByRole('button', { name: /Possibly admitted task/ }),
+    page.getByRole('button', { name: /^Possibly admitted task\b/ }),
   ).toBeVisible();
   expect(queries).toBeGreaterThan(before);
   await expect(editor).toContainText('Inspect README');
