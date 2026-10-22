@@ -2477,6 +2477,7 @@ async function verifyWorkspaceRestore(
         'hook_registration',
         'hook_execution',
         'file_history',
+        'history_maintenance',
         // H3 families: an admitted child_run or monitor_run journal is
         // exactly what a workspace-profile load must restore, driven by
         // their own record parsers up front.

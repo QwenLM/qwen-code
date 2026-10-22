@@ -139,6 +139,7 @@ import {
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedSessionMessageSession } from './hosted-session-message-session.js';
 import { HostedContextCompression } from './hosted-context-compression.js';
+import type { HistoryMaintenance } from '@qwen-code/qwen-code-core/managed-runtime/managed-history-maintenance-record.js';
 import { HostedTeamSession } from './hosted-team-session.js';
 import { teamMemberPreamble } from './hosted-member-chain.js';
 import { hostedWakeContinuationId } from './hosted-wake-continuation.js';
@@ -16651,6 +16652,114 @@ describe('Hosted Harness no-tool session', () => {
     expect(created.status).toBe(400);
     expect(created.body.error).toBe('invalid_managed_session_store');
     expect(created.body.message).toContain('writerToken is invalid');
+  });
+
+  it('cold loads a workspace after a durable no-op context compression', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    const server = await app(true);
+    const toolProfile = 'hosted-workspace-files/1';
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile,
+    });
+    expect(created.status).toBe(200);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .expect(204);
+    const sessionKey = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      sessionId: SESSION_ID,
+      sessionKey,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+    });
+    const operationId = randomUUID();
+    try {
+      const admitted: HistoryMaintenance = {
+        schemaVersion: 1,
+        kind: 'context_compression',
+        operationId,
+        expectedCompactionRevision: 0,
+        historyCutSequence: managed.authority.committedSequence,
+        requestRef: await managed.resources.publish(
+          'managed-message',
+          Buffer.from('{}'),
+        ),
+        phase: 'admitted',
+        attempt: 0,
+        candidateRef: null,
+        outcome: null,
+        failureCode: null,
+        compactionRevision: null,
+        run: {
+          state: 'admitted',
+          reason: null,
+          definition: null,
+          executionCallId: null,
+          effectId: null,
+          dispatchId: null,
+          deliveryId: null,
+          execution: null,
+          runtime: null,
+          delivery: null,
+        },
+      };
+      const generating: HistoryMaintenance = {
+        ...admitted,
+        phase: 'generating',
+        attempt: 1,
+        run: { ...admitted.run, state: 'running' },
+      };
+      const completed: HistoryMaintenance = {
+        ...generating,
+        phase: 'settled',
+        outcome: 'noop',
+        run: { ...generating.run, state: 'settled' },
+      };
+      for (const record of [admitted, generating, completed]) {
+        await managed.authority.commitHistoryMaintenance(
+          {
+            operation: 'contextCompression',
+            commandId: `${operationId}:${record.phase}`,
+            sessionKey,
+            contentDigest: createHash('sha256')
+              .update(JSON.stringify(record))
+              .digest('hex'),
+          },
+          { record },
+          { class: 'harness', activation: managed.activation },
+        );
+      }
+    } finally {
+      await managed.close();
+    }
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store(), toolProfile });
+    expect(loaded.status).toBe(200);
+    const status = await headers(
+      supertest(server).get(
+        `/session/${SESSION_ID}/context/compressions/${operationId}`,
+      ),
+    ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    expect(status.status).toBe(200);
+    expect(status.body).toMatchObject({
+      operationId,
+      status: 'completed',
+      outcome: 'noop',
+      compactionRevision: 0,
+    });
+    expect(state.model).not.toHaveBeenCalled();
   });
 
   it('refuses a workspace cold load before another input when a committed resource is missing', async () => {
