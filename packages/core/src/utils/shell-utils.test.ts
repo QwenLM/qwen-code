@@ -1312,6 +1312,18 @@ describe('splitCommands', () => {
     ]);
   });
 
+  // Keeping those characters at a segment edge must not keep a segment that is
+  // nothing but them: downstream `checkCommandPermissions` normalizes such a
+  // segment to '' and `isCommandAllowed('')` answers 'ask', so one stray CR at
+  // the end of a paste turns an allow-listed command into a prompt.
+  it('drops a trailing segment made only of whitespace-class characters', () => {
+    for (const phantom of ['\r', '\v', '\f', '\u00a0', '\r\r', ' \r ']) {
+      expect(splitCommands(`git status;${phantom}`)).toEqual(['git status']);
+      expect(splitCommands(`git status\n${phantom}`)).toEqual(['git status']);
+      expect(splitCommands(`git status&&${phantom}`)).toEqual(['git status']);
+    }
+  });
+
   describe('command substitution containing a quoted paren', () => {
     it.each([
       [

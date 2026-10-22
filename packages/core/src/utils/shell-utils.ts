@@ -421,7 +421,15 @@ export function splitCommands(command: string): string[] {
     commands.push(finalSegment);
   }
 
-  return commands.filter(Boolean); // Filter out any empty strings
+  // A segment made only of whitespace-class characters is not a command: bash
+  // has a word there, but `checkCommandPermissions` normalizes the segment to
+  // '' and `isCommandAllowed('')` answers 'ask', so a phantom segment from a
+  // mixed-line-ending paste or an NBSP copied off a web page turns a user's
+  // allow rule into a prompt for every command it prefixes. `trim()` decides
+  // *whether* a segment carries any non-whitespace text; it never rewrites the
+  // text of a segment that is kept, so a redirection target made of a bare CR,
+  // VT, FF or NBSP still survives.
+  return commands.filter((command) => command.trim().length > 0);
 }
 
 /**
