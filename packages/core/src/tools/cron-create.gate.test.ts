@@ -15,6 +15,8 @@ import { CronScheduler } from '../services/cronScheduler.js';
 import {
   readCronTasks,
   taskHasLegacyCondition,
+  updateCronTasks,
+  withTaskGate,
 } from '../services/cronTasksFile.js';
 import { Storage } from '../config/storage.js';
 import { ApprovalMode } from '../config/approval-mode.js';
@@ -336,6 +338,52 @@ describe('CronCreateTool gate', () => {
         gate: './probe.sh',
       },
     ]);
+  });
+
+  it('keeps a dialog confirmation for the current-session task the daemon writes', async () => {
+    // Default mode, no rule covering the gate: only the confirmation lets it
+    // run unattended. The daemon writes the task file and returns its id; this
+    // session's scheduler installs the job on its next reload, and that job
+    // must carry the confirmation or its first fire is blocked.
+    config._scheduler.destroy();
+    config = makeConfig({
+      mode: ApprovalMode.DEFAULT,
+      evaluate: async () => 'ask',
+      creator: async (request) => {
+        await updateCronTasks(tmpDir, (tasks) => [
+          ...tasks,
+          withTaskGate(
+            {
+              id: 'cron-current',
+              cron: request.cron,
+              prompt: request.prompt,
+              recurring: request.recurring,
+              createdAt: Date.now(),
+              lastFiredAt: null,
+            },
+            request.gate,
+          ),
+        ]);
+        return { id: 'cron-current', cron: request.cron };
+      },
+    });
+    tool = new CronCreateTool(config);
+    const invocation = tool.build({
+      ...params,
+      durable: true,
+      sessionMode: 'current',
+    });
+    const details = await invocation.getConfirmationDetails(signal());
+    await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    const result = await promptIdContext.run('prompt-1', () =>
+      invocation.execute(signal()),
+    );
+    expect(result.error).toBeUndefined();
+
+    await config._scheduler.enableDurable('session-1');
+    const job = config._scheduler.list().find((j) => j.id === 'cron-current');
+    expect(job?.gate).toBe('./probe.sh');
+    expect(job?.gateApproved).toBe(true);
   });
 
   it('rejects a gate on a one-shot task, which a quiet gate would consume', async () => {

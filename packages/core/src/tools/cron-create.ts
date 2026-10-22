@@ -256,6 +256,9 @@ class CronCreateInvocation extends BaseToolInvocation<
           promptId,
           ...(gate ? { gate } : {}),
         });
+        // The daemon writes the task and this session's scheduler installs
+        // it on its next reload; carry the confirmation over to that job.
+        if (gate) scheduler.approveGate(created.id, gate);
         job = { id: created.id, cronExpr: created.cron };
       } else {
         const created = durable

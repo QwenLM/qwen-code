@@ -486,5 +486,89 @@ describe('CronScheduler gate', () => {
         true,
       );
     });
+
+    it('carries a confirmation to a task another component writes, once it loads', async () => {
+      // The daemon's current-session creator writes the task file; this
+      // scheduler only meets the task on its next reload.
+      const task = (id: string, gate: string) =>
+        withTaskGate(
+          {
+            id,
+            cron: '* * * * *',
+            prompt: 'p',
+            recurring: true,
+            createdAt: at(10, 29).getTime(),
+            // Stamped at creation: no catch-up runs, only the tick below.
+            lastFiredAt: at(10, 29).getTime(),
+          },
+          gate,
+        );
+      scheduler.approveGate('confirmed', './probe.sh');
+      scheduler.approveGate('swapped', './probe.sh');
+      await writeCronTasks(tmpDir, [
+        task('confirmed', './probe.sh'),
+        task('swapped', './other.sh'),
+      ]);
+      await scheduler.enableDurable('session-1');
+      scheduler.start((j) => fired.push(j));
+      const approved = (id: string) =>
+        scheduler.list().find((j) => j.id === id)?.gateApproved === true;
+      expect(approved('confirmed')).toBe(true);
+      // Confirmed for another command than the one on disk.
+      expect(approved('swapped')).toBe(false);
+
+      scheduler.tick(at(10, 30, 59));
+      expect(script.calls).toHaveLength(2);
+      const byGate = Object.fromEntries(
+        script.calls.map((c) => [c.gate, c.options.approvedInProcess]),
+      );
+      // Settle both runs before asserting, so a failure here cannot leave
+      // pending runs for the next test's releases.
+      await script.release(quiet);
+      await script.release(quiet);
+      expect(byGate).toEqual({ './probe.sh': true, './other.sh': false });
+
+      // A job already loaded takes the confirmation at once.
+      scheduler.approveGate('swapped', './other.sh');
+      expect(approved('swapped')).toBe(true);
+    });
+
+    it('starts a fresh failure streak when the gate is replaced on disk', async () => {
+      // The daemon's PATCH swaps the command and drops the file's status; the
+      // running session must not carry the old command's streak over, or the
+      // new command's first failure would be counted silently.
+      const job = await scheduler.createDurable(
+        '* * * * *',
+        'p',
+        true,
+        './probe.sh',
+      );
+      job.gateApproved = true;
+      await scheduler.enableDurable('session-1');
+      scheduler.start((j) => fired.push(j));
+      scheduler.tick(at(10, 30, 59));
+      await script.release(failed); // reported
+      scheduler.tick(at(10, 31, 59));
+      await script.release(failed); // counted only
+      expect(fired).toHaveLength(1);
+      const current = () => scheduler.list().find((j) => j.id === job.id);
+      expect(current()?.gateStatus?.consecutiveFailures).toBe(2);
+      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+
+      await updateCronTasks(tmpDir, (tasks) =>
+        tasks.map(({ gateStatus: _dropped, ...t }) =>
+          withTaskGate(t, './other.sh'),
+        ),
+      );
+      await reload();
+      expect(current()?.gate).toBe('./other.sh');
+      expect(current()?.gateStatus).toBeUndefined();
+      scheduler.tick(at(10, 32, 59));
+      await script.release(failed);
+      expect(fired).toHaveLength(2);
+      expect(fired[1]!.prompt).toContain('./other.sh');
+      expect(current()?.gateStatus?.consecutiveFailures).toBe(1);
+    });
   });
 });

@@ -444,6 +444,10 @@ export class CronScheduler {
   /** See {@link setGateSkippedListener}. */
   private gateSkippedListener: (() => void) | null = null;
 
+  /** Gates confirmed for tasks not loaded yet, by task id. See
+   * {@link approveGate}. */
+  private readonly pendingGateApprovals = new Map<string, string>();
+
   /**
    * Creates a new session-only cron job. Returns the created job.
    * Throws if the max job limit is reached.
@@ -645,6 +649,7 @@ export class CronScheduler {
     // A gate still running for this job must deliver nothing afterwards:
     // delete takes effect immediately (safe-delete design).
     this.abortGate(id);
+    this.pendingGateApprovals.delete(id);
     const job = this.jobs.get(id);
     if (!job) {
       this.restorablePerRunOneShots.delete(id);
@@ -1078,6 +1083,11 @@ export class CronScheduler {
         this.abortGate(task.id);
       }
       const job = durableTaskToJob(task, this.recurringMaxAgeMs, existing);
+      const approvedGate = this.pendingGateApprovals.get(task.id);
+      if (approvedGate !== undefined) {
+        this.pendingGateApprovals.delete(task.id);
+        if (approvedGate === job.gate) job.gateApproved = true;
+      }
       if (existing?.lastFiredAt !== undefined) {
         job.lastFiredAt = Math.max(existing.lastFiredAt, job.lastFiredAt ?? 0);
       }
@@ -1393,6 +1403,22 @@ export class CronScheduler {
    */
   setGateSkippedListener(listener: (() => void) | null): void {
     this.gateSkippedListener = listener;
+  }
+
+  /**
+   * Records that `cron_create` confirmed `gate` in this process for a task
+   * another component writes to disk (the daemon's current-session creator),
+   * so this scheduler's job for it may run the gate unattended, like a job it
+   * created itself. Applies at once when the job is loaded, otherwise on the
+   * reload that installs it, and only while the task's gate is that command.
+   */
+  approveGate(id: string, gate: string): void {
+    const job = this.jobs.get(id);
+    if (!job) {
+      this.pendingGateApprovals.set(id, gate);
+      return;
+    }
+    if (job.gate === gate) job.gateApproved = true;
   }
 
   /**
@@ -1781,6 +1807,7 @@ export class CronScheduler {
       controller.abort();
     }
     this.gatesInFlight.clear();
+    this.pendingGateApprovals.clear();
 
     if (this.durableEnabled) {
       // Invalidate in-flight durable continuations (see durableGeneration).
@@ -2238,7 +2265,10 @@ function gateStatusAfterReload(
   existing?: CronJob,
 ): CronGateStatus | undefined {
   const fromFile = task.gateStatus;
-  const inMemory = existing?.gateStatus;
+  // A summary of another command says nothing about this one: a replaced
+  // gate starts its own failure streak, so its first failure is reported.
+  const inMemory =
+    existing && existing.gate === task.gate ? existing.gateStatus : undefined;
   if (!inMemory) return fromFile;
   if (!fromFile || inMemory.lastAt >= fromFile.lastAt) return inMemory;
   return fromFile;
