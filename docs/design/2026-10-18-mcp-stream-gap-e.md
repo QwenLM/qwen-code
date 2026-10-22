@@ -42,7 +42,7 @@ No standalone FG12e ledger. A stream-resume case belongs to FG12f / turn deliver
 After FG12f, the #14447 status table and the #12380 Stage F table still listed one open e boundary: an actual Runtime MCP connection replacement. FG12f's replacement case (its decision 5) commits a new AgentDefinition revision while the running Session stays pinned, so no Runtime connection is replaced. FG12f said the Harness-private configuration route cannot carry the case for a Spring-created Session. That limit belongs to the test surface, not the product:
 
 - The Harness mints the client id when it opens a Session for a create or a load (`clientId: randomUUID()` in `hosted-harness-session.ts`) and returns it in the attachment. The Broker is not involved. Spring keeps the id on the `HarnessSessionRef` in `QwenHostedHarnessConnector.attachments` and sends it on every Harness call. The public API never exposes it, so a test that uses only the public API cannot send the command.
-- Spring itself never sends `POST /session/:id/mcp/configurations`: `HostedHarnessClient` has no MCP route, and explicit replacement stays Harness-private, as the issue states. The FG13 Hook gates already read the same attachment to call Harness-private status routes. This cell does the same.
+- Spring never sends `POST /session/:id/mcp/configurations`, so explicit replacement stays Harness-private, as the issue states. Since #15119 `HostedHarnessClient` does send the Session MCP management route (`POST /session/:id/mcp/management`), but that route refuses with `hosted_turn_active` while a Turn is active, so a change sent through Spring cannot land while a call is held. The FG13 Hook gates already read the same attachment to call Harness-private status routes. This cell does the same.
 - The route refuses while `mcpBusy`, `mcpRecovering` or `blocked` is set. It does not refuse while a Turn is active, so a replacement can land while a model-driven MCP tool call is held.
 - The Runtime opens the replacement as a new connection: a higher `configRevision`, a new connection generation and a new stdio process. It then marks the older sibling `retiring`. A sibling with a pending call is closed only after that call settles: `settled()` closes a retiring connection once its `pending` map is empty.
 
@@ -71,11 +71,11 @@ Each witness mutates the packaged bundle the class runs (`dist/`). Both are red:
 
 ### Budget
 
-Measured on Linux aarch64, JDK 21, MySQL 8.4.6: the cell takes 12.9 s, 13.8 s and 13.7 s in three class runs, and the class is green 4/4 in 143.3 s, 144.6 s and 144.4 s. Run alone, with the cold boot, it takes 25.9 s. It is shorter than the other three cases because its second Turn writes into the half-open SSE connections the cut clients left, so Tomcat's 30 s graceful shutdown has no request to wait for. The cell is budgeted at 2x its largest in-class time: +28 s, so the healthy sum moves from 10623 s to 10651 s and the fork from 11223 s to 11251 s. 11851 s of fork plus wrap still fits the 198-minute Verify step, so the job ceiling is unchanged.
+Measured on Linux aarch64, JDK 21, MySQL 8.4.6: the cell takes 12.9 s, 13.8 s and 13.7 s in three class runs, and the class is green 4/4 in 143.3 s, 144.6 s and 144.4 s. Run alone, with the cold boot, it takes 25.9 s. It is shorter than the other three cases because its second Turn writes into the half-open SSE connections the cut clients left, so Tomcat's 30 s graceful shutdown has no request to wait for. The cell is budgeted at 2x its largest in-class time: +28 s on top of the FG11d queue-one cell (#15187), so the healthy sum moves from 10636 s to 10664 s and the fork from 11236 s to 11264 s. 11864 s of fork plus wrap still fits the 198-minute Verify step with 16 s left, so the job ceiling is unchanged.
 
 ### Not covered
 
-- A replacement sent by Spring. No such caller exists.
+- A change sent through Spring's Session MCP management route (#15119). It refuses while a Turn is active, so it cannot land during a held call, and this cell does not exercise it.
 - A replacement while a raw `mcp_operation` is in flight. The route answers `409 hosted_mcp_operation_active` while `mcpBusy` is set.
 - A retiring connection that fails to drain, a non-stdio transport, and a Harness or Spring restart after a replacement.
 - The close-time release of the superseded configuration. The cell leaves the Session open; FG12a's configure-replacement case (`HostedMcpReplyLossIT`) closes a replaced Session through the Harness.

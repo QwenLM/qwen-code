@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -349,8 +348,8 @@ class HostedMcpStreamGapIT {
 
     /** The Session's MCP configuration records by revision. */
     private List<JsonNode> configurations(String session) {
-        return spring.getBean(ManagedExtensionRecordStore.class)
-                .listRecords(tenant, session, "mcp_configuration").stream()
+        return HostedGateTestSupport.extensionRecords(jdbc, tenant, session,
+                "mcp_configuration").stream()
                 .sorted(java.util.Comparator.comparingInt(record -> record
                         .path("configRevision").asInt()))
                 .toList();
