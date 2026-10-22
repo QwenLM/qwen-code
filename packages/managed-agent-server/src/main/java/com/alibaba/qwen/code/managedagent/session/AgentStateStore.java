@@ -98,6 +98,13 @@ public interface AgentStateStore {
         throw new UnsupportedOperationException("Child Session creation is unavailable");
     }
 
+    default StoreModels.Admission insertPublicChildSessionCommand(String tenantId,
+            String parentSessionId, String idempotencyKey, String requestDigest,
+            String title, List<Map<String, Object>> input, String payloadDigest,
+            StoreModels.SessionLineage lineage, com.fasterxml.jackson.databind.JsonNode snapshot) {
+        throw new UnsupportedOperationException("Public child Session creation is unavailable");
+    }
+
     /**
      * The isolation slice (#13753 I1): the same creation, bound to the
      * child run's ready child Workspace. The child's row takes the
@@ -202,6 +209,30 @@ public interface AgentStateStore {
         return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
                 agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
                 approvalSelectionSupported, planMode, planModeSupported);
+    }
+
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
+            String approvalMode, boolean approvalSelectionSupported, Boolean planMode, boolean planModeSupported,
+            List<Map<String, Object>> skills, boolean publicChildrenSupported) {
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
+                approvalSelectionSupported, planMode, planModeSupported, skills);
+    }
+
+    @org.springframework.transaction.annotation.Transactional
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
+            String approvalMode, boolean approvalSelectionSupported, Boolean planMode, boolean planModeSupported,
+            List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId) {
+        if (modelId != null) {
+            throw new UnsupportedOperationException("Initial model selection is unavailable");
+        }
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
+                approvalSelectionSupported, planMode, planModeSupported, skills, publicChildrenSupported);
     }
 
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,

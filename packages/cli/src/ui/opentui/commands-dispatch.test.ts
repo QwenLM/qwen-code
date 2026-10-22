@@ -42,6 +42,7 @@ import type { OpenTuiCommandHost } from './commands-context.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
 import { helpCommand } from '../commands/helpCommand.js';
 import { clearCommand } from '../commands/clearCommand.js';
+import { vimCommand } from '../commands/vimCommand.js';
 import { OpenTuiSlashGateway } from './slash-gateway.js';
 
 const { logSlashCommandSpy, loadInteractiveCommandsMock } = vi.hoisted(() => ({
@@ -816,33 +817,44 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
     ).toBeUndefined();
   });
 
-  it('replaces the vim toggle message with a faithful unsupported notice (G-11b)', async () => {
-    const commands = [
-      stub({
-        name: 'vim',
-        action: async (context) => {
-          const enabled = await context.ui.toggleVimEnabled();
-          return {
-            type: 'message',
-            messageType: 'info',
-            content: enabled
-              ? 'Entered Vim mode. Run /vim again to exit.'
-              : 'Exited Vim mode.',
-          };
-        },
-      }),
-    ];
-    // The host reports vim off (the renderer has no vim mode); without the
-    // override the ink message would misleadingly say "Exited Vim mode."
-    const { outcome, host } = await dispatch('/vim', commands, {
-      toggleVimEnabled: async () => false,
-    });
-    expect(outcome).toEqual({ kind: 'handled' });
-    expect(host.items.at(-1)).toMatchObject({
-      type: 'info',
-      text: 'Vim mode is not yet available in the OpenTUI renderer.',
-    });
-  });
+  it.each([
+    [true, 'Entered Vim mode. Run /vim again to exit.'],
+    [false, 'Exited Vim mode.'],
+  ])(
+    'preserves the shared /vim message and recording when enabled is %s',
+    async (enabled, message) => {
+      const toggleVimEnabled = vi.fn().mockResolvedValue(enabled);
+      const recordSlashCommand = vi.fn();
+      const config = {
+        getChatRecordingService: () => ({ recordSlashCommand }),
+      } as unknown as Config;
+      const host = createFakeHost();
+      host.toggleVimEnabled = toggleVimEnabled;
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [vimCommand],
+      );
+
+      expect(await dispatcher.handle('/vim')).toEqual({ kind: 'handled' });
+      expect(toggleVimEnabled).toHaveBeenCalledTimes(1);
+      expect(host.items).toHaveLength(2);
+      expect(host.items[0]).toMatchObject({ type: 'user', text: '/vim' });
+      expect(host.items[1]).toMatchObject({ type: 'info', text: message });
+      expect(recordSlashCommand).toHaveBeenCalledTimes(2);
+      expect(recordSlashCommand).toHaveBeenNthCalledWith(1, {
+        phase: 'invocation',
+        rawCommand: '/vim',
+        sentToModel: false,
+        hiddenInvocation: false,
+      });
+      expect(recordSlashCommand).toHaveBeenNthCalledWith(2, {
+        phase: 'result',
+        rawCommand: '/vim',
+        outputHistoryItems: [{ type: 'info', text: message }],
+      });
+    },
+  );
 
   it('parent commands without an action list subcommands (info)', async () => {
     const commands = [

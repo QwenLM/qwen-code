@@ -74,6 +74,13 @@ public class ManagedAgentProperties implements EnvironmentAware {
         return harness;
     }
 
+    public boolean admitsPublicChildAgents() {
+        return harness.isWorkspaceChildAgentsEnabled() && harness.isWorkspaceShellEnabled()
+                && runtimeBroker.isDurableLocalProcess()
+                && LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
+                && "session".equals(runtimeBroker.getBoundSessionIsolationClass());
+    }
+
     public Auth getAuth() {
         return auth;
     }
@@ -601,6 +608,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private boolean enabled;
         private boolean workspaceFilesEnabled;
         private boolean workspaceShellEnabled;
+        private boolean workspaceChildAgentsEnabled = true;
         private String baseUrl = "http://127.0.0.1:4170";
         private String token = "";
         private String capabilityDigest = "";
@@ -651,6 +659,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
         public void setWorkspaceFilesEnabled(boolean workspaceFilesEnabled) {
             this.workspaceFilesEnabled = workspaceFilesEnabled;
         }
+
+        public boolean isWorkspaceChildAgentsEnabled() { return workspaceChildAgentsEnabled; }
+
+        public void setWorkspaceChildAgentsEnabled(boolean value) { workspaceChildAgentsEnabled = value; }
 
         public boolean isWorkspaceShellEnabled() {
             return workspaceShellEnabled;
