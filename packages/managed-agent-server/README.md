@@ -249,7 +249,10 @@ Instead of the token and digest, `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`
 can name the Harness's own environment file. The server then reads
 `QWEN_SERVER_TOKEN` and `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` from it into its
 configuration, never into its process environment, and refuses to start when
-either direct value is also set.
+either direct value is also set. Write each credential as `KEY=value` on one
+line. The server refuses a line it might read differently from systemd or a
+shell: a continuation, an unterminated quote, text after a closing quote, or a
+whitespace, quote, backslash, `$` or backtick in a credential value.
 
 Create a Session:
 

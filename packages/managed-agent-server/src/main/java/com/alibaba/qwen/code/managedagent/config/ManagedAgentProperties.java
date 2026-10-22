@@ -29,11 +29,16 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 @ConfigurationProperties("qwen.managed-agent")
 public class ManagedAgentProperties implements EnvironmentAware {
     private static final Logger LOG = LoggerFactory.getLogger(
             ManagedAgentProperties.class);
+
+    private static final Set<String> HARNESS_CREDENTIAL_KEYS =
+            Set.of("QWEN_SERVER_TOKEN", "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST");
+    private static final Pattern PLAIN_CREDENTIAL = Pattern.compile("[^\\s\"'\\\\$`]*");
 
     private final Harness harness = new Harness();
     private final SessionStore sessionStore = new SessionStore();
@@ -57,6 +62,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private List<String> definitionModels = List.of();
     private List<ModelOption> modelCatalog = List.of();
     private String trustedActorHeader = "";
+    // Validation may run more than once; the file is read only the first time.
+    private boolean harnessCredentialsApplied;
     // Null on a plain `new`; the sweep then falls back to magnitude bands.
     private Environment environment;
 
@@ -176,33 +183,70 @@ public class ManagedAgentProperties implements EnvironmentAware {
     // process's environment, which Runtime workers would inherit.
     private void applyHarnessCredentialsFile() {
         String file = harness.getCredentialsFile();
-        if (StringUtils.isBlank(file)) {
+        if (!harness.isEnabled() || harnessCredentialsApplied || StringUtils.isBlank(file)) {
             return;
         }
         if (StringUtils.isNotBlank(harness.getToken()) || StringUtils.isNotBlank(harness.getCapabilityDigest())) {
             throw new IllegalStateException("Configure the Hosted Harness token and capability digest either in"
                     + " harness.credentials-file or directly, not both");
         }
-        Map<String, String> values = new LinkedHashMap<>();
-        try {
-            for (String raw : Files.readAllLines(Path.of(file), StandardCharsets.UTF_8)) {
-                String line = raw.strip();
-                int separator = line.indexOf('=');
-                if (separator < 0) {
-                    continue;
-                }
-                String value = line.substring(separator + 1).strip();
-                if (value.length() >= 2 && (value.charAt(0) == '"' || value.charAt(0) == '\'')
-                        && value.charAt(value.length() - 1) == value.charAt(0)) {
-                    value = value.substring(1, value.length() - 1);
-                }
-                values.put(line.substring(0, separator).strip(), value);
-            }
-        } catch (IOException | RuntimeException error) {
-            throw new IllegalStateException("Hosted Harness credentials file " + file + " cannot be read", error);
-        }
+        Map<String, String> values = readHarnessEnvironmentFile(file);
         harness.setToken(credential(values, "QWEN_SERVER_TOKEN", file));
         harness.setCapabilityDigest(credential(values, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", file));
+        harnessCredentialsApplied = true;
+    }
+
+    // systemd and a shell `source` both read this file for the Harness, so
+    // accept only lines both read the way this parser does and refuse the
+    // rest, instead of silently taking a different value.
+    private static Map<String, String> readHarnessEnvironmentFile(String file) {
+        List<String> lines;
+        try {
+            lines = Files.readAllLines(Path.of(file), StandardCharsets.UTF_8);
+        } catch (IOException | RuntimeException error) {
+            throw new IllegalStateException("Hosted Harness credentials file " + file + " cannot be read ("
+                    + error.getClass().getSimpleName() + ")");
+        }
+        Map<String, String> values = new LinkedHashMap<>();
+        for (int index = 0; index < lines.size(); index++) {
+            String line = lines.get(index).strip();
+            if (line.endsWith("\\")) {
+                throw unsupportedCredentialLine(file, index, "a line continuation");
+            }
+            int separator = line.indexOf('=');
+            if (line.startsWith("#") || line.startsWith(";") || separator < 0) {
+                continue;
+            }
+            String key = line.substring(0, separator).strip();
+            String value = line.substring(separator + 1).strip();
+            char quote = value.isEmpty() ? 0 : value.charAt(0);
+            if (quote == '"' && value.indexOf('\\') >= 0) {
+                throw unsupportedCredentialLine(file, index, "an escape inside double quotes");
+            }
+            if (quote == '"' || quote == '\'') {
+                int close = value.indexOf(quote, 1);
+                if (close < 0) {
+                    throw unsupportedCredentialLine(file, index, "an unterminated quote");
+                }
+                if (close != value.length() - 1) {
+                    throw unsupportedCredentialLine(file, index, "text after a closing quote");
+                }
+                value = value.substring(1, close);
+            }
+            if (HARNESS_CREDENTIAL_KEYS.contains(key) && !PLAIN_CREDENTIAL.matcher(value).matches()) {
+                throw unsupportedCredentialLine(file, index,
+                        "whitespace, a quote, a backslash, `$` or a backtick in " + key);
+            }
+            values.put(key, value);
+        }
+        return values;
+    }
+
+    // Names the line, never its content: the line may hold a credential.
+    private static IllegalStateException unsupportedCredentialLine(String file, int index, String construct) {
+        return new IllegalStateException("Hosted Harness credentials file " + file + " line " + (index + 1)
+                + " uses " + construct + "; write KEY=value without continuations, escapes, expansions"
+                + " or trailing text");
     }
 
     private static String credential(Map<String, String> values, String key, String file) {

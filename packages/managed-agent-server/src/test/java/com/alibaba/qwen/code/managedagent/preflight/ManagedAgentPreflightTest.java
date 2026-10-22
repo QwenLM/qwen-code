@@ -172,6 +172,12 @@ class ManagedAgentPreflightTest {
             assertTrue(check.detail().contains("401"));
             assertTrue(check.fix().contains(
                     "QWEN_MANAGED_AGENT_HARNESS_TOKEN"));
+            ManagedAgentProperties fromFile = harness(
+                    "http://127.0.0.1:" + server.getAddress().getPort());
+            fromFile.getHarness().setCredentialsFile("/etc/harness.env");
+            assertEquals("set QWEN_SERVER_TOKEN in /etc/harness.env to the"
+                    + " token the Harness accepts",
+                    ManagedAgentPreflight.harnessCheck(fromFile).fix());
         } finally {
             server.stop(0);
         }
@@ -320,9 +326,14 @@ class ManagedAgentPreflightTest {
     void warnsWhenTheHarnessCredentialsFileIsShared(@TempDir Path directory)
             throws IOException {
         ManagedAgentProperties properties = new ManagedAgentProperties();
-        assertEquals(ManagedAgentPreflight.Status.SKIP,
-                ManagedAgentPreflight.credentialsFileCheck(properties).status());
         Path file = Files.writeString(directory.resolve("harness.env"), "");
+        properties.getHarness().setCredentialsFile(file.toString());
+        assertEquals("disabled",
+                ManagedAgentPreflight.credentialsFileCheck(properties).detail());
+        properties.getHarness().setEnabled(true);
+        properties.getHarness().setCredentialsFile("");
+        assertEquals("no Harness credentials configured",
+                ManagedAgentPreflight.credentialsFileCheck(properties).detail());
         properties.getHarness().setCredentialsFile(file.toString());
         Files.setPosixFilePermissions(file,
                 java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
@@ -334,6 +345,89 @@ class ManagedAgentPreflightTest {
                 ManagedAgentPreflight.credentialsFileCheck(properties);
         assertEquals(ManagedAgentPreflight.Status.WARN, shared.status());
         assertEquals("chmod 600 " + file, shared.fix());
+        Files.setPosixFilePermissions(file,
+                java.nio.file.attribute.PosixFilePermissions.fromString("rw----r--"));
+        ManagedAgentPreflight.Check world =
+                ManagedAgentPreflight.credentialsFileCheck(properties);
+        assertEquals(ManagedAgentPreflight.Status.WARN, world.status());
+        assertEquals("chmod 600 " + file, world.fix());
+        // The server reads it at startup, so an unreadable file fails.
+        properties.getHarness().setCredentialsFile(
+                directory.resolve("missing.env").toString());
+        ManagedAgentPreflight.Check missing =
+                ManagedAgentPreflight.credentialsFileCheck(properties);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, missing.status());
+        assertTrue(missing.fix().startsWith("chown it to the service account"));
+        // An unusable path reports a row instead of ending the run.
+        properties.getHarness().setCredentialsFile("/etc/qwen\0managed.env");
+        assertEquals(ManagedAgentPreflight.Status.WARN,
+                ManagedAgentPreflight.credentialsFileCheck(properties).status());
+    }
+
+    @Test
+    void warnsWhenAConfigFileWithSecretsIsShared(@TempDir Path directory)
+            throws IOException {
+        Path file = Files.writeString(directory.resolve("application.yml"),
+                "qwen:\n  managed-agent:\n    runtime-broker:\n"
+                        + "      credential-key: 'x'\n");
+        Files.setPosixFilePermissions(file,
+                java.nio.file.attribute.PosixFilePermissions.fromString("rw-r-----"));
+        ManagedAgentPreflight.Check shared = ManagedAgentPreflight
+                .configFileCheck(List.of("file:" + file));
+        assertEquals(ManagedAgentPreflight.Status.WARN, shared.status());
+        assertEquals("chmod 600 " + file, shared.fix());
+        Files.setPosixFilePermissions(file,
+                java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+        assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight
+                .configFileCheck(List.of("file:" + file)).status());
+    }
+
+    @Test
+    void sendsTheTokenTheStartupValidationReadFromTheFile(
+            @TempDir Path directory) throws IOException {
+        String token = "f".repeat(64);
+        Path file = Files.writeString(directory.resolve("harness.env"),
+                "QWEN_SERVER_TOKEN=" + token
+                        + "\nQWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=" + DIGEST
+                        + "\n");
+        HttpServer server = HttpServer.create(
+                new InetSocketAddress("127.0.0.1", 0), 0);
+        AtomicReference<String> authorization = new AtomicReference<>();
+        server.createContext("/capabilities", exchange -> {
+            authorization.set(
+                    exchange.getRequestHeaders().getFirst("Authorization"));
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        server.start();
+        try {
+            ManagedAgentProperties properties = new ManagedAgentProperties();
+            properties.getHarness().setEnabled(true);
+            properties.getSessionStore().setEnabled(true);
+            properties.getHarness().setCredentialsFile(file.toString());
+            properties.getHarness().setBaseUrl(
+                    "http://127.0.0.1:" + server.getAddress().getPort());
+            // run() adds the validation row before the Harness row.
+            assertEquals(ManagedAgentPreflight.Status.PASS,
+                    ManagedAgentPreflight.startupValidationCheck(properties)
+                            .status());
+            assertEquals(ManagedAgentPreflight.Status.PASS,
+                    ManagedAgentPreflight.harnessCheck(properties).status());
+            assertEquals("Bearer " + token, authorization.get());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void refusesTheShippedPlaceholderToken() {
+        ManagedAgentProperties properties = harness("http://127.0.0.1:1");
+        properties.getHarness().setToken("replace-with-a-private-random-token");
+        ManagedAgentPreflight.Check check =
+                ManagedAgentPreflight.harnessCheck(properties);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, check.status());
+        assertEquals("token is still the shipped template placeholder",
+                check.detail());
     }
 
     @Test

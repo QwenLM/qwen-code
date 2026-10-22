@@ -536,6 +536,15 @@ test('leaves the Session Store wiring to the server defaults in the env template
 
 // The server derives the store switch, URL and workspace ID; an explicit
 // workspace ID would conflict with the local-process Broker's derived one.
+function assertDerivesSessionStoreWiring(env) {
+  assert.doesNotMatch(env, /^QWEN_MANAGED_AGENT_SESSION_STORE_/m);
+  assert.doesNotMatch(env, /^QWEN_MANAGED_AGENT_WORKSPACE_ID=/m);
+  assert.match(
+    env,
+    /^QWEN_MANAGED_AGENT_WORKSPACE_CWD=\/srv\/qwen-workspace$/m,
+  );
+}
+
 // harness.env is the one copy of the shared credentials; server.env names it.
 function assertReadsHarnessCredentials(server, { token, digest }, harnessEnv) {
   assert.ok(!server.includes(token));
@@ -551,14 +560,18 @@ function assertReadsHarnessCredentials(server, { token, digest }, harnessEnv) {
   );
 }
 
-function assertDerivesSessionStoreWiring(env) {
-  assert.doesNotMatch(env, /^QWEN_MANAGED_AGENT_SESSION_STORE_/m);
-  assert.doesNotMatch(env, /^QWEN_MANAGED_AGENT_WORKSPACE_ID=/m);
-  assert.match(
-    env,
-    /^QWEN_MANAGED_AGENT_WORKSPACE_CWD=\/srv\/qwen-workspace$/m,
+test('ships the Harness credential keys the control plane reads', async () => {
+  const template = await readFile(
+    new URL(
+      '../../packages/managed-agent-server/distribution/systemd/harness.env.example',
+      import.meta.url,
+    ),
+    'utf8',
   );
-}
+  // The control plane matches these keys exactly, from the start of a line.
+  assert.match(template, /^QWEN_SERVER_TOKEN=/m);
+  assert.match(template, /^QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=sha256:/m);
+});
 
 test('rejects a stable distribution version', async () => {
   await assert.rejects(

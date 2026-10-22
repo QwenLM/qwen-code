@@ -32,6 +32,7 @@ class HarnessCredentialsFileTest {
                 "QWEN_SERVER_TOKEN=replaced-by-the-later-line",
                 "",
                 "  QWEN_SERVER_TOKEN = '" + TOKEN + "'  ",
+                "# QWEN_SERVER_TOKEN='commented out, don't",
                 "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=\"" + DIGEST + "\"",
                 "QWEN_HOSTED_HARNESS_BROKER_ARGS=--managed-runtime-broker-token=ignored",
                 "not an assignment"));
@@ -39,14 +40,67 @@ class HarnessCredentialsFileTest {
         properties.validateWorkspaceFiles();
         assertThat(properties.getHarness().getToken()).isEqualTo(TOKEN);
         assertThat(properties.getHarness().getCapabilityDigest()).isEqualTo(DIGEST);
+        // Validation may run again, as preflight's public entry allows.
+        properties.validateWorkspaceFiles();
+        assertThat(properties.getHarness().getToken()).isEqualTo(TOKEN);
+    }
+
+    @Test
+    void keepsEveryEqualsSignAfterTheFirst(@TempDir Path directory) throws IOException {
+        Path file = Files.writeString(directory.resolve("harness.env"),
+                "QWEN_SERVER_TOKEN=QmFzZTY0==\nQWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=" + DIGEST + "\n");
+        ManagedAgentProperties properties = withFile(file);
+        properties.validateWorkspaceFiles();
+        assertThat(properties.getHarness().getToken()).isEqualTo("QmFzZTY0==");
+    }
+
+    @Test
+    void refusesConstructsTheTwoReadersDisagreeOn(@TempDir Path directory) throws IOException {
+        String digest = "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=" + DIGEST;
+        String secret = "abcdef0123";
+        String[][] cases = {
+            {"QWEN_SERVER_TOKEN=" + secret + "\\", "a line continuation"},
+            {"# a comment that continues\\", "a line continuation"},
+            {"QWEN_SERVER_TOKEN=\"" + secret + "\\\"x\"", "an escape inside double quotes"},
+            {"QWEN_SERVER_TOKEN='" + secret, "an unterminated quote"},
+            {"QWEN_SERVER_TOKEN='" + secret + "' # rotated", "text after a closing quote"},
+            {"QWEN_SERVER_TOKEN=$SHARED_" + secret, "whitespace, a quote, a backslash, `$` or a backtick in QWEN_SERVER_TOKEN"},
+            {"QWEN_SERVER_TOKEN=`cat " + secret + "`", "whitespace, a quote, a backslash, `$` or a backtick in QWEN_SERVER_TOKEN"},
+            {"QWEN_SERVER_TOKEN=" + secret + " " + secret, "whitespace, a quote, a backslash, `$` or a backtick in QWEN_SERVER_TOKEN"},
+        };
+        for (String[] refused : cases) {
+            Path file = Files.writeString(directory.resolve("harness.env"),
+                    "# Generated\n" + digest + "\n" + refused[0] + "\n");
+            assertThatThrownBy(withFile(file)::validateWorkspaceFiles).as(refused[0])
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("Hosted Harness credentials file " + file + " line 3 uses " + refused[1]
+                            + "; write KEY=value without continuations, escapes, expansions or trailing text")
+                    .message().doesNotContain(secret);
+        }
+        // An ignored key may use anything that keeps to a single line.
+        Path ignored = Files.writeString(directory.resolve("ignored.env"), "QWEN_SERVER_TOKEN=" + TOKEN + "\n"
+                + digest + "\nQWEN_HOSTED_HARNESS_BROKER_ARGS=--a $B --c\n");
+        ManagedAgentProperties properties = withFile(ignored);
+        properties.validateWorkspaceFiles();
+        assertThat(properties.getHarness().getToken()).isEqualTo(TOKEN);
     }
 
     @Test
     void refusesAFileThatCannotBeRead(@TempDir Path directory) {
         Path missing = directory.resolve("missing.env");
+        // The type, not a chained cause, reaches preflight's innermost-message row.
         assertThatThrownBy(withFile(missing)::validateWorkspaceFiles)
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessage("Hosted Harness credentials file " + missing + " cannot be read");
+                .hasMessage("Hosted Harness credentials file " + missing + " cannot be read (NoSuchFileException)")
+                .hasNoCause();
+    }
+
+    @Test
+    void ignoresTheFileWhileTheHarnessIsDisabled(@TempDir Path directory) {
+        ManagedAgentProperties properties = withFile(directory.resolve("missing.env"));
+        properties.getHarness().setEnabled(false);
+        properties.validateWorkspaceFiles();
+        assertThat(properties.getHarness().getToken()).isEmpty();
     }
 
     @Test
@@ -91,6 +145,8 @@ class HarnessCredentialsFileTest {
 
     private static ManagedAgentProperties withFile(Path file) {
         ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setEnabled(true);
+        properties.getSessionStore().setEnabled(true);
         properties.getHarness().setCredentialsFile(file.toString());
         return properties;
     }

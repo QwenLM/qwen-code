@@ -27,22 +27,24 @@ Making the control plane read the Harness's variable names from its own environm
 
 ### Setting
 
-`qwen.managed-agent.harness.credentials-file` (`QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`) names the Harness environment file. When it is set, startup validation reads the file and assigns:
+`qwen.managed-agent.harness.credentials-file` (`QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`) names the Harness environment file. When it is set and the Harness is enabled, startup validation reads the file once and assigns:
 
 - `QWEN_SERVER_TOKEN` to `harness.token`;
 - `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` to `harness.capability-digest`.
 
 Other keys, such as `QWEN_HOSTED_HARNESS_BROKER_ARGS`, are ignored. The values are held only in the bound configuration and are never logged.
 
-The file uses the subset of the systemd `EnvironmentFile` syntax that the shipped files use. Each line is trimmed and split at its first `=`; lines without one are ignored, and a comment line never names one of the two keys. Both sides are trimmed, and a value enclosed in a matching pair of single or double quotes loses them. There is no variable expansion, and a later assignment replaces an earlier one, as in systemd.
+Both systemd and a shell `source` read this file for the Harness, so the control plane accepts only the lines both readers take literally and refuses the rest instead of reading a different value. Each line is trimmed. A line ending in `\` is refused, comments included, because both readers continue it on the next line. Lines starting with `#` or `;`, and lines without `=`, are otherwise skipped. A line is split at its first `=` and both sides are trimmed. A value may be enclosed in one matching pair of single or double quotes. An opening quote without its closing quote, text after the closing quote, and a backslash inside double quotes are refused. A value for one of the two keys must contain no whitespace, quote, backslash, `$` or backtick, which rules out escapes, expansions and command substitution. A later assignment replaces an earlier one, as in systemd. A refusal names the file, the line number and the construct, never the line's content.
 
 ### Failure semantics
 
 - The file is set together with a non-blank `harness.token` or `harness.capability-digest`: startup fails and asks for one source.
-- The file cannot be read: startup fails, naming the path.
+- The file cannot be read: startup fails, naming the path and the exception type.
+- A line uses a refused construct: startup fails, naming the path and the line.
 - A required key is missing or blank: startup fails, naming the key and the path.
+- The Harness is disabled: the file is not read.
 
-The resolution runs in the same startup validation that preflight calls, so `--check` reports these failures in its `validation` row before any listener starts. The existing `harness` row then checks the resolved token and digest as before. A new `credentials` row reports `SKIP` without a file, `WARN` with a `chmod 600` fix when the file is group- or world-readable, and `PASS` otherwise.
+The resolution runs in the same startup validation that preflight calls, so `--check` reports these failures in its `validation` row before any listener starts. The existing `harness` row then checks the resolved token and digest as before. It also fails a token that still carries the shipped templates' `replace-` placeholder, which the Harness would accept. A new `credentials` row reports `SKIP` while the Harness is disabled or no file is set. It reports `FAIL` with a `chown` fix when the service account cannot read the file, and `WARN` with a `chmod 600` fix when the file is group- or world-readable, the same policy and wording the `config` row applies to `application.yml`. Otherwise it reports `PASS`.
 
 ### Templates, bootstrap and systemd
 
@@ -59,9 +61,9 @@ The resolution runs in the same startup validation that preflight calls, so `--c
 
 ## Validation plan
 
-- Unit tests on `ManagedAgentProperties`: both keys resolve from a file in the shipped format with comments, quotes, an ignored extra key and a repeated key; a missing file, a missing key and a blank key each fail with the path and key; a direct token or digest together with the file fails; no file leaves the direct values untouched; `application.yml` binds `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`.
-- Preflight tests: the `credentials` row reports `SKIP`, `PASS` for mode `0600` and `WARN` for a group-readable file.
-- Template tests: the bootstrap's `server.env` and `server.env.example` reference `harness.env` and carry neither credential.
+- Unit tests on `ManagedAgentProperties`: both keys resolve from a file in the shipped format with comments, quotes, an ignored extra key, a repeated key and a value containing `=`; each refused construct fails with the line and without the value; a missing file, a missing key and a blank key each fail with the path and key; a direct token or digest together with the file fails; a disabled Harness ignores the file; a second validation pass is a no-op; no file leaves the direct values untouched; `application.yml` binds `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`.
+- Preflight tests: the `credentials` row reports `SKIP`, `PASS` for mode `0600`, `WARN` for group- and world-readable files and an unusable path, and `FAIL` for an unreadable file. The `harness` row sends the token the validation read from the file and fails the template placeholder. File-aware fixes cover the 401 branch.
+- Template tests: the bootstrap's `server.env` and `server.env.example` reference `harness.env` and carry neither credential, and `harness.env.example` starts both keys at the beginning of a line.
 - End-to-end: generate the files with the bootstrap, start the real Harness from `harness.env`, start the packaged server from `server.env`, run `--check`, and complete one Turn. Repeat with a conflicting direct token and with a missing key to observe the refusals.
 
 ## Acceptance criteria

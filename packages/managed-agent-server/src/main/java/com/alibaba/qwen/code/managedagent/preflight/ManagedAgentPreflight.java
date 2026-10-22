@@ -244,25 +244,38 @@ public final class ManagedAgentPreflight {
             return new Check("config", Status.FAIL,
                     path + " is not readable", "chmod 600 " + path);
         }
+        String content;
         try {
-            String content = Files.readString(file, StandardCharsets.UTF_8);
-            boolean secrets = content.contains("credential-key")
-                    || content.contains("signing-key")
-                    || content.contains("password");
+            content = Files.readString(file, StandardCharsets.UTF_8);
+        } catch (IOException error) {
+            return new Check("config", Status.WARN,
+                    path + ": cannot inspect permissions", null);
+        }
+        boolean secrets = content.contains("credential-key")
+                || content.contains("signing-key")
+                || content.contains("password");
+        return secrets ? sharedSecretFileCheck("config", file, path)
+                : new Check("config", Status.PASS, path, null);
+    }
+
+    // One policy for every file that holds a secret: WARN, not FAIL, when
+    // anyone but its owner can read it, so the operator sees the chmod.
+    private static Check sharedSecretFileCheck(String row, Path file,
+            String path) {
+        try {
             Set<PosixFilePermission> permissions =
                     Files.getPosixFilePermissions(file);
-            if (secrets && (permissions.contains(PosixFilePermission.GROUP_READ)
-                    || permissions.contains(
-                    PosixFilePermission.OTHERS_READ))) {
-                return new Check("config", Status.WARN,
+            if (permissions.contains(PosixFilePermission.GROUP_READ)
+                    || permissions.contains(PosixFilePermission.OTHERS_READ)) {
+                return new Check(row, Status.WARN,
                         path + " is group- or world-readable",
                         "chmod 600 " + path);
             }
         } catch (IOException | UnsupportedOperationException error) {
-            return new Check("config", Status.WARN,
+            return new Check(row, Status.WARN,
                     path + ": cannot inspect permissions", null);
         }
-        return new Check("config", Status.PASS, path, null);
+        return new Check(row, Status.PASS, path, null);
     }
 
     private static Check keyRingCheck(ManagedAgentProperties properties) {
@@ -342,25 +355,33 @@ public final class ManagedAgentPreflight {
     }
 
     static Check credentialsFileCheck(ManagedAgentProperties properties) {
-        String file = properties.getHarness().getCredentialsFile();
+        ManagedAgentProperties.Harness harness = properties.getHarness();
+        if (!harness.isEnabled()) {
+            return new Check("credentials", Status.SKIP, "disabled", null);
+        }
+        String file = harness.getCredentialsFile();
         if (StringUtils.isBlank(file)) {
             return new Check("credentials", Status.SKIP,
-                    "Harness credentials configured directly", null);
+                    StringUtils.isBlank(harness.getToken())
+                            ? "no Harness credentials configured"
+                            : "Harness credentials configured directly",
+                    null);
         }
+        Path path;
         try {
-            Set<PosixFilePermission> permissions =
-                    Files.getPosixFilePermissions(Path.of(file));
-            if (permissions.contains(PosixFilePermission.GROUP_READ)
-                    || permissions.contains(PosixFilePermission.OTHERS_READ)) {
-                return new Check("credentials", Status.WARN,
-                        file + " is group- or world-readable",
-                        "chmod 600 " + file);
-            }
-        } catch (IOException | UnsupportedOperationException error) {
+            path = Path.of(file);
+        } catch (RuntimeException error) {
             return new Check("credentials", Status.WARN,
                     file + ": cannot inspect permissions", null);
         }
-        return new Check("credentials", Status.PASS, file, null);
+        // The server reads the file as its service account at startup.
+        if (!Files.isReadable(path)) {
+            return new Check("credentials", Status.FAIL,
+                    file + " is not readable",
+                    "chown it to the service account, then chmod 600 "
+                            + file);
+        }
+        return sharedSecretFileCheck("credentials", path, file);
     }
 
     static Check harnessCheck(ManagedAgentProperties properties) {
@@ -374,6 +395,13 @@ public final class ManagedAgentPreflight {
                 : "QWEN_SERVER_TOKEN in " + file;
         if (StringUtils.isBlank(harness.getToken())) {
             return new Check("harness", Status.FAIL, "token is empty",
+                    "set " + tokenSetting);
+        }
+        // The shipped templates' placeholder works as a token, but anyone
+        // can read it in the distribution.
+        if (harness.getToken().startsWith("replace-")) {
+            return new Check("harness", Status.FAIL,
+                    "token is still the shipped template placeholder",
                     "set " + tokenSetting);
         }
         if (!isDigest(harness.getCapabilityDigest())) {

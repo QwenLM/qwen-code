@@ -27,22 +27,24 @@ Hosted Harness 和 Java 控制面必须共享同一个 bearer token 和同一个
 
 ### 配置项
 
-`qwen.managed-agent.harness.credentials-file`（`QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`）指定 Harness 的环境文件。设置后，启动校验读取该文件并赋值：
+`qwen.managed-agent.harness.credentials-file`（`QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`）指定 Harness 的环境文件。设置后且 Harness 已开启时，启动校验读取该文件一次并赋值：
 
 - `QWEN_SERVER_TOKEN` 赋给 `harness.token`；
 - `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` 赋给 `harness.capability-digest`。
 
 其他键（如 `QWEN_HOSTED_HARNESS_BROKER_ARGS`）被忽略。这些值只保存在绑定后的配置中，从不写入日志。
 
-文件采用随包文件所用的 systemd `EnvironmentFile` 语法子集。每行先去掉首尾空白，再在第一个 `=` 处拆分；没有 `=` 的行被忽略，注释行也不可能命名这两个键。键和值都去掉首尾空白，用一对相同的单引号或双引号包围的值去掉引号。不做变量展开；与 systemd 一样，后出现的赋值覆盖先出现的。
+systemd 和 shell 的 `source` 都会为 Harness 读取这个文件，因此控制面只接受两种读取方式都按字面理解的行，其余一律拒绝，而不是读出不同的值。每行先去掉首尾空白。以 `\` 结尾的行会被拒绝（注释行也一样），因为两种读取方式都会把它续接到下一行。其余以 `#` 或 `;` 开头的行、以及没有 `=` 的行被跳过。每行在第一个 `=` 处拆分，键和值都去掉首尾空白。值可以用一对相同的单引号或双引号包围。只有开引号没有闭引号、闭引号之后还有文字、双引号内出现反斜杠，都会被拒绝。两个键的值不得包含空白、引号、反斜杠、`$` 或反引号，从而排除转义、变量展开和命令替换。与 systemd 一样，后出现的赋值覆盖先出现的。拒绝信息给出文件、行号和写法，从不包含该行内容。
 
 ### 失败语义
 
 - 同时设置了该文件和非空的 `harness.token` 或 `harness.capability-digest`：启动失败，要求只保留一个来源。
-- 文件无法读取：启动失败，并给出路径。
+- 文件无法读取：启动失败，并给出路径和异常类型。
+- 某行使用了被拒绝的写法：启动失败，并给出路径和行号。
 - 必需的键缺失或为空：启动失败，并给出键名和路径。
+- Harness 关闭：不读取该文件。
 
-解析发生在 preflight 也会调用的同一个启动校验中，因此 `--check` 会在任何监听启动之前，于 `validation` 行报告这些失败。随后已有的 `harness` 行照旧检查解析出的 token 和 digest。新增的 `credentials` 行在未设置文件时为 `SKIP`；文件对 group 或 others 可读时为 `WARN`，并给出 `chmod 600` 修复；其余情况为 `PASS`。
+解析发生在 preflight 也会调用的同一个启动校验中，因此 `--check` 会在任何监听启动之前，于 `validation` 行报告这些失败。随后已有的 `harness` 行照旧检查解析出的 token 和 digest，并且当 token 仍是随包模板中以 `replace-` 开头的占位符（Harness 会接受它）时报告失败。新增的 `credentials` 行在 Harness 关闭或未设置文件时为 `SKIP`；服务账号无法读取该文件时为 `FAIL` 并给出 `chown` 修复；文件对 group 或 others 可读时为 `WARN` 并给出 `chmod 600` 修复，与 `config` 行对 `application.yml` 采用的策略和措辞相同；其余情况为 `PASS`。
 
 ### 模板、bootstrap 与 systemd
 
@@ -59,9 +61,9 @@ Hosted Harness 和 Java 控制面必须共享同一个 bearer token 和同一个
 
 ## 验证计划
 
-- `ManagedAgentProperties` 单元测试：从随包格式的文件（含注释、引号、被忽略的额外键和重复键）中解析出两个键；文件缺失、键缺失、键为空分别以路径和键名失败；直接配置的 token 或 digest 与文件同时存在时失败；不设文件时直接配置的值不变；`application.yml` 绑定 `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`。
-- preflight 测试：`credentials` 行分别报告 `SKIP`、权限 `0600` 时的 `PASS`，以及 group 可读时的 `WARN`。
-- 模板测试：bootstrap 生成的 `server.env` 和 `server.env.example` 引用 `harness.env`，且不包含任何一项凭据。
+- `ManagedAgentProperties` 单元测试：从随包格式的文件（含注释、引号、被忽略的额外键、重复键和含 `=` 的值）中解析出两个键；每种被拒绝的写法都以行号失败，且不包含值；文件缺失、键缺失、键为空分别以路径和键名失败；直接配置的 token 或 digest 与文件同时存在时失败；Harness 关闭时忽略文件；第二次校验不产生任何影响；不设文件时直接配置的值不变；`application.yml` 绑定 `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`。
+- preflight 测试：`credentials` 行分别报告 `SKIP`、权限 `0600` 时的 `PASS`、group 或 others 可读以及路径不可用时的 `WARN`，以及文件不可读时的 `FAIL`；`harness` 行发送校验从文件读到的 token，并对模板占位符报告失败；指向文件的修复提示覆盖 401 分支。
+- 模板测试：bootstrap 生成的 `server.env` 和 `server.env.example` 引用 `harness.env`，且不包含任何一项凭据，并且 `harness.env.example` 的两个键都从行首开始。
 - 端到端：用 bootstrap 生成文件，从 `harness.env` 启动真实 Harness，从 `server.env` 启动打包后的服务端，运行 `--check` 并完成一个 Turn。再分别以冲突的直接 token 和缺失的键重复，观察拒绝行为。
 
 ## 验收标准
