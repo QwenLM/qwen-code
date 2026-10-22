@@ -32,6 +32,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskCancelRequ
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskEvent;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskEventQueryRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskGetRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskPage;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskQueryRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscriptRequest;
@@ -86,7 +87,7 @@ public class WebShellAgentController {
     }
 
     @PostMapping("/tasks/query")
-    public WebShellPage<WebShellTask> tasks(TenantContext tenant,
+    public WebShellTaskPage tasks(TenantContext tenant,
             @Valid @RequestBody WebShellTaskQueryRequest request) {
         return tasks.queryWebShellTasks(tenant.tenantId(), tenant.actorId(),
                 request.sessionId(), request.cursor(),
@@ -126,7 +127,14 @@ public class WebShellAgentController {
             @RequestBody WebShellListRequest request) {
         return service.listWebShellSessions(tenant.tenantId(),
                 tenant.actorId(), request.cursor(), request.limit() == null ? 20
-                        : request.limit());
+                        : request.limit(), request.archiveState(), request.titleQuery());
+    }
+
+    @PostMapping("/sessions/export/query")
+    public ApiModels.WebShellExportPage export(TenantContext tenant,
+            @Valid @RequestBody ApiModels.WebShellExportRequest request) {
+        return service.exportPage(tenant.tenantId(), tenant.actorId(), request.sessionId(),
+                request.cursor(), request.limit() == null ? 100 : request.limit());
     }
 
     @PostMapping("/sessions/get")
@@ -218,6 +226,10 @@ public class WebShellAgentController {
                     "unsupported_approval_mode",
                     "Approval mode selection requires a bound Workspace.");
         }
+        if (selection == null && request.modelId() != null) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature",
+                    "Model selection requires a bound Workspace.");
+        }
         if (selection == null && request.skills() != null && !request.skills().isEmpty()) {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature",
                     "Session Skills require a bound Workspace.");
@@ -233,7 +245,7 @@ public class WebShellAgentController {
                 : service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), request.idempotencyKey(),
                         request.agentId(), null, request.title(), null,
-                        request.input(), selection, request.approvalMode(), request.planMode(), request.skills()));
+                        request.input(), selection, request.approvalMode(), request.planMode(), request.skills(), request.modelId()));
         return ResponseEntity.accepted().body(admission);
     }
 
@@ -274,27 +286,35 @@ public class WebShellAgentController {
     @PostMapping("/sessions/close")
     public ResponseEntity<WebShellCommandOperation> close(
             TenantContext tenant,
-            @Valid @RequestBody WebShellLifecycleRequest request) {
+            @Valid @RequestBody WebShellLifecycleRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
         return operation(tenant, request, OperationKind.CLOSE);
     }
 
     @PostMapping("/sessions/archive")
     public ResponseEntity<WebShellCommandOperation> archive(
             TenantContext tenant,
-            @Valid @RequestBody WebShellLifecycleRequest request) {
+            @Valid @RequestBody WebShellLifecycleRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
         return operation(tenant, request, OperationKind.ARCHIVE);
     }
 
     @PostMapping("/sessions/delete")
     public ResponseEntity<WebShellCommandOperation> delete(
             TenantContext tenant,
-            @Valid @RequestBody WebShellLifecycleRequest request) {
+            @Valid @RequestBody WebShellLifecycleRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
         return operation(tenant, request, OperationKind.DELETE);
     }
 
     @PostMapping("/sessions/unarchive")
     public ResponseEntity<WebShellSession> unarchive(TenantContext tenant,
-            @Valid @RequestBody WebShellLifecycleRequest request) {
+            @Valid @RequestBody WebShellLifecycleRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
         var result = service.unarchiveWebShellSession(tenant.tenantId(), tenant.actorId(),
                 request.idempotencyKey(), request.sessionId());
         return ResponseEntity.ok().header("X-Qwen-Idempotent-Replay", Boolean.toString(result.replayed()))

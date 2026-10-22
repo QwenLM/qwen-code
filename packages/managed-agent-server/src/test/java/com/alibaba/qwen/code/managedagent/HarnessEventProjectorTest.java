@@ -5,6 +5,8 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.persistence.EventIdentity;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.Map;
 
@@ -55,6 +57,32 @@ class HarnessEventProjectorTest {
                 "prompt", Map.of()), "turn-1");
 
         assertThat(event.errorCode()).isEqualTo("model_failed");
+        assertThat(event.data().toString()).doesNotContain("secret")
+                .doesNotContain("/private/workspace");
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "model_payment_required, HTTP 402, billing",
+        "model_authentication_failed, HTTP 401, credentials",
+        "model_access_denied, HTTP 403, permissions",
+        "model_rate_limited, HTTP 429, later",
+        "model_request_timeout, timed out, later",
+        "model_request_rejected, rejected, configuration",
+        "model_service_unavailable, unavailable, later",
+        "model_request_failed, Model API request failed, logs"
+    })
+    void projectsSafeActionableModelApiFailures(String code,
+            String cause, String action) {
+        ProjectedEvent event = projector.project(new SourceEvent(3L,
+                "turn_error", Map.of("code", code, "message",
+                        "token=secret path=/private/workspace"),
+                "prompt", Map.of()), "turn-1");
+
+        assertThat(event.errorCode()).isEqualTo(code);
+        assertThat(event.errorMessage()).contains(cause).contains(action);
+        assertThat(event.terminalStatus()).isEqualTo("FAILED");
+        assertThat(event.data()).containsEntry("message", event.errorMessage());
         assertThat(event.data().toString()).doesNotContain("secret")
                 .doesNotContain("/private/workspace");
     }
