@@ -7,6 +7,7 @@
 export type {
   ExportConfig,
   ExportMessage,
+  ExportMessageAuthor,
   ExportSessionData,
 } from './types.js';
 export { collectSessionData, collectSessionMetadata } from './collect.js';
@@ -27,6 +28,7 @@ export {
   createExportTranscriptDocumentV1,
   type CreateExportTranscriptDocumentOptions,
   type ExportMetadataPresentationV1,
+  type ExportTranscriptAuthorV1,
   type ExportTranscriptBlockV1,
   type ExportTranscriptDiagnosticV1,
   type ExportTranscriptDocumentV1,

@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
+import type { WorkflowAncestorTrustProvider } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   atomicWriteFileSync,
   createDebugLogger,
@@ -16,7 +17,6 @@ import {
   Storage,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
-import stripJsonComments from 'strip-json-comments';
 import { parseJsoncObject, updateJsoncContent } from '../utils/jsonc-editor.js';
 import {
   arePathsEquivalent,
@@ -27,6 +27,7 @@ import {
   resolveTrustDecision,
   resolveTrustRule,
 } from './trust-precedence.js';
+import { isWorkflowAncestorDirectorySafe } from './workflow-ancestor-directory-safety.js';
 
 const debugLogger = createDebugLogger('TRUSTED_FOLDERS');
 
@@ -125,10 +126,24 @@ export class LoadedTrustedFolders {
     );
   }
 
-  setValue(path: string, trustLevel: TrustLevel): void {
+  setValue(
+    path: string,
+    trustLevel: TrustLevel,
+    preserveExistingTrust = false,
+  ): void {
     const committedConfig = writeTrustedFolders(
       this.user.path,
-      (diskConfig) => ({ ...diskConfig, [path]: trustLevel }),
+      (diskConfig) => {
+        const existing = diskConfig[path];
+        if (
+          preserveExistingTrust &&
+          (existing === TrustLevel.TRUST_FOLDER ||
+            existing === TrustLevel.TRUST_PARENT)
+        ) {
+          return diskConfig;
+        }
+        return { ...diskConfig, [path]: trustLevel };
+      },
     );
     this.user.config = committedConfig;
     notifyTrustedFoldersChanged();
@@ -146,10 +161,15 @@ export function resetTrustedFoldersForTesting(): void {
 }
 
 export function loadTrustedFolders(): LoadedTrustedFolders {
-  if (loadedTrustedFolders) {
-    return loadedTrustedFolders;
-  }
+  loadedTrustedFolders ??= readTrustedFoldersFile(false);
+  return loadedTrustedFolders;
+}
 
+export function loadTrustedFoldersFresh(): LoadedTrustedFolders {
+  return readTrustedFoldersFile(true);
+}
+
+function readTrustedFoldersFile(validateRules: boolean): LoadedTrustedFolders {
   const errors: TrustedFoldersError[] = [];
   let userConfig: Record<string, TrustLevel> = {};
 
@@ -159,33 +179,54 @@ export function loadTrustedFolders(): LoadedTrustedFolders {
   try {
     if (fs.existsSync(userPath)) {
       const content = fs.readFileSync(userPath, 'utf-8');
-      const parsed: unknown = JSON.parse(stripJsonComments(content));
-
-      if (
-        typeof parsed !== 'object' ||
-        parsed === null ||
-        Array.isArray(parsed)
-      ) {
-        errors.push({
-          message: 'Trusted folders file is not a valid JSON object.',
-          path: userPath,
-        });
-      } else {
-        userConfig = parsed as Record<string, TrustLevel>;
-      }
+      const parsed = parseJsoncObject(content);
+      if (validateRules) assertTrustedFoldersConfig(parsed);
+      userConfig = parsed as Record<string, TrustLevel>;
     }
   } catch (error: unknown) {
     errors.push({
-      message: getErrorMessage(error),
+      message:
+        error instanceof Error &&
+        error.message === 'JSONC document root is not a JSON object.'
+          ? 'Trusted folders file is not a valid JSON object.'
+          : getErrorMessage(error),
       path: userPath,
     });
   }
 
-  loadedTrustedFolders = new LoadedTrustedFolders(
+  return new LoadedTrustedFolders(
     { path: userPath, config: userConfig },
     errors,
   );
-  return loadedTrustedFolders;
+}
+
+export function createLocalWorkflowAncestorTrustProvider(
+  settings: Settings,
+): WorkflowAncestorTrustProvider {
+  return async (ancestorDirs, canonicalTargetDir) => {
+    if (!isFolderTrustEnabled(settings)) {
+      return ancestorDirs.map(isWorkflowAncestorDirectorySafe);
+    }
+    if (ideContextStore.get()?.workspaceState?.isTrusted === false) {
+      return ancestorDirs.map(() => false);
+    }
+    const folders = loadTrustedFoldersFresh();
+    if (folders.errors.length > 0) {
+      debugLogger.warn(
+        'Workflow ancestor trust denied: invalid trusted folders snapshot:',
+        folders.errors
+          .map((error) => `${error.path}: ${error.message}`)
+          .join('; '),
+      );
+      return ancestorDirs.map(() => false);
+    }
+    if (folders.isPathTrusted(canonicalTargetDir) !== true) {
+      return ancestorDirs.map(() => false);
+    }
+    return ancestorDirs.map(
+      (directory) => folders.isPathTrusted(directory) === true,
+    );
+  };
 }
 
 export function saveTrustedFolders(

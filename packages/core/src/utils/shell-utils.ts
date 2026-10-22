@@ -17,6 +17,7 @@ import {
   type ExecFileOptions,
 } from 'node:child_process';
 import { accessSync, constants as fsConstants } from 'node:fs';
+import { resolveWorkspacePath } from './workspaceContext.js';
 
 const SHELL_TOOL_NAMES = ['run_shell_command', 'ShellTool'];
 
@@ -1627,6 +1628,46 @@ export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
 }
 
 /**
+ * Whether a command backgrounds any part of itself with `&`: anywhere at its
+ * top level, at its end, or inside a script it hands to a shell wrapper —
+ * also a wrapper behind a prefix `normalizeMonitorCommand` does not unwrap
+ * (`nohup bash -c './probe.sh &'`, `sudo -u ci bash -c …`, `env FOO=1 bash
+ * -c …`). Nested scripts are checked the same way. An `&` inside a quoted
+ * argument that is not a shell script (`gh api 'pulls?a=1&b=2'`) does not
+ * count.
+ */
+export function backgroundsAnyPart(command: string): boolean {
+  const { wrapperTokens, innerCommand, innerArgsSuffix } =
+    parseMonitorShellWrapper(command);
+  for (const part of [innerCommand, innerArgsSuffix ?? '']) {
+    if (
+      hasNonFinalTopLevelBackgroundOperator(part) ||
+      stripTrailingBackgroundAmp(part) !== part
+    ) {
+      return true;
+    }
+  }
+  if (wrapperTokens) return backgroundsAnyPart(innerCommand);
+  // Not a wrapper at the head: look for one further along. Each recursion
+  // only enters a wrapper's script, which is shorter than the command.
+  let rest = takeLeadingToken(command)?.rest ?? '';
+  for (
+    let token = takeLeadingToken(rest);
+    token;
+    token = takeLeadingToken(rest)
+  ) {
+    if (
+      parseMonitorShellWrapper(rest).wrapperTokens &&
+      backgroundsAnyPart(rest)
+    ) {
+      return true;
+    }
+    rest = token.rest;
+  }
+  return false;
+}
+
+/**
  * Detects command substitution patterns in a shell command, following bash quoting rules:
  * - Single quotes ('): Everything literal, no substitution possible
  * - Double quotes ("): Command substitution with $() and backticks unless escaped with \
@@ -2081,6 +2122,25 @@ export function buildShellExecWarnings(
     return [COMMAND_SUBSTITUTION_WARNING];
   }
   return undefined;
+}
+
+/**
+ * The confirmation warning for a shell-like tool whose `directory` is outside
+ * the workspace. The workspace check follows symlinks, so name the directory
+ * it resolved to: a link inside the workspace that points out would otherwise
+ * be shown by a path that looks internal.
+ */
+export function buildOutsideWorkspaceWarning(directory: string): string {
+  let resolved: string;
+  try {
+    resolved = resolveWorkspacePath(directory);
+  } catch {
+    // Unresolvable: show the directory as given.
+    resolved = path.resolve(directory);
+  }
+  return resolved === path.resolve(directory)
+    ? `Runs outside the workspace in ${directory}`
+    : `Runs outside the workspace in ${resolved} (via ${directory})`;
 }
 
 /**

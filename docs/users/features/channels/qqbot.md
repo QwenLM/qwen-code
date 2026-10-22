@@ -116,6 +116,41 @@ If the QQ server rejects a Markdown message for any reason, the channel automati
 
 This is the opposite of the WeChat channel, which strips all Markdown. You can let the agent use full Markdown with the QQ channel.
 
+## Images, Videos, and Files
+
+Users can send images, videos, files, and voice messages to the bot. An image is passed to the agent as vision input, so the agent sees the picture itself — screenshots, error messages, and diagrams all work — and the same file is also saved to a temporary local path for the case where the model cannot take images. A video, a file, or a voice message is saved to a temporary local path and the agent is told that path.
+
+A media message does not need any text — an image-only, video-only, file-only, or voice-only message starts a turn, and the channel uses `(image)`, `(video)`, `(file)`, or `(voice)` as the placeholder. When the message does carry text, that text is kept as the caption.
+
+A file is anything the platform delivers as `content_type: file` — Word documents, PDFs, spreadsheets, archives, source files. QQ reports no MIME type for a file, so the channel keeps the sender's own extension (restricted to letters and digits, falling back to `.bin` when there is none) and saves the bytes under `channel-files/<uuid>/` in the system temporary directory; the agent's read tool uses that extension to decide how to open the document.
+
+A voice message arrives as `content_type: voice`. Alongside the original SILK URL, QQ provides `voice_wav_url` — the same audio already converted to WAV — and the channel prefers it; when the platform does not send one, the channel falls back to the original URL. The bytes are saved under `channel-files/<uuid>/` as `qq_voice.wav`, or `qq_voice.silk` when the original SILK URL was used, and the agent is told that path. The platform's ASR text is not used; the agent works from the saved audio file.
+
+- Images are limited to 8 MB and videos, files, and voice messages to 20 MB, and at most five attachments per message are handled. Anything larger is skipped and logged to the channel's stderr.
+- Downloaded files are not deleted. They stay under the system temporary directory, which the system clears on its own schedule.
+
+Image input requires a model that accepts images. Declare the capability when the model is multimodal but not recognised by name. The field belongs on the provider entry that serves the model, because a top-level `model.generationConfig` value is ignored for provider-backed models:
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "your-model-id",
+        "baseUrl": "https://example.invalid/v1",
+        "generationConfig": {
+          "modalities": { "image": true }
+        }
+      }
+    ]
+  }
+}
+```
+
+With a text-only model the agent receives an "unsupported image" note plus the saved path instead of the picture.
+
+Sending images, videos, files, or voice messages back to QQ is not supported.
+
 ## Token Management
 
 Access tokens expire after approximately 2 hours. The channel automatically refreshes them at 80% of their TTL (typically ~1.6 hours). If a refresh fails, it retries after 60 seconds.

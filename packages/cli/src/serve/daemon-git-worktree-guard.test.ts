@@ -78,6 +78,44 @@ afterAll(async () => {
 
 describe('createDaemonToolGuard', () => {
   it.each([
+    {
+      name: 'relocated Git mutation',
+      toolName: ToolNames.SHELL,
+      args: { command: `git -C ${cmdPath(outsideRepo)} reset --hard` },
+    },
+    {
+      name: 'external shell cwd',
+      toolName: ToolNames.SHELL,
+      args: { command: 'pwd', directory: outsideRepo },
+    },
+    {
+      name: 'external monitor cwd',
+      toolName: ToolNames.MONITOR,
+      args: { command: 'pwd', directory: outsideRepo },
+    },
+  ])(
+    'admits $name only after runtime permission checking',
+    async ({ toolName, args }) => {
+      const guard = createDaemonToolGuard();
+      const call = { ...request(args.command, args), toolName };
+
+      await expect(guard(call)).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard({ ...call, permissionChecked: false }),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard({
+          ...call,
+          arguments: { ...args, permissionChecked: true },
+        }),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard({ ...call, permissionChecked: true }),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
+  it.each([
     () => `git -C ${cmdPath(outsideRepo)} reset --hard`,
     () => `git -C${cmdPath(outsideRepo)} checkout -- .`,
     () =>
@@ -2281,17 +2319,23 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
       ).resolves.toEqual({ allowed: true });
     });
 
-    it('fails closed on a directory the daemon cannot place', async () => {
-      const guard = createDaemonToolGuard();
+    it.each([undefined, true])(
+      'fails closed on an unverifiable directory with permissionChecked=%s',
+      async (permissionChecked) => {
+        const guard = createDaemonToolGuard();
 
-      // The session id owns no worktree here, so this scope is unverifiable.
-      await expect(
-        guard(call('git commit -m x', outsideRepo)),
-      ).resolves.toMatchObject({
-        allowed: false,
-        reason: expect.stringContaining('execution directory'),
-      });
-    });
+        // The session id owns no worktree here, so this scope is unverifiable.
+        await expect(
+          guard({
+            ...call('git commit -m x', outsideRepo),
+            ...(permissionChecked === undefined ? {} : { permissionChecked }),
+          }),
+        ).resolves.toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining('execution directory'),
+        });
+      },
+    );
 
     it('contains a sub-agent to an in-project agent worktree', async () => {
       // `AgentTool` with `isolation: 'worktree'` provisions under
@@ -2334,6 +2378,15 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
       await expect(
         guard(call(`git -C ${sibling} reset --hard`, agentWorktree)),
       ).resolves.toMatchObject({ allowed: false });
+      // Admission does not lift that containment: the permission flow never
+      // re-establishes the worktree boundary, so a pinned sub-agent stays
+      // pinned even after Full Access or a human admitted the call.
+      await expect(
+        guard({
+          ...call(`git -C ${sibling} reset --hard`, agentWorktree),
+          permissionChecked: true,
+        }),
+      ).resolves.toMatchObject({ allowed: false });
     });
 
     it('contains a sub-agent to the worktree it reports', async () => {
@@ -2359,6 +2412,14 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
         // ...while reaching back into the parent checkout is not.
         await expect(
           guard(inWorktree(`git -C ${effectiveCwd} reset --hard`)),
+        ).resolves.toMatchObject({ allowed: false });
+        // An admitted call is contained the same way: the worktree, not the
+        // admission, is the boundary for a pinned sub-agent.
+        await expect(
+          guard({
+            ...inWorktree(`git -C ${effectiveCwd} reset --hard`),
+            permissionChecked: true,
+          }),
         ).resolves.toMatchObject({ allowed: false });
       } finally {
         await rm(GitWorktreeService.getSessionDir(isolatedSessionId), {
@@ -3126,6 +3187,22 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
 
     await expect(guard(call)).resolves.toEqual({ allowed: true });
     expect(externalGuard).toHaveBeenCalledWith(call);
+  });
+
+  it('preserves external provider denial after runtime permission checking', async () => {
+    const providerDenial = {
+      allowed: false,
+      reason: 'Provider policy denied this invocation.',
+    };
+    const externalGuard = vi.fn().mockResolvedValue(providerDenial);
+    const guard = createDaemonToolGuard(externalGuard);
+    const call = {
+      ...request(`git -C ${cmdPath(outsideRepo)} reset --hard`),
+      permissionChecked: true,
+    };
+
+    await expect(guard(call)).resolves.toEqual(providerDenial);
+    expect(externalGuard).toHaveBeenCalledExactlyOnceWith(call);
   });
 
   it('returns an external provider denial for an otherwise allowed call', async () => {

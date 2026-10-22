@@ -5,6 +5,7 @@
  */
 
 import { useCallback } from 'react';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import { randomUUID } from 'node:crypto';
 import {
   type Config,
@@ -17,6 +18,7 @@ import {
 import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
+  computeResumedPromptCountSeed,
 } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -70,6 +72,7 @@ export interface UseBranchCommandOptions {
     'clearItems' | 'loadHistory' | 'addItem'
   >;
   startNewSession: (sessionId: string) => void;
+  seedPromptCount: (count: number) => void;
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
@@ -100,6 +103,7 @@ export function useBranchCommand(
     config,
     historyManager,
     startNewSession,
+    seedPromptCount,
     clearPendingState,
     setSessionName,
     remount,
@@ -132,6 +136,7 @@ export function useBranchCommand(
       let oldSessionId = config.getSessionId();
       let coreSwapped = false;
       let uiSwapped = false;
+      let toolsInvalidated = false;
       let forkCreated = false;
       // Whether THIS attempt opened the swap transaction: the catch block
       // may only settle a transaction it opened itself. A latch-rejected
@@ -249,6 +254,9 @@ export function useBranchCommand(
         //    The transaction opened in step 0 covers the initialize()
         //    replay (#9833; see beginTelemetrySwap's JSDoc in core
         //    client.ts).
+        const modSession = getInteractiveModSession(config);
+        modSession?.invalidateTools();
+        toolsInvalidated = modSession !== undefined;
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);
@@ -274,8 +282,16 @@ export function useBranchCommand(
           collapsePreviewCount,
         );
         startNewSession(newSessionId);
+        // startNewSession resets the counter, so seed afterward.
+        seedPromptCount(
+          computeResumedPromptCountSeed(
+            resumed.conversation.messages,
+            newSessionId,
+          ),
+        );
         uiSwapped = true;
         config.getLlmClient()?.commitTelemetrySwap?.();
+        await getInteractiveModSession(config)?.syncSession('resume');
         clearPendingState?.();
         historyManager.clearItems();
         historyManager.loadHistory(uiHistoryItems);
@@ -325,6 +341,7 @@ export function useBranchCommand(
           // failures (hook, remount, announce) are non-fatal and
           // surfaced as an error item without unwinding the swap.
           try {
+            getInteractiveModSession(config)?.invalidateTools();
             config.startNewSession(oldSessionId, prevSessionData);
             // Re-hydrate chat history against the restored session. Best-
             // effort: if this throws too, sessionId + recorder are still
@@ -343,6 +360,9 @@ export function useBranchCommand(
           // replays the parent's history on top of the fork's already-
           // committed replay, and restore overwrites rather than subtracts,
           // so the final state is exactly pre-swap (#9833).
+          if (toolsInvalidated && config.getSessionId() === oldSessionId) {
+            await getInteractiveModSession(config)?.restoreTools();
+          }
           config.getLlmClient()?.abortTelemetrySwap?.();
         } else if (swapOpened) {
           // Either the core swap never happened (nothing was replayed — the
@@ -353,6 +373,13 @@ export function useBranchCommand(
           // `swapOpened = true`, so it owns no transaction here, and the
           // shared slot may hold a different in-flight swap (#9844). See
           // beginTelemetrySwap's JSDoc in core client.ts.
+          if (
+            toolsInvalidated &&
+            !uiSwapped &&
+            config.getSessionId() === oldSessionId
+          ) {
+            await getInteractiveModSession(config)?.restoreTools();
+          }
           config.getLlmClient()?.commitTelemetrySwap?.();
         }
         if (forkCreated && !uiSwapped) {
@@ -379,6 +406,7 @@ export function useBranchCommand(
       config,
       historyManager,
       startNewSession,
+      seedPromptCount,
       clearPendingState,
       setSessionName,
       remount,

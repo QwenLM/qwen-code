@@ -5,17 +5,14 @@
  */
 
 /**
- * @fileoverview Full team lifecycle E2E test.
- *
- * Exercises the complete flow through real tool execute() methods
- * backed by a real TeamManager + FakeBackend:
+ * @fileoverview Full team lifecycle E2E test, through real tool execute()
+ * methods backed by a real TeamManager + FakeBackend:
  *
  *   create team → spawn teammates → create tasks → send messages
  *   → list tasks → update tasks → delete team
  *
- * This validates the full wiring between tools, config, team
- * manager, mailbox, and task system — everything except the LLM
- * and CLI rendering.
+ * Validates the wiring between tools, config, team manager, mailbox, and
+ * task system — everything except the LLM and CLI rendering.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -58,8 +55,7 @@ const { __setMockGlobalDir } = (await import('../config/storage.js')) as any;
 
 // ─── Mock InProcessBackend → FakeBackend ───────────────────
 
-// Capture the backend created by TeamCreateTool so we can
-// script FakeAgents on it.
+// Capture the backend created by TeamCreateTool to script FakeAgents on it.
 let capturedBackend: FakeBackend | null = null;
 
 vi.mock('../agents/backends/InProcessBackend.js', async () => {
@@ -81,9 +77,7 @@ vi.mock('../agents/backends/InProcessBackend.js', async () => {
 
 let tmpDir: string;
 
-/**
- * Mutable config mock that tracks state set by tools.
- */
+/** Mutable config mock that tracks state set by tools. */
 function makeConfig(): Config {
   let teamManager: TeamManager | null = null;
   let teamContext: TeamContext | null = null;
@@ -120,6 +114,20 @@ async function exec(
     returnDisplay?: unknown;
   }>;
 }
+
+/** Creates team `teamName` through TeamCreateTool on a fresh config. */
+async function createTeam(teamName: string) {
+  const config = makeConfig();
+  await exec(new TeamCreateTool(config), { team_name: teamName });
+  const manager = config.getTeamManager()!;
+  const spawn = (fields: { name: string; prompt?: string }) =>
+    manager.spawnTeammate({ ...fields, cwd: tmpDir });
+  return { manager, spawn };
+}
+
+const systemPromptOf = (agentId: string) =>
+  capturedBackend!.getSpawnConfig(agentId)?.inProcess?.runtimeConfig
+    ?.promptConfig?.systemPrompt ?? '';
 
 // ─── Setup / Teardown ──────────────────────────────────────
 
@@ -166,8 +174,7 @@ describe('Team lifecycle E2E', () => {
     expect(teamFile.name).toBe('lifecycle');
 
     // ── Step 2: Create tasks BEFORE teammates ──────────────
-    // Tasks created without idle teammates stay pending
-    // (no auto-claiming).
+    // Tasks created without idle teammates stay pending (no auto-claiming).
     const taskCreateTool = new TaskCreateTool(config);
 
     const task1Result = await exec(taskCreateTool, {
@@ -216,12 +223,11 @@ describe('Team lifecycle E2E', () => {
 
     // ── Step 4: Block task2/task3 on task1, then spawn ───
     // The status/ownership updates in the next step each notify the
-    // task-list listeners; if task2/3 were claimable, the idle
-    // teammates would auto-claim them before the status-filter
-    // assertions run. Edges are added while no members exist, so
-    // nothing can race the blocking. Completing task1 below clears
-    // the edges (completion-unblock) and hands task2/3 to
-    // auto-claim, which the settle after it observes.
+    // task-list listeners; if task2/3 were claimable, idle teammates would
+    // auto-claim them before the status-filter assertions run. Edges are
+    // added while no members exist, so nothing can race the blocking.
+    // Completing task1 below clears the edges (completion-unblock) and hands
+    // task2/3 to auto-claim, which the settle after it observes.
     const taskUpdateTool = new TaskUpdateTool(config);
     const task2Id = task2Result.llmContent.match(/Task #(\d+)/)![1];
     for (const blockedId of [task2Id, task3Id]) {
@@ -236,11 +242,10 @@ describe('Team lifecycle E2E', () => {
       owner: 'leader',
     });
 
-    // Teammates are spawned BEFORE the ownership update below: since
-    // #9282, task_update refuses to assign to a teammate that does
-    // not exist — an owned in_progress task has no delivery path
-    // other than the direct dispatch, so persisting an assignment to
-    // a nonexistent owner would be a dead end.
+    // Teammates are spawned BEFORE the ownership update below: since #9282,
+    // task_update refuses to assign to a nonexistent teammate — an owned
+    // in_progress task has no delivery path other than the direct dispatch,
+    // so persisting an assignment to a nonexistent owner is a dead end.
     const backend = capturedBackend!;
     expect(backend).not.toBeNull();
 
@@ -289,8 +294,8 @@ describe('Team lifecycle E2E', () => {
     expect(completeResult.error).toBeUndefined();
     expect(completeResult.llmContent).toContain('completed');
 
-    // Let auto-claiming settle — idle agents will claim
-    // pending tasks in the background.
+    // Let auto-claiming settle — idle agents claim pending tasks in the
+    // background.
     await new Promise((r) => setTimeout(r, 150));
 
     // ── Step 6: Send messages via SendMessageTool ────────
@@ -353,8 +358,7 @@ describe('Team lifecycle E2E', () => {
     expect(config.getTeamManager()).toBeNull();
     expect(config.getTeamContext()).toBeNull();
 
-    // Let any pending async operations settle before
-    // afterEach removes tmpDir.
+    // Let pending async operations settle before afterEach removes tmpDir.
     await new Promise((r) => setTimeout(r, 100));
 
     // ── Step 9: Verify tools fail without a team ─────────
@@ -396,19 +400,9 @@ describe('Team lifecycle E2E', () => {
   });
 
   it('team file tracks spawned members', async () => {
-    const config = makeConfig();
-    const createTool = new TeamCreateTool(config);
-    await exec(createTool, { team_name: 'tracked' });
-
-    const manager = config.getTeamManager()!;
-    await manager.spawnTeammate({
-      name: 'worker-1',
-      cwd: tmpDir,
-    });
-    await manager.spawnTeammate({
-      name: 'worker-2',
-      cwd: tmpDir,
-    });
+    const { manager, spawn } = await createTeam('tracked');
+    await spawn({ name: 'worker-1' });
+    await spawn({ name: 'worker-2' });
 
     const teamFile = manager.getTeamFile();
     expect(teamFile.members).toHaveLength(2);
@@ -418,22 +412,10 @@ describe('Team lifecycle E2E', () => {
   });
 
   it('injects prompt addendum into spawned teammates', async () => {
-    const config = makeConfig();
-    const createTool = new TeamCreateTool(config);
-    await exec(createTool, { team_name: 'prompt-test' });
+    const { spawn } = await createTeam('prompt-test');
+    await spawn({ name: 'worker' });
 
-    const backend = capturedBackend!;
-    const manager = config.getTeamManager()!;
-
-    await manager.spawnTeammate({
-      name: 'worker',
-      cwd: tmpDir,
-    });
-
-    const workerId = formatAgentId('worker', 'prompt-test');
-    const spawnConfig = backend.getSpawnConfig(workerId);
-    const prompt =
-      spawnConfig?.inProcess?.runtimeConfig?.promptConfig?.systemPrompt ?? '';
+    const prompt = systemPromptOf(formatAgentId('worker', 'prompt-test'));
 
     // Should contain team addendum content.
     expect(prompt).toContain('You are agent');
@@ -443,23 +425,10 @@ describe('Team lifecycle E2E', () => {
   });
 
   it('appends addendum to custom prompt', async () => {
-    const config = makeConfig();
-    const createTool = new TeamCreateTool(config);
-    await exec(createTool, { team_name: 'custom' });
+    const { spawn } = await createTeam('custom');
+    await spawn({ name: 'dev', prompt: 'You are a code reviewer.' });
 
-    const backend = capturedBackend!;
-    const manager = config.getTeamManager()!;
-
-    await manager.spawnTeammate({
-      name: 'dev',
-      cwd: tmpDir,
-      prompt: 'You are a code reviewer.',
-    });
-
-    const devId = formatAgentId('dev', 'custom');
-    const spawnConfig = backend.getSpawnConfig(devId);
-    const prompt =
-      spawnConfig?.inProcess?.runtimeConfig?.promptConfig?.systemPrompt ?? '';
+    const prompt = systemPromptOf(formatAgentId('dev', 'custom'));
 
     // Custom prompt + addendum both present.
     expect(prompt).toContain('You are a code reviewer.');

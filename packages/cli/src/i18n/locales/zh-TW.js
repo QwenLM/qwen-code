@@ -9,6 +9,10 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  'Generated UI': 'Generated UI 生成式介面',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    '在支援的本機工作階段中啟用內建 Generated UI。重新建立所屬工作階段後生效。',
+
   'Cannot disable an extension-provided MCP server here.':
     '無法在此處停用擴展提供的 MCP 伺服器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的認證資訊。',
@@ -23,6 +27,8 @@ export default {
   'Project level': '專案層級',
   'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
     '剪貼簿圖片貼上功能無法使用，因為原生剪貼簿模組載入失敗。請重新安裝 Qwen Code，或改用 npm 安裝方式。',
+  'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.':
+    '剪貼簿圖片貼上功能無法使用：未找到支援的剪貼簿工具。在 Linux 上請安裝 `wl-clipboard`（Wayland）或 `xclip`（X11），若為無頭環境請設定 DISPLAY/WAYLAND_DISPLAY。',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -183,7 +189,10 @@ export default {
   'toolDisplayName.UpdateGoal': '更新目標',
   'toolDisplayName.ProposeGoal': '提議目標',
   'toolDisplayName.SaveMemory': '儲存記憶',
+  'toolDisplayName.ManageMemory': '管理記憶',
+  'toolDisplayName.SearchMemory': '搜尋記憶',
   'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Advisor': '審查模型',
   'toolDisplayName.Artifact': '製品',
   'toolDisplayName.RecordArtifact': '記錄製品',
   'toolDisplayName.RecordSource': '記錄來源',
@@ -405,6 +414,8 @@ export default {
     '回退不會影響手動編輯或透過 shell 命令修改的檔案。',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     '無法回退到已被壓縮的輪次，請嘗試更近一些的輪次。',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    '無法將對話回退到該輪次：它已無法與模型歷史對應（例如經過重試）。請嘗試更近一些的輪次。',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     '該輪次無法還原檔案（沒有擷取到檔案變更，或該輪次屬於本次會話之前）。',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -707,6 +718,9 @@ export default {
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     '要查看更改，必須重啟 Qwen Code。按 r 退出並立即應用更改。',
   'Code Mode Only (Experimental)': '僅程式碼模式（實驗性）',
+  'Mods (Experimental)': 'Mods（實驗性）',
+  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
+    '在受信任的本機互動終端和無介面工作階段中載入已啟用擴充功能的實驗性 Mods。修改後需重新啟動。',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '終端響鈴通知',
@@ -1944,6 +1958,10 @@ export default {
   'API key cannot be empty.': 'API Key 不能為空。',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     '無效的 API Key，Coding Plan API Key 均以 "sk-sp-" 開頭，請檢查',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    '無效的 API Key。按量付費 Key 以 "sk-" 或 "sk-ws-" 開頭。Token Plan Key（"sk-sp-"）請使用 Token Plan 入口。',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    '無效的 API Key。Token Plan API Key 以 "sk-sp-" 開頭。請從 Token Plan 控制台產生，或使用 Standard API Key 入口綁定按量付費 Key。',
   'You can get your Coding Plan API key here':
     '您可以在這裏獲取 Coding Plan API Key',
   'You can get your Token Plan API key here':
@@ -1962,6 +1980,17 @@ export default {
     '您可以在 settings.json 中配置 API Key 和模型',
   'Refer to the documentation for setup instructions': '請參考文檔瞭解配置說明',
   'Coding Plan': 'Coding Plan',
+  QwenCloud: '千問AI平台',
+  'QwenCloud · Access Method': '千問AI平台 · 接入方式',
+  'Official recommended setup: Token Plan or Standard API Key':
+    '官方推薦配置：Token Plan 或 Standard API Key',
+  'Pay-as-you-go · Connect with an existing platform API key':
+    '按量付費 · 使用既有的平台 API Key 連線',
+  'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)':
+    '按月 Credit 額度訂閱 · 專用 endpoint（個人版與團隊版）',
+  'China — 千问AI平台': '中國 — 千問AI平台',
+  'International — QwenCloud': '國際 — QwenCloud',
+  Platform: '平台',
   Custom: '自定義',
   'Select Region for Coding Plan': '選擇 Coding Plan 區域',
   'Choose based on where your account is registered':
@@ -1979,6 +2008,9 @@ export default {
     '上下文超出限制！請使用 /compress 或 /clear 來減少上下文。',
   'No API response yet. Send a message to see actual usage.':
     '暫無 API 響應。發送消息以查看實際使用情況。',
+  'Estimated usage, including the conversation': '估算用量（含對話）',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    '尚未收到 provider 用量，以下為本地估算，包含對話。',
   'Estimated pre-conversation overhead': '預估對話前開銷',
   'Context window': '上下文窗口',
   tokens: 'tokens',
@@ -2129,6 +2161,13 @@ export default {
     '在不影響主對話的情況下快速提問旁支問題',
   'Get a second opinion on the current conversation from a reviewer model':
     '讓審查模型對目前對話給出第二意見',
+  'Configure the Advisor model': '設定 Advisor 模型',
+  'Disable Advisor': '停用 Advisor',
+  'Select Advisor Model': '選擇 Advisor 模型',
+  'Advisor disabled': 'Advisor 已停用',
+  'Advisor set to {{model}}': 'Advisor 已設定為 {{model}}',
+  'Selected Advisor model is unavailable.': '所選 Advisor 模型無法使用。',
+  'Advisor configuration is unavailable.': 'Advisor 設定無法使用。',
   'Consulting advisor...': '正在諮詢審查模型...',
   'Advisor review failed: {{error}}': '審查失敗：{{error}}',
   'No conversation context available for /advisor':
@@ -2495,4 +2534,6 @@ export default {
   'Kept model as {{model}}': '模型保持為 {{model}}',
   'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
     '檢視其他 Qwen Code 工作階段傳來的待處理訊息（accept | deny），並管理受信任控制器（controllers | revoke）',
+  'Create a git commit with an AI-drafted message':
+    '使用 AI 起草的提交訊息建立 git 提交',
 };

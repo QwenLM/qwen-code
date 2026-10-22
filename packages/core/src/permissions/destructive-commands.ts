@@ -9,7 +9,11 @@
  * non-deterministic and can fail due to API unavailability, timeout, or poor
  * judgment on ambiguous prompts like "clean up the git state". This module
  * provides deterministic regex-based blocking that cannot be bypassed by
- * classifier failures.
+ * classifier failures on the denying call itself: the block is hard until
+ * denial tracking reaches the consecutive-block or session-total cap, at which
+ * point `applyAutoModeDecision` escalates to a confirmation only a human can
+ * give — it marks the escalation `requiresHumanDecision`, so a
+ * `PermissionRequest` hook returning `allow` cannot waive it.
  *
  * Only applies in AUTO mode — YOLO mode is an explicit opt-out of all guards.
  */
@@ -181,7 +185,9 @@ export function clearSessionCommits(): void {
 /**
  * Check whether a shell command is destructively blocked by the deterministic
  * guard. Runs before the L5.3 classifier — failures here are hard blocks
- * regardless of classifier availability.
+ * regardless of classifier availability, until denial tracking reaches the
+ * consecutive-block or session-total cap; at a cap `applyAutoModeDecision`
+ * escalates to a human-only confirmation instead (`requiresHumanDecision`).
  *
  * @param command - The raw shell command string
  * @param userPrompt - The user's most recent prompt text
@@ -197,7 +203,12 @@ export function isDestructiveCommand(
 
   for (const pattern of DESTRUCTIVE_GIT_PATTERNS) {
     if (pattern.test(expanded) && !userMentionsDiscard(userPrompt)) {
-      const matched = command.match(pattern)?.[0] ?? command;
+      // `git clean -[a-zA-Z]*f` matches an unbounded run, and the fallback is
+      // the whole model-authored command. Bound the echoed fragment: the reason
+      // is clamped to 200 chars at the permission boundary, and a longer match
+      // would push this template's own recovery instruction past the clamp.
+      const match = command.match(pattern)?.[0] ?? command;
+      const matched = match.length > 80 ? `${match.slice(0, 79)}…` : match;
       return {
         blocked: true,
         reason: `Blocked destructive git command: "${matched}". To proceed, explicitly mention discarding local work in your prompt.`,

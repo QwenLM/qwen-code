@@ -559,13 +559,32 @@ describe('ProcessTransport', () => {
       expect(mockSpawn).toHaveBeenCalledWith(
         'qwen',
         expect.arrayContaining([
-          '--sandbox',
+          '--sandbox=true',
           '--safe-mode',
           '--insecure',
           '--worktree',
         ]),
         expect.any(Object),
       );
+    });
+
+    it('keeps text extraArgs separate from automatic sandbox selection', () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      new ProcessTransport({
+        pathToQwenExecutable: 'qwen',
+        sandbox: true,
+        extraArgs: ['explain the parser'],
+      });
+
+      const args = mockSpawn.mock.calls[0][1] as string[];
+      expect(args.slice(-2)).toEqual(['--sandbox=true', 'explain the parser']);
     });
 
     it('should pass disabledSlashCommands through --disabled-slash-commands', () => {
@@ -637,6 +656,7 @@ describe('ProcessTransport', () => {
 
       const absentFlags = [
         '--sandbox',
+        '--sandbox=true',
         '--safe-mode',
         '--insecure',
         '--worktree',

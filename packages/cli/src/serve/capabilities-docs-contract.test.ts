@@ -10,6 +10,8 @@ import { describe, expect, it } from 'vitest';
 import {
   CONDITIONAL_SERVE_FEATURES,
   getAdvertisedServeFeatures,
+  hostedPersonaServeFeatures,
+  SERVE_CAPABILITY_REGISTRY,
   SERVE_PROTOCOL_VERSION,
 } from './capabilities.js';
 
@@ -68,4 +70,30 @@ it('advertises batched session catalogs for single and multiple workspaces', () 
   expect(
     getAdvertisedServeFeatures(undefined, { workspaceRuntimeAvailable: true }),
   ).toContain('session_catalog_batch');
+});
+
+it('derives the hosted persona tags from the registry, never a hand list', () => {
+  // The Java client hard-refuses a Harness omitting
+  // managed_session_journal_delta_v1, so the persona's wire list is
+  // load-bearing: pin exactly these two, and pin the DERIVATION — a tag
+  // joins the persona only by gating its Map entry on the hostedHarness
+  // toggle, which is what each registry predicate already says.
+  expect(hostedPersonaServeFeatures().sort()).toEqual([
+    'hosted_harness_private_v1',
+    'managed_session_journal_delta_v1',
+  ]);
+  const personaTagged = [...CONDITIONAL_SERVE_FEATURES.keys()]
+    .filter(
+      (feature) =>
+        (
+          SERVE_CAPABILITY_REGISTRY[feature] as
+            | { hostedPersona?: boolean }
+            | undefined
+        )?.hostedPersona === true,
+    )
+    .sort();
+  expect(personaTagged).toEqual([
+    'hosted_harness_private_v1',
+    'managed_session_journal_delta_v1',
+  ]);
 });

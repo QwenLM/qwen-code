@@ -34,28 +34,15 @@ vi.mock('node:stream/promises', () => ({
 }));
 
 describe('parseNpmPackageSource', () => {
-  it('should parse scoped package without version', () => {
-    const result = parseNpmPackageSource('@ali/openclaw-tmcp-dingtalk');
-    expect(result.name).toBe('@ali/openclaw-tmcp-dingtalk');
-    expect(result.version).toBeUndefined();
-  });
-
-  it('should parse scoped package with version', () => {
-    const result = parseNpmPackageSource('@ali/openclaw-tmcp-dingtalk@1.2.0');
-    expect(result.name).toBe('@ali/openclaw-tmcp-dingtalk');
-    expect(result.version).toBe('1.2.0');
-  });
-
-  it('should parse scoped package with latest tag', () => {
-    const result = parseNpmPackageSource('@scope/pkg@latest');
-    expect(result.name).toBe('@scope/pkg');
-    expect(result.version).toBe('latest');
-  });
-
-  it('should parse scoped package with semver range', () => {
-    const result = parseNpmPackageSource('@scope/pkg@^1.0.0');
-    expect(result.name).toBe('@scope/pkg');
-    expect(result.version).toBe('^1.0.0');
+  it.each<[string, string, string | undefined]>([
+    ['without version', '@ali/openclaw-tmcp-dingtalk', undefined],
+    ['with version', '@ali/openclaw-tmcp-dingtalk', '1.2.0'],
+    ['with latest tag', '@scope/pkg', 'latest'],
+    ['with semver range', '@scope/pkg', '^1.0.0'],
+  ])('should parse scoped package %s', (_, name, version) => {
+    const result = parseNpmPackageSource(version ? `${name}@${version}` : name);
+    expect(result.name).toBe(name);
+    expect(result.version).toBe(version);
   });
 
   it('should throw for invalid source', () => {
@@ -89,32 +76,21 @@ describe('parseNpmPackageSource', () => {
 });
 
 describe('isScopedNpmPackage', () => {
-  it('should return true for scoped package', () => {
-    expect(isScopedNpmPackage('@ali/openclaw-tmcp-dingtalk')).toBe(true);
+  it.each([
+    ['scoped package', '@ali/openclaw-tmcp-dingtalk'],
+    ['scoped package with version', '@ali/openclaw-tmcp-dingtalk@1.2.0'],
+    ['scoped package with dots', '@my.org/my.pkg'],
+  ])('should return true for %s', (_, source) => {
+    expect(isScopedNpmPackage(source)).toBe(true);
   });
 
-  it('should return true for scoped package with version', () => {
-    expect(isScopedNpmPackage('@ali/openclaw-tmcp-dingtalk@1.2.0')).toBe(true);
-  });
-
-  it('should return true for scoped package with dots', () => {
-    expect(isScopedNpmPackage('@my.org/my.pkg')).toBe(true);
-  });
-
-  it('should return false for owner/repo format', () => {
-    expect(isScopedNpmPackage('owner/repo')).toBe(false);
-  });
-
-  it('should return false for unscoped package', () => {
-    expect(isScopedNpmPackage('some-package')).toBe(false);
-  });
-
-  it('should return false for git URL', () => {
-    expect(isScopedNpmPackage('https://github.com/owner/repo')).toBe(false);
-  });
-
-  it('should return false for local path', () => {
-    expect(isScopedNpmPackage('/path/to/extension')).toBe(false);
+  it.each([
+    ['owner/repo format', 'owner/repo'],
+    ['unscoped package', 'some-package'],
+    ['git URL', 'https://github.com/owner/repo'],
+    ['local path', '/path/to/extension'],
+  ])('should return false for %s', (_, source) => {
+    expect(isScopedNpmPackage(source)).toBe(false);
   });
 });
 
@@ -182,113 +158,112 @@ const https = await import('node:https');
 const http = await import('node:http');
 const tar = await import('tar');
 
-function mockNpmRegistryResponse(data: object) {
+/**
+ * Answers the n-th https.get call (1-based) with the response `reply` returns
+ * (none when it returns undefined; it may answer later through `respond`),
+ * and returns `request(n)` as the client request.
+ */
+function mockGet(
+  reply: (n: number, respond: (res: object) => void) => object | void,
+  request: (n: number) => object = () => ({
+    on: vi.fn().mockReturnThis(),
+    destroy: vi.fn(),
+  }),
+) {
+  let n = 0;
   vi.mocked(https.get).mockImplementation(
     (_url: unknown, _options: unknown, callback: unknown) => {
-      const mockRes = {
-        statusCode: 200,
-        on: vi.fn((event: string, handler: (data?: Buffer) => void) => {
-          if (event === 'data') {
-            handler(Buffer.from(JSON.stringify(data)));
-          }
-          if (event === 'end') {
-            handler();
-          }
-        }),
+      n += 1;
+      const respond = (res: object) => {
+        if (typeof callback === 'function') callback(res as never);
       };
-      if (typeof callback === 'function') {
-        callback(mockRes as never);
-      }
-      return { on: vi.fn() } as never;
+      const res = reply(n, respond);
+      if (res) respond(res);
+      return request(n) as never;
     },
   );
 }
 
-function mockNpmRegistryStatus(statusCode: number) {
-  const response = {
-    statusCode,
-    headers: {},
-    on: vi.fn(),
-    resume: vi.fn(),
-  };
-  vi.mocked(https.get).mockImplementation(
-    (_url: unknown, _options: unknown, callback: unknown) => {
-      if (typeof callback === 'function') {
-        callback(response as never);
-      }
-      return { on: vi.fn() } as never;
-    },
-  );
-  return response;
-}
+/** `{ statusCode, headers: {}, on }`, with `extra` adding or replacing fields. */
+const response = <T extends object>(statusCode: number, extra: T) => ({
+  statusCode,
+  headers: {},
+  on: vi.fn(),
+  ...extra,
+});
 
-function npmMetadataResponse(tarballUrl: string) {
-  return {
-    statusCode: 200,
-    headers: {},
+/** Metadata redirects are drained with `resume`, tarball ones `destroy`ed. */
+const redirect = (location: string, cleanup: 'resume' | 'destroy') =>
+  response(302, { headers: { location }, [cleanup]: vi.fn() });
+
+const tarball = (destroy = vi.fn()) =>
+  response(200, { pipe: vi.fn(), destroy });
+
+/** A 200 response that emits `data` as one JSON chunk and then ends. */
+const jsonResponse = (data: object) =>
+  response(200, {
     on: vi.fn((event: string, handler: (data?: Buffer) => void) => {
-      if (event === 'data') {
-        handler(
-          Buffer.from(
-            JSON.stringify({
-              'dist-tags': { latest: '1.0.0' },
-              versions: {
-                '1.0.0': { dist: { tarball: tarballUrl } },
-              },
-            }),
-          ),
-        );
-      }
+      if (event === 'data') handler(Buffer.from(JSON.stringify(data)));
       if (event === 'end') handler();
     }),
-  };
-}
+  });
+
+/** Metadata whose only version, 1.0.0 (latest), has this tarball. */
+const npmMetadataResponse = (tarball: string) =>
+  jsonResponse({
+    'dist-tags': { latest: '1.0.0' },
+    versions: { '1.0.0': { dist: { tarball } } },
+  });
+
+const TGZ = 'https://registry.example.com/pkg.tgz';
 
 function mockNpmDownload(tarballUrl: string, tarballBytes?: number) {
-  let requestCount = 0;
-  vi.mocked(https.get).mockImplementation(
-    (_url: unknown, _options: unknown, callback: unknown) => {
-      requestCount += 1;
-      const mockRes =
-        requestCount === 1
-          ? {
-              statusCode: 200,
-              headers: {},
-              on: vi.fn((event: string, handler: (data?: Buffer) => void) => {
-                if (event === 'data') {
-                  handler(
-                    Buffer.from(
-                      JSON.stringify({
-                        'dist-tags': { latest: '1.0.0' },
-                        versions: {
-                          '1.0.0': { dist: { tarball: tarballUrl } },
-                        },
-                      }),
-                    ),
-                  );
-                }
-                if (event === 'end') handler();
-              }),
+  mockGet((n) =>
+    n === 1
+      ? npmMetadataResponse(tarballUrl)
+      : response(200, {
+          on: vi.fn((event: string, handler: (chunk: Buffer) => void) => {
+            if (event === 'data' && tarballBytes !== undefined) {
+              handler({ length: tarballBytes } as Buffer);
             }
-          : {
-              statusCode: 200,
-              headers: {},
-              on: vi.fn((event: string, handler: (chunk: Buffer) => void) => {
-                if (event === 'data' && tarballBytes !== undefined) {
-                  handler({ length: tarballBytes } as Buffer);
-                }
-              }),
-              pipe: vi.fn(),
-              destroy: vi.fn(),
-            };
-      if (typeof callback === 'function') callback(mockRes as never);
-      return {
-        on: vi.fn().mockReturnThis(),
-        setTimeout: vi.fn(),
-        destroy: vi.fn(),
-      } as never;
-    },
+          }),
+          pipe: vi.fn(),
+          destroy: vi.fn(),
+        }),
   );
+}
+
+/** Downloads @scope/pkg from registry.example.com; `meta` overrides fields. */
+const download = (
+  meta: Partial<ExtensionInstallMetadata> = {},
+  signal?: AbortSignal,
+) =>
+  downloadFromNpmRegistry(
+    {
+      source: '@scope/pkg',
+      type: 'npm',
+      registryUrl: 'https://registry.example.com',
+      ...meta,
+    },
+    '/tmp/qwen-extension',
+    signal,
+  );
+
+/** Serves one tar entry list to the next tar.t inspection. */
+function mockTarEntries(...entries: Array<{ type: string; path: string }>) {
+  mockNpmDownload(TGZ);
+  vi.mocked(tar.t).mockImplementationOnce(async (options) => {
+    for (const entry of entries) options.onReadEntry?.(entry as never);
+  });
+}
+
+/** Crosses the 120s download deadline; `outcome` must reject with it. */
+async function expectTimedOut(outcome: Promise<unknown>) {
+  const settled = outcome.catch((error: unknown) => error);
+  await vi.advanceTimersByTimeAsync(120_000);
+  await expect(settled).resolves.toMatchObject({
+    message: 'npm tarball download timed out after 120000ms',
+  });
 }
 
 describe('downloadFromNpmRegistry', () => {
@@ -315,16 +290,9 @@ describe('downloadFromNpmRegistry', () => {
 
   it('does not send the ambient npm token to an override registry', async () => {
     vi.stubEnv('NPM_TOKEN', 'ambient-secret');
-    mockNpmDownload('https://registry.example.com/pkg.tgz');
+    mockNpmDownload(TGZ);
 
-    await downloadFromNpmRegistry(
-      {
-        source: '@scope/pkg',
-        type: 'npm',
-        registryUrl: 'https://registry.example.com',
-      },
-      '/tmp/qwen-extension',
-    );
+    await download();
 
     expect(vi.mocked(https.get).mock.calls[0]?.[1]).toMatchObject({
       headers: {},
@@ -335,14 +303,7 @@ describe('downloadFromNpmRegistry', () => {
     vi.stubEnv('NPM_TOKEN', 'ambient-secret');
     mockNpmDownload('https://registry.npmjs.org/pkg.tgz');
 
-    await downloadFromNpmRegistry(
-      {
-        source: '@scope/pkg',
-        type: 'npm',
-        registryUrl: 'https://registry.npmjs.org/custom-path',
-      },
-      '/tmp/qwen-extension',
-    );
+    await download({ registryUrl: 'https://registry.npmjs.org/custom-path' });
 
     expect(vi.mocked(https.get).mock.calls[0]?.[1]).toMatchObject({
       headers: { Authorization: 'Bearer ambient-secret' },
@@ -350,57 +311,32 @@ describe('downloadFromNpmRegistry', () => {
   });
 
   it('redacts credentialed registry URLs in metadata request errors', async () => {
-    const response = mockNpmRegistryStatus(404);
+    const res = response(404, { resume: vi.fn() });
+    mockGet(() => res);
 
     await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://user:token@registry.example.com',
-        },
-        '/tmp/qwen-extension',
-      ),
+      download({ registryUrl: 'https://user:token@registry.example.com' }),
     ).rejects.toThrow(
       'npm registry request failed with status 404: https://***REDACTED***@registry.example.com/@scope%2fpkg',
     );
-    expect(response.resume).toHaveBeenCalled();
+    expect(res.resume).toHaveBeenCalled();
   });
 
   it('rejects npm metadata response stream errors', async () => {
     const responseError = new Error('metadata response interrupted');
-    vi.mocked(https.get).mockImplementation(
-      (_url: unknown, _options: unknown, callback: unknown) => {
-        if (typeof callback === 'function') {
-          callback({
-            statusCode: 200,
-            headers: {},
-            on: vi.fn((event: string, handler: (error?: Error) => void) => {
-              if (event === 'error')
-                queueMicrotask(() => handler(responseError));
-            }),
-          } as never);
-        }
-        return { on: vi.fn().mockReturnThis() } as never;
-      },
+    mockGet(() =>
+      response(200, {
+        on: vi.fn((event: string, handler: (error?: Error) => void) => {
+          if (event === 'error') queueMicrotask(() => handler(responseError));
+        }),
+      }),
     );
 
-    await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://registry.example.com',
-        },
-        '/tmp/qwen-extension',
-      ),
-    ).rejects.toBe(responseError);
+    await expect(download()).rejects.toBe(responseError);
   });
 
   it('destroys npm metadata responses that exceed the size limit', async () => {
-    const response = {
-      statusCode: 200,
-      headers: {},
+    const res = response(200, {
       destroy: vi.fn(),
       on: vi.fn((event: string, handler: (data?: Buffer) => void) => {
         if (event === 'data') {
@@ -409,64 +345,23 @@ describe('downloadFromNpmRegistry', () => {
         }
         if (event === 'end') handler();
       }),
-    };
-    vi.mocked(https.get).mockImplementation(
-      (_url: unknown, _options: unknown, callback: unknown) => {
-        if (typeof callback === 'function') callback(response as never);
-        return { on: vi.fn().mockReturnThis() } as never;
-      },
-    );
+    });
+    mockGet(() => res);
 
-    await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://registry.example.com',
-        },
-        '/tmp/qwen-extension',
-      ),
-    ).rejects.toThrow('npm package metadata exceeded maximum size');
-    expect(response.destroy).toHaveBeenCalledOnce();
+    await expect(download()).rejects.toThrow(
+      'npm package metadata exceeded maximum size',
+    );
+    expect(res.destroy).toHaveBeenCalledOnce();
   });
 
   it('destroys non-200 npm tarball responses before rejecting', async () => {
-    const response = {
-      statusCode: 503,
-      headers: {},
-      on: vi.fn(),
-      destroy: vi.fn(),
-    };
-    let requestCount = 0;
-    vi.mocked(https.get).mockImplementation(
-      (_url: unknown, _options: unknown, callback: unknown) => {
-        requestCount += 1;
-        if (typeof callback === 'function') {
-          callback(
-            (requestCount === 1
-              ? npmMetadataResponse('https://registry.example.com/pkg.tgz')
-              : response) as never,
-          );
-        }
-        return {
-          on: vi.fn().mockReturnThis(),
-          setTimeout: vi.fn(),
-          destroy: vi.fn(),
-        } as never;
-      },
-    );
+    const res = response(503, { destroy: vi.fn() });
+    mockGet((n) => (n === 1 ? npmMetadataResponse(TGZ) : res));
 
-    await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://registry.example.com',
-        },
-        '/tmp/qwen-extension',
-      ),
-    ).rejects.toThrow('Failed to download npm tarball: status 503');
-    expect(response.destroy).toHaveBeenCalled();
+    await expect(download()).rejects.toThrow(
+      'Failed to download npm tarball: status 503',
+    );
+    expect(res.destroy).toHaveBeenCalled();
   });
 
   it('preserves the original reason for a pre-aborted npm download', async () => {
@@ -474,17 +369,7 @@ describe('downloadFromNpmRegistry', () => {
     const reason = new Error('download cancelled');
     controller.abort(reason);
 
-    await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://registry.example.com',
-        },
-        '/tmp/qwen-extension',
-        controller.signal,
-      ),
-    ).rejects.toBe(reason);
+    await expect(download({}, controller.signal)).rejects.toBe(reason);
     expect(https.get).not.toHaveBeenCalled();
     expect(tar.t).not.toHaveBeenCalled();
     expect(tar.x).not.toHaveBeenCalled();
@@ -497,14 +382,7 @@ describe('downloadFromNpmRegistry', () => {
     mockNpmDownload('HTTPS://registry.example.com/@scope/pkg/-/pkg-1.0.0.tgz');
 
     await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'HTTPS://registry.example.com',
-        },
-        '/tmp/qwen-extension',
-      ),
+      download({ registryUrl: 'HTTPS://registry.example.com' }),
     ).resolves.toEqual({ version: '1.0.0', type: 'npm' });
     expect(https.get).toHaveBeenCalledTimes(2);
     expect(http.get).not.toHaveBeenCalled();
@@ -514,255 +392,109 @@ describe('downloadFromNpmRegistry', () => {
     vi.spyOn(dns, 'lookup').mockResolvedValue([
       { address: '8.8.8.8', family: 4 },
     ] as never);
-    mockNpmRegistryResponse({
-      'dist-tags': { latest: '1.0.0' },
-      versions: {
-        '1.0.0': {
-          dist: { tarball: 'http://127.0.0.1/internal.tgz' },
-        },
-      },
-    });
+    mockGet(() => npmMetadataResponse('http://127.0.0.1/internal.tgz'));
 
-    await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://registry.example.com',
-          networkPolicy: 'public',
-        },
-        '/tmp/qwen-extension',
-      ),
-    ).rejects.toThrow('must use HTTPS');
+    await expect(download({ networkPolicy: 'public' })).rejects.toThrow(
+      'must use HTTPS',
+    );
 
     expect(https.get).toHaveBeenCalledTimes(1);
     expect(http.get).not.toHaveBeenCalled();
   });
 
   it('resolves relative npm metadata redirects', async () => {
-    let requestCount = 0;
-    vi.mocked(https.get).mockImplementation(
-      (url: unknown, _options: unknown, callback: unknown) => {
-        requestCount += 1;
-        const response =
-          requestCount === 1
-            ? {
-                statusCode: 302,
-                headers: { location: '/redirected-metadata' },
-                on: vi.fn(),
-                resume: vi.fn(),
-              }
-            : requestCount === 2
-              ? npmMetadataResponse('https://registry.example.com/pkg.tgz')
-              : {
-                  statusCode: 200,
-                  headers: {},
-                  on: vi.fn(),
-                  pipe: vi.fn(),
-                  destroy: vi.fn(),
-                };
-        if (typeof callback === 'function') callback(response as never);
-        return { on: vi.fn().mockReturnThis(), destroy: vi.fn() } as never;
-      },
+    mockGet((n) =>
+      n === 1
+        ? redirect('/redirected-metadata', 'resume')
+        : n === 2
+          ? npmMetadataResponse(TGZ)
+          : tarball(),
     );
 
-    await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://registry.example.com',
-        },
-        '/tmp/qwen-extension',
-      ),
-    ).resolves.toEqual({ version: '1.0.0', type: 'npm' });
+    await expect(download()).resolves.toEqual({
+      version: '1.0.0',
+      type: 'npm',
+    });
     expect(vi.mocked(https.get).mock.calls[1]?.[0]).toBe(
       'https://registry.example.com/redirected-metadata',
     );
   });
 
   it('rejects an invalid npm metadata redirect from an async response', async () => {
-    vi.mocked(https.get).mockImplementation(
-      (_url: unknown, _options: unknown, callback: unknown) => {
-        queueMicrotask(() => {
-          if (typeof callback === 'function') {
-            callback({
-              statusCode: 302,
-              headers: { location: 'http://[' },
-              on: vi.fn(),
-              resume: vi.fn(),
-            } as never);
-          }
-        });
-        return { on: vi.fn().mockReturnThis(), destroy: vi.fn() } as never;
-      },
-    );
+    mockGet((_n, respond) => {
+      queueMicrotask(() => respond(redirect('http://[', 'resume')));
+    });
 
-    await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://registry.example.com',
-        },
-        '/tmp/qwen-extension',
-      ),
-    ).rejects.toThrow('Invalid npm redirect URL: http://[');
+    await expect(download()).rejects.toThrow(
+      'Invalid npm redirect URL: http://[',
+    );
     expect(tar.t).not.toHaveBeenCalled();
   });
 
   it('stops following npm metadata redirect loops', async () => {
-    vi.mocked(https.get).mockImplementation(
-      (_url: unknown, _options: unknown, callback: unknown) => {
-        if (typeof callback === 'function') {
-          callback({
-            statusCode: 302,
-            headers: { location: '/metadata-loop' },
-            on: vi.fn(),
-            resume: vi.fn(),
-          } as never);
-        }
-        return { on: vi.fn().mockReturnThis(), destroy: vi.fn() } as never;
-      },
-    );
+    mockGet(() => redirect('/metadata-loop', 'resume'));
 
-    await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://registry.example.com',
-        },
-        '/tmp/qwen-extension',
-      ),
-    ).rejects.toThrow('Too many redirects while fetching npm package metadata');
+    await expect(download()).rejects.toThrow(
+      'Too many redirects while fetching npm package metadata',
+    );
     expect(https.get).toHaveBeenCalledTimes(11);
   });
 
   it('resolves relative npm tarball redirects', async () => {
-    let requestCount = 0;
-    vi.mocked(https.get).mockImplementation(
-      (_url: unknown, _options: unknown, callback: unknown) => {
-        requestCount += 1;
-        const response =
-          requestCount === 1
-            ? npmMetadataResponse('https://registry.example.com/pkg.tgz')
-            : requestCount === 2
-              ? {
-                  statusCode: 302,
-                  headers: { location: '/pkg-final.tgz' },
-                  on: vi.fn(),
-                  destroy: vi.fn(),
-                }
-              : {
-                  statusCode: 200,
-                  headers: {},
-                  on: vi.fn(),
-                  pipe: vi.fn(),
-                  destroy: vi.fn(),
-                };
-        if (typeof callback === 'function') callback(response as never);
-        return { on: vi.fn().mockReturnThis(), destroy: vi.fn() } as never;
-      },
+    mockGet((n) =>
+      n === 1
+        ? npmMetadataResponse(TGZ)
+        : n === 2
+          ? redirect('/pkg-final.tgz', 'destroy')
+          : tarball(),
     );
 
-    await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://registry.example.com',
-        },
-        '/tmp/qwen-extension',
-      ),
-    ).resolves.toEqual({ version: '1.0.0', type: 'npm' });
+    await expect(download()).resolves.toEqual({
+      version: '1.0.0',
+      type: 'npm',
+    });
     expect(vi.mocked(https.get).mock.calls[2]?.[0]).toBe(
       'https://registry.example.com/pkg-final.tgz',
     );
   });
 
   it('stops following npm tarball redirect loops', async () => {
-    let requestCount = 0;
-    vi.mocked(https.get).mockImplementation(
-      (_url: unknown, _options: unknown, callback: unknown) => {
-        requestCount += 1;
-        const response =
-          requestCount === 1
-            ? npmMetadataResponse('https://registry.example.com/pkg.tgz')
-            : {
-                statusCode: 302,
-                headers: { location: '/tarball-loop' },
-                on: vi.fn(),
-                destroy: vi.fn(),
-              };
-        if (typeof callback === 'function') callback(response as never);
-        return { on: vi.fn().mockReturnThis(), destroy: vi.fn() } as never;
-      },
+    mockGet((n) =>
+      n === 1 ? npmMetadataResponse(TGZ) : redirect('/tarball-loop', 'destroy'),
     );
 
-    await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://registry.example.com',
-        },
-        '/tmp/qwen-extension',
-      ),
-    ).rejects.toThrow('Too many redirects while downloading npm package');
+    await expect(download()).rejects.toThrow(
+      'Too many redirects while downloading npm package',
+    );
     expect(https.get).toHaveBeenCalledTimes(12);
   });
 
   it('preserves the original abort reason during a redirected npm download', async () => {
     const controller = new AbortController();
     const reason = new Error('download cancelled');
-    let requestCount = 0;
     let finalRequestError: ((error: Error) => void) | undefined;
-    vi.mocked(https.get).mockImplementation(
-      (_url: unknown, _options: unknown, callback: unknown) => {
-        requestCount += 1;
-        if (typeof callback === 'function') {
-          if (requestCount === 1) {
-            callback(
-              npmMetadataResponse(
-                'https://registry.example.com/pkg.tgz',
-              ) as never,
-            );
-          } else if (requestCount === 2) {
-            callback({
-              statusCode: 302,
-              headers: { location: '/pkg-final.tgz' },
-              on: vi.fn(),
-              destroy: vi.fn(),
-            } as never);
-          }
-        }
-        return {
-          on: vi.fn().mockImplementation(function (
-            this: unknown,
-            event: string,
-            handler: (error: Error) => void,
-          ) {
-            if (requestCount === 3 && event === 'error') {
-              finalRequestError = handler;
-            }
-            return this;
-          }),
-          destroy: vi.fn(),
-        } as never;
-      },
+    mockGet(
+      (n) =>
+        n === 1
+          ? npmMetadataResponse(TGZ)
+          : n === 2
+            ? redirect('/pkg-final.tgz', 'destroy')
+            : undefined,
+      (n) => ({
+        on: vi.fn(function (
+          this: unknown,
+          event: string,
+          handler: (error: Error) => void,
+        ) {
+          if (n === 3 && event === 'error') finalRequestError = handler;
+          return this;
+        }),
+        destroy: vi.fn(),
+      }),
     );
 
-    const outcome = downloadFromNpmRegistry(
-      {
-        source: '@scope/pkg',
-        type: 'npm',
-        registryUrl: 'https://registry.example.com',
-      },
-      '/tmp/qwen-extension',
-      controller.signal,
-    );
-    await vi.waitFor(() => expect(requestCount).toBe(3));
+    const outcome = download({}, controller.signal);
+    await vi.waitFor(() => expect(https.get).toHaveBeenCalledTimes(3));
     expect(
       (vi.mocked(https.get).mock.calls[2]?.[1] as { signal?: AbortSignal })
         .signal?.aborted,
@@ -779,24 +511,9 @@ describe('downloadFromNpmRegistry', () => {
   it.each(['SymbolicLink', 'Link'] as const)(
     'rejects npm tarballs containing %s entries before extraction',
     async (type) => {
-      mockNpmDownload('https://registry.example.com/pkg.tgz');
-      vi.mocked(tar.t).mockImplementationOnce(async (options) => {
-        options.onReadEntry?.({
-          type,
-          path: 'package/escape',
-        } as never);
-      });
+      mockTarEntries({ type, path: 'package/escape' });
 
-      await expect(
-        downloadFromNpmRegistry(
-          {
-            source: '@scope/pkg',
-            type: 'npm',
-            registryUrl: 'https://registry.example.com',
-          },
-          '/tmp/qwen-extension',
-        ),
-      ).rejects.toThrow(
+      await expect(download()).rejects.toThrow(
         'Tar archive contains unsupported link entry: package/escape',
       );
       expect(tar.x).not.toHaveBeenCalled();
@@ -804,24 +521,14 @@ describe('downloadFromNpmRegistry', () => {
   );
 
   it('sanitizes and bounds rejected tar entry paths', async () => {
-    mockNpmDownload('https://registry.example.com/pkg.tgz');
-    vi.mocked(tar.t).mockImplementationOnce(async (options) => {
-      options.onReadEntry?.({
-        type: 'SymbolicLink',
-        path: `escape\n\u001b]8;;https://example.com\u0007${'x'.repeat(300)}`,
-      } as never);
+    mockTarEntries({
+      type: 'SymbolicLink',
+      path: `escape\n\u001b]8;;https://example.com\u0007${'x'.repeat(300)}`,
     });
 
     let message = '';
     try {
-      await downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://registry.example.com',
-        },
-        '/tmp/qwen-extension',
-      );
+      await download();
     } catch (error) {
       message = error instanceof Error ? error.message : String(error);
     }
@@ -838,84 +545,42 @@ describe('downloadFromNpmRegistry', () => {
   });
 
   it('rejects tar links whose sanitized path is empty', async () => {
-    mockNpmDownload('https://registry.example.com/pkg.tgz');
-    vi.mocked(tar.t).mockImplementationOnce(async (options) => {
-      options.onReadEntry?.({
-        type: 'SymbolicLink',
-        path: '\u001b[31m\u001b[0m\u0007',
-      } as never);
-    });
+    mockTarEntries({ type: 'SymbolicLink', path: '\u001b[31m\u001b[0m\u0007' });
 
-    await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://registry.example.com',
-        },
-        '/tmp/qwen-extension',
-      ),
-    ).rejects.toThrow(
+    await expect(download()).rejects.toThrow(
       'Tar archive contains unsupported link entry: <sanitized empty path>',
     );
     expect(tar.x).not.toHaveBeenCalled();
   });
 
   it('reports every rejected tar link', async () => {
-    mockNpmDownload('https://registry.example.com/pkg.tgz');
-    vi.mocked(tar.t).mockImplementationOnce(async (options) => {
-      options.onReadEntry?.({
-        type: 'SymbolicLink',
-        path: 'package/first-link',
-      } as never);
-      options.onReadEntry?.({
-        type: 'Link',
-        path: 'package/second-link',
-      } as never);
-    });
+    mockTarEntries(
+      { type: 'SymbolicLink', path: 'package/first-link' },
+      { type: 'Link', path: 'package/second-link' },
+    );
 
-    await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://registry.example.com',
-        },
-        '/tmp/qwen-extension',
-      ),
-    ).rejects.toThrow(
+    await expect(download()).rejects.toThrow(
       'Tar archive contains 2 unsupported link entries: package/first-link, package/second-link',
     );
     expect(tar.x).not.toHaveBeenCalled();
   });
 
   it('bounds rejected tar link collection', async () => {
-    mockNpmDownload('https://registry.example.com/pkg.tgz');
-    vi.mocked(tar.t).mockImplementationOnce(async (options) => {
-      for (let index = 0; index <= 100; index += 1) {
-        options.onReadEntry?.({
-          type: 'SymbolicLink',
-          path: `package/link-${index}`,
-        } as never);
-      }
-    });
+    mockTarEntries(
+      ...Array.from({ length: 101 }, (_, index) => ({
+        type: 'SymbolicLink',
+        path: `package/link-${index}`,
+      })),
+    );
 
-    await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://registry.example.com',
-        },
-        '/tmp/qwen-extension',
-      ),
-    ).rejects.toThrow('more than 100 unsupported link entries');
+    await expect(download()).rejects.toThrow(
+      'more than 100 unsupported link entries',
+    );
     expect(tar.x).not.toHaveBeenCalled();
 
     // Tripping the link-count cap makes failValidation destroy the read
-    // stream; the mocked stream must support that cleanly. Before the
-    // createReadStream mock returned a destroyable object, this path raised
-    // a TypeError inside the tar.t mock instead of completing.
+    // stream, so the mocked stream must be destroyable: before it was, this
+    // path raised a TypeError inside the tar.t mock instead of completing.
     const createdStream = vi.mocked(fs.createReadStream).mock.results[0]
       ?.value as { destroy: ReturnType<typeof vi.fn> } | undefined;
     expect(createdStream?.destroy).toHaveBeenCalled();
@@ -927,41 +592,19 @@ describe('downloadFromNpmRegistry', () => {
   it('stops between tar inspection and extraction when cancelled', async () => {
     const controller = new AbortController();
     const reason = new Error('inspection cancelled');
-    mockNpmDownload('https://registry.example.com/pkg.tgz');
+    mockNpmDownload(TGZ);
     vi.mocked(tar.t).mockImplementationOnce(async () => {
       controller.abort(reason);
     });
 
-    await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://registry.example.com',
-        },
-        '/tmp/qwen-extension',
-        controller.signal,
-      ),
-    ).rejects.toBe(reason);
+    await expect(download({}, controller.signal)).rejects.toBe(reason);
     expect(tar.x).not.toHaveBeenCalled();
   });
 
   it('rejects npm tarballs larger than 100 MB', async () => {
-    mockNpmDownload(
-      'https://registry.example.com/pkg.tgz',
-      100 * 1024 * 1024 + 1,
-    );
+    mockNpmDownload(TGZ, 100 * 1024 * 1024 + 1);
 
-    await expect(
-      downloadFromNpmRegistry(
-        {
-          source: '@scope/pkg',
-          type: 'npm',
-          registryUrl: 'https://registry.example.com',
-        },
-        '/tmp/qwen-extension',
-      ),
-    ).rejects.toThrow(
+    await expect(download()).rejects.toThrow(
       'npm extension archive download exceeded maximum size of 104857600 bytes',
     );
     expect(tar.t).not.toHaveBeenCalled();
@@ -969,57 +612,13 @@ describe('downloadFromNpmRegistry', () => {
 
   it('times out a stalled npm tarball download', async () => {
     vi.useFakeTimers();
-    let requestCount = 0;
     const destroy = vi.fn();
-    vi.mocked(https.get).mockImplementation(
-      (_url: unknown, _options: unknown, callback: unknown) => {
-        requestCount += 1;
-        if (requestCount === 1 && typeof callback === 'function') {
-          callback({
-            statusCode: 200,
-            headers: {},
-            on: vi.fn((event: string, handler: (data?: Buffer) => void) => {
-              if (event === 'data') {
-                handler(
-                  Buffer.from(
-                    JSON.stringify({
-                      'dist-tags': { latest: '1.0.0' },
-                      versions: {
-                        '1.0.0': {
-                          dist: {
-                            tarball: 'https://registry.example.com/pkg.tgz',
-                          },
-                        },
-                      },
-                    }),
-                  ),
-                );
-              }
-              if (event === 'end') handler();
-            }),
-          } as never);
-        }
-        return {
-          on: vi.fn().mockReturnThis(),
-          setTimeout: vi.fn(),
-          destroy,
-        } as never;
-      },
+    mockGet(
+      (n) => (n === 1 ? npmMetadataResponse(TGZ) : undefined),
+      () => ({ on: vi.fn().mockReturnThis(), destroy }),
     );
 
-    const outcome = downloadFromNpmRegistry(
-      {
-        source: '@scope/pkg',
-        type: 'npm',
-        registryUrl: 'https://registry.example.com',
-      },
-      '/tmp/qwen-extension',
-    ).catch((error: unknown) => error);
-    await vi.advanceTimersByTimeAsync(120_000);
-
-    await expect(outcome).resolves.toMatchObject({
-      message: 'npm tarball download timed out after 120000ms',
-    });
+    await expectTimedOut(download());
     expect(destroy).toHaveBeenCalledOnce();
   });
 
@@ -1035,32 +634,13 @@ describe('downloadFromNpmRegistry', () => {
             resolveTarballDns = resolve;
           }) as never,
       );
-    vi.mocked(https.get).mockImplementation(
-      (_url: unknown, _options: unknown, callback: unknown) => {
-        if (typeof callback === 'function') {
-          callback(
-            npmMetadataResponse('https://cdn.example.com/pkg.tgz') as never,
-          );
-        }
-        return { on: vi.fn().mockReturnThis(), destroy: vi.fn() } as never;
-      },
+    mockGet(() => npmMetadataResponse('https://cdn.example.com/pkg.tgz'));
+
+    const outcome = download({ networkPolicy: 'public' }).catch(
+      (error: unknown) => error,
     );
-
-    const outcome = downloadFromNpmRegistry(
-      {
-        source: '@scope/pkg',
-        type: 'npm',
-        registryUrl: 'https://registry.example.com',
-        networkPolicy: 'public',
-      },
-      '/tmp/qwen-extension',
-    ).catch((error: unknown) => error);
     await vi.waitFor(() => expect(lookup).toHaveBeenCalledTimes(2));
-    await vi.advanceTimersByTimeAsync(120_000);
-
-    await expect(outcome).resolves.toMatchObject({
-      message: 'npm tarball download timed out after 120000ms',
-    });
+    await expectTimedOut(outcome);
     expect(https.get).toHaveBeenCalledOnce();
     resolveTarballDns?.([{ address: '8.8.4.4', family: 4 }]);
     await Promise.resolve();
@@ -1069,7 +649,6 @@ describe('downloadFromNpmRegistry', () => {
 
   it('destroys a stalled npm response and file at the download deadline', async () => {
     vi.useFakeTimers();
-    let requestCount = 0;
     const responseDestroy = vi.fn();
     const fileDestroy = vi.fn();
     vi.mocked(fs.createWriteStream).mockReturnValue({
@@ -1077,46 +656,11 @@ describe('downloadFromNpmRegistry', () => {
       close: vi.fn(),
       destroy: fileDestroy,
     } as never);
-    vi.mocked(https.get).mockImplementation(
-      (_url: unknown, _options: unknown, callback: unknown) => {
-        requestCount += 1;
-        if (typeof callback === 'function') {
-          if (requestCount === 1) {
-            callback(
-              npmMetadataResponse(
-                'https://registry.example.com/pkg.tgz',
-              ) as never,
-            );
-          } else {
-            callback({
-              statusCode: 200,
-              headers: {},
-              on: vi.fn(),
-              pipe: vi.fn(),
-              destroy: responseDestroy,
-            } as never);
-          }
-        }
-        return {
-          on: vi.fn().mockReturnThis(),
-          destroy: vi.fn(),
-        } as never;
-      },
+    mockGet((n) =>
+      n === 1 ? npmMetadataResponse(TGZ) : tarball(responseDestroy),
     );
 
-    const outcome = downloadFromNpmRegistry(
-      {
-        source: '@scope/pkg',
-        type: 'npm',
-        registryUrl: 'https://registry.example.com',
-      },
-      '/tmp/qwen-extension',
-    ).catch((error: unknown) => error);
-    await vi.advanceTimersByTimeAsync(120_000);
-
-    await expect(outcome).resolves.toMatchObject({
-      message: 'npm tarball download timed out after 120000ms',
-    });
+    await expectTimedOut(download());
     expect(responseDestroy).toHaveBeenCalledOnce();
     expect(fileDestroy).toHaveBeenCalledOnce();
     expect(tar.t).not.toHaveBeenCalled();
@@ -1125,70 +669,25 @@ describe('downloadFromNpmRegistry', () => {
 
   it('times out the active request across npm tarball redirects', async () => {
     vi.useFakeTimers();
-    let requestCount = 0;
     const childDestroy = vi.fn();
-    vi.mocked(https.get).mockImplementation(
-      (_url: unknown, _options: unknown, callback: unknown) => {
-        requestCount += 1;
-        if (requestCount === 1 && typeof callback === 'function') {
-          callback({
-            statusCode: 200,
-            headers: {},
-            on: vi.fn((event: string, handler: (data?: Buffer) => void) => {
-              if (event === 'data') {
-                handler(
-                  Buffer.from(
-                    JSON.stringify({
-                      'dist-tags': { latest: '1.0.0' },
-                      versions: {
-                        '1.0.0': {
-                          dist: {
-                            tarball: 'https://registry.example.com/pkg.tgz',
-                          },
-                        },
-                      },
-                    }),
-                  ),
-                );
-              }
-              if (event === 'end') handler();
-            }),
-          } as never);
-        } else if (requestCount === 2 && typeof callback === 'function') {
+    mockGet(
+      (n, respond) => {
+        if (n === 2) {
           setTimeout(
             () =>
-              callback({
-                statusCode: 302,
-                headers: {
-                  location: 'https://cdn.example.com/pkg.tgz',
-                },
-                on: vi.fn(),
-                destroy: vi.fn(),
-              } as never),
+              respond(redirect('https://cdn.example.com/pkg.tgz', 'destroy')),
             119_999,
           );
         }
-        return {
-          on: vi.fn().mockReturnThis(),
-          setTimeout: vi.fn(),
-          destroy: requestCount === 3 ? childDestroy : vi.fn(),
-        } as never;
+        return n === 1 ? npmMetadataResponse(TGZ) : undefined;
       },
+      (n) => ({
+        on: vi.fn().mockReturnThis(),
+        destroy: n === 3 ? childDestroy : vi.fn(),
+      }),
     );
 
-    const outcome = downloadFromNpmRegistry(
-      {
-        source: '@scope/pkg',
-        type: 'npm',
-        registryUrl: 'https://registry.example.com',
-      },
-      '/tmp/qwen-extension',
-    ).catch((error: unknown) => error);
-    await vi.advanceTimersByTimeAsync(120_000);
-
-    await expect(outcome).resolves.toMatchObject({
-      message: 'npm tarball download timed out after 120000ms',
-    });
+    await expectTimedOut(download());
     expect(childDestroy).toHaveBeenCalledOnce();
     expect(tar.t).not.toHaveBeenCalled();
     expect(tar.x).not.toHaveBeenCalled();
@@ -1207,20 +706,29 @@ describe('checkNpmUpdate', () => {
     vi.restoreAllMocks();
   });
 
+  /** Serves these dist-tags and versions, then checks `source`@`releaseTag`. */
+  const check = (
+    source: string,
+    releaseTag: string,
+    tags: Record<string, string>,
+    versions: string[],
+    registryUrl = 'https://registry.npmjs.org',
+  ) => {
+    mockGet(() =>
+      jsonResponse({
+        'dist-tags': tags,
+        versions: Object.fromEntries(
+          versions.map((v) => [v, { dist: { tarball: '' } }]),
+        ),
+      }),
+    );
+    return checkNpmUpdate({ source, type: 'npm', releaseTag, registryUrl });
+  };
+
   it('should report UPDATE_AVAILABLE when latest is newer', async () => {
-    mockNpmRegistryResponse({
-      'dist-tags': { latest: '2.0.0' },
-      versions: { '2.0.0': { dist: { tarball: '' } } },
-    });
-
-    const metadata: ExtensionInstallMetadata = {
-      source: '@scope/pkg',
-      type: 'npm',
-      releaseTag: '1.0.0',
-      registryUrl: 'https://registry.npmjs.org',
-    };
-
-    const result = await checkNpmUpdate(metadata);
+    const result = await check('@scope/pkg', '1.0.0', { latest: '2.0.0' }, [
+      '2.0.0',
+    ]);
     expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
   });
 
@@ -1228,19 +736,14 @@ describe('checkNpmUpdate', () => {
     vi.mocked(http.get).mockImplementation(() => {
       throw new Error('wrong client');
     });
-    mockNpmRegistryResponse({
-      'dist-tags': { latest: '1.0.0' },
-      versions: { '1.0.0': { dist: { tarball: '' } } },
-    });
 
-    const metadata: ExtensionInstallMetadata = {
-      source: '@scope/pkg',
-      type: 'npm',
-      releaseTag: '1.0.0',
-      registryUrl: 'HTTPS://registry.npmjs.org',
-    };
-
-    const result = await checkNpmUpdate(metadata);
+    const result = await check(
+      '@scope/pkg',
+      '1.0.0',
+      { latest: '1.0.0' },
+      ['1.0.0'],
+      'HTTPS://registry.npmjs.org',
+    );
 
     expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
     expect(https.get).toHaveBeenCalled();
@@ -1248,80 +751,39 @@ describe('checkNpmUpdate', () => {
   });
 
   it('should report UP_TO_DATE when latest matches', async () => {
-    mockNpmRegistryResponse({
-      'dist-tags': { latest: '1.0.0' },
-      versions: { '1.0.0': { dist: { tarball: '' } } },
-    });
-
-    const metadata: ExtensionInstallMetadata = {
-      source: '@scope/pkg',
-      type: 'npm',
-      releaseTag: '1.0.0',
-      registryUrl: 'https://registry.npmjs.org',
-    };
-
-    const result = await checkNpmUpdate(metadata);
+    const result = await check('@scope/pkg', '1.0.0', { latest: '1.0.0' }, [
+      '1.0.0',
+    ]);
     expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
   });
 
   it('should report UP_TO_DATE for pinned exact version', async () => {
-    mockNpmRegistryResponse({
-      'dist-tags': { latest: '2.0.0' },
-      versions: {
-        '1.0.0': { dist: { tarball: '' } },
-        '2.0.0': { dist: { tarball: '' } },
-      },
-    });
-
-    const metadata: ExtensionInstallMetadata = {
-      source: '@scope/pkg@1.0.0',
-      type: 'npm',
-      releaseTag: '1.0.0',
-      registryUrl: 'https://registry.npmjs.org',
-    };
-
-    const result = await checkNpmUpdate(metadata);
+    const result = await check(
+      '@scope/pkg@1.0.0',
+      '1.0.0',
+      { latest: '2.0.0' },
+      ['1.0.0', '2.0.0'],
+    );
     expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
   });
 
   it('should check correct dist-tag for non-latest tag installs', async () => {
-    mockNpmRegistryResponse({
-      'dist-tags': { latest: '1.0.0', beta: '2.0.0-beta.2' },
-      versions: {
-        '1.0.0': { dist: { tarball: '' } },
-        '2.0.0-beta.1': { dist: { tarball: '' } },
-        '2.0.0-beta.2': { dist: { tarball: '' } },
-      },
-    });
-
-    const metadata: ExtensionInstallMetadata = {
-      source: '@scope/pkg@beta',
-      type: 'npm',
-      releaseTag: '2.0.0-beta.1',
-      registryUrl: 'https://registry.npmjs.org',
-    };
-
-    const result = await checkNpmUpdate(metadata);
+    const result = await check(
+      '@scope/pkg@beta',
+      '2.0.0-beta.1',
+      { latest: '1.0.0', beta: '2.0.0-beta.2' },
+      ['1.0.0', '2.0.0-beta.1', '2.0.0-beta.2'],
+    );
     expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
   });
 
   it('should report UP_TO_DATE for beta tag when on latest beta', async () => {
-    mockNpmRegistryResponse({
-      'dist-tags': { latest: '1.0.0', beta: '2.0.0-beta.2' },
-      versions: {
-        '1.0.0': { dist: { tarball: '' } },
-        '2.0.0-beta.2': { dist: { tarball: '' } },
-      },
-    });
-
-    const metadata: ExtensionInstallMetadata = {
-      source: '@scope/pkg@beta',
-      type: 'npm',
-      releaseTag: '2.0.0-beta.2',
-      registryUrl: 'https://registry.npmjs.org',
-    };
-
-    const result = await checkNpmUpdate(metadata);
+    const result = await check(
+      '@scope/pkg@beta',
+      '2.0.0-beta.2',
+      { latest: '1.0.0', beta: '2.0.0-beta.2' },
+      ['1.0.0', '2.0.0-beta.2'],
+    );
     expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
   });
 });

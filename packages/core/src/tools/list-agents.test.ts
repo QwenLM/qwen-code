@@ -41,6 +41,30 @@ function peerRow(over: Record<string, unknown> = {}) {
   };
 }
 
+function toolWith(
+  registry = new BackgroundTaskRegistry(),
+  teammates: string[] = [],
+  slot = SHARED_RECORD_SLOT,
+) {
+  return new ListAgentsTool({
+    getBackgroundTaskRegistry: () => registry,
+    getSessionRegistrySlot: () => slot,
+    getTeamManager: () =>
+      teammates.length === 0
+        ? null
+        : {
+            getTeamFile: () => ({
+              leadAgentId: 'lead-1',
+              members: teammates.map((name) => ({ name })),
+            }),
+          },
+  } as unknown as Config);
+}
+
+async function run(tool = toolWith()) {
+  return tool.validateBuildAndExecute({}, new AbortController().signal);
+}
+
 describe('ListAgentsTool', () => {
   let registry: BackgroundTaskRegistry;
   let tool: ListAgentsTool;
@@ -52,18 +76,11 @@ describe('ListAgentsTool', () => {
     getOwnPeerIdentity.mockResolvedValue(null);
     listMessageablePeers.mockResolvedValue([]);
     registry = new BackgroundTaskRegistry();
-    tool = new ListAgentsTool({
-      getBackgroundTaskRegistry: () => registry,
-      getTeamManager: () => null,
-      getSessionRegistrySlot: () => SHARED_RECORD_SLOT,
-    } as unknown as Config);
+    tool = toolWith(registry);
   });
 
   it('reports an empty roster', async () => {
-    const result = await tool.validateBuildAndExecute(
-      {},
-      new AbortController().signal,
-    );
+    const result = await run(tool);
 
     expect(tool.name).toBe('list_agents');
     expect(result.llmContent).toBe(
@@ -75,17 +92,10 @@ describe('ListAgentsTool', () => {
   });
 
   it('reads its own identity from the record this session registered under', async () => {
-    // A daemon-hosted session owns a minted record; its process holds no
-    // `<pid>.json` at all. Reading the shared path instead would return
-    // null, and the listing would be silently empty for exactly the
-    // sessions this path exists to serve.
-    const hosted = new ListAgentsTool({
-      getBackgroundTaskRegistry: () => registry,
-      getTeamManager: () => null,
-      getSessionRegistrySlot: () => 'a1b2c3d4',
-    } as unknown as Config);
-
-    await hosted.validateBuildAndExecute({}, new AbortController().signal);
+    // A daemon-hosted session owns a minted record and no `<pid>.json`;
+    // reading the shared path would return null and silently empty the
+    // listing for exactly the sessions this path exists to serve.
+    await run(toolWith(registry, [], 'a1b2c3d4'));
 
     expect(getOwnPeerIdentity).toHaveBeenCalledWith('a1b2c3d4');
   });
@@ -134,10 +144,7 @@ describe('ListAgentsTool', () => {
       resumeBlockedReason: 'Transcript does not match.',
     });
 
-    const result = await tool.validateBuildAndExecute(
-      {},
-      new AbortController().signal,
-    );
+    const result = await run(tool);
 
     expect(JSON.parse(String(result.llmContent))).toEqual({
       agents: [
@@ -168,27 +175,32 @@ describe('ListAgentsTool — peer sessions', () => {
     ref: 'se1f00',
   };
 
-  function toolWith(
-    registry = new BackgroundTaskRegistry(),
+  /** Lists `peers` (with `teammates` in an active team) and parses the JSON. */
+  async function listPeers(
+    peers: Array<ReturnType<typeof peerRow>>,
     teammates: string[] = [],
   ) {
-    return new ListAgentsTool({
-      getBackgroundTaskRegistry: () => registry,
-      getSessionRegistrySlot: () => SHARED_RECORD_SLOT,
-      getTeamManager: () =>
-        teammates.length === 0
-          ? null
-          : {
-              getTeamFile: () => ({
-                leadAgentId: 'lead-1',
-                members: teammates.map((name) => ({ name })),
-              }),
-            },
-    } as unknown as Config);
+    listMessageablePeers.mockResolvedValue(peers);
+    const result = await run(toolWith(undefined, teammates));
+    return JSON.parse(String(result.llmContent));
   }
 
-  async function run(tool = toolWith()) {
-    return tool.validateBuildAndExecute({}, new AbortController().signal);
+  const addresses = (parsed: { sessions: Array<{ to: string }> }) =>
+    parsed.sessions.map((session) => session.to);
+
+  /** A registry holding one running background agent. */
+  function registryWithOneAgent() {
+    const registry = new BackgroundTaskRegistry();
+    registry.register({
+      agentId: 'a1',
+      description: 'do a thing',
+      status: 'running',
+      isBackgrounded: true,
+      startTime: 1,
+      abortController: new AbortController(),
+      outputFile: '/tmp/a1.jsonl',
+    });
+    return registry;
   }
 
   beforeEach(() => {
@@ -217,22 +229,18 @@ describe('ListAgentsTool — peer sessions', () => {
   it('appends the ref when a teammate shadows the bare name', async () => {
     // send_message tries teammates first with a sanitized lookup, so a
     // peer whose name sanitizes to a teammate's is unreachable bare.
-    listMessageablePeers.mockResolvedValue([
-      peerRow({ sessionId: 's1', name: 'Docs-CD', ref: 'aaa111' }),
-      peerRow({ sessionId: 's2', name: 'other-ef', ref: 'bbb222' }),
-    ]);
-    const parsed = JSON.parse(
-      String((await run(toolWith(undefined, ['docs-cd']))).llmContent),
+    const parsed = await listPeers(
+      [
+        peerRow({ sessionId: 's1', name: 'Docs-CD', ref: 'aaa111' }),
+        peerRow({ sessionId: 's2', name: 'other-ef', ref: 'bbb222' }),
+      ],
+      ['docs-cd'],
     );
-    expect(parsed.sessions.map((s: { to: string }) => s.to)).toEqual([
-      'Docs-CD [aaa111]',
-      'other-ef',
-    ]);
+    expect(addresses(parsed)).toEqual(['Docs-CD [aaa111]', 'other-ef']);
   });
 
   it('lists a peer with a bare name as its address, and names itself', async () => {
-    listMessageablePeers.mockResolvedValue([peerRow()]);
-    const parsed = JSON.parse(String((await run()).llmContent));
+    const parsed = await listPeers([peerRow()]);
     expect(parsed).toEqual({
       agents: [],
       self: { name: 'self-00', ref: 'se1f00' },
@@ -250,7 +258,7 @@ describe('ListAgentsTool — peer sessions', () => {
   });
 
   it("passes each session's kind through to the model", async () => {
-    listMessageablePeers.mockResolvedValue([
+    const parsed = await listPeers([
       peerRow({ sessionId: 's1', ref: 'aaa111', kind: 'serve' }),
       peerRow({
         sessionId: 's2',
@@ -259,7 +267,6 @@ describe('ListAgentsTool — peer sessions', () => {
         kind: 'external',
       }),
     ]);
-    const parsed = JSON.parse(String((await run()).llmContent));
     expect(parsed.sessions.map((s: { kind: string }) => s.kind)).toEqual([
       'serve',
       'external',
@@ -267,23 +274,17 @@ describe('ListAgentsTool — peer sessions', () => {
   });
 
   it('appends the ref only when two sessions share a name', async () => {
-    listMessageablePeers.mockResolvedValue([
+    const parsed = await listPeers([
       peerRow({ sessionId: 's1', ref: 'aaa111' }),
       peerRow({ sessionId: 's2', ref: 'bbb222', cwd: '/w/other' }),
     ]);
-    const parsed = JSON.parse(String((await run()).llmContent));
-    expect(parsed.sessions.map((s: { to: string }) => s.to)).toEqual([
-      'docs-cd [aaa111]',
-      'docs-cd [bbb222]',
-    ]);
+    expect(addresses(parsed)).toEqual(['docs-cd [aaa111]', 'docs-cd [bbb222]']);
   });
 
   it('appends the ref when a bracketed name is shadowed by a teammate', async () => {
-    listMessageablePeers.mockResolvedValue([
-      peerRow({ sessionId: 's1', name: 'notes [draft]', ref: 'aaa111' }),
-    ]);
-    const parsed = JSON.parse(
-      String((await run(toolWith(undefined, ['notes-draft']))).llmContent),
+    const parsed = await listPeers(
+      [peerRow({ sessionId: 's1', name: 'notes [draft]', ref: 'aaa111' })],
+      ['notes-draft'],
     );
     expect(parsed.sessions[0].to).toBe('notes [draft] [aaa111]');
   });
@@ -298,16 +299,10 @@ describe('ListAgentsTool — peer sessions', () => {
         ipcPath: '/tmp/s2.sock',
       }),
     ];
-    listMessageablePeers.mockResolvedValue(peers);
-    const parsed = JSON.parse(
-      String((await run(toolWith(undefined, ['docs-cd']))).llmContent),
-    );
-    const addresses = parsed.sessions.map(
-      (session: { to: string }) => session.to,
-    );
-    expect(new Set(addresses).size).toBe(2);
-    expect(addresses).toEqual(['[aaa111]', 'docs-cd [aaa111] [bbb222]']);
-    for (const [index, address] of addresses.entries()) {
+    const printed = addresses(await listPeers(peers, ['docs-cd']));
+    expect(new Set(printed).size).toBe(2);
+    expect(printed).toEqual(['[aaa111]', 'docs-cd [aaa111] [bbb222]']);
+    for (const [index, address] of printed.entries()) {
       expect(resolvePeerTarget(peers, address)).toEqual({
         kind: 'one',
         peer: peers[index],
@@ -316,33 +311,30 @@ describe('ListAgentsTool — peer sessions', () => {
   });
 
   it('appends the ref for leader handles intercepted by team routing', async () => {
-    listMessageablePeers.mockResolvedValue([
-      peerRow({ sessionId: 's1', name: 'leader', ref: 'aaa111' }),
-      peerRow({
-        sessionId: 's2',
-        name: 'lead-1',
-        ref: 'bbb222',
-        ipcPath: '/tmp/s2.sock',
-      }),
-    ]);
-    const parsed = JSON.parse(
-      String((await run(toolWith(undefined, ['worker']))).llmContent),
+    const parsed = await listPeers(
+      [
+        peerRow({ sessionId: 's1', name: 'leader', ref: 'aaa111' }),
+        peerRow({
+          sessionId: 's2',
+          name: 'lead-1',
+          ref: 'bbb222',
+          ipcPath: '/tmp/s2.sock',
+        }),
+      ],
+      ['worker'],
     );
-    expect(
-      parsed.sessions.map((session: { to: string }) => session.to),
-    ).toEqual(['leader [aaa111]', 'lead-1 [bbb222]']);
+    expect(addresses(parsed)).toEqual(['leader [aaa111]', 'lead-1 [bbb222]']);
   });
 
   it('omits started_at when the registry timestamp is outside Date range', async () => {
-    listMessageablePeers.mockResolvedValue([
+    const parsed = await listPeers([
       peerRow({ sessionId: 's1', startedAt: 9e15 }),
     ]);
-    const parsed = JSON.parse(String((await run()).llmContent));
     expect(parsed.sessions[0]).not.toHaveProperty('started_at');
   });
 
   it('excludes this session from its own listing', async () => {
-    listMessageablePeers.mockResolvedValue([
+    const parsed = await listPeers([
       peerRow({
         sessionId: 'self',
         ref: 'se1f00',
@@ -351,18 +343,16 @@ describe('ListAgentsTool — peer sessions', () => {
       }),
       peerRow({ sessionId: 's2', ref: 'bbb222' }),
     ]);
-    const parsed = JSON.parse(String((await run()).llmContent));
     expect(parsed.sessions).toHaveLength(1);
     expect(parsed.sessions[0].name).toBe('docs-cd');
   });
 
   it("keeps a session that merely shares this one's inbox", async () => {
-    // A process hosting several sessions binds one inbox for all of them,
-    // so a sibling's reply address is this session's own. It is still a
-    // different session with its own id, its own work and its own model —
-    // hiding it would leave the sessions in one process unable to see
-    // each other at all.
-    listMessageablePeers.mockResolvedValue([
+    // A multi-session process binds one inbox for all, so a sibling's reply
+    // address is this session's own. It is still a different session (own
+    // id, work and model); hiding it would leave co-hosted sessions unable
+    // to see each other at all.
+    const parsed = await listPeers([
       peerRow({
         sessionId: 'sibling',
         ref: 'bbb222',
@@ -370,17 +360,15 @@ describe('ListAgentsTool — peer sessions', () => {
         ipcPath: '/tmp/self.sock',
       }),
     ]);
-    const parsed = JSON.parse(String((await run()).llmContent));
     expect(parsed.sessions).toEqual([
       expect.objectContaining({ name: 'app-11', ref: 'bbb222' }),
     ]);
   });
 
   it('excludes this session when its record carries a freshly patched id', async () => {
-    // A /clear re-id patches this session's record in place; landing
-    // between the two reads, the stale id filter no longer recognizes
-    // it. The reply address does not move on a re-id, so the entry is
-    // re-read before it is advertised as a sibling.
+    // A /clear re-id patches this session's record in place; landing between
+    // the two reads, the stale id filter misses it. The reply address does
+    // not move on a re-id, so the entry is re-read before being advertised.
     getOwnPeerIdentity
       .mockResolvedValueOnce(SELF)
       .mockResolvedValue({ ...SELF, sessionId: 's2' });
@@ -401,7 +389,7 @@ describe('ListAgentsTool — peer sessions', () => {
     // `qwen --resume <id>` from another directory: same session id under
     // a second process. sendToPeer refuses it as self, so advertising it
     // would hand the model a dead address.
-    listMessageablePeers.mockResolvedValue([
+    const parsed = await listPeers([
       peerRow({
         sessionId: 'self',
         ref: 'se1f00',
@@ -411,13 +399,12 @@ describe('ListAgentsTool — peer sessions', () => {
       }),
       peerRow({ sessionId: 's2', ref: 'bbb222' }),
     ]);
-    const parsed = JSON.parse(String((await run()).llmContent));
     expect(parsed.sessions).toHaveLength(1);
     expect(parsed.sessions[0].name).toBe('docs-cd');
   });
 
   it("keeps a peer that merely shares this session's name", async () => {
-    listMessageablePeers.mockResolvedValue([
+    const parsed = await listPeers([
       peerRow({
         sessionId: 'self',
         ref: 'se1f00',
@@ -432,7 +419,6 @@ describe('ListAgentsTool — peer sessions', () => {
         ipcPath: '/tmp/s2.sock',
       }),
     ]);
-    const parsed = JSON.parse(String((await run()).llmContent));
     expect(parsed.sessions).toEqual([
       expect.objectContaining({
         name: 'self-00',
@@ -443,72 +429,43 @@ describe('ListAgentsTool — peer sessions', () => {
   });
 
   it('never advertises the broadcast keyword as a peer address', async () => {
-    listMessageablePeers.mockResolvedValue([
+    const parsed = await listPeers([
       peerRow({ sessionId: 's1', name: '*', ref: 'aaa111' }),
     ]);
-    const parsed = JSON.parse(String((await run()).llmContent));
     expect(parsed.sessions).toHaveLength(1);
     expect(parsed.sessions[0].to).not.toBe('*');
     expect(parsed.sessions[0].to).toContain('aaa111');
   });
 
   it('intercepts the leader handle only while a team is active', async () => {
-    listMessageablePeers.mockResolvedValue([
-      peerRow({ sessionId: 's1', name: 'leader', ref: 'aaa111' }),
-    ]);
-    const noTeam = JSON.parse(String((await run()).llmContent));
+    const peers = [peerRow({ sessionId: 's1', name: 'leader', ref: 'aaa111' })];
+    const noTeam = await listPeers(peers);
     expect(noTeam.sessions[0].to).toBe('leader');
-    const withTeam = JSON.parse(
-      String((await run(toolWith(undefined, ['alice']))).llmContent),
-    );
+    const withTeam = await listPeers(peers, ['alice']);
     expect(withTeam.sessions[0].to).toBe('leader [aaa111]');
   });
 
   it('omits a peer that no address in the grammar can single out', async () => {
     // Same name and the same ref: every candidate is ambiguous for both.
-    listMessageablePeers.mockResolvedValue([
+    const parsed = await listPeers([
       peerRow({ sessionId: 's1', name: 'docs-cd', ref: 'aaa111' }),
       peerRow({ sessionId: 's2', name: 'docs-cd', ref: 'aaa111', cwd: '/w/2' }),
       peerRow({ sessionId: 's3', name: 'other-ef', ref: 'bbb222' }),
     ]);
-    const parsed = JSON.parse(String((await run()).llmContent));
-    expect(parsed.sessions.map((s: { to: string }) => s.to)).toEqual([
-      'other-ef',
-    ]);
+    expect(addresses(parsed)).toEqual(['other-ef']);
   });
 
   it('counts both kinds in the display line', async () => {
-    const registry = new BackgroundTaskRegistry();
-    registry.register({
-      agentId: 'a1',
-      description: 'do a thing',
-      status: 'running',
-      isBackgrounded: true,
-      startTime: 1,
-      abortController: new AbortController(),
-      outputFile: '/tmp/a1.jsonl',
-    });
     listMessageablePeers.mockResolvedValue([peerRow()]);
-    const result = await run(toolWith(registry));
+    const result = await run(toolWith(registryWithOneAgent()));
     expect(result.returnDisplay).toBe(
       'Listed 1 background agent and 1 other session.',
     );
   });
 
   it('omits the sessions key entirely when there are none', async () => {
-    const registry = new BackgroundTaskRegistry();
-    registry.register({
-      agentId: 'a1',
-      description: 'do a thing',
-      status: 'running',
-      isBackgrounded: true,
-      startTime: 1,
-      abortController: new AbortController(),
-      outputFile: '/tmp/a1.jsonl',
-    });
-    const parsed = JSON.parse(
-      String((await run(toolWith(registry))).llmContent),
-    );
+    const result = await run(toolWith(registryWithOneAgent()));
+    const parsed = JSON.parse(String(result.llmContent));
     expect(parsed.sessions).toBeUndefined();
     expect(parsed.self).toEqual({ name: 'self-00', ref: 'se1f00' });
     expect(parsed.agents).toHaveLength(1);

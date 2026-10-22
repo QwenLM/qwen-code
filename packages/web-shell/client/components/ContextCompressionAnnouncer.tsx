@@ -1,12 +1,15 @@
 import { createContext, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { ContextUsageControls } from '../hooks/useContextUsageControls';
+import type {
+  ContextCompressionControls,
+  ContextUsageControls,
+} from '../hooks/useContextUsageControls';
 import { useI18n } from '../i18n';
 import { useWebShellPortalRoot } from '../portalRoot';
 
 export type CompressionPhase =
   | 'pending'
-  | NonNullable<ContextUsageControls['result']>['kind'];
+  | NonNullable<ContextCompressionControls['result']>['kind'];
 
 export interface CompressionAnnouncement {
   operation: object;
@@ -23,11 +26,19 @@ export function compressionMessageKey(phase: CompressionPhase) {
   return {
     pending: 'contextUsage.compressing',
     completed: 'contextUsage.compressed',
+    compressed: 'contextUsage.compressedUnknown',
+    noop: 'contextCompression.noop',
     cancelled: 'contextUsage.compressCancelled',
     interrupted: 'contextUsage.compressInterrupted',
     refreshFailed: 'contextUsage.compressRefreshFailed',
     failed: 'contextUsage.compressFailed',
   }[phase];
+}
+
+export function compressionPhaseTone(
+  phase: CompressionPhase,
+): 'error' | 'info' {
+  return phase === 'failed' || phase === 'refreshFailed' ? 'error' : 'info';
 }
 
 function scopeKey(scope: { sessionId: string; workspaceCwd?: string }) {
@@ -62,33 +73,32 @@ function SessionAnnouncement({
   spoken: WeakSet<CompressionAnnouncement>;
 }) {
   const { t } = useI18n();
-  const [message, setMessage] = useState<{
-    text: string;
-    error: boolean;
-  }>();
+  const [phase, setPhase] = useState<CompressionPhase>();
   useEffect(() => {
     if (!announcement || spoken.has(announcement)) return;
-    setMessage(undefined);
+    setPhase(undefined);
+    let retentionTimer: number | undefined;
     // Keep the live nodes mounted before changing their text, including when
     // consecutive operations finish with the same message.
     const timer = window.setTimeout(() => {
       spoken.add(announcement);
-      setMessage({
-        text: t(compressionMessageKey(announcement.phase)),
-        error:
-          announcement.phase === 'failed' ||
-          announcement.phase === 'refreshFailed',
-      });
+      setPhase(announcement.phase);
+      retentionTimer = window.setTimeout(() => setPhase(undefined), 10_000);
     }, 0);
-    return () => window.clearTimeout(timer);
-  }, [announcement, spoken, t]);
+    return () => {
+      window.clearTimeout(timer);
+      window.clearTimeout(retentionTimer);
+    };
+  }, [announcement, spoken]);
+  const text = phase ? t(compressionMessageKey(phase)) : '';
+  const error = phase && compressionPhaseTone(phase) === 'error';
   return (
     <div className="sr-only" data-web-shell-compression-announcer>
       <div role="status" aria-live="polite" aria-atomic="true">
-        {message && !message.error ? message.text : ''}
+        {!error ? text : ''}
       </div>
       <div role="alert" aria-live="assertive" aria-atomic="true">
-        {message?.error ? message.text : ''}
+        {error ? text : ''}
       </div>
     </div>
   );

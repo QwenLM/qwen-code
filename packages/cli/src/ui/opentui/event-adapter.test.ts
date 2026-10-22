@@ -13,6 +13,29 @@ import {
 type AnyEv = Parameters<ReturnType<typeof createEventMapper>>[0];
 
 describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
+  it('formats native Advisor advice and historical structured reviews', () => {
+    expect(
+      toolResultEvent('consult', {
+        type: 'advisor_advice',
+        model: 'reviewer',
+        text: 'Inspect the failing boundary.',
+      }),
+    ).toEqual({
+      type: 'tool-result',
+      id: 'consult',
+      display: 'Inspect the failing boundary.',
+    });
+    expect(
+      renderResultDisplay({
+        type: 'advisor_review',
+        verdict: 'Sound.',
+        risks: 'None.',
+        missingEvidence: 'Tests.',
+        recommendation: 'Verify.',
+      }),
+    ).toContain('## Verdict\n\nSound.');
+  });
+
   it('maps content to text delta', () => {
     const map = createEventMapper();
     expect(
@@ -447,6 +470,27 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
           text:
             'A potential loop was detected. This can happen due to repetitive ' +
             'tool calls or other model behavior. The request has been halted.',
+        },
+      ]);
+    });
+
+    it('maps a loop_detected with a known cause to the headless explanation', () => {
+      const map = createEventMapper();
+      const out = map({
+        type: 'loop_detected',
+        value: {
+          loopType: 'turn_tool_call_cap',
+          loopReason: 'explicit_cap',
+          toolCallCount: 4,
+          toolCallLimit: 3,
+        },
+      } as unknown as AnyEv);
+      expect(out).toEqual([
+        {
+          type: 'info',
+          text: expect.stringContaining(
+            'the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)',
+          ),
         },
       ]);
     });

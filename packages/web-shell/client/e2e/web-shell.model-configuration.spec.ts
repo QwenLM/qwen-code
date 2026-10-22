@@ -189,6 +189,7 @@ async function openModelSettings(page: Page, testInfo: TestInfo) {
       .getByRole('button', { name: 'Toggle menu', exact: true })
       .click();
   }
+  await page.getByRole('button', { name: 'More', exact: true }).click();
   await page
     .getByRole('button', { name: 'Settings', exact: true })
     .first()
@@ -445,6 +446,9 @@ test('keeps invalid values editable and preserves defaults on a failed save', as
   await expect(
     page.getByRole('alert').filter({ hasText: 'Test save failed' }),
   ).toHaveCount(1);
+  await expect(page.getByRole('alert').filter({ hasText: /\S/ })).toHaveCount(
+    1,
+  );
   await expect(
     page.getByRole('button', { name: 'Save', exact: true }),
   ).toBeEnabled();
@@ -777,6 +781,9 @@ test('reports a failed runtime sync after saving a context window', async ({
         'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
     }),
   ).toHaveCount(1);
+  await expect(page.getByRole('status').filter({ hasText: /\S/ })).toHaveCount(
+    1,
+  );
   await edit.click();
   await expect(page.getByLabel('Context window', { exact: true })).toHaveValue(
     '65536',
@@ -787,23 +794,14 @@ test('edits a persisted context window, retries a failure, and resets to automat
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  const { configurations, daemon, scenario } = await openModelSettings(
-    page,
-    testInfo,
-  );
+  const { configurations } = await openModelSettings(page, testInfo);
   const reloadSettings = async () => {
     await page.reload();
-    await daemon.sse.waitForConnection(scenario.sessionId);
-    await daemon.sendEvent(
-      replayCompleteEvent({ sessionId: scenario.sessionId }),
+    await expect(page).toHaveURL(/\/settings$/);
+    await expect(page.getByTestId('inline-panel')).toHaveAttribute(
+      'aria-label',
+      'Settings',
     );
-    await page
-      .getByRole('button', { name: 'Toggle menu', exact: true })
-      .click();
-    await page
-      .getByRole('button', { name: 'Settings', exact: true })
-      .first()
-      .click();
     await page
       .getByRole('navigation', { name: 'Settings' })
       .getByRole('button', { name: /^Model/ })
@@ -861,6 +859,9 @@ test('edits a persisted context window, retries a failure, and resets to automat
   await expect(
     page.getByRole('alert').filter({ hasText: 'Test context save failed' }),
   ).toHaveCount(1);
+  await expect(page.getByRole('alert').filter({ hasText: /\S/ })).toHaveCount(
+    1,
+  );
   await expect(context).toHaveValue('65536');
   await page
     .getByRole('button', { name: 'save Configured Test Model', exact: true })

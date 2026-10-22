@@ -51,12 +51,17 @@ import {
   isValidCronTaskRoutingId,
   MAX_JOBS,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
+  type CronGateStatus,
   type CronRunSessionOutcome,
   type CronTaskDelivery,
   type DurableCronTask,
   type CronTaskRun,
 } from '@qwen-code/qwen-code-core';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import type {
+  BridgeClientRequestContext,
+  CloseSessionOpts,
+} from '@qwen-code/acp-bridge';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
@@ -116,7 +121,11 @@ export interface ScheduledTasksSessionBridge {
     signal?: AbortSignal,
     context?: { onPromptAdmitted?: () => void },
   ): Promise<unknown>;
-  closeSession(sessionId: string): Promise<unknown>;
+  closeSession(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+    opts?: CloseSessionOpts,
+  ): Promise<unknown>;
   /** Persist a restorable transcript anchor for an eligible default session. */
   ensureDefaultSessionPersisted?(sessionId: string): Promise<void>;
   /** Advance the in-memory session-catalog revision after a successful
@@ -621,6 +630,7 @@ async function dispatchTaskToFreshSession(
               prompt: task.prompt,
               triggeredAt,
               trigger: 'manual',
+              ...(task.gate ? { gate: task.gate } : {}),
             }),
           },
         ],
@@ -769,6 +779,10 @@ interface ScheduledTaskView {
   groupId: string | null;
   runs: CronTaskRun[];
   delivery?: CronTaskDelivery;
+  /** The gate command, or null for an ungated task. */
+  gate: string | null;
+  /** Summary of the gate's recent runs; null until the gate first ran. */
+  gateStatus: CronGateStatus | null;
 }
 
 /** Next scheduled fire (epoch ms) for an enabled task, or null when the task
@@ -815,6 +829,9 @@ function toView(task: DurableCronTask): ScheduledTaskView {
     // never special-cases undefined.
     runs: Array.isArray(task.runs) ? task.runs : [],
     ...(task.delivery !== undefined ? { delivery: task.delivery } : {}),
+    gate:
+      typeof task.gate === 'string' && task.gate.length > 0 ? task.gate : null,
+    gateStatus: task.gateStatus ?? null,
   };
 }
 
@@ -1858,11 +1875,16 @@ function registerScheduledTaskCrudRoutes(
           .json({ error: 'Task not found', code: 'task_not_found' });
         return;
       }
-      // Stop the now-orphaned session (keeps its transcript on disk as history).
+      // Remove the now-orphaned live session only after its child confirms that
+      // no background work still owns it. The idle reaper retries after holds
+      // clear; the transcript remains on disk as history either way.
       if (boundSessionId && sessionOwnedByTask && bridge) {
         try {
           await runWithScheduledTaskTarget(target, () =>
-            bridge.closeSession(boundSessionId!),
+            bridge.closeSession(boundSessionId!, undefined, {
+              closeIfUnheld: true,
+              reason: 'scheduled_task_deleted',
+            }),
           );
         } catch (error) {
           if (sendActivityGateError(res, error)) return;

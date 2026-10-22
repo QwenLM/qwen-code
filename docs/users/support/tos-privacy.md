@@ -84,7 +84,7 @@ You can disable or uninstall the Chrome extension in Chrome's extension manager 
 
 ### Limited use of browser data
 
-Qwen Code's use and transfer of data received through the Chrome extension adhere to the [Chrome Web Store User Data Policy](https://developer.chrome.com/docs/webstore/program-policies/user-data), including its Limited Use requirements. Browser data is used to provide the extension's single purpose: connecting Chrome to Qwen Code for user-requested browser assistance. It is not sold, used for advertising, or used to determine creditworthiness or lending eligibility. Transfers are limited to providing that functionality, including processing by the AI provider you configure, and other uses permitted by that policy.
+Qwen Code's use and transfer of data received through the Chrome extension adhere to the [Chrome Web Store User Data Policy](https://developer.chrome.com/docs/webstore/program-policies/user-data-faq), including its Limited Use requirements. Browser data is used to provide the extension's single purpose: connecting Chrome to Qwen Code for user-requested browser assistance. It is not sold, used for advertising, or used to determine creditworthiness or lending eligibility. Transfers are limited to providing that functionality, including processing by the AI provider you configure, and other uses permitted by that policy.
 
 For questions about browser data handling, contact the team through the [Qwen Code issue tracker](https://github.com/QwenLM/qwen-code/issues). Share only the details needed to explain the question; remove credentials and private page content from public reports.
 

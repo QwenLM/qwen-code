@@ -47,6 +47,106 @@ function clockFrom(values: number[]) {
   });
 }
 
+type ProfilerOptions = NonNullable<
+  Parameters<typeof createSessionStartProfiler>[1]
+>;
+const T0 = () => new Date('2026-07-06T00:00:00.000Z');
+const T1 = () => new Date('2026-07-06T12:34:56.789Z');
+
+/** Enabled profiler on a scripted clock that collects its records in memory. */
+function profile(
+  source: SessionStartSource,
+  now: number[],
+  opts: ProfilerOptions = {},
+) {
+  const records: SessionStartProfileRecord[] = [];
+  const profiler = createSessionStartProfiler(source, {
+    enabled: true,
+    now: clockFrom(now),
+    writeRecord: (record) => records.push(record),
+    getTimestamp: T0,
+    ...opts,
+  });
+  return { profiler, records };
+}
+
+const expectWriteFailed = (
+  payload: unknown = expect.objectContaining({ name: 'Error' }),
+) =>
+  expect(debugLoggerMock.debug).toHaveBeenCalledWith(
+    'session-start-profiler write failed',
+    payload,
+  );
+
+interface RuntimeDirCtx {
+  runtimeDir: string;
+  perfDir: string;
+  profilePath: string;
+  /** Env-enabled Clear profiler with the real JSONL writer. */
+  start: (now: number[]) => ReturnType<typeof createSessionStartProfiler>;
+}
+
+/**
+ * Runs `body` against a temp QWEN_RUNTIME_DIR with profiling enabled by env.
+ * `noFollowless` reloads the module with O_NOFOLLOW stubbed away (the Windows
+ * flag set).
+ */
+async function withRuntimeDir(
+  body: (ctx: RuntimeDirCtx) => Promise<void>,
+  noFollowless = false,
+) {
+  const runtimeDir = await mkdtemp(join(tmpdir(), 'session-start-profiler-'));
+  vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);
+  vi.stubEnv(SESSION_START_PROFILE_ENV, '1');
+  if (noFollowless) {
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      return {
+        ...actual,
+        constants: { ...actual.constants, O_NOFOLLOW: undefined },
+      };
+    });
+  }
+
+  try {
+    const create = noFollowless
+      ? (await import('./session-start-profiler.js')).createSessionStartProfiler
+      : createSessionStartProfiler;
+    const perfDir = join(runtimeDir, 'session-start-perf');
+    await body({
+      runtimeDir,
+      perfDir,
+      profilePath: join(perfDir, 'session-start-2026-07-06.jsonl'),
+      start: (now) =>
+        create(SessionStartSource.Clear, {
+          now: clockFrom(now),
+          getTimestamp: T1,
+        }),
+    });
+  } finally {
+    if (noFollowless) {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+    }
+    await rm(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/** Plants a symlink at the profile path; finish() must not write through it. */
+const expectSymlinkedFileRefused = (noFollowless: boolean) =>
+  withRuntimeDir(async ({ runtimeDir, perfDir, profilePath, start }) => {
+    const targetPath = join(runtimeDir, 'target.jsonl');
+    await mkdir(perfDir);
+    await writeFile(targetPath, 'sentinel', 'utf8');
+    await symlink(targetPath, profilePath);
+
+    expect(() => start([10, 20]).finish({ ok: true })).not.toThrow();
+
+    await expect(readFile(targetPath, 'utf8')).resolves.toBe('sentinel');
+    expectWriteFailed();
+  }, noFollowless);
+
 describe('session-start-profiler', () => {
   const itNoSymlink = process.platform === 'win32' ? it.skip : it;
 
@@ -67,7 +167,7 @@ describe('session-start-profiler', () => {
       enabled: false,
       now,
       writeRecord,
-      getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
+      getTimestamp: T0,
     });
 
     await expect(
@@ -114,14 +214,11 @@ describe('session-start-profiler', () => {
   );
 
   it('records sync and async stages when enabled', async () => {
-    const records: SessionStartProfileRecord[] = [];
-    const profiler = createSessionStartProfiler(SessionStartSource.Resume, {
-      enabled: true,
-      sessionId: 'session-123',
-      now: clockFrom([10, 12, 15, 16, 21, 30]),
-      writeRecord: (record) => records.push(record),
-      getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
-    });
+    const { profiler, records } = profile(
+      SessionStartSource.Resume,
+      [10, 12, 15, 16, 21, 30],
+      { sessionId: 'session-123' },
+    );
 
     await expect(
       profiler.time('initial_chat_history', async () => 'history'),
@@ -144,10 +241,7 @@ describe('session-start-profiler', () => {
         ok: true,
         sessionId: 'session-123',
         totalMs: 20,
-        stages: {
-          initial_chat_history: 3,
-          system_instruction: 5,
-        },
+        stages: { initial_chat_history: 3, system_instruction: 5 },
         extraHistoryLength: 3,
         historyLength: 4,
         snapshotEntryCount: 2,
@@ -161,13 +255,10 @@ describe('session-start-profiler', () => {
   });
 
   it('rounds elapsed durations to two decimal places', async () => {
-    const records: SessionStartProfileRecord[] = [];
-    const profiler = createSessionStartProfiler(SessionStartSource.Resume, {
-      enabled: true,
-      now: clockFrom([100.111, 100.222, 100.678, 101.111, 102.345, 102.789]),
-      writeRecord: (record) => records.push(record),
-      getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
-    });
+    const { profiler, records } = profile(
+      SessionStartSource.Resume,
+      [100.111, 100.222, 100.678, 101.111, 102.345, 102.789],
+    );
 
     await profiler.time('initial_chat_history', async () => undefined);
     profiler.timeSync('system_instruction', () => undefined);
@@ -176,21 +267,15 @@ describe('session-start-profiler', () => {
     expect(records[0]).toMatchObject({
       ok: true,
       totalMs: 2.68,
-      stages: {
-        initial_chat_history: 0.46,
-        system_instruction: 1.23,
-      },
+      stages: { initial_chat_history: 0.46, system_instruction: 1.23 },
     });
   });
 
   it('accumulates repeated stage durations', () => {
-    const records: SessionStartProfileRecord[] = [];
-    const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
-      enabled: true,
-      now: clockFrom([10, 12, 15, 18, 23, 30]),
-      writeRecord: (record) => records.push(record),
-      getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
-    });
+    const { profiler, records } = profile(
+      SessionStartSource.Clear,
+      [10, 12, 15, 18, 23, 30],
+    );
 
     expect(profiler.timeSync('system_instruction', () => 'first')).toBe(
       'first',
@@ -203,20 +288,15 @@ describe('session-start-profiler', () => {
     expect(records[0]).toMatchObject({
       ok: true,
       totalMs: 20,
-      stages: {
-        system_instruction: 8,
-      },
+      stages: { system_instruction: 8 },
     });
   });
 
   it('rethrows stage errors and preserves the failed stage', async () => {
-    const records: SessionStartProfileRecord[] = [];
-    const profiler = createSessionStartProfiler(SessionStartSource.Startup, {
-      enabled: true,
-      now: clockFrom([100, 110, 125, 130]),
-      writeRecord: (record) => records.push(record),
-      getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
-    });
+    const { profiler, records } = profile(
+      SessionStartSource.Startup,
+      [100, 110, 125, 130],
+    );
     const error = new Error('setTools failed');
 
     await expect(
@@ -229,21 +309,16 @@ describe('session-start-profiler', () => {
     expect(records[0]).toMatchObject({
       ok: false,
       totalMs: 30,
-      stages: {
-        set_tools: 15,
-      },
+      stages: { set_tools: 15 },
       failedStage: 'set_tools',
     });
   });
 
   it('preserves the first failed stage', async () => {
-    const records: SessionStartProfileRecord[] = [];
-    const profiler = createSessionStartProfiler(SessionStartSource.Startup, {
-      enabled: true,
-      now: clockFrom([100, 110, 115, 120, 130, 140]),
-      writeRecord: (record) => records.push(record),
-      getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
-    });
+    const { profiler, records } = profile(
+      SessionStartSource.Startup,
+      [100, 110, 115, 120, 130, 140],
+    );
 
     await expect(
       profiler.time('stage_a', async () => {
@@ -260,22 +335,16 @@ describe('session-start-profiler', () => {
     expect(records[0]).toMatchObject({
       ok: false,
       totalMs: 40,
-      stages: {
-        stage_a: 5,
-        stage_b: 10,
-      },
+      stages: { stage_a: 5, stage_b: 10 },
       failedStage: 'stage_a',
     });
   });
 
   it('rethrows sync stage errors and preserves the failed stage', () => {
-    const records: SessionStartProfileRecord[] = [];
-    const profiler = createSessionStartProfiler(SessionStartSource.Startup, {
-      enabled: true,
-      now: clockFrom([100, 110, 120, 130]),
-      writeRecord: (record) => records.push(record),
-      getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
-    });
+    const { profiler, records } = profile(
+      SessionStartSource.Startup,
+      [100, 110, 120, 130],
+    );
     const error = new Error('system instruction failed');
 
     expect(() =>
@@ -288,62 +357,46 @@ describe('session-start-profiler', () => {
     expect(records[0]).toMatchObject({
       ok: false,
       totalMs: 30,
-      stages: {
-        system_instruction: 10,
-      },
+      stages: { system_instruction: 10 },
       failedStage: 'system_instruction',
     });
   });
 
   it('writes at most one record when finish is called multiple times', () => {
-    const records: SessionStartProfileRecord[] = [];
-    const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
-      enabled: true,
-      now: clockFrom([1, 2, 3]),
-      writeRecord: (record) => records.push(record),
-      getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
-    });
+    const { profiler, records } = profile(SessionStartSource.Clear, [1, 2, 3]);
 
     profiler.finish({ ok: true });
     profiler.finish({ ok: false });
 
     expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({
-      ok: true,
-      totalMs: 1,
-    });
-    expect(records[0]).not.toHaveProperty('extraHistoryLength');
-    expect(records[0]).not.toHaveProperty('historyLength');
-    expect(records[0]).not.toHaveProperty('snapshotEntryCount');
-    expect(records[0]).not.toHaveProperty('deferredReminderCount');
-    expect(records[0]).not.toHaveProperty('failedStage');
+    expect(records[0]).toMatchObject({ ok: true, totalMs: 1 });
+    for (const key of [
+      'extraHistoryLength',
+      'historyLength',
+      'snapshotEntryCount',
+      'deferredReminderCount',
+      'failedStage',
+    ]) {
+      expect(records[0]).not.toHaveProperty(key);
+    }
   });
 
   it('does not throw when the output writer fails', () => {
-    const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
-      enabled: true,
-      now: clockFrom([1, 2]),
+    const { profiler } = profile(SessionStartSource.Clear, [1, 2], {
       writeRecord: () => {
         throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
       },
-      getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
     });
 
     expect(() => profiler.finish({ ok: true })).not.toThrow();
-    expect(debugLoggerMock.debug).toHaveBeenCalledWith(
-      'session-start-profiler write failed',
-      { name: 'Error', message: 'disk full', code: 'ENOSPC' },
-    );
+    expectWriteFailed({ name: 'Error', message: 'disk full', code: 'ENOSPC' });
   });
 
   it('does not throw when recovery debug logging fails', () => {
-    const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
-      enabled: true,
-      now: clockFrom([1, 2]),
+    const { profiler } = profile(SessionStartSource.Clear, [1, 2], {
       writeRecord: () => {
         throw new Error('disk full');
       },
-      getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
     });
     debugLoggerMock.debug.mockImplementation(() => {
       throw new Error('debug log failed');
@@ -359,21 +412,16 @@ describe('session-start-profiler', () => {
     let profiler: ReturnType<typeof createSessionStartProfiler> | undefined;
 
     expect(() => {
-      profiler = createSessionStartProfiler(SessionStartSource.Clear, {
-        enabled: true,
-        now: clockFrom([1, 2]),
+      profiler = profile(SessionStartSource.Clear, [1, 2], {
         writeRecord: vi.fn(),
-        getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
-      });
+      }).profiler;
     }).not.toThrow();
     expect(profiler?.enabled).toBe(true);
   });
 
   it('does not throw when finish metadata collection fails', () => {
     const writeRecord = vi.fn();
-    const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
-      enabled: true,
-      now: clockFrom([1, 2]),
+    const { profiler } = profile(SessionStartSource.Clear, [1, 2], {
       writeRecord,
       getTimestamp: () => {
         throw new Error('clock failed');
@@ -384,16 +432,9 @@ describe('session-start-profiler', () => {
     expect(writeRecord).not.toHaveBeenCalled();
   });
 
-  it('writes bounded JSONL without sensitive fields', async () => {
-    const runtimeDir = await mkdtemp(join(tmpdir(), 'session-start-profiler-'));
-    vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);
-    vi.stubEnv(SESSION_START_PROFILE_ENV, '1');
-
-    try {
-      const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
-        now: clockFrom([10, 15, 20, 30]),
-        getTimestamp: () => new Date('2026-07-06T12:34:56.789Z'),
-      });
+  it('writes bounded JSONL without sensitive fields', () =>
+    withRuntimeDir(async ({ perfDir, profilePath, start }) => {
+      const profiler = start([10, 15, 20, 30]);
       profiler.timeSync('system_instruction', () => 'system');
       profiler.finish({
         ok: true,
@@ -403,10 +444,9 @@ describe('session-start-profiler', () => {
         deferredReminderCount: 0,
       });
 
-      const perfDir = join(runtimeDir, 'session-start-perf');
-      const profilePath = join(perfDir, 'session-start-2026-07-06.jsonl');
-      const files = await readdir(perfDir);
-      expect(files).toEqual(['session-start-2026-07-06.jsonl']);
+      expect(await readdir(perfDir)).toEqual([
+        'session-start-2026-07-06.jsonl',
+      ]);
       if (process.platform !== 'win32') {
         expect((await stat(perfDir)).mode & 0o777).toBe(0o700);
         expect((await stat(profilePath)).mode & 0o777).toBe(0o600);
@@ -423,71 +463,32 @@ describe('session-start-profiler', () => {
         stages: { system_instruction: 5 },
       });
       expect(record).not.toHaveProperty('sessionId');
-      expect(serialized).not.toContain('prompt');
-      expect(serialized).not.toContain('/test/');
-      expect(serialized).not.toContain('test-session-id');
-      expect(serialized).not.toContain('hook output');
-      expect(serialized).not.toContain('tool name');
-    } finally {
-      await rm(runtimeDir, { recursive: true, force: true });
-    }
-  });
+      for (const secret of [
+        'prompt',
+        '/test/',
+        'test-session-id',
+        'hook output',
+        'tool name',
+      ]) {
+        expect(serialized).not.toContain(secret);
+      }
+    }));
 
-  it('writes profile records when O_NOFOLLOW is unavailable', async () => {
-    const runtimeDir = await mkdtemp(join(tmpdir(), 'session-start-profiler-'));
-    vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);
-    vi.stubEnv(SESSION_START_PROFILE_ENV, '1');
-    vi.resetModules();
-    vi.doMock('node:fs', async (importOriginal) => {
-      const actual = await importOriginal<typeof import('node:fs')>();
-      return {
-        ...actual,
-        constants: { ...actual.constants, O_NOFOLLOW: undefined },
-      };
-    });
+  it('writes profile records when O_NOFOLLOW is unavailable', () =>
+    withRuntimeDir(async ({ profilePath, start }) => {
+      start([10, 20]).finish({ ok: true });
 
-    try {
-      const { createSessionStartProfiler: createProfiler } = await import(
-        './session-start-profiler.js'
-      );
-      const profiler = createProfiler(SessionStartSource.Clear, {
-        now: clockFrom([10, 20]),
-        getTimestamp: () => new Date('2026-07-06T12:34:56.789Z'),
-      });
-      profiler.finish({ ok: true });
-
-      const raw = await readFile(
-        join(
-          runtimeDir,
-          'session-start-perf',
-          'session-start-2026-07-06.jsonl',
-        ),
-        'utf8',
-      );
+      const raw = await readFile(profilePath, 'utf8');
       expect(JSON.parse(raw.trim())).toMatchObject({ ok: true });
       expect(debugLoggerMock.error).not.toHaveBeenCalled();
-    } finally {
-      vi.doUnmock('node:fs');
-      vi.resetModules();
-      await rm(runtimeDir, { recursive: true, force: true });
-    }
-  });
+    }, true));
 
-  it('appends to an existing JSONL file', async () => {
-    const runtimeDir = await mkdtemp(join(tmpdir(), 'session-start-profiler-'));
-    vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);
-    vi.stubEnv(SESSION_START_PROFILE_ENV, '1');
-
-    try {
-      const perfDir = join(runtimeDir, 'session-start-perf');
-      const profilePath = join(perfDir, 'session-start-2026-07-06.jsonl');
+  it('appends to an existing JSONL file', () =>
+    withRuntimeDir(async ({ perfDir, profilePath, start }) => {
       await mkdir(perfDir);
       await writeFile(profilePath, '{"existing":true}\n', 'utf8');
 
-      const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
-        now: clockFrom([10, 15, 20]),
-        getTimestamp: () => new Date('2026-07-06T12:34:56.789Z'),
-      });
+      const profiler = start([10, 15, 20]);
       profiler.timeSync('system_instruction', () => undefined);
       profiler.finish({ ok: true });
 
@@ -500,121 +501,32 @@ describe('session-start-profiler', () => {
         ok: true,
         stages: { system_instruction: 5 },
       });
-    } finally {
-      await rm(runtimeDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  itNoSymlink('does not write through a symlinked JSONL file', async () => {
-    const runtimeDir = await mkdtemp(join(tmpdir(), 'session-start-profiler-'));
-    vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);
-    vi.stubEnv(SESSION_START_PROFILE_ENV, '1');
-
-    try {
-      const perfDir = join(runtimeDir, 'session-start-perf');
-      const targetPath = join(runtimeDir, 'target.jsonl');
-      const profilePath = join(perfDir, 'session-start-2026-07-06.jsonl');
-      await mkdir(perfDir);
-      await writeFile(targetPath, 'sentinel', 'utf8');
-      await symlink(targetPath, profilePath);
-
-      const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
-        now: clockFrom([10, 20]),
-        getTimestamp: () => new Date('2026-07-06T12:34:56.789Z'),
-      });
-      expect(() => profiler.finish({ ok: true })).not.toThrow();
-
-      await expect(readFile(targetPath, 'utf8')).resolves.toBe('sentinel');
-      expect(debugLoggerMock.debug).toHaveBeenCalledWith(
-        'session-start-profiler write failed',
-        expect.objectContaining({ name: 'Error' }),
-      );
-    } finally {
-      await rm(runtimeDir, { recursive: true, force: true });
-    }
-  });
-
-  itNoSymlink(
-    'rejects a symlinked JSONL file even when O_NOFOLLOW is unavailable',
-    async () => {
-      // The cross-product the two sibling tests miss: O_NOFOLLOW stubbed away
-      // (the Windows flag set) AND a symlink planted at the profile path. On
-      // Windows the lstat pre-check is the ONLY guard, so this pins that
-      // assertSafeExistingProfileFile still refuses the link before the open —
-      // and it runs on Linux CI, where the kernel would otherwise mask it.
-      const runtimeDir = await mkdtemp(
-        join(tmpdir(), 'session-start-profiler-'),
-      );
-      vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);
-      vi.stubEnv(SESSION_START_PROFILE_ENV, '1');
-      vi.resetModules();
-      vi.doMock('node:fs', async (importOriginal) => {
-        const actual = await importOriginal<typeof import('node:fs')>();
-        return {
-          ...actual,
-          constants: { ...actual.constants, O_NOFOLLOW: undefined },
-        };
-      });
-
-      try {
-        const perfDir = join(runtimeDir, 'session-start-perf');
-        const targetPath = join(runtimeDir, 'target.jsonl');
-        const profilePath = join(perfDir, 'session-start-2026-07-06.jsonl');
-        await mkdir(perfDir);
-        await writeFile(targetPath, 'sentinel', 'utf8');
-        await symlink(targetPath, profilePath);
-
-        const { createSessionStartProfiler: createProfiler } = await import(
-          './session-start-profiler.js'
-        );
-        const profiler = createProfiler(SessionStartSource.Clear, {
-          now: clockFrom([10, 20]),
-          getTimestamp: () => new Date('2026-07-06T12:34:56.789Z'),
-        });
-        expect(() => profiler.finish({ ok: true })).not.toThrow();
-
-        await expect(readFile(targetPath, 'utf8')).resolves.toBe('sentinel');
-        expect(debugLoggerMock.debug).toHaveBeenCalledWith(
-          'session-start-profiler write failed',
-          expect.objectContaining({ name: 'Error' }),
-        );
-      } finally {
-        vi.doUnmock('node:fs');
-        vi.resetModules();
-        await rm(runtimeDir, { recursive: true, force: true });
-      }
-    },
+  itNoSymlink('does not write through a symlinked JSONL file', () =>
+    expectSymlinkedFileRefused(false),
   );
 
+  // The cross-product the two sibling tests miss: O_NOFOLLOW stubbed away (the
+  // Windows flag set) AND a symlink planted at the profile path. On Windows the
+  // lstat pre-check is the ONLY guard, so this pins that
+  // assertSafeExistingProfileFile still refuses the link before the open — and
+  // it runs on Linux CI, where the kernel would otherwise mask it.
   itNoSymlink(
-    'does not write through a symlinked profile directory',
-    async () => {
-      const runtimeDir = await mkdtemp(
-        join(tmpdir(), 'session-start-profiler-'),
-      );
-      vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);
-      vi.stubEnv(SESSION_START_PROFILE_ENV, '1');
+    'rejects a symlinked JSONL file even when O_NOFOLLOW is unavailable',
+    () => expectSymlinkedFileRefused(true),
+  );
 
-      try {
-        const targetDir = join(runtimeDir, 'target-perf');
-        const perfDir = join(runtimeDir, 'session-start-perf');
-        await mkdir(targetDir);
-        await symlink(targetDir, perfDir);
+  itNoSymlink('does not write through a symlinked profile directory', () =>
+    withRuntimeDir(async ({ runtimeDir, perfDir, start }) => {
+      const targetDir = join(runtimeDir, 'target-perf');
+      await mkdir(targetDir);
+      await symlink(targetDir, perfDir);
 
-        const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
-          now: clockFrom([10, 20]),
-          getTimestamp: () => new Date('2026-07-06T12:34:56.789Z'),
-        });
-        expect(() => profiler.finish({ ok: true })).not.toThrow();
+      expect(() => start([10, 20]).finish({ ok: true })).not.toThrow();
 
-        await expect(readdir(targetDir)).resolves.toEqual([]);
-        expect(debugLoggerMock.debug).toHaveBeenCalledWith(
-          'session-start-profiler write failed',
-          expect.objectContaining({ name: 'Error' }),
-        );
-      } finally {
-        await rm(runtimeDir, { recursive: true, force: true });
-      }
-    },
+      await expect(readdir(targetDir)).resolves.toEqual([]);
+      expectWriteFailed();
+    }),
   );
 });

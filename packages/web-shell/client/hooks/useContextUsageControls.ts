@@ -23,13 +23,17 @@ type CompressionResult =
   | { kind: 'completed'; usage: DaemonSessionContextUsageStatus }
   | { kind: 'failed' | 'cancelled' | 'refreshFailed' | 'interrupted' };
 
-export interface ContextUsageControls {
-  sessionId: string;
-  workspaceCwd?: string;
+export interface ContextCompressionControls {
   canCompress: boolean;
   compressing: boolean;
-  result?: CompressionResult;
+  result?: CompressionResult | { kind: 'compressed' | 'noop' };
   compress(): Promise<void>;
+}
+
+export interface ContextUsageControls extends ContextCompressionControls {
+  sessionId: string;
+  workspaceCwd?: string;
+  result?: CompressionResult;
   captureOwner(): DaemonSessionOwnerSnapshot;
   getContextUsage: DaemonSessionActions['getContextUsage'];
 }

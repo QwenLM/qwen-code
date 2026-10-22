@@ -14,7 +14,7 @@
 // stops being an attack then fails here instead of certifying the guards it
 // walked around.
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
@@ -30,16 +30,14 @@ import { join } from 'node:path';
 import { getRecentGitStatus } from './gitUtils.js';
 import { getGitWorkingTreeStatus } from './gitDiff.js';
 import { isGitIgnored } from './git-ignore.js';
-import { GitWorktreeService } from '../services/gitWorktreeService.js';
-import { __test__ as worktreeCleanupInternals } from '../services/worktreeCleanup.js';
+import {
+  GitWorktreeService,
+  worktreeHasWork,
+} from '../services/gitWorktreeService.js';
 
-// The plant is a `/bin/sh` script, so the attack itself does not exist on
-// Windows and the question has no answer there.
-const itWherePlantRuns = it.skipIf(process.platform === 'win32');
-
-// Each case builds a repository and spawns a handful of git processes, which
-// blows the package's 15s local ceiling under coverage on a loaded machine.
-const PLANT_TIMEOUT_MS = 30_000;
+// Every case uses this `it`: the plant is a `/bin/sh` script, so the attack
+// itself does not exist on Windows and the question has no answer there.
+const it = test.skipIf(process.platform === 'win32');
 
 /** The program-valued keys a tree obtained as files can carry. */
 type Plant =
@@ -51,6 +49,8 @@ type Plant =
 
 const DIFF_PLANTS: Plant[] = ['diff.external', 'diff.pwn.textconv'];
 
+// 30s suite timeout (end of block): each case builds a repository and spawns
+// several git processes, past the 15s local ceiling under coverage when loaded.
 describe('a planted git program reaches no automatic git call', () => {
   const made: string[] = [];
 
@@ -70,7 +70,7 @@ describe('a planted git program reaches no automatic git call', () => {
    * tracked file dirty so the index refresh actually re-stats and the diff has
    * content to render.
    */
-  const planted = (plant: Plant = 'core.fsmonitor') => {
+  const planted = (plant: Plant = 'core.fsmonitor', helperOutside = false) => {
     const repo = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-fsmonitor-')));
     made.push(repo);
     const canary = join(repo, 'PWNED');
@@ -94,10 +94,21 @@ describe('a planted git program reaches no automatic git call', () => {
     g('add', 'a.ts', '.gitignore', '.gitattributes');
     g('commit', '-qm', 'init');
 
-    const helper =
-      plant === 'post-index-change'
-        ? join(repo, '.git', 'hooks', 'post-index-change')
-        : join(repo, 'plant.sh');
+    let helper: string;
+    if (plant === 'post-index-change') {
+      helper = join(repo, '.git', 'hooks', 'post-index-change');
+    } else if (helperOutside) {
+      // The shared worktree probe reads untracked and ignored entries as
+      // work, so a helper sitting in the tree would make the "clean"
+      // control read dirty for reasons unrelated to the plant.
+      const helperDir = realpathSync(
+        mkdtempSync(join(tmpdir(), 'qwen-plant-')),
+      );
+      made.push(helperDir);
+      helper = join(helperDir, 'plant.sh');
+    } else {
+      helper = join(repo, 'plant.sh');
+    }
     // An fsmonitor helper reports "trust nothing" by failing, so the status
     // stays correct; a textconv or external diff helper is expected to exit
     // clean and hand git the rendered content on stdout.
@@ -145,101 +156,87 @@ describe('a planted git program reaches no automatic git call', () => {
     return { repo, fired };
   };
 
-  itWherePlantRuns(
-    'the fixture is a live attack: an ungated status runs the plant',
-    () => {
-      const { repo, fired } = planted();
-      // The exact command `getRecentGitStatus` used to run. `--no-optional-locks`
-      // is kept to pin that it does NOT suppress the hook.
-      execFileSync(
-        'git',
-        ['--no-optional-locks', 'status', '--short', '--branch'],
-        { cwd: repo, encoding: 'utf8' },
-      );
-      expect(fired()).toBe(true);
-    },
-    PLANT_TIMEOUT_MS,
-  );
+  // Diffs a planted worktree through the service: the plant must not fire,
+  // and the diff must still render.
+  const expectWorktreeDiffWithoutFiring = async (plant?: Plant) => {
+    const { repo, fired } = planted(plant);
+    const diff = await new GitWorktreeService(repo).getWorktreeDiff(
+      repo,
+      'main',
+    );
+    expect(fired()).toBe(false);
+    expect(diff).not.toContain('Error getting diff');
+    expect(diff).toContain('a.ts');
+  };
 
-  itWherePlantRuns(
-    'startup context collection does not run it',
-    () => {
-      const { repo, fired } = planted();
-      const snapshot = getRecentGitStatus(repo);
-      expect(fired()).toBe(false);
-      // The guard must not have cost the output it exists to produce.
-      expect(snapshot).toContain('Current branch: main');
-      expect(snapshot).toContain('a.ts');
-    },
-    PLANT_TIMEOUT_MS,
-  );
+  it('the fixture is a live attack: an ungated status runs the plant', () => {
+    const { repo, fired } = planted();
+    // The exact command `getRecentGitStatus` used to run. `--no-optional-locks`
+    // is kept to pin that it does NOT suppress the hook.
+    execFileSync(
+      'git',
+      ['--no-optional-locks', 'status', '--short', '--branch'],
+      { cwd: repo, encoding: 'utf8' },
+    );
+    expect(fired()).toBe(true);
+  });
 
-  itWherePlantRuns(
-    'the gpg fixture is a live attack: an ungated log runs the plant',
-    () => {
-      const { repo, fired } = planted('gpg.program');
-      execFileSync('git', ['log', '--oneline', '-n', '5'], { cwd: repo });
-      expect(fired()).toBe(true);
-    },
-    PLANT_TIMEOUT_MS,
-  );
+  it('startup context collection does not run it', () => {
+    const { repo, fired } = planted();
+    const snapshot = getRecentGitStatus(repo);
+    expect(fired()).toBe(false);
+    // The guard must not have cost the output it exists to produce.
+    expect(snapshot).toContain('Current branch: main');
+    expect(snapshot).toContain('a.ts');
+  });
 
-  itWherePlantRuns(
-    'startup context collection does not run a configured gpg program',
-    () => {
-      const { repo, fired } = planted('gpg.program');
-      const snapshot = getRecentGitStatus(repo);
-      expect(fired()).toBe(false);
-      expect(snapshot).toContain('Current branch: main');
-      expect(snapshot).toContain('signed');
-    },
-    PLANT_TIMEOUT_MS,
-  );
+  it('the gpg fixture is a live attack: an ungated log runs the plant', () => {
+    const { repo, fired } = planted('gpg.program');
+    execFileSync('git', ['log', '--oneline', '-n', '5'], { cwd: repo });
+    expect(fired()).toBe(true);
+  });
 
-  itWherePlantRuns(
-    'the working-tree status behind the daemon routes does not run it',
-    async () => {
-      const { repo, fired } = planted();
-      // Every git call in `gitDiff` goes through one `runGit`, so guarding it
-      // there covers the index-refreshing ones — `status`, `ls-files`, `diff`,
-      // `diff-tree` — along with any call site added later.
-      const status = await getGitWorkingTreeStatus(repo);
-      expect(fired()).toBe(false);
-      expect(status?.branch).toBe('main');
-      expect(status?.unstaged).toBe(1);
-    },
-    PLANT_TIMEOUT_MS,
-  );
+  it('startup context collection does not run a configured gpg program', () => {
+    const { repo, fired } = planted('gpg.program');
+    const snapshot = getRecentGitStatus(repo);
+    expect(fired()).toBe(false);
+    expect(snapshot).toContain('Current branch: main');
+    expect(snapshot).toContain('signed');
+  });
 
-  itWherePlantRuns(
-    'the ignore probe does not run it',
-    () => {
-      const { repo, fired } = planted();
-      expect(isGitIgnored(repo, 'ignored.txt')).toBe(true);
-      expect(fired()).toBe(false);
-    },
-    PLANT_TIMEOUT_MS,
-  );
+  it('the working-tree status behind the daemon routes does not run it', async () => {
+    const { repo, fired } = planted();
+    // Every git call in `gitDiff` goes through one `runGit`, so guarding it
+    // there covers the index-refreshing ones — `status`, `ls-files`, `diff`,
+    // `diff-tree` — along with any call site added later.
+    const status = await getGitWorkingTreeStatus(repo);
+    expect(fired()).toBe(false);
+    expect(status?.branch).toBe('main');
+    expect(status?.unstaged).toBe(1);
+  });
 
-  itWherePlantRuns.each(['core.fsmonitor', 'post-index-change'] as const)(
+  it('the ignore probe does not run it', () => {
+    const { repo, fired } = planted();
+    expect(isGitIgnored(repo, 'ignored.txt')).toBe(true);
+    expect(fired()).toBe(false);
+  });
+
+  it.each(['core.fsmonitor', 'post-index-change'] as const)(
     'the stale-worktree cleanup probe does not run %s',
     async (plant) => {
-      const { repo, fired } = planted(plant);
-      // `hasTrackedChanges` fail-closes to `true`, so asserting only the dirty
+      const { repo, fired } = planted(plant, true);
+      // `worktreeHasWork` fail-closes to `true`, so asserting only the dirty
       // answer cannot tell a real status read from a swallowed git error. Read
       // the clean tree first: only a successful `status` can return `false`.
       writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
-      expect(await worktreeCleanupInternals.hasTrackedChanges(repo)).toBe(
-        false,
-      );
+      expect(await worktreeHasWork(repo)).toBe(false);
       writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
-      expect(await worktreeCleanupInternals.hasTrackedChanges(repo)).toBe(true);
+      expect(await worktreeHasWork(repo)).toBe(true);
       expect(fired()).toBe(false);
     },
-    PLANT_TIMEOUT_MS,
   );
 
-  itWherePlantRuns.each(['core.fsmonitor', 'post-index-change'] as const)(
+  it.each(['core.fsmonitor', 'post-index-change'] as const)(
     'the exit-tool dirty probes do not run %s',
     async (plant) => {
       const { repo, fired } = planted(plant);
@@ -255,95 +252,71 @@ describe('a planted git program reaches no automatic git call', () => {
       });
       expect(fired()).toBe(false);
     },
-    PLANT_TIMEOUT_MS,
   );
 
-  itWherePlantRuns(
-    'the exit-tool probes inherit the environment and read the global excludesFile',
-    async () => {
-      const { repo } = planted('post-index-change');
-      // A clean tracked tree plus one untracked `*.log` that a global
-      // `core.excludesFile` ignores. If the probe clobbered the child
-      // environment (`.env('GIT_OPTIONAL_LOCKS', '0')` replaces it outright),
-      // git would never read this config and would report the file untracked.
-      // The config and ignore files live OUTSIDE the repo so they do not
-      // themselves show up as untracked entries.
-      writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
-      writeFileSync(join(repo, 'x.log'), 'ignored noise\n');
-      const outside = mkdtempSync(join(tmpdir(), 'qwen-globalcfg-'));
-      made.push(outside);
-      const ignoreFile = join(outside, 'global-ignore');
-      writeFileSync(ignoreFile, '*.log\n');
-      const globalConfig = join(outside, 'global-config');
-      writeFileSync(globalConfig, `[core]\n  excludesFile = ${ignoreFile}\n`);
-      vi.stubEnv('GIT_CONFIG_GLOBAL', globalConfig);
+  it('the exit-tool probes inherit the environment and read the global excludesFile', async () => {
+    const { repo } = planted('post-index-change');
+    // A clean tracked tree plus one untracked `*.log` that a global
+    // `core.excludesFile` ignores. If the probe clobbered the child
+    // environment (`.env('GIT_OPTIONAL_LOCKS', '0')` replaces it outright),
+    // git would never read this config and would report the file untracked.
+    // The config and ignore files live OUTSIDE the repo so they do not
+    // themselves show up as untracked entries.
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
+    writeFileSync(join(repo, 'x.log'), 'ignored noise\n');
+    const outside = mkdtempSync(join(tmpdir(), 'qwen-globalcfg-'));
+    made.push(outside);
+    const ignoreFile = join(outside, 'global-ignore');
+    writeFileSync(ignoreFile, '*.log\n');
+    const globalConfig = join(outside, 'global-config');
+    writeFileSync(globalConfig, `[core]\n  excludesFile = ${ignoreFile}\n`);
+    vi.stubEnv('GIT_CONFIG_GLOBAL', globalConfig);
 
-      const service = new GitWorktreeService(repo);
-      expect(await service.hasWorktreeChanges(repo)).toBe(false);
-      expect(await service.countWorktreeChanges(repo)).toEqual({
-        tracked: 0,
-        untracked: 0,
-      });
-    },
-    PLANT_TIMEOUT_MS,
-  );
+    const service = new GitWorktreeService(repo);
+    expect(await service.hasWorktreeChanges(repo)).toBe(false);
+    expect(await service.countWorktreeChanges(repo)).toEqual({
+      tracked: 0,
+      untracked: 0,
+    });
+  });
 
-  itWherePlantRuns(
-    'the exit-tool probes pin --untracked-files=all so a hidden untracked mode cannot read a worktree clean',
-    async () => {
-      const { repo, fired } = planted('post-index-change');
-      // Clean the tracked file and leave a single untracked file. An ambient
-      // `status.showUntrackedFiles=no` (a user's `~/.gitconfig`, or a
-      // tree-shipped `.git/config` a linked worktree inherits) would make a
-      // bare `status --porcelain` read the worktree clean and destroy the
-      // untracked output — unless the probe pins `--untracked-files=all`.
-      writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
-      execFileSync('git', ['config', 'status.showUntrackedFiles', 'no'], {
-        cwd: repo,
-        encoding: 'utf8',
-      });
-      writeFileSync(join(repo, 'agent-output.ts'), 'untracked agent output\n');
+  it('the exit-tool probes pin --untracked-files=all so a hidden untracked mode cannot read a worktree clean', async () => {
+    const { repo, fired } = planted('post-index-change');
+    // Clean the tracked file and leave a single untracked file. An ambient
+    // `status.showUntrackedFiles=no` (a user's `~/.gitconfig`, or a
+    // tree-shipped `.git/config` a linked worktree inherits) would make a
+    // bare `status --porcelain` read the worktree clean and destroy the
+    // untracked output — unless the probe pins `--untracked-files=all`.
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
+    execFileSync('git', ['config', 'status.showUntrackedFiles', 'no'], {
+      cwd: repo,
+      encoding: 'utf8',
+    });
+    writeFileSync(join(repo, 'agent-output.ts'), 'untracked agent output\n');
 
-      const service = new GitWorktreeService(repo);
-      expect(await service.hasWorktreeChanges(repo)).toBe(true);
-      expect(await service.countWorktreeChanges(repo)).toEqual({
-        tracked: 0,
-        untracked: 1,
-      });
-      expect(fired()).toBe(false);
-    },
-    PLANT_TIMEOUT_MS,
-  );
+    const service = new GitWorktreeService(repo);
+    expect(await service.hasWorktreeChanges(repo)).toBe(true);
+    expect(await service.countWorktreeChanges(repo)).toEqual({
+      tracked: 0,
+      untracked: 1,
+    });
+    expect(fired()).toBe(false);
+  });
 
-  itWherePlantRuns(
-    'the post-index-change fixture is a live attack: an ungated status runs it',
-    () => {
-      const { repo, fired } = planted('post-index-change');
-      execFileSync('git', ['status', '--porcelain'], { cwd: repo });
-      expect(fired()).toBe(true);
-    },
-    PLANT_TIMEOUT_MS,
-  );
+  it('the post-index-change fixture is a live attack: an ungated status runs it', () => {
+    const { repo, fired } = planted('post-index-change');
+    execFileSync('git', ['status', '--porcelain'], { cwd: repo });
+    expect(fired()).toBe(true);
+  });
 
-  itWherePlantRuns(
-    'staging a worktree to diff it does not run it',
-    async () => {
-      const { repo, fired } = planted();
-      // This path stages everything, diffs against the base and resets — and
-      // `add --all`, `diff` and `reset` were each measured to refresh the
-      // index, so guarding only the read-only commands would leave it open.
-      const diff = await new GitWorktreeService(repo).getWorktreeDiff(
-        repo,
-        'main',
-      );
-      expect(fired()).toBe(false);
-      expect(diff).not.toContain('Error getting diff');
-      expect(diff).toContain('a.ts');
-    },
-    PLANT_TIMEOUT_MS,
-  );
+  it('staging a worktree to diff it does not run it', async () => {
+    // This path stages everything, diffs against the base and resets — and
+    // `add --all`, `diff` and `reset` were each measured to refresh the
+    // index, so guarding only the read-only commands would leave it open.
+    await expectWorktreeDiffWithoutFiring();
+  });
 
-  itWherePlantRuns.each(DIFF_PLANTS)(
+  it.each(DIFF_PLANTS)(
     'the %s fixture is a live attack: an ungated diff runs it',
     (plant) => {
       const { repo, fired } = planted(plant);
@@ -354,21 +327,10 @@ describe('a planted git program reaches no automatic git call', () => {
       });
       expect(fired()).toBe(true);
     },
-    PLANT_TIMEOUT_MS,
   );
 
-  itWherePlantRuns.each(DIFF_PLANTS)(
+  it.each(DIFF_PLANTS)(
     'a planted %s does not run when a worktree is diffed',
-    async (plant) => {
-      const { repo, fired } = planted(plant);
-      const diff = await new GitWorktreeService(repo).getWorktreeDiff(
-        repo,
-        'main',
-      );
-      expect(fired()).toBe(false);
-      expect(diff).not.toContain('Error getting diff');
-      expect(diff).toContain('a.ts');
-    },
-    PLANT_TIMEOUT_MS,
+    (plant) => expectWorktreeDiffWithoutFiring(plant),
   );
-});
+}, 30_000);

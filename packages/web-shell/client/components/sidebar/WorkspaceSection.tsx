@@ -23,7 +23,9 @@ import {
   FolderClosedIcon,
   FolderOpenIcon,
   Globe2Icon,
+  InboxIcon,
 } from 'lucide-react';
+import { Empty, EmptyMedia, EmptyDescription } from '../ui/empty';
 import { useI18n } from '../../i18n';
 import { formatDateTime } from '../../utils/formatDateTime';
 import {
@@ -121,8 +123,18 @@ export interface WorkspaceHeaderActionsContext {
 
 interface WorkspaceSectionProps {
   workspace: DaemonWorkspaceCapability;
+  executionLabel?: string;
+  /**
+   * localStorage seed for the expansion/collapsed-group preferences,
+   * defaulting to the workspace id. Multi-host renderers pass an
+   * origin-prefixed id so two daemons hosting the same workspace id
+   * never share a preference; single-host callers leave it unset and
+   * keep the keys they always had.
+   */
+  storageKey?: string;
   remote?: boolean;
   renderHeader?: (expanded: boolean) => ReactNode;
+  hideHeader?: boolean;
   client: DaemonClient;
   reloadToken: number;
   untrustedLabel: string;
@@ -234,8 +246,11 @@ interface WorkspaceSectionProps {
 
 export function WorkspaceSection({
   workspace,
+  executionLabel,
+  storageKey,
   remote = false,
   renderHeader,
+  hideHeader = false,
   client,
   reloadToken,
   untrustedLabel,
@@ -284,11 +299,12 @@ export function WorkspaceSection({
     catalog: DaemonChannelTypeCatalog;
     snapshot: DaemonChannelsSnapshot;
   }>();
+  const storageId = storageKey ?? workspace.id;
   const [internalExpanded, setInternalExpanded] = useState(() =>
-    readWorkspaceExpanded(workspace.id),
+    readWorkspaceExpanded(storageId),
   );
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(() =>
-    readWorkspaceCollapsedGroupIds(workspace.id),
+    readWorkspaceCollapsedGroupIds(storageId),
   );
   const [actionsVisible, setActionsVisible] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -305,9 +321,9 @@ export function WorkspaceSection({
   // Uncontrolled workspace rows restore the user's last choice.
   useEffect(() => {
     if (controlledExpanded === undefined) {
-      setInternalExpanded(readWorkspaceExpanded(workspace.id));
+      setInternalExpanded(readWorkspaceExpanded(storageId));
     }
-  }, [controlledExpanded, workspace.id]);
+  }, [controlledExpanded, storageId]);
 
   useEffect(() => {
     // The five-row preview is scoped per source; reset the one-shot
@@ -318,18 +334,18 @@ export function WorkspaceSection({
   // The render site keys this component by workspace id, so an id change
   // always remounts and the lazy useState initializer re-reads storage.
   useEffect(() => {
-    writeWorkspaceCollapsedGroupIds(workspace.id, collapsedGroupIds);
-  }, [collapsedGroupIds, workspace.id]);
+    writeWorkspaceCollapsedGroupIds(storageId, collapsedGroupIds);
+  }, [collapsedGroupIds, storageId]);
 
   useEffect(() => {
     if (
       controlledExpanded === undefined &&
       autoExpandKey &&
-      (forceAutoExpand || !hasWorkspaceExpansionPreference(workspace.id))
+      (forceAutoExpand || !hasWorkspaceExpansionPreference(storageId))
     ) {
       setInternalExpanded(true);
     }
-  }, [autoExpandKey, controlledExpanded, forceAutoExpand, workspace.id]);
+  }, [autoExpandKey, controlledExpanded, forceAutoExpand, storageId]);
 
   const sessionsEnabled = renderSessions && !disabled;
   const sessionsVisible = expanded || Boolean(searchQuery.trim());
@@ -791,7 +807,7 @@ export function WorkspaceSection({
     const nextExpanded = !expanded;
     setInternalExpanded(nextExpanded);
     if (controlledExpanded === undefined) {
-      writeWorkspaceExpanded(workspace.id, nextExpanded);
+      writeWorkspaceExpanded(storageId, nextExpanded);
     }
     onExpandedChange?.(nextExpanded);
   };
@@ -841,6 +857,9 @@ export function WorkspaceSection({
               >
                 {workspaceLabel(workspace)}
               </span>
+              {executionLabel && (
+                <span className={styles.badge}>{executionLabel}</span>
+              )}
             </span>
             {!workspace.trusted && (
               <span className={styles.badge}>{untrustedLabel}</span>
@@ -857,7 +876,7 @@ export function WorkspaceSection({
   );
   return (
     <div className={styles.section}>
-      {overviewEnabled && !renderHeader && !disabled ? (
+      {hideHeader ? null : overviewEnabled && !renderHeader && !disabled ? (
         <WorkspaceDetailsTooltip
           label={workspaceLabel(workspace)}
           cwd={workspace.ssh ? sshWorkspaceLabel(workspace.ssh) : gitPollCwd}
@@ -934,7 +953,17 @@ export function WorkspaceSection({
               // page settles there is no data yet, so the "no sessions" notice
               // would flash for a whole fetch round-trip.
               pendingSession ||
-              (sessionsLoading && sessionsPage === undefined) ? null : (
+              (sessionsLoading &&
+                sessionsPage === undefined) ? null : hideHeader ? (
+                <Empty className="gap-2 py-8">
+                  <EmptyMedia className="mb-0 text-muted-foreground/40">
+                    <InboxIcon size={40} strokeWidth={1} aria-hidden="true" />
+                  </EmptyMedia>
+                  <EmptyDescription className="text-xs">
+                    {noSessionsLabel}
+                  </EmptyDescription>
+                </Empty>
+              ) : (
                 <div className={styles.empty}>{noSessionsLabel}</div>
               )
             ) : channelSessionGroups ? (

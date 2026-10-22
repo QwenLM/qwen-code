@@ -542,6 +542,24 @@ describe('MessageItem background notification spacing', () => {
   );
 });
 
+function openMessageMenu(container: HTMLElement) {
+  const trigger = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="More message actions"]',
+  );
+  expect(trigger).not.toBeNull();
+  act(() => {
+    trigger!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+    );
+  });
+}
+
+function messageMenuItem(label: string) {
+  return [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+    (element) => element.textContent === label,
+  );
+}
+
 describe('MessageItem inline message editing', () => {
   function renderEditableUserMessage(
     onSubmitUserMessageEdit: (content: string) => boolean | Promise<boolean>,
@@ -561,11 +579,8 @@ describe('MessageItem inline message editing', () => {
     const onSubmitUserMessageEdit = vi.fn().mockResolvedValue(true);
     const container = renderEditableUserMessage(onSubmitUserMessageEdit);
 
-    act(() => {
-      container
-        .querySelector<HTMLButtonElement>('button[aria-label="Edit message"]')
-        ?.click();
-    });
+    openMessageMenu(container);
+    act(() => messageMenuItem('Edit message')!.click());
     expect(captured.userMessageProps?.editing).toBe(true);
 
     await act(async () => {
@@ -583,11 +598,8 @@ describe('MessageItem inline message editing', () => {
     const onSubmitUserMessageEdit = vi.fn().mockResolvedValue(false);
     const container = renderEditableUserMessage(onSubmitUserMessageEdit);
 
-    act(() => {
-      container
-        .querySelector<HTMLButtonElement>('button[aria-label="Edit message"]')
-        ?.click();
-    });
+    openMessageMenu(container);
+    act(() => messageMenuItem('Edit message')!.click());
 
     await act(async () => {
       container
@@ -627,9 +639,8 @@ it.each([
         </TurnCallsProvider>
       </I18nProvider>,
     );
-    const entry = view.querySelector<HTMLButtonElement>(
-      '[aria-label="View tool calls"]',
-    );
+    if (visible) openMessageMenu(view);
+    const entry = messageMenuItem('View tool calls');
     expect(Boolean(entry)).toBe(visible);
     if (entry) {
       act(() => entry.click());
@@ -656,9 +667,8 @@ it('updates the Tool calls entry when the user message source is filled in', () 
     </I18nProvider>
   );
   const { root, container } = renderWithRoot(row());
-  expect(
-    container.querySelector('[aria-label="View tool calls"]'),
-  ).not.toBeNull();
+  openMessageMenu(container);
+  expect(messageMenuItem('View tool calls')).toBeDefined();
   act(() => root.render(row('goal_runtime')));
-  expect(container.querySelector('[aria-label="View tool calls"]')).toBeNull();
+  expect(messageMenuItem('View tool calls')).toBeUndefined();
 });

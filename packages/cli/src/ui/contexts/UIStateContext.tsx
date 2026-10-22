@@ -72,6 +72,7 @@ export interface UIState {
   skillReviewPending: { taskId: string; skills: PendingSkillView[] } | null;
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;
+  isAdvisorModelMode: boolean;
   isVoiceModelMode: boolean;
   isVisionModelMode: boolean;
   isCompactionModelMode: boolean;
@@ -171,6 +172,7 @@ export interface UIState {
    * indicator; cleared when the turn returns to idle.
    */
   workflowKeywordActive: boolean;
+  pendingPastes?: Map<string, string>;
   sessionStats: SessionStatsState;
   terminalWidth: number;
   terminalHeight: number;

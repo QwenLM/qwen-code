@@ -9,19 +9,23 @@ import type { Mock } from 'vitest';
 import type * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { GitWorktreeService } from './gitWorktreeService.js';
+import type { WorktreeInfo } from './gitWorktreeService.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 
 const hoistedMockSimpleGit = vi.hoisted(() => vi.fn());
-const hoistedMockCheckIsRepo = vi.hoisted(() => vi.fn());
-const hoistedMockInit = vi.hoisted(() => vi.fn());
-const hoistedMockAdd = vi.hoisted(() => vi.fn());
-const hoistedMockCommit = vi.hoisted(() => vi.fn());
-const hoistedMockRevparse = vi.hoisted(() => vi.fn());
-const hoistedMockRaw = vi.hoisted(() => vi.fn());
-const hoistedMockBranch = vi.hoisted(() => vi.fn());
-const hoistedMockDiff = vi.hoisted(() => vi.fn());
-const hoistedMockMerge = vi.hoisted(() => vi.fn());
-const hoistedMockStash = vi.hoisted(() => vi.fn());
+const git = {
+  env: vi.fn(),
+  checkIsRepo: vi.fn(),
+  init: vi.fn(),
+  add: vi.fn(),
+  commit: vi.fn(),
+  revparse: vi.fn(),
+  raw: vi.fn(),
+  branch: vi.fn(),
+  diff: vi.fn(),
+  merge: vi.fn(),
+  stash: vi.fn(),
+};
 
 vi.mock('simple-git', () => ({
   simpleGit: hoistedMockSimpleGit,
@@ -61,6 +65,35 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   };
 });
 
+const runSetup = (service: GitWorktreeService, worktreeNames: string[]) =>
+  service.setupWorktrees({
+    sessionId: 's1',
+    sourceRepoPath: '/repo',
+    worktreeNames,
+  });
+
+function worktreeInfo(
+  name: string,
+  over: Partial<WorktreeInfo> = {},
+): WorktreeInfo {
+  return {
+    id: `s1/${name}`,
+    name,
+    path: `/mock-qwen/worktrees/s1/worktrees/${name}`,
+    branch: `worktrees/s1/${name}`,
+    isActive: true,
+    createdAt: 1,
+    ...over,
+  };
+}
+
+/** `git.raw` calls whose argv starts with `prefix`. */
+const rawCalls = (...prefix: string[]) =>
+  git.raw.mock.calls.filter(
+    (call) =>
+      Array.isArray(call[0]) && prefix.every((arg, i) => call[0][i] === arg),
+  );
+
 describe('GitWorktreeService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -68,29 +101,22 @@ describe('GitWorktreeService', () => {
     hoistedMockGetGlobalQwenDir.mockReturnValue('/mock-qwen');
     (isCommandAvailable as Mock).mockReturnValue({ available: true });
 
-    hoistedMockSimpleGit.mockImplementation(() => ({
-      checkIsRepo: hoistedMockCheckIsRepo,
-      init: hoistedMockInit,
-      add: hoistedMockAdd,
-      commit: hoistedMockCommit,
-      revparse: hoistedMockRevparse,
-      raw: hoistedMockRaw,
-      branch: hoistedMockBranch,
-      diff: hoistedMockDiff,
-      merge: hoistedMockMerge,
-      stash: hoistedMockStash,
-    }));
+    hoistedMockSimpleGit.mockImplementation(() => {
+      const instance = { ...git };
+      git.env.mockReturnValue(instance);
+      return instance;
+    });
 
-    hoistedMockCheckIsRepo.mockResolvedValue(true);
-    hoistedMockInit.mockResolvedValue(undefined);
-    hoistedMockAdd.mockResolvedValue(undefined);
-    hoistedMockCommit.mockResolvedValue(undefined);
-    hoistedMockRevparse.mockResolvedValue('main\n');
-    hoistedMockRaw.mockResolvedValue('');
-    hoistedMockBranch.mockResolvedValue({ branches: {} });
-    hoistedMockDiff.mockResolvedValue('');
-    hoistedMockMerge.mockResolvedValue(undefined);
-    hoistedMockStash.mockResolvedValue('');
+    git.checkIsRepo.mockResolvedValue(true);
+    git.init.mockResolvedValue(undefined);
+    git.add.mockResolvedValue(undefined);
+    git.commit.mockResolvedValue(undefined);
+    git.revparse.mockResolvedValue('main\n');
+    git.raw.mockResolvedValue('');
+    git.branch.mockResolvedValue({ branches: {} });
+    git.diff.mockResolvedValue('');
+    git.merge.mockResolvedValue(undefined);
+    git.stash.mockResolvedValue('');
 
     hoistedMockFsMkdir.mockResolvedValue(undefined);
     hoistedMockFsAccess.mockRejectedValue({ code: 'ENOENT' });
@@ -112,64 +138,62 @@ describe('GitWorktreeService', () => {
   });
 
   it('isGitRepository should fallback to checkIsRepo() when root check throws', async () => {
-    hoistedMockCheckIsRepo
+    git.checkIsRepo
       .mockRejectedValueOnce(new Error('root check failed'))
       .mockResolvedValueOnce(true);
     const service = new GitWorktreeService('/repo');
 
     await expect(service.isGitRepository()).resolves.toBe(true);
-    expect(hoistedMockCheckIsRepo).toHaveBeenNthCalledWith(1, 'is-repo-root');
-    expect(hoistedMockCheckIsRepo).toHaveBeenNthCalledWith(2);
+    expect(git.checkIsRepo).toHaveBeenNthCalledWith(1, 'is-repo-root');
+    expect(git.checkIsRepo).toHaveBeenNthCalledWith(2);
   });
 
   it('isGitRepository should detect subdirectory inside an existing repo', async () => {
     // IS_REPO_ROOT returns false for a subdirectory, but checkIsRepo()
     // (without params) returns true because we're inside a repo.
-    hoistedMockCheckIsRepo
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(true);
+    git.checkIsRepo.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
     const service = new GitWorktreeService('/repo/subdir');
 
     await expect(service.isGitRepository()).resolves.toBe(true);
-    expect(hoistedMockCheckIsRepo).toHaveBeenNthCalledWith(1, 'is-repo-root');
-    expect(hoistedMockCheckIsRepo).toHaveBeenNthCalledWith(2);
+    expect(git.checkIsRepo).toHaveBeenNthCalledWith(1, 'is-repo-root');
+    expect(git.checkIsRepo).toHaveBeenNthCalledWith(2);
   });
 
   it('initializeRepository should initialize a new repo on main', async () => {
-    hoistedMockCheckIsRepo.mockResolvedValue(false);
+    git.checkIsRepo.mockResolvedValue(false);
     const service = new GitWorktreeService('/repo');
 
     const result = await service.initializeRepository();
 
     expect(result).toEqual({ initialized: true });
-    expect(hoistedMockInit).toHaveBeenCalledWith(false);
-    expect(hoistedMockRaw).toHaveBeenCalledWith([
+    expect(git.init).toHaveBeenCalledWith(false);
+    expect(git.raw).toHaveBeenCalledWith([
       'symbolic-ref',
       'HEAD',
       'refs/heads/main',
     ]);
-    expect(hoistedMockAdd).toHaveBeenCalledWith('.');
-    expect(hoistedMockCommit).toHaveBeenCalledWith('Initial commit', {
+    expect(git.add).toHaveBeenCalledWith('.');
+    expect(git.commit).toHaveBeenCalledWith('Initial commit', {
       '--allow-empty': null,
     });
-    expect(hoistedMockInit.mock.invocationCallOrder[0]!).toBeLessThan(
-      hoistedMockRaw.mock.invocationCallOrder[0]!,
+    expect(git.init.mock.invocationCallOrder[0]!).toBeLessThan(
+      git.raw.mock.invocationCallOrder[0]!,
     );
-    expect(hoistedMockRaw.mock.invocationCallOrder[0]!).toBeLessThan(
-      hoistedMockCommit.mock.invocationCallOrder[0]!,
+    expect(git.raw.mock.invocationCallOrder[0]!).toBeLessThan(
+      git.commit.mock.invocationCallOrder[0]!,
     );
   });
 
   it('initializeRepository should not update HEAD for an existing repo', async () => {
-    hoistedMockCheckIsRepo.mockResolvedValue(true);
+    git.checkIsRepo.mockResolvedValue(true);
     const service = new GitWorktreeService('/repo');
 
     const result = await service.initializeRepository();
 
     expect(result).toEqual({ initialized: false });
-    expect(hoistedMockInit).not.toHaveBeenCalled();
-    expect(hoistedMockRaw).not.toHaveBeenCalled();
-    expect(hoistedMockCommit).not.toHaveBeenCalled();
+    expect(git.init).not.toHaveBeenCalled();
+    expect(git.raw).not.toHaveBeenCalled();
+    expect(git.commit).not.toHaveBeenCalled();
   });
 
   it('createWorktree should create a sanitized branch and worktree path', async () => {
@@ -187,7 +211,7 @@ describe('GitWorktreeService', () => {
     expect(result.success).toBe(true);
     expect(result.worktree?.branch).toBe('main-s1-model-a');
     expect(result.worktree?.path).toBe(expectedPath);
-    expect(hoistedMockRaw).toHaveBeenCalledWith([
+    expect(git.raw).toHaveBeenCalledWith([
       'worktree',
       'add',
       '-b',
@@ -200,11 +224,7 @@ describe('GitWorktreeService', () => {
   it('setupWorktrees should fail early for colliding sanitized names', async () => {
     const service = new GitWorktreeService('/repo');
 
-    const result = await service.setupWorktrees({
-      sessionId: 's1',
-      sourceRepoPath: '/repo',
-      worktreeNames: ['Model A', 'model_a'],
-    });
+    const result = await runSetup(service, ['Model A', 'model_a']);
 
     expect(result.success).toBe(false);
     expect(result.errors).toHaveLength(1);
@@ -216,18 +236,11 @@ describe('GitWorktreeService', () => {
     (isCommandAvailable as Mock).mockReturnValue({ available: false });
     const service = new GitWorktreeService('/repo');
 
-    const result = await service.setupWorktrees({
-      sessionId: 's1',
-      sourceRepoPath: '/repo',
-      worktreeNames: ['model-a'],
-    });
+    const result = await runSetup(service, ['model-a']);
 
     expect(result.success).toBe(false);
     expect(result.errors).toEqual([
-      {
-        name: 'system',
-        error: 'Git is not installed. Please install Git.',
-      },
+      { name: 'system', error: 'Git is not installed. Please install Git.' },
     ]);
   });
 
@@ -237,19 +250,9 @@ describe('GitWorktreeService', () => {
     vi.spyOn(service, 'createWorktree')
       .mockResolvedValueOnce({
         success: true,
-        worktree: {
-          id: 's1/a',
-          name: 'a',
-          path: '/w/a',
-          branch: 'worktrees/s1/a',
-          isActive: true,
-          createdAt: 1,
-        },
+        worktree: worktreeInfo('a', { path: '/w/a' }),
       })
-      .mockResolvedValueOnce({
-        success: false,
-        error: 'boom',
-      });
+      .mockResolvedValueOnce({ success: false, error: 'boom' });
     const cleanupSpy = vi.spyOn(service, 'cleanupSession').mockResolvedValue({
       success: true,
       removedWorktrees: [],
@@ -257,11 +260,7 @@ describe('GitWorktreeService', () => {
       errors: [],
     });
 
-    const result = await service.setupWorktrees({
-      sessionId: 's1',
-      sourceRepoPath: '/repo',
-      worktreeNames: ['a', 'b'],
-    });
+    const result = await runSetup(service, ['a', 'b']);
 
     expect(result.success).toBe(false);
     expect(result.errors).toContainEqual({ name: 'b', error: 'boom' });
@@ -278,7 +277,7 @@ describe('GitWorktreeService', () => {
   });
 
   it('removeWorktree should fallback to fs.rm + worktree prune when git remove fails', async () => {
-    hoistedMockRaw
+    git.raw
       .mockRejectedValueOnce(new Error('remove failed'))
       .mockResolvedValueOnce('');
     const service = new GitWorktreeService('/repo');
@@ -290,73 +289,63 @@ describe('GitWorktreeService', () => {
       recursive: true,
       force: true,
     });
-    expect(hoistedMockRaw).toHaveBeenNthCalledWith(2, ['worktree', 'prune']);
+    expect(git.raw).toHaveBeenNthCalledWith(2, ['worktree', 'prune']);
   });
 
   it('cleanupSession should remove branches from listed worktrees', async () => {
     const service = new GitWorktreeService('/repo');
-    vi.spyOn(service, 'listWorktrees').mockResolvedValue([
-      {
-        id: 's1/a',
-        name: 'a',
-        path: '/w/a',
-        branch: 'main-s1-a',
-        isActive: true,
-        createdAt: Date.now(),
-      },
-      {
-        id: 's1/b',
-        name: 'b',
-        path: '/w/b',
-        branch: 'main-s1-b',
-        isActive: true,
-        createdAt: Date.now(),
-      },
-    ]);
+    vi.spyOn(service, 'listWorktrees').mockResolvedValue(
+      ['a', 'b'].map((name) =>
+        worktreeInfo(name, {
+          path: `/w/${name}`,
+          branch: `main-s1-${name}`,
+          createdAt: Date.now(),
+        }),
+      ),
+    );
     vi.spyOn(service, 'removeWorktree').mockResolvedValue({ success: true });
 
     const result = await service.cleanupSession('s1');
 
     expect(result.success).toBe(true);
     expect(result.removedBranches).toEqual(['main-s1-a', 'main-s1-b']);
-    expect(hoistedMockBranch).toHaveBeenCalledWith(['-D', 'main-s1-a']);
-    expect(hoistedMockBranch).toHaveBeenCalledWith(['-D', 'main-s1-b']);
-    expect(hoistedMockRaw).toHaveBeenCalledWith(['worktree', 'prune']);
+    expect(git.branch).toHaveBeenCalledWith(['-D', 'main-s1-a']);
+    expect(git.branch).toHaveBeenCalledWith(['-D', 'main-s1-b']);
+    expect(git.raw).toHaveBeenCalledWith(['worktree', 'prune']);
   });
 
   it('getWorktreeDiff should return staged raw diff without creating commits', async () => {
     const service = new GitWorktreeService('/repo');
-    hoistedMockDiff.mockResolvedValue('diff --git a/a.ts b/a.ts');
+    git.diff.mockResolvedValue('diff --git a/a.ts b/a.ts');
 
     const diff = await service.getWorktreeDiff('/w/a', 'main');
 
     expect(diff).toBe('diff --git a/a.ts b/a.ts');
-    expect(hoistedMockAdd).toHaveBeenCalledWith(['--all']);
-    expect(hoistedMockDiff).toHaveBeenCalledWith([
+    expect(git.add).toHaveBeenCalledWith(['--all']);
+    expect(git.diff).toHaveBeenCalledWith([
       '--no-ext-diff',
       '--no-textconv',
       '--binary',
       '--cached',
       'main',
     ]);
-    expect(hoistedMockCommit).not.toHaveBeenCalled();
+    expect(git.commit).not.toHaveBeenCalled();
   });
 
   it('applyWorktreeChanges should apply raw patch via git apply', async () => {
     const service = new GitWorktreeService('/repo');
-    // resolveBaseline returns the baseline commit SHA
-    hoistedMockRaw
+    git.raw
       .mockResolvedValueOnce('baseline-sha\n') // resolveBaseline log --grep
       .mockResolvedValueOnce('') // reset (from withStagedChanges)
       .mockResolvedValueOnce(''); // git apply
-    hoistedMockDiff.mockResolvedValueOnce('diff --git a/a.ts b/a.ts');
+    git.diff.mockResolvedValueOnce('diff --git a/a.ts b/a.ts');
 
     const result = await service.applyWorktreeChanges('/w/a', '/repo');
 
     expect(result.success).toBe(true);
-    expect(hoistedMockAdd).toHaveBeenCalledWith(['--all']);
+    expect(git.add).toHaveBeenCalledWith(['--all']);
     // Should diff against the baseline commit, not merge-base
-    expect(hoistedMockDiff).toHaveBeenCalledWith([
+    expect(git.diff).toHaveBeenCalledWith([
       '--no-ext-diff',
       '--no-textconv',
       '--binary',
@@ -364,9 +353,7 @@ describe('GitWorktreeService', () => {
       'baseline-sha',
     ]);
 
-    const applyCall = hoistedMockRaw.mock.calls.find(
-      (call) => Array.isArray(call[0]) && call[0][0] === 'apply',
-    );
+    const applyCall = rawCalls('apply')[0];
     expect(applyCall).toBeDefined();
     // When baseline is used, --3way is omitted (target working tree
     // matches the pre-image, so plain apply works cleanly).
@@ -383,28 +370,23 @@ describe('GitWorktreeService', () => {
 
   it('applyWorktreeChanges should skip apply when patch is empty', async () => {
     const service = new GitWorktreeService('/repo');
-    // resolveBaseline returns baseline commit
-    hoistedMockRaw.mockResolvedValueOnce('baseline-sha\n');
-    hoistedMockDiff.mockResolvedValueOnce('   \n');
+    git.raw.mockResolvedValueOnce('baseline-sha\n'); // resolveBaseline
+    git.diff.mockResolvedValueOnce('   \n');
 
     const result = await service.applyWorktreeChanges('/w/a', '/repo');
 
     expect(result.success).toBe(true);
-    const applyCall = hoistedMockRaw.mock.calls.find(
-      (call) => Array.isArray(call[0]) && call[0][0] === 'apply',
-    );
-    expect(applyCall).toBeUndefined();
+    expect(rawCalls('apply')[0]).toBeUndefined();
     expect(hoistedMockFsWriteFile).not.toHaveBeenCalled();
   });
 
   it('applyWorktreeChanges should return error when git apply fails', async () => {
     const service = new GitWorktreeService('/repo');
-    // resolveBaseline returns baseline commit
-    hoistedMockRaw
+    git.raw
       .mockResolvedValueOnce('baseline-sha\n') // resolveBaseline
       .mockResolvedValueOnce('') // reset from withStagedChanges
       .mockRejectedValueOnce(new Error('apply failed'));
-    hoistedMockDiff.mockResolvedValueOnce('diff --git a/a.ts b/a.ts');
+    git.diff.mockResolvedValueOnce('diff --git a/a.ts b/a.ts');
 
     const result = await service.applyWorktreeChanges('/w/a', '/repo');
 
@@ -417,56 +399,30 @@ describe('GitWorktreeService', () => {
   });
 
   describe('dirty state propagation', () => {
-    function makeWorktreeInfo(
-      name: string,
-      sessionId: string,
-    ): {
-      id: string;
-      name: string;
-      path: string;
-      branch: string;
-      isActive: boolean;
-      createdAt: number;
-    } {
-      return {
-        id: `${sessionId}/${name}`,
-        name,
-        path: `/mock-qwen/worktrees/${sessionId}/worktrees/${name}`,
-        branch: `worktrees/${sessionId}/${name}`,
-        isActive: true,
-        createdAt: 1,
-      };
+    /** setupWorktrees over `names`, each of whose creation succeeds. */
+    function setupCreated(...names: string[]) {
+      const service = new GitWorktreeService('/repo');
+      vi.spyOn(service, 'isGitRepository').mockResolvedValue(true);
+      const create = vi.spyOn(service, 'createWorktree');
+      const created = (name: string) => ({
+        success: true,
+        worktree: worktreeInfo(name),
+      });
+      if (names.length === 1) create.mockResolvedValue(created(names[0]!));
+      else
+        for (const name of names) create.mockResolvedValueOnce(created(name));
+      return runSetup(service, names);
     }
 
     it('setupWorktrees should apply dirty state snapshot to each worktree', async () => {
-      hoistedMockStash.mockResolvedValue('snapshot-sha\n');
-      const service = new GitWorktreeService('/repo');
-      vi.spyOn(service, 'isGitRepository').mockResolvedValue(true);
-      vi.spyOn(service, 'createWorktree')
-        .mockResolvedValueOnce({
-          success: true,
-          worktree: makeWorktreeInfo('a', 's1'),
-        })
-        .mockResolvedValueOnce({
-          success: true,
-          worktree: makeWorktreeInfo('b', 's1'),
-        });
+      git.stash.mockResolvedValue('snapshot-sha\n');
 
-      const result = await service.setupWorktrees({
-        sessionId: 's1',
-        sourceRepoPath: '/repo',
-        worktreeNames: ['a', 'b'],
-      });
+      const result = await setupCreated('a', 'b');
 
       expect(result.success).toBe(true);
-      expect(hoistedMockStash).toHaveBeenCalledWith(['create']);
+      expect(git.stash).toHaveBeenCalledWith(['create']);
       // stash apply should be called once per worktree
-      const stashApplyCalls = hoistedMockRaw.mock.calls.filter(
-        (call: unknown[]) =>
-          Array.isArray(call[0]) &&
-          call[0][0] === 'stash' &&
-          call[0][1] === 'apply',
-      );
+      const stashApplyCalls = rawCalls('stash', 'apply');
       expect(stashApplyCalls).toHaveLength(2);
       expect(stashApplyCalls[0]![0]).toEqual([
         'stash',
@@ -476,45 +432,19 @@ describe('GitWorktreeService', () => {
     });
 
     it('setupWorktrees should skip stash apply when working tree is clean', async () => {
-      hoistedMockStash.mockResolvedValue('\n');
-      const service = new GitWorktreeService('/repo');
-      vi.spyOn(service, 'isGitRepository').mockResolvedValue(true);
-      vi.spyOn(service, 'createWorktree').mockResolvedValue({
-        success: true,
-        worktree: makeWorktreeInfo('a', 's1'),
-      });
+      git.stash.mockResolvedValue('\n');
 
-      const result = await service.setupWorktrees({
-        sessionId: 's1',
-        sourceRepoPath: '/repo',
-        worktreeNames: ['a'],
-      });
+      const result = await setupCreated('a');
 
       expect(result.success).toBe(true);
-      const stashApplyCalls = hoistedMockRaw.mock.calls.filter(
-        (call: unknown[]) =>
-          Array.isArray(call[0]) &&
-          call[0][0] === 'stash' &&
-          call[0][1] === 'apply',
-      );
-      expect(stashApplyCalls).toHaveLength(0);
+      expect(rawCalls('stash', 'apply')).toHaveLength(0);
     });
 
     it('setupWorktrees should still succeed when stash apply fails', async () => {
-      hoistedMockStash.mockResolvedValue('snapshot-sha\n');
-      hoistedMockRaw.mockRejectedValue(new Error('stash apply conflict'));
-      const service = new GitWorktreeService('/repo');
-      vi.spyOn(service, 'isGitRepository').mockResolvedValue(true);
-      vi.spyOn(service, 'createWorktree').mockResolvedValue({
-        success: true,
-        worktree: makeWorktreeInfo('a', 's1'),
-      });
+      git.stash.mockResolvedValue('snapshot-sha\n');
+      git.raw.mockRejectedValue(new Error('stash apply conflict'));
 
-      const result = await service.setupWorktrees({
-        sessionId: 's1',
-        sourceRepoPath: '/repo',
-        worktreeNames: ['a'],
-      });
+      const result = await setupCreated('a');
 
       // Setup should still succeed — dirty state failure is non-fatal
       expect(result.success).toBe(true);
@@ -522,19 +452,9 @@ describe('GitWorktreeService', () => {
     });
 
     it('setupWorktrees should still succeed when stash create fails', async () => {
-      hoistedMockStash.mockRejectedValue(new Error('stash create failed'));
-      const service = new GitWorktreeService('/repo');
-      vi.spyOn(service, 'isGitRepository').mockResolvedValue(true);
-      vi.spyOn(service, 'createWorktree').mockResolvedValue({
-        success: true,
-        worktree: makeWorktreeInfo('a', 's1'),
-      });
+      git.stash.mockRejectedValue(new Error('stash create failed'));
 
-      const result = await service.setupWorktrees({
-        sessionId: 's1',
-        sourceRepoPath: '/repo',
-        worktreeNames: ['a'],
-      });
+      const result = await setupCreated('a');
 
       // Setup should still succeed — stash create failure is non-fatal
       expect(result.success).toBe(true);
@@ -543,213 +463,154 @@ describe('GitWorktreeService', () => {
   });
 
   describe('parsePRReference', () => {
+    const parse = (input: string) => GitWorktreeService.parsePRReference(input);
+
     it('recognises #N shorthand', () => {
-      expect(GitWorktreeService.parsePRReference('#123')).toBe(123);
-      expect(GitWorktreeService.parsePRReference('#1')).toBe(1);
-      expect(GitWorktreeService.parsePRReference('#99999')).toBe(99999);
+      expect(parse('#123')).toBe(123);
+      expect(parse('#1')).toBe(1);
+      expect(parse('#99999')).toBe(99999);
     });
 
     it('trims surrounding whitespace before matching', () => {
-      expect(GitWorktreeService.parsePRReference('  #42  ')).toBe(42);
+      expect(parse('  #42  ')).toBe(42);
     });
 
     it('rejects leading zeros to keep round-trips unambiguous', () => {
-      expect(GitWorktreeService.parsePRReference('#0123')).toBeNull();
-      expect(GitWorktreeService.parsePRReference('#0')).toBeNull();
+      expect(parse('#0123')).toBeNull();
+      expect(parse('#0')).toBeNull();
     });
 
     it('recognises full GitHub PR URLs (any host)', () => {
-      expect(
-        GitWorktreeService.parsePRReference(
-          'https://github.com/QwenLM/qwen-code/pull/4174',
-        ),
-      ).toBe(4174);
-      expect(
-        GitWorktreeService.parsePRReference(
-          'http://gh.enterprise.example.com/team/repo/pull/9',
-        ),
-      ).toBe(9);
+      expect(parse('https://github.com/QwenLM/qwen-code/pull/4174')).toBe(4174);
+      expect(parse('http://gh.enterprise.example.com/team/repo/pull/9')).toBe(
+        9,
+      );
     });
 
     it('tolerates trailing slash, query string, and fragment', () => {
-      expect(
-        GitWorktreeService.parsePRReference('https://github.com/o/r/pull/123/'),
-      ).toBe(123);
-      expect(
-        GitWorktreeService.parsePRReference(
-          'https://github.com/o/r/pull/123?foo=bar',
-        ),
-      ).toBe(123);
-      expect(
-        GitWorktreeService.parsePRReference(
-          'https://github.com/o/r/pull/123#discussion_r999',
-        ),
-      ).toBe(123);
+      expect(parse('https://github.com/o/r/pull/123/')).toBe(123);
+      expect(parse('https://github.com/o/r/pull/123?foo=bar')).toBe(123);
+      expect(parse('https://github.com/o/r/pull/123#discussion_r999')).toBe(
+        123,
+      );
     });
 
     it('returns null for plain slugs and malformed inputs', () => {
-      expect(GitWorktreeService.parsePRReference('my-feature')).toBeNull();
-      expect(GitWorktreeService.parsePRReference('#abc')).toBeNull();
-      expect(GitWorktreeService.parsePRReference('123')).toBeNull();
-      expect(
-        GitWorktreeService.parsePRReference('https://example.com/'),
-      ).toBeNull();
-      expect(
-        GitWorktreeService.parsePRReference(
-          'https://github.com/o/r/issues/123',
-        ),
-      ).toBeNull();
-      expect(GitWorktreeService.parsePRReference('')).toBeNull();
+      expect(parse('my-feature')).toBeNull();
+      expect(parse('#abc')).toBeNull();
+      expect(parse('123')).toBeNull();
+      expect(parse('https://example.com/')).toBeNull();
+      expect(parse('https://github.com/o/r/issues/123')).toBeNull();
+      expect(parse('')).toBeNull();
     });
 
     it('safely handles non-string input', () => {
-      expect(
-        GitWorktreeService.parsePRReference(undefined as unknown as string),
-      ).toBeNull();
-      expect(
-        GitWorktreeService.parsePRReference(null as unknown as string),
-      ).toBeNull();
+      expect(parse(undefined as unknown as string)).toBeNull();
+      expect(parse(null as unknown as string)).toBeNull();
     });
   });
 
   describe('getMainWorktreePath', () => {
+    /** One porcelain `worktree` record. */
+    const entry = (dir: string, branch = 'main') =>
+      `worktree ${dir}\nHEAD abc123\nbranch refs/heads/${branch}\n`;
+
+    /** Queues `git.raw` answers (an Error rejects), then resolves from `cwd`. */
+    function mainPath(cwd: string, answers: Array<string | Error>) {
+      for (const answer of answers) {
+        if (answer instanceof Error) git.raw.mockRejectedValueOnce(answer);
+        else git.raw.mockResolvedValueOnce(answer);
+      }
+      return new GitWorktreeService(cwd).getMainWorktreePath();
+    }
+
     it('parses the first porcelain entry as the main worktree path', async () => {
-      hoistedMockRaw.mockResolvedValueOnce(
-        'worktree /repo\n' +
-          'HEAD abc123\n' +
-          'branch refs/heads/main\n' +
-          '\n' +
-          'worktree /repo/.qwen/worktrees/wt\n' +
-          'HEAD abc123\n' +
-          'branch refs/heads/wt\n',
-      );
+      const porcelain =
+        entry('/repo') + '\n' + entry('/repo/.qwen/worktrees/wt', 'wt');
       // Round-trip validation: `--git-common-dir` answers absolute from a
       // linked worktree and relative from the main tree; both resolve to the
       // same common dir.
-      hoistedMockRaw.mockResolvedValueOnce('/repo/.git');
-      hoistedMockRaw.mockResolvedValueOnce('.git');
-      const service = new GitWorktreeService('/repo/.qwen/worktrees/wt');
-
-      await expect(service.getMainWorktreePath()).resolves.toBe('/repo');
-      expect(hoistedMockRaw).toHaveBeenCalledWith([
-        'worktree',
-        'list',
-        '--porcelain',
-      ]);
+      await expect(
+        mainPath('/repo/.qwen/worktrees/wt', [porcelain, '/repo/.git', '.git']),
+      ).resolves.toBe('/repo');
+      expect(git.raw).toHaveBeenCalledWith(['worktree', 'list', '--porcelain']);
     });
 
-    it('accepts a bare-repository first entry', async () => {
-      hoistedMockRaw.mockResolvedValueOnce('worktree /srv/repo.git\nbare\n');
-      hoistedMockRaw.mockResolvedValueOnce('.');
-      hoistedMockRaw.mockResolvedValueOnce('.');
-      const service = new GitWorktreeService('/srv/repo.git');
-
-      await expect(service.getMainWorktreePath()).resolves.toBe(
+    it.each<[string, string, Array<string | Error>, string | null]>([
+      [
+        'accepts a bare-repository first entry',
         '/srv/repo.git',
-      );
-    });
-
-    it('returns null when the first line is not a worktree entry', async () => {
-      hoistedMockRaw.mockResolvedValueOnce('HEAD abc123\n');
-      const service = new GitWorktreeService('/repo');
-
-      await expect(service.getMainWorktreePath()).resolves.toBeNull();
-    });
-
-    it('returns null when the porcelain output is empty', async () => {
-      hoistedMockRaw.mockResolvedValueOnce('');
-      const service = new GitWorktreeService('/repo');
-
-      await expect(service.getMainWorktreePath()).resolves.toBeNull();
-    });
-
-    it('returns null when git fails', async () => {
-      hoistedMockRaw.mockRejectedValueOnce(new Error('git unavailable'));
-      const service = new GitWorktreeService('/repo');
-
-      await expect(service.getMainWorktreePath()).resolves.toBeNull();
-    });
-
-    // A main-tree path containing a newline splits the first porcelain entry
-    // across lines; the truncated prefix can resolve inside a DIFFERENT
-    // repository and aim the containment gate at that repo's worktree
-    // registry. The path remainder lands where a record attribute belongs —
-    // it is not one, so the anchor is refused and callers fall back to
-    // `--show-toplevel`, which keeps interior newlines intact.
-    it('returns null when the main-tree path contains a newline', async () => {
-      hoistedMockRaw.mockResolvedValueOnce(
-        'worktree /outer/sub/\n' +
-          'R1\n' +
-          'HEAD abc123\n' +
-          'branch refs/heads/main\n',
-      );
-      const service = new GitWorktreeService('/outer/sub/\nR1');
-
-      await expect(service.getMainWorktreePath()).resolves.toBeNull();
-    });
-
-    // The attribute-shape backstop: a remainder that is itself a record
-    // attribute (`detached`, `HEAD …`, …) — or a path ending right at a
-    // newline — parses cleanly, so the parse check alone cannot catch the
-    // truncation. The round-trip refuses the anchor: probed at the truncated
-    // prefix, `--git-common-dir` resolves against a DIFFERENT repository.
-    it('returns null when the truncated prefix belongs to another repository', async () => {
-      hoistedMockRaw.mockResolvedValueOnce(
-        'worktree /outer/sub/\n' +
-          'detached\n' +
-          'HEAD abc123\n' +
-          'branch refs/heads/main\n',
-      );
-      hoistedMockRaw.mockResolvedValueOnce('.git');
-      // git -C /outer/sub walks up into the enclosing repository.
-      hoistedMockRaw.mockResolvedValueOnce('/outer/.git');
-      const service = new GitWorktreeService('/outer/sub/\ndetached');
-
-      await expect(service.getMainWorktreePath()).resolves.toBeNull();
-    });
-
-    it('returns null when the anchor probe fails', async () => {
-      hoistedMockRaw.mockResolvedValueOnce(
-        'worktree /gone/repo\n' + 'HEAD abc123\n' + 'branch refs/heads/main\n',
-      );
-      hoistedMockRaw.mockResolvedValueOnce('.git');
-      hoistedMockRaw.mockRejectedValueOnce(new Error('not a git repository'));
-      const service = new GitWorktreeService('/gone/repo');
-
-      await expect(service.getMainWorktreePath()).resolves.toBeNull();
-    });
-
-    // git preserves a path's leading/trailing whitespace verbatim in the
-    // porcelain output; the parse must not mutate the anchor (a trim would
-    // aim every subsequent gate at a different directory).
-    it('preserves whitespace in the main worktree path', async () => {
-      hoistedMockRaw.mockResolvedValueOnce(
-        'worktree /srv/proj \n' + 'HEAD abc123\n' + 'branch refs/heads/main\n',
-      );
-      hoistedMockRaw.mockResolvedValueOnce('.git');
-      hoistedMockRaw.mockResolvedValueOnce('.git');
-      const service = new GitWorktreeService('/srv/proj ');
-
-      await expect(service.getMainWorktreePath()).resolves.toBe('/srv/proj ');
-    });
-
-    // git's stdout is LF-terminated on all platforms, so a trailing CR in
-    // the porcelain answer is part of the directory name, not a terminator.
-    it('preserves a trailing CR in the main worktree path', async () => {
-      hoistedMockRaw.mockResolvedValueOnce(
-        'worktree /srv/proj\r\n' + 'HEAD abc123\n' + 'branch refs/heads/main\n',
-      );
-      hoistedMockRaw.mockResolvedValueOnce('.git');
-      hoistedMockRaw.mockResolvedValueOnce('.git');
-      const service = new GitWorktreeService('/srv/proj\r');
-
-      await expect(service.getMainWorktreePath()).resolves.toBe('/srv/proj\r');
+        ['worktree /srv/repo.git\nbare\n', '.', '.'],
+        '/srv/repo.git',
+      ],
+      [
+        'returns null when the first line is not a worktree entry',
+        '/repo',
+        ['HEAD abc123\n'],
+        null,
+      ],
+      ['returns null when the porcelain output is empty', '/repo', [''], null],
+      [
+        'returns null when git fails',
+        '/repo',
+        [new Error('git unavailable')],
+        null,
+      ],
+      // A main-tree path containing a newline splits the first porcelain
+      // entry across lines; the truncated prefix can resolve inside a
+      // DIFFERENT repository and aim the containment gate at that repo's
+      // worktree registry. The path remainder lands where a record attribute
+      // belongs; it is not one, so the anchor is refused and callers fall
+      // back to `--show-toplevel`, which keeps interior newlines intact.
+      [
+        'returns null when the main-tree path contains a newline',
+        '/outer/sub/\nR1',
+        [entry('/outer/sub/\nR1')],
+        null,
+      ],
+      // The attribute-shape backstop: a remainder that is itself a record
+      // attribute (`detached`, `HEAD …`, …), or a path ending right at a
+      // newline, parses cleanly, so the parse check alone cannot catch the
+      // truncation. The round-trip refuses the anchor: probed at the
+      // truncated prefix, `--git-common-dir` resolves against a DIFFERENT
+      // repository (git -C /outer/sub walks up into the enclosing one).
+      [
+        'returns null when the truncated prefix belongs to another repository',
+        '/outer/sub/\ndetached',
+        [entry('/outer/sub/\ndetached'), '.git', '/outer/.git'],
+        null,
+      ],
+      [
+        'returns null when the anchor probe fails',
+        '/gone/repo',
+        [entry('/gone/repo'), '.git', new Error('not a git repository')],
+        null,
+      ],
+      // git preserves a path's leading/trailing whitespace verbatim in the
+      // porcelain output; the parse must not mutate the anchor (a trim would
+      // aim every subsequent gate at a different directory).
+      [
+        'preserves whitespace in the main worktree path',
+        '/srv/proj ',
+        [entry('/srv/proj '), '.git', '.git'],
+        '/srv/proj ',
+      ],
+      // git's stdout is LF-terminated on all platforms, so a trailing CR in
+      // the porcelain answer is part of the directory name, not a terminator.
+      [
+        'preserves a trailing CR in the main worktree path',
+        '/srv/proj\r',
+        [entry('/srv/proj\r'), '.git', '.git'],
+        '/srv/proj\r',
+      ],
+    ])('%s', async (_title, cwd, answers, expected) => {
+      await expect(mainPath(cwd, answers)).resolves.toBe(expected);
     });
   });
 
   describe('getRepoTopLevel', () => {
     it('preserves whitespace in the repository top-level path', async () => {
-      hoistedMockRaw.mockResolvedValueOnce('/srv/proj \n');
+      git.raw.mockResolvedValueOnce('/srv/proj \n');
       const service = new GitWorktreeService('/srv/proj ');
 
       await expect(service.getRepoTopLevel()).resolves.toBe('/srv/proj ');
@@ -758,7 +619,7 @@ describe('GitWorktreeService', () => {
     // git's stdout is LF-terminated on all platforms, so a trailing CR in
     // the answer is part of the directory name, not a line terminator.
     it('preserves a trailing CR in the repository top-level path', async () => {
-      hoistedMockRaw.mockResolvedValueOnce('/srv/proj\r\n');
+      git.raw.mockResolvedValueOnce('/srv/proj\r\n');
       const service = new GitWorktreeService('/srv/proj\r');
 
       await expect(service.getRepoTopLevel()).resolves.toBe('/srv/proj\r');
@@ -766,30 +627,24 @@ describe('GitWorktreeService', () => {
   });
 
   describe('validateUserWorktreeSlug', () => {
+    const validate = (
+      ...args: Parameters<typeof GitWorktreeService.validateUserWorktreeSlug>
+    ) => GitWorktreeService.validateUserWorktreeSlug(...args);
+
     it('reserves pr-<number> slugs for PR-backed worktrees', () => {
-      expect(GitWorktreeService.validateUserWorktreeSlug('pr-42')).toMatch(
-        /reserved/,
-      );
+      expect(validate('pr-42')).toMatch(/reserved/);
       // `pr-0` is not the reserved shape and stays a legal user slug; the
       // backfill's [1-9] pattern simply never binds it.
-      expect(GitWorktreeService.validateUserWorktreeSlug('pr-0')).toBeNull();
-      expect(
-        GitWorktreeService.validateUserWorktreeSlug('my-pr-42'),
-      ).toBeNull();
+      expect(validate('pr-0')).toBeNull();
+      expect(validate('my-pr-42')).toBeNull();
     });
 
     it('allows the pr-<number> shape for PR-backed creators only', () => {
-      expect(
-        GitWorktreeService.validateUserWorktreeSlug('pr-42', {
-          allowPrBackedShape: true,
-        }),
-      ).toBeNull();
+      expect(validate('pr-42', { allowPrBackedShape: true })).toBeNull();
       // The other slug rules still apply.
-      expect(
-        GitWorktreeService.validateUserWorktreeSlug('pr-42/..', {
-          allowPrBackedShape: true,
-        }),
-      ).toMatch(/may only contain/);
+      expect(validate('pr-42/..', { allowPrBackedShape: true })).toMatch(
+        /may only contain/,
+      );
     });
   });
 });

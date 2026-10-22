@@ -15,6 +15,8 @@ import type { Stats } from 'node:fs';
 import type { Response as UndiciResponse } from 'undici';
 import * as tar from 'tar';
 import type { ReadEntry } from 'tar';
+import semver from 'semver';
+import type { JsRuntime } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { loadUndici } from '../utils/load-undici.js';
 import { verifySignature } from '../utils/standalone-update-verify.js';
@@ -54,9 +56,10 @@ function validateTarget(target: string): void {
   }
 }
 
-function archiveFilename(target: string): string {
+function archiveFilename(target: string, runtime: JsRuntime): string {
   const ext = target.startsWith('win') ? 'zip' : 'tar.gz';
-  return `qwen-code-${target}.${ext}`;
+  const suffix = runtime === 'bun' ? '-opentui-preview' : '';
+  return `qwen-code-${target}${suffix}.${ext}`;
 }
 
 function escapePS(s: string): string {
@@ -430,13 +433,30 @@ function spawnAndCapture(
   command: string,
   args: string[],
   timeoutMs: number,
+  cwd: string,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const env = { ...process.env };
+  // Probe the shipped interpreter and CLI without inherited startup overrides.
+  for (const key of Object.keys(env)) {
+    if (
+      /^(NODE_OPTIONS|BUN_OPTIONS|CLI_VERSION|QWEN_CODE_RELAUNCH_ARGS)$/i.test(
+        key,
+      )
+    )
+      delete env[key];
+  }
   return new Promise((resolve, reject) => {
     let settled = false;
     const child = execFile(
       command,
       args,
-      { timeout: timeoutMs },
+      {
+        env,
+        cwd,
+        timeout: timeoutMs,
+        killSignal: 'SIGKILL',
+        maxBuffer: 64 * 1024,
+      },
       (err, out, stderr) => {
         if (settled) return;
         settled = true;
@@ -456,76 +476,202 @@ function spawnAndCapture(
         resolve({ exitCode: 0, stdout: out || '', stderr: stderr || '' });
       },
     );
-    child.on('error', (e) => {
+    child.on('error', () => {
       if (settled) return;
       settled = true;
-      reject(e);
+      reject(new Error('Smoke test failed: unable to start new binary'));
     });
   });
 }
 
 /**
- * Verifies the new installation can actually run by invoking --version.
+ * Verifies the bundled CLI runs and its launcher can load it.
  * Prevents replacing a working install with a broken binary.
  */
-async function smokeTest(newInstallDir: string, target: string): Promise<void> {
+async function smokeTest(
+  newInstallDir: string,
+  target: string,
+  runtime: JsRuntime,
+  expectedVersion: string,
+): Promise<void> {
   const resolvedInstallDir = path.resolve(newInstallDir);
-  const nodeBin = target.startsWith('win')
-    ? path.join(resolvedInstallDir, 'node', 'node.exe')
-    : path.join(resolvedInstallDir, 'node', 'bin', 'node');
+  const interpreter = target.startsWith('win')
+    ? path.join(resolvedInstallDir, runtime, `${runtime}.exe`)
+    : path.join(resolvedInstallDir, runtime, 'bin', runtime);
   const cliBin = path.join(resolvedInstallDir, 'lib', 'cli.js');
 
-  if (!fs.existsSync(nodeBin)) {
-    throw new Error(`Smoke test failed: node binary not found at ${nodeBin}`);
+  if (!fs.existsSync(interpreter)) {
+    throw new Error(
+      `Smoke test failed: ${runtime} binary not found at ${interpreter}`,
+    );
   }
   if (!fs.existsSync(cliBin)) {
-    throw new Error(`Smoke test failed: cli.js not found at ${cliBin}`);
+    throw new Error(`Smoke test failed: CLI entry not found at ${cliBin}`);
   }
 
-  const { exitCode, stdout, stderr } = await spawnAndCapture(
-    nodeBin,
-    [cliBin, '--version'],
-    10_000,
-  );
-  if (exitCode !== 0) {
-    const detail = stderr.trim() ? `: ${stderr.trim()}` : '';
-    throw new Error(
-      `Smoke test failed: new binary exited with code ${exitCode}${detail}`,
+  // The archive and the user's project may both contain bunfig preloads.
+  // mkdtemp creates an empty private directory (0700), shared by all probes.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-smoke-'));
+  try {
+    const identity = await spawnAndCapture(
+      interpreter,
+      [
+        '-e',
+        'console.log(JSON.stringify({runtime:process.versions.bun?"bun":"node",platform:process.platform,arch:process.arch}))',
+      ],
+      10_000,
+      cwd,
     );
-  }
-  const version = stdout.trim();
-  if (!SEMVER_RE.test(version)) {
-    throw new Error(
-      `Smoke test failed: unexpected version output "${version}"`,
+    let actual: unknown;
+    try {
+      actual = JSON.parse(identity.stdout);
+    } catch {
+      throw new Error('Smoke test failed: invalid interpreter identity');
+    }
+    const [platform, arch] = target.split('-');
+    if (
+      identity.exitCode !== 0 ||
+      !actual ||
+      typeof actual !== 'object' ||
+      Array.isArray(actual) ||
+      Reflect.get(actual, 'runtime') !== runtime ||
+      Reflect.get(actual, 'platform') !==
+        (platform === 'win' ? 'win32' : platform) ||
+      Reflect.get(actual, 'arch') !== arch
+    ) {
+      throw new Error(
+        'Smoke test failed: interpreter identity does not match the expected runtime and target',
+      );
+    }
+
+    const { exitCode, stdout } = await spawnAndCapture(
+      interpreter,
+      [cliBin, '--version'],
+      10_000,
+      cwd,
     );
+    if (exitCode !== 0) {
+      throw new Error(
+        `Smoke test failed: new binary exited with code ${exitCode}`,
+      );
+    }
+    const version = stdout.trim();
+    if (!SEMVER_RE.test(version)) {
+      throw new Error('Smoke test failed: unexpected version output');
+    }
+    let versionMatches: boolean;
+    try {
+      versionMatches = semver.eq(version, expectedVersion);
+    } catch {
+      versionMatches = false;
+    }
+    if (!versionMatches) {
+      throw new Error(
+        'Smoke test failed: CLI version does not match the expected version',
+      );
+    }
+    // The launcher's --version fast path only reads package metadata.
+    const launcher = await spawnAndCapture(
+      interpreter,
+      [path.join(resolvedInstallDir, 'lib', 'cli-entry.js'), '--help'],
+      10_000,
+      cwd,
+    );
+    if (launcher.exitCode !== 0) {
+      throw new Error('Smoke test failed: launcher could not load CLI');
+    }
+    debugLogger.info(`Smoke test passed: ${version}`);
+  } finally {
+    try {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    } catch {
+      debugLogger.warn('Could not remove the smoke test temporary directory');
+    }
   }
-  debugLogger.info(`Smoke test passed: ${version}`);
 }
 
 // Check .deferred marker and .new directory for an in-flight swap from a
 // previous Windows update. Called from both acquireLock fast-path and
 // slow-path so that a freshly created lock file cannot bypass the check.
+function pendingSwapError(standaloneDir: string): Error {
+  return new Error(
+    `A previous update left a pending swap at ${standaloneDir}.new. ` +
+      'If no qwen-update.bat process is running, remove the pending swap and .qwen-update.lock, then try again.',
+  );
+}
+
+// Marker-present variant of the pending-swap remedy: on these branches the
+// .deferred marker itself is the artifact blocking the update, so the
+// remedy must name it — removing only .new and the lock leaves the marker
+// in place, and the next update hits the same marker branch again.
+function deferredMarkerError(standaloneDir: string): Error {
+  return new Error(
+    `A previous update left a deferred-swap marker at ${standaloneDir}.deferred. ` +
+      `If no qwen-update.bat process is running, remove the marker, the pending swap at ${standaloneDir}.new, and .qwen-update.lock, then try again.`,
+  );
+}
+
+// A bat swap waits at most ~60s for the CLI and launcher to exit before
+// moving directories, so a .new directory older than this without a
+// .deferred marker cannot belong to a live swap: the bat deletes the marker
+// when it exits, and the parent writes the marker right after spawning it —
+// only a *fresh* marker-less .new can still be in flight.
+const PENDING_SWAP_STALE_MS = 15 * 60 * 1000;
+
 function checkDeferredSwap(standaloneDir: string): void {
   const deferredMarker = `${standaloneDir}.deferred`;
+  let swapProvenDead = false;
   if (fs.existsSync(deferredMarker)) {
+    let marker: string;
     try {
-      const batPid = parseInt(
-        fs.readFileSync(deferredMarker, 'utf-8').trim(),
-        10,
-      );
-      if (!Number.isNaN(batPid) && isProcessAlive(batPid)) {
+      marker = fs.readFileSync(deferredMarker, 'utf-8').trim();
+    } catch {
+      // A marker we cannot read cannot prove the bat is gone (EACCES/EBUSY/
+      // EIO) — fail closed rather than deleting a swap that may be live.
+      throw deferredMarkerError(standaloneDir);
+    }
+    const batPid = parseInt(marker, 10);
+    if (!Number.isSafeInteger(batPid) || batPid <= 0 || batPid > 2147483647) {
+      // A torn marker is no liveness proof either, and a value that cannot be a
+      // PID makes process.kill throw ERR_INVALID_ARG_TYPE instead of answering
+      // the liveness question. Send it to the error that carries the removal
+      // steps rather than one that tells the user to wait.
+      throw deferredMarkerError(standaloneDir);
+    }
+    if (!isProcessProvablyGone(batPid)) {
+      // A PID that cannot be proven gone normally means the bat is still
+      // swapping — but a hung bat or a reused PID would block every future
+      // update forever, so an aged marker escapes to a deferred-marker remedy
+      // instead. The parent writes the marker right after spawning the bat and
+      // the bat deletes it on exit, so the marker's mtime ages the same way as
+      // the marker-less .new check below. The escape must not authorize
+      // deleting .new: a stale marker does not prove the swap directory is
+      // safe to remove, so swapProvenDead stays false.
+      let markerStale = false;
+      try {
+        markerStale =
+          Date.now() - fs.statSync(deferredMarker).mtimeMs >
+          PENDING_SWAP_STALE_MS;
+      } catch {
+        // unreadable — cannot prove age, keep waiting
+      }
+      if (markerStale) {
+        // This branch fires precisely when the PID is not provably gone (alive,
+        // or held by a process we may not signal), so the guard must stay
+        // actionable when a qwen-update.bat really is running (hung bat: end it
+        // first); with a reused PID no bat exists and the cleanup applies
+        // directly.
         throw new Error(
-          'A previous update is still being applied. Please wait a moment and try again.',
+          `A previous update left a deferred-swap marker at ${standaloneDir}.deferred. ` +
+            `If a qwen-update.bat process is still running, end it first; then remove the marker, the pending swap at ${standaloneDir}.new, and .qwen-update.lock, and try again.`,
         );
       }
-    } catch (readErr) {
-      if (
-        readErr instanceof Error &&
-        readErr.message.startsWith('A previous update')
-      ) {
-        throw readErr;
-      }
+      throw new Error(
+        'A previous update is still being applied. Please wait a moment and try again.',
+      );
     }
+    // The bat's PID is confirmed dead, so a leftover .new is residue.
+    swapProvenDead = true;
     // Bat script has exited (or crashed) — clean up stale marker
     try {
       fs.unlinkSync(deferredMarker);
@@ -534,11 +680,37 @@ function checkDeferredSwap(standaloneDir: string): void {
     }
   }
 
-  if (fs.existsSync(`${standaloneDir}.new`)) {
-    throw new Error(
-      `A previous update left a pending swap at ${standaloneDir}.new. ` +
-        'If no qwen-update.bat process is running, remove the pending swap and .qwen-update.lock, then try again.',
-    );
+  const pendingDir = `${standaloneDir}.new`;
+  if (fs.existsSync(pendingDir)) {
+    if (!swapProvenDead) {
+      // No marker: normally failed-swap residue (the bat deletes the marker
+      // on exit), but the parent spawns the bat BEFORE writing the marker,
+      // so a marker-less .new could still be mid-swap right now. Only a
+      // provably stale directory is safe to remove.
+      let stale = false;
+      try {
+        stale =
+          Date.now() - fs.statSync(pendingDir).mtimeMs > PENDING_SWAP_STALE_MS;
+      } catch {
+        // unreadable — fail closed below
+      }
+      if (!stale) {
+        throw pendingSwapError(standaloneDir);
+      }
+    }
+    try {
+      fs.rmSync(pendingDir, { recursive: true, force: true });
+    } catch (err) {
+      // Fail closed: continuing would let atomicReplace delete the .old
+      // rollback snapshot before its own retry fails with the same error,
+      // destroying the recovery route. Surface it as a pending-swap error so
+      // acquireLock releases the freshly taken lock on the way out.
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `A previous update left a pending swap at ${pendingDir} that could not be removed (${reason}). ` +
+          'Remove it and .qwen-update.lock, then try again.',
+      );
+    }
   }
 }
 
@@ -650,6 +822,21 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+// Unlike isProcessAlive, this treats "cannot tell" as "not gone": EPERM means
+// the process exists but is not ours to signal (an elevated bat probed from an
+// unelevated shell), which is no proof of death. Only ESRCH is. Callers that
+// decide whether a lock is stealable keep using isProcessAlive — being
+// conservative there would re-block updates forever. This is for the one gate
+// that authorizes deleting a staged install.
+function isProcessProvablyGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ESRCH';
+  }
+}
+
 function atomicReplace(
   standaloneDir: string,
   newDir: string,
@@ -753,7 +940,7 @@ function atomicReplace(
       );
     }
     // Write .deferred marker with the bat script PID so future `qwen update`
-    // calls can detect the in-flight swap via isProcessAlive(batPid).
+    // calls can detect the in-flight swap via isProcessProvablyGone(batPid).
     // acquireLock checks this marker before allowing lock theft.
     fs.writeFileSync(deferredMarker, String(child.pid));
     return 'deferred';
@@ -995,20 +1182,47 @@ function detectTarget(): string {
   throw new Error(`Unsupported platform: ${platform}-${arch}`);
 }
 
-export async function performStandaloneUpdate(
-  standaloneDir: string,
-  newVersion: string,
-): Promise<'done' | 'deferred'> {
-  const versionPath = normalizeVersion(newVersion);
-  const baseUrl = resolveUpdateBaseUrl();
-
+function standaloneUpdateTarget(standaloneDir: string): {
+  target: string;
+  runtime: JsRuntime;
+  version?: string;
+  isFirstTimeMigration: boolean;
+} {
   let target: string;
+  let runtime: JsRuntime = 'node';
+  let version: string | undefined;
   let isFirstTimeMigration = false;
   const manifestPath = path.join(standaloneDir, 'manifest.json');
   if (fs.existsSync(manifestPath)) {
-    const manifestRaw = fs.readFileSync(manifestPath, 'utf-8');
-    const manifest = JSON.parse(manifestRaw) as { target?: string };
+    const invalidManifestMessage =
+      `Invalid installed standalone manifest at ${manifestPath}. ` +
+      "Restore this installation's manifest from a known-good backup, or " +
+      'reinstall the same runtime flavor in a new directory. ' +
+      'Keep the current installation and backup until recovery is verified.';
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    } catch {
+      throw new Error(invalidManifestMessage);
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(invalidManifestMessage);
+    }
+    const manifest = parsed as {
+      target?: string;
+      runtime?: unknown;
+      version?: string;
+    };
+    if (
+      manifest.runtime !== undefined &&
+      manifest.runtime !== 'node' &&
+      manifest.runtime !== 'bun'
+    ) {
+      throw new Error('Unknown standalone runtime');
+    }
+    runtime = manifest.runtime ?? 'node';
     target = manifest.target ?? detectTarget();
+    version = manifest.version;
   } else if (fs.existsSync(standaloneDir)) {
     // Directory exists but has no manifest — not a managed Qwen install.
     // Refuse to overwrite to avoid data loss.
@@ -1021,8 +1235,120 @@ export async function performStandaloneUpdate(
     isFirstTimeMigration = true;
   }
   validateTarget(target);
+  return { target, runtime, version, isFirstTimeMigration };
+}
 
-  const filename = archiveFilename(target);
+function standaloneDirectoryIdentity(standaloneDir: string) {
+  if (!fs.existsSync(standaloneDir)) return undefined;
+  const { dev, ino, birthtimeMs } = fs.statSync(standaloneDir);
+  return { dev, ino, birthtimeMs };
+}
+
+function downloadedStandaloneManifest(standaloneDir: string) {
+  const manifest: unknown = JSON.parse(
+    fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+  );
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new Error('Invalid downloaded standalone manifest');
+  }
+  const { name, version, target, runtime } = manifest as Record<
+    string,
+    unknown
+  >;
+  if (
+    name !== '@qwen-code/qwen-code' ||
+    typeof version !== 'string' ||
+    !semver.valid(version)
+  ) {
+    throw new Error('Invalid downloaded standalone name or version');
+  }
+  if (typeof target !== 'string') {
+    throw new Error(
+      'Downloaded standalone manifest requires an explicit target',
+    );
+  }
+  validateTarget(target);
+  if (runtime !== 'node' && runtime !== 'bun') {
+    throw new Error('Downloaded standalone manifest requires a valid runtime');
+  }
+  return { target, runtime, version };
+}
+
+export async function prepareStandaloneUpdate(
+  standaloneDir: string,
+  newVersion: string,
+): Promise<{
+  activate(): Promise<'done' | 'deferred'>;
+  cleanup(): void;
+}> {
+  const versionPath = normalizeVersion(newVersion);
+  const baseUrl = resolveUpdateBaseUrl();
+  const { target, runtime, version } = standaloneUpdateTarget(standaloneDir);
+  const identity = standaloneDirectoryIdentity(standaloneDir);
+  const filename = archiveFilename(target, runtime);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-update-'));
+  const cleanup = () => {
+    process.off('exit', cleanup);
+    try {
+      fs.rmSync(directory, { recursive: true, force: true });
+    } catch {
+      // The process may exit with the archive stream still open on Windows.
+    }
+  };
+  process.on('exit', cleanup);
+  try {
+    const archiveHash = await downloadToFile(
+      versionPath,
+      filename,
+      path.join(directory, filename),
+      baseUrl,
+    );
+    await verifyChecksum(archiveHash, filename, versionPath, baseUrl);
+    return {
+      async activate() {
+        try {
+          return await applyStandaloneUpdate(standaloneDir, newVersion, {
+            directory,
+            target,
+            runtime,
+            version,
+            identity,
+          });
+        } finally {
+          cleanup();
+        }
+      },
+      cleanup,
+    };
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
+export async function performStandaloneUpdate(
+  standaloneDir: string,
+  newVersion: string,
+): Promise<'done' | 'deferred'> {
+  return applyStandaloneUpdate(standaloneDir, newVersion);
+}
+
+async function applyStandaloneUpdate(
+  standaloneDir: string,
+  newVersion: string,
+  preparedArchive?: {
+    directory: string;
+    target: string;
+    runtime: JsRuntime;
+    version?: string;
+    identity: ReturnType<typeof standaloneDirectoryIdentity>;
+  },
+): Promise<'done' | 'deferred'> {
+  const versionPath = normalizeVersion(newVersion);
+  const baseUrl = preparedArchive ? undefined : resolveUpdateBaseUrl();
+  const { target, runtime, isFirstTimeMigration } =
+    standaloneUpdateTarget(standaloneDir);
+  const filename = archiveFilename(target, runtime);
   const parentDir = path.dirname(standaloneDir);
 
   // Ensure the parent directory exists so the lock file can be created.
@@ -1038,20 +1364,13 @@ export async function performStandaloneUpdate(
     throw new Error('Another update is already in progress');
   }
 
-  if (isFirstTimeMigration) {
-    try {
-      fs.mkdirSync(standaloneDir, { recursive: true });
-    } catch (err) {
-      releaseLock(lockPath);
-      throw err;
-    }
-  }
-
   // Download to a temp dir in os.tmpdir(), then extract to a sibling dir
   // of standaloneDir to avoid EXDEV (cross-device rename).
   // extractDir uses mkdtempSync (random suffix) to prevent symlink
   // pre-creation attacks on predictable directory names.
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-update-'));
+  const tempDir =
+    preparedArchive?.directory ??
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-update-'));
   let extractDir: string;
   let updateResult: 'done' | 'deferred' | undefined;
   let migrationArtifacts: BinWrapperArtifacts | undefined;
@@ -1064,20 +1383,50 @@ export async function performStandaloneUpdate(
   }
 
   try {
+    if (preparedArchive) {
+      const installed = standaloneUpdateTarget(standaloneDir);
+      if (
+        installed.target !== preparedArchive.target ||
+        installed.runtime !== preparedArchive.runtime
+      ) {
+        throw new Error('The standalone installation changed during download');
+      }
+      if (
+        installed.version &&
+        semver.valid(installed.version) &&
+        semver.gte(installed.version, newVersion)
+      ) {
+        return 'done';
+      }
+      const identity = standaloneDirectoryIdentity(standaloneDir);
+      if (
+        installed.version !== preparedArchive.version ||
+        identity?.dev !== preparedArchive.identity?.dev ||
+        identity?.ino !== preparedArchive.identity?.ino ||
+        identity?.birthtimeMs !== preparedArchive.identity?.birthtimeMs
+      ) {
+        throw new Error('The standalone installation changed during download');
+      }
+    }
+    if (isFirstTimeMigration) {
+      fs.mkdirSync(standaloneDir, { recursive: true });
+    }
     const archivePath = path.join(tempDir, filename);
-    debugLogger.info(`Downloading ${filename} (${versionPath})...`);
-    updateEventEmitter.emit('update-info', {
-      message: t('Downloading update...'),
-    });
-    const archiveHash = await downloadToFile(
-      versionPath,
-      filename,
-      archivePath,
-      baseUrl,
-    );
+    if (!preparedArchive) {
+      debugLogger.info(`Downloading ${filename} (${versionPath})...`);
+      updateEventEmitter.emit('update-info', {
+        message: t('Downloading update...'),
+      });
+      const archiveHash = await downloadToFile(
+        versionPath,
+        filename,
+        archivePath,
+        baseUrl,
+      );
 
-    debugLogger.info('Verifying checksum...');
-    await verifyChecksum(archiveHash, filename, versionPath, baseUrl);
+      debugLogger.info('Verifying checksum...');
+      await verifyChecksum(archiveHash, filename, versionPath, baseUrl);
+    }
 
     debugLogger.info('Extracting archive...');
     await extractArchive(archivePath, extractDir, target);
@@ -1089,8 +1438,18 @@ export async function performStandaloneUpdate(
       );
     }
 
+    const extracted = downloadedStandaloneManifest(newInstallDir);
+    if (
+      extracted.target !== target ||
+      extracted.runtime !== runtime ||
+      !semver.eq(extracted.version, newVersion)
+    ) {
+      throw new Error(
+        'Downloaded archive does not match the expected target, runtime and version',
+      );
+    }
     debugLogger.info('Running smoke test...');
-    await smokeTest(newInstallDir, target);
+    await smokeTest(newInstallDir, target, runtime, newVersion);
 
     debugLogger.info('Replacing installation...');
     updateResult = atomicReplace(standaloneDir, newInstallDir, lockPath);

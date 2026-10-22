@@ -24,6 +24,10 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import type { WebShellSlashCommandHandler } from '../App';
 import type { WebShellModelManagementOptions } from '../modelManagement';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from '../unavailableModels';
 import type { RegisterContextUsageControls } from '../hooks/useContextUsageControls';
 import { useI18n } from '../i18n';
 import { ChatPane, type PaneHeaderActionsRenderer } from './ChatPane';
@@ -54,6 +58,7 @@ import styles from './SplitView.module.css';
 const MAX_PANES = MAX_SPLIT_PANES;
 
 export interface SplitViewProps {
+  showResponseTokensPerSecond?: boolean;
   /** Sessions to show in the split view. */
   sessionIds?: string[];
   /** Respect the host's session-details action allowlist. */
@@ -78,6 +83,8 @@ export interface SplitViewProps {
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   onSlashCommand?: WebShellSlashCommandHandler;
   modelManagement?: WebShellModelManagementOptions;
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   onOpenGoals?: () => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onOpenMonitor?: (
@@ -134,6 +141,8 @@ export function SplitView({
   onImageIngestionNotice,
   onSlashCommand,
   modelManagement,
+  unavailableModels,
+  mountUnavailableModelTooltip,
   onOpenGoals,
   onRightPanelOpen,
   onOpenMonitor,
@@ -151,6 +160,7 @@ export function SplitView({
   voiceWorkspaceRevisions = {},
   voiceWorkspaces,
   sessionWorkflowEnabled = false,
+  showResponseTokensPerSecond = false,
   planControlVisible = false,
 }: SplitViewProps) {
   const { t } = useI18n();
@@ -644,6 +654,7 @@ export function SplitView({
                       />
                     ) : null}
                     <ChatPane
+                      showResponseTokensPerSecond={showResponseTokensPerSecond}
                       title={titleById.get(sessionId)}
                       sessionSummary={
                         showSessionDetails
@@ -673,6 +684,10 @@ export function SplitView({
                       onImageIngestionNotice={onImageIngestionNotice}
                       onSlashCommand={onSlashCommand}
                       modelManagement={modelManagement}
+                      unavailableModels={unavailableModels}
+                      mountUnavailableModelTooltip={
+                        mountUnavailableModelTooltip
+                      }
                       onOpenGoals={onOpenGoals}
                       onRightPanelOpen={onRightPanelOpen}
                       onOpenMonitor={onOpenMonitor}

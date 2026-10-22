@@ -50,6 +50,21 @@ export function parseSha256Sums(content) {
   return checksums;
 }
 
+/**
+ * Escape a value embedded in a `::error::`/`::warning::` workflow command.
+ * The value can be contributor-controlled (a fork PR's filename, model
+ * output), and the runner parses workflow commands from stderr too: a raw LF
+ * would emit a second, forged command from the step. `%` must be replaced
+ * first, or the `%0A`/`%0D` sequences the other two arms emit get
+ * double-encoded.
+ */
+export function escapeWorkflowCommand(text) {
+  return String(text)
+    .replace(/%/g, '%25')
+    .replace(/\r/g, '%0D')
+    .replace(/\n/g, '%0A');
+}
+
 export function readOptionValue(argv, index, optionName) {
   const value = argv[index + 1];
   if (!value || value.startsWith('-')) {

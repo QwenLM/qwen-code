@@ -4,15 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi, onTestFinished } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { preview } from 'vite';
+import { createServer, preview } from 'vite';
 import type { ConfigEnv, ProxyOptions, UserConfig } from 'vite';
 import viteConfig, {
   BRAND_ROUTE_PROXY,
+  MANAGED_AGENT_JAVA_ROUTE_PROXY,
+  MANAGED_AGENT_PUBLIC_ROUTE_PROXY,
   QUALIFIED_ACP_WS_PROXY,
   QUALIFIED_VOICE_STREAM_PROXY,
 } from '../vite.config';
@@ -27,39 +29,73 @@ function loadConfig(): UserConfig {
   });
 }
 
-it('serves preview documents with CSP scoped to the selected daemon', async ({
+it('serves the settings page without claiming the settings source module', async ({
   onTestFinished,
 }) => {
-  const dist = await mkdtemp(join(tmpdir(), 'web-shell-preview-'));
-  onTestFinished(() => rm(dist, { recursive: true, force: true }));
-  await writeFile(
-    join(dist, 'index.html'),
-    '<!doctype html><title>Preview</title>',
-  );
-  const server = await preview({
+  const server = await createServer({
     ...loadConfig(),
     configFile: false,
-    build: { outDir: dist },
-    preview: { host: '127.0.0.1', port: 0 },
+    server: { host: '127.0.0.1', port: 0 },
   });
   onTestFinished(() => server.close());
+  await server.listen();
   const baseUrl = server.resolvedUrls!.local[0];
-  for (const [query, expected] of [
-    [
-      '?daemon=https%3A%2F%2Fdaemon.example.com%3A4170',
-      "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
-    ],
-    ['//', "connect-src 'self'"],
-    ['', "connect-src 'self'"],
-  ]) {
-    const response = await fetch(`${baseUrl}${query}`);
+  for (const path of ['settings', 'settings?theme=dark', 'settings/']) {
+    const response = await fetch(`${baseUrl}${path}`, {
+      headers: { accept: 'text/html' },
+    });
     expect(response.status).toBe(200);
-    expect(await response.text()).toContain('<title>Preview</title>');
-    expect(
-      response.headers.get('Content-Security-Policy')?.split('; '),
-    ).toContain(expected);
+    expect(response.headers.get('content-type')).toContain('text/html');
+    expect(await response.text()).toContain('/main.tsx');
   }
+  const source = await fetch(`${baseUrl}settings.ts`);
+  expect(source.status).toBe(200);
+  expect(source.headers.get('content-type')).toContain('javascript');
 });
+
+it.each([
+  [undefined, false],
+  ['0', false],
+  [' FALSE ', false],
+  ['1', true],
+  [' TRUE ', true],
+  ['', true],
+] as const)(
+  'serves preview documents with CSP scoped to the selected daemon (desktop=%s)',
+  async (desktopRelay, enabled) => {
+    vi.stubEnv('QWEN_SERVE_CLIENT_MCP_OVER_WS', desktopRelay);
+    onTestFinished(() => vi.unstubAllEnvs());
+    const dist = await mkdtemp(join(tmpdir(), 'web-shell-preview-'));
+    onTestFinished(() => rm(dist, { recursive: true, force: true }));
+    await writeFile(
+      join(dist, 'index.html'),
+      '<!doctype html><title>Preview</title>',
+    );
+    const server = await preview({
+      ...loadConfig(),
+      configFile: false,
+      build: { outDir: dist },
+      preview: { host: '127.0.0.1', port: 0 },
+    });
+    onTestFinished(() => server.close());
+    const baseUrl = server.resolvedUrls!.local[0];
+    for (const [query, expected] of [
+      [
+        '?daemon=https%3A%2F%2Fdaemon.example.com%3A4170',
+        "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+      ],
+      ['//', "connect-src 'self'"],
+      ['', "connect-src 'self'"],
+    ]) {
+      const response = await fetch(`${baseUrl}${query}`);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain('<title>Preview</title>');
+      expect(
+        response.headers.get('Content-Security-Policy')?.split('; '),
+      ).toContain(expected + (enabled ? ' http://127.0.0.1:47821' : ''));
+    }
+  },
+);
 
 describe('Web Shell Voice development proxy', () => {
   it('proxies only qualified Voice stream upgrades', () => {
@@ -131,6 +167,24 @@ describe('Web Shell standalone session development proxy', () => {
   it('proxies standalone session routes to the daemon', () => {
     const proxy = loadConfig().server?.proxy;
     expect(proxy?.['/standalone/sessions']).toBe(proxy?.['/session']);
+  });
+});
+
+describe('Web Shell Java Managed Agent development proxy', () => {
+  it('proxies Java WebShell metadata and public artifact bytes', () => {
+    const proxy = loadConfig().server?.proxy;
+    const managed = proxy?.[MANAGED_AGENT_JAVA_ROUTE_PROXY];
+
+    expect(managed).not.toBeTypeOf('string');
+    expect(managed).toBeDefined();
+    // Compare against the same expression the config uses: the README's
+    // dual-path setup exports this variable for real development.
+    expect((managed as ProxyOptions).target).toBe(
+      process.env['QWEN_MANAGED_AGENT_JAVA_URL'] ?? 'http://127.0.0.1:8080',
+    );
+    expect(MANAGED_AGENT_JAVA_ROUTE_PROXY).toBe('/api/agent/web-shell/v1');
+    expect(MANAGED_AGENT_PUBLIC_ROUTE_PROXY).toBe('/v1/agents');
+    expect(proxy?.[MANAGED_AGENT_PUBLIC_ROUTE_PROXY]).toBe(managed);
   });
 });
 
@@ -212,5 +266,23 @@ describe('Web Shell remote workspace development proxy', () => {
     expect(
       options?.bypass?.(request, {} as unknown as ServerResponse, options),
     ).toBeUndefined();
+  });
+});
+
+describe('Web Shell launcher-supplied open path', () => {
+  // scripts/managed-agent-dev.js hands the token-bearing open path through
+  // the environment instead of argv; server.open is where it lands.
+  it('opens the path QWEN_WEB_SHELL_OPEN_PATH carries', () => {
+    vi.stubEnv('QWEN_WEB_SHELL_OPEN_PATH', '/?managed=1&token=PROBETOKEN');
+    onTestFinished(() => vi.unstubAllEnvs());
+
+    expect(loadConfig().server?.open).toBe('/?managed=1&token=PROBETOKEN');
+  });
+
+  it('stays closed when no launcher set the variable', () => {
+    vi.stubEnv('QWEN_WEB_SHELL_OPEN_PATH', undefined);
+    onTestFinished(() => vi.unstubAllEnvs());
+
+    expect(loadConfig().server?.open).toBeUndefined();
   });
 });

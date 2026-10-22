@@ -1,0 +1,134 @@
+/* Live agent runs at the bottom of a chat session, styled as the agents'
+   replies in progress (AssistantMessage's classes do the message layout). */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  margin: 16px 0;
+}
+
+.run {
+  min-width: 0;
+}
+
+.stop {
+  margin-left: auto;
+}
+
+.status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.status[data-attention] {
+  color: var(--foreground);
+}
+
+.run[data-agent-run-status='failed'] .status,
+.run[data-agent-run-status='offline'] .status {
+  color: var(--error-color);
+}
+
+.error {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.approval {
+  margin-top: 4px;
+}
+
+.stopAllRow {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 6px;
+}
+
+/* A tool input preview reads as code whatever the page's font reset does. */
+.approval pre {
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.pendingRecord {
+  margin-top: 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+/* One bar per squad engagement under way: the squad's tag, then each
+   participant as avatar, name and state. */
+.squadBars {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.squadBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  padding: 2px 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+/* One participant: the leader deciding, or a member working / replied. */
+.squadEntry {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.squadEntryName {
+  color: var(--foreground);
+}
+
+.squadEntryState {
+  color: var(--muted-foreground);
+}
+
+.squadEntryIcon {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.squadEntrySpin {
+  color: var(--muted-foreground);
+  animation: squad-entry-spin 1s linear infinite;
+}
+
+.squadEntryDone {
+  color: var(--success-color);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .squadEntrySpin {
+    animation: none;
+  }
+}
+
+@keyframes squad-entry-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* A deferred @-mention, shown until its record lands. */
+.pendingMention {
+  opacity: 0.7;
+}

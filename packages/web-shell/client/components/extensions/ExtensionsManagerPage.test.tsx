@@ -31,7 +31,10 @@ const state = vi.hoisted(() => {
     refreshHandle,
     workspaceHandle,
     client,
+    signals: { extensionsVersion: 0 },
     actions: {
+      loadExtensionSummaries: vi.fn(),
+      loadExtensionDetails: vi.fn(),
       loadExtensionsStatus: vi.fn(),
       activeExtensionOperations: vi.fn(),
       extensionOperationStatus: vi.fn(),
@@ -50,7 +53,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => ({ clientId: 'client-1' }),
   useWorkspace: () => state.workspace,
   useWorkspaceActions: () => state.actions,
-  useWorkspaceEventSignals: () => undefined,
+  useWorkspaceEventSignals: () => state.signals,
 }));
 
 const { ExtensionsManagerPage } = await import('./ExtensionsManagerPage');
@@ -109,6 +112,9 @@ beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
+  state.signals.extensionsVersion = 0;
+  state.actions.loadExtensionSummaries.mockReset();
+  state.actions.loadExtensionDetails.mockReset();
   state.workspace.capabilities.features = [
     'extension_activation_explicit_refresh',
   ];
@@ -741,5 +747,144 @@ describe('ExtensionsManagerPage activation refresh', () => {
       'session refresh failed: boom-newer-refresh',
     );
     expect(container.textContent).not.toContain('boom-superseded-refresh');
+  });
+});
+
+describe('ExtensionsManagerPage lazy details', () => {
+  const summary = {
+    kind: 'extension',
+    id: 'a'.repeat(64),
+    name: 'demo',
+    displayName: 'Demo',
+    version: '1.0.0',
+    isActive: true,
+    path: '/extensions/demo',
+  };
+  const details = {
+    ...summary,
+    details: {
+      commands: [],
+      skills: ['review'],
+      agents: [],
+      mcpServers: [],
+      contextFiles: [],
+      settings: [],
+    },
+  };
+
+  function enableSummaries() {
+    state.workspace.capabilities.features.push('extension_list_details');
+    state.actions.loadExtensionSummaries.mockResolvedValue({
+      extensions: [summary],
+    });
+    state.actions.loadExtensionDetails.mockResolvedValue(details);
+  }
+
+  async function selectDemo() {
+    await act(async () =>
+      container.querySelector<HTMLElement>('[aria-label="Demo"]')!.click(),
+    );
+  }
+
+  it('uses the full status on older daemons without requesting details', async () => {
+    await renderPage();
+    await selectDemo();
+    expect(state.actions.loadExtensionsStatus).toHaveBeenCalledOnce();
+    expect(state.actions.loadExtensionSummaries).not.toHaveBeenCalled();
+    expect(state.actions.loadExtensionDetails).not.toHaveBeenCalled();
+  });
+
+  it('loads metadata first and shows a loading state until selected resources arrive', async () => {
+    enableSummaries();
+    let resolveDetails!: (value: typeof details) => void;
+    state.actions.loadExtensionDetails.mockReturnValue(
+      new Promise((resolve) => {
+        resolveDetails = resolve;
+      }),
+    );
+    await renderPage();
+    expect(state.actions.loadExtensionsStatus).not.toHaveBeenCalled();
+    expect(state.actions.loadExtensionDetails).not.toHaveBeenCalled();
+    await selectDemo();
+    expect(state.actions.loadExtensionDetails).toHaveBeenCalledWith('demo');
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      'Loading',
+    );
+    expect(container.querySelector('[role="tablist"]')).toBeNull();
+    await act(async () => resolveDetails(details));
+    expect(container.querySelector('[role="tablist"]')?.textContent).toContain(
+      'Skills 1',
+    );
+  });
+
+  it('shows detail failures and retries without discarding the list', async () => {
+    enableSummaries();
+    state.actions.loadExtensionDetails.mockRejectedValueOnce(
+      new Error('Details unavailable'),
+    );
+    await renderPage();
+    await selectDemo();
+    expect(container.textContent).toContain('Details unavailable');
+    expect(container.querySelector('[role="tablist"]')).toBeNull();
+    await act(async () => findButton('Try again').click());
+    expect(state.actions.loadExtensionDetails).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[role="tablist"]')?.textContent).toContain(
+      'Skills 1',
+    );
+  });
+
+  it('ignores details that complete after returning to the list and selecting another extension', async () => {
+    enableSummaries();
+    state.actions.loadExtensionSummaries.mockResolvedValue({
+      extensions: [
+        summary,
+        { ...summary, id: 'b', name: 'other', displayName: 'Other' },
+      ],
+    });
+    let resolveDetails!: (value: typeof details) => void;
+    state.actions.loadExtensionDetails.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveDetails = resolve;
+      }),
+    );
+    state.actions.loadExtensionDetails.mockResolvedValue({
+      ...details,
+      name: 'other',
+      details: { ...details.details, skills: ['first', 'second'] },
+    });
+    await renderPage();
+    await selectDemo();
+    await act(async () => findButton('Manage Extensions').click());
+    await act(async () =>
+      container.querySelector<HTMLElement>('[aria-label="Other"]')!.click(),
+    );
+    await act(async () => resolveDetails(details));
+    expect(container.querySelector('[role="tablist"]')?.textContent).toContain(
+      'Skills 2',
+    );
+  });
+
+  it('reloads the selected details when an extension event refreshes the same name', async () => {
+    enableSummaries();
+    await renderPage();
+    await selectDemo();
+    state.actions.loadExtensionDetails.mockResolvedValue({
+      ...details,
+      details: { ...details.details, skills: ['first', 'second'] },
+    });
+    state.signals.extensionsVersion += 1;
+    await act(async () =>
+      root.render(
+        <I18nProvider language="en">
+          <ExtensionsManagerPage onClose={vi.fn()} />
+        </I18nProvider>,
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(state.actions.loadExtensionDetails).toHaveBeenCalledTimes(2),
+    );
+    expect(container.querySelector('[role="tablist"]')?.textContent).toContain(
+      'Skills 2',
+    );
   });
 });

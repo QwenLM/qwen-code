@@ -21,6 +21,8 @@ import * as path from 'node:path';
 import {
   CommitAttributionService,
   computeCharContribution,
+  type AttributionSnapshot,
+  type FileAttribution,
   type StagedFileInfo,
 } from './commitAttribution.js';
 
@@ -75,9 +77,26 @@ describe('computeCharContribution', () => {
 });
 
 describe('CommitAttributionService', () => {
+  let service: CommitAttributionService;
   beforeEach(() => {
     CommitAttributionService.resetInstance();
+    service = CommitAttributionService.getInstance();
   });
+  const attr = (p: string) => service.getFileAttribution(p);
+  const restore = (over: Partial<AttributionSnapshot>) =>
+    service.restoreFromSnapshot({
+      type: 'attribution-snapshot',
+      surface: 'cli',
+      fileStates: {},
+      promptCount: 0,
+      promptCountAtLastCommit: 0,
+      ...over,
+    });
+  const fileState = (
+    aiContribution: number,
+    aiCreated: boolean,
+    contentHash: string,
+  ): FileAttribution => ({ aiContribution, aiCreated, contentHash });
 
   it('should return the same singleton instance', () => {
     const a = CommitAttributionService.getInstance();
@@ -86,102 +105,75 @@ describe('CommitAttributionService', () => {
   });
 
   it('should track new file creation', () => {
-    const service = CommitAttributionService.getInstance();
     service.recordEdit('/project/src/file.ts', null, 'hello world');
-
-    const attr = service.getFileAttribution('/project/src/file.ts');
-    expect(attr!.aiCreated).toBe(true);
-    expect(attr!.aiContribution).toBe(11);
+    expect(attr('/project/src/file.ts')!.aiCreated).toBe(true);
+    expect(attr('/project/src/file.ts')!.aiContribution).toBe(11);
   });
 
   it('should NOT treat empty existing file as new file creation', () => {
-    const service = CommitAttributionService.getInstance();
     service.recordEdit('/project/empty.ts', '', 'new content');
-
-    const attr = service.getFileAttribution('/project/empty.ts');
-    expect(attr!.aiCreated).toBe(false);
-    expect(attr!.aiContribution).toBe(11);
+    expect(attr('/project/empty.ts')!.aiCreated).toBe(false);
+    expect(attr('/project/empty.ts')!.aiContribution).toBe(11);
   });
 
   it('should track edits with prefix/suffix algorithm', () => {
-    const service = CommitAttributionService.getInstance();
     service.recordEdit('/project/f.ts', 'Hello World', 'Hello world');
-    expect(service.getFileAttribution('/project/f.ts')!.aiContribution).toBe(1);
+    expect(attr('/project/f.ts')!.aiContribution).toBe(1);
   });
 
   it('should accumulate contributions across multiple edits', () => {
-    const service = CommitAttributionService.getInstance();
     service.recordEdit('/project/f.ts', 'aaa', 'bbb'); // 3
     service.recordEdit('/project/f.ts', 'bbb', 'bbbccc'); // 3
-    expect(service.getFileAttribution('/project/f.ts')!.aiContribution).toBe(6);
+    expect(attr('/project/f.ts')!.aiContribution).toBe(6);
   });
 
-  // Out-of-band mutation detection: if the input `oldContent` doesn't
-  // match the contentHash AI recorded after its previous edit, the
-  // file was changed externally between AI's two writes — drop the
-  // accumulator before counting the new edit so prior AI work the
-  // user has since overwritten doesn't get credited later.
+  // Out-of-band mutation: if `oldContent` doesn't match the contentHash of
+  // AI's previous write, the file changed externally in between; drop the
+  // accumulator so AI work the user has since overwritten isn't credited.
   it('should reset accumulator when oldContent diverges from AI last write', () => {
-    const service = CommitAttributionService.getInstance();
-    // First AI edit: file goes from 'abc' to 'AI block of 100 chars padded' (28 chars).
-    const aiBlock = 'AI block of 100 chars padded';
-    service.recordEdit('/project/f.ts', 'abc', aiBlock);
-    const after1 = service.getFileAttribution('/project/f.ts')!;
+    service.recordEdit('/project/f.ts', 'abc', 'AI block of 100 chars padded');
+    const after1 = attr('/project/f.ts')!;
     expect(after1.aiContribution).toBeGreaterThan(0);
 
-    // Now a DIFFERENT oldContent shows up — the user paste-replaced
-    // the file via an external editor in between. AI's recordEdit
-    // should reset the counter before applying the new contribution.
+    // The user paste-replaced the file in an external editor in between.
     service.recordEdit('/project/f.ts', 'user paste replacement', 'final');
-    const after2 = service.getFileAttribution('/project/f.ts')!;
-    // aiContribution is now bounded by the divergent edit alone, NOT
-    // accumulated on top of after1.aiContribution.
-    expect(after2.aiContribution).toBeLessThan(after1.aiContribution);
+    // Bounded by the divergent edit alone, not accumulated on after1.
+    expect(attr('/project/f.ts')!.aiContribution).toBeLessThan(
+      after1.aiContribution,
+    );
   });
 
-  // Fresh-file lifetime: when AI re-creates a file at a path that was
-  // previously tracked but has since been deleted (oldContent === null
-  // signals "no file existed on disk"), the previous tracked state is
-  // from a different file lifetime. Without this reset, AI's
-  // accumulated chars from the deleted file would carry over and
-  // double-count toward the new file's attribution.
+  // Fresh-file lifetime: AI re-creating a previously tracked, since-deleted
+  // path (oldContent === null: nothing on disk) starts a new lifetime; the
+  // deleted file's chars must not carry over and double-count.
   it('should reset accumulator when re-creating a previously-tracked deleted file', () => {
-    const service = CommitAttributionService.getInstance();
-    // First lifetime: AI creates 'foo.ts' with 100 chars of content.
-    const firstContent = 'A'.repeat(100);
-    service.recordEdit('/project/foo.ts', null, firstContent);
-    const after1 = service.getFileAttribution('/project/foo.ts')!;
+    service.recordEdit('/project/foo.ts', null, 'A'.repeat(100));
+    const after1 = attr('/project/foo.ts')!;
     expect(after1.aiContribution).toBe(100);
     expect(after1.aiCreated).toBe(true);
 
-    // Second lifetime: file was deleted (e.g. user `rm foo.ts`), then
-    // AI re-creates it with new (shorter) content. oldContent=null
-    // signals "didn't exist on disk before this write".
-    const secondContent = 'short';
-    service.recordEdit('/project/foo.ts', null, secondContent);
-    const after2 = service.getFileAttribution('/project/foo.ts')!;
-    // aiContribution should reflect ONLY the second write's chars, not
-    // 100 + 5. aiCreated stays true (this lifetime is also a creation).
+    // Deleted (e.g. `rm foo.ts`), then re-created with shorter content.
+    service.recordEdit('/project/foo.ts', null, 'short');
+    const after2 = attr('/project/foo.ts')!;
+    // Only the second write's chars (not 100 + 5); still a creation.
     expect(after2.aiContribution).toBe(5);
     expect(after2.aiCreated).toBe(true);
   });
 
   it('should NOT reset accumulator when oldContent matches AI last write', () => {
-    const service = CommitAttributionService.getInstance();
     service.recordEdit('/project/f.ts', 'abc', 'AI step one');
-    const after1 = service.getFileAttribution('/project/f.ts')!;
-    // Second AI edit picks up where the first left off — oldContent
-    // matches the post-first hash, so accumulation continues.
+    const after1 = attr('/project/f.ts')!;
+    // oldContent matches the post-first hash, so accumulation continues.
     service.recordEdit('/project/f.ts', 'AI step one', 'AI step two final');
-    const after2 = service.getFileAttribution('/project/f.ts')!;
-    expect(after2.aiContribution).toBeGreaterThan(after1.aiContribution);
+    expect(attr('/project/f.ts')!.aiContribution).toBeGreaterThan(
+      after1.aiContribution,
+    );
   });
 
-  // validateAgainst runs at commit time and drops entries whose
-  // recorded post-write hash doesn't match the caller-supplied
-  // content — catches user edits that happened entirely outside the
-  // Edit/Write tools (no recordEdit was called, so the input-hash
-  // check above couldn't see the divergence).
+  // validateAgainst runs at commit time and drops entries whose recorded
+  // post-write hash doesn't match the supplied content: catches user edits
+  // made entirely outside Edit/Write (no recordEdit, so the input-hash
+  // check above couldn't see them).
   describe('validateAgainst', () => {
     let tmpDir: string;
     beforeEach(() => {
@@ -190,154 +182,102 @@ describe('CommitAttributionService', () => {
     afterEach(() => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
+    // Writes `onDisk` to tmpDir/name and records AI creating it with `ai`.
+    function tracked(name: string, ai: string, onDisk = ai) {
+      const filePath = path.join(tmpDir, name);
+      fs.writeFileSync(filePath, onDisk, 'utf-8');
+      service.recordEdit(filePath, null, ai);
+      return filePath;
+    }
 
     it('drops entries whose content has diverged', () => {
-      const service = CommitAttributionService.getInstance();
-      const filePath = path.join(tmpDir, 'diverged.ts');
-      fs.writeFileSync(filePath, 'AI wrote this', 'utf-8');
-      service.recordEdit(filePath, null, 'AI wrote this');
-      expect(service.getFileAttribution(filePath)).toBeDefined();
-
-      // Caller passes a reader that returns the diverged content.
+      const filePath = tracked('diverged.ts', 'AI wrote this');
+      expect(attr(filePath)).toBeDefined();
       service.validateAgainst(() => 'human replaced this');
-      expect(service.getFileAttribution(filePath)).toBeUndefined();
+      expect(attr(filePath)).toBeUndefined();
     });
 
     it('keeps entries whose content matches', () => {
-      const service = CommitAttributionService.getInstance();
-      const filePath = path.join(tmpDir, 'unchanged.ts');
-      fs.writeFileSync(filePath, 'AI wrote this', 'utf-8');
-      service.recordEdit(filePath, null, 'AI wrote this');
+      const filePath = tracked('unchanged.ts', 'AI wrote this');
       service.validateAgainst(() => 'AI wrote this');
-      expect(service.getFileAttribution(filePath)).toBeDefined();
+      expect(attr(filePath)).toBeDefined();
     });
 
     it('keeps entries when getContent returns null (no comparison signal)', () => {
-      const service = CommitAttributionService.getInstance();
-      const filePath = path.join(tmpDir, 'no-comparison.ts');
-      fs.writeFileSync(filePath, 'will be queried', 'utf-8');
-      service.recordEdit(filePath, null, 'will be queried');
-      // null = "no committed blob / unreadable / out-of-scope" — the
-      // entry should NOT be dropped.
+      const filePath = tracked('no-comparison.ts', 'will be queried');
+      // null = "no committed blob / unreadable / out-of-scope": keep it.
       service.validateAgainst(() => null);
-      expect(service.getFileAttribution(filePath)).toBeDefined();
+      expect(attr(filePath)).toBeDefined();
     });
 
-    // BOM/CRLF normalisation: writeTextFile preserves the file's BOM
-    // and CRLF line-ending choice independently of whether AI's
-    // recordEdit input string contained the BOM char or used LF. The
-    // on-disk bytes returned by `git show` can therefore include a
-    // leading U+FEFF and CRLFs that AI never wrote — the hash MUST
-    // canonicalise both sides so a BOM/CRLF file isn't dropped on
-    // every commit.
+    // BOM/CRLF normalisation: writeTextFile keeps the file's BOM and CRLF
+    // choice regardless of AI's input string, so `git show` bytes can carry
+    // a U+FEFF and CRLFs AI never wrote. The hash MUST canonicalise both
+    // sides or every BOM/CRLF file is dropped on every commit.
     it('keeps entries when on-disk content has BOM but AI input did not', () => {
-      const service = CommitAttributionService.getInstance();
-      const filePath = path.join(tmpDir, 'bom.ts');
-      // Simulate the on-disk file having a BOM (writeTextFile wrote
-      // it because the previous file version had one).
-      const aiContent = 'export const foo = 42;';
-      const onDiskWithBom = '﻿' + aiContent;
-      fs.writeFileSync(filePath, onDiskWithBom, 'utf-8');
-      service.recordEdit(filePath, null, aiContent);
-
-      // Reader returns the on-disk content (with BOM). After
-      // canonicalisation, both sides hash to the same value.
+      // writeTextFile kept the BOM from the previous file version.
+      const onDiskWithBom = '﻿export const foo = 42;';
+      const filePath = tracked(
+        'bom.ts',
+        'export const foo = 42;',
+        onDiskWithBom,
+      );
       service.validateAgainst(() => onDiskWithBom);
-      expect(service.getFileAttribution(filePath)).toBeDefined();
+      expect(attr(filePath)).toBeDefined();
     });
 
     it('keeps entries when on-disk uses CRLF but AI input used LF', () => {
-      const service = CommitAttributionService.getInstance();
-      const filePath = path.join(tmpDir, 'crlf.ts');
-      const aiContent = 'line one\nline two\n';
       const onDiskCrlf = 'line one\r\nline two\r\n';
-      fs.writeFileSync(filePath, onDiskCrlf, 'utf-8');
-      service.recordEdit(filePath, null, aiContent);
+      const filePath = tracked('crlf.ts', 'line one\nline two\n', onDiskCrlf);
       service.validateAgainst(() => onDiskCrlf);
-      expect(service.getFileAttribution(filePath)).toBeDefined();
+      expect(attr(filePath)).toBeDefined();
     });
 
-    // Combined: BOM + CRLF on disk, plain LF + no BOM in AI input.
-    // The most common case for a Windows-edited file the model
-    // returned in unix form.
+    // The most common case: a Windows-edited file the model returned in
+    // unix form (BOM + CRLF on disk, plain LF and no BOM from AI).
     it('keeps entries when on-disk has BOM AND CRLF, AI input had neither', () => {
-      const service = CommitAttributionService.getInstance();
-      const filePath = path.join(tmpDir, 'bom-crlf.ts');
-      const aiContent = 'foo\nbar\n';
       const onDisk = '﻿foo\r\nbar\r\n';
-      fs.writeFileSync(filePath, onDisk, 'utf-8');
-      service.recordEdit(filePath, null, aiContent);
+      const filePath = tracked('bom-crlf.ts', 'foo\nbar\n', onDisk);
       service.validateAgainst(() => onDisk);
-      expect(service.getFileAttribution(filePath)).toBeDefined();
+      expect(attr(filePath)).toBeDefined();
     });
 
-    // Legacy snapshot from before contentHash existed: the entry has
-    // an empty contentHash. We can't tell stale from fresh, so leave
-    // it alone (don't reset).
+    // Legacy snapshot from before contentHash existed: empty contentHash
+    // means no baseline to tell stale from fresh, so keep the entry even if
+    // the reader returns different content.
     it('skips entries with empty contentHash (legacy snapshot)', () => {
-      const service = CommitAttributionService.getInstance();
-      service.restoreFromSnapshot({
-        type: 'attribution-snapshot',
-        surface: 'cli',
-        fileStates: {
-          '/legacy.ts': {
-            aiContribution: 50,
-            aiCreated: false,
-            contentHash: '',
-          },
-        },
-        promptCount: 0,
-        promptCountAtLastCommit: 0,
-      });
-      // Even if the reader claims a different hash, an empty recorded
-      // hash means we have no baseline — keep the entry.
+      restore({ fileStates: { '/legacy.ts': fileState(50, false, '') } });
       service.validateAgainst(() => 'totally different');
-      expect(service.getFileAttribution('/legacy.ts')).toBeDefined();
+      expect(attr('/legacy.ts')).toBeDefined();
     });
 
-    // Deleted-file lookup must remain stable: recordEdit canonicalises
-    // the path via realpathSync; getFileAttribution must still resolve
-    // the same canonical key after the leaf is unlinked. realpathOrSelf
-    // canonicalises the parent and rejoins the basename for missing
-    // leaves so macOS /var ↔ /private/var doesn't break the lookup
-    // post-deletion.
+    // recordEdit canonicalises via realpathSync; after the leaf is unlinked
+    // realpath throws, so realpathOrSelf canonicalises the parent and
+    // rejoins the basename, keeping macOS /var ↔ /private/var lookups
+    // working post-deletion.
     it('keeps deleted-file entries reachable via the original path', () => {
-      const service = CommitAttributionService.getInstance();
-      const filePath = path.join(tmpDir, 'deleted.ts');
-      fs.writeFileSync(filePath, 'will be deleted', 'utf-8');
-      service.recordEdit(filePath, null, 'will be deleted');
+      const filePath = tracked('deleted.ts', 'will be deleted');
       fs.unlinkSync(filePath);
-      // Lookup must still find the entry by the original path even
-      // though realpath of the leaf now throws.
-      expect(service.getFileAttribution(filePath)).toBeDefined();
+      expect(attr(filePath)).toBeDefined();
     });
   });
 
   it('should save session baseline on first edit', () => {
-    const service = CommitAttributionService.getInstance();
     service.recordEdit('/project/f.ts', 'original content', 'new content');
-
-    // Baseline should have been saved from oldContent
-    // We can verify indirectly: after clear, baseline is gone
+    // Baseline was saved from oldContent; verified indirectly: after clear,
+    // it is gone.
     service.clearAttributions();
     expect(service.hasAttributions()).toBe(false);
   });
 
   it('should return defensive copies', () => {
-    const service = CommitAttributionService.getInstance();
     service.recordEdit('/project/f.ts', null, 'content');
-
-    const copy = service.getFileAttribution('/project/f.ts')!;
-    copy.aiContribution = 99999;
-
-    expect(
-      service.getFileAttribution('/project/f.ts')!.aiContribution,
-    ).not.toBe(99999);
+    attr('/project/f.ts')!.aiContribution = 99999;
+    expect(attr('/project/f.ts')!.aiContribution).not.toBe(99999);
   });
 
   describe('prompt counting', () => {
     it('should track prompt counts', () => {
-      const service = CommitAttributionService.getInstance();
       expect(service.getPromptCount()).toBe(0);
 
       service.incrementPromptCount();
@@ -349,7 +289,6 @@ describe('CommitAttributionService', () => {
     });
 
     it('should reset prompts-since-commit counter on successful clear', () => {
-      const service = CommitAttributionService.getInstance();
       service.incrementPromptCount();
       service.incrementPromptCount();
       service.clearAttributions(true);
@@ -359,7 +298,6 @@ describe('CommitAttributionService', () => {
     });
 
     it('should NOT reset prompts-since-commit on failed clear', () => {
-      const service = CommitAttributionService.getInstance();
       service.incrementPromptCount();
       service.incrementPromptCount();
       service.recordEdit('/project/f.ts', null, 'x');
@@ -374,14 +312,12 @@ describe('CommitAttributionService', () => {
 
   describe('surface tracking', () => {
     it('should default to cli surface', () => {
-      const service = CommitAttributionService.getInstance();
       expect(service.getSurface()).toBe('cli');
     });
   });
 
   describe('snapshot / restore', () => {
     it('should serialize and restore state', () => {
-      const service = CommitAttributionService.getInstance();
       service.recordEdit('/project/f.ts', null, 'hello');
       service.incrementPromptCount();
       service.incrementPromptCount();
@@ -405,14 +341,12 @@ describe('CommitAttributionService', () => {
 
   describe('generateNotePayload', () => {
     it('should compute real AI/human percentages', () => {
-      const service = CommitAttributionService.getInstance();
       service.recordEdit('/project/src/main.ts', '', 'x'.repeat(200));
 
       const staged = makeStagedInfo(['src/main.ts', 'src/human.ts'], {
         'src/main.ts': 400,
         'src/human.ts': 200,
       });
-
       const note = service.generateNotePayload(
         staged,
         '/project',
@@ -427,7 +361,6 @@ describe('CommitAttributionService', () => {
     });
 
     it('should exclude generated files', () => {
-      const service = CommitAttributionService.getInstance();
       service.recordEdit('/project/src/main.ts', null, 'code');
 
       const staged = makeStagedInfo(
@@ -446,7 +379,6 @@ describe('CommitAttributionService', () => {
     });
 
     it('should include promptCount', () => {
-      const service = CommitAttributionService.getInstance();
       service.recordEdit('/project/f.ts', null, 'code');
       service.incrementPromptCount();
       service.incrementPromptCount();
@@ -457,26 +389,20 @@ describe('CommitAttributionService', () => {
     });
 
     it('should sanitize internal model codenames', () => {
-      const service = CommitAttributionService.getInstance();
       service.recordEdit('/project/f.ts', null, 'x');
       const staged = makeStagedInfo(['f.ts'], { 'f.ts': 10 });
+      const generator = (model: string) =>
+        service.generateNotePayload(staged, '/project', model).generator;
 
-      expect(
-        service.generateNotePayload(staged, '/project', 'qwen-72b').generator,
-      ).toBe('Qwen-Coder');
-      expect(
-        service.generateNotePayload(staged, '/project', 'CustomAgent')
-          .generator,
-      ).toBe('CustomAgent');
+      expect(generator('qwen-72b')).toBe('Qwen-Coder');
+      expect(generator('CustomAgent')).toBe('CustomAgent');
     });
 
-    // Long-line edits inflate the tracked AI char count (we count actual
-    // characters), but diffSize comes from `git diff --stat` which
-    // approximates each changed line as ~40 chars. Without clamping,
-    // aiChars stays large while humanChars snaps to 0, leaving
-    // aiChars+humanChars > the committed change magnitude.
+    // AI chars count actual characters, but diffSize comes from `git diff
+    // --stat` (~40 chars per changed line), so long-line edits leave aiChars
+    // large while humanChars snaps to 0: aiChars + humanChars would exceed
+    // the committed change magnitude without clamping.
     it('should clamp aiChars to diffSize so totals stay consistent', () => {
-      const service = CommitAttributionService.getInstance();
       // Big AI edit but small reported diff (one long-line change).
       service.recordEdit('/project/src/big.ts', '', 'x'.repeat(1000));
 
@@ -492,16 +418,14 @@ describe('CommitAttributionService', () => {
     });
   });
 
-  // The service realpath's file paths at every entry/exit point so a
-  // symlinked vs canonical absolute path collapses to one entry. This
-  // matters most on macOS (`/var` → `/private/var`), where edit.ts
-  // can record a path under one form while git rev-parse reports the
-  // other — without canonicalisation, the lookup never matches and
-  // AI attribution silently zeroes out.
+  // Paths are realpath'd at every entry/exit point so symlinked and
+  // canonical forms collapse to one entry. On macOS (`/var` →
+  // `/private/var`) edit.ts may record one form while git rev-parse reports
+  // the other; without canonicalisation the lookup never matches and AI
+  // attribution silently zeroes out.
   describe('symlink-aware path canonicalisation', () => {
     beforeEach(() => {
-      // Map any /var/... input to /private/var/... (the macOS-ism).
-      // Anything else passes through unchanged.
+      // Map /var/... to /private/var/... (the macOS-ism); pass others through.
       vi.mocked(fs.realpathSync).mockImplementation(((input: unknown) => {
         const s = String(input);
         if (s.startsWith('/var/')) return s.replace('/var/', '/private/var/');
@@ -514,24 +438,17 @@ describe('CommitAttributionService', () => {
     });
 
     it('records and looks up under the canonical path', () => {
-      const service = CommitAttributionService.getInstance();
       service.recordEdit('/var/repo/src/main.ts', '', 'x'.repeat(50));
-
-      // Lookup with EITHER form should work — the service canonicalises
-      // both write and read.
-      expect(service.getFileAttribution('/var/repo/src/main.ts')).toBeDefined();
-      expect(
-        service.getFileAttribution('/private/var/repo/src/main.ts'),
-      ).toBeDefined();
+      // Either form works: both write and read are canonicalised.
+      expect(attr('/var/repo/src/main.ts')).toBeDefined();
+      expect(attr('/private/var/repo/src/main.ts')).toBeDefined();
     });
 
     it('matches diff paths when baseDir is the symlinked form', () => {
-      const service = CommitAttributionService.getInstance();
       service.recordEdit('/var/repo/src/main.ts', '', 'x'.repeat(80));
 
-      // generateNotePayload receives the symlinked baseDir; the loop
-      // canonicalises it before computing path.relative against the
-      // (already-canonical) keys.
+      // The loop canonicalises the symlinked baseDir before computing
+      // path.relative against the (already-canonical) keys.
       const staged = makeStagedInfo(['src/main.ts'], { 'src/main.ts': 80 });
       const note = service.generateNotePayload(staged, '/var/repo');
 
@@ -540,25 +457,18 @@ describe('CommitAttributionService', () => {
     });
 
     it('clearAttributedFiles deletes by canonical key without realpath-ing the leaf', () => {
-      const service = CommitAttributionService.getInstance();
       service.recordEdit('/var/repo/src/deleted.ts', '', 'will be removed');
-      expect(
-        service.getFileAttribution('/var/repo/src/deleted.ts'),
-      ).toBeDefined();
+      expect(attr('/var/repo/src/deleted.ts')).toBeDefined();
 
-      // Caller composes paths against a canonical baseDir (mirrors
-      // attachCommitAttribution's pattern), so the leaf doesn't need
-      // to exist for the delete to find the right key.
+      // Callers compose paths against a canonical baseDir (as
+      // attachCommitAttribution does), so the leaf needn't exist.
       service.clearAttributedFiles(
         new Set(['/private/var/repo/src/deleted.ts']),
       );
-      expect(
-        service.getFileAttribution('/var/repo/src/deleted.ts'),
-      ).toBeUndefined();
+      expect(attr('/var/repo/src/deleted.ts')).toBeUndefined();
     });
 
     it('moves attribution across committed renames before payload generation', () => {
-      const service = CommitAttributionService.getInstance();
       service.recordEdit('/var/repo/src/old.ts', '', 'renamed content');
 
       service.applyCommittedRenames(
@@ -566,10 +476,8 @@ describe('CommitAttributionService', () => {
         '/private/var/repo',
       );
 
-      expect(
-        service.getFileAttribution('/var/repo/src/old.ts'),
-      ).toBeUndefined();
-      expect(service.getFileAttribution('/var/repo/src/new.ts')).toBeDefined();
+      expect(attr('/var/repo/src/old.ts')).toBeUndefined();
+      expect(attr('/var/repo/src/new.ts')).toBeDefined();
 
       const staged = makeStagedInfo(['src/new.ts'], { 'src/new.ts': 80 }, [], {
         'src/old.ts': 'src/new.ts',
@@ -580,7 +488,6 @@ describe('CommitAttributionService', () => {
     });
 
     it('merges old-path attribution into an existing destination entry', () => {
-      const service = CommitAttributionService.getInstance();
       service.recordEdit('/var/repo/src/old.ts', '', 'old ai text');
       service.recordEdit('/var/repo/src/new.ts', '', 'new ai text');
 
@@ -589,93 +496,49 @@ describe('CommitAttributionService', () => {
         '/private/var/repo',
       );
 
-      const attr = service.getFileAttribution('/var/repo/src/new.ts')!;
-      expect(attr.aiContribution).toBe(
+      expect(attr('/var/repo/src/new.ts')!.aiContribution).toBe(
         'old ai text'.length + 'new ai text'.length,
       );
-      expect(
-        service.getFileAttribution('/var/repo/src/old.ts'),
-      ).toBeUndefined();
+      expect(attr('/var/repo/src/old.ts')).toBeUndefined();
     });
 
     it('canonicalises keys on snapshot restore', () => {
-      const service = CommitAttributionService.getInstance();
-      service.restoreFromSnapshot({
-        type: 'attribution-snapshot',
-        surface: 'cli',
-        // Snapshot written before the canonicalisation fix could carry
-        // either form; restore should normalise to canonical.
-        fileStates: {
-          '/var/repo/src/legacy.ts': {
-            aiContribution: 99,
-            aiCreated: false,
-            contentHash: '',
-          },
-        },
-        promptCount: 0,
-        promptCountAtLastCommit: 0,
+      // Snapshots written before the canonicalisation fix could carry either
+      // form; restore normalises to canonical, so the canonical lookup works.
+      restore({
+        fileStates: { '/var/repo/src/legacy.ts': fileState(99, false, '') },
       });
-
-      // Lookup under the canonical form succeeds even though the
-      // snapshot wrote the symlink form.
-      expect(
-        service.getFileAttribution('/private/var/repo/src/legacy.ts')!
-          .aiContribution,
-      ).toBe(99);
+      expect(attr('/private/var/repo/src/legacy.ts')!.aiContribution).toBe(99);
     });
 
-    // A snapshot straddling the canonicalisation fix can carry both
-    // the symlinked and canonical paths for the same file. After
-    // realpathOrSelf normalises them, the second entry to land
-    // would overwrite the first if we just `set()` — losing the
-    // first form's accumulated aiContribution. Merge instead.
+    // A snapshot straddling the canonicalisation fix can carry both forms of
+    // one file; once realpathOrSelf normalises them a plain `set()` would
+    // let the second overwrite the first's aiContribution. Merge instead.
     it('merges duplicate entries collapsed by canonicalisation', () => {
-      const service = CommitAttributionService.getInstance();
-      service.restoreFromSnapshot({
-        type: 'attribution-snapshot',
-        surface: 'cli',
+      restore({
         fileStates: {
-          '/var/repo/src/dup.ts': {
-            aiContribution: 30,
-            aiCreated: false,
-            contentHash: 'old',
-          },
-          '/private/var/repo/src/dup.ts': {
-            aiContribution: 70,
-            aiCreated: true,
-            contentHash: 'new',
-          },
+          '/var/repo/src/dup.ts': fileState(30, false, 'old'),
+          '/private/var/repo/src/dup.ts': fileState(70, true, 'new'),
         },
-        promptCount: 0,
-        promptCountAtLastCommit: 0,
       });
 
-      const restored = service.getFileAttribution(
-        '/private/var/repo/src/dup.ts',
-      )!;
+      const restored = attr('/private/var/repo/src/dup.ts')!;
       expect(restored.aiContribution).toBe(100);
       // aiCreated is OR'd: any form carrying true wins.
       expect(restored.aiCreated).toBe(true);
     });
 
-    // A corrupted snapshot with promptCountAtLastCommit > promptCount
-    // would surface a negative `getPromptsSinceLastCommit()` and
-    // propagate as a "(-3)-shotted" trailer into PR text.
+    // A corrupted snapshot with promptCountAtLastCommit > promptCount would
+    // surface a negative getPromptsSinceLastCommit() and a "(-3)-shotted"
+    // trailer in PR text.
     it('clamps promptCountAtLastCommit to promptCount on restore', () => {
-      const service = CommitAttributionService.getInstance();
-      service.restoreFromSnapshot({
-        type: 'attribution-snapshot',
-        surface: 'cli',
-        fileStates: {},
-        promptCount: 5,
-        promptCountAtLastCommit: 99,
-      });
+      restore({ promptCount: 5, promptCountAtLastCommit: 99 });
       expect(service.getPromptsSinceLastCommit()).toBe(0);
     });
 
-    // `surface` lands verbatim in the git-notes payload and is used
-    // as a Map key. Non-string values would coerce into
-    // `[object Object]` etc. Fall back to the current client surface.
+    // `surface` lands verbatim in the git-notes payload and is a Map key;
+    // non-strings would coerce to `[object Object]` etc. Fall back to the
+    // current client surface.
     it.each([
       ['object', { foo: 'bar' }],
       ['number', 42],
@@ -684,25 +547,16 @@ describe('CommitAttributionService', () => {
     ])(
       'falls back to client surface when snapshot.surface is non-string (%s)',
       (_label, badValue) => {
-        const service = CommitAttributionService.getInstance();
-        service.restoreFromSnapshot({
-          type: 'attribution-snapshot',
-          surface: badValue as unknown as string,
-          fileStates: {},
-          promptCount: 0,
-          promptCountAtLastCommit: 0,
-        });
+        restore({ surface: badValue as unknown as string });
         // getClientSurface() returns 'cli' in tests (no env var set).
         expect(service.getSurface()).toBe('cli');
       },
     );
 
-    // Envelope-level corruption: a payload whose `type` discriminator
-    // is wrong (or whose top-level shape is non-object) must reset to
-    // a clean state instead of polluting fileAttributions. The
-    // resume-time caller passes `snapshot as AttributionSnapshot`
-    // from a structural cast off `unknown`, so the runtime value
-    // could be anything.
+    // Envelope-level corruption: a wrong `type` discriminator or non-object
+    // top level must reset to a clean state instead of polluting
+    // fileAttributions. The resume-time caller casts `unknown` to
+    // AttributionSnapshot, so the runtime value could be anything.
     it.each([
       ['null', null],
       ['array', []],
@@ -713,29 +567,21 @@ describe('CommitAttributionService', () => {
     ])(
       'resets to fresh state when snapshot envelope is malformed (%s)',
       (_label, badPayload) => {
-        const service = CommitAttributionService.getInstance();
-        // Seed some pre-existing state to confirm the reset clears it.
+        // Seed pre-existing state to confirm the reset clears it.
         service.recordEdit('/project/preexisting.ts', null, 'hello');
-        expect(
-          service.getFileAttribution('/project/preexisting.ts'),
-        ).toBeDefined();
+        expect(attr('/project/preexisting.ts')).toBeDefined();
 
         service.restoreFromSnapshot(
-          badPayload as unknown as Parameters<
-            typeof service.restoreFromSnapshot
-          >[0],
+          badPayload as unknown as AttributionSnapshot,
         );
-        expect(
-          service.getFileAttribution('/project/preexisting.ts'),
-        ).toBeUndefined();
+        expect(attr('/project/preexisting.ts')).toBeUndefined();
         expect(service.getSurface()).toBe('cli');
         expect(service.getPromptsSinceLastCommit()).toBe(0);
       },
     );
 
-    // `fileStates` must be a plain object; otherwise Object.entries
-    // would happily iterate an array's [index, value] pairs and seed
-    // fileAttributions with numeric-string keys.
+    // `fileStates` must be a plain object; Object.entries would otherwise
+    // iterate an array's [index, value] pairs and seed numeric-string keys.
     it.each([
       ['array', []],
       ['string', 'oops'],
@@ -744,16 +590,11 @@ describe('CommitAttributionService', () => {
     ])(
       'ignores non-object fileStates (%s) without polluting attribution map',
       (_label, badFileStates) => {
-        const service = CommitAttributionService.getInstance();
-        service.restoreFromSnapshot({
-          type: 'attribution-snapshot',
-          surface: 'cli',
+        restore({
           fileStates: badFileStates as unknown as Record<
             string,
-            { aiContribution: number; aiCreated: boolean; contentHash: string }
+            FileAttribution
           >,
-          promptCount: 0,
-          promptCountAtLastCommit: 0,
         });
         expect(service.hasAttributions()).toBe(false);
       },

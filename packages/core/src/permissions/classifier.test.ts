@@ -30,6 +30,7 @@ import {
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
+import { content, fnCall, fnResponse } from '../test-utils/model-fixtures.js';
 
 function makeConfig(
   autoModeSettings: ReturnType<Config['getAutoModeSettings']> = {},
@@ -53,6 +54,37 @@ function makeInput(over: Partial<ClassifierInput> = {}): ClassifierInput {
     ...over,
   };
 }
+
+/** Queues stage 1 = block, stage 2 = allow. */
+const escalateThenAllow = () =>
+  runSideQueryMock
+    .mockResolvedValueOnce({ shouldBlock: true })
+    .mockResolvedValueOnce({ thinking: 't', shouldBlock: false, reason: '' });
+
+/** A sideQuery implementation that aborts `controller`, then throws. */
+const abortThenThrow = (controller: AbortController) => async () => {
+  controller.abort();
+  throw new Error('aborted');
+};
+
+type SideQueryOptions = {
+  purpose?: string;
+  model?: string;
+  contents: unknown;
+  config?: {
+    temperature?: number;
+    maxOutputTokens?: number;
+    thinkingConfig?: { includeThoughts?: boolean };
+  };
+};
+
+/** The options object passed to the `index`-th sideQuery call. */
+const sideQueryOptions = (index: number) =>
+  runSideQueryMock.mock.calls[index]?.[1] as SideQueryOptions;
+
+const classifyWithSettings = (
+  settings: ReturnType<Config['getAutoModeSettings']>,
+) => classifyAction(makeInput({ config: makeConfig(settings) }));
 
 beforeEach(() => {
   runSideQueryMock.mockReset();
@@ -80,66 +112,32 @@ describe('classifyAction — stage 1 happy path', () => {
   it('passes the fast-stage purpose to sideQuery', async () => {
     runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
     await classifyAction(makeInput());
-    const call = runSideQueryMock.mock.calls[0]?.[1] as { purpose?: string };
-    expect(call?.purpose).toBe('permission_classifier_stage1');
+    expect(sideQueryOptions(0)?.purpose).toBe('permission_classifier_stage1');
   });
 });
 
 describe('classifyAction — stage 1 escalates to stage 2', () => {
   it('sends the same trusted-answer transcript to both stages', async () => {
-    runSideQueryMock
-      .mockResolvedValueOnce({ shouldBlock: true })
-      .mockResolvedValueOnce({ thinking: 't', shouldBlock: false, reason: '' });
+    escalateThenAllow();
 
     await classifyAction(
       makeInput({
         messages: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'ask-1',
-                  name: 'ask_user_question',
-                  args: {},
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'ask-1',
-                  name: 'ask_user_question',
-                  response: {},
-                },
-              },
-            ],
-          },
+          content('model', fnCall('ask_user_question', {}, 'ask-1')),
+          content('user', fnResponse('ask_user_question', {}, 'ask-1')),
         ],
         trustedUserAnswers: [
           {
             callId: 'ask-1',
             omitted: false,
-            answers: [
-              {
-                question: 'Create marker?',
-                answer: 'No',
-              },
-            ],
+            answers: [{ question: 'Create marker?', answer: 'No' }],
           },
         ],
       }),
     );
 
-    const stage1 = runSideQueryMock.mock.calls[0]?.[1] as {
-      contents: unknown;
-    };
-    const stage2 = runSideQueryMock.mock.calls[1]?.[1] as {
-      contents: unknown;
-    };
+    const stage1 = sideQueryOptions(0);
+    const stage2 = sideQueryOptions(1);
     expect(stage2.contents).toBe(stage1.contents);
     expect(JSON.stringify(stage1.contents)).toContain('Create marker?');
     expect(JSON.stringify(stage1.contents)).toContain('No');
@@ -182,12 +180,9 @@ describe('classifyAction — stage 1 escalates to stage 2', () => {
   });
 
   it('passes the thinking-stage purpose for the second call', async () => {
-    runSideQueryMock
-      .mockResolvedValueOnce({ shouldBlock: true })
-      .mockResolvedValueOnce({ thinking: 't', shouldBlock: false, reason: '' });
+    escalateThenAllow();
     await classifyAction(makeInput());
-    const call = runSideQueryMock.mock.calls[1]?.[1] as { purpose?: string };
-    expect(call?.purpose).toBe('permission_classifier_stage2');
+    expect(sideQueryOptions(1)?.purpose).toBe('permission_classifier_stage2');
   });
 });
 
@@ -213,10 +208,7 @@ describe('classifyAction — unavailable on stage 1 failure', () => {
 
   it('re-throws when the user signal is aborted (not converted to block)', async () => {
     const controller = new AbortController();
-    runSideQueryMock.mockImplementationOnce(async () => {
-      controller.abort();
-      throw new Error('aborted');
-    });
+    runSideQueryMock.mockImplementationOnce(abortThenThrow(controller));
     await expect(
       classifyAction(makeInput({ signal: controller.signal })),
     ).rejects.toThrow();
@@ -241,10 +233,7 @@ describe('classifyAction — unavailable on stage 2 failure', () => {
     const controller = new AbortController();
     runSideQueryMock
       .mockResolvedValueOnce({ shouldBlock: true })
-      .mockImplementationOnce(async () => {
-        controller.abort();
-        throw new Error('aborted');
-      });
+      .mockImplementationOnce(abortThenThrow(controller));
     await expect(
       classifyAction(makeInput({ signal: controller.signal })),
     ).rejects.toThrow();
@@ -252,52 +241,26 @@ describe('classifyAction — unavailable on stage 2 failure', () => {
 });
 
 describe('classifier configuration', () => {
-  it('uses configured stage timeouts when provided', async () => {
+  /** Runs stage 1 (block) + stage 2 with the given timeouts; returns the spy. */
+  async function timeoutsUsedFor(stage1Ms: number, stage2Ms: number) {
     const timeoutSpy = vi
       .spyOn(AbortSignal, 'timeout')
       .mockImplementation(() => new AbortController().signal);
-    runSideQueryMock
-      .mockResolvedValueOnce({ shouldBlock: true })
-      .mockResolvedValueOnce({ thinking: 't', shouldBlock: false, reason: '' });
+    escalateThenAllow();
+    await classifyWithSettings({
+      classifier: { timeouts: { stage1Ms, stage2Ms } },
+    });
+    return timeoutSpy;
+  }
 
-    await classifyAction(
-      makeInput({
-        config: makeConfig({
-          classifier: {
-            timeouts: {
-              stage1Ms: 12_345,
-              stage2Ms: 67_890,
-            },
-          },
-        }),
-      }),
-    );
-
+  it('uses configured stage timeouts when provided', async () => {
+    const timeoutSpy = await timeoutsUsedFor(12_345, 67_890);
     expect(timeoutSpy).toHaveBeenNthCalledWith(1, 12_345);
     expect(timeoutSpy).toHaveBeenNthCalledWith(2, 67_890);
   });
 
   it('falls back when configured stage timeouts are too low', async () => {
-    const timeoutSpy = vi
-      .spyOn(AbortSignal, 'timeout')
-      .mockImplementation(() => new AbortController().signal);
-    runSideQueryMock
-      .mockResolvedValueOnce({ shouldBlock: true })
-      .mockResolvedValueOnce({ thinking: 't', shouldBlock: false, reason: '' });
-
-    await classifyAction(
-      makeInput({
-        config: makeConfig({
-          classifier: {
-            timeouts: {
-              stage1Ms: 1,
-              stage2Ms: 999,
-            },
-          },
-        }),
-      }),
-    );
-
+    const timeoutSpy = await timeoutsUsedFor(1, 999);
     expect(timeoutSpy).toHaveBeenNthCalledWith(1, STAGE1_TIMEOUT_MS);
     expect(timeoutSpy).toHaveBeenNthCalledWith(2, STAGE2_TIMEOUT_MS);
     expect(debugLoggerMock.warn).toHaveBeenCalledWith(
@@ -311,58 +274,29 @@ describe('classifier configuration', () => {
   it('uses temperature 0 and max_output_tokens=256 with thinking disabled for stage 1', async () => {
     runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
     await classifyAction(makeInput());
-    const opts = runSideQueryMock.mock.calls[0]?.[1] as {
-      config?: {
-        temperature?: number;
-        maxOutputTokens?: number;
-        thinkingConfig?: { includeThoughts?: boolean };
-      };
-    };
+    const opts = sideQueryOptions(0);
     expect(opts.config?.temperature).toBe(0);
     expect(opts.config?.maxOutputTokens).toBe(256);
     expect(opts.config?.thinkingConfig?.includeThoughts).toBe(false);
   });
 
   it('uses max_output_tokens=4096 with thinking disabled for stage 2', async () => {
-    runSideQueryMock
-      .mockResolvedValueOnce({ shouldBlock: true })
-      .mockResolvedValueOnce({ thinking: 't', shouldBlock: false, reason: '' });
+    escalateThenAllow();
     await classifyAction(makeInput());
-    const opts = runSideQueryMock.mock.calls[1]?.[1] as {
-      config?: {
-        maxOutputTokens?: number;
-        thinkingConfig?: { includeThoughts?: boolean };
-      };
-    };
+    const opts = sideQueryOptions(1);
     expect(opts.config?.maxOutputTokens).toBe(4096);
     // Thinking is disabled in every stage (latency-sensitive permission gate).
     expect(opts.config?.thinkingConfig?.includeThoughts).toBe(false);
   });
 
   it('enables API thinking only for stage 2 when configured', async () => {
-    runSideQueryMock
-      .mockResolvedValueOnce({ shouldBlock: true })
-      .mockResolvedValueOnce({ thinking: 't', shouldBlock: false, reason: '' });
+    escalateThenAllow();
+    await classifyWithSettings({
+      classifier: { thinking: { stage2Enabled: true } },
+    });
 
-    await classifyAction(
-      makeInput({
-        config: makeConfig({
-          classifier: {
-            thinking: {
-              stage2Enabled: true,
-            },
-          },
-        }),
-      }),
-    );
-
-    const stage1 = runSideQueryMock.mock.calls[0]?.[1] as {
-      config?: { thinkingConfig?: { includeThoughts?: boolean } };
-    };
-    const stage2 = runSideQueryMock.mock.calls[1]?.[1] as {
-      config?: { thinkingConfig?: { includeThoughts?: boolean } };
-    };
-
+    const stage1 = sideQueryOptions(0);
+    const stage2 = sideQueryOptions(1);
     expect(stage1.config?.thinkingConfig?.includeThoughts).toBe(false);
     expect(stage2.config?.thinkingConfig?.includeThoughts).toBe(true);
   });
@@ -370,19 +304,16 @@ describe('classifier configuration', () => {
   it('does not pin a model — defaults to the fast model via sideQuery', async () => {
     runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
     await classifyAction(makeInput());
-    const opts = runSideQueryMock.mock.calls[0]?.[1] as { model?: string };
-    expect(opts.model).toBeUndefined();
+    expect(sideQueryOptions(0).model).toBeUndefined();
   });
 });
 
-// Context-overflow detection now delegated to the shared
-// `isContextLengthExceededError` utility; tests covering its behavior live
-// alongside that module (utils/contextLengthError.test.ts).
+// Context-overflow detection is delegated to the shared
+// `isContextLengthExceededError` (tested in utils/contextLengthError.test.ts).
 
 describe('sanitizeClassifierReason', () => {
-  // Security-critical: the classifier reason is LLM-generated and gets
-  // interpolated into the main model's tool-error message. A hostile
-  // reason can stage a prompt injection if not sanitized.
+  // Security-critical: the LLM-generated reason is interpolated into the main
+  // model's tool-error message; unsanitized, it can stage a prompt injection.
 
   it('passes empty / falsy through unchanged', () => {
     expect(sanitizeClassifierReason('')).toBe('');
@@ -395,18 +326,16 @@ describe('sanitizeClassifierReason', () => {
   });
 
   it('iterates strip until stable — no complete <...> tag can survive', () => {
-    // The threat is a pseudo-tag like `<system>...` confusing the
-    // downstream model. A single /<[^>]*>/g pass on a nested input
-    // like `<scr<script>extra>` leaves `>` orphaned tokens which is
-    // fine — what must NOT survive is any complete `<...>` pair.
+    // The threat is a pseudo-tag like `<system>...` confusing the downstream
+    // model. One /<[^>]*>/g pass over `<scr<script>extra>` leaves orphaned `>`
+    // (fine); what must NOT survive is any complete `<...>` pair.
     const result = sanitizeClassifierReason('<scr<script>extra>payload');
     expect(result).not.toMatch(/<[^>]*>/);
   });
 
   it('bounds iteration so adversarial inputs cannot create unbounded work', () => {
-    // 8-iteration cap means the function is O(n) regardless of how the
-    // attacker structures the input. Even a degenerate string with many
-    // overlapping tags terminates promptly.
+    // The 8-iteration cap keeps it O(n) however the input is structured, so
+    // even many overlapping tags terminate promptly.
     const adversarial = '<a'.repeat(2000) + '>'.repeat(2000);
     const t0 = Date.now();
     sanitizeClassifierReason(adversarial);

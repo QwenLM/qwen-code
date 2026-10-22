@@ -177,9 +177,7 @@ test.beforeEach(async ({ page }, testInfo) => {
   await page
     .getByRole('button', { name: 'Toggle right panel', exact: true })
     .click();
-  await page
-    .getByRole('button', { name: /Web preview.*Preview a running/ })
-    .click();
+  await page.getByTestId('right-panel-open-web-preview').click();
 });
 
 async function openPreview(page: Page, url: string) {
@@ -287,6 +285,9 @@ test('rejects unsafe URLs and preserves the working preview after invalid input'
     await expect(
       page.getByRole('alert').filter({ hasText: 'development address' }),
     ).toHaveCount(1);
+    await expect(page.getByRole('alert').filter({ hasText: /\S/ })).toHaveCount(
+      1,
+    );
     await expect(appFrame(page).locator('#storage')).toHaveText('working');
   }
 });

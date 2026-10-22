@@ -292,9 +292,9 @@ ls ~/.qwen/extensions/*/skills/
 
 ## 5. 第四步：系统提示词（建议最后做）
 
-**5,253 token 已在健康线 4–5k 内。** 不改上游能省的只有 **775**：output style 的 `keepCodingInstructions: false` 精确删掉 `## Software Engineering Tasks`（3,068 字符，`packages/core/src/core/prompts.ts:369-372`），不多不少。
+**5,253 token 已在健康线 4–5k 内。** 不改上游能省的只有 **775**：output style 的 `keepCodingInstructions: false` 精确删掉 `## Software Engineering Tasks`（3,068 字符，`packages/core/src/core/prompts.ts:369-372`），不多不少。（2026-09-25 更正：#12546 第二轮精简后，该段切片（标题到下一标题、`string.length` 口径）为 2,482 字符，开关实际删除 2,077 字符 ≈ 525 token——切片段尾 405 字符的两条通用 bullet 由调用方拼接、不在段函数返回值内，原文「3,068 字符、不多不少」混淆了切片与删除量两个口径；该函数现位于 `packages/core/src/core/prompts.ts:402`。5,253 总量仍是 v0.24.1 基线，引用前须按 §0.1 重测。）
 
-⚠️ 这一段里含下面锚点列表中的 `- **Report outcomes faithfully:**`（`prompts.ts:285`，位于 `getSoftwareEngineeringTasksSection`）。若采用该开关，须在该 output style 的 `prompt` 正文中补回这条，否则静态检查必然失败。**待验证**：开启后跑一次 `QWEN_WRITE_SYSTEM_MD` 导出——注意它导出的是不带 style 的基础提示词，所以要看的是会话实际发出的系统指令里 `Report outcomes faithfully` 是否仍在。
+⚠️ 这一段里含下面锚点列表中的 `- **Report outcomes faithfully:**`（`prompts.ts:415`，位于 `getSoftwareEngineeringTasksSection`）。若采用该开关，须在该 output style 的 `prompt` 正文中补回这条，否则静态检查必然失败。**待验证**：开启后跑一次 `QWEN_WRITE_SYSTEM_MD` 导出——注意它导出的是不带 style 的基础提示词，所以要看的是会话实际发出的系统指令里 `Report outcomes faithfully` 是否仍在。
 
 **不建议整体替换**（`--system-prompt` / `QWEN_SYSTEM_MD`）：默认提示词里约 6,349 字符（30.5%）是安全与行为边界——被拒工具调用不得绕路、hook 注入内容不算用户输入、危险操作四分类、不泄露密钥、如实汇报。替换后要自己维护副本，而 `prompts.ts` 上游约每周 2 次提交，脱节了不会有任何测试失败。对于 skill 中大量存在生产写确认、`fail-closed`、禁止 `DROP TABLE` 一类约束的部署，这层兜底尤其不该动。
 
