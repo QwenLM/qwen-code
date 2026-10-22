@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.DaemonProtocolException;
+import com.alibaba.qwen.code.daemon.DaemonTransportException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilityMismatchException;
@@ -897,8 +898,18 @@ public class HarnessCoordinator {
                     flush(turn, stream.eventEpoch(), batch, leaseLost);
                     batchBytes = 0;
                     flushAt = 0;
-                    if (incoming.isEmpty() && stream.recoveryBlocked(lastEventId)
-                            && incoming.isEmpty()) {
+                    // An unavailable advisory read must not replace the stream's
+                    // authoritative terminal event or its bounded idle failure.
+                    boolean recoveryBlocked = false;
+                    try {
+                        recoveryBlocked = incoming.isEmpty() && stream.recoveryBlocked(lastEventId);
+                    } catch (DaemonTransportException error) {
+                        LOG.warn("Managed Harness recovery probe is unavailable"
+                                        + " tenant={} session={} turn={} failure={}",
+                                turn.tenantId(), turn.sessionId(), turn.turnId(),
+                                error.getClass().getSimpleName());
+                    }
+                    if (recoveryBlocked && incoming.isEmpty()) {
                         requireLease(leaseLost);
                         boolean parked = store.markTurnRecoveryBlocked(turn.tenantId(),
                                 turn.sessionId(), turn.turnId(), owner,

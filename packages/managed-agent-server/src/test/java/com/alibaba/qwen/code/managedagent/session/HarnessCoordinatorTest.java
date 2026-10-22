@@ -5,6 +5,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.DaemonProtocolException;
+import com.alibaba.qwen.code.daemon.DaemonTransportException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
@@ -1366,7 +1367,7 @@ class HarnessCoordinatorTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"blocked", "terminal", "unavailable", "epoch-changed", "park-cas-lost"})
+    @ValueSource(strings = {"blocked", "terminal", "unavailable", "epoch-changed", "park-cas-lost", "transport-error"})
     void aHarnessParkOnlyObservesTheOriginalExecution(String mode) {
         AgentStateStore store = boundCancellingStore();
         TurnRecord parked = new TurnRecord("tenant", "session", "turn", "prompt",
@@ -1386,6 +1387,8 @@ class HarnessCoordinatorTest {
             when(stream.recoveryBlocked(1)).thenThrow(new IllegalStateException("journal unavailable"));
             when(store.markTurnRecoveryBlocked(anyString(), anyString(), anyString(),
                     anyString(), anyString(), anyString())).thenReturn(false);
+        } else if ("transport-error".equals(mode)) {
+            when(stream.recoveryBlocked(1)).thenThrow(mock(DaemonTransportException.class));
         }
         when(stream.next()).thenReturn(new SourceEvent(2L, "turn_complete",
                 Map.of("stopReason", "end_turn"), "prompt", Map.of()), null);
@@ -3499,8 +3502,9 @@ class HarnessCoordinatorTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"idle", "controls", "terminal"})
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"idle", "controls", "terminal", "transport-error"})
     void anInactiveRecoveryBlockedStreamParksWithoutSettlingOrReplaying(String mode) throws Exception {
+        boolean terminalAtProbe = "terminal".equals(mode) || "transport-error".equals(mode);
         AgentStateStore store = boundCancellingStore();
         TurnRecord running = turn("tenant", "session", "turn", "prompt", "epoch", 1);
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
@@ -3524,7 +3528,7 @@ class HarnessCoordinatorTest {
                 return new SourceEvent(sequence.incrementAndGet(), "managed_journal_event",
                         Map.of(), null, Map.of());
             }
-            if ("terminal".equals(mode)) {
+            if (terminalAtProbe) {
                 if (sequence.getAndIncrement() == 1) {
                     emitTerminal.await();
                     return new SourceEvent(2L, "turn_complete", Map.of("stopReason", "end_turn"),
@@ -3536,9 +3540,12 @@ class HarnessCoordinatorTest {
             return null;
         });
         when(stream.recoveryBlocked(anyLong())).thenAnswer(ignored -> {
-            if ("terminal".equals(mode)) {
+            if (terminalAtProbe) {
                 emitTerminal.countDown();
                 assertThat(terminalQueued.await(5, TimeUnit.SECONDS)).isTrue();
+            }
+            if ("transport-error".equals(mode)) {
+                throw mock(DaemonTransportException.class);
             }
             return true;
         });
@@ -3555,9 +3562,10 @@ class HarnessCoordinatorTest {
                 Clock.systemUTC(), new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "turn");
-            if ("terminal".equals(mode)) {
+            if (terminalAtProbe) {
                 verify(store, timeout(20_000)).recordHarnessEvents(eq("tenant"), eq("session"),
-                        eq("turn"), anyString(), eq("epoch"), anyList());
+                        eq("turn"), anyString(), eq("epoch"), argThat(events -> events.size() == 1
+                                && events.get(0).sourceId() == 2 && events.get(0).projection().terminal()));
                 verify(store, never()).markTurnRecoveryBlocked(anyString(), anyString(), anyString(),
                         anyString(), anyString(), anyString());
             } else {
@@ -3569,6 +3577,8 @@ class HarnessCoordinatorTest {
             executor.shutdownNow();
         }
         verify(stream).close();
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(), anyString(),
+                anyString(), anyLong(), anyBoolean());
         verify(store, never()).failTurn(anyString(), anyString(), anyString(),
                 anyString(), anyString(), anyString());
         verify(harness, never()).cancel(anyString(), anyString());
