@@ -139,6 +139,7 @@ import {
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedSessionMessageSession } from './hosted-session-message-session.js';
 import { HostedContextCompression } from './hosted-context-compression.js';
+import type { HistoryMaintenance } from '@qwen-code/qwen-code-core/managed-runtime/managed-history-maintenance-record.js';
 import { HostedTeamSession } from './hosted-team-session.js';
 import { teamMemberPreamble } from './hosted-member-chain.js';
 import { hostedWakeContinuationId } from './hosted-wake-continuation.js';
@@ -16653,6 +16654,114 @@ describe('Hosted Harness no-tool session', () => {
     expect(created.body.message).toContain('writerToken is invalid');
   });
 
+  it('cold loads a workspace after a durable no-op context compression', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    const server = await app(true);
+    const toolProfile = 'hosted-workspace-files/1';
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile,
+    });
+    expect(created.status).toBe(200);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .expect(204);
+    const sessionKey = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      sessionId: SESSION_ID,
+      sessionKey,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+    });
+    const operationId = randomUUID();
+    try {
+      const admitted: HistoryMaintenance = {
+        schemaVersion: 1,
+        kind: 'context_compression',
+        operationId,
+        expectedCompactionRevision: 0,
+        historyCutSequence: managed.authority.committedSequence,
+        requestRef: await managed.resources.publish(
+          'managed-message',
+          Buffer.from('{}'),
+        ),
+        phase: 'admitted',
+        attempt: 0,
+        candidateRef: null,
+        outcome: null,
+        failureCode: null,
+        compactionRevision: null,
+        run: {
+          state: 'admitted',
+          reason: null,
+          definition: null,
+          executionCallId: null,
+          effectId: null,
+          dispatchId: null,
+          deliveryId: null,
+          execution: null,
+          runtime: null,
+          delivery: null,
+        },
+      };
+      const generating: HistoryMaintenance = {
+        ...admitted,
+        phase: 'generating',
+        attempt: 1,
+        run: { ...admitted.run, state: 'running' },
+      };
+      const completed: HistoryMaintenance = {
+        ...generating,
+        phase: 'settled',
+        outcome: 'noop',
+        run: { ...generating.run, state: 'settled' },
+      };
+      for (const record of [admitted, generating, completed]) {
+        await managed.authority.commitHistoryMaintenance(
+          {
+            operation: 'contextCompression',
+            commandId: `${operationId}:${record.phase}`,
+            sessionKey,
+            contentDigest: createHash('sha256')
+              .update(JSON.stringify(record))
+              .digest('hex'),
+          },
+          { record },
+          { class: 'harness', activation: managed.activation },
+        );
+      }
+    } finally {
+      await managed.close();
+    }
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store(), toolProfile });
+    expect(loaded.status).toBe(200);
+    const status = await headers(
+      supertest(server).get(
+        `/session/${SESSION_ID}/context/compressions/${operationId}`,
+      ),
+    ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    expect(status.status).toBe(200);
+    expect(status.body).toMatchObject({
+      operationId,
+      status: 'completed',
+      outcome: 'noop',
+      compactionRevision: 0,
+    });
+    expect(state.model).not.toHaveBeenCalled();
+  });
+
   it('refuses a workspace cold load before another input when a committed resource is missing', async () => {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
     const server = await app(true);
@@ -19708,6 +19817,75 @@ describe('Hosted Harness no-tool session', () => {
         clientId,
       );
     }
+  });
+
+  it('persists a safe model API failure across cold transcript replay', async () => {
+    const { HostedModelApiError } = await import('./hosted-harness-model.js');
+    state.model.mockRejectedValueOnce(
+      new HostedModelApiError({
+        status: 402,
+        message: 'Insufficient Balance token=private-provider-secret',
+      }),
+    );
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const prompt = [{ type: 'text', text: 'hello' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    const expectFailure = async (
+      target: Awaited<ReturnType<typeof app>>,
+      clientId: string,
+    ) => {
+      const transcript = await headers(
+        supertest(target).get(`/session/${SESSION_ID}/transcript`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(transcript.status).toBe(200);
+      expect(transcript.body.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'turn_error',
+            data: expect.objectContaining({
+              code: 'model_payment_required',
+              message:
+                'Model API payment required (HTTP 402). Check the provider account balance and billing before retrying.',
+            }),
+          }),
+        ]),
+      );
+      expect(JSON.stringify(transcript.body)).not.toContain(
+        'private-provider-secret',
+      );
+    };
+    await vi.waitFor(
+      () => expectFailure(server, created.body.clientId as string),
+      {
+        timeout: SETTLE_TIMEOUT_MS,
+      },
+    );
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+      204,
+    );
+    const restarted = await app();
+    const loaded = await headers(
+      supertest(restarted).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    await expectFailure(restarted, loaded.body.clientId as string);
+    expect(state.model).toHaveBeenCalledOnce();
+    await headers(supertest(restarted).delete(`/session/${SESSION_ID}`)).expect(
+      204,
+    );
   });
 
   it('logs the failure cause while keeping the public turn error generic', async () => {
@@ -29492,26 +29670,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
       // behind must not hold the session (plain attach + 409 streams
       // forever per round-7's probe).
       await parkToolTurn();
-      vi.spyOn(
-        LocalManagedSessionAuthority.prototype,
-        'harnessRunAuthorization',
-      ).mockResolvedValue({
-        status: 'runnable',
-        checkpoint: {
-          identity: {
-            turnId: PROMPT_ID,
-            promptId: PROMPT_ID,
-            checkpointId: 'checkpoint-await-action',
-          },
-          attempt: {},
-          continuation: { phase: 'await_action' },
-          approval: { state: 'requested', requestId: 'request-1' },
-          output: {},
-          followUp: {},
-          runtime: {},
-          tools: { items: [] },
-        },
-      } as never);
+      mockApprovalWaitAuthorization();
       vi.spyOn(
         LocalManagedSessionAuthority.prototype,
         'action',
@@ -29540,10 +29699,8 @@ describe('Hosted Harness Runtime turn takeover', () => {
 
   // A REAL checkpoint structurally read as an approval wait: the phase and
   // approval copy are overridden while identity, sequence and the rest of
-  // the underlying authority pass through — so the wait's own durable gate
-  // and the cancelled settle's close hook both drive on a coherent
-  // authority. (A wholesale mock leaves the real latest checkpoint at the
-  // tool round's await_runtime and the resolve hook would never fire.)
+  // the underlying authority pass through. The approval-only fixture clears
+  // Runtime groups so its resolved checkpoint satisfies the write schema.
   function mockApprovalWaitAuthorization() {
     const original =
       LocalManagedSessionAuthority.prototype.harnessRunAuthorization;
@@ -29562,7 +29719,8 @@ describe('Hosted Harness Runtime turn takeover', () => {
             phase: 'await_action',
           },
           approval: { state: 'requested', requestId: 'request-1' },
-          tools: { items: [] },
+          tools: null,
+          runtime: null,
         },
       } as never;
     });
