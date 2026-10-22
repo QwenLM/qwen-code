@@ -239,6 +239,84 @@ class ManagedAgentPreflightTest {
     }
 
     @Test
+    void reportsTheEffectiveSessionStoreWiring() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getSessionStore().setEnabled(true);
+        assertEquals(ManagedAgentPreflight.Status.SKIP,
+                ManagedAgentPreflight.sessionStoreCheck(properties).status());
+        properties.getHarness().setEnabled(true);
+        ManagedAgentPreflight.Check url =
+                ManagedAgentPreflight.sessionStoreCheck(properties);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, url.status());
+        assertTrue(url.fix().contains(
+                "QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL"));
+        properties.getSessionStore().setBaseUrl("http://127.0.0.1:8080");
+        ManagedAgentPreflight.Check workspace =
+                ManagedAgentPreflight.sessionStoreCheck(properties);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, workspace.status());
+        assertTrue(workspace.fix().contains(
+                "QWEN_MANAGED_AGENT_WORKSPACE_CWD"));
+        properties.getSessionStore().setWorkspaceId("workspace");
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                ManagedAgentPreflight.sessionStoreCheck(properties).status());
+        properties.getSessionStore().setEnabled(false);
+        assertEquals(ManagedAgentPreflight.Status.SKIP,
+                ManagedAgentPreflight.sessionStoreCheck(properties).status());
+    }
+
+    @Test
+    void derivesTheSessionStoreWiringFromTheShippedDefaults(
+            @TempDir Path workspace) throws IOException {
+        var environment = new StandardEnvironment();
+        environment.getPropertySources().addFirst(
+                new org.springframework.core.env.MapPropertySource("test",
+                        java.util.Map.of(
+                                "QWEN_MANAGED_AGENT_HARNESS_ENABLED", "true",
+                                "QWEN_MANAGED_AGENT_WORKSPACE_CWD",
+                                workspace.toString(),
+                                "server.port", "9090")));
+        List<ManagedAgentPreflight.Check> checks = new ArrayList<>();
+        ManagedAgentPreflight.loadConfiguration(environment, List.of(),
+                checks);
+        ManagedAgentProperties properties =
+                ManagedAgentPreflight.bind(environment, checks);
+        assertTrue(checks.isEmpty(), checks.toString());
+        ManagedAgentPreflight.startupValidationCheck(properties);
+        ManagedAgentPreflight.Check check =
+                ManagedAgentPreflight.sessionStoreCheck(properties);
+        assertEquals(ManagedAgentPreflight.Status.PASS, check.status());
+        assertEquals("http://127.0.0.1:9090",
+                properties.getSessionStore().getBaseUrl());
+        assertEquals(org.apache.commons.codec.digest.DigestUtils.sha256Hex(
+                        workspace.toRealPath().toString().getBytes(
+                                java.nio.charset.StandardCharsets.UTF_8))
+                        .substring(0, 16),
+                properties.getSessionStore().getWorkspaceId());
+    }
+
+    @Test
+    void failsTheDerivedStoreUrlOfATlsListener(@TempDir Path workspace) {
+        var environment = new StandardEnvironment();
+        environment.getPropertySources().addFirst(
+                new org.springframework.core.env.MapPropertySource("test",
+                        java.util.Map.of(
+                                "QWEN_MANAGED_AGENT_HARNESS_ENABLED", "true",
+                                "QWEN_MANAGED_AGENT_WORKSPACE_CWD",
+                                workspace.toString(),
+                                "server.ssl.bundle", "web")));
+        List<ManagedAgentPreflight.Check> checks = new ArrayList<>();
+        ManagedAgentPreflight.loadConfiguration(environment, List.of(),
+                checks);
+        ManagedAgentProperties properties =
+                ManagedAgentPreflight.bind(environment, checks);
+        ManagedAgentPreflight.startupValidationCheck(properties);
+        ManagedAgentPreflight.Check check =
+                ManagedAgentPreflight.sessionStoreCheck(properties);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, check.status());
+        assertEquals("base URL is empty", check.detail());
+    }
+
+    @Test
     void requiresTheSessionStoreForWorkspaceFiles() {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setEnabled(true);

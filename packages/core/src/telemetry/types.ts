@@ -30,6 +30,7 @@ import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { SkillTool } from '../tools/skill.js';
 import type { AgentTool } from '../tools/agent/agent.js';
 import type { ToolErrorType } from '../tools/tool-error.js';
+import type { LoopProtectionMode } from '../services/loop-protection.js';
 import type {
   GoalLimitKind,
   GoalStateCause,
@@ -610,6 +611,37 @@ export class LoopDetectedEvent implements BaseTelemetryEvent {
     if (detail?.toolCallLimit !== undefined) {
       this.tool_call_limit = detail.toolCallLimit;
     }
+  }
+}
+
+/**
+ * One loop-protection decision of a governed detector (#14828): a reminder
+ * queued, the turn stopped, or (under `off`) the detection only recorded.
+ * Budget stops and the provider-id breaker are not governed and emit none.
+ */
+export class LoopProtectionEvent implements BaseTelemetryEvent {
+  'event.name': 'loop_protection';
+  'event.timestamp': string;
+  prompt_id: string;
+  loop_type: LoopType;
+  decision: 'reminded' | 'stopped' | 'observed';
+  mode: LoopProtectionMode;
+  declare loop_reason?: LoopReason;
+
+  constructor(params: {
+    prompt_id: string;
+    loop_type: LoopType;
+    decision: 'reminded' | 'stopped' | 'observed';
+    mode: LoopProtectionMode;
+    loop_reason?: LoopReason;
+  }) {
+    this['event.name'] = 'loop_protection';
+    this['event.timestamp'] = new Date().toISOString();
+    this.prompt_id = params.prompt_id;
+    this.loop_type = params.loop_type;
+    this.decision = params.decision;
+    this.mode = params.mode;
+    if (params.loop_reason !== undefined) this.loop_reason = params.loop_reason;
   }
 }
 
