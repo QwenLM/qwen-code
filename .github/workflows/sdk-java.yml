@@ -292,13 +292,15 @@ jobs:
           fi
 
       - name: 'Upload Maven test reports on failure'
-        if: 'failure()'
+        if: 'failure() || cancelled()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'sdk-java-test-reports-${{ matrix.os }}-java-${{ matrix.java }}'
           path: |
             packages/sdk-java/qwencode/target/surefire-reports/*.txt
+            packages/sdk-java/qwencode/target/surefire-reports/*.dumpstream
             packages/managed-agent-server/target/surefire-reports/*.txt
+            packages/managed-agent-server/target/surefire-reports/*.dumpstream
           if-no-files-found: 'ignore'
           retention-days: 7
 
@@ -763,13 +765,15 @@ jobs:
         run: 'node scripts/check-failsafe-reports.js non-hosted packages/managed-agent-server'
 
       - name: 'Upload Maven test reports on failure'
-        if: 'failure()'
+        if: 'failure() || cancelled()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'sdk-java-test-reports-mysql-integration-java-21'
           path: |
             packages/managed-agent-server/target/surefire-reports/*.txt
+            packages/managed-agent-server/target/surefire-reports/*.dumpstream
             packages/managed-agent-server/target/failsafe-reports/*.txt
+            packages/managed-agent-server/target/failsafe-reports/*.dumpstream
           if-no-files-found: 'ignore'
           retention-days: 7
 

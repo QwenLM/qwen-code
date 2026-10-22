@@ -248,7 +248,9 @@ describe('SDK Java self-hosted workflow guards', () => {
         'sdk-java-test-reports-${{ matrix.os }}-java-${{ matrix.java }}',
       paths: [
         'packages/sdk-java/qwencode/target/surefire-reports/*.txt',
+        'packages/sdk-java/qwencode/target/surefire-reports/*.dumpstream',
         'packages/managed-agent-server/target/surefire-reports/*.txt',
+        'packages/managed-agent-server/target/surefire-reports/*.dumpstream',
       ],
       testStep: 'Run Runtime Broker state tests',
     },
@@ -257,7 +259,9 @@ describe('SDK Java self-hosted workflow guards', () => {
       artifact: 'sdk-java-test-reports-mysql-integration-java-21',
       paths: [
         'packages/managed-agent-server/target/surefire-reports/*.txt',
+        'packages/managed-agent-server/target/surefire-reports/*.dumpstream',
         'packages/managed-agent-server/target/failsafe-reports/*.txt',
+        'packages/managed-agent-server/target/failsafe-reports/*.dumpstream',
       ],
       testStep:
         'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration',
@@ -269,7 +273,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       const upload = steps.find(
         (s) => s.name === 'Upload Maven test reports on failure',
       );
-      expect(upload.if).toBe('failure()');
+      expect(upload.if).toBe('failure() || cancelled()');
       expect(upload.uses).toBe(
         'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
       );
