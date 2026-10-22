@@ -4,15 +4,21 @@
 
 ## 状态与源码边界
 
-**Phase 5：实施中；当前 C 的 build、typecheck、单测、native 与产品验证均为 NOT_RUN。** 隔离的 `feat/opentui-session-recovery` 工作树已从最初 `23f1cd5` 计划基座快进至 `d677b8df38eb4c3fd955618d14e720ac70efa783`（tree `3c229e79e17734677323bb2ed3032e7b1fd62225`）。这是开发基座，不是已接受父提交：B 的 combining-character native 失败仍未关闭，Ready 前必须整合修复并验证。不新增 core API、依赖、记录 schema 或第二个历史 owner。
+**Phase 5：实施与源码 bundle 验证进行中；最终提交和完整产品验收仍未完成。** 当前证据归属本地 `6c3c63584c01cf0a5b421aa719e6ff1df8a23700` 加冻结的七文件 v4 工作补丁 `1c4f3277b4b0e7364b5e0cee706a2750db02cbade38c66e092202feb6c7d8319`，不是已提交的最终候选。Build、typecheck 已通过；25 个 CLI 完整文件共 1,514 案全部通过，无失败、跳过或 bail 未执行。Native 组件验证通过 26 个捕获帧、19 次输入和两个精确回调。新的 WIP 源码 bundle 已通过，CLI SHA 为 `53859bf54605e32e3c594c95fc6f040d6e53644bb69f79ffad467ac95d911cf1`；它不是已安装的 npm 或 standalone 产物。不新增 core API、依赖、记录 schema 或第二个历史 owner。
+
+本状态检查点已通过 Node 22 + Ink、Bun 1.3.14 + Ink 和 strict Bun 1.3.14 + OpenTUI 三腿各自的 `/quit` 与 `/exit`，共六案源码 bundle H15。每案恰好一个真实模型 HTTP 请求，在 teardown 前展示告别标题、交互统计和墙钟时长且无输入框，并自然退出 0。六案源码 bundle 汇总 SHA 为 `1cde10ab1e7593eb86282014b5c870ed8313e177aab5658cfd915f1bb3b65dfc`。六案通过不关闭其他退出别名、持久日志冷召回、H01–H14、安装产物或平台门禁。精确收据汇总见下文。
+
+PR #15067（交互/输出）和 #14046 已合并。本地 C 整合包含选定的已接受 main 基线，但 npm 分发 PR #14959 已进入 Ready 待审，仍未合并，head 为 `cf0bb9d6db84594020951c88d9970ff46d357856`；本地依赖整合及其验收不能被描述成已合并。早期父批次失败保留其历史归属，不能在对应修复已被接受后继续误列为当前阻断。
 
 Phase 4 固定历史参考（`~/.local/bin/qwen` 0.22.0 及其私有 Node 22.23.2）已一次通过 H01a、H01b、H09a：7 个真实 PTY、7 个模型请求、7 次 `/quit` exit 0。该参考不是操作者当前默认 global 命令，也不代表当前 C 或 Ink 验收。原失败与 blocked 版本保留于 ignored 证据；最终汇总为 `.qwen/investigations/session-recovery-global-outer-v6/historical-baseline-summary.json`。
 
 d677 的正常依赖 setup 已通过，使用固定 Node 24.19/pnpm 11.24 和共享 store，安装了 Husky，但未运行 build 或测试。收据为 `.qwen/investigations/c-d677-setup-v1/20261021T143821Z-7fc8df-install/independent-receipt.json`。并行源码改动明确不在该安装守卫的验收范围内。
 
-源码对照为 Ink/main `a0e414945502b1d08ec969d7d3f59d6a1e96bdd7`。只读调查已将 42 个文件与精确提交核对；16 个共享文件中 15 个与 main 逐字相同，剩余 AppContainer 差异是父批次 Vim 提交时清空 buffer。这是源码证据，不是新的运行结果。父级交互/输出批次仍有自身验证阻断；Ready 前必须继承其已接受的后继提交，重新绑定基线后才能宣称完成整合。
+源码对照为 Ink/main `a0e414945502b1d08ec969d7d3f59d6a1e96bdd7`。只读调查已将 42 个文件与精确提交核对；16 个共享文件中 15 个与 main 逐字相同，剩余 AppContainer 差异是父批次 Vim 提交时清空 buffer。这是源码证据，不是新的运行结果。这是最初计划检查点；其中父批次阻断已由后来合并的 #15067 处理。当前验证使用上文独立列明的源码与补丁边界。
 
 本方案沿用既有会话/记录/恢复/transcript 提案及全部 H01–H14 案组。早期结果，包括 Markdown 下划线差异与同会话 reset 修复，保留为历史证据，不能当作新树验收。原调查 checkout 中的 ignored 记录为 `.qwen/investigations/session-record-recovery-transcript-20261021/` 和 `.qwen/investigations/session-recovery-scope-b23f1-main-a0-v1/`。本树新的可执行基线规格位于 `.qwen/e2e-tests/2026-10-21-opentui-session-recovery.md`。
+
+当前状态收据锚点：build `c3a38ed7`、typecheck `4dd86b41`、完整 CLI `9b3c8648`、native 组件 `01ec0686`、WIP bundle `ff4aaabb`；H15 NodeInk quit `edf27265`、NodeInk exit `f2a36835`、BunInk quit `b00925a3`、BunInk exit `4c776a6e`、strict OpenTUI quit `557c6a49`、strict OpenTUI exit `1ca2f20c`。完整路径与 SHA 保留在 ignored 控制台账。原 logger 环境、transcript/routing 与 native fixture 的 FAIL/BAIL 证据全部保留；后续通过仅覆盖明确绑定的后继组合。
 
 ## 问题与完整交付边界
 
@@ -37,7 +43,7 @@ OpenTUI 已经能加载会话、持有结构化输入队列、运行模型/工�
 
 ## 现有 owner 与具体缺口
 
-除特别说明外，下表路径均位于 `packages/cli/src/ui/`。这些是最初计划基座的源码观察。下述 Phase 5 接线仍是未验证 WIP；历史版本校准不关闭这些义务。
+除特别说明外，下表路径均位于 `packages/cli/src/ui/`。这些是最初计划基座的源码观察。下述接线保留最初计划基座的观察。当前完整文件和组件验证仅覆盖具名源码接缝；历史校准与源码测试不关闭真实产品义务。
 
 | 范围               | 现有 producer 与 consumer                                                                                                                                               | 最小接线                                                                                                   |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
@@ -116,6 +122,8 @@ Checkpoint 的迟到结果守卫核对现有 session、idle、取消信号和来
 
 将 `/rewind`、`/rollback` 和现有空输入 double-Esc 路径接到真实 selector，保留 idle/dialog/IDE 门禁。已标识的当前 turn 来自 live transcript，不能只用命令 host history。变更前调用 `computeApiTruncationIndex` 和 `isIdentifiedRetainedTurn`，按共享 helper 拒绝歧义或压缩后的身份。
 
+selector 消费父弹窗区域的真实高度，保留正常尺寸的七项上限及已有 label/value 样式。紧小终端与 resize 复用现有 frame/chrome 和选择窗口 helper：只有当前窗口实际绘制了 target/action label，Enter 才能推进或恢复；空字符串、纯空白及截断后仅剩省略号的 label 不得提交；源首行本身就是省略号时，只要未被截断并实际绘制，仍是合法 target。区域扩大后，同一选择重新可用。确认画面与按键仍由 phase 状态持有，现有 restore/session/history 事务 owner 不变。三个定向完整文件已通过 68 案，后续完整 CLI 验证通过 1,514 案。Native 组件验证捕获 26 帧并观察到预期有界区域。这些源码/组件结果不证明安装产物 PTY 的 viewport 裁切或完整 H09 渲染一致性；原 routing 与 native fixture 失败仍保留。
+
 存在 model client 时复用当前 Ink 次序：校验会话切点、按选择 rewind 文件，然后才截断允许的 core/UI 状态，并通过 `rewindRecording` 移动记录分支。保留没有 client 时的明确分支：conversation-only 失败；combined 仍尝试恢复文件、保留会话/snapshot 历史，并提示已跳过会话 rewind。Code-only 保留会话和 snapshot 历史；combined 操作部分文件失败时不得截断会话。Recording rewind 重新挂接已有 journal ancestry，而非删除任意 JSONL 后缀。若需避免复制验证与失败次序，可小范围抽取已有 CLI 操作供两 UI 共用；不计划改变 core API 或大范围搬迁 hook。
 
 共享 CLI 事务由两个真实 consumer 使用。迟到文件操作核对现有 session 与当前历史身份；OpenTUI 同步读取 live refs，包含 React 尚未 commit 的窗口。Rewind 返回真实保留数组，每条自有 notice 再返回下一个真实快照，供延迟草稿注入核验。同 ID reset 或新 turn 使两者失效，不向后继恢复旧草稿或写入 notice。失效前已恢复的文件仍是实际副作用，stale 不等于文件已回滚。UI 截断先于 conversation recording rewind，记录移除数量取自真实 live 前缀。
@@ -138,7 +146,7 @@ Checkpoint 的迟到结果守卫核对现有 session、idle、取消信号和来
 
 ## 验收矩阵
 
-Ignored Phase 3 计划将下列稳定案组展开成命名分支。当前 C 全部案组均为 **NOT_RUN**；只有上文明确标注历史参考的 H01a/H01b/H09a dry-run 已完成。基线例外与候选通过分别报告；跳过一个分支不能关闭其案组。
+Ignored Phase 3 计划将下列稳定案组展开成命名分支。当前源码/补丁组合上的 H01–H14 **完整产品案组仍为 NOT_RUN**；具名完整文件/组件结果和六案 H15 源码 bundle 通过不关闭这些案组。上文 H01a/H01b/H09a dry-run 继续只归属历史参考。基线例外与候选通过分别报告；跳过一个分支不能关闭其案组。
 
 | 案组                     | 必须验证的行为与反例                                                                                                                     |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
@@ -157,36 +165,36 @@ Ignored Phase 3 计划将下列稳定案组展开成命名分支。当前 C 全�
 | H13 — Markdown           | 字面下划线回归、真实 emphasis/code/path/CJK/link/table 对照、streaming/settled frames、source 字节及 render-error 归属。                 |
 | H14 — 长 transcript      | 长 resume 与 picker preview、head/tail/window/scroll/resize/expanded code、稳定选择与有界渲染。                                          |
 
-参考矩阵先解析实际 launcher/runtime 后运行 global `qwen`，再用同一本地 artifact 分别运行 Node 24.19 + Ink、Bun 1.3.14 + Ink、Bun 1.3.14 + strict OpenTUI。历史参考版本来自实际执行发现；当前 C/当前 Ink 验证尚未运行。Strict readiness 必须证明所选渲染器；仅证明没有 fallback 还不能证明所有操作合同。
+参考矩阵先解析实际 launcher/runtime 后运行 global `qwen`，再用同一本地 artifact 分别运行 Node 24.19 + Ink、Bun 1.3.14 + Ink、Bun 1.3.14 + strict OpenTUI。历史参考版本来自实际执行发现。上文六案当前 H15 使用同一 WIP 源码 bundle 的真实 Node 22 + Ink、Bun 1.3.14 + Ink 和 strict Bun 1.3.14 + OpenTUI；其余当前 C/Ink 产品矩阵仍为 NOT_RUN。Strict readiness 必须证明所选渲染器；仅证明没有 fallback 还不能证明所有操作合同。
 
 使用自有配置/工作区、真实 PTY 输入与模型 HTTP、实际日志/journal/文件证据、精确请求数量和值、fresh PID/start 身份。普通完成用 `/quit` 并精确断言 exit 0；raw Ctrl+C 与 active cancel 分别校准。以有界 deadline 等待真实协议/退出事件，不以固定 sleep 或已可见 prompt 判断完成。测试在共享 heavy lease 下串行执行，retry 0、单 worker、unhandled error 致失败、保留首败并提供清理证据。
 
 ## 风险、例外与完成门槛
 
-- 当前父源码是依赖，不是完成验收的声明；任何已接受父修复后，实施与新 artifact 验证都需重新绑定。
+- 已合并的 #15067/#14046 与本地整合、已 Ready 但仍未合并的 #14959 具有不同依赖状态。父源码改变后需重新绑定源码/产物证据；本地验收不证明远端已合并。
 - Ink 已知 deny JSON 镜像缺口与父批次 accepted-steering 事件补齐仍是明确有意差异，不新造协议，也不为逐字 parity 削弱已有修复。
 - 无输出取消后的 journal 冷重放、retry 后 rewind 身份、纯 thought 时序和命令失败日志需精确当前 Ink 校准；本设计未宣称新增已实证 Ink bug。
 - Linux、Windows、sandbox 文件系统行为、真实麦克风/权限/音频设备、WebSocket ASR、发布版升级均 NOT_RUN；macOS 自有 fixture 或组件测试不覆盖这些能力。
 - 即使 renderer 依赖延迟交付，H13/H14 仍可见；没有预先授权新增库、版本或默认行为变更。
 
-Ready 需要已接受父批次、完整同步双语设计、global/当前 Ink 基线、变更路径的有意义复现、正常 full build/typecheck、定向 owner/projection/native 测试、三个本地腿的所有适用 H01–H14 分支、明确例外处置、source/artifact/runtime 身份和清理，以及两次连续干净的全 diff/consumer 审阅。实现和最终 PR 仍作为一个完整会话事务交付。历史 dry-run 与 setup 收据只满足各自具名前置条件；当前 C 的动态门禁仍未关闭。
+Ready 需要已接受父批次、完整同步双语设计、global/当前 Ink 基线、变更路径的有意义复现、正常 full build/typecheck、定向 owner/projection/native 测试、三个本地腿的所有适用 H01–H14 分支、明确例外处置、source/artifact/runtime 身份和清理，以及两次连续干净的全 diff/consumer 审阅。实现和最终 PR 仍作为一个完整会话事务交付。历史 dry-run 与 setup 收据只满足各自具名前置条件；当前具名源码/组件门禁和六案 H15 源码 bundle 已通过，但完整 H01–H14、其余 H15 分支、冷日志/journal、安装产物与非宿主平台仍未关闭。同候选 Ink 与 OpenTUI 的真实 held-shell/Ctrl+Y 安全合同均失败。这些同候选失败既不能确立新引入的 OpenTUI 特有回归，也不能排除 C 的共享回归，更不能证明 main 运行时通过；main 运行时基线仍为 NOT_RUN。
 
 ### 清理前的退出展示
 
 共享 quit/exit 结果提供用户消息、时长和 ID。OpenTUI 入口用当前会话统计快照投影这些原始消息，交给已有 transcript view，替换普通应用和输入框。临时展示不追加 host history、logger、录制、JSON 输出或模型输入。第一次退出请求独占转换；展示提交后保留与 Ink 相同的 100 ms 呈现窗口，然后调用既有退出生命周期。卸载会取消该定时器。设置重启传入空消息时立即退出，不制造摘要。既有 Ctrl+C/Ctrl+D 中断退出及渲染错误退出保持退出码和清理路径。
 
-验收必须观察实际安装的 strict renderer，在离开 alternate screen 前展示告别标题、交互统计与墙钟时长，并在恰好一次模型请求后自然 exit 0。退出后的 resume 回显是独立证据。入口测试覆盖传入时长、输入框替换、录制/提示计数控制的 resume 提示、重复请求、空重启与定时器清理。在旧 c395 源码加候选 patch 622bcbc8d769170a9505f0441165d3315db878881ac9bc0ebd33939cfa2ecd3a 的组合上，四个完整源码测试文件的 217 案全部通过；原 stock-status 取消探针的 1 个选中用例通过，另 66 案精确未选中。这些结果仅覆盖该旧源码组合。当前 main/B5f916 整合后的构建、类型检查、native 测试和真实安装产物 PTY 回归均仍为 NOT_RUN；原始失败与后续源码修复证据全部保留。
+验收必须观察实际安装的 strict renderer，在离开 alternate screen 前展示告别标题、交互统计与墙钟时长，并在恰好一次模型请求后自然 exit 0。退出后的 resume 回显是独立证据。入口测试覆盖传入时长、输入框替换、录制/提示计数控制的 resume 提示、重复请求、空重启与定时器清理。在旧 c395 源码加候选 patch 622bcbc8d769170a9505f0441165d3315db878881ac9bc0ebd33939cfa2ecd3a 的组合上，四个完整源码测试文件的 217 案全部通过；原 stock-status 取消探针的 1 个选中用例通过，另 66 案精确未选中。这些结果仅覆盖该旧源码组合。当前 v4 组合已有上文具名 build/type、1,514 CLI、native 26 帧、WIP bundle 及六案 H15 源码 bundle 通过；真实安装产物 PTY 与其他 H15 分支仍为 NOT_RUN；原始失败与后续源码修复证据全部保留。
 
 ### 回放中的结构化压缩标记
 
-canonical 回放将每个压缩标记保留为一个已有 compaction 行，携带完整 token 数、估计标志、状态、类型、canonical history ID 和恢复展示策略。折叠标记保持隐藏但仍供 rewind 使用；展开标记使用已有压缩渲染。fast 与摘要压缩保持可区分，共享 rewind 映射因此仍能排除 fast 作为 API 截断边界。live 命令 info 投影与 provider 的上下文自动压缩通知保持不变；回放重置整个 transcript，不追加第二份。原 collapsed fast/summarize 回归断言未改。旧 c395 加 patch 622bcbc8 的 217 案源码结果包含原 fast/summarize 断言及新增精确事件/身份回归，不能算作当前 main/B 整合通过。新整合后的构建/类型检查、native 渲染与安装产物 PTY 验收仍为 NOT_RUN；两次原四文件失败均保留。
+canonical 回放将每个压缩标记保留为一个已有 compaction 行，携带完整 token 数、估计标志、状态、类型、canonical history ID 和恢复展示策略。折叠标记保持隐藏但仍供 rewind 使用；展开标记使用已有压缩渲染。fast 与摘要压缩保持可区分，共享 rewind 映射因此仍能排除 fast 作为 API 截断边界。live 命令 info 投影与 provider 的上下文自动压缩通知保持不变；回放重置整个 transcript，不追加第二份。原 collapsed fast/summarize 回归断言未改。旧 c395 加 patch 622bcbc8 的 217 案源码结果包含原 fast/summarize 断言及新增精确事件/身份回归，不能算作当前 main/B 整合通过。当前 v4 的 build/type、CLI 完整文件及有界 native 组件帧已在具名范围内通过；完整 replay/native/安装产物 PTY 产品验收仍为 NOT_RUN；两次原四文件失败均保留。
 
 ### 裸退出与持久输入召回
 
-仅既有 normalizer 识别的精确裸退出 token 绕过 dispatcher USER 日志，使新 Logger 冷加载后仍召回最后一条真实 prompt。带参数的 quit/exit、带空格的 slash 输入和无关 help/clear/reset/new 命令仍保留精确 trimmed 召回及原 await 后 session guard。这与 transcript 的 slash 录制排除策略分离。原 1a2a 八别名失败和普通 prompt/help 正控均保留；在源码 1a2a703cfba99d8bfaf54ee1acf0a7e0b543411c 加 patch 1272d01a2b986080d603d46b018b3884560a3c6fd40caaffac3dd51beb9a138d 上，未改的原诊断两案通过（另 90 案精确未选中），dispatcher/gateway 两个完整文件 126 案全部通过，包含新增 15 案真实文件系统回归。此候选的 build/typecheck、native 与安装 PTY 尚未通过；与 R3 整合后仍需新源码/产物绑定。旧 217 案证据仍只归属原 c395/patch622b 组合。
+仅既有 normalizer 识别的精确裸退出 token 绕过 dispatcher USER 日志，使新 Logger 冷加载后仍召回最后一条真实 prompt。带参数的 quit/exit、带空格的 slash 输入和无关 help/clear/reset/new 命令仍保留精确 trimmed 召回及原 await 后 session guard。这与 transcript 的 slash 录制排除策略分离。原 1a2a 八别名失败和普通 prompt/help 正控均保留；在源码 1a2a703cfba99d8bfaf54ee1acf0a7e0b543411c 加 patch 1272d01a2b986080d603d46b018b3884560a3c6fd40caaffac3dd51beb9a138d 上，未改的原诊断两案通过（另 90 案精确未选中），dispatcher/gateway 两个完整文件 126 案全部通过，包含新增 15 案真实文件系统回归。当前 v4 组合已有上文具名 build/type、完整文件、native 组件及源码 bundle 通过；持久日志冷 CLI 召回与安装产物 PTY 仍为 NOT_RUN。旧 1a2a 源码结果不能替代这些产品门禁。旧 217 案证据仍只归属原 c395/patch622b 组合。
 
 ### 重复模型 slash 的身份
 
 命令 host 仅在前一条调用尚未送达模型时抑制连续同文用户回显。一旦前条 `sentToModel` 为 true，后续同文调用必须获得实际入库的 host 行及自己的 history ID，既有 dispatcher 更新才能附上下一轮 prompt ID。live 投影保留两行，共享 rewind 接收到两个 prompt 身份，即使 assistant 输出只存在于 live transcript。local/未送模型的重复回显继续保持原去重和分配新 ID 后返回的行为。ID 分配、dispatcher 提交、fold/replay 匹配、logger admission 和录制策略均不改。
 
-在整合源码 c0cd94c0f2ecb89dce9f9b6f7620de406a362e7a 上，独立组件诊断的一个正控通过，重复模型 slash 案失败（另 105 案精确未选中）：两个不同提交结果仅产生一个 host/live 用户行与一个 rewind 边界。原始失败保留。候选增加实际 fold 的 host 回归及显式未送模型重复正控；候选准备时，源码验证和整合后的 build/type/native/安装产物 PTY 验收均为 NOT_RUN。随后在 c0cd 加候选 patch f9d535 上，不变的原诊断两案通过（另 105 案未选中）；仅校准旧 info 投影断言以精确包含既有 historyId 后，c0cd 加 patch 0958e48 的 host/dispatcher 两完整文件 136 案通过，无跳过或 bail 未运行，两项新增回归实际执行。原 124 通过、1 失败、11 bail 未运行结果保留。当前整合后的 build/type/native/安装产物 PTY 仍为 NOT_RUN。先前 217 案和裸退出冷召回结果继续只归属其具名旧源码/patch 组合。
+在整合源码 c0cd94c0f2ecb89dce9f9b6f7620de406a362e7a 上，独立组件诊断的一个正控通过，重复模型 slash 案失败（另 105 案精确未选中）：两个不同提交结果仅产生一个 host/live 用户行与一个 rewind 边界。原始失败保留。候选增加实际 fold 的 host 回归及显式未送模型重复正控；候选准备时，源码验证和整合后的 build/type/native/安装产物 PTY 验收均为 NOT_RUN。随后在 c0cd 加候选 patch f9d535 上，不变的原诊断两案通过（另 105 案未选中）；仅校准旧 info 投影断言以精确包含既有 historyId 后，c0cd 加 patch 0958e48 的 host/dispatcher 两完整文件 136 案通过，无跳过或 bail 未运行，两项新增回归实际执行。原 124 通过、1 失败、11 bail 未运行结果保留。当前 v4 的 build/type 及完整 CLI/native 组件运行已在具名范围通过。冷 replay/retry 到 rewind 身份及安装产物 PTY 仍为 NOT_RUN。先前 217 案和裸退出冷召回结果继续只归属其具名旧源码/patch 组合。

@@ -56,11 +56,7 @@ R3 整合 [#14134 的 c807de17](https://github.com/QwenLM/qwen-code/pull/14134)
 [#14187 的 d14b2ad1](https://github.com/QwenLM/qwen-code/pull/14187) 中对应回归覆盖。
 沙箱诊断、Mem0 spawn/身份、cgroup launcher、bwrap/landlock relay/protected root
 成对接入现有 helper。cgroup 保留 hook 与 managed-child-run 两类消费者及
-`reapOnParentExit`。保留的定向测试已在整合候选 `e8192c18` 上通过；其独立验收
-41 个实际产品场景与另列的三个合成协议场景，范围见下方分发设计。
-历史 `b734a90e` 的 frozen install、完整 build/bundle 与 typecheck 已通过。本次
-main8545558a 整合包含 #14046 已合并的 `2972234e` 和四文件 `92d4b193` 已回收主进程
-guard；新组合树的全部动态验证仍为 NOT_RUN。Linux 原生 cgroup/bwrap/landlock 仍未验证。
+`reapOnParentExit`。源码检查点 `0d353777` 纳入已接受的 main `19d3289f`，包含 #14046 与 #15067，同时保留本解释器边界与依赖输入。macOS arm64 fresh build 和 typecheck 已通过。历史 e819/b734/7368/61f 结果保留各自原始源码、运行时与产物范围，不能代替最终组合验收。[分发设计](2026-10-21-opentui-npm-distribution.zh-CN.md) 分别记录这些结果、当前候选门禁与安装产物证明。Linux 原生 cgroup/bwrap/landlock、其他平台及正式发布版本升级验收仍未完成。
 
 明确不接收 #14134 提议的三处替换。review Vitest 保留调用它的宿主解释器，容器分支
 继续使用镜像的 `node`。PEM oracle 和 TLS 信任探针保留 `process.execPath`，与

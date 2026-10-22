@@ -71,13 +71,7 @@ and its regression coverage from
 It migrates the sandbox diagnostic, Mem0 spawn/identity, cgroup launcher, and
 bwrap/landlock relay/protected-root pairs through the existing helper. cgroup
 retains both hook and managed-child-run consumers and `reapOnParentExit`.
-The retained focused tests passed at consolidated `e8192c18`; its independent
-41 actual product cases and three separate synthetic protocol cases are scoped
-in the distribution design below. Historical `b734a90e` passed frozen install,
-full build/bundle and typecheck. The current main8545558a integration includes
-#14046's merged `2972234e` and the four-file `92d4b193` reaped-leader guard;
-all combined-tree dynamic validation is NOT_RUN. Native Linux
-cgroup/bwrap/landlock remain unverified.
+Source checkpoint `0d353777` incorporates accepted main `19d3289f`, including #14046 and #15067, while preserving this interpreter boundary and dependency inputs. Fresh build and typecheck passed on macOS arm64. Historical e819/b734/7368/61f results retain their original source, runtime and artifact scope rather than proving final-combination acceptance. The [distribution design](2026-10-21-opentui-npm-distribution.md) separates those results, current-candidate gates and installed-artifact proof. Native Linux cgroup/bwrap/landlock and other platform/released-update acceptance remain open.
 
 Three proposed swaps are deliberately not taken from #14134. Review Vitest
 keeps its invoking host interpreter; its container branch still uses the

@@ -625,6 +625,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
     case 'rewind':
       return (
         <OpentuiRewindSelector
+          availableTerminalHeight={props.availableTerminalHeight}
           turns={props.rewindTurns ?? []}
           fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
           getDiffStats={(promptId) =>

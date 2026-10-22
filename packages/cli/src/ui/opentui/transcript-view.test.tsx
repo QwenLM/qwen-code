@@ -177,7 +177,7 @@ describe('OpenTuiTranscriptView', () => {
     expect(view.container.textContent).toContain('summary only');
     expect(view.container.textContent).not.toContain('FULL');
     view.rerender(<OpenTuiTranscriptView items={[item]} thoughtsExpanded />);
-    expect(view.container.textContent).toContain('FULL CONTENT');
+    expect(view.container.textContent).toContain('FULL\\u001b[31m CONTENT');
     expect(view.container.textContent).not.toContain('summary only');
     expect(view.container.textContent).not.toContain('\u001b');
     expect(view.container.textContent).not.toContain('\u0007');

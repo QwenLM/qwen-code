@@ -4,31 +4,11 @@
 
 ## Status and problem
 
-The consolidated candidate `e8192c18b1643e20ea9c9a8fa2a2d023eb004c46`
-incorporates R1 `65c20e3fcd4360222655b6e7af0e2dbbe67e86cb` and the interpreter
-work below. Its macOS arm64 build, typecheck and focused gates passed.
-Independent acceptance passed five real npm installation layouts and 41 distinct
-actual product cases, including lifecycle, runtime modes, resources and managed
-and manual updates. Three synthetic protocol cases passed separately; their
-CLI/update producers were synthetic, so they do not add actual-product coverage.
-The three earlier actual-case failures and first synthetic preparation failure
-remain recorded rather than relabeled as passes. Update fixtures use owned
-0.0.0 clones and the unchanged candidate 0.25.3 tarball, not two published releases.
+The source checkpoint `0d353777bb054b9d5c9925f134dd63db7c316614` normally merges main `19d3289f4818617efdf31ca46d4db0522da36f95`, including the accepted input/output batch #15067 and Bun PTY #14046. It preserves all 49 distribution changes and the existing dependency inputs. Fresh macOS arm64 build and typecheck passed at this checkpoint. Affected consumer, native, bundle and installed-product gates are recorded separately in [#14959](https://github.com/QwenLM/qwen-code/pull/14959); a successful source build is not installed-artifact acceptance.
 
-The prior `b734a90e` passed frozen installation, full build/bundle and typecheck;
-its artifact acceptance remained pending. The current normal merge incorporates
-main `8545558a25db342683cb84a6814e591c6fcf6c67`, retaining R1, Generated UI assets
-and release executable-bit protection. Main contains #14046's reviewed `2972234e`
-via squash merge `97567d5d`. This batch also incorporates the four-file guard fix
-`92d4b193266c5b5fc15927570c8e2fe4fabcadf6`: after native leader exit, skip numeric
-process-group signalling while retaining identity-checked descendant cleanup.
-All dynamic validation of this combined tree is NOT_RUN; the e819 and b734
-results remain historical. The new artifact must remeasure the 160 MiB gate.
+Earlier evidence remains bound to its source and artifact. Candidate `e8192c18` passed five installation layouts and 41 distinct actual-product cases, plus three separate synthetic protocol cases. Update fixtures used owned 0.0.0 clones and a candidate tarball, not two published releases. Later `7368b97` installation coverage recorded 20 functional passes and two characterized Ink deny gaps across 22 cases; `61f4e5be` source/runtime gates preceded this main integration. None proves the final combined artifact. Original failures, platform skips and corrected harness runs remain recorded separately; the final tarball must remeasure the 160 MiB unpacked-size gate.
 
-The observed serve shutdown failure and strict interactive `--json-file` output
-gap remain open. Native Linux cgroup/bwrap/landlock, other platforms and official
-release upgrades also remain unverified. This is an opt-in compatibility delivery,
-not completion of the migration of all TUI sessions to Bun.
+The original strict interactive `--json-file` defect is covered by the accepted output changes, but the final installed combination still requires its own output regression. The historical serve shutdown failure requires current-candidate characterization. Native Linux cgroup/bwrap/landlock, other supported platforms and released-version upgrades remain separate open gates. Windows ConPTY diagnostics are not installed-Qwen acceptance and do not change the pinned Bun runtime. This remains an opt-in POSIX npm delivery; completion of all TUI migration and a default-renderer change require the overall migration gates.
 
 The published npm manifest excludes `opentui-assets` and has no private Bun
 runtime. On Node below 26.4, an explicit OpenTUI request falls back to Ink; on
