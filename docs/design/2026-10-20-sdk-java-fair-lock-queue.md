@@ -103,8 +103,8 @@ the fast tier's 90-minute budget is again far above one hold.
 
 The test job had the same shape and the same failure: it held the lock across
 the sdk-java suite and the managed-agent H2 suite (925 s). On 2026-10-22 run
-39811435705's fast job stayed head of the queue for the full 5400 s as ticket
-271 on both attempts and failed before Maven ran. It now seeds a job-local
+39811435705's fast job stayed head of the queue for the full 5400 s as tickets
+258 and 271 on the two attempts and failed before Maven ran. It now seeds a job-local
 repository from the host cache, runs all three Maven commands unlocked, and
 takes the lock only for its write-back. A write-back acquisition that times
 out warns and skips the copy instead of failing a step whose suite already
