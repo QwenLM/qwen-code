@@ -1382,7 +1382,7 @@ export async function checkReadiness(deps: WorkflowDeps): Promise<void> {
   const api = deps.api ?? liveApi;
   await api.probe(deps.ep);
   const request = freezeRequest(deps.ep.generationConfig, deps.ep.model);
-  const frozenLimit = request.params['max_tokens'];
+  const frozenLimit = request.params[outputBudgetKey(request.params)];
   deps.out(
     `ready: ${new URL(deps.ep.baseUrl).host} accepts Batch requests with these credentials (nothing was billed)`,
   );
