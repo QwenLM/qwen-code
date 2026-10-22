@@ -376,8 +376,9 @@ export async function backfillWorkspaceSessionPrs(
       } catch {
         transcriptRaw = '';
       }
+      const liveCandidate = live?.sessionId === sessionId;
       const reviewed =
-        live?.sessionId === sessionId
+        liveCandidate && live
           ? liveReviewTargets(live.rawCommand)
           : collectReviewedPrNumbers(transcriptRaw);
       const conventionNumber = worktree
@@ -543,6 +544,10 @@ export async function backfillWorkspaceSessionPrs(
   }
 
   for (const candidate of candidates) {
+    // The live command names one session; the commit below uses this to
+    // decide whether a missing transcript is a brand-new turn or a deleted
+    // session, and to re-resolve its location under the lane.
+    const liveCandidate = live?.sessionId === candidate.sessionId;
     // Insert in ASCENDING authority so the strongest bindings survive the
     // sidecar's tail cap: reviewed first (the session merely looked at that
     // PR), and the worktree convention last (the session exists FOR that
@@ -671,6 +676,25 @@ export async function backfillWorkspaceSessionPrs(
     }
     if (numbers.length === 0 && repairs.size === 0) continue;
     const existingNumbers = new Set((existing ?? []).map((pr) => pr.number));
+    // A live bind names only the current command, so the sweep's
+    // transcript-order plan does not carry the session's older review
+    // bindings. Without them in the plan, every older review counts as a
+    // foreign occupant and a full sidecar leaves zero slots for the new
+    // review. Include them as evictable occupants — only `review`
+    // provenance; create/worktree and pre-provenance entries keep their
+    // slots — ordered oldest-first, so the cap trims the oldest review and
+    // the new command survives.
+    const liveReviewOccupants =
+      options.liveReview === undefined
+        ? []
+        : (existing ?? [])
+            .filter(
+              (entry) =>
+                entry.source === 'review' &&
+                !numbers.includes(entry.number) &&
+                entry.createdAt < snapshotAt,
+            )
+            .map((entry) => entry.number);
     const urls = new Map<number, string>();
     const states = new Map<number, SessionPr['state']>();
     for (const number of numbers) {
@@ -726,6 +750,7 @@ export async function backfillWorkspaceSessionPrs(
         (number) => existingNumbers.has(number) || urls.has(number),
       ),
     );
+    for (const number of liveReviewOccupants) droppable.add(number);
     const createdAt = new Date().toISOString();
     let added = 0;
     // A closed generation is a whole-run condition, not a per-session write
@@ -733,18 +758,67 @@ export async function backfillWorkspaceSessionPrs(
     // failed) instead of miscounting it in writeErrors.
     assertGenerationOpen();
     const commit = async (): Promise<void> => {
-      const persisted = await replaceSessionPrs(prPath, (fresh) => {
+      // The shared lane excludes transitions that are IN FLIGHT, but one may
+      // have completed between the pre-lane location/snapshot and this
+      // commit. A live bind re-resolves under the lane and writes where the
+      // session is NOW: a deleted session must not resurrect its sidecar, and
+      // an archived one must not have its binding stranded in the active
+      // directory. The sweep keeps its pre-lane path on purpose: a session
+      // that moved mid-scan is re-bound by a later sweep from its new
+      // transcript, and writing here would leave a stray sidecar.
+      let commitPrPath = prPath;
+      let commitTranscriptPath = transcriptPath;
+      if (liveCandidate) {
+        let location: SessionArchiveState | 'conflict' | undefined = undefined;
+        try {
+          location = await sessionService.getSessionLocation(
+            candidate.sessionId,
+          );
+        } catch {
+          // An unknown location cannot be written safely: do not assume
+          // active and resurrect metadata under the wrong state.
+          return;
+        }
+        if (location === 'active' || location === 'archived') {
+          commitPrPath = sessionService.getPrSessionPathForArchiveState(
+            candidate.sessionId,
+            location,
+          );
+          commitTranscriptPath = path.join(
+            path.dirname(commitPrPath),
+            `${candidate.sessionId}.jsonl`,
+          );
+        } else {
+          if (location === 'conflict') return;
+          // No transcript in either state. A session the bridge still owns is
+          // a brand-new turn whose transcript has not been written yet; one
+          // the bridge no longer knows was deleted and must not be
+          // resurrected. A partial bridge without the lookup keeps the
+          // pre-lane path.
+          const getSummary = (
+            runtime.bridge as {
+              getSessionSummary?: (sessionId: string) => unknown;
+            }
+          ).getSessionSummary;
+          if (typeof getSummary === 'function') {
+            try {
+              getSummary.call(runtime.bridge, candidate.sessionId);
+            } catch {
+              return;
+            }
+          }
+        }
+      }
+      const persisted = await replaceSessionPrs(commitPrPath, (fresh) => {
         assertGenerationOpen();
         // Under the archive lane no archive/delete rename can interleave
         // with this write; the existence check still covers a transcript
         // removed by a path that takes no lane, so the plan never
         // resurrects a sidecar for a session gone from this archive state.
-        // A live `/review` bind is exempt: the daemon admitted this
-        // session, and a brand-new turn can precede its transcript file.
-        if (
-          options.liveReview?.sessionId !== candidate.sessionId &&
-          !existsSync(transcriptPath)
-        ) {
+        // A live `/review` bind is exempt only after the re-check above
+        // proved the session still exists (a bridge-owned new turn); a
+        // deleted one returned already.
+        if (!liveCandidate && !existsSync(commitTranscriptPath)) {
           return null;
         }
         // Repair legacy fabricated URLs first (Aone only), so the repaired
@@ -812,7 +886,7 @@ export async function backfillWorkspaceSessionPrs(
         );
         const foreignCount = foreignEntries.length;
         const slots = Math.max(0, SESSION_PR_LIST_LIMIT - foreignCount);
-        let plan = numbers.filter(
+        let plan = [...liveReviewOccupants, ...numbers].filter(
           (number) => droppable.has(number) && !foreignNumbers.has(number),
         );
         if (plan.length > slots) {
@@ -957,7 +1031,7 @@ export async function backfillWorkspaceSessionPrs(
         // the freshest list, so a bind queued between the rewrite's commit
         // and the sync keeps its slot instead of being clobbered by the
         // rewrite-time snapshot. No-op when the session is not live.
-        await replaceSessionPrs(prPath, (fresh) => {
+        await replaceSessionPrs(commitPrPath, (fresh) => {
           // Never publish into a retired generation's bridge.
           assertGenerationOpen();
           runtime.bridge.setSessionPrs?.(

@@ -36,9 +36,13 @@ daemon 接纳 `/review` 提示词时，立即绑定 PR。
 - **Aone。** Aone 号经 `mr view` 解析。代码绝不拼 `<origin>/pull/<N>` 链接。
 - **来源等级。** 绑定写 `source: 'review'`。`create` 与 `worktree` 的等级更高。
   现有上限裁剪会保留更强的绑定。
-- **归档状态。** 钩子解析会话位置，写入对应的 sidecar。新会话默认 active。
-- **transcript 缺失。** 实时会话豁免“transcript 必须存在”的写入闸门。daemon
-  已经接纳了这个会话。
+- **上限。** 实时审查加入现有上限计划。旧的 `review` 绑定可被淘汰；`create`、
+  `worktree` 与无 provenance 条目保留槽位。满额会话因此替换最旧的 review，
+  而不是冻结徽标。
+- **归档状态。** 在 archive lane 内重新解析会话位置并写入对应 sidecar。已归档
+  会话写 archived sidecar；已删除会话跳过。
+- **transcript 缺失。** 只有 bridge 仍持有的会话可以在 transcript 未落盘时绑定——
+  即新会话。位置无法确定时 fail closed。
 - **发布。** 实时写入会失效会话列表缓存并标记 catalog 变更。徽标在正常的
   live-state 刷新中出现。
 - **幂等。** 同一号码重复 `/review` 不会重排或刷新绑定。
@@ -52,7 +56,7 @@ daemon 接纳 `/review` 提示词时，立即绑定 PR。
 ## 验证
 
 - 回填测试覆盖：无 transcript 的实时绑定、归档与 URL 形态、仅扫描目标会话、
-  catalog 标记、文件目标拒绝、untrusted 闸门。
+  catalog 标记、文件目标拒绝、untrusted 闸门、满额淘汰、归档/删除生命周期竞争。
 - 提示路由测试覆盖：首个文本块的传递、后续文本块与 untrusted workspace 的
   拒绝。
 - `packages/cli` 的 typecheck、ESLint、Prettier 通过。

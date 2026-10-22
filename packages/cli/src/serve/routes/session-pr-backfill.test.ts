@@ -211,7 +211,10 @@ describe('backfillWorkspaceSessionPrs', () => {
         overlayKeys: [],
         effectiveEnv: { GH_TOKEN: 'x' },
       },
-      bridge: { markSessionCatalogChanged: vi.fn() },
+      bridge: {
+        markSessionCatalogChanged: vi.fn(),
+        getSessionSummary: vi.fn(() => ({ sessionId: 'live' })),
+      },
     } as unknown as WorkspaceRuntime;
     sessionService = createWorkspaceRuntimeSessionService(runtime);
   });
@@ -2666,6 +2669,127 @@ describe('backfillWorkspaceSessionPrs', () => {
         sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
       ),
     ).toBeNull();
+  });
+
+  it('evicts the oldest review when a live /review reaches the cap', async () => {
+    // A live bind names only the new command. Older review bindings must
+    // still join the cap plan, or a full sidecar freezes the badge forever.
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await seedPrSidecar(
+      SESSION_A,
+      Array.from({ length: SESSION_PR_LIST_LIMIT }, (_, index) => index + 1),
+      'active',
+      'review',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(11, 'fix/11')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(
+      runtime,
+      undefined,
+      undefined,
+      {
+        liveReview: { sessionId: SESSION_A, rawCommand: '/review 11' },
+      },
+    );
+
+    expect(result).toMatchObject({ bound: 1, overLimit: 1 });
+    expect(
+      (await readSessionPrs(prPath))?.map((entry) => entry.number),
+    ).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  });
+
+  it('writes a live bind into the archived sidecar when the session is archived before the lane', async () => {
+    // The shared lane serialises in-flight transitions only; an archive that
+    // completed between the snapshot and the lane must not leave the bind in
+    // the active directory.
+    await seedSession(SESSION_A);
+    const archiveCoordinator = new SessionArchiveCoordinator();
+    const activePrPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    const archivedPrPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'archived',
+    );
+    sidecarReadHook.current = {
+      path: activePrPath,
+      run: async () => {
+        await archiveCoordinator.runExclusiveMany([SESSION_A], async () => {
+          await archiveSession(SESSION_A);
+        });
+      },
+    };
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(
+      runtime,
+      undefined,
+      undefined,
+      {
+        archiveCoordinator,
+        liveReview: { sessionId: SESSION_A, rawCommand: '/review 77' },
+      },
+    );
+
+    expect(result).toMatchObject({ bound: 1, written: 1 });
+    expect(await readSessionPrs(archivedPrPath)).toMatchObject([
+      { number: 77 },
+    ]);
+    expect(await readSessionPrs(activePrPath)).toBeNull();
+  });
+
+  it('does not resurrect a deleted live session sidecar', async () => {
+    // The bridge no longer knows the session, so a missing transcript is a
+    // deletion, not a brand-new turn.
+    await seedSession(SESSION_A);
+    const activePrPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    const archivedPrPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'archived',
+    );
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    sidecarReadHook.current = {
+      path: activePrPath,
+      run: async () => {
+        await fsp.rm(path.join(chatsDir, `${SESSION_A}.jsonl`));
+      },
+    };
+    vi.mocked(runtime.bridge.getSessionSummary).mockImplementation(() => {
+      throw new Error('SessionNotFound');
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(
+      runtime,
+      undefined,
+      undefined,
+      {
+        liveReview: { sessionId: SESSION_A, rawCommand: '/review 77' },
+      },
+    );
+
+    expect(result).toMatchObject({ bound: 0, written: 0 });
+    expect(await readSessionPrs(activePrPath)).toBeNull();
+    expect(await readSessionPrs(archivedPrPath)).toBeNull();
   });
 
   it('ignores /review mentions outside user text records', async () => {

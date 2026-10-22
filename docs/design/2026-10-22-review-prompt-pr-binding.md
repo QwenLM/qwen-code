@@ -42,10 +42,16 @@ Bind the PR when the daemon admits a `/review` prompt.
   an `<origin>/pull/<N>` link.
 - **Provenance.** The binding uses `source: 'review'`. The `create` and
   `worktree` sources outrank it. The existing cap keeps stronger bindings.
-- **Archive state.** The hook resolves the session location and writes to the
-  matching sidecar. A new session defaults to active.
-- **Missing transcript.** The live session is exempt from the "transcript must
-  exist" write guard. The daemon already admitted this session.
+- **Cap.** A live review joins the existing cap plan. Older `review` bindings
+  are evictable; `create`, `worktree`, and pre-provenance entries keep their
+  slots. A full session therefore replaces its oldest review instead of
+  freezing the badge.
+- **Archive state.** Under the archive lane the hook re-resolves the session
+  location and writes the matching sidecar. An archived session gets the
+  archived sidecar; a deleted session is skipped.
+- **Missing transcript.** Only a session the bridge still owns may bind
+  without a transcript — a brand-new turn whose transcript is not on disk
+  yet. An unknown location fails closed.
 - **Publication.** A live write drops the session-list cache and marks the
   catalog changed. The badge appears on the normal live-state refetch.
 - **Idempotency.** A repeat `/review` for the same number does not reorder or
@@ -62,7 +68,8 @@ Bind the PR when the daemon admits a `/review` prompt.
 
 - The backfill tests cover a live binding without a transcript, the archive
   and URL forms, single-session scope, the catalog mark, file-target
-  rejection, and the untrusted gate.
+  rejection, the untrusted gate, cap eviction, and the archive/delete
+  lifecycle races.
 - The prompt-route tests cover the hand-off of the first text block and the
   rejection of a later block and of an untrusted workspace.
 - `packages/cli` typecheck, ESLint, and Prettier pass.
