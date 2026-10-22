@@ -293,6 +293,9 @@
         </profile>
         <profile>
             <id>mysql-integration</id>
+            <properties>
+                <mysql.integration.forks>1</mysql.integration.forks>
+            </properties>
             <build>
                 <plugins>
                     <plugin>
@@ -303,6 +306,18 @@
                             <excludes>
                                 <exclude>**/Hosted*IT.java</exclude>
                             </excludes>
+                            <forkCount>${mysql.integration.forks}</forkCount>
+                            <reuseForks>true</reuseForks>
+                            <systemPropertyVariables>
+                                <qwen.mysql.forkCount>${mysql.integration.forks}</qwen.mysql.forkCount>
+                                <!-- A literal prefix preserves the late fork placeholder through Maven interpolation. -->
+                                <qwen.mysql.forkNumber>0${surefire.forkNumber}</qwen.mysql.forkNumber>
+                            </systemPropertyVariables>
+                            <properties>
+                                <configurationParameters>
+                                    junit.jupiter.execution.parallel.enabled = false
+                                </configurationParameters>
+                            </properties>
                         </configuration>
                         <executions>
                             <execution>
@@ -599,8 +614,10 @@
                                  healthy 10612 s, fork 11212 s, Verify 197 minutes. The FG11d
                                  cancel-isolation cell adds 11 s (2x its measured 5.1 s):
                                  healthy 10623 s, fork 11223 s, Verify 198 minutes
-                                 (11823 s of fork plus wrap no longer fit 197). -->
-                            <forkedProcessTimeoutInSeconds>11223</forkedProcessTimeoutInSeconds>
+                                 (11823 s of fork plus wrap no longer fit 197). The FG11d queue-one cell
+                                 adds 13 s (2x its measured 6.5 s): healthy 10636 s, fork 11236 s,
+                                 Verify 198 minutes. -->
+                            <forkedProcessTimeoutInSeconds>11236</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

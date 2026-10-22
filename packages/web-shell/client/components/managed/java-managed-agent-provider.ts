@@ -1,3 +1,4 @@
+import type { components } from './generated/managed-agent-api';
 import {
   isJavaAgentResyncRequired,
   JavaManagedAgentClient,
@@ -14,6 +15,7 @@ import { managedRequestId } from './managed-session-storage';
 import { isManagedApprovalMode } from './managed-agent-provider';
 import { browserArtifactSave } from './managed-artifact-download';
 import type { ManagedArtifactSave } from './managed-tool-result-types';
+import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
 import type {
   ManagedAgentCommandOptions,
   ManagedAgentPendingAction,
@@ -151,6 +153,44 @@ export function createJavaManagedAgentProvider(
   }
   return {
     kind: 'java',
+    lifecycle: {
+      submit: (kind, sessionId, command) =>
+        client.lifecycleCommand(
+          kind,
+          {
+            sessionId,
+            idempotencyKey: command.idempotencyKey,
+            requestId: managedRequestId(),
+          },
+          command.signal,
+        ),
+      async unarchive(sessionId, command) {
+        return toSessionSummary(
+          await client.unarchiveSession(
+            {
+              sessionId,
+              idempotencyKey: command.idempotencyKey,
+              requestId: managedRequestId(),
+            },
+            command.signal,
+          ),
+        );
+      },
+      async query(sessionId, operationId, request) {
+        const operation = await client.queryOperation(
+          { sessionId, operationId },
+          request.signal,
+        );
+        if (!['close', 'archive', 'delete'].includes(operation.type))
+          throw new Error('Unexpected lifecycle operation type');
+        return operation as components['schemas']['WebShellCommandOperation'];
+      },
+    },
+    exportSnapshot: (sessionId, request) =>
+      client.exportSnapshot(
+        { sessionId, cursor: request.cursor, limit: 100 },
+        request.signal,
+      ),
     storageKey: storageKey(options),
     workspaceFiles: {
       query: (request, command) =>
@@ -160,6 +200,7 @@ export function createJavaManagedAgentProvider(
     },
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    titleSearch: true,
     recovery: {
       query: (sessionId, request) =>
         client.getRecovery(sessionId, request.signal),
@@ -205,6 +246,54 @@ export function createJavaManagedAgentProvider(
     mcp: {
       list: (sessionId, request) =>
         client.getSessionMcp(sessionId, request.signal),
+    },
+    mcpManagement: {
+      storageScope: options.productScope?.trim()
+        ? storageKey(options)
+        : undefined,
+      async query(sessionId, request) {
+        return requireMcpManagementSnapshot(
+          await client.queryMcpManagement(
+            { sessionId, requestId: managedRequestId() },
+            request.signal,
+          ),
+          sessionId,
+        );
+      },
+      async submit(sessionId, command, request) {
+        const snapshot = requireMcpManagementSnapshot(
+          await client.submitMcpManagement(
+            {
+              ...command,
+              sessionId,
+              requestId: request.requestId,
+              idempotencyKey: request.idempotencyKey,
+            },
+            request.signal,
+          ),
+          sessionId,
+        );
+        if (
+          !snapshot.operation ||
+          snapshot.operation.action !== command.action ||
+          snapshot.operation.serverId !== command.serverId ||
+          snapshot.operation.revision !== command.expectedRevision + 1
+        )
+          throw new Error('Managed MCP operation identity mismatch');
+        return snapshot;
+      },
+      async operation(sessionId, operationId, request) {
+        const snapshot = requireMcpManagementSnapshot(
+          await client.getMcpManagementOperation(
+            { sessionId, operationId, requestId: managedRequestId() },
+            request.signal,
+          ),
+          sessionId,
+        );
+        if (snapshot.operation?.operationId !== operationId)
+          throw new Error('Managed MCP operation identity mismatch');
+        return snapshot;
+      },
     },
     tasks: {
       list: (sessionId, request) =>
@@ -622,7 +711,12 @@ export function createJavaManagedAgentProvider(
       : {}),
     async listSessions(request) {
       const page = await client.listSessions(
-        { cursor: request.cursor, limit: request.limit },
+        {
+          cursor: request.cursor,
+          limit: request.limit,
+          archiveState: request.archiveState,
+          titleQuery: request.titleQuery,
+        },
         request.signal,
       );
       return {
@@ -740,6 +834,7 @@ function toSessionSummary(
   session: JavaAgentSession,
 ): ManagedAgentSessionSummary {
   const turnStatus = session.activeTurn?.status.toLowerCase();
+  const recoveryBlocked = turnStatus === 'recovery_blocked';
   const runtimeState = toRuntimeState(session.environment?.state);
   const phase = toPhase(turnStatus, runtimeState);
   const active =
@@ -781,6 +876,9 @@ function toSessionSummary(
     ...(session.contextCompressionOperationId
       ? { contextCompressionOperationId: session.contextCompressionOperationId }
       : {}),
+    lifecycleStatus: session.status.toLowerCase(),
+    lastSequence: session.lastSequence,
+    lifecycleOperation: session.lifecycleOperation,
     activeTurnId: session.activeTurn?.turnId,
     ...(session.recovery ? { recovery: session.recovery } : {}),
     title: session.title || session.sessionId,
@@ -794,6 +892,18 @@ function toSessionSummary(
     runtimeReady: runtimeState === 'ready',
     runtimeState,
     capabilities: {
+      ...(session.capabilities?.sessionClose === true
+        ? { sessionClose: true }
+        : {}),
+      ...(session.capabilities?.sessionArchive === true
+        ? { sessionArchive: true }
+        : {}),
+      ...(session.capabilities?.sessionUnarchive === true
+        ? { sessionUnarchive: true }
+        : {}),
+      ...(session.capabilities?.sessionDelete === true
+        ? { sessionDelete: true }
+        : {}),
       ...(session.capabilities?.rename === true ? { canRename: true } : {}),
       ...(session.capabilities?.tasks === true ? { tasks: true } : {}),
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
@@ -801,6 +911,7 @@ function toSessionSummary(
         sessionActive &&
         !active &&
         !session.contextCompressionOperationId &&
+        !recoveryBlocked &&
         session.recovery?.nextTurnAllowed !== false &&
         (!session.workspace ||
           (workspaceTurns && session.capabilities?.foregroundShell !== false)),
@@ -809,7 +920,7 @@ function toSessionSummary(
       // server refuses anyone else.
       canCancel:
         sessionActive &&
-        active &&
+        (active || recoveryBlocked) &&
         turnStatus !== 'cancelling' &&
         session.recovery?.actions.cancel !== false,
       ...(session.capabilities?.durableOperations === true
@@ -1003,6 +1114,22 @@ function requireTaskCancelOperation(
   )
     throw new Error('Task cancel operation identity mismatch');
   return operation as ManagedTaskCancelOperation;
+}
+
+function requireMcpManagementSnapshot(
+  snapshot: ManagedMcpManagementSnapshot,
+  sessionId: string,
+): ManagedMcpManagementSnapshot {
+  if (
+    snapshot.sessionId !== sessionId ||
+    !Number.isSafeInteger(snapshot.revision) ||
+    snapshot.revision < 0 ||
+    typeof snapshot.supported !== 'boolean' ||
+    !Array.isArray(snapshot.servers) ||
+    !Array.isArray(snapshot.availableServers)
+  )
+    throw new Error('Managed MCP Session identity mismatch');
+  return snapshot;
 }
 
 function storageKey(options: JavaManagedAgentProviderOptions): string {

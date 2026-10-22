@@ -1,4 +1,8 @@
 import type { components } from './generated/managed-agent-api';
+import type {
+  ManagedMcpManagementCommand,
+  ManagedMcpManagementSnapshot,
+} from './managed-mcp-management-types';
 import type { ManagedToolResultReader } from './managed-tool-result-types';
 
 export type ManagedAgentSessionPhase =
@@ -12,6 +16,12 @@ export type ManagedAgentSessionPhase =
   | 'completed'
   | 'failed'
   | 'cancelled';
+
+export function isManagedSessionRunning(
+  phase: ManagedAgentSessionPhase,
+): boolean {
+  return !['created', 'completed', 'failed', 'cancelled'].includes(phase);
+}
 
 export type ManagedAgentRuntimeState =
   | 'unknown'
@@ -83,6 +93,16 @@ export interface ManagedModelChangeResult {
   replayed: boolean;
 }
 
+export type ManagedLifecycleKind = 'close' | 'archive' | 'delete';
+export type ManagedLifecycleAction =
+  | ManagedLifecycleKind
+  | 'unarchive'
+  | 'close_archive';
+export type ManagedLifecycleOperation =
+  components['schemas']['WebShellCommandOperation'];
+export type ManagedExportPage = components['schemas']['WebShellExportPage'];
+export type ManagedExportItem = components['schemas']['WebShellItem'];
+
 export interface ManagedAgentSessionSummary {
   sessionId: string;
   agentId?: string;
@@ -95,6 +115,9 @@ export interface ManagedAgentSessionSummary {
   modelSelection?: ManagedModelSelection;
   compactionRevision?: number;
   contextCompressionOperationId?: string;
+  lifecycleStatus?: string;
+  lastSequence?: number;
+  lifecycleOperation?: components['schemas']['WebShellLifecycleOperation'];
   activeTurnId?: string;
   title: string;
   workspaceCwd?: string;
@@ -114,6 +137,10 @@ export interface ManagedAgentSessionSummary {
     canSend: boolean;
     canCancel: boolean;
     canRename?: boolean;
+    sessionClose?: boolean;
+    sessionArchive?: boolean;
+    sessionUnarchive?: boolean;
+    sessionDelete?: boolean;
     actions?: boolean;
     tasks?: boolean;
     artifacts?: boolean;
@@ -243,9 +270,31 @@ export interface ManagedAgentPendingAction {
 
 export interface ManagedAgentProvider {
   readonly kind: 'daemon' | 'java';
+  readonly lifecycle?: {
+    submit(
+      kind: ManagedLifecycleKind,
+      sessionId: string,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedLifecycleOperation>;
+    unarchive(
+      sessionId: string,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedAgentSessionSummary>;
+    query(
+      sessionId: string,
+      operationId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedLifecycleOperation>;
+  };
+  exportSnapshot?(
+    sessionId: string,
+    options: ManagedAgentRequestOptions & { cursor?: string },
+  ): Promise<ManagedExportPage>;
   readonly storageKey: string;
   readonly canCancel: boolean;
   readonly acceptsWorkspaceCwd: boolean;
+  /** Present when the provider can filter the complete Session history by title. */
+  readonly titleSearch?: boolean;
   readonly recovery?: {
     query(
       sessionId: string,
@@ -273,6 +322,24 @@ export interface ManagedAgentProvider {
       sessionId: string,
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedSessionMcp>;
+  };
+  readonly mcpManagement?: {
+    /** Explicit tenant/actor namespace for pending commands saved in this tab. */
+    readonly storageScope?: string;
+    query(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedMcpManagementSnapshot>;
+    submit(
+      sessionId: string,
+      command: ManagedMcpManagementCommand,
+      options: ManagedAgentCommandOptions & { requestId: string },
+    ): Promise<ManagedMcpManagementSnapshot>;
+    operation(
+      sessionId: string,
+      operationId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedMcpManagementSnapshot>;
   };
   /** Present when the provider can serve Hosted permission Actions. */
   readonly actions?: {
@@ -451,6 +518,8 @@ export interface ManagedAgentProvider {
   listSessions(
     options: ManagedAgentRequestOptions & {
       workspaceCwd?: string;
+      archiveState?: 'unarchived' | 'archived' | 'all';
+      titleQuery?: string;
       limit?: number;
       cursor?: string;
     },

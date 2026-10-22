@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.daemon.CreateHarnessSession;
 import com.alibaba.qwen.code.daemon.DaemonApprovalMode;
 import com.alibaba.qwen.code.daemon.DaemonEvent;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.GetHarnessTranscript;
 import com.alibaba.qwen.code.daemon.HarnessEventStream;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
@@ -68,6 +69,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final Set<AttachmentKey> pendingRecovery =
             ConcurrentHashMap.newKeySet();
     private final Map<AttachmentKey, HarnessSessionRef> attachments =
+            new ConcurrentHashMap<>();
+    // A management-only ref carries no takeover proof for ordinary recovery or cancellation.
+    private final Map<AttachmentKey, HarnessSessionRef> mcpManagementAttachments =
             new ConcurrentHashMap<>();
     // Single flight for the first attachment of a Session. computeIfAbsent
     // would run the blocking Harness call under the map bin monitor, which
@@ -314,6 +318,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
         }
         attachments.remove(key);
+        mcpManagementAttachments.remove(key);
         pendingRecovery.remove(key);
     }
 
@@ -343,6 +348,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private Attachment doCreateOrLoad(String tenantId, String sessionId,
             boolean loadExisting, boolean passiveManagedRuntimeRecovery,
             boolean actionResponse) {
+        return doCreateOrLoad(tenantId, sessionId, loadExisting, passiveManagedRuntimeRecovery, actionResponse, false);
+    }
+
+    private Attachment doCreateOrLoad(String tenantId, String sessionId,
+            boolean loadExisting, boolean passiveManagedRuntimeRecovery,
+            boolean actionResponse, boolean mcpManagementOnly) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         requireShellApproval(session);
         if (session.workspace() != null) {
@@ -366,10 +377,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
         requireApprovalSelectionSupport(session);
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
-        HarnessSessionRef cached = attachments.get(key);
+        if (!mcpManagementOnly && !loadExisting && !attachments.containsKey(key)
+                && mcpManagementAttachments.containsKey(key)) {
+            return doCreateOrLoad(tenantId, sessionId, true, true, actionResponse, false);
+        }
+        Map<AttachmentKey, HarnessSessionRef> selectedAttachments =
+                mcpManagementOnly ? mcpManagementAttachments : attachments;
+        HarnessSessionRef cached = selectedAttachments.get(key);
         HarnessSessionRef attached = (passiveManagedRuntimeRecovery && loadExisting)
                 || (cached != null && cached.isRecoveryCleanupOnly())
-                ? load(session, passiveManagedRuntimeRecovery) : cached;
+                ? load(session, passiveManagedRuntimeRecovery, false, false, mcpManagementOnly) : cached;
         boolean minted = cached != null && cached.isRecoveryCleanupOnly();
         if (attached == null) {
             AttachmentLock slot = attachmentLocks.compute(key,
@@ -381,11 +398,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     });
             slot.lock.lock();
             try {
-                attached = attachments.get(key);
+                attached = selectedAttachments.get(key);
                 if (attached == null) {
-                    attached = loadExisting ? load(session, passiveManagedRuntimeRecovery)
-                            : create(session, passiveManagedRuntimeRecovery);
-                    attachments.put(key, attached);
+                    attached = loadExisting ? load(session, passiveManagedRuntimeRecovery, false, false, mcpManagementOnly)
+                            : create(session, passiveManagedRuntimeRecovery, mcpManagementOnly);
+                    selectedAttachments.put(key, attached);
                     minted = true;
                 }
             } finally {
@@ -394,11 +411,22 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         --held.holders == 0 ? null : held);
             }
         }
-        if (session.workspace() != null
-                && !approvalModeConfirmed(session, attached, minted)) {
-            attachments.remove(key, attached);
-            throw new IllegalStateException(
-                    "Hosted Harness did not confirm the Session approval mode");
+        try {
+            if (session.workspace() != null
+                    && !approvalModeConfirmed(session, attached, minted && !mcpManagementOnly)) {
+                selectedAttachments.remove(key, attached);
+                throw new IllegalStateException(
+                        "Hosted Harness did not confirm the Session approval mode");
+            }
+        } catch (RuntimeException error) {
+            if (mcpManagementOnly) {
+                selectedAttachments.remove(key, attached);
+            }
+            throw error;
+        }
+        if (mcpManagementOnly) {
+            return new Attachment(attached.getHarnessBootId(), null,
+                    attached.getHarnessLastEventId(), attached.getHarnessEventEpoch());
         }
         HarnessSessionRef loaded = attached;
         attachments.compute(key, (ignored, held) -> {
@@ -512,6 +540,51 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             return sessionStore.isEnabled() && client().capabilities().getFeatures().contains("session-skills/2");
         } catch (RuntimeException unavailable) {
             return false;
+        }
+    }
+
+    @Override
+    public boolean supportsMcpManagement() {
+        try {
+            return sessionStore.isEnabled() && client().capabilities().getFeatures().contains("session-mcp-management/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
+    public Map<String, Object> mcpManagement(String tenantId, String sessionId) {
+        try {
+            requireReadyForNewWork(tenantId, sessionId, false);
+            HarnessSessionRef ref = mcpManagementAttachment(tenantId, sessionId, true);
+            return client().mcpManagement(ref);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
+    public Map<String, Object> manageMcp(String tenantId, String sessionId, Map<String, Object> command) {
+        try {
+            requireReadyForNewWork(tenantId, sessionId, false);
+            HarnessSessionRef ref = mcpManagementAttachment(tenantId, sessionId, true);
+            return client().manageMcp(ref, command);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
+    public Map<String, Object> mcpManagementOperation(String tenantId, String sessionId, String operationId) {
+        try {
+            requireReadyForNewWork(tenantId, sessionId, false);
+            HarnessSessionRef ref = mcpManagementAttachment(tenantId, sessionId, false);
+            return client().mcpManagementOperation(ref, operationId);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
         }
     }
 
@@ -701,7 +774,27 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private SourceStream doStream(String tenantId, String sessionId,
             long lastEventId, String eventEpoch) {
         HarnessSessionRef ref = attachment(tenantId, sessionId, false);
-        HarnessEventStream stream = client().streamEvents(
+        return openStream(client(), ref, lastEventId, eventEpoch);
+    }
+
+    @Override
+    public SourceStream observeStream(String tenantId, String sessionId, String bootId,
+            long lastEventId, String eventEpoch) {
+        requireShellApproval(sessions.requireSession(tenantId, sessionId));
+        HarnessSessionRef ref = attachments.get(new AttachmentKey(tenantId, sessionId));
+        if (bootId == null || ref == null || !bootId.equals(ref.getHarnessBootId())) {
+            throw new IllegalStateException("Original Harness attachment is unavailable");
+        }
+        HostedHarnessClient source = client();
+        if (!bootId.equals(source.capabilities().getBootId())) {
+            throw new IllegalStateException("Original Harness generation is unavailable");
+        }
+        return openStream(source, ref, lastEventId, eventEpoch);
+    }
+
+    private SourceStream openStream(HostedHarnessClient source, HarnessSessionRef ref,
+            long lastEventId, String eventEpoch) {
+        HarnessEventStream stream = source.streamEvents(
                 StreamHarnessEvents.builder()
                         .session(ref)
                         .lastEventId(lastEventId)
@@ -719,6 +812,20 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 return event == null ? null : new SourceEvent(event.getId(),
                         event.getType(), event.getData(),
                         event.getPromptId(), event.getMetadata());
+            }
+
+            @Override
+            public boolean recoveryBlocked(long afterEventId) {
+                var status = source.getStatus(ref);
+                Object blocked = status.getRaw().get("recoveryBlocked");
+                if (blocked != null && !(blocked instanceof Boolean)) {
+                    throw new IllegalStateException(
+                            "Hosted Harness recoveryBlocked is not a boolean");
+                }
+                return !status.hasActivePrompt() && Boolean.TRUE.equals(blocked)
+                        && source.getTranscript(GetHarnessTranscript.builder()
+                                .session(ref).cursor(Long.toString(afterEventId)).limit(1).build())
+                                .getEvents().isEmpty();
             }
 
             @Override
@@ -1063,6 +1170,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     private String doCloseSession(String tenantId, String sessionId) {
         attachments.remove(new AttachmentKey(tenantId, sessionId));
+        mcpManagementAttachments.remove(new AttachmentKey(tenantId, sessionId));
         pendingRecovery.remove(new AttachmentKey(tenantId, sessionId));
         HostedHarnessClient current = client();
         current.closeSession(sessionId);
@@ -1090,6 +1198,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             current.close();
         }
         attachments.clear();
+        mcpManagementAttachments.clear();
         pendingRecovery.clear();
     }
 
@@ -1121,6 +1230,17 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             attachment = attachments.get(key);
         }
         return attachment;
+    }
+
+    private HarnessSessionRef mcpManagementAttachment(String tenantId, String sessionId, boolean initialize) {
+        AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+        HarnessSessionRef attached = attachments.get(key);
+        if (attached == null) {
+            SessionRecord session = sessions.requireSession(tenantId, sessionId);
+            doCreateOrLoad(tenantId, sessionId, !initialize || session.harnessBootId() != null, false, false, true);
+            attached = mcpManagementAttachments.get(key);
+        }
+        return attached;
     }
 
     private HarnessSessionRef attachment(String tenantId, String sessionId, boolean newWork) {
@@ -1186,7 +1306,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         return session;
     }
 
-    private HarnessSessionRef create(SessionRecord session, boolean passiveManagedRuntimeRecovery) {
+    private HarnessSessionRef create(SessionRecord session, boolean passiveManagedRuntimeRecovery, boolean mcpManagementOnly) {
         requireApprovalSelectionSupport(session);
         try {
             String profile = toolProfile(session);
@@ -1244,33 +1364,33 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             if (error.getStatusCode() != 409) {
                 throw error;
             }
-            return load(session, passiveManagedRuntimeRecovery);
+            return load(session, passiveManagedRuntimeRecovery, false, false, mcpManagementOnly);
         } catch (SessionCreationOutcomeUnknownException error) {
-            return load(session, passiveManagedRuntimeRecovery);
+            return load(session, passiveManagedRuntimeRecovery, false, false, mcpManagementOnly);
         }
-    }
-
-    private HarnessSessionRef load(SessionRecord session,
-            boolean passiveManagedRuntimeRecovery) {
-        return load(session, passiveManagedRuntimeRecovery, false);
-    }
-
-    private HarnessSessionRef load(SessionRecord session,
-            boolean passiveManagedRuntimeRecovery,
-            boolean driveRuntimeRecovery) {
-        return load(session, passiveManagedRuntimeRecovery,
-                driveRuntimeRecovery, false);
     }
 
     private HarnessSessionRef load(SessionRecord session,
             boolean passiveManagedRuntimeRecovery,
             boolean driveRuntimeRecovery, boolean cancellationTakeover) {
-        return load(session, passiveManagedRuntimeRecovery, driveRuntimeRecovery, cancellationTakeover, null);
+        return load(session, passiveManagedRuntimeRecovery, driveRuntimeRecovery, cancellationTakeover, false, null);
+    }
+
+    private HarnessSessionRef load(SessionRecord session,
+            boolean passiveManagedRuntimeRecovery,
+            boolean driveRuntimeRecovery, boolean cancellationTakeover, boolean mcpManagementOnly) {
+        return load(session, passiveManagedRuntimeRecovery, driveRuntimeRecovery, cancellationTakeover, mcpManagementOnly, null);
     }
 
     private HarnessSessionRef load(SessionRecord session,
             boolean passiveManagedRuntimeRecovery,
             boolean driveRuntimeRecovery, boolean cancellationTakeover, String promptId) {
+        return load(session, passiveManagedRuntimeRecovery, driveRuntimeRecovery, cancellationTakeover, false, promptId);
+    }
+
+    private HarnessSessionRef load(SessionRecord session,
+            boolean passiveManagedRuntimeRecovery,
+            boolean driveRuntimeRecovery, boolean cancellationTakeover, boolean mcpManagementOnly, String promptId) {
         if ((cancellationTakeover && session.workspace() != null) || promptId != null) {
             requireTargetedCancellation(promptId);
         }
@@ -1292,7 +1412,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (promptId != null) {
             request.withCancellationPromptId(promptId);
         }
-        return client().loadSession(request);
+        return mcpManagementOnly ? client().loadMcpManagementSession(request) : client().loadSession(request);
     }
 
     @Override
@@ -1718,11 +1838,17 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private List<Map<String, Object>> mcpServers(SessionRecord session) {
-        if (session.agentDefinitionDigest() == null || definitions == null) {
+        if (session.agentDefinitionDigest() == null || definitions == null
+                || WorkspaceToolProfiles.READ.equals(session.toolProfile())) {
             return null;
         }
         List<Map<String, Object>> pins = AgentDefinitionExtensions.mcpServers(
                 definitions.pinnedContent(session).get("mcp_servers"), session.toolProfile());
+        if (!pins.isEmpty() && WorkspaceToolProfiles.SHELL.equals(session.toolProfile())
+                && (!client().capabilities().getFeatures().contains("workspace-shell-mcp/1")
+                        || !client().capabilities().getLifecycleV2Profiles().contains(WorkspaceToolProfiles.SHELL))) {
+            throw new IllegalStateException("Hosted Workspace Shell with MCP is unavailable");
+        }
         return pins.isEmpty() ? null : pins;
     }
 
@@ -1847,6 +1973,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         // recovery path hand out a null report).
         String liveBootId = error.getActualBootId();
         attachments.entrySet().removeIf(entry ->
+                !liveBootId.equals(entry.getValue().getHarnessBootId()));
+        mcpManagementAttachments.entrySet().removeIf(entry ->
                 !liveBootId.equals(entry.getValue().getHarnessBootId()));
         pendingRecovery.retainAll(attachments.keySet());
         if (dropped) {
