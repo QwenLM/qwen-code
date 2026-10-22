@@ -30,7 +30,7 @@
 
 页面可见时每三秒串行刷新聚合审批，独立于任务面板。切换 Session、账号或 Provider 时中止请求并丢弃迟到响应。复用任务面板展示活动数量、待审批、停止中及实际 child 审批模式。任务响应增加 `stopRequested` 和实际 `approvalMode`，任务列表的 `activeChildCount` 返回不受分页影响的活动 child 总数。通过 `childSessionId` 和现有 transcript 读取结果，返回父会话时保留草稿。跟踪取消的 child 至权威终态；取消命令完成本身不足以显示已终止。
 
-[会话生命周期 UI](2026-10-22-managed-session-lifecycle-ui.zh-CN.md) 与 child 委派同时可用。WebShell 生命周期能力保留 actor 所有者校验，公开 child 继续只接收委派输入，并保持不可变策略。按归档状态筛选的 Session 分页和历史导出与聚合 Actions、child transcript 对话框相互独立；打开 child 时保持父会话及其草稿挂载。契约版本 1.84 同时包含生命周期/导出和公开 child 接口。
+[会话生命周期 UI](2026-10-22-managed-session-lifecycle-ui.zh-CN.md) 与 child 委派同时可用。WebShell 生命周期能力保留 actor 所有者校验，公开 child 继续只接收委派输入，并保持不可变策略。按归档状态筛选的 Session 分页和历史导出与聚合 Actions、child transcript 对话框相互独立；打开 child 时保持父会话及其草稿挂载。契约版本 1.85 同时包含生命周期/导出、检查点恢复和公开 child 接口。
 
 ## 验证与发布
 

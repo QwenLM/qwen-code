@@ -1463,7 +1463,9 @@ public class ManagedAgentService {
 
     private static WebShellTurn webShellTurn(TurnSummary turn) {
         return new WebShellTurn(turn.turnId(), turn.sessionId(),
-                turn.status().toLowerCase(Locale.ROOT), turn.createdAt(),
+                AgentStateStore.HARNESS_RECOVERY_BLOCKED.equals(turn.errorCode())
+                        && ("RUNNING".equals(turn.status()) || "ACCEPTED".equals(turn.status()))
+                        ? "recovery_blocked" : turn.status().toLowerCase(Locale.ROOT), turn.createdAt(),
                 turn.completedAt(), turn.errorCode());
     }
 

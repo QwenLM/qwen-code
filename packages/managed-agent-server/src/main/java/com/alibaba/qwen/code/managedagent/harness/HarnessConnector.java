@@ -178,6 +178,12 @@ public interface HarnessConnector extends AutoCloseable {
     SourceStream stream(String tenantId, String sessionId, long lastEventId,
             String eventEpoch);
 
+    /** Reads only an existing original attachment; it must never load or take over execution. */
+    default SourceStream observeStream(String tenantId, String sessionId, String bootId,
+            long lastEventId, String eventEpoch) {
+        throw new UnsupportedOperationException("Read-only Harness observation is unavailable");
+    }
+
     default void resolveAction(
             String tenantId,
             String sessionId,
@@ -320,6 +326,10 @@ public interface HarnessConnector extends AutoCloseable {
         String eventEpoch();
 
         SourceEvent next();
+
+        default boolean recoveryBlocked(long afterEventId) {
+            return false;
+        }
 
         @Override
         void close();

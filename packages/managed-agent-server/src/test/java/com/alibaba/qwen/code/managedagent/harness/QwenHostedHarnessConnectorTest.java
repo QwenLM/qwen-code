@@ -2861,7 +2861,7 @@ class QwenHostedHarnessConnectorTest {
                     ReflectionTestUtils.setField(connector, "client", alive);
                     return ref;
                 });
-        return new Object[] {connector, dead, alive};
+        return new Object[] {connector, dead, alive, ref};
     }
 
     @Test
@@ -2916,6 +2916,95 @@ class QwenHostedHarnessConnectorTest {
         connector.stream("tenant-a", SESSION_ID, 0L, "epoch");
 
         verify(alive).streamEvents(any());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,true,false,true", "true,true,false,false", "false,false,false,false", "false,true,true,false"})
+    void streamRecoveryStatusUsesTheSameInactiveAttachment(boolean active,
+            boolean blocked, boolean pendingTranscript, boolean expected) {
+        Object[] fixture = refetchFixture();
+        QwenHostedHarnessConnector connector = (QwenHostedHarnessConnector) fixture[0];
+        HostedHarnessClient client = (HostedHarnessClient) fixture[2];
+        when(client.streamEvents(any())).thenReturn(mock(HarnessEventStream.class));
+        var status = mock(com.alibaba.qwen.code.daemon.HarnessSessionStatus.class);
+        when(status.hasActivePrompt()).thenReturn(active);
+        when(status.getRaw()).thenReturn(Map.of("recoveryBlocked", blocked));
+        when(client.getStatus(any())).thenReturn(status);
+        var page = mock(com.alibaba.qwen.code.daemon.HarnessTranscriptPage.class);
+        when(page.getEvents()).thenReturn(pendingTranscript
+                ? List.<Object>of(Map.of("type", "turn_complete")) : List.of());
+        when(client.getTranscript(any())).thenReturn(page);
+        try (var stream = connector.stream("tenant-a", SESSION_ID, 0L, "epoch")) {
+            assertThat(stream.recoveryBlocked(42L)).isEqualTo(expected);
+        }
+        verify(client).getStatus((HarnessSessionRef) fixture[3]);
+        if (!active && blocked) {
+            var query = org.mockito.ArgumentCaptor.forClass(com.alibaba.qwen.code.daemon.GetHarnessTranscript.class);
+            verify(client).getTranscript(query.capture());
+            assertThat(ReflectionTestUtils.getField(query.getValue(), "session")).isSameAs(fixture[3]);
+            assertThat(ReflectionTestUtils.getField(query.getValue(), "cursor")).isEqualTo("42");
+            assertThat(ReflectionTestUtils.getField(query.getValue(), "limit")).isEqualTo(1);
+        } else {
+            verify(client, never()).getTranscript(any());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"cold", "attachment-generation", "client-generation"})
+    void readOnlyObservationNeverLoadsAMissingOrChangedAttachment(String mode) {
+        Object[] fixture = refetchFixture();
+        QwenHostedHarnessConnector connector = (QwenHostedHarnessConnector) fixture[0];
+        HostedHarnessClient original = (HostedHarnessClient) fixture[1];
+        HostedHarnessClient client = (HostedHarnessClient) fixture[2];
+        if (!"cold".equals(mode)) {
+            connector.createOrLoad("tenant-a", SESSION_ID, true);
+            clearInvocations(original, client);
+        }
+        if ("client-generation".equals(mode)) {
+            when(client.capabilities().getBootId()).thenReturn(NEW_BOOT_ID);
+        }
+        String boot = "attachment-generation".equals(mode) ? NEW_BOOT_ID : BOOT_ID;
+        assertThatThrownBy(() -> connector.observeStream("tenant-a", SESSION_ID, boot, 42, "epoch"))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("unavailable");
+        for (HostedHarnessClient candidate : List.of(original, client)) {
+            verify(candidate, never()).loadSession(any());
+            verify(candidate, never()).createSession(any());
+            verify(candidate, never()).streamEvents(any());
+        }
+    }
+
+    @Test
+    void readOnlyObservationKeepsItsOriginalClientAndAttachment() {
+        Object[] fixture = refetchFixture();
+        QwenHostedHarnessConnector connector = (QwenHostedHarnessConnector) fixture[0];
+        HostedHarnessClient original = (HostedHarnessClient) fixture[1];
+        HostedHarnessClient client = (HostedHarnessClient) fixture[2];
+        HarnessSessionRef ref = (HarnessSessionRef) fixture[3];
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+        clearInvocations(original, client);
+        HarnessEventStream events = mock(HarnessEventStream.class);
+        when(events.getEventEpoch()).thenReturn("epoch");
+        when(client.streamEvents(any())).thenReturn(events);
+        var status = mock(com.alibaba.qwen.code.daemon.HarnessSessionStatus.class);
+        when(status.getRaw()).thenReturn(Map.of("recoveryBlocked", true));
+        when(client.getStatus(ref)).thenReturn(status);
+        var page = mock(com.alibaba.qwen.code.daemon.HarnessTranscriptPage.class);
+        when(page.getEvents()).thenReturn(List.of());
+        when(client.getTranscript(any())).thenReturn(page);
+        try (var stream = connector.observeStream("tenant-a", SESSION_ID, BOOT_ID, 42, "epoch")) {
+            ReflectionTestUtils.setField(connector, "client", original);
+            assertThat(stream.recoveryBlocked(42)).isTrue();
+        }
+        var request = ArgumentCaptor.forClass(com.alibaba.qwen.code.daemon.StreamHarnessEvents.class);
+        verify(client).streamEvents(request.capture());
+        assertThat(ReflectionTestUtils.getField(request.getValue(), "session")).isSameAs(ref);
+        assertThat(ReflectionTestUtils.getField(request.getValue(), "eventEpoch")).isEqualTo("epoch");
+        assertThat(ReflectionTestUtils.getField(request.getValue(), "lastEventId")).isEqualTo(42L);
+        verify(client).getStatus(ref);
+        verify(events).close();
+        verifyNoInteractions(original);
+        verify(client, never()).loadSession(any());
+        verify(client, never()).createSession(any());
     }
 
     @Test

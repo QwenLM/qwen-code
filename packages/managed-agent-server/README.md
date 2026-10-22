@@ -211,7 +211,13 @@ publishes an immutable prerelease. See
 [Managed Agent reference deployment](../../docs/users/managed-agent-reference-deployment.md)
 and the [distribution design](../../docs/design/2026-10-14-managed-agent-reference-distribution.md).
 The bundled launcher also supports `--check`, a read-only preflight for
-configuration, Harness reachability, ports and database grants.
+configuration, Harness reachability, ports and database grants. When the
+database check succeeds, the output includes a `capacity` line with grouped
+counts from `ma_runtime_binding`, `ma_runtime_session` and `ma_operation`.
+These are durable logical records for capacity triage; they are not a count of
+physical worker processes or memory usage. The line explicitly reports
+physical processes and memory as unknown, and does not infer idle work or
+reclaim anything. If the database check fails, capacity remains skipped.
 
 ## Prerequisites
 
@@ -1412,7 +1418,7 @@ QWEN_MANAGED_HOOK_CGROUP_ROOT=/sys/fs/cgroup/your-delegated-root \
   -Dmysql.user=root -Dmysql.password= verify
 ```
 
-Missing Linux/MySQL/cgroup prerequisites are not acceptance. This selector verifies only the extension class; it does not establish that the complete Hosted profile passed. Evidence is saved before forced fixture teardown under `target/failsafe-reports/hosted-extension-evidence/` and is included in the existing CI report upload. The interrupted MCP case leaves its public Turn `RUNNING`, its ordinary execution `UNKNOWN`, and rejects new input and close with `409 turn_active`; successful cleanup is established by the separate healthy-close case. This gate uses a controlled loopback model and local stdio transport, so it does not establish upstream-model, remote transport, reboot, cross-machine, SSH MCP/Hook, or production acceptance. See the complete [English design](../../docs/design/2026-10-16-managed-extension-acceptance.md) and [Chinese design](../../docs/design/2026-10-16-managed-extension-acceptance.zh-CN.md).
+Missing Linux/MySQL/cgroup prerequisites are not acceptance. This selector verifies only the extension class; it does not establish that the complete Hosted profile passed. Evidence is saved before forced fixture teardown under `target/failsafe-reports/hosted-extension-evidence/` and is included in the existing CI report upload. The interrupted MCP case leaves its public Turn `RUNNING` with durable `ma_turn.error_code = hosted_runtime_recovery_blocked` and ordinary execution `UNKNOWN`, rejects new input and close with `409 turn_active`, and does not replay the physical effect; successful cleanup is established by the separate healthy-close case. This gate uses a controlled loopback model and local stdio transport, so it does not establish upstream-model, remote transport, reboot, cross-machine, SSH MCP/Hook, or production acceptance. See the complete [English design](../../docs/design/2026-10-16-managed-extension-acceptance.md) and [Chinese design](../../docs/design/2026-10-16-managed-extension-acceptance.zh-CN.md).
 
 ## Real-model end-to-end check
 
