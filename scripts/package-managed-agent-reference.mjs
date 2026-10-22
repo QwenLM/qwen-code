@@ -261,11 +261,8 @@ export async function createReferenceDistribution({
     path.join(root, 'packages/cli/src/serve/capabilities.ts'),
     'utf8',
   );
-  const brokerProvider = await readFile(
-    path.join(
-      root,
-      'packages/cli/src/serve/broker-managed-runtime-provider.ts',
-    ),
+  const brokerClient = await readFile(
+    path.join(root, 'packages/cli/src/serve/managed-runtime-broker-client.ts'),
     'utf8',
   );
   const applicationConfiguration = await readFile(
@@ -422,7 +419,7 @@ export async function createReferenceDistribution({
       ),
       managedRuntimeBrokerProtocolVersion: Number(
         match(
-          brokerProvider,
+          brokerClient,
           /MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION = (\d+)/,
           'Runtime Broker protocol version',
         ),

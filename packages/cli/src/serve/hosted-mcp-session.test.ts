@@ -875,22 +875,19 @@ it('does not release the owner until the physical drain receipt is durably commi
 });
 
 it.each([
-  { status: 409, code: 'runtime_session_not_ready', retry: true, held: false },
+  { status: 409, code: 'runtime_session_not_ready' },
   {
     status: 409,
     code: 'runtime_session_not_acquirable',
-    retry: true,
-    held: false,
   },
-  { status: 409, code: 'runtime_session_not_ready', retry: true, held: true },
-  { status: 503, code: 'runtime_session_not_ready', retry: false, held: false },
-  { status: 409, code: 'runtime_admission_closed', retry: false, held: false },
-  { status: 409, code: 'runtime_session_conflict', retry: false, held: false },
-  { status: 403, code: 'workspace_access_denied', retry: false, held: false },
-  { status: 0, code: 'network failure', retry: false, held: false },
+  { status: 503, code: 'runtime_session_not_ready' },
+  { status: 409, code: 'runtime_admission_closed' },
+  { status: 409, code: 'runtime_session_conflict' },
+  { status: 403, code: 'workspace_access_denied' },
+  { status: 0, code: 'network failure' },
 ])(
-  'recovers legacy releasing records only after a closed-owner rejection ($status $code, held: $held)',
-  async ({ status, code, retry, held }) => {
+  'refuses an owner rejection before the drain receipt is committed ($status $code)',
+  async ({ status, code }) => {
     await mcp.ensureReady();
     const saved =
       session.authority.extensionRecordsInDomain('mcp_configuration')[0];
@@ -900,7 +897,7 @@ it.each([
     };
     await session.authority.commitExtensionRecord(
       {
-        operation: 'legacy-release',
+        operation: 'release-started',
         commandId: randomUUID(),
         sessionKey: session.authority.sessionHeader.sessionKey,
         contentDigest: 'a'.repeat(64),
@@ -921,21 +918,15 @@ it.each([
       failure,
     );
     const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
-    if (held)
-      release.mockRejectedValue(new Error('still owns unfinished work'));
-    if (retry && !held) await mcp.close();
-    else
-      await expect(mcp.close()).rejects.toThrow(
-        held ? 'still owns unfinished work' : failure.message,
-      );
+    await expect(mcp.close()).rejects.toThrow(failure.message);
     expect(mcp.broker.runtimeSessionId).toBe(owner);
-    expect(release).toHaveBeenCalledTimes(retry ? 1 : 0);
+    expect(release).not.toHaveBeenCalled();
     expect(
       parseMcpConfiguration(
         session.authority.extensionRecordsInDomain('mcp_configuration')[0]
           .record,
       ).releaseState,
-    ).toBe(retry && !held ? 'released' : 'releasing');
+    ).toBe('releasing');
     expect(
       requests.filter((entry) => entry.kind === 'mcp-release'),
     ).toHaveLength(0);
