@@ -17,7 +17,8 @@ import { BackgroundTasksPill } from './background-view/BackgroundTasksPill.js';
 import { MCPHealthPill } from './mcp/MCPHealthPill.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 
-import { MAX_STATUS_LINES, useStatusLine } from '../hooks/useStatusLine.js';
+import { MAX_STATUS_LINES } from '../hooks/useStatusLine.js';
+import { useStatusLine } from '../hooks/use-ink-status-line.js';
 import { useConfigInitMessage } from '../hooks/useConfigInitMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
