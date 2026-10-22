@@ -1964,8 +1964,11 @@ class HostedAutomationFaultGatesIT {
         waiting().atMost(Duration.ofSeconds(60)).until(() -> runState(queued) != null);
         assertThat(runState(queued)).as("the queued run is committed, not settled")
                 .isNotIn("cancelled", "completed", "failed");
-        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("manual:fg11d-queue-second"))
-                .as("the queued input never reached the model").isEmpty();
+        // The parked turn, not the overlap arm, is what holds the queued input, so this
+        // is an observation over a dwell rather than an attribution to `queue_one`.
+        waiting().atMost(Duration.ofSeconds(2)).during(Duration.ofMillis(1500))
+                .until(() -> modelPrompts.stream().noneMatch(
+                        prompt -> prompt.contains("manual:fg11d-queue-second")));
         assertThat(jdbc.queryForMap("SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
                 + " AND schedule_id = ? AND occurrence_key = ?", tenant, id, "manual:fg11d-queue-second"))
                 .as("the queued occurrence is recorded as fired").containsEntry("outcome", "fired");
