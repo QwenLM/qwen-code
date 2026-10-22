@@ -101,6 +101,13 @@ drop fd 9 so a survivor
 cannot retain the lock. A hold now measures the copy instead of the suite, and
 the fast tier's 90-minute budget is again far above one hold.
 
+The test job follows the same rule. Its suite was the other long hold: on
+2026-10-22 the full-tier Java 21 leg of run 39754414693 ran for 89 minutes on
+the same host as run 39771949573's fast-tier job, which waited out its
+90-minute budget and failed five seconds after that leg ended. Its Maven runs
+now resolve from the job-local repository seeded from `~/.m2`, and only its
+write-back takes the lock.
+
 ### Fast-tier priority
 
 The FIFO queue bounds a waiter by its position, but it still puts a fast-tier
@@ -209,8 +216,8 @@ order this section exists to prevent.
   head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper and the
-  `sdk_java_lock_acquire 5400` budget at each acquisition site, the MariaDB
-  lane's Maven runs above its acquisition and its write-back children's fd 9
+  `sdk_java_lock_acquire 5400` budget at each acquisition site, both jobs'
+  Maven runs above their acquisition, their write-back children's fd 9
   close, and the `.size-baseline` records the workflow's new size.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
@@ -218,7 +225,9 @@ order this section exists to prevent.
 ## Acceptance criteria
 
 - Both lock sites in `sdk-java.yml` acquire through the helper at 5400 s;
-  the test job passes its tier and the MariaDB site defaults to normal.
+  the test job passes its tier and the MariaDB site defaults to normal. Both
+  sites run their Maven suites from a job-local repository before the
+  acquisition.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.
