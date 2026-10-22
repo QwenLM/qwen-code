@@ -20,6 +20,7 @@ import {
   rereadAutoMemoryDocument,
   sanitizeAutoMemoryPromptField,
   scanAllAutoMemoryTopicDocuments,
+  scanAutoMemoryIndexDocumentsFromRoot,
   scanAutoMemorySnapshot,
   scanAutoMemoryTopicDocuments,
   scanTeamAutoMemoryTopicDocuments,
@@ -801,6 +802,9 @@ describe('auto-memory topic scanning', () => {
       process.platform === 'win32' ? 'junction' : 'dir',
     );
 
+    await expect(
+      scanAutoMemoryIndexDocumentsFromRoot(teamRoot, 'team'),
+    ).rejects.toThrow('symlinked memory root');
     await expect(scanTeamAutoMemoryTopicDocuments(projectRoot)).rejects.toThrow(
       'symlinked memory root',
     );

@@ -175,9 +175,9 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
     trimmed.length - noticeStart <= 1024 &&
     !trimmed.slice(noticeStart + 2).includes('\n');
   const writerNotice = hasWriterNotice ? trimmed.slice(noticeStart) : '';
-  const entryContent = hasWriterNotice
-    ? trimmed.slice(0, noticeStart)
-    : trimmed;
+  const entryContent = (
+    hasWriterNotice ? trimmed.slice(0, noticeStart) : trimmed
+  ).trimEnd();
   const lines = entryContent.split('\n');
   const lineCount = lines.length;
   const charCount = entryContent.length;
@@ -190,9 +190,10 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
 
   const entries = lines;
   const { content, dropped } = trimIndexToBudgetDetailed(entries);
-  const hasOverlongEntry = entries
-    .slice(0, MAX_MANAGED_AUTO_MEMORY_INDEX_LINES)
-    .some((line) => line.length > MAX_INDEX_LINE_CHARS);
+  const candidates = entries.slice(0, MAX_MANAGED_AUTO_MEMORY_INDEX_LINES);
+  const hasOverlongEntry = candidates.some(
+    (line) => line.length > MAX_INDEX_LINE_CHARS,
+  );
 
   const reason =
     wasCharTruncated && !wasLineTruncated
@@ -205,12 +206,13 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
         ? `${lineCount} lines (limit: ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES})`
         : `${lineCount} lines and ${charCount} UTF-16 code units`;
 
-  // Name a lever that can actually move the number. Shortening entries only
-  // helps when one is over the per-line limit; with every entry legal the
-  // overflow is the entry COUNT, and no amount of rewording clears it.
-  const lever = hasOverlongEntry
-    ? ` Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files. Prune or merge entries if the count is still over budget.`
-    : ` No candidate entry exceeds the ${MAX_INDEX_LINE_CHARS}-unit line limit, so shortening entries cannot help — prune or merge entries.`;
+  // Shortening a candidate cannot reduce the line count or an excluded tail.
+  const lever =
+    candidates.join('\n').length > MAX_INDEX_CHARS && hasOverlongEntry
+      ? ` Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files. Prune or merge entries if the count is still over budget.`
+      : hasOverlongEntry
+        ? ' Shortening entries cannot reduce the line count — prune or merge entries.'
+        : ` No candidate entry exceeds the ${MAX_INDEX_LINE_CHARS}-unit line limit, so shortening entries cannot help — prune or merge entries.`;
 
   return `${content}${writerNotice}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded.${describeDroppedIndexEntries(
     dropped,

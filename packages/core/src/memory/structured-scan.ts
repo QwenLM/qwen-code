@@ -620,13 +620,14 @@ export async function scanAllAutoMemoryTopicDocumentsFromRoot(
 export async function scanAutoMemoryIndexDocumentsFromRoot(
   root: string,
   scope: AutoMemoryScope,
+  deterministic = scope === 'team',
 ): Promise<{
   docs: ScannedAutoMemoryDocument[];
   omitted: ScannedAutoMemoryDocument[];
 }> {
   const docs = await scanAutoMemoryDocumentsFromRoot(root, {
     scope,
-    deterministic: scope === 'team',
+    deterministic,
     uncapped: true,
   });
   return {

@@ -23,7 +23,6 @@ import {
 } from './paths.js';
 import { resolveTrustedMemoryRoot } from './trusted-memory-filesystem.js';
 import {
-  scanAllAutoMemoryTopicDocumentsFromRoot,
   scanAutoMemoryIndexDocumentsFromRoot,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
@@ -223,8 +222,9 @@ function docIndexLine(
 
 /**
  * Assemble pre-built index lines into the final MEMORY.md body, enforcing the
- * line-count and character caps and appending a truncation warning when either
- * trips. Each entry is exactly one line (descriptions are single-line).
+ * line-count and character caps, and appending a notice when either cap trips
+ * or the caller reports topic files omitted by the scan cap. Each entry is
+ * exactly one line (descriptions are single-line).
  */
 function assembleIndex(
   lines: string[],
@@ -257,9 +257,9 @@ function assembleIndex(
   const budgetLever =
     reasons.length === 0
       ? ''
-      : hasOverlongEntry
-        ? ` Keep index entries to at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files. Prune or merge entries if still over budget.`
-        : ' Prune or merge entries to reduce the index.';
+      : charCount > MAX_INDEX_CHARS && hasOverlongEntry
+        ? ' Overlong entries already omit descriptions. Shorten their topic-file paths or frontmatter names, or merge topic files/remove obsolete ones. Editing only the generated index will not survive a rebuild.'
+        : ' Merge topic files or remove obsolete ones to reduce the index. Editing only the generated index will not survive a rebuild.';
   const scanLever =
     scanOmitted > 0
       ? ' Merge topic files or remove obsolete ones to reduce the file count.'
@@ -405,8 +405,13 @@ export async function rebuildAutoMemoryIndexAtRoot(
 ): Promise<string> {
   if (!existsSync(root)) return '';
   await resolveTrustedMemoryRoot(root, getMemoryRootTrustedAnchor(root));
-  const docs = await scanAllAutoMemoryTopicDocumentsFromRoot(root, scope);
-  const content = buildManagedAutoMemoryIndex(docs);
+  // Preserve this compatibility entry point's mtime order, even for team roots.
+  const { docs, omitted } = await scanAutoMemoryIndexDocumentsFromRoot(
+    root,
+    scope,
+    false,
+  );
+  const content = buildManagedAutoMemoryIndex(docs, undefined, omitted);
   await atomicWriteFile(path.join(root, AUTO_MEMORY_INDEX_FILENAME), content, {
     encoding: 'utf-8',
     noFollow: true,

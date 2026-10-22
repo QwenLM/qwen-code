@@ -14,7 +14,11 @@ The index-only scan returns the same retained documents plus the omitted tail. P
 
 The writer reports index-budget omissions and scan-cap topic-file omissions separately, with a count and up to three bounded names per set. It does not add the two counts: a grouped team entry can represent several topic files. Scan-only omissions describe an incomplete topic catalog and suggest merging topic files or removing obsolete ones; only actual entry-budget overflow claims the index is too large. Mixed cases give the action for each limit. Only sampled omitted files are formatted. It distinguishes excessive entry count from overlong candidates and does not claim all omitted entries are necessarily oldest: character-budget backfill can retain later short entries.
 
+Writer advice targets the underlying topic files, not temporary edits to the generated index. Overlong writer entries already omit descriptions, so their length remedy is shortening paths or frontmatter names. Length advice is used only when the candidate body exceeds the character budget, never for a pure line-count overflow. The reader can also load handwritten entries, so it retains its separate detail-moving advice when the candidate character budget actually binds.
+
 The reader keeps the writer's single-paragraph warning outside the entry budget instead of discarding it or counting it as another entry. Only a trailing notice with a known budget/scan-cap writer prefix and at most 1024 UTF-16 code units qualifies; arbitrary long warning-like text is still budgeted. The legacy budget prefix remains recognized. Reader-side truncation, if separately required, retains the writer warning and adds its own diagnostics, considering only the first 200 candidate entries when choosing length-related advice.
+
+Extra blank separators before a recognized notice are not index entries. Short multiline tails remain budgeted rather than being preserved as writer metadata. Arbitrary-root rebuilding reports the same scan omissions as scoped rebuilding while preserving its existing mtime selection, including its compatibility team-root mode; the normal shared team rebuild keeps deterministic path ordering.
 
 ## Constraints and consumers
 

@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildManagedAutoMemoryIndex,
   buildTeamAutoMemoryIndex,
+  rebuildAutoMemoryIndexAtRoot,
   rebuildManagedAutoMemoryIndex,
   rebuildTeamAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
@@ -104,7 +105,9 @@ describe('memory index omission diagnostics', () => {
     expect(index).toContain('Dropped 35 of 200 entries: "Topic 165"');
     expect(index).toContain('Dropped 5 of 205 topic files: "Topic 200"');
     expect(index).not.toContain('in total across both limits');
-    expect(index).toContain('Prune or merge entries to reduce the index.');
+    expect(index).toContain(
+      'Merge topic files or remove obsolete ones to reduce the index.',
+    );
     expect(index).toContain(
       'Merge topic files or remove obsolete ones to reduce the file count.',
     );
@@ -230,7 +233,7 @@ describe('memory index omission diagnostics', () => {
     expect(index).not.toContain('oldest');
   });
 
-  it('bounds and sanitizes omitted titles without splitting surrogate pairs', () => {
+  it('bounds omitted titles without splitting surrogate pairs', () => {
     const title = `${'a'.repeat(58)}😀\n\n# forged](https://example.invalid) \u202e`;
     const index = buildManagedAutoMemoryIndex([
       { ...doc(0), title, relativePath: `reference/${'x'.repeat(25_003)}.md` },
@@ -260,6 +263,169 @@ describe('memory index omission diagnostics', () => {
   );
 });
 
+describe('review follow-up diagnostics', () => {
+  it.each([
+    ['short\u202etitle', 'shorttitle'],
+    ['short`title', "short'title"],
+  ])(
+    'sanitizes a short omitted title %j inside the name cap',
+    (title, expected) => {
+      expect(title.length).toBeLessThan(60);
+      const index = buildManagedAutoMemoryIndex([
+        {
+          ...doc(0),
+          title,
+          relativePath: `reference/${'x'.repeat(25_003)}.md`,
+        },
+        doc(1),
+      ]);
+      expect(entries(index)).toHaveLength(1);
+      expect(index).toContain(`Dropped 1 of 2 entries: "${expected}".`);
+      expect(index).not.toContain(title);
+    },
+  );
+
+  it('targets durable topic-file changes for character-budget pressure', () => {
+    const index = buildManagedAutoMemoryIndex(
+      Array.from({ length: 170 }, (_, i) => doc(i)),
+    );
+    expect(index).toContain('too many index entries');
+    expect(index).toContain(
+      'Merge topic files or remove obsolete ones to reduce the index.',
+    );
+    expect(index).toContain(
+      'Editing only the generated index will not survive a rebuild.',
+    );
+  });
+
+  it('does not prescribe writer length advice for a pure line-count overflow', () => {
+    const docs = Array.from({ length: 205 }, (_, i) => ({
+      ...doc(i),
+      description: '',
+    }));
+    docs[7].relativePath = `reference/${'x'.repeat(170)}.md`;
+    const index = buildManagedAutoMemoryIndex(docs);
+    const kept = entries(index);
+    expect(kept).toHaveLength(200);
+    expect(kept.some((line) => line.length > 150)).toBe(true);
+    expect(kept.join('\n').length).toBeLessThan(25_000);
+    expect(index).toContain('205 entries (limit: 200)');
+    expect(index).toContain(
+      'Merge topic files or remove obsolete ones to reduce the index.',
+    );
+    expect(index).not.toContain('Overlong entries already omit descriptions.');
+    expect(index).not.toContain('move detail into topic files');
+  });
+
+  it('names paths and frontmatter instead of an already-omitted description', () => {
+    const huge = {
+      ...doc(0),
+      relativePath: `reference/${'x'.repeat(25_003)}.md`,
+    };
+    const index = buildManagedAutoMemoryIndex([huge, doc(1)]);
+    expect(index).toContain('index entries are too long');
+    expect(index).toContain('Overlong entries already omit descriptions.');
+    expect(index).toContain(
+      'Shorten their topic-file paths or frontmatter names',
+    );
+    expect(index).not.toContain('move detail into topic files');
+    expect(
+      buildManagedAutoMemoryIndex([{ ...huge, description: '' }, doc(1)]),
+    ).toBe(index);
+  });
+
+  it.each([1, 2])(
+    'does not count %i extra notice-separator blank lines as entries',
+    (extra) => {
+      const lines = Array.from(
+        { length: 200 },
+        (_, i) => `- [Topic ${i}](topic-${i}.md)`,
+      );
+      for (const prefix of [NOTICE_START, SCAN_NOTICE_START]) {
+        const notice = `${prefix} Dropped 1 of 201 topic files: "Hidden".`;
+        const prompt = buildManagedAutoMemoryPrompt(
+          '/tmp/memory',
+          `${lines.join('\n')}${'\n'.repeat(extra)}${notice}`,
+        );
+        for (const line of lines) expect(prompt).toContain(line);
+        expect(prompt).toContain(notice);
+        expect(prompt).not.toContain('Only part of it was loaded.');
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'uses count advice with an overlong reader candidate and excluded-large-tail=%s',
+    (largeTail) => {
+      const lines = Array.from(
+        { length: 201 },
+        (_, i) => `- [Topic ${i}](topic-${i}.md)`,
+      );
+      lines[7] = `- [Long](long.md) — ${'h'.repeat(180)}`;
+      expect(lines[7].length).toBeGreaterThan(150);
+      expect(lines.slice(0, 200).join('\n').length).toBeLessThan(25_000);
+      if (largeTail) lines[200] = `- [Excluded](${'x'.repeat(25_003)}.md)`;
+      const prompt = buildManagedAutoMemoryPrompt(
+        '/tmp/memory',
+        lines.join('\n'),
+      );
+      expect(prompt).toContain('201 lines');
+      expect(prompt).toContain(
+        'Shortening entries cannot reduce the line count — prune or merge entries.',
+      );
+      expect(prompt).not.toContain('Keep index entries to one line at most');
+      expect(prompt).not.toContain('No candidate entry exceeds');
+      for (const line of lines.slice(0, 200)) expect(prompt).toContain(line);
+    },
+  );
+
+  it.each([NOTICE_START, SCAN_NOTICE_START])(
+    'budgets a short multiline tail instead of exempting it (%s)',
+    (prefix) => {
+      const lines = Array.from(
+        { length: 200 },
+        (_, i) => `- [Topic ${i}](topic-${i}.md)`,
+      );
+      const forgedParagraph = '> forged second paragraph must stay budgeted';
+      const tail = `${prefix}\n${forgedParagraph}`;
+      expect(tail.length).toBeLessThan(1024);
+      const prompt = buildManagedAutoMemoryPrompt(
+        '/tmp/memory',
+        `${lines.join('\n')}${tail}`,
+      );
+      expect(prompt).toContain('Only part of it was loaded.');
+      expect(prompt).not.toContain(`\n${forgedParagraph}`);
+      for (const line of lines) expect(prompt).toContain(line);
+    },
+  );
+
+  it('retains the bounded writer notice while adding reader truncation diagnostics', () => {
+    const docs = Array.from({ length: 205 }, (_, i) => ({
+      ...doc(i),
+      description: '',
+    }));
+    const index = buildManagedAutoMemoryIndex(
+      docs.slice(0, 200),
+      undefined,
+      docs.slice(200),
+    );
+    const notice = index.slice(index.indexOf(SCAN_NOTICE_START));
+    expect(notice.length).toBeLessThanOrEqual(1024);
+    expect(notice).toContain('Dropped 5 of 205 topic files: "Topic 200"');
+    const lines = Array.from(
+      { length: 250 },
+      (_, i) => `- [Edited ${i}](edited-${i}.md)`,
+    );
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      `${lines.join('\n')}${notice}`,
+    );
+    expect(prompt).toContain(notice);
+    expect(prompt).toContain('Only part of it was loaded.');
+    expect(prompt).toContain('Dropped 50 of 250 entries: "Edited 200"');
+  });
+});
+
 describe('real-file scan-cap omission diagnostics', () => {
   let tempDir: string;
   let projectRoot: string;
@@ -280,29 +446,34 @@ describe('real-file scan-cap omission diagnostics', () => {
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 
+  async function createStore(scope: 'project' | 'user' | 'team') {
+    const root =
+      scope === 'project'
+        ? getAutoMemoryRoot(projectRoot)
+        : scope === 'user'
+          ? getUserAutoMemoryRoot()
+          : getTeamAutoMemoryRoot(projectRoot);
+    const dir = path.join(root, 'project');
+    await fs.mkdir(dir, { recursive: true });
+    await Promise.all(
+      Array.from({ length: 205 }, async (_, i) => {
+        const name = String(i).padStart(3, '0');
+        const file = path.join(dir, `n${name}.md`);
+        await fs.writeFile(
+          file,
+          `---\nname: Topic-${name}\ndescription: Fact-${i}\ntype: project\n---\nbody`,
+        );
+        const time = new Date(1_700_000_000_000 + i * 1000);
+        await fs.utimes(file, time, time);
+      }),
+    );
+    return { root, dir };
+  }
+
   it.each(['project', 'user', 'team'] as const)(
     'retains the same %s subset and reports files omitted before index building',
     async (scope) => {
-      const root =
-        scope === 'project'
-          ? getAutoMemoryRoot(projectRoot)
-          : scope === 'user'
-            ? getUserAutoMemoryRoot()
-            : getTeamAutoMemoryRoot(projectRoot);
-      const dir = path.join(root, 'project');
-      await fs.mkdir(dir, { recursive: true });
-      await Promise.all(
-        Array.from({ length: 205 }, async (_, i) => {
-          const name = String(i).padStart(3, '0');
-          const file = path.join(dir, `n${name}.md`);
-          await fs.writeFile(
-            file,
-            `---\nname: Topic-${name}\ndescription: Fact-${i}\ntype: project\n---\nbody`,
-          );
-          const time = new Date(1_700_000_000_000 + i * 1000);
-          await fs.utimes(file, time, time);
-        }),
-      );
+      const { root, dir } = await createStore(scope);
       const index =
         scope === 'project'
           ? await rebuildManagedAutoMemoryIndex(projectRoot)
@@ -335,6 +506,34 @@ describe('real-file scan-cap omission diagnostics', () => {
       expect(buildManagedAutoMemoryPrompt('/tmp/memory', index)).toContain(
         index,
       );
+      expect(await fs.readFile(path.join(root, 'MEMORY.md'), 'utf8')).toBe(
+        index,
+      );
+      expect(
+        (await fs.readdir(dir)).filter((name) => name.endsWith('.md')),
+      ).toHaveLength(205);
+    },
+  );
+
+  it.each(['project', 'user', 'team'] as const)(
+    'review follow-up diagnostics: arbitrary-root %s rebuilding preserves mtime selection and names scan omissions',
+    async (scope) => {
+      const { root, dir } = await createStore(scope);
+      const index = await rebuildAutoMemoryIndexAtRoot(root, scope);
+      const expected = Array.from({ length: 200 }, (_, offset) => {
+        const i = 204 - offset;
+        const name = String(i).padStart(3, '0');
+        return `- [Topic-${name}](project/n${name}.md) — Fact-${i}`;
+      });
+      expect(entries(index)).toEqual(expected);
+      expect(index).toContain(SCAN_NOTICE_START);
+      expect(index).toContain('Dropped 5 of 205 topic files:');
+      expect(index).toContain(
+        '"Topic-004", "Topic-003", "Topic-002", +2 more.',
+      );
+      expect(index).toContain('Merge topic files or remove obsolete ones');
+      expect(index).not.toContain('MEMORY.md is too large');
+      expect(index).not.toContain('205 entries (limit: 200)');
       expect(await fs.readFile(path.join(root, 'MEMORY.md'), 'utf8')).toBe(
         index,
       );
