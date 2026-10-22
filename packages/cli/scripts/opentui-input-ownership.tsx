@@ -92,9 +92,89 @@ try {
   );
   assert(editor, 'The native textarea must be mounted');
   await input(() => ui.mockInput.pasteBracketedText(JSON.stringify(a)));
-  await act(async () =>
-    ui.waitForFrame((frame) => /📎 clipboard-/.test(frame)),
-  );
+  try {
+    await act(async () =>
+      ui.waitForFrame((frame) => /📎 clipboard-/.test(frame)),
+    );
+  } catch (error) {
+    try {
+      const { readdir, lstat, realpath } = await import('node:fs/promises');
+      const { createHash } = await import('node:crypto');
+      const { sep } = await import('node:path');
+      const { Storage } = await import(
+        '@qwen-code/qwen-code-core/config/storage.js'
+      );
+      const clipboardDir = join(Storage.getGlobalTempDir(), 'clipboard');
+      assert.ok(clipboardDir.startsWith(scratch + sep));
+      const describeFile = async (file: string) => {
+        try {
+          const stat = await lstat(file);
+          return {
+            path: file,
+            isFile: stat.isFile(),
+            size: stat.size,
+            sha256: stat.isFile()
+              ? createHash('sha256')
+                  .update(await readFile(file))
+                  .digest('hex')
+              : null,
+          };
+        } catch (fileError) {
+          return { path: file, error: String(fileError) };
+        }
+      };
+      let clipboardNames: string[] | { error: string };
+      try {
+        const directory = await realpath(clipboardDir);
+        assert.ok(directory.startsWith((await realpath(scratch)) + sep));
+        clipboardNames = await readdir(directory);
+      } catch (readError) {
+        clipboardNames = { error: String(readError) };
+      }
+      console.error(
+        JSON.stringify({
+          diagnostic: 'input-ownership:first-attachment-frame',
+          originalError: String(error),
+          editorText: editor.plainText,
+          frame: ui.captureCharFrame(),
+          submissions,
+          inputPngs: await Promise.all([a, b].map(describeFile)),
+          clipboardDir,
+          clipboardFiles: Array.isArray(clipboardNames)
+            ? await Promise.all(
+                clipboardNames.map((name) =>
+                  describeFile(join(clipboardDir, name)),
+                ),
+              )
+            : clipboardNames,
+          textNodes: nodes(ui.renderer.root).flatMap((node) =>
+            'plainText' in node && typeof node.plainText === 'string'
+              ? [
+                  {
+                    id: node.id,
+                    type: node.constructor.name,
+                    text: node.plainText,
+                  },
+                ]
+              : [],
+          ),
+        }),
+      );
+    } catch (diagnosticError) {
+      try {
+        console.error(
+          JSON.stringify({
+            diagnostic:
+              'input-ownership:first-attachment-frame:collection-error',
+            error: String(diagnosticError),
+          }),
+        );
+      } catch {
+        // Diagnostic output must not replace the original frame error.
+      }
+    }
+    throw error;
+  }
   await key('RETURN');
   assert.equal(
     submissions.length,
