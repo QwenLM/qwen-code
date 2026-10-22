@@ -223,38 +223,45 @@ describe('WorkspaceBindingCreator', () => {
     displayName: 'Remote project',
   };
 
-  it('prepares an editable handoff with the permitted Workspace, cwd and Agent without creating or sending', async () => {
-    const createSession = directCreation();
-    provider.workspaceBinding!.modelPresets = [
-      { agentId: 'agent-a', label: 'A' },
-      { agentId: 'agent-b', label: 'B' },
-    ];
-    await render(true, true, undefined, {
-      handoff: {
-        sourceSessionId: 'original',
-        workspaceId: 'ws-a',
-        cwdRelative: 'project',
-        agentId: 'agent-b',
-        text: 'Historical reference',
-        truncated: true,
-      },
-    });
-    expect(editorMocks.setText).toHaveBeenCalledTimes(1);
-    expect(editorMocks.setText).toHaveBeenCalledWith('Historical reference');
-    expect(editorMocks.props?.composerScopeKey).toContain(
-      ':new:handoff:original',
-    );
-    expect(provider.workspaceBinding!.get).toHaveBeenCalledWith(
-      'ws-a',
-      expect.anything(),
-    );
-    expect(container.textContent).toContain('Review and edit this handoff');
-    expect(container.textContent).toContain('32 KiB');
-    await expectWorkingDirectory('project');
-    expect(createSession).not.toHaveBeenCalled();
-    expect(createEmpty).not.toHaveBeenCalled();
-    expect(onCreated).not.toHaveBeenCalled();
-  });
+  it.each([
+    { handoffAgent: 'agent-b', presetAgents: ['agent-a', 'agent-b'] },
+    { handoffAgent: 'agent-a', presetAgents: ['agent-b'] },
+  ])(
+    'prepares an editable handoff with the permitted Workspace, cwd and Agent $handoffAgent without creating or sending',
+    async ({ handoffAgent, presetAgents }) => {
+      const createSession = directCreation();
+      provider.workspaceBinding!.modelPresets = presetAgents.map((agentId) => ({
+        agentId,
+        label: agentId,
+      }));
+      await render(true, true, undefined, {
+        handoff: {
+          sourceSessionId: 'original',
+          workspaceId: 'ws-a',
+          cwdRelative: 'project',
+          agentId: handoffAgent,
+          text: 'Historical reference',
+          truncated: true,
+        },
+      });
+      expect(editorMocks.setText).toHaveBeenCalledTimes(1);
+      expect(editorMocks.setText).toHaveBeenCalledWith('Historical reference');
+      expect(editorMocks.props?.composerScopeKey).toContain(
+        ':new:handoff:original',
+      );
+      expect(editorMocks.props?.currentModel).toBe(handoffAgent);
+      expect(provider.workspaceBinding!.get).toHaveBeenCalledWith(
+        'ws-a',
+        expect.anything(),
+      );
+      expect(container.textContent).toContain('Review and edit this handoff');
+      expect(container.textContent).toContain('32 KiB');
+      await expectWorkingDirectory('project');
+      expect(createSession).not.toHaveBeenCalled();
+      expect(createEmpty).not.toHaveBeenCalled();
+      expect(onCreated).not.toHaveBeenCalled();
+    },
+  );
 
   it('keeps a lost Workspace grant behind the existing admission controls for handoff drafts', async () => {
     const createSession = directCreation();
@@ -874,6 +881,105 @@ describe('WorkspaceBindingCreator', () => {
     });
     return { createSession, getSessionOptions };
   }
+
+  it.each(['default', 'auto-edit', 'yolo'] as const)(
+    'selects a catalog model independently of the %s approval policy',
+    async (approvalMode) => {
+      const { createSession, getSessionOptions } = approvalSelection();
+      provider.workspaceBinding = {
+        ...provider.workspaceBinding!,
+        agentId: 'qwen-code',
+        modelPresets: [
+          { agentId: 'qwen-code', modelId: 'model-a', label: 'A' },
+          { agentId: 'qwen-code', modelId: 'model-b', label: 'B' },
+        ],
+      };
+      getSessionOptions.mockResolvedValue({
+        approvalMode: 'default',
+        availableApprovalModes: ['default', 'auto-edit', 'yolo'],
+        modelSelectionSupported: true,
+      });
+      getSession.mockResolvedValue({
+        sessionId: 'session-a',
+        agentId: 'qwen-code',
+        approvalMode,
+        modelSelection: { modelId: 'model-b', revision: 1 },
+        workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+      });
+      await render();
+      expect(editorMocks.props?.availableModes).toEqual([
+        'default',
+        'auto-edit',
+        'yolo',
+      ]);
+      await act(async () => editorMocks.props!.onSelectMode!(approvalMode));
+      await act(async () => editorMocks.props!.onSelectModel!('model-b'));
+      expect(editorMocks.props?.currentMode).toBe(approvalMode);
+      expect(editorMocks.props?.currentModel).toBe('model-b');
+      const commit = await sendInitial('Use chosen model and policy');
+      expect(createSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agentId: 'qwen-code',
+          modelId: 'model-b',
+          approvalMode,
+        }),
+        expect.any(Object),
+      );
+      expect(commit).toHaveBeenCalledOnce();
+      expect(onCreated).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('freezes the model and permission after an unknown creation across remount', async () => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      agentId: 'qwen-code',
+      modelPresets: [{ agentId: 'qwen-code', modelId: 'model-a', label: 'A' }],
+    };
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default', 'yolo'],
+      modelSelectionSupported: true,
+    });
+    createSession.mockRejectedValueOnce(new Error('Unknown delivery'));
+    await render();
+    await act(async () => editorMocks.props!.onSelectMode!('yolo'));
+    await sendInitial('Frozen first prompt');
+    const [request, command] = createSession.mock.calls[0];
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      agentId: 'qwen-code',
+      approvalMode: 'yolo',
+      modelSelection: { modelId: 'model-a', revision: 1 },
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    await render();
+    await sendInitial('Changed draft');
+    expect(createSession).toHaveBeenLastCalledWith(
+      request,
+      expect.objectContaining({ idempotencyKey: command.idempotencyKey }),
+    );
+    expect(request).toMatchObject({
+      modelId: 'model-a',
+      approvalMode: 'yolo',
+      text: 'Frozen first prompt',
+    });
+    expect(onCreated).toHaveBeenCalledWith('session-a', 'ws-a');
+  });
+
+  it('refuses catalog creation when the host lacks the initial-model capability', async () => {
+    const { createSession } = approvalSelection();
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      modelPresets: [{ agentId: 'agent-a', modelId: 'model-a', label: 'A' }],
+    };
+    await render();
+    await sendInitial('Do not silently use the default model');
+    expect(createSession).not.toHaveBeenCalled();
+  });
 
   it('loads actual policy options and selects a mode without changing model, Workspace or draft', async () => {
     const { createSession, getSessionOptions } = approvalSelection();

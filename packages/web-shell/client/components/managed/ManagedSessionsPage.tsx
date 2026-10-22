@@ -76,6 +76,7 @@ import { isManagedSessionRunning } from './managed-agent-provider';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
 import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
+import { ManagedChildSessionView } from './ManagedChildSessionView';
 import { useManagedTaskCancel } from './use-managed-task-cancel';
 import type {
   ManagedAgentProvider,
@@ -405,7 +406,21 @@ function ManagedSessionsContent({
   const [wideTasks, setWideTasks] = useState(false);
   const [taskPanelSession, setTaskPanelSession] = useState<string>();
   const taskPanelOpen = !!sessionId && taskPanelSession === sessionId;
-  const tasks = useManagedTasks(provider, clientId, sessionId, taskPanelOpen);
+  const publicChildren = detail.summary?.capabilities.childAgents === true;
+  const tasks = useManagedTasks(
+    provider,
+    clientId,
+    sessionId,
+    taskPanelOpen || publicChildren,
+  );
+  const [childView, setChildView] = useState<{
+    provider: ManagedAgentProvider;
+    clientId: string;
+    root: string;
+    child: string;
+    trigger: Element | null;
+  }>();
+  useEffect(() => setChildView(undefined), [provider, clientId, sessionId]);
   const taskSnapshots = useMemo(
     () => (tasks.task ? [...tasks.page.data, tasks.task] : tasks.page.data),
     [tasks.page.data, tasks.task],
@@ -647,13 +662,26 @@ function ManagedSessionsContent({
     // Unknown while the summary reloads, so the shown approval is kept.
     detail.summary ? detail.summary.capabilities.actions === true : undefined,
     detail.events,
+    publicChildren,
+  );
+  const childApprovalSessions = useMemo(
+    () =>
+      new Set(
+        approvals.actions
+          .filter((action) => action.sessionId !== sessionId)
+          .map((action) => action.sessionId),
+      ),
+    [approvals.actions, sessionId],
   );
   const pendingApproval = useMemo(
     () =>
       approvals.action
-        ? toManagedPermissionRequest(approvals.action, messages)
+        ? toManagedPermissionRequest(
+            approvals.action,
+            approvals.action.sessionId === sessionId ? messages : [],
+          )
         : null,
-    [approvals.action, messages],
+    [approvals.action, messages, sessionId],
   );
   const cwd = useManagedCwdChange(
     provider,
@@ -1933,9 +1961,16 @@ function ManagedSessionsContent({
               className={home ? shellStyles.footer : 'shrink-0'}
               data-testid="managed-approval"
             >
+              {approvals.action?.sessionId !== sessionId && (
+                <p className="mb-2 text-sm font-medium">
+                  {t('managed.tasks.childApproval')} ·{' '}
+                  {approvals.action?.sessionId}
+                </p>
+              )}
               <ToolApproval
                 request={pendingApproval}
                 planExecutionMode={
+                  approvals.action?.sessionId === sessionId &&
                   approvals.action?.toolName === 'exit_plan_mode' &&
                   approvals.action.turnId === detail.summary?.activeTurnId
                     ? detail.summary?.approvalMode
@@ -2498,6 +2533,16 @@ function ManagedSessionsContent({
             key={`${provider.storageKey}:${sessionId}`}
             wide={wideTasks}
             tasks={tasks}
+            waitingSessions={childApprovalSessions}
+            onOpenChild={(child) =>
+              setChildView({
+                provider,
+                clientId,
+                root: sessionId,
+                child,
+                trigger: document.activeElement,
+              })
+            }
             cancel={taskCancel}
             canCancel={
               summary?.capabilities.tasks === true && !!provider.tasks.cancel
@@ -2517,6 +2562,26 @@ function ManagedSessionsContent({
             }}
           />
         )}
+        {childView &&
+          childView.provider === provider &&
+          childView.clientId === clientId &&
+          childView.root === sessionId && (
+            <ManagedChildSessionView
+              key={`${provider.storageKey}:${sessionId}:${childView.child}`}
+              provider={provider}
+              clientId={clientId}
+              sessionId={childView.child}
+              onClose={() => setChildView(undefined)}
+              restoreFocus={() => {
+                if (
+                  childView.trigger instanceof HTMLElement &&
+                  childView.trigger.isConnected
+                )
+                  childView.trigger.focus();
+                else taskTriggerRef.current?.focus();
+              }}
+            />
+          )}
       </div>
     </div>
   );
