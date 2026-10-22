@@ -1,3 +1,7 @@
+import {
+  MANAGED_LIFECYCLE_MESSAGES_EN,
+  MANAGED_LIFECYCLE_MESSAGES_ZH,
+} from './components/managed/managed-lifecycle-messages.js';
 import { plural } from './utils/plural.js';
 import {
   MESSAGE_DELETION_MESSAGES_EN,
@@ -3288,11 +3292,19 @@ const EN: Messages = {
   'skills.install.error.folderRequired': 'Enter a folder path.',
   'skills.install.error.githubRequired': 'Enter a GitHub SKILL.md URL.',
   'skills.install.error.invalidName':
-    'The skill name is missing or contains unsupported characters.',
+    'Enter a name such as my-skill using only ASCII letters, digits, dots, underscores, or hyphens.',
   'skills.install.error.manifestMissing':
     'The package must contain a SKILL.md file at its root.',
   'skills.install.error.invalidPackage':
-    'The skill package is invalid. Check its structure and SKILL.md content.',
+    'Correct the reported file or package structure, then upload the skill again.',
+  'skills.install.error.frontmatter':
+    'Put the opening --- on the first line of SKILL.md (remove any leading blank lines), and add a closing --- after the YAML fields.',
+  'skills.install.error.invalidManifest':
+    'Open SKILL.md, correct the field reported above, then upload the skill again.',
+  'skills.install.error.nameMismatch':
+    'Make the entered skill name match the name in SKILL.md, then upload the skill again.',
+  'skills.install.error.unsafePath':
+    'Use a regular skill directory and files instead of symbolic links, and check the reported installation path.',
   'skills.install.error.zipTooLarge': 'The ZIP file must not exceed 6 MB.',
   'skills.install.error.invalidFolder': 'Enter a valid local skill folder.',
   'skills.install.error.githubFailed':
@@ -3434,6 +3446,20 @@ const EN: Messages = {
   'contextUsage.compress': 'Compress context',
   'contextUsage.compressing': 'Compressing…',
   'contextUsage.compressed': 'Compression completed. Context usage refreshed.',
+  'contextUsage.compressedUnknown':
+    'Compression completed. Context usage will be observed on the next turn.',
+  'managed.compression.unconfirmed':
+    'Compression is unconfirmed. Check its status before continuing.',
+  'managed.compression.recoveryBlocked': 'Compression is waiting for recovery.',
+  'managed.compression.confirm': 'Check compression status',
+  'managed.compression.storage':
+    'Could not save the compression request. Compression was not started.',
+  'managed.compression.storageUpdate':
+    'Could not save the latest compression status. Check it again after refreshing.',
+  'managed.compression.conflict':
+    'The context changed. Review its latest state and try again.',
+  'managed.compression.busy':
+    'The session is busy. Wait until it is idle before compressing.',
   'contextUsage.compressCancelled':
     'Cancellation requested. Refresh to check current usage.',
   'contextUsage.compressInterrupted':
@@ -3442,7 +3468,7 @@ const EN: Messages = {
   'contextUsage.compressRefreshFailed':
     'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
   'contextUsage.compressUnavailable':
-    'Requires an idle, connected, writable session with the built-in compression command and no active goal.',
+    'Requires an idle, connected session with permission to compress context.',
   'contextCompression.result': (v) =>
     `Context compressed ${v?.from ?? ''} → ${v?.to ?? ''}`,
   'contextCompression.instructionsTruncated': (v) =>
@@ -4486,6 +4512,7 @@ const EN: Messages = {
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
   ...MANAGED_TASK_MESSAGES_EN,
+  ...MANAGED_LIFECYCLE_MESSAGES_EN,
   ...WORKSPACE_REGISTRATION_MESSAGES_EN,
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
@@ -7536,11 +7563,20 @@ const ZH: Messages = {
   'skills.install.error.authentication': '上传技能需要身份认证。',
   'skills.install.error.folderRequired': '请输入文件夹路径。',
   'skills.install.error.githubRequired': '请输入 GitHub SKILL.md 地址。',
-  'skills.install.error.invalidName': '技能名称缺失或包含不支持的字符。',
+  'skills.install.error.invalidName':
+    '请输入仅含英文字母、数字、点、下划线或连字符的名称，例如 my-skill。',
   'skills.install.error.manifestMissing':
     '技能包根目录中必须包含 SKILL.md 文件。',
   'skills.install.error.invalidPackage':
-    '技能包无效，请检查目录结构和 SKILL.md 内容。',
+    '请修正上述文件或技能包目录结构，然后重新上传。',
+  'skills.install.error.frontmatter':
+    '请让 SKILL.md 第一行直接以 --- 开始（删除前面的空行），并在 YAML 字段后添加结束标记 ---。',
+  'skills.install.error.invalidManifest':
+    '请打开 SKILL.md，修正上述字段后重新上传。',
+  'skills.install.error.nameMismatch':
+    '请将输入的技能名称与 SKILL.md 中的 name 保持一致，然后重新上传。',
+  'skills.install.error.unsafePath':
+    '请使用普通技能目录和文件，避免符号链接，并检查上述安装路径。',
   'skills.install.error.zipTooLarge': 'ZIP 文件不能超过 6 MB。',
   'skills.install.error.invalidFolder': '请输入有效的本地技能文件夹路径。',
   'skills.install.error.githubFailed':
@@ -7674,6 +7710,16 @@ const ZH: Messages = {
   'contextUsage.compress': '手动压缩',
   'contextUsage.compressing': '正在压缩…',
   'contextUsage.compressed': '压缩完成，已刷新上下文用量。',
+  'contextUsage.compressedUnknown': '压缩完成，下一轮会重新观测上下文用量。',
+  'managed.compression.unconfirmed':
+    '尚未确认压缩结果，请先查询状态再继续操作。',
+  'managed.compression.recoveryBlocked': '压缩正在等待恢复。',
+  'managed.compression.confirm': '查询压缩状态',
+  'managed.compression.storage': '无法保存压缩请求，尚未开始压缩。',
+  'managed.compression.storageUpdate':
+    '无法保存最新压缩状态，刷新后请重新查询。',
+  'managed.compression.conflict': '上下文已变化，请确认最新状态后重试。',
+  'managed.compression.busy': '会话忙碌，请等待空闲后再压缩。',
   'contextUsage.compressCancelled': '已请求取消压缩，请刷新确认当前用量。',
   'contextUsage.compressInterrupted':
     '压缩期间连接发生变化，请刷新查看当前使用量。',
@@ -7681,7 +7727,7 @@ const ZH: Messages = {
   'contextUsage.compressRefreshFailed':
     '压缩已完成，但用量刷新失败。请点击刷新重试。',
   'contextUsage.compressUnavailable':
-    '会话连接正常、空闲、可写、没有活动目标且支持内置压缩命令时可用。',
+    '会话连接正常、空闲且有上下文压缩权限时可用。',
   'contextCompression.result': (v) =>
     `上下文已压缩 ${v?.from ?? ''} → ${v?.to ?? ''}`,
   'contextCompression.instructionsTruncated': (v) =>
@@ -8639,6 +8685,7 @@ const ZH: Messages = {
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
   ...MANAGED_TASK_MESSAGES_ZH,
+  ...MANAGED_LIFECYCLE_MESSAGES_ZH,
   ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,

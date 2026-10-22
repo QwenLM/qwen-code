@@ -127,6 +127,22 @@ export class JavaManagedAgentClient {
     return this.post<JavaAgentSession>('/sessions/get', { sessionId }, signal);
   }
 
+  getRecovery(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['SessionRecovery']>(
+      '/session-recovery/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  recheckRecovery(sessionId: string, turnId: string, signal?: AbortSignal) {
+    return this.post<Schemas['SessionRecovery']>(
+      '/session-recovery/recheck',
+      { sessionId, turnId },
+      signal,
+    );
+  }
+
   async renameSession(
     request: Schemas['WebShellRenameRequest'],
     signal?: AbortSignal,
@@ -249,6 +265,36 @@ export class JavaManagedAgentClient {
     return this.post('/session-options/query', { agentId }, signal);
   }
 
+  lifecycleCommand(
+    kind: 'close' | 'archive' | 'delete',
+    request: Schemas['WebShellLifecycleRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellCommandOperation']>(
+      `/sessions/${kind}`,
+      request,
+      signal,
+    );
+  }
+
+  unarchiveSession(
+    request: Schemas['WebShellLifecycleRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<JavaAgentSession>('/sessions/unarchive', request, signal);
+  }
+
+  exportSnapshot(
+    request: Schemas['WebShellExportRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellExportPage']>(
+      '/sessions/export/query',
+      request,
+      signal,
+    );
+  }
+
   getTranscript(
     request: Schemas['WebShellTranscriptRequest'],
     signal?: AbortSignal,
@@ -341,6 +387,13 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ): Promise<Schemas['WebShellCwdOperation']> {
     return this.post('/sessions/cwd/change', request, signal);
+  }
+
+  compressContext(
+    request: Schemas['WebShellContextCompressionRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellContextCompressionOperation']> {
+    return this.post('/sessions/compress', request, signal);
   }
 
   getSessionModels(sessionId: string, signal?: AbortSignal) {

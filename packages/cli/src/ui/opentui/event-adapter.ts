@@ -118,7 +118,7 @@ type OpenTuiStreamEventData =
   | { type: 'compaction'; compression: CompressionProps }
   /** Info notice row (ink `addItem({type: INFO})` → InfoMessage): `●` prefix
    * + primary-colored text, e.g. the auto-compact `chat_compressed` notice. */
-  | { type: 'info'; text: string }
+  | { type: 'info'; text: string; historyIsSynthetic?: false }
   /** Error notice row (ink `type: 'error'` → ErrorMessage): `✕` prefix +
    * error-colored text with an optional inline hint. */
   | { type: 'error'; text: string; hint?: string }

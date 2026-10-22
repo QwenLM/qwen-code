@@ -51,6 +51,7 @@ import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { redactProxy } from '../systemInfoFields.js';
 import { formatInlineImageOverflow } from '../utils/inline-image-parts.js';
+import { isSyntheticHistoryItem } from '../utils/historyUtils.js';
 
 /** Runtime state the host supplies for items that read it in ink. */
 export interface ItemProjectionContext {
@@ -1129,7 +1130,15 @@ export function projectItemToStreamEvent(
 ): OpenTuiStreamEvent | null {
   const viaSpecialText = (): OpenTuiStreamEvent | null => {
     const text = projectSpecialItemText(item, ctx);
-    return text === null ? null : { type: 'info', text };
+    return text === null
+      ? null
+      : {
+          type: 'info',
+          text,
+          ...(isSyntheticHistoryItem(item)
+            ? {}
+            : { historyIsSynthetic: false }),
+        };
   };
   switch (item.type) {
     case 'user':
@@ -1257,6 +1266,12 @@ export function projectHistoryToStreamEvents(
           text: item.text,
           promptId: item.promptId,
           sentToModel: item.sentToModel,
+        });
+        break;
+      case 'compression':
+        events.push({
+          type: 'compaction',
+          compression: item.compression,
         });
         break;
       case 'gemini':

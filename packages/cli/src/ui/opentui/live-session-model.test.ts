@@ -527,6 +527,26 @@ describe('foldLiveEvent compaction', () => {
 });
 
 describe('foldLiveEvent info (chat_compressed parity)', () => {
+  it('preserves meaningful classification without a canonical history id', () => {
+    expect(
+      foldLiveEvent([], {
+        type: 'info',
+        text: 'Status',
+        historyIsSynthetic: false,
+      }),
+    ).toEqual([
+      {
+        kind: 'info',
+        id: expect.any(String),
+        text: 'Status',
+        historyIsSynthetic: false,
+      },
+    ]);
+    expect(foldLiveEvent([], { type: 'info', text: 'Preparing' })).toEqual([
+      { kind: 'info', id: expect.any(String), text: 'Preparing' },
+    ]);
+  });
+
   it('pushes the info row and settles a streaming assistant block', () => {
     const items = foldLiveEvent([assistant('partial')], {
       type: 'info',

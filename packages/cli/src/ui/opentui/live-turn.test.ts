@@ -37,6 +37,11 @@ import { OpenTuiAppHost } from './opentui-host.js';
 import { OpenTuiSlashDispatcher } from './commands-dispatch.js';
 import { CommandKind } from '../commands/types.js';
 import { historyCommand } from '../commands/historyCommand.js';
+import { helpCommand } from '../commands/helpCommand.js';
+import { aboutCommand } from '../commands/aboutCommand.js';
+import { getExtendedSystemInfo } from '../systemInfo.js';
+import { isSyntheticHistoryItem } from '../utils/historyUtils.js';
+import { OpenTuiSlashGateway } from './slash-gateway.js';
 import { createOpenTuiCommandContext } from './commands-context.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
@@ -93,6 +98,20 @@ vi.mock('./live-session.js', () => ({
       await new Promise<void>((resolve) => live.waiters.push(resolve));
     yield { type: 'done' };
   },
+}));
+
+vi.mock('../systemInfo.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../systemInfo.js')>()),
+  getExtendedSystemInfo: vi.fn(async () => ({
+    cliVersion: 'STATUS-REGRESSION',
+    modelVersion: 'controlled-model',
+    selectedAuthType: 'controlled',
+    osPlatform: 'test',
+    osArch: 'test',
+    osRelease: 'test',
+    nodeVersion: 'controlled-node',
+    sessionId: 'status-session',
+  })),
 }));
 
 describe('imagePathsToParts', () => {
@@ -460,87 +479,247 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     },
   );
 
-  it('a later processed input invalidates the old log rollback even while its log write is pending', async () => {
-    let finishLog!: () => void;
-    const pending = new Promise<void>((resolve) => {
-      finishLog = resolve;
-    });
-    const logMessage = vi
-      .fn()
-      .mockReturnValueOnce(pending)
-      .mockResolvedValue(undefined);
-    const removeLastUserMessage = vi.fn(async () => true);
-    const logger = { logMessage, removeLastUserMessage } as unknown as Logger;
-    const config = {
-      getLlmClient: () => ({ stripOrphanedUserEntriesFromHistory: vi.fn() }),
-    } as unknown as Config;
-    const { result } = renderHook(() => useOpenTuiLiveTurn({ config, logger }));
-    await act(async () => {
-      result.current.submit('ordinary');
-    });
-    const settings = { merged: {} } as LoadedSettings;
-    const host = new OpenTuiAppHost({
-      config,
-      settings,
-      logger,
-      transcript: {
-        append: result.current.applyEvent,
-        reset: result.current.resetTranscript,
-        clear: () => result.current.resetTranscript([]),
-      },
-      confirmations: {
-        presentShell: async () => ({ outcome: ToolConfirmationOutcome.Cancel }),
-        presentAction: async () => false,
-      },
-      onChange: () => {},
-      toggleVimEnabled: async () => false,
-      reloadCommands: () => {},
-      startNewSession: () => {},
-      getSessionStats: () => ({}) as SessionStatsState,
-    });
-    const dispatcher = new OpenTuiSlashDispatcher(
-      host,
-      {
-        config: null,
+  it.each(['visible local command', 'hidden help dialog'] as const)(
+    'protects a later %s log while an earlier log write is pending',
+    async (laterInput) => {
+      const hiddenHelp = laterInput === 'hidden help dialog';
+      const query = hiddenHelp ? '/help' : '/local-note';
+      let finishLog!: () => void;
+      const pending = new Promise<void>((resolve) => {
+        finishLog = resolve;
+      });
+      const logMessage = vi
+        .fn()
+        .mockReturnValueOnce(pending)
+        .mockResolvedValue(undefined);
+      const removeLastUserMessage = vi.fn(async () => true);
+      const logger = { logMessage, removeLastUserMessage } as unknown as Logger;
+      const stripOrphanedUserEntriesFromHistory = vi.fn();
+      const config = {
+        getLlmClient: () => ({ stripOrphanedUserEntriesFromHistory }),
+      } as unknown as Config;
+      const { result } = renderHook(() =>
+        useOpenTuiLiveTurn({ config, logger }),
+      );
+      await act(async () => {
+        result.current.submit('ordinary');
+      });
+      const settings = { merged: {} } as LoadedSettings;
+      const host = new OpenTuiAppHost({
+        config,
         settings,
         logger,
-        onInputProcessed: result.current.notifyInputProcessed,
-      },
-      [
-        {
-          name: 'help',
-          description: 'local help',
-          kind: CommandKind.BUILT_IN,
-          action: () => ({
-            type: 'message',
-            messageType: 'info',
-            content: 'help stays visible',
-          }),
+        transcript: {
+          append: result.current.applyEvent,
+          reset: result.current.resetTranscript,
+          clear: () => result.current.resetTranscript([]),
         },
-      ],
-    );
-    await act(async () => {
-      expect(await dispatcher.handle('/help')).toEqual({ kind: 'handled' });
-    });
-    await act(async () => finishLog());
-    act(() => result.current.interrupt(() => true));
-    await act(async () => live.waiters.shift()?.());
-    expect(logMessage.mock.calls.map((call) => call[1])).toEqual([
-      'ordinary',
-      '/help',
-    ]);
-    expect(removeLastUserMessage).not.toHaveBeenCalled();
-    expect(result.current.items).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
+        confirmations: {
+          presentShell: async () => ({
+            outcome: ToolConfirmationOutcome.Cancel,
+          }),
+          presentAction: async () => false,
+        },
+        onChange: () => {},
+        toggleVimEnabled: async () => false,
+        reloadCommands: () => {},
+        startNewSession: () => {},
+        getSessionStats: () => ({}) as SessionStatsState,
+      });
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        {
+          config: null,
+          settings,
+          logger,
+          onInputProcessed: result.current.notifyInputProcessed,
+        },
+        [
+          hiddenHelp
+            ? helpCommand
+            : {
+                name: 'local-note',
+                description: 'controlled local output',
+                kind: CommandKind.BUILT_IN,
+                canRunDuringStreaming: true,
+                action: () => ({
+                  type: 'message',
+                  messageType: 'info',
+                  content: 'local output stays visible',
+                }),
+              },
+        ],
+      );
+      expect(dispatcher.mustDeferDuringStreaming(query)).toBe(false);
+      await act(async () => {
+        expect(await dispatcher.handle(query)).toEqual(
+          hiddenHelp
+            ? { kind: 'open_dialog', request: { dialog: 'help' } }
+            : { kind: 'handled' },
+        );
+      });
+      expect(live.turns).toHaveLength(0);
+      if (hiddenHelp) {
+        expect(result.current.items).toEqual([
+          expect.objectContaining({ kind: 'user', text: 'ordinary' }),
+        ]);
+      }
+      await act(async () => finishLog());
+      expect(live.turns).toHaveLength(1);
+      const settled = vi.fn(() => true);
+      act(() => result.current.interrupt(settled));
+      await act(async () => live.waiters.shift()?.());
+      expect(settled).toHaveBeenCalledTimes(1);
+      expect(logMessage.mock.calls.map((call) => call[1])).toEqual([
+        'ordinary',
+        query,
+      ]);
+      expect(removeLastUserMessage).not.toHaveBeenCalled();
+      if (hiddenHelp) {
+        expect(result.current.items).toEqual([]);
+        expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalledTimes(1);
+      } else {
+        expect(result.current.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              kind: 'user',
+              text: query,
+              sentToModel: false,
+            }),
+            expect.objectContaining({
+              kind: 'info',
+              text: 'local output stays visible',
+            }),
+          ]),
+        );
+        expect(stripOrphanedUserEntriesFromHistory).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it.each([
+    { output: 'status', withLogger: true },
+    { output: 'status', withLogger: false },
+    { output: 'info', withLogger: true },
+    { output: 'info', withLogger: false },
+  ] as const)(
+    'uses canonical $output cancellation classification with logger=$withLogger',
+    async ({ output, withLogger }) => {
+      const strip = vi.fn();
+      const remove = vi.fn(async () => true);
+      const logger = withLogger
+        ? ({
+            logMessage: vi.fn(async () => {}),
+            removeLastUserMessage: remove,
+          } as unknown as Logger)
+        : null;
+      const config = {
+        getLlmClient: () => ({ stripOrphanedUserEntriesFromHistory: strip }),
+      } as unknown as Config;
+      const settings = { merged: {} } as LoadedSettings;
+      const hook = renderHook(() => useOpenTuiLiveTurn({ config, logger }));
+      const host = new OpenTuiAppHost({
+        config,
+        settings,
+        logger,
+        transcript: {
+          append: hook.result.current.applyEvent,
+          reset: hook.result.current.resetTranscript,
+          clear: () => hook.result.current.resetTranscript([]),
+        },
+        confirmations: {
+          presentShell: async () => ({
+            outcome: ToolConfirmationOutcome.Cancel,
+          }),
+          presentAction: async () => false,
+        },
+        onChange: () => {},
+        toggleVimEnabled: async () => false,
+        reloadCommands: () => {},
+        startNewSession: () => {},
+        getSessionStats: () => ({}) as SessionStatsState,
+      });
+      const gateway = new OpenTuiSlashGateway();
+      gateway.attach(
+        new OpenTuiSlashDispatcher(
+          host,
+          {
+            config: null,
+            settings,
+            logger,
+            onInputProcessed: hook.result.current.notifyInputProcessed,
+          },
+          [aboutCommand],
+        ),
+      );
+      vi.mocked(getExtendedSystemInfo).mockClear();
+      try {
+        await act(async () => {
+          expect(hook.result.current.submit('ordinary')).toBe(true);
+        });
+        expect(live.turns).toHaveLength(1);
+        expect(live.waiters).toHaveLength(1);
+        host.setStreaming(hook.result.current.streaming);
+        expect(host.isStreaming()).toBe(true);
+        await act(async () => {
+          if (output === 'status') {
+            expect(await gateway.mustDeferDuringStreaming('/status')).toBe(
+              false,
+            );
+            expect(await gateway.dispatch('/status')).toEqual({
+              kind: 'dispatched',
+              outcome: { kind: 'handled' },
+            });
+          } else host.addItem({ type: 'info', text: 'Preparing' }, 1000);
+        });
+        expect(gateway.isBusy()).toBe(false);
+        expect(getExtendedSystemInfo).toHaveBeenCalledTimes(
+          output === 'status' ? 1 : 0,
+        );
+        const canonical = host.getHistory().at(-1)!;
+        expect(canonical.type).toBe(output === 'status' ? 'about' : 'info');
+        expect(isSyntheticHistoryItem(canonical)).toBe(output === 'info');
+        const beforeCancel = hook.result.current.items;
+        expect(beforeCancel).toHaveLength(2);
+        expect(beforeCancel[0]).toMatchObject({
           kind: 'user',
-          text: '/help',
-          sentToModel: false,
-        }),
-        expect.objectContaining({ kind: 'info', text: 'help stays visible' }),
-      ]),
-    );
-  });
+          text: 'ordinary',
+        });
+        expect(beforeCancel[1]).toMatchObject({
+          kind: 'info',
+          historyId: canonical.id,
+          text:
+            output === 'status'
+              ? expect.stringContaining('STATUS-REGRESSION')
+              : 'Preparing',
+        });
+        const settled = vi.fn(() => true);
+        act(() => hook.result.current.interrupt(settled));
+        await act(async () => live.waiters.shift()?.());
+        expect(live.signals[0].aborted).toBe(true);
+        expect(hook.result.current.streaming).toBe(false);
+        expect(live.turns).toHaveLength(1);
+        expect(settled).toHaveBeenCalledExactlyOnceWith({
+          kind: 'cancelled',
+          queued: null,
+          prompt: expect.objectContaining({ text: 'ordinary' }),
+        });
+        expect(host.getHistory().at(-1)).toBe(canonical);
+        expect(hook.result.current.items).toEqual(
+          output === 'status' ? beforeCancel : [],
+        );
+        expect(strip).toHaveBeenCalledTimes(output === 'info' ? 1 : 0);
+        expect(remove).toHaveBeenCalledTimes(
+          output === 'info' && withLogger ? 1 : 0,
+        );
+      } finally {
+        await act(async () => {
+          hook.unmount();
+          live.waiters.splice(0).forEach((release) => release());
+        });
+      }
+    },
+  );
 
   it('keeps meaningful streamed content while the composer restores the prompt', async () => {
     const strip = vi.fn();

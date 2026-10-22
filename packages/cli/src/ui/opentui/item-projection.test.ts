@@ -12,6 +12,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   CompressionStatus,
+  ToolDisplayNames,
   type Config,
   type SessionMetrics,
 } from '@qwen-code/qwen-code-core';
@@ -1023,7 +1024,11 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
   it('routes the special kinds through projectSpecialItemText as info rows', () => {
     expect(
       projectItemToStreamEvent({ type: 'about', systemInfo: {} as never }, ctx),
-    ).toEqual({ type: 'info', text: expect.stringContaining('Status') });
+    ).toEqual({
+      type: 'info',
+      text: expect.stringContaining('Status'),
+      historyIsSynthetic: false,
+    });
     expect(
       projectItemToStreamEvent(
         {
@@ -1037,7 +1042,11 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
         },
         ctx,
       ),
-    ).toEqual({ type: 'info', text: 'Compressing chat history' });
+    ).toEqual({
+      type: 'info',
+      text: 'Compressing chat history',
+      historyIsSynthetic: false,
+    });
     expect(
       projectItemToStreamEvent({ type: 'stats', duration: '9m' }, ctx)?.type,
     ).toBe('info');
@@ -1121,6 +1130,94 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
 });
 
 describe('canonical resumed tool projection', () => {
+  it('preserves meaningful classification through replay and folding', () => {
+    const canonical: HistoryItem[] = [
+      { id: 7, type: 'about', systemInfo: {} as never },
+      {
+        id: 8,
+        type: 'info',
+        text: 'Preparing',
+        display: { suppressOnRestore: true },
+      },
+    ];
+    const events = projectHistoryToStreamEvents(canonical, {});
+    expect(events).toEqual([
+      {
+        type: 'info',
+        text: 'Status\nProxy: no proxy',
+        historyIsSynthetic: false,
+        historyId: 7,
+      },
+      {
+        type: 'info',
+        text: 'Preparing',
+        historyId: 8,
+        historyDisplay: { suppressOnRestore: true },
+      },
+      { type: 'done' },
+    ]);
+    const items = events.reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+    expect(items).toEqual([
+      {
+        kind: 'info',
+        id: expect.any(String),
+        text: 'Status\nProxy: no proxy',
+        historyIsSynthetic: false,
+        historyId: 7,
+      },
+      {
+        kind: 'info',
+        id: expect.any(String),
+        text: 'Preparing',
+        historyId: 8,
+        display: { suppressOnRestore: true },
+      },
+    ]);
+  });
+
+  it('replays one structured compression row without changing live notice projection', () => {
+    const compression = {
+      isPending: false,
+      originalTokenCount: 100,
+      newTokenCount: 40,
+      compressionStatus: CompressionStatus.COMPRESSED,
+      compressionKind: 'summarize' as const,
+      originalTokenCountIsEstimated: true,
+      newTokenCountIsEstimated: false,
+    };
+    const item: HistoryItem = {
+      id: 73,
+      type: 'compression',
+      compression,
+      display: { suppressOnRestore: true },
+    };
+    const events = projectHistoryToStreamEvents([item], {});
+    expect(events).toEqual([
+      {
+        type: 'compaction',
+        compression,
+        historyId: 73,
+        historyDisplay: { suppressOnRestore: true },
+      },
+      { type: 'done' },
+    ]);
+    const items = events.reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: 'compaction',
+      compression,
+      historyId: 73,
+      display: { suppressOnRestore: true },
+    });
+    expect(isHistoryItemVisibleAfterRestore(items[0])).toBe(false);
+    expect(rewindBoundaryHistory(items)).toEqual([{ ...item, id: 0 }]);
+    expect(projectItemToStreamEvent(item, {})).toMatchObject({
+      type: 'info',
+      text: projectCompression(compression),
+      historyIsSynthetic: false,
+    });
+  });
+
   it.each(['fast', 'summarize'] as const)(
     'keeps collapsed %s boundaries and full-array turn identities available for rewind',
     (compressionKind) => {
@@ -1183,7 +1280,7 @@ describe('canonical resumed tool projection', () => {
         tools: [
           {
             callId: 'read-1',
-            name: 'read_file',
+            name: ToolDisplayNames.READ_FILE,
             description: 'owned.txt',
             status: ToolCallStatus.Success,
             confirmationDetails: undefined,

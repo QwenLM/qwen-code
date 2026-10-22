@@ -495,15 +495,16 @@ export function useOpenTuiLiveTurn(
               const onlySynthetic = history
                 .slice(index + 1)
                 .every((item) =>
-                  [
-                    'info',
-                    'error',
-                    'warning',
-                    'retry',
-                    'thinking',
-                    'away-recap',
-                    'stop-hook',
-                  ].includes(item.kind),
+                  item.kind === 'info'
+                    ? (item.historyIsSynthetic ?? true)
+                    : [
+                        'error',
+                        'warning',
+                        'retry',
+                        'thinking',
+                        'away-recap',
+                        'stop-hook',
+                      ].includes(item.kind),
                 );
               if (
                 user?.kind === 'user' &&

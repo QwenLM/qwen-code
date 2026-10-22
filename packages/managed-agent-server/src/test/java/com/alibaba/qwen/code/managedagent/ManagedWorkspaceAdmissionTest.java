@@ -1970,6 +1970,28 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     @Test
+    void compressionCapabilityAllowsResidentWorkspacesAndRequiresTheOperatorAndFrozenFacts() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        grant(tenant, "ws-a", "operator2", true);
+        grant(tenant, "ws-a", "reader", false);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.supportsContextCompression()).thenReturn(true);
+        var enabled = boundServiceWith(harness);
+        org.springframework.test.util.ReflectionTestUtils.setField(enabled, "runtimeWarmer",
+                mock(com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeWarmer.class));
+        var summary = enabled.getWebShellSession(tenant, "operator2", session);
+        assertThat(summary.capabilities().cwdChange()).isFalse();
+        assertThat(summary.capabilities().contextCompression()).isTrue();
+        assertThat(summary.compactionRevision()).isZero();
+        assertThat(enabled.getWebShellSession(tenant, "reader", session).capabilities().contextCompression()).isFalse();
+        jdbc.update("UPDATE ma_workspace_access SET role='READER' WHERE tenant_id=? AND actor_id=?", tenant,
+                "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertThat(enabled.getWebShellSession(tenant, "operator2", session).capabilities().contextCompression()).isFalse();
+    }
+
+    @Test
     void renameCapabilityUsesTheRoleAndFrozenFactsIndependentlyOfTurnApprovalSupport() {
         String tenant = "tenant-" + UUID.randomUUID();
         String session = boundSession(tenant);

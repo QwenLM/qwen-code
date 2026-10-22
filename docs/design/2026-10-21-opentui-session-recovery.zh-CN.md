@@ -86,6 +86,8 @@ Accepted-steering 输入记录明确补齐 Ink 的遗漏：已检查的 Ink 接�
 
 遵循真实 Ink 无输出合同：只有当前 attempt 实际拥有的 user row、没有有意义输出、没有已启动工具、没有队列/后继冲突，并满足对应空草稿条件，才允许回滚。使用同步的 meaningful-content 观察，不等待下一次 React render。文本/图片输出有意义；纯 thought 在当前 Ink 取消逻辑中是 synthetic，必须单独校准。
 
+标准命令结果投影为普通 info 行时，保留共享 Ink 对原始记录的 synthetic 分类。`/status` 等有意义结果携带 `historyIsSynthetic: false`，经过实时、重放及 rewind 消息的折叠仍保留，包括没有 history ID 的事件。普通 info 保持原有未标注形状和 synthetic 缺省行为。此元数据来自原始 history item，不根据文本或 ID 猜测，也不是可配置选项或 JSON 输出协议变更。有无 logger 时取消都保留有意义结果；普通 synthetic 通知仍可回滚。磁盘日志的删除资格保持独立。
+
 符合条件时删除精确的可见行、调用现有 core orphan-user 清理，并移除匹配的输入日志。否则保留已有内容，通过既有结构化 composer settlement 恢复输入。保留父批次 generation guard、同 ID 的 `kind: 'reset'`、pending-image 所有权、accepted steering 和 successor 恢复。Reset 只清理过期 claim，不能当取消去 pop/restore queue。旧 `finally` 不得清理或 finalize 下一轮。
 
 四种记录必须分开：可见 transcript、内存 core history、项目输入日志、持久化 conversation journal。当前 Ink 取消链没有调用 `rewindRecording`，所以本设计不承诺无输出取消会物理删除 journal 记录。冷 resume 行为需先做 characterization；若是共享 Ink 缺口，应明确裁决，不能只给 OpenTUI 偷加 journal 删除。Dual-output JSON 保持 append-only，不追溯擦除已输出事件。
@@ -168,3 +170,13 @@ Ignored Phase 3 计划将下列稳定案组展开成命名分支。当前 C 全�
 - 即使 renderer 依赖延迟交付，H13/H14 仍可见；没有预先授权新增库、版本或默认行为变更。
 
 Ready 需要已接受父批次、完整同步双语设计、global/当前 Ink 基线、变更路径的有意义复现、正常 full build/typecheck、定向 owner/projection/native 测试、三个本地腿的所有适用 H01–H14 分支、明确例外处置、source/artifact/runtime 身份和清理，以及两次连续干净的全 diff/consumer 审阅。实现和最终 PR 仍作为一个完整会话事务交付。历史 dry-run 与 setup 收据只满足各自具名前置条件；当前 C 的动态门禁仍未关闭。
+
+### 清理前的退出展示
+
+共享 quit/exit 结果提供用户消息、时长和 ID。OpenTUI 入口用当前会话统计快照投影这些原始消息，交给已有 transcript view，替换普通应用和输入框。临时展示不追加 host history、logger、录制、JSON 输出或模型输入。第一次退出请求独占转换；展示提交后保留与 Ink 相同的 100 ms 呈现窗口，然后调用既有退出生命周期。卸载会取消该定时器。设置重启传入空消息时立即退出，不制造摘要。既有 Ctrl+C/Ctrl+D 中断退出及渲染错误退出保持退出码和清理路径。
+
+验收必须观察实际安装的 strict renderer，在离开 alternate screen 前展示告别标题、交互统计与墙钟时长，并在恰好一次模型请求后自然 exit 0。退出后的 resume 回显是独立证据。入口测试覆盖传入时长、输入框替换、录制/提示计数控制的 resume 提示、重复请求、空重启与定时器清理。在旧 c395 源码加候选 patch 622bcbc8d769170a9505f0441165d3315db878881ac9bc0ebd33939cfa2ecd3a 的组合上，四个完整源码测试文件的 217 案全部通过；原 stock-status 取消探针的 1 个选中用例通过，另 66 案精确未选中。这些结果仅覆盖该旧源码组合。当前 main/B5f916 整合后的构建、类型检查、native 测试和真实安装产物 PTY 回归均仍为 NOT_RUN；原始失败与后续源码修复证据全部保留。
+
+### 回放中的结构化压缩标记
+
+canonical 回放将每个压缩标记保留为一个已有 compaction 行，携带完整 token 数、估计标志、状态、类型、canonical history ID 和恢复展示策略。折叠标记保持隐藏但仍供 rewind 使用；展开标记使用已有压缩渲染。fast 与摘要压缩保持可区分，共享 rewind 映射因此仍能排除 fast 作为 API 截断边界。live 命令 info 投影与 provider 的上下文自动压缩通知保持不变；回放重置整个 transcript，不追加第二份。原 collapsed fast/summarize 回归断言未改。旧 c395 加 patch 622bcbc8 的 217 案源码结果包含原 fast/summarize 断言及新增精确事件/身份回归，不能算作当前 main/B 整合通过。新整合后的构建/类型检查、native 渲染与安装产物 PTY 验收仍为 NOT_RUN；两次原四文件失败均保留。
