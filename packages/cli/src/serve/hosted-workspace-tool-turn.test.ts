@@ -83,7 +83,10 @@ import {
   HostedSkillCatalog,
 } from './hosted-skill-catalog.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
-import { writeHostedTodos } from './hosted-todo-session.js';
+import {
+  hostedTodoInstructions,
+  writeHostedTodos,
+} from './hosted-todo-session.js';
 import * as hostedPlan from './hosted-plan-mode.js';
 
 const broker = vi.hoisted(() => ({
@@ -1796,7 +1799,11 @@ it('refuses a glob call a /1 profile never advertised', async () => {
 });
 
 // #15076: `todo_write` is declared only by the `/3` profiles.
-function createV3Turn(profile = 'hosted-workspace-files/3') {
+function createV3Turn(
+  profile = 'hosted-workspace-files/3',
+  shell = false,
+  publicPlanMode = false,
+) {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
@@ -1804,12 +1811,63 @@ function createV3Turn(profile = 'hosted-workspace-files/3') {
     'prompt',
     commit,
     messageFitsInline,
+    shell
+      ? { resources: session.resources, assertWritable: async () => {} }
+      : undefined,
     undefined,
     undefined,
-    undefined,
-    { profile },
+    { profile, publicPlanMode },
   );
 }
+
+// The `/3` widening reached the boundary Plan gate, so the Turn constructor
+// admits the same profiles; a planning round still withholds the writing tool
+// and must not tell the model to use it.
+it.each([
+  ['hosted-workspace-files/3', false],
+  ['hosted-workspace-shell/3', true],
+] as const)(
+  'admits public Plan mode on %s and refuses the todo_write it withholds',
+  async (profile, shell) => {
+    vi.spyOn(hostedPlan, 'hostedPublicPlanActive').mockResolvedValue(true);
+    // Seed durable state so a withheld tool is the only thing keeping its
+    // instruction out of the round.
+    const seeded = {
+      todos: [{ id: 'a', content: 'first', status: 'pending' as const }],
+    };
+    await writeHostedTodos(session, 'prompt', 'seed-call', seeded);
+    expect(await hostedTodoInstructions(session)).toContain(
+      JSON.stringify(seeded.todos),
+    );
+    turn = createV3Turn(profile, shell, true);
+    const names = (await turn.declarations(new AbortController().signal)).map(
+      (tool) => tool.name,
+    );
+    expect(names).not.toContain('todo_write');
+    expect(names).toContain('exit_plan_mode');
+    expect(await turn.todoInstructions()).toBe('');
+    const changed = {
+      todos: [{ id: 'a', content: 'first', status: 'completed' as const }],
+    };
+    const call = { ...calls[0], name: 'todo_write', args: changed };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: changed } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toContain(
+      'Plan mode is read-only',
+    );
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    // The refusal committed nothing: the seeded list is still the latest.
+    expect(await hostedTodoInstructions(session)).toContain(
+      JSON.stringify(seeded.todos),
+    );
+    await expect(turn.finish()).resolves.toBeUndefined();
+  },
+);
 
 it.each([
   ['hosted-workspace-files/3', ['todo_write'], false],

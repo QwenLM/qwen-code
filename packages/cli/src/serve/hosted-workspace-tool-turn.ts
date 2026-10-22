@@ -1919,6 +1919,8 @@ export class HostedWorkspaceToolTurn {
           'hosted-workspace-files/1',
           'hosted-workspace-shell/1',
           'hosted-workspace-shell/2',
+          'hosted-workspace-files/3',
+          'hosted-workspace-shell/3',
         ].includes(this.profile ?? ''))
     )
       throw new Error('Public Plan mode is unavailable for this Session.');
@@ -2126,7 +2128,11 @@ export class HostedWorkspaceToolTurn {
   }
 
   async todoInstructions(): Promise<string> {
-    return this.declaresTodoTool() ? hostedTodoInstructions(this.session) : '';
+    // A planning round withholds `todo_write` from `declarations()`, so it must
+    // not inject an instruction to keep the list current with it.
+    return this.declaresTodoTool() && !this.planning
+      ? hostedTodoInstructions(this.session)
+      : '';
   }
 
   planModeInstructions(): string {

@@ -295,7 +295,13 @@ export function assertManagedSessionChannelAdapterEnabled(
  * list; the bodies module refuses to load over a name left here.
  */
 export const MANAGED_SESSION_ENVELOPE_DOMAINS: readonly ManagedSessionDomain[] =
-  ['goal_state', 'session_metadata', 'file_history', 'session_source'];
+  [
+    'goal_state',
+    'todo_state',
+    'session_metadata',
+    'file_history',
+    'session_source',
+  ];
 
 export function assertManagedSessionDomainEnabled(
   domain: ManagedSessionDomain,
