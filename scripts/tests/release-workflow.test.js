@@ -3052,9 +3052,8 @@ exit 0`,
     // or below twice the worker cap would fire first and lose the host-naming
     // diagnostic.
     expect(spawnMs).toBeGreaterThan(2 * workerMs);
-    // Slow-pool measurements around this spawn: ~295 s job setup, ~8 s runtime
-    // provisioning, ~288 s scripts suite, ~8 s teardown. The job timeout bounds
-    // everything, so retuning either constant alone must fail here.
+    // Reserve an estimated 600 s for phases outside the spawn. This checks
+    // the declared upper budget, not a minimum cap or live execution time.
     const aroundTheSpawnSeconds = 600;
     expect(spawnMs / 1000 + aroundTheSpawnSeconds).toBeLessThanOrEqual(
       releaseYaml.jobs.quality_scripts['timeout-minutes'] * 60,

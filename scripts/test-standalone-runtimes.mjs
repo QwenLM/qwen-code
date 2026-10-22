@@ -19,10 +19,9 @@ const repo = path.dirname(path.dirname(script));
 // subprocess probes run about twice as slowly there: in release run
 // 39621619809 the node worker passed at 294 s and the bun worker was
 // SIGTERM'd by the old 300 s per-worker cap at 301 s; the old 600 s outer
-// cap was never reached. The spawn outlives both sequential workers plus
-// their setup, and quality_scripts' 30-minute budget also covers ~295 s of
-// job setup and the ~288 s scripts suite, so 540 s per worker is the most
-// that envelope holds. release-workflow.test.js pins both bounds.
+// cap was never reached. The spawn allows both sequential workers plus setup.
+// Keep headroom inside quality_scripts' 30-minute job budget for its other
+// phases; release-workflow.test.js checks the declared budget's upper bound.
 const WORKER_TIMEOUT_MS = 540_000;
 const CI_TIMEOUT_MS = 2 * WORKER_TIMEOUT_MS + 60_000;
 const sha = (file) =>
