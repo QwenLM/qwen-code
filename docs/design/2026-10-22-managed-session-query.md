@@ -45,6 +45,11 @@ at the user's request; CI and database-specific execution remain unverified.
 
 ## Follow-up
 
-The UI needs an explicit title-search mode or an agreed combined navigation-search
-contract before connecting these filters to the existing search field. Track that
-in #15077; this API/provider slice does not close the issue.
+The Java WebShell provider now exposes an independent title-search input. It sends
+the server-side `titleQuery` on the first page and every subsequent page, while
+the existing navigation search remains responsible for Session IDs and Workspace
+names. Other providers do not render the input. The title input is intentionally
+separate from navigation search until a combined-search contract is agreed.
+
+The issue remains open for runtime qualification and any future combined-search
+decision; this UI wiring does not claim a snapshot across concurrent changes.

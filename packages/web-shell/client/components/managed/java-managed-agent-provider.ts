@@ -199,6 +199,7 @@ export function createJavaManagedAgentProvider(
     },
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    titleSearch: true,
     async renameSession(sessionId, displayName, command) {
       const result = await client.renameSession(
         {
