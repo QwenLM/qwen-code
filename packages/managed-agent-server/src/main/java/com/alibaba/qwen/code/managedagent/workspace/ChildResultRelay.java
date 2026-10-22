@@ -518,9 +518,11 @@ public class ChildResultRelay {
                     return;
                 }
                 try {
-                    admission = sessions.createChildSession(pending.tenantId(),
-                            pending.parentSessionId(), pending.childRunId(),
-                            description, prompt, isolated);
+                    admission = envelope.has("publicLaunch")
+                            ? sessions.createPublicChildSession(pending.tenantId(), pending.parentSessionId(),
+                                    pending.childRunId(), description, prompt, envelope.required("publicLaunch"))
+                            : sessions.createChildSession(pending.tenantId(), pending.parentSessionId(),
+                                    pending.childRunId(), description, prompt, isolated);
                 } catch (ManagedAgentException refused) {
                     // A new child only (a replay answers before this
                     // check): the row moved off the parent's binding or was

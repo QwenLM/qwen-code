@@ -84,22 +84,22 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
 
 ### Hold scope: the write-back, not the suite
 
-A fair queue still cannot bound a wait that outlasts its budget. The MySQL
-integration lane held the lock across its install and its full `clean verify`;
-under pool contention that verify can run for hours (run 39628985638 held the
-lock 15:54-18:57) while the fast tier owns the same lock with a 90-minute wait.
-Run 39738538199's MySQL leg then sat at the head of the queue for its full
-90-minute budget while another lane held the lock across its suite, and failed
-without starting Maven.
+A fair queue still cannot bound a wait that outlasts its budget. The MariaDB
+lane held the lock across its install and its full MySQL `clean verify`; under
+pool contention that verify ran for about three hours (run 39628985638 held it
+15:54-18:57) while the fast tier owns the same lock with a 90-minute wait. Run
+39627609266's fast-tier job arrived at 17:38, stayed head of the queue, and
+failed at 19:15 without starting Maven — the hold, not the queue order, was
+the bound.
 
 Both Maven runs already resolve from a job-local repository, so they touch no
 host-shared state. Only the cache write-back mutates `~/.m2`, so only the
 write-back takes the lock. The seed (`cp -aln`) is read-only and best-effort
 and runs before the acquisition; the Maven runs run unlocked; the write-back
-holds one acquisition, and its `mkdir` and bounded `find`/`cp` children drop
-fd 9 so a survivor cannot retain the lock. A hold now measures the copy
-instead of the suite, and the fast tier's 90-minute budget is again far above
-one hold.
+holds one acquisition, and its `mkdir` and bounded `find`/`cp` children
+drop fd 9 so a survivor
+cannot retain the lock. A hold now measures the copy instead of the suite, and
+the fast tier's 90-minute budget is again far above one hold.
 
 ### Fast-tier priority
 
@@ -209,7 +209,7 @@ order this section exists to prevent.
   head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper and the
-  `sdk_java_lock_acquire 5400` budget at each acquisition site, the MySQL
+  `sdk_java_lock_acquire 5400` budget at each acquisition site, the MariaDB
   lane's Maven runs above its acquisition and its write-back children's fd 9
   close, and the `.size-baseline` records the workflow's new size.
 - Real-host soak is CI itself: the first pool runs after merge either

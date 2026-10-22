@@ -170,8 +170,8 @@ describe('SDK Java self-hosted workflow guards', () => {
     for (const command of maven) {
       expect(command.trim(), lockedSteps[0].name).toMatch(/ 9>&-$/);
     }
-    // This lane locks only its write-back: both Maven runs are above the
-    // acquisition, and the write-back children drop fd 9 so a cancelled
+    // The MariaDB lane locks only its write-back: both Maven runs are above
+    // the acquisition, and the write-back children drop fd 9 so a cancelled
     // job's survivor cannot retain the lock.
     const integration = lockedSteps[1].run;
     const lockAt = integration.indexOf(
@@ -191,8 +191,8 @@ describe('SDK Java self-hosted workflow guards', () => {
     'retains serialization while Maven runs and releases it with a surviving child',
     () => {
       const jobs = parse(workflow).jobs;
-      // Only the test job's Maven runs are inside the lock now; this lane's
-      // Maven runs resolve from a job-local repository above it.
+      // Only the test job's Maven runs are inside the lock now; the MariaDB
+      // lane's Maven runs resolve from a job-local repository above it.
       const commands = jobs.test.steps.flatMap((s) =>
         s.run?.includes('sdk-java-tests.lock')
           ? (s.run.replace(/\\\n/g, ' ').match(/^\s*mvn .+$/gm) ?? [])
@@ -1206,10 +1206,10 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
 
   it('holds the per-host sdk-java lock once around the cache write-back', () => {
     // The Maven runs resolve from the job-local repository, so the lock now
-    // guards only the host-shared cache write-back. Run 39738538199's job
-    // burned its full 90-minute wait as head of the queue while a sibling
-    // whole-suite hold ran; a multi-hour verify must not sit between the fast
-    // tier and its hold.
+    // guards only the host-shared cache write-back. Run 39627609266's
+    // fast-tier job burned its full 90-minute wait while the previous
+    // whole-suite hold ran from 15:54 to 18:57 (run 39628985638); a
+    // multi-hour verify must not sit between the fast tier and its hold.
     const parsed = parse(workflow);
     const mavenSteps = parsed.jobs['mysql-integration'].steps.filter(
       (s) => typeof s.run === 'string' && s.run.includes('mvn '),
@@ -1263,9 +1263,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(verifyAt).toBeGreaterThan(cdAt);
     expect(verifyAt).toBeLessThan(lockAt);
     expect(writeBackAt).toBeGreaterThan(lockAt);
-    // The ceiling must absorb one full lock wait, the ~3-hour Maven run, the
-    // write-back backstop and ~30 minutes of uncapped setup; 310 leaves a few
-    // minutes of margin.
+    // The ceiling must absorb one full lock wait, the ~3-hour Maven run,
+    // the write-back backstop and ~30 minutes of uncapped setup; 310 leaves
+    // a few minutes of margin.
     const writeBackBound = Number(
       step.run.match(/timeout (\d+) find \. /)?.[1],
     );

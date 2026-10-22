@@ -450,7 +450,8 @@ jobs:
     # Pool routing per the flyway job (#13245): hosted queue starvation fails
     # a zero-step job outright (#13623), the pool does not. The job is
     # pool-safe: the database is a per-leg container on a random host port,
-    # and every Maven run holds the test job's per-host sdk-java lock.
+    # both Maven runs use a job-local repository, and only the shared cache
+    # write-back holds the test job's per-host sdk-java lock.
     # Both legs run the same non-Hosted *IT family, as before #14936 removed
     # the MariaDB service. The MariaDB leg is what keeps the published
     # MariaDB-only V12 repair (RTRIM, error 1901) and the schema catalog's
@@ -473,12 +474,13 @@ jobs:
             engine_args: '--innodb-use-native-aio=0'
     # On the pool this job takes the per-host sdk-java lock only for its
     # shared Maven cache write-back: both Maven runs resolve from a job-local
-    # repository, so a multi-hour verify must not hold the lock and strand
-    # the fast tier (run 39738538199 waited its full 90-minute budget as head
-    # of the queue behind a whole-suite hold). The ceiling absorbs that wait,
-    # the ~3-hour Maven run, the 5-minute write-back backstop and 30 minutes
-    # of uncapped setup: 310. Hosted lanes never take the lock and inherit
-    # this ceiling as a bound, not as an expected duration.
+    # repository, so holding the lock across the whole integration suite
+    # serialized the fast tier behind a multi-hour hold (run 39628985638 held
+    # it 15:54-18:57 while run 39627609266's fast-tier job burned its full
+    # 90-minute wait). The ceiling absorbs that wait, the ~3-hour Maven run,
+    # the 5-minute write-back backstop and 30 minutes of uncapped setup: 310.
+    # Hosted lanes never take the lock and inherit this ceiling as a bound,
+    # not as an expected duration.
     timeout-minutes: 310
     env:
       MYSQL_CONTAINER: 'qwen-code-sdk-java-${{ matrix.database }}-${{ github.run_id }}-${{ github.run_attempt }}'
@@ -738,8 +740,8 @@ jobs:
           # Both Maven runs resolve from the job-local copy above, so they do
           # not touch host-shared state and must not hold the per-host lock:
           # a MySQL verify can run for hours under pool contention, and the
-          # fast tier's 90-minute budget expires behind it (run 39738538199
-          # waited the full budget as head of the queue).
+          # fast tier's 90-minute wait expires behind it (run 39627609266
+          # waited 17:38-19:15 behind run 39628985638's integration hold).
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
           cd packages/managed-agent-server
           # Keep mysql.url for release runs that check out an older tag.
@@ -750,9 +752,13 @@ jobs:
             -Dmysql.url.2="jdbc:mysql://127.0.0.1:${MYSQL_PORT_2}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
             -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check
           # Only the write-back mutates host-shared state, so only it takes
-          # the per-host lock. The ticketed queue in sdk-java-lock.sh orders
-          # that wait (fast PR legs overtake until they park or are promoted)
-          # instead of a wake-up race against sibling holds (qwen-code#14743).
+          # the per-host lock. One acquisition spans the write-back: run
+          # 39353663670's verify step waited the full 90 minutes after the
+          # install step released the lock, so a per-step lock let this job
+          # lose its place in the host queue between installing and verifying.
+          # The ticketed queue in sdk-java-lock.sh orders that one wait (fast
+          # PR legs overtake it until it parks or is promoted) instead of a
+          # wake-up race against sibling holds (qwen-code#14743).
           if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
             sdk_java_lock_acquire 5400
@@ -886,7 +892,12 @@ jobs:
     # second-fire refusal cell adds 25 s, moving the fork to 11212 s; the FG11d
     # cancel-isolation cell adds 11 s, moving the fork to 11223 s and raising
     # Verify to 198 minutes, wrapping fork + 600 s plus margin (11823 s of fork
-    # plus wrap, 0 s left: the next cell must raise the step);
+    # plus wrap); the FG11d queue-one cell adds 13 s, moving the fork to
+    # 11236 s and leaving Verify at 198 minutes, wrapping fork + 600 s plus
+    # margin (11836 s of fork plus wrap); the FG12e Runtime connection
+    # replacement cell adds 28 s, moving the fork to 11264 s and leaving
+    # Verify at 198 minutes, wrapping fork + 600 s plus margin (11864 s of
+    # fork plus wrap, 16 s left);
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
@@ -991,7 +1002,8 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 11223 s, so the step wraps to fork + 600 s plus margin (198 min).
+        # 11264 s, so the step wraps to fork + 600 s plus margin (198 min,
+        # 16 s left before the step must move).
         timeout-minutes: 198
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
