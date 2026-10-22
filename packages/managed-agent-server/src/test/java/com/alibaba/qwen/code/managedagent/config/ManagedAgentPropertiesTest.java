@@ -873,6 +873,55 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
+    void publicChildrenDefaultOnWithoutEnablingUnsupportedRuntimeProfiles() {
+        var properties = new ManagedAgentProperties();
+        assertThat(properties.getHarness().isWorkspaceChildAgentsEnabled()).isTrue();
+        assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        assertThat(properties.admitsPublicChildAgents()).isTrue();
+        properties.getHarness().setWorkspaceChildAgentsEnabled(false);
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getHarness().setWorkspaceChildAgentsEnabled(true);
+        properties.getRuntimeBroker().setDurableLocalProcess(false);
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().setDurableLocalProcess(true);
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("session");
+        properties.getRuntimeBroker().setProvisioner("kubernetes-workspace");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+    }
+
+    @Test
+    void publicChildEnvironmentOverrideDisablesTheShippedDefault() throws Exception {
+        String key = "qwen.managed-agent.harness.workspace-child-agents-enabled";
+        String variable = "QWEN_MANAGED_AGENT_WORKSPACE_CHILD_AGENTS_ENABLED";
+        var values = applicationYmlValues();
+        assertThat(values).containsEntry(key, "${" + variable + ":true}");
+        for (boolean disabled : List.of(false, true)) {
+            new ApplicationContextRunner()
+                    .withPropertyValues(key + "=" + values.get(key))
+                    .withInitializer(ctx -> {
+                        var ambient = new java.util.LinkedHashMap<String, Object>(System.getenv());
+                        ambient.remove(variable);
+                        if (disabled) {
+                            ambient.put(variable, "false");
+                        }
+                        ctx.getEnvironment().getPropertySources().replace("systemEnvironment",
+                                new org.springframework.core.env.MapPropertySource("systemEnvironment", ambient));
+                    })
+                    .withUserConfiguration(PropertiesConfiguration.class)
+                    .run(started -> {
+                        assertThat(started).hasNotFailed();
+                        var bound = started.getBean(ManagedAgentProperties.class);
+                        assertThat(bound.getHarness().isWorkspaceChildAgentsEnabled()).isEqualTo(!disabled);
+                        assertThat(bound.admitsPublicChildAgents()).isFalse();
+                    });
+        }
+    }
+
+    @Test
     void shellAdmissionIsDefaultOffAndRequiresAnAskingModeAndFiles() throws Exception {
         String key = "qwen.managed-agent.harness.workspace-shell-enabled";
         assertThat(applicationYmlValues()).containsEntry(key,

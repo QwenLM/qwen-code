@@ -79,9 +79,14 @@ final class HostedShellOutputProbe implements AutoCloseable {
 
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
         String storage = "storage-" + sessions.indexOf(session);
-        return jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+        var physical = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
                 tenant, storage);
+        var member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id, execution_storage_key"
+                + " FROM ma_runtime_session WHERE tenant_id = ? AND harness_session_id = ?",
+                tenant, session.get("sessionId"));
+        member.put("physicalOwner", physical);
+        return member;
     }
 
     private List<?> owned() {
@@ -159,8 +164,8 @@ final class HostedShellOutputProbe implements AutoCloseable {
         for (String key : List.of("binding_id", "runtime_generation", "runtime_session_id")) {
             assertThat(original.get(key)).isEqualTo(row.get(key));
         }
-        assertThat(original.get("holder_key")).isEqualTo(sha256((row.get("binding_id") + "\u0000"
-                + row.get("runtime_generation") + "\u0000" + row.get("runtime_session_id")).getBytes(StandardCharsets.UTF_8)));
+        assertThat(original.get("execution_storage_key"))
+                .isEqualTo(((Map<?, ?>) original.get("physicalOwner")).get("storage_key"));
         assertThat(jdbc.queryForList("SELECT session_state FROM ma_runtime_session WHERE harness_session_id = ?",
                 String.class, id)).containsExactly("READY");
         return Map.of("state", row.get("execution_state"));

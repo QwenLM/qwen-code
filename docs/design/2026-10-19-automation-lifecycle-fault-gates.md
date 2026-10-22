@@ -60,11 +60,32 @@ asserts:
 - the cancelled run reaches `cancelled` from its committed proof, and its
   occurrence settles once;
 - the schedule, future slots, sibling runs and foreground work are untouched;
-- a queued input cancelled before any attempt settles with no model call. That
-  a run which completes on its own keeps its outcome is delivered: a cancel
+- a queued input cancelled before any attempt settles with no model call —
+  **stays open**. A queue does form on the public surface: under the
+  `queue_one` overlap policy (and under `allow` below its concurrency quota)
+  admission admits a second manual fire while the first run is active, because
+  `hasOpenTurn` reads only public `ma_turn` rows and the automation wake turn is
+  journal-side, and `countRefusal` admits at one active run for `queue_one`. The
+  second run commits and its input waits in the journal — the object a cancel
+  before any attempt would have to settle model-free. The reachability half is
+  delivered: `fg11dQueueOneAdmitsASecondFireOnMySql` pins that the second fire
+  is admitted under `queue_one` — its own run id and a `fired` occurrence — and
+  that no prompt for it appears while the first turn stays parked. That absence
+  comes from the parked turn, not from the overlap arm; the cell bounds it with
+  a dwell. The cancel half stays open: a task cancel on that queued run is
+  accepted and the run stays `running` (measured locally, not gated), because
+  the queue is settled by the turn, not by the cancel.
+  What `fg11dSecondFireIsRefusedWhileTheFirstRunsOnMySql` pins is narrower: under
+  the default `skip` policy a second fire at one active run is refused
+  `409 automation_run_skipped` with `skipped`/`overlap` and no run behind it —
+  the refusal, not the arm;
+- a run which completes on its own keeps its outcome — delivered: a cancel
   arriving after settlement is refused with `409 task_action_unavailable`
   (`The task does not accept a cancellation now.`), and the run stays
   `completed` with its occurrence `fired`;
+- a cancel retried under the same key reuses its committed operation and changes
+  nothing — delivered: the second request answers the cancelled task, the run
+  stays `cancelled` and the occurrence settles once;
 - a retry under the same key reuses the original operation and run — delivered:
   the second `POST /runs` answers the run it already made, records no second
   occurrence and starts no second Turn. That a parked cancel is never
@@ -106,8 +127,18 @@ around it.
   which the third makes effective where the guard is not enabled by itself.
   With those the close completes and the next slot records `skipped` for
   `session_not_active`. A close attempted while a turn is in flight is refused
-  with `409 turn_active`, which is what bounds the queued-input arm: the queue
-  is decided by the turn, never by a close.
+  with `409 turn_active`, so a close never decides the fate of a queued input:
+  that queue is decided by the turn, not by the close.
+- The queued-input arm is reachable, so this lane leaves it open rather than
+  closing it with a refusal. `fg11dSecondFireIsRefusedWhileTheFirstRunsOnMySql`
+  runs under the default `skip` policy, where `countRefusal` refuses at one
+  active run: it pins that refusal, not the open-Turn arm, which `hasOpenTurn`
+  never reaches here (`ma_turn` holds only public turns, and this cell's only
+  public turn is the warm turn `createSession` completes). Under `queue_one`
+  the same fire is admitted and the queue forms deterministically — no race is
+  needed — which is why the criterion above stays open. Every admission arm
+  answers the reason `overlap`, so no assertion on the refusal body can say
+  which arm refused.
 - A task cancel needs the projection's task id, not the run record id:
   passing `arun_…` answers `task_not_found`, and the id from
   `GET /v1/agents/sessions/{id}/tasks` is accepted. With the wake turn kept

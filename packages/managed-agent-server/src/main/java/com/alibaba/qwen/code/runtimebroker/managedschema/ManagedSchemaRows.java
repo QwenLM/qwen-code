@@ -19,7 +19,8 @@ public final class ManagedSchemaRows {
             "o3_backfill_pending", "projection_pending", "terminal", "truncated",
             "archived", "quarantined", "write_evidence", "accepted_complete",
             "workspace_bound", "verification_ready", "is_default", "provision_seeded",
-            "drain_requested", "cancel_requested", "enabled", "csi_guard");
+            "drain_requested", "cancel_requested", "enabled", "csi_guard",
+            "execution_exclusive");
     private static final Set<String> IDENTITIES =
             Set.of(
                     "tenant_id",

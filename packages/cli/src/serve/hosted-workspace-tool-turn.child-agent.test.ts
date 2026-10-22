@@ -132,6 +132,8 @@ function createTurn(
   hooksSession?: HostedHookSession,
   profile: HostedWorkspaceToolProfile = 'hosted-workspace-team-lead/1',
   childSnapshots = false,
+  publicChildren = false,
+  launchEnabled: () => boolean = () => true,
 ): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -170,6 +172,18 @@ function createTurn(
         ? {
             childAgents: {
               funnel: children,
+              publicChildren,
+              launchEnabled,
+              snapshot: async (sourcePromptId, modelId, modelRoute) => ({
+                version: 1,
+                sourcePromptId,
+                modelId,
+                modelRoute,
+                approvalMode: 'auto-edit',
+                approvalRevision: 2,
+                modelRevision: 1,
+                skillsRef: null,
+              }),
               depth,
               childWorkspaces,
               childSnapshots,
@@ -313,6 +327,53 @@ it('hides the agent tool when public shell admission attaches no child orchestra
     'hosted-workspace-shell/1',
   ).declarations(new AbortController().signal);
   expect(tools.some((tool) => tool.name === 'agent')).toBe(false);
+});
+
+it('public scope exposes only agent orchestration and rechecks the live deployment gate', async () => {
+  let enabled = true;
+  const turn = createTurn(
+    0,
+    undefined,
+    'prompt',
+    false,
+    false,
+    true,
+    undefined,
+    'hosted-workspace-shell/1',
+    false,
+    true,
+    () => enabled,
+  );
+  turn.setChildModelRoute('model', {
+    authType: 'openai',
+    endpointDigest: 'a'.repeat(64),
+    providerPin: 'b'.repeat(64),
+  });
+  const names = (await turn.declarations(new AbortController().signal)).map(
+    (tool) => tool.name,
+  );
+  expect(names).toContain('agent');
+  for (const name of [
+    'workflow',
+    'send_message',
+    'team_create',
+    'task_create',
+    'request_shutdown',
+  ])
+    expect(names).not.toContain(name);
+  const isolated = await executeAgent(
+    turn,
+    call({ description: 'audit', prompt: 'review', isolation: 'worktree' }),
+  );
+  expect(JSON.stringify(isolated)).toContain('isolation');
+  expect(children.launchedChildRunsOf(sessionKey.sessionId)).toEqual([]);
+  enabled = false;
+  const refused = await executeAgent(
+    turn,
+    call({ description: 'audit', prompt: 'review' }, 'call-disabled'),
+  );
+  expect(JSON.stringify(refused)).toContain('error');
+  expect(children.launchedChildRunsOf(sessionKey.sessionId)).toEqual([]);
 });
 
 it('declares the agent tool at the root and hides it from a child Session', async () => {
