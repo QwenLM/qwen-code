@@ -326,6 +326,86 @@ describe('useComposerCore tooltip portal', () => {
 });
 
 describe('useComposerCore history and drafts', () => {
+  it.each([
+    ['panel', 'ArrowUp'],
+    ['panel', 'ArrowDown'],
+    ['search', 'ArrowUp'],
+    ['search', 'ArrowDown'],
+  ] as const)(
+    'keeps caret control after a %s recall followed by %s',
+    async (recall, key) => {
+      const entry = 'line one\nline two\nline three';
+      localStorage.setItem(
+        'qwen-web-shell-history',
+        JSON.stringify([entry, 'newest prompt']),
+      );
+      const onFocusFooter = vi.fn(() => true);
+      await mount({ onFocusFooter });
+      act(() => latest!.setText('unsent draft'));
+      act(() => latest!.searchState.openHistorySearch());
+      if (recall === 'panel') {
+        act(() => latest!.searchState.restoreSearchMatch!(entry));
+        act(() => latest!.searchState.closeSearch(false));
+      } else {
+        act(() =>
+          latest!.searchState.handleSearchInput({
+            target: { value: 'line two' },
+            nativeEvent: { isComposing: false },
+          } as unknown as React.ChangeEvent<HTMLInputElement>),
+        );
+        act(() =>
+          latest!.searchState.handleSearchKeyDown({
+            key: 'Tab',
+            nativeEvent: { isComposing: false },
+            preventDefault: vi.fn(),
+          } as unknown as React.KeyboardEvent<HTMLInputElement>),
+        );
+      }
+      expect(latest!.getText()).toBe(entry);
+      const view = latest!.viewRef.current!;
+      act(() => view.dispatch({ selection: { anchor: 12 } }));
+      act(() => pressHistoryKey(key));
+      expect(latest!.getText()).toBe(entry);
+      expect(onFocusFooter).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['ArrowUp', 'ArrowDown'] as const)(
+    'keeps a selected history entry when pressing %s',
+    async (key) => {
+      const entry = 'line one\nline two\nline three';
+      localStorage.setItem(
+        'qwen-web-shell-history',
+        JSON.stringify(['older prompt', entry]),
+      );
+      await mount();
+      act(() => pressHistoryKey('ArrowUp'));
+      expect(latest!.getText()).toBe(entry);
+      const view = latest!.viewRef.current!;
+      act(() => view.dispatch({ selection: { anchor: 2, head: 12 } }));
+      act(() => pressHistoryKey(key));
+      expect(latest!.getText()).toBe(entry);
+    },
+  );
+
+  it.each(['ArrowUp', 'ArrowDown'] as const)(
+    'keeps hard-newline history text while %s moves inside it',
+    async (key) => {
+      const entry = 'line one\nline two\nline three';
+      localStorage.setItem(
+        'qwen-web-shell-history',
+        JSON.stringify(['older prompt', entry]),
+      );
+      await mount();
+      act(() => latest!.setText('unsent draft'));
+      act(() => pressHistoryKey('ArrowUp'));
+      const view = latest!.viewRef.current!;
+      act(() => view.dispatch({ selection: { anchor: 12 } }));
+      act(() => pressHistoryKey(key));
+      expect(latest!.getText()).toBe(entry);
+    },
+  );
+
   it('places the caret after a draft restored on initial mount', async () => {
     localStorage.setItem(
       getSessionDraftKey('restored-session'),

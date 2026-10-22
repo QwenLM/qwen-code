@@ -1404,10 +1404,12 @@ type MultilineHistoryBoundary = 'editor' | 'handled' | 'history';
 function handleMultilineHistoryBoundary(
   view: EditorView,
   direction: 'up' | 'down',
+  isNavigatingHistory: boolean,
 ): MultilineHistoryBoundary {
   const doc = view.state.doc;
   const selection = view.state.selection.main;
   if (!selection.empty) return 'editor';
+  if (isNavigatingHistory && doc.lines === 1) return 'history';
 
   const head = selection.head;
   const from = view.moveToLineBoundary(selection, false).head;
@@ -3418,9 +3420,11 @@ export function useComposerCore(
             closeSlashMenu();
             closeAtMenu();
           }
-          const multilineBoundary = isBrowsingHistory
-            ? 'history'
-            : handleMultilineHistoryBoundary(view, 'up');
+          const multilineBoundary = handleMultilineHistoryBoundary(
+            view,
+            'up',
+            isBrowsingHistory && history.isNavigating(),
+          );
           if (multilineBoundary === 'handled') return true;
           if (multilineBoundary === 'editor') return false;
           if (shellModeRef.current) {
@@ -3475,9 +3479,11 @@ export function useComposerCore(
             closeSlashMenu();
             closeAtMenu();
           }
-          const multilineBoundary = isBrowsingHistory
-            ? 'history'
-            : handleMultilineHistoryBoundary(view, 'down');
+          const multilineBoundary = handleMultilineHistoryBoundary(
+            view,
+            'down',
+            isBrowsingHistory && history.isNavigating(),
+          );
           if (multilineBoundary === 'handled') return true;
           if (multilineBoundary === 'editor') return false;
           if (shellModeRef.current) {

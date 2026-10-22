@@ -431,6 +431,7 @@ interface ChatEditorRenderProps
   availableModes?: ComponentProps<typeof ChatEditor>['availableModes'];
   planMode?: boolean;
   modeControlsDisabled?: boolean;
+  planControlsDisabled?: boolean;
   onTogglePlan?: () => void;
   isRunning?: boolean;
   onSubmit?: ComponentProps<typeof ChatEditor>['onSubmit'];
@@ -3468,6 +3469,36 @@ describe('ChatEditor Plan toolbar switch fallback', () => {
           }) as unknown as MediaQueryList,
       );
     }
+  });
+
+  it('can disable Plan independently while keeping execution approval selectable', () => {
+    const onSelectMode = vi.fn();
+    const onTogglePlan = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode', 'plan'],
+      planControlsDisabled: true,
+      planMode: true,
+      currentMode: 'default',
+      onSelectMode,
+      onTogglePlan,
+    });
+    const plan = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-plan-button]',
+    );
+    expect(plan?.disabled).toBe(true);
+    act(() => plan!.click());
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.click(),
+    );
+    const choice = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Full Access'));
+    expect(choice).toBeDefined();
+    act(() => choice!.click());
+    expect(onSelectMode).toHaveBeenCalledWith('yolo');
+    expect(onTogglePlan).not.toHaveBeenCalled();
   });
 
   it('keeps permission and Plan controls operable while approval disables input', () => {

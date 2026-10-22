@@ -20,8 +20,14 @@ import type { Content, Part } from '@google/genai';
 import { createHash, randomUUID } from 'node:crypto';
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import { DEFAULT_TOOL_OUTPUT_BATCH_BUDGET } from '@qwen-code/qwen-code-core/config/config.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
-import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import type {
+  ChatRecord,
+  ChatCompressionRecordPayload,
+} from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
+import { buildSessionHistoryFromConversation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
@@ -137,10 +143,22 @@ export async function applyHostedModelPin(
   }
 }
 
+export function hostedToolOutputBudget(cwd: string): number {
+  return (
+    loadSettings(cwd, {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: true,
+      workspaceTrusted: false,
+    }).merged.tools?.toolOutputBatchBudget ?? DEFAULT_TOOL_OUTPUT_BATCH_BUDGET
+  );
+}
+
 export async function runHostedHarnessTextTurn(input: {
   sessionId: string;
   cwd: string;
   history: readonly ChatRecord[];
+  excludedPromptIds?: ReadonlySet<string>;
+  commitCompression?: (payload: ChatCompressionRecordPayload) => Promise<void>;
   prompt: string;
   attachmentParts?: readonly Part[];
   promptId: string;
@@ -171,6 +189,7 @@ export async function runHostedHarnessTextTurn(input: {
         | 'resumeHookResults'
         | 'hookStopReason'
         | 'setModelRound'
+        | 'setToolOutputBudget'
         | 'planModeInstructions'
       >
     >;
@@ -210,6 +229,9 @@ export async function runHostedHarnessTextTurn(input: {
     true,
     { toolInvocationGuard: () => ({ allowed: false }) },
   );
+  const outputBudget = config.getToolOutputBatchBudget?.();
+  if (outputBudget !== undefined)
+    input.toolTurn?.setToolOutputBudget?.(outputBudget);
   const contextWithInstructions = (context: string | undefined) =>
     [
       input.agentInstructions
@@ -231,18 +253,16 @@ export async function runHostedHarnessTextTurn(input: {
   let pendingToolResults =
     input.resumeFromToolResults !== undefined ||
     (input.resumeModel?.pendingToolResults ?? false);
-  const initialMessages: Content[] = input.history.flatMap((record) =>
-    (record.type === 'user' ||
-      record.type === 'assistant' ||
-      record.type === 'tool_result') &&
-    record.message?.parts
-      ? [
-          {
-            role: record.type === 'assistant' ? 'model' : 'user',
-            parts: record.message.parts,
-          },
-        ]
-      : [],
+  const excludeUnanswered = (history: Content[]) =>
+    history.filter(
+      (entry) =>
+        entry.role !== 'user' ||
+        !input.excludedPromptIds?.has(getApiHistoryPromptId(entry) ?? ''),
+    );
+  const initialMessages: Content[] = excludeUnanswered(
+    buildSessionHistoryFromConversation({
+      messages: input.history,
+    }).apiHistory,
   );
   if (!input.resumeFromToolResults && !input.resumeModel)
     initialMessages.push({
@@ -450,29 +470,59 @@ export async function runHostedHarnessTextTurn(input: {
     // injects them before the first request too.
     let injectedContext: string | undefined;
     let injectedTools: ReadonlySet<string> | undefined;
+    const lastAssistant = input.history.findLastIndex(
+      (record) => record.type === 'assistant',
+    );
+    const resumedIds = new Set(
+      input.resumeFromToolResults?.flatMap((part) =>
+        part.functionResponse?.id ? [part.functionResponse.id] : [],
+      ),
+    );
     const historyRecords = input.resumeFromToolResults
-      ? input.history.slice(
-          0,
-          input.history.findLastIndex((record) => record.type === 'assistant') +
-            1,
-        )
+      ? input.history.flatMap((record, index) => {
+          if (index <= lastAssistant) return [record];
+          if (record.type !== 'system' || record.subtype !== 'chat_compression')
+            return [];
+          const payload = record.systemPayload as ChatCompressionRecordPayload;
+          const prefix = payload.summaryPrefixLength;
+          const pending = payload.compressedHistory?.at(-1);
+          const responses = pending?.parts?.flatMap((part) =>
+            part.functionResponse ? [part.functionResponse] : [],
+          );
+          // A pre-send snapshot owns the pending response too. Restore its
+          // compressed prefix, then send that response through the resume path.
+          if (
+            typeof prefix !== 'number' ||
+            !Number.isSafeInteger(prefix) ||
+            prefix < 0 ||
+            payload.compressedHistory.length !== prefix + 1 ||
+            pending?.role !== 'user' ||
+            !responses?.length ||
+            responses.some((response) => !resumedIds.has(response.id ?? ''))
+          )
+            return [record];
+          return [
+            {
+              ...record,
+              systemPayload: {
+                ...payload,
+                compressedHistory: payload.compressedHistory.slice(0, prefix),
+                ...(payload.promptIds
+                  ? { promptIds: payload.promptIds.slice(0, prefix) }
+                  : {}),
+              },
+            },
+          ];
+        })
       : input.history;
-    const history: Content[] = historyRecords.flatMap((record) => {
-      if (
-        (record.type === 'user' ||
-          record.type === 'assistant' ||
-          (input.toolTurn && record.type === 'tool_result')) &&
-        record.message?.parts
-      ) {
-        return [
-          {
-            role: record.type === 'assistant' ? 'model' : 'user',
-            parts: record.message.parts,
-          },
-        ];
-      }
-      return [];
+    const restored = buildSessionHistoryFromConversation({
+      messages: historyRecords,
     });
+    const history = excludeUnanswered(restored.apiHistory);
+    if (input.commitCompression)
+      client.setCompressionObserver(input.commitCompression, {
+        restoreRecentFiles: false,
+      });
     // Failed and cancelled turns have no assistant record, and curated
     // history drops an empty assistant record while keeping its prompt. Omit
     // both kinds of unanswered prompt even when later completed turns follow.
@@ -490,6 +540,7 @@ export async function runHostedHarnessTextTurn(input: {
                 : answered(entry),
             ),
       );
+    client.getChat().setCompletedToolCallIds?.(restored.completedToolCallIds);
     historyReady = true;
     input.hooks?.setMessagesProvider(() =>
       client.getHistory().map((message) => ({ ...message })),

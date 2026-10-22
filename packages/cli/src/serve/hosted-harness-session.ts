@@ -5,9 +5,15 @@
  */
 
 import {
+  HostedContextCompression,
+  HostedCompressionRefusal,
+} from './hosted-context-compression.js';
+
+import {
   parseHostedApprovalSelection,
   readHostedTurnApprovalSelection,
   hostedTurnApproval,
+  createHostedLiveApprovalReader,
   type HostedApprovalSelection,
 } from './hosted-approval-selection.js';
 import {
@@ -46,6 +52,7 @@ import {
   hostedActionDenied,
   endHostedAction,
   parseHostedActionOptions,
+  hostedLiveApprovalPoll,
 } from './hosted-tool-approval.js';
 
 import {
@@ -151,11 +158,14 @@ import {
   HostedModelRoundLimitError,
   HostedImageInputUnsupportedError,
   runHostedHarnessTextTurn,
+  hostedToolOutputBudget,
 } from './hosted-harness-model.js';
 import { hostedToolProgress } from './hosted-tool-progress.js';
 import {
   HostedSkillCatalog,
   readHostedSkills,
+  parseSessionSkillsRef,
+  sameSessionSkillsRef,
 } from './hosted-skill-catalog.js';
 import {
   parseHostedWorkflowLaunchBlock,
@@ -294,6 +304,7 @@ import {
   type HostedWorkspaceContextSlot,
   type HostedWorkspaceToolProfile,
   type HostedShellTurnOptions,
+  type HostedApprovalTurnOptions,
 } from './hosted-workspace-tool-turn.js';
 import type { HostedHarnessContract } from './hosted-harness-contract.js';
 import {
@@ -471,11 +482,13 @@ function blockRecovery(
 }
 
 interface HostedSession {
+  compression?: HostedContextCompression;
   streamOwner: { bootId: string; eventEpoch: string };
   managed: ManagedSession;
   storeBaseUrl: string;
   definition: Record<string, unknown> | null;
   agentDefinition?: HostedAgentDefinition;
+  sessionSkillsRef?: ManagedSessionDurableRef;
   skills?: HostedSkillCatalog;
   clientId: string;
   cwd: string;
@@ -601,6 +614,40 @@ interface HostedSession {
   readonly heldRuntimeTurns: Set<string>;
 }
 
+async function hostedApprovalForTurn(
+  session: HostedSession,
+  promptId: string,
+): Promise<HostedApprovalTurnOptions | undefined> {
+  if (!session.approval) return undefined;
+  const settings = (await hostedTurnApproval(
+    session.managed,
+    promptId,
+    session.approval,
+  ))!;
+  const live =
+    session.stores &&
+    !session.definition?.['lineage'] &&
+    [
+      'hosted-workspace-files/1',
+      'hosted-workspace-shell/1',
+      'hosted-workspace-shell/2',
+    ].includes(session.toolProfile ?? '');
+  return {
+    settings,
+    waiters: session.waiters,
+    isBlocked: () => session.blocked,
+    ...(live
+      ? {
+          readSettings: createHostedLiveApprovalReader(
+            settings,
+            await readHostedTurnApprovalSelection(session.managed, promptId),
+            () => session.stores!.approvalSelection(),
+          ),
+        }
+      : {}),
+  };
+}
+
 /**
  * H4e-b3 decisions 5/9: whether this run's first committed input carried
  * an unescaped `plan-mode="required"` preamble. Only a Session with a
@@ -644,6 +691,64 @@ async function ensureMemberPlanMode(session: HostedSession): Promise<boolean> {
   const planMode = await hostedFirstInputPlanMode(session.managed);
   if (planMode) session.memberPlanMode = true;
   return planMode;
+}
+
+function compressionFor(session: HostedSession): HostedContextCompression {
+  return (session.compression ??= new HostedContextCompression({
+    session: session.managed,
+    cwd: session.cwd,
+    agentDefinition: session.agentDefinition,
+    instructions: async () =>
+      [
+        await readHostedAgentInstructions(
+          session.agentDefinition,
+          session.managed.resources,
+        ),
+        session.skills?.instructions(),
+        session.workspaceContext,
+      ]
+        .filter(Boolean)
+        .join('\n\n'),
+    busy: () => {
+      const pending = new Set<string>();
+      for (const event of session.managed.authority.eventsInSequenceRange(
+        1,
+        session.managed.authority.committedSequence,
+      )) {
+        if (event.kind === 'input.accepted')
+          pending.add(event.payload['turnId'] as string);
+        if (event.kind === 'turn.settled')
+          pending.delete(event.payload['turnId'] as string);
+      }
+      return !!(
+        session.active ||
+        session.recoveredTurn ||
+        session.blocked ||
+        pending.size ||
+        session.mcpClosing ||
+        session.mcpBusy ||
+        session.mcpRecovering ||
+        session.hooksBusy ||
+        session.mcp?.hasPendingOperations() ||
+        session.hooks?.hasPendingOperations ||
+        session.managed.authority.currentActivation?.phase !== 'active'
+      );
+    },
+    hasPendingHooks: () => !!session.hooks?.hasPendingOperations,
+    ...(session.hooks
+      ? {
+          fireHook: (event, operationId, fields) =>
+            runHostedLifecycleHook(session, event, operationId, { ...fields }),
+        }
+      : {}),
+  }));
+}
+
+function compressionBusy(session: HostedSession): boolean {
+  return (
+    !!session.compression?.busy ||
+    !!session.managed.authority.activeHistoryMaintenance
+  );
 }
 
 async function runHostedLifecycleHook(
@@ -2276,6 +2381,13 @@ async function verifyWorkspaceRestore(
     }
     if (ref.kind === 'managed-definition') {
       const definition = object(JSON.parse(bytes.toString('utf8')));
+      const sessionSkills = parseSessionSkillsRef(
+        definition?.['sessionSkillsRef'],
+      );
+      if (sessionSkills) {
+        await readRef(sessionSkills);
+        await readHostedSkills(sessionSkills, resources);
+      }
       const pin = parseHostedAgentDefinition(definition?.['agentDefinition']);
       if (pin?.instructionsRef) {
         await readRef(pin.instructionsRef);
@@ -3083,15 +3195,34 @@ async function executeHostedTurn(
       const actionId = plan.actionId!;
       const original = authority.action(actionId)!;
       const options = await readHostedActionOptions(session.managed, original);
-      onResumeReady?.();
-      await session.waiters.wait(
-        actionId,
-        options.expiresAt,
-        abort.signal,
-        () =>
-          authority.action(actionId)?.state !== 'requested' ||
-          authority.writesStopped,
-      );
+      try {
+        const liveApproval =
+          options.toolName !== 'exit_plan_mode'
+            ? await hostedApprovalForTurn(session, promptId)
+            : undefined;
+        onResumeReady?.();
+        await session.waiters.wait(
+          actionId,
+          options.expiresAt,
+          abort.signal,
+          () =>
+            authority.action(actionId)?.state !== 'requested' ||
+            authority.writesStopped,
+          liveApproval?.readSettings
+            ? hostedLiveApprovalPoll(
+                session.managed,
+                session.waiters,
+                options,
+                liveApproval.readSettings,
+                abort.signal,
+                false,
+                liveApproval.isBlocked,
+              )
+            : undefined,
+        );
+      } catch (cause) {
+        throw new HostedToolRecoveryRequiredError(cause);
+      }
       if (authority.action(actionId)?.state === 'requested')
         await endHostedAction(
           session.managed,
@@ -3201,6 +3332,7 @@ async function executeHostedTurn(
     async (modelScope) =>
       harness.run(async () => {
         const projected = await session.managed.sink.project();
+        const modelRecords = await session.managed.sink.projectModelRecords();
         const settledPrompts = new Set(
           authority
             .eventsInSequenceRange(1, authority.committedSequence)
@@ -3210,13 +3342,14 @@ async function executeHostedTurn(
         const unanswered = unansweredPrompts(session);
         const history = (
           session.toolProfile
-            ? projected.filter(
+            ? modelRecords.filter(
                 (entry) =>
+                  entry.type === 'system' ||
                   settledPrompts.has(entry.daemonPromptId) ||
                   ((resumeFromToolResults || resumeApproval || resumeModel) &&
                     entry.daemonPromptId === promptId),
               )
-            : projected
+            : modelRecords
         ).filter(
           (entry) =>
             !(
@@ -3247,7 +3380,10 @@ async function executeHostedTurn(
           type: 'assistant' | 'tool_result',
           parts: Part[],
           model: string,
-          identity?: { uuid: string; timestamp: string },
+          identity?: Pick<
+            ChatRecord,
+            'uuid' | 'timestamp' | 'clientInitiatedSkills'
+          >,
         ) =>
           record(session, sessionId, type, parentUuid, {
             daemonPromptId: promptId,
@@ -3260,7 +3396,10 @@ async function executeHostedTurn(
           type: 'assistant' | 'tool_result',
           parts: Part[],
           model: string,
-          identity?: { uuid: string; timestamp: string },
+          identity?: Pick<
+            ChatRecord,
+            'uuid' | 'timestamp' | 'clientInitiatedSkills'
+          >,
         ) => {
           const message = messageRecord(type, parts, model, identity);
           if (type === 'assistant' && deltas) {
@@ -3298,14 +3437,7 @@ async function executeHostedTurn(
                   HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
                 session.publication,
                 session.shell,
-                session.approval && {
-                  settings: (await hostedTurnApproval(
-                    session.managed,
-                    promptId,
-                    session.approval,
-                  ))!,
-                  waiters: session.waiters,
-                },
+                await hostedApprovalForTurn(session, promptId),
                 {
                   mcp: session.mcp,
                   hooks: session.hooks,
@@ -3331,6 +3463,8 @@ async function executeHostedTurn(
                 },
               )
             : undefined;
+        if (toolTurn && session.skills)
+          toolTurn.setToolOutputBudget(hostedToolOutputBudget(session.cwd));
         if (resumeApproval) {
           if (!toolTurn)
             throw new HostedToolRecoveryRequiredError(
@@ -3379,6 +3513,15 @@ async function executeHostedTurn(
                   sessionId,
                   cwd,
                   history,
+                  excludedPromptIds: unansweredPrompts(session),
+                  commitCompression: async (payload) => {
+                    await session.managed.sink.write(
+                      record(session, sessionId, 'system', null, {
+                        subtype: 'chat_compression',
+                        systemPayload: payload,
+                      }),
+                    );
+                  },
                   prompt: text,
                   attachmentParts: promptInput.attachments,
                   promptId,
@@ -3680,7 +3823,9 @@ export function registerHostedHarnessSessionRoutes(
     const body = object(req.body);
     const sessionId = create ? body?.['sessionId'] : req.params['id'];
     let agentDefinition: HostedAgentDefinition | undefined;
+    let sessionSkillsRef: ManagedSessionDurableRef | undefined;
     try {
+      sessionSkillsRef = parseSessionSkillsRef(body?.['sessionSkillsRef']);
       agentDefinition = parseHostedAgentDefinition(
         body?.['agentDefinition'],
         create,
@@ -3715,8 +3860,9 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     if (
-      (agentDefinition?.skillsRef !== undefined &&
-        (!toolProfile || !brokerOptions)) ||
+      ((agentDefinition?.skillsRef !== undefined ||
+        sessionSkillsRef !== undefined) &&
+        ((create && !toolProfile) || !brokerOptions)) ||
       (toolProfile !== undefined &&
         ((!isHostedWorkspaceProfile(toolProfile) &&
           toolProfile !== HOSTED_MCP_PROFILE) ||
@@ -3863,6 +4009,14 @@ export function registerHostedHarnessSessionRoutes(
       resident &&
       !create &&
       !sameHostedAgentDefinition(resident.agentDefinition, agentDefinition)
+    ) {
+      error(res, 409, 'hosted_agent_definition_conflict');
+      return;
+    }
+    if (
+      resident &&
+      !create &&
+      !sameSessionSkillsRef(resident.sessionSkillsRef, sessionSkillsRef)
     ) {
       error(res, 409, 'hosted_agent_definition_conflict');
       return;
@@ -4489,6 +4643,7 @@ export function registerHostedHarnessSessionRoutes(
                   engine: 'managed',
                   sessionId,
                   ...(agentDefinition ? { agentDefinition } : {}),
+                  ...(sessionSkillsRef ? { sessionSkillsRef } : {}),
                   ...(toolProfile ? { toolProfile } : {}),
                   ...(foregroundOnly ? { foregroundOnly: true } : {}),
                   ...(mcpServers ? { mcpServers } : {}),
@@ -4546,23 +4701,28 @@ export function registerHostedHarnessSessionRoutes(
         ),
       );
       let savedAgentDefinition: HostedAgentDefinition | undefined;
+      let savedSessionSkillsRef: ManagedSessionDurableRef | undefined;
       let skills: HostedSkillCatalog | undefined;
       try {
         savedAgentDefinition = parseHostedAgentDefinition(
           definition?.['agentDefinition'],
         );
+        savedSessionSkillsRef = parseSessionSkillsRef(
+          definition?.['sessionSkillsRef'],
+        );
+        if (!sameSessionSkillsRef(savedSessionSkillsRef, sessionSkillsRef))
+          throw new Error('Session Skills reference changed.');
         if (!sameHostedAgentDefinition(savedAgentDefinition, agentDefinition))
           throw new Error('Agent definition identity changed.');
         await readHostedAgentInstructions(
           savedAgentDefinition,
           managed.resources,
         );
-        if (savedAgentDefinition?.skillsRef)
+        const effectiveSkillsRef =
+          savedSessionSkillsRef ?? savedAgentDefinition?.skillsRef;
+        if (effectiveSkillsRef)
           skills = new HostedSkillCatalog(
-            await readHostedSkills(
-              savedAgentDefinition.skillsRef,
-              managed.resources,
-            ),
+            await readHostedSkills(effectiveSkillsRef, managed.resources),
           );
       } catch {
         await managed.close();
@@ -4652,6 +4812,9 @@ export function registerHostedHarnessSessionRoutes(
         storeBaseUrl: store.baseUrl,
         definition,
         agentDefinition: savedAgentDefinition,
+        ...(savedSessionSkillsRef
+          ? { sessionSkillsRef: savedSessionSkillsRef }
+          : {}),
         ...(skills ? { skills } : {}),
         clientId: randomUUID(),
         cwd,
@@ -4874,6 +5037,7 @@ export function registerHostedHarnessSessionRoutes(
         session.channels
       ) {
         const wakeBusy = () =>
+          compressionBusy(session) ||
           session.active !== undefined ||
           // A recovered-but-undriven Turn holds no live admission, yet its
           // parked checkpoint is what a monitor Turn's commit would
@@ -6048,6 +6212,7 @@ export function registerHostedHarnessSessionRoutes(
         }
       }
       sessions.set(sessionId, session);
+      compressionFor(session).resume();
       // H6c: a settle → settle-revision crash window closes here. It runs
       // beside the pump's first turn: the funnel serializes its commits and
       // a settle is idempotent, so the order between the two is immaterial.
@@ -6215,6 +6380,77 @@ export function registerHostedHarnessSessionRoutes(
       }
     }
     next();
+  });
+
+  app.use('/session/:id', (req, res, next) => {
+    const session = identity(req, sessions);
+    if (
+      session &&
+      req.method !== 'GET' &&
+      compressionBusy(session) &&
+      (req.method === 'DELETE' ||
+        /^\/(detach|lifecycle|title|files\/rewind|mcp|hooks)(\/|$)/u.test(
+          req.path,
+        ))
+    )
+      return error(res, 409, 'session_context_busy');
+    next();
+  });
+
+  app.post('/session/:id/context/compress', async (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    const body = object(req.body);
+    if (!session.toolProfile || (session.childDepth ?? 0) !== 0)
+      return error(res, 409, 'unsupported_feature');
+    const operationId = body?.['operationId'];
+    const expectedCompactionRevision = body?.['expectedCompactionRevision'];
+    if (
+      typeof operationId !== 'string' ||
+      !operationId ||
+      operationId.length > 128 ||
+      !Number.isSafeInteger(expectedCompactionRevision) ||
+      (expectedCompactionRevision as number) < 0 ||
+      Object.keys(body!).some(
+        (key) =>
+          ![
+            'operationId',
+            'expectedCompactionRevision',
+            'modelSelection',
+          ].includes(key),
+      )
+    )
+      return error(res, 400, 'invalid_context_compression');
+    try {
+      const modelSelection = parseHostedModelSelection(
+        body?.['modelSelection'],
+      );
+      const status = await compressionFor(session).admit({
+        operationId,
+        expectedCompactionRevision: expectedCompactionRevision as number,
+        ...(modelSelection ? { modelSelection } : {}),
+      });
+      res.status(202).json(status);
+    } catch (cause) {
+      if (cause instanceof HostedCompressionRefusal)
+        return error(res, 409, cause.code);
+      if (cause instanceof ManagedSessionConflictError)
+        return error(res, 409, 'session_context_busy');
+      writeStderrLineSafe(
+        `qwen serve: Hosted context compression admission failed: ${String(cause)}`,
+      );
+      return error(res, 503, 'context_compression_unavailable');
+    }
+  });
+
+  app.get('/session/:id/context/compressions/:operationId', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    const compression = compressionFor(session);
+    const status = compression.status(req.params['operationId']!);
+    if (!status) return error(res, 404, 'operation_not_found');
+    compression.resume();
+    res.json(status);
   });
 
   app.post('/session/:id/lifecycle', async (req, res) => {
@@ -6635,6 +6871,7 @@ export function registerHostedHarnessSessionRoutes(
     // LAST synchronous evaluation of this exact set: this first call
     // refuses early, the post-probe one is what guards the claim.
     const turnSlotLatch = (): string | undefined => {
+      if (compressionBusy(session)) return 'session_context_busy';
       if (session.mcpClosing) return 'hosted_session_closing';
       if (session.hooksBusy) return 'hosted_hook_operation_active';
       if (session.mcpBusy || session.mcpRecovering)
@@ -8627,6 +8864,7 @@ export function registerHostedHarnessSessionRoutes(
       try {
         const harness = createManagedHarnessHandle(session.managed);
         let projected = await session.managed.sink.project();
+        let modelRecords = await session.managed.sink.projectModelRecords();
         const settledPrompts = new Set(
           session.managed.authority
             .eventsInSequenceRange(
@@ -8658,13 +8896,16 @@ export function registerHostedHarnessSessionRoutes(
               'Recovered Runtime turn has no journaled tool call.',
             );
           }
-          const parkedRound = new Set(turnRecords.slice(lastCallIndex + 1));
+          const parkedRound = new Set(
+            turnRecords.slice(lastCallIndex + 1).map((entry) => entry.uuid),
+          );
           const unanswered = unansweredPrompts(session);
-          const history = projected.filter(
+          const history = modelRecords.filter(
             (entry) =>
-              (settledPrompts.has(entry.daemonPromptId) ||
+              (entry.type === 'system' ||
+                settledPrompts.has(entry.daemonPromptId) ||
                 (entry.daemonPromptId === promptId &&
-                  !parkedRound.has(entry))) &&
+                  !parkedRound.has(entry.uuid))) &&
               !(
                 entry.type === 'user' &&
                 entry.daemonPromptId !== undefined &&
@@ -8686,7 +8927,10 @@ export function registerHostedHarnessSessionRoutes(
           type: 'assistant' | 'tool_result',
           parts: Part[],
           model: string,
-          identity?: { uuid: string; timestamp: string },
+          identity?: Pick<
+            ChatRecord,
+            'uuid' | 'timestamp' | 'clientInitiatedSkills'
+          >,
         ) =>
           record(session, sessionId, type, parentUuid, {
             daemonPromptId: promptId,
@@ -8699,7 +8943,10 @@ export function registerHostedHarnessSessionRoutes(
           type: 'assistant' | 'tool_result',
           parts: Part[],
           model: string,
-          identity?: { uuid: string; timestamp: string },
+          identity?: Pick<
+            ChatRecord,
+            'uuid' | 'timestamp' | 'clientInitiatedSkills'
+          >,
         ) => {
           const message = messageRecord(type, parts, model, identity);
           if (type === 'assistant') {
@@ -8731,14 +8978,7 @@ export function registerHostedHarnessSessionRoutes(
             ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
           session.publication,
           session.shell,
-          session.approval && {
-            settings: (await hostedTurnApproval(
-              session.managed,
-              promptId,
-              session.approval,
-            ))!,
-            waiters: session.waiters,
-          },
+          await hostedApprovalForTurn(session, promptId),
           {
             mcp: session.mcp,
             skills: session.skills,
@@ -8758,6 +8998,8 @@ export function registerHostedHarnessSessionRoutes(
                 ?.planMode === true,
           },
         );
+        if (session.skills)
+          toolTurn.setToolOutputBudget(hostedToolOutputBudget(session.cwd));
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
         try {
           // The agent wait (#13708): fold every run the checkpoint still
@@ -8825,6 +9067,7 @@ export function registerHostedHarnessSessionRoutes(
             });
             if (outstanding.length > 0 || filled > 0) {
               projected = await session.managed.sink.project();
+              modelRecords = await session.managed.sink.projectModelRecords();
               ({ history, resumeParts } = deriveRound());
             }
           }
@@ -8878,6 +9121,7 @@ export function registerHostedHarnessSessionRoutes(
             });
             if (outstanding.length > 0 || filled > 0) {
               projected = await session.managed.sink.project();
+              modelRecords = await session.managed.sink.projectModelRecords();
               ({ history, resumeParts } = deriveRound());
             }
           }
@@ -8901,6 +9145,7 @@ export function registerHostedHarnessSessionRoutes(
           });
           if (answered > 0) {
             projected = await session.managed.sink.project();
+            modelRecords = await session.managed.sink.projectModelRecords();
             ({ history, resumeParts } = deriveRound());
           }
           if (resumeParts.length === 0) {
@@ -8965,6 +9210,15 @@ export function registerHostedHarnessSessionRoutes(
             sessionId,
             cwd,
             history,
+            excludedPromptIds: unansweredPrompts(session),
+            commitCompression: async (payload) => {
+              await session.managed.sink.write(
+                record(session, sessionId, 'system', null, {
+                  subtype: 'chat_compression',
+                  systemPayload: payload,
+                }),
+              );
+            },
             prompt: '',
             promptId,
             signal: abort.signal,
@@ -10177,6 +10431,8 @@ export function registerHostedHarnessSessionRoutes(
       allowMissingClientId || authority !== undefined,
     );
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (compressionBusy(session))
+      return error(res, 409, 'session_context_busy');
     if (
       session.active ||
       session.mcpBusy ||

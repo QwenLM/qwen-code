@@ -6,10 +6,11 @@ import {
 } from './utils/mockDaemon';
 
 const EDITOR = '[data-web-shell-composer-editor] .cm-content';
-const paragraph =
-  'Keep this unsent paragraph while moving the caret between visual rows. '.repeat(
-    8,
-  );
+const paragraph = Array.from(
+  { length: 8 },
+  () =>
+    'Keep this unsent paragraph while moving the caret between visual rows.',
+).join(' ');
 const history = [`Older prompt: ${paragraph}`, `Newest prompt: ${paragraph}`];
 
 async function openSession(page: Page, baseURL: string) {
@@ -37,8 +38,19 @@ async function caretOffset(editor: Locator) {
     const range = document.createRange();
     range.selectNodeContents(element);
     range.setEnd(selection.focusNode, selection.focusOffset);
-    return range.toString().length;
+    const lineIndex = Array.from(
+      element.querySelectorAll('.cm-line'),
+    ).findIndex((line) => line.contains(selection.focusNode));
+    if (lineIndex < 0)
+      throw new Error('The caret must be inside a document line');
+    return range.toString().length + lineIndex;
   });
+}
+
+async function expectText(editor: Locator, text: string) {
+  await expect
+    .poll(() => editor.locator('.cm-line').allTextContents())
+    .toEqual(text.split('\n'));
 }
 
 async function expectWrapped(editor: Locator) {
@@ -66,15 +78,18 @@ for (const [name, draft] of [
       await page.setViewportSize({ width: 1100, height: 900 });
       const editor = await openSession(page, baseURL!);
       await editor.fill(draft!);
+      await expectText(editor, draft!);
       await expectWrapped(editor);
       if (key === 'ArrowDown') await editor.press('ControlOrMeta+Home');
       const before = await caretOffset(editor);
       await editor.press(key);
-      await expect(editor).toHaveText(draft!);
+      await expectText(editor, draft!);
       if (key === 'ArrowUp') {
         expect(await caretOffset(editor)).toBeLessThan(before);
+        expect(await caretOffset(editor)).toBeGreaterThan(0);
       } else {
         expect(await caretOffset(editor)).toBeGreaterThan(before);
+        expect(await caretOffset(editor)).toBeLessThan(draft!.length);
       }
     });
   }
@@ -98,6 +113,9 @@ test('snaps to the edge before history and restores a wrapped draft after browsi
   await expect(editor).toHaveText(history[1]!);
   await editor.press('ArrowUp');
   await expect(editor).toHaveText(history[0]!);
+  await editor.press('ControlOrMeta+Home');
+  await editor.press('ArrowRight');
+  expect(await caretOffset(editor)).toBe(1);
   await editor.press('ArrowDown');
   await expect(editor).toHaveText(history[1]!);
   await editor.press('ArrowDown');
@@ -121,7 +139,7 @@ test('a short single row still enters history immediately @smoke', async ({
   await expect(editor).toHaveText('short draft');
 });
 
-test('an active selection is handled by the editor without replacing the draft @smoke', async ({
+test('active selections preserve both drafts and recalled history @smoke', async ({
   page,
   baseURL,
 }) => {
@@ -130,4 +148,41 @@ test('an active selection is handled by the editor without replacing the draft @
   await editor.press('ControlOrMeta+A');
   await editor.press('ArrowUp');
   await expect(editor).toHaveText('selected draft');
+  await editor.press('ArrowUp');
+  await expectText(editor, history[1]!);
+  await editor.press('ControlOrMeta+A');
+  await editor.press('ArrowUp');
+  await expectText(editor, history[1]!);
 });
+
+for (const recall of ['search', 'panel']) {
+  test(`a ${recall} recall keeps wrapped text while arrows move inside it @smoke`, async ({
+    page,
+    baseURL,
+  }) => {
+    const editor = await openSession(page, baseURL!);
+    await editor.fill('unsent draft');
+    await editor.press('Control+r');
+    const search = page.locator('[data-web-shell-composer-history-search]');
+    await search.fill('Older prompt:');
+    if (recall === 'search') {
+      await search.press('Tab');
+    } else {
+      await page.getByRole('button', { name: /Older prompt:/ }).click();
+    }
+    await expectText(editor, history[0]!);
+    await expectWrapped(editor);
+    await editor.press('ControlOrMeta+Home');
+    await editor.press('ArrowDown');
+    const middle = await caretOffset(editor);
+    expect(middle).toBeGreaterThan(0);
+    expect(middle).toBeLessThan(history[0]!.length);
+    await expectText(editor, history[0]!);
+    await expect(editor).toBeFocused();
+
+    await editor.press('ArrowUp');
+    await expectText(editor, history[0]!);
+    expect(await caretOffset(editor)).toBeLessThan(middle);
+    await expect(editor).toBeFocused();
+  });
+}

@@ -46,6 +46,7 @@ interface RegisterWorkspaceSkillsRoutesDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  getSkillsSnapshot?: (workspaceCwd: string) => Promise<unknown>;
   getSkillsConfigStatus: (
     workspaceCwd: string,
     trusted: boolean,
@@ -628,6 +629,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
     | 'safeBody'
     | 'sendBridgeError'
     | 'getSkillsConfigStatus'
+    | 'getSkillsSnapshot'
     | 'invalidateSkillsConfigStatus'
   > & { workspaceRegistry: WorkspaceRegistry },
 ): void {
@@ -675,6 +677,43 @@ export function registerWorkspaceQualifiedSkillsRoutes(
       }
     },
   );
+  app.get('/workspaces/:workspace/config/skills/snapshot', async (req, res) => {
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
+    if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+    const entry = resolveWorkspaceEntryFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
+    if (!entry) return;
+    const generation = entry.current;
+    if (!deps.getSkillsSnapshot) {
+      res.status(501).json({ code: 'skills_snapshot_unavailable' });
+      return;
+    }
+    try {
+      const snapshot = await deps.getSkillsSnapshot(runtime.workspaceCwd);
+      generation?.guard.assertOpen();
+      if (
+        entry.state !== 'active' ||
+        entry.current !== generation ||
+        !runtime.trusted
+      ) {
+        res.status(409).json({ code: 'workspace_generation_closed' });
+        return;
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(200).json(snapshot);
+    } catch (error) {
+      deps.sendBridgeError(res, error, {
+        route: 'GET /workspaces/:workspace/config/skills/snapshot',
+      });
+    }
+  });
   app.get('/workspaces/:workspace/config/skills', async (req, res) => {
     const entry = resolveWorkspaceEntryFromParam(
       deps.workspaceRegistry,

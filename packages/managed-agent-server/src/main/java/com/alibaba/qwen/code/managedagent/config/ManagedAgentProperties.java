@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
 import jakarta.annotation.PostConstruct;
@@ -7,7 +8,9 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.convert.DurationUnit;
+import org.springframework.boot.web.server.Ssl;
 import org.springframework.context.EnvironmentAware;
 import org.springframework.core.env.Environment;
 
@@ -164,8 +167,51 @@ public class ManagedAgentProperties implements EnvironmentAware {
         validateWorkspaceFiles();
     }
 
+    // On a single host the Harness reaches the store routes on this
+    // server's loopback listener, and the store scope is the Runtime
+    // Broker's workspace identity, so neither needs its own setting.
+    private void applySessionStoreDefaults() {
+        if (!sessionStore.isEnabled()) {
+            return;
+        }
+        if (StringUtils.isBlank(sessionStore.getBaseUrl()) && environment != null) {
+            sessionStore.setBaseUrl(localStoreBaseUrl());
+        }
+        if (StringUtils.isNotBlank(sessionStore.getWorkspaceId())) {
+            return;
+        }
+        String provisioner = runtimeBroker.getProvisioner();
+        if (StringUtils.isNotBlank(runtimeBroker.getWorkspaceId())) {
+            sessionStore.setWorkspaceId(runtimeBroker.getWorkspaceId());
+        } else if (StringUtils.isNotBlank(runtimeBroker.getWorkspaceCwd())
+                && (LocalProcessRuntimeProvisioner.KIND.equals(provisioner)
+                        || "kubernetes".equals(provisioner))) {
+            sessionStore.setWorkspaceId(EmbeddedRuntimeBroker.workspaceId(runtimeBroker));
+        }
+    }
+
+    private String localStoreBaseUrl() {
+        boolean internal = internalServer.getPort() > 0;
+        int port = internal ? internalServer.getPort()
+                : environment.getProperty("server.port", Integer.class, 8080);
+        String address = internal ? internalServer.getAddress()
+                : environment.getProperty("server.address", "");
+        // The internal listener is always plaintext; a TLS public listener
+        // needs a URL whose certificate the Harness accepts.
+        if (port <= 0 || !internal
+                && Ssl.isEnabled(Binder.get(environment).bind("server.ssl", Ssl.class).orElse(null))) {
+            return "";
+        }
+        return switch (address) {
+            case "", "0.0.0.0", "::", "127.0.0.1" -> "http://127.0.0.1:" + port;
+            case "::1" -> "http://[::1]:" + port;
+            default -> "";
+        };
+    }
+
     @PostConstruct
     void validateWorkspaceFiles() {
+        applySessionStoreDefaults();
         // The sweep runs first, so a bare milliseconds-style override
         // warns with the unit hint before the range check below fails the
         // boot, and the refusal message itself names the convention.
@@ -210,6 +256,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
                         || !WorkspaceExecutionProfile.admitsIsolationClass(runtimeBroker.getIsolationClass())
                         || (runtimeBroker.getWorkspaceMounts().isEmpty()
                                 && runtimeBroker.getWorkspaceCreationRoot().isBlank()
+                                && !runtimeBroker.isVerifiedWorkspaceRecoveryEnabled()
                                 && runtimeBroker.getSsh().getNodes().isEmpty()))
                         || mode == null
                         || !Set.of("yolo", "default", "auto-edit")
@@ -239,7 +286,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
             throw new IllegalStateException("Session-create warm requires Workspace-isolated"
                     + " bound Sessions and no SSH nodes");
         }
-        if (!runtimeBroker.getWorkspaceCreationRoot().isBlank()
+        if ((!runtimeBroker.getWorkspaceCreationRoot().isBlank() || runtimeBroker.isLocalDirectoryImportEnabled())
                 && (!harness.isWorkspaceFilesEnabled()
                         || !runtimeBroker.isDurableLocalProcess()
                         || !runtimeBroker.isVerifiedWorkspaceRecoveryEnabled())) {
@@ -1003,6 +1050,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private String residentKubernetesTokenFile = "";
         private String residentKubernetesCaFile = "";
         private String workspaceCreationRoot = "";
+        private boolean localDirectoryImportEnabled;
         private String isolationClass = "session";
         private String boundSessionIsolationClass = "session";
         private boolean sessionCreateWarm;
@@ -1175,6 +1223,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setWorkspaceCreationRoot(String workspaceCreationRoot) {
             this.workspaceCreationRoot = workspaceCreationRoot;
+        }
+
+        public boolean isLocalDirectoryImportEnabled() {
+            return localDirectoryImportEnabled;
+        }
+
+        public void setLocalDirectoryImportEnabled(boolean localDirectoryImportEnabled) {
+            this.localDirectoryImportEnabled = localDirectoryImportEnabled;
         }
 
         public record WorkspaceMount(String tenantId, String storageId, String root) {

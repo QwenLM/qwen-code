@@ -6,7 +6,10 @@
 
 import type { Content, Part } from '@google/genai';
 import type { ConversationRecord } from '../services/sessionService.js';
-import { buildSessionHistoryFromConversation } from '../services/session-api-history.js';
+import {
+  buildSessionHistoryFromConversation,
+  cloneApiHistory,
+} from '../services/session-api-history.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import {
   detectTurnInterruption,
@@ -148,7 +151,7 @@ export function buildSessionRecoveryPlanFromApiHistory({
   const gaps = historyGaps ?? [];
   const planId = createPlanId(sessionId, originalApiHistory.length);
 
-  const apiHistory = structuredClone(originalApiHistory);
+  const apiHistory = cloneApiHistory(originalApiHistory);
   const repairResult = repairOrphanedToolUseTurns(apiHistory);
   const repairs: RecoveryRepair[] = [
     ...repairResult.injected.map((repair) => ({
