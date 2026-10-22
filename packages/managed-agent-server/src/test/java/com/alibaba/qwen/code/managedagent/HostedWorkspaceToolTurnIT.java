@@ -32,6 +32,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashSet;
@@ -455,7 +456,7 @@ class HostedWorkspaceToolTurnIT {
                     assertThat(producers).as("Runtime producers before Broker shutdown").isNotEmpty();
                     broker.close();
                     for (ProcessHandle producer : producers) {
-                        awaitStopped(producer);
+                        HostedProcessLiveness.awaitStopped(producer, Duration.ofSeconds(10), "Producer before retained read");
                     }
                     System.out.println("HOSTED_SHELL_PRODUCERS_EXITED: " + producers.size());
                     Path readerLog = temporary.resolve("reader.log");
@@ -502,42 +503,6 @@ class HostedWorkspaceToolTurnIT {
                 }
             }
         }
-    }
-
-    /**
-     * Polls instead of {@code onExit()}: that future completes on the common
-     * ForkJoinPool, so in a fork shared with every Hosted*IT class a busy pool
-     * can time it out for a producer that is already gone (#15049). A zombie
-     * no longer writes, and a container runner's PID 1 may never reap it.
-     */
-    private static void awaitStopped(ProcessHandle producer) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        while (running(producer)) {
-            assertThat(System.nanoTime()).as(() -> "Producer before retained read: " + describe(producer))
-                    .isLessThan(deadline);
-            Thread.sleep(20);
-        }
-    }
-
-    private static boolean running(ProcessHandle process) {
-        return process.isAlive() && !"Z".equals(state(process));
-    }
-
-    /** The /proc state letter, or null where there is no /proc entry to read. */
-    private static String state(ProcessHandle process) {
-        try {
-            String stat = Files.readString(Path.of("/proc", Long.toString(process.pid()), "stat"));
-            int name = stat.lastIndexOf(')');
-            return stat.substring(name + 2, name + 3);
-        } catch (java.io.IOException unavailable) {
-            return null;
-        }
-    }
-
-    private static String describe(ProcessHandle process) {
-        String state = state(process);
-        return process.pid() + " (parent " + process.parent().map(parent -> Long.toString(parent.pid())).orElse("?")
-                + ", state " + (state == null ? "?" : state) + "): " + process.info().commandLine().orElse("?");
     }
 
     private void assertFaultLedger(JdbcTemplate jdbc, String tenant, Map<String, Object> session, int index,
