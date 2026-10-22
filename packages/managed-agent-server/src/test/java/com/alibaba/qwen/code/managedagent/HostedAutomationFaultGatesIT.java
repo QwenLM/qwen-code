@@ -1904,18 +1904,28 @@ class HostedAutomationFaultGatesIT {
         assertThat(runState(first)).as("the cancel still stands").isEqualTo("cancelled");
         assertThat(request("GET", "/v1/agent-automations/" + id, null, null, 200).path("state").asText())
                 .as("the schedule survives both").isEqualTo("live");
-        // Every sibling cancel cell pins the occurrence ledger; without it a
-        // regression that re-drives or double-settles either key would pass on
-        // the run state and prompt counts alone.
-        assertThat(jdbc.queryForMap("SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
-                + " AND schedule_id = ? AND occurrence_key = ?", tenant, id, "manual:fg11d-iso-first"))
-                .as("the cancelled key keeps its one fired occurrence").containsEntry("outcome", "fired");
-        assertThat(jdbc.queryForMap("SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
-                + " AND schedule_id = ? AND occurrence_key = ?", tenant, id, "manual:fg11d-iso-sibling"))
-                .as("the sibling key fires its own occurrence").containsEntry("outcome", "fired");
+        // Every sibling cancel cell pins the occurrence ledger. The row count only
+        // catches a spurious third key: a re-drive of a named key is an UPDATE on
+        // the (tenant, schedule, occurrence_key) primary key — `deferOccurrence`
+        // bumps `attempts` — so it leaves the count alone and is caught by the
+        // attempts assertion instead.
+        Map<String, Object> cancelled = jdbc.queryForMap("SELECT outcome, attempts FROM"
+                + " ma_schedule_occurrence WHERE tenant_id = ? AND schedule_id = ? AND occurrence_key = ?",
+                tenant, id, "manual:fg11d-iso-first");
+        assertThat(cancelled).as("the cancelled key keeps its one fired occurrence")
+                .containsEntry("outcome", "fired");
+        assertThat(((Number) cancelled.get("attempts")).intValue())
+                .as("the cancelled key is never re-driven").isZero();
+        Map<String, Object> siblingOccurrence = jdbc.queryForMap("SELECT outcome, attempts FROM"
+                + " ma_schedule_occurrence WHERE tenant_id = ? AND schedule_id = ? AND occurrence_key = ?",
+                tenant, id, "manual:fg11d-iso-sibling");
+        assertThat(siblingOccurrence).as("the sibling key fires its own occurrence")
+                .containsEntry("outcome", "fired");
+        assertThat(((Number) siblingOccurrence.get("attempts")).intValue())
+                .as("the sibling key is never re-driven").isZero();
         assertThat(jdbc.queryForList("SELECT occurrence_key FROM ma_schedule_occurrence WHERE tenant_id = ?"
                 + " AND schedule_id = ?", String.class, tenant, id))
-                .as("neither key is re-driven").hasSize(2);
+                .as("no third occurrence key exists").hasSize(2);
         assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("manual:fg11d-iso-first"))
                 .as("the cancelled run keeps its one Turn").hasSize(1);
         assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("manual:fg11d-iso-sibling"))
