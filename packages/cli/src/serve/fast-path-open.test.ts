@@ -17,6 +17,7 @@ const originalSystemDefaultsPath =
 const originalTrustedFoldersPath =
   process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
 const originalServerToken = process.env['QWEN_SERVER_TOKEN'];
+const originalSettingsMarker = process.env['FAST_PATH_OPEN_SETTINGS_MARKER'];
 
 describe('serve fast path --open import boundary', () => {
   let tempQwenHome: string | undefined;
@@ -73,6 +74,11 @@ describe('serve fast path --open import boundary', () => {
       delete process.env['QWEN_SERVER_TOKEN'];
     } else {
       process.env['QWEN_SERVER_TOKEN'] = originalServerToken;
+    }
+    if (originalSettingsMarker === undefined) {
+      delete process.env['FAST_PATH_OPEN_SETTINGS_MARKER'];
+    } else {
+      process.env['FAST_PATH_OPEN_SETTINGS_MARKER'] = originalSettingsMarker;
     }
     if (tempQwenHome) {
       fs.rmSync(tempQwenHome, { recursive: true, force: true });
