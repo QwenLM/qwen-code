@@ -1,3 +1,4 @@
+import type { components } from './generated/managed-agent-api';
 import type { ManagedToolResultReader } from './managed-tool-result-types';
 
 export type ManagedAgentSessionPhase =
@@ -18,12 +19,104 @@ export type ManagedAgentRuntimeState =
   | 'ready'
   | 'failed';
 
+export type ManagedApprovalMode = 'default' | 'auto-edit' | 'yolo';
+export type ManagedInputBlock = components['schemas']['InputBlock'];
+export type ManagedSessionSkills =
+  components['schemas']['WebShellSessionSkills'];
+export type ManagedSessionMcp = components['schemas']['PublicMcpCatalog'];
+
+export function isManagedApprovalMode(
+  value: unknown,
+): value is ManagedApprovalMode {
+  return value === 'default' || value === 'auto-edit' || value === 'yolo';
+}
+
+export type ManagedSessionSkill = components['schemas']['SessionCreationSkill'];
+export type ManagedSessionRecovery = components['schemas']['SessionRecovery'];
+export type ManagedTurnCancelOperation =
+  components['schemas']['WebShellCommandOperation'];
+
+export interface ManagedSessionOptions {
+  approvalMode: ManagedApprovalMode;
+  availableApprovalModes: ManagedApprovalMode[];
+  planModeSupported?: boolean;
+  inputAttachments?: boolean;
+  skillsSupported?: boolean;
+}
+
+export interface ManagedSessionApproval extends ManagedSessionOptions {
+  approvalRevision: number;
+  supported: boolean;
+  planMode?: boolean;
+  liveSupported?: boolean;
+}
+
+export interface ManagedApprovalChangeResult {
+  sessionId: string;
+  approvalMode: ManagedApprovalMode;
+  approvalRevision: number;
+  replayed: boolean;
+  planMode?: boolean;
+}
+
+export interface ManagedModelContext {
+  modelId: string;
+  inputTokens?: number;
+  contextWindowSize?: number;
+  observedAt: number;
+}
+
+export interface ManagedModelSelection {
+  modelId?: string;
+  revision: number;
+}
+
+export interface ManagedSessionModels {
+  models: { modelId: string; label: string }[];
+  modelSelection: ManagedModelSelection;
+  supported: boolean;
+}
+
+export interface ManagedModelChangeResult {
+  sessionId: string;
+  modelSelection: ManagedModelSelection;
+  replayed: boolean;
+}
+
+export type ManagedLifecycleKind = 'close' | 'archive' | 'delete';
+export type ManagedLifecycleAction =
+  | ManagedLifecycleKind
+  | 'unarchive'
+  | 'close_archive';
+export type ManagedLifecycleOperation =
+  components['schemas']['WebShellCommandOperation'];
+export type ManagedExportPage = components['schemas']['WebShellExportPage'];
+export type ManagedExportItem = components['schemas']['WebShellItem'];
+
 export interface ManagedAgentSessionSummary {
   sessionId: string;
+  agentId?: string;
+  approvalMode?: ManagedApprovalMode;
+  initialApprovalMode?: ManagedApprovalMode;
+  approvalRevision?: number;
+  planMode?: boolean;
+  planModeSupported?: boolean;
+  modelContext?: ManagedModelContext;
+  modelSelection?: ManagedModelSelection;
+  compactionRevision?: number;
+  contextCompressionOperationId?: string;
+  lifecycleStatus?: string;
+  lastSequence?: number;
+  lifecycleOperation?: components['schemas']['WebShellLifecycleOperation'];
   activeTurnId?: string;
   title: string;
   workspaceCwd?: string;
-  workspace?: { workspaceId: string; cwdRelative: string };
+  workspace?: {
+    workspaceId: string;
+    cwdRelative: string;
+    contextRevision?: number;
+    state?: 'ready' | 'changing' | 'recovery_blocked';
+  };
   createdAt: number;
   admittedAt: number;
   updatedAt: number;
@@ -33,12 +126,25 @@ export interface ManagedAgentSessionSummary {
   capabilities: {
     canSend: boolean;
     canCancel: boolean;
+    canRename?: boolean;
+    sessionClose?: boolean;
+    sessionArchive?: boolean;
+    sessionUnarchive?: boolean;
+    sessionDelete?: boolean;
     actions?: boolean;
+    tasks?: boolean;
     artifacts?: boolean;
     /** The caller may submit later Turns to this Workspace-bound Session. */
     workspaceTurns?: boolean;
+    cwdChange?: boolean;
+    modelChange?: boolean;
+    contextCompression?: boolean;
+    approvalModeChange?: boolean;
+    inputAttachments?: boolean;
+    durableOperations?: boolean;
   };
   failure?: { code: string; message: string };
+  recovery?: ManagedSessionRecovery;
 }
 
 export type ManagedAgentSessionEventType =
@@ -59,6 +165,7 @@ export type ManagedAgentSessionEventType =
   | 'cancelling'
   | 'cancelled'
   | 'action_updated'
+  | 'context_changed'
   | 'stream_gap';
 
 export interface ManagedAgentSessionEvent {
@@ -68,6 +175,12 @@ export interface ManagedAgentSessionEvent {
   sessionId: string;
   turnId: string;
   data?: unknown;
+  /**
+   * Projected from a durable snapshot item rather than a raw event. The
+   * server can retract its items (reconciliation), after which these
+   * projections must not survive a resync.
+   */
+  assembledFromItem?: boolean;
 }
 
 export interface ManagedAgentSessionTranscript {
@@ -90,6 +203,46 @@ export interface ManagedAgentCommandOptions extends ManagedAgentRequestOptions {
   idempotencyKey: string;
 }
 
+export type ManagedCwdOperation = components['schemas']['WebShellCwdOperation'];
+export type ManagedContextCompressionOperation =
+  components['schemas']['WebShellContextCompressionOperation'];
+export type ManagedTask = components['schemas']['WebShellTask'];
+export type ManagedTaskPage = components['schemas']['WebShellTaskPage'];
+export type ManagedTaskEvent = components['schemas']['WebShellTaskEvent'];
+export type ManagedTaskEventPage =
+  components['schemas']['WebShellTaskEventPage'];
+export type ManagedTaskCancelOperation =
+  components['schemas']['WebShellCommandOperation'] & { type: 'task_cancel' };
+
+export type ManagedRuntimeNode = components['schemas']['WebShellRuntimeNode'];
+
+export type ManagedWorkspaceDirectory =
+  components['schemas']['WebShellWorkspaceDirectory'];
+
+export type ManagedWorkspaceCreateOperation =
+  components['schemas']['WebShellWorkspaceCreateOperation'];
+
+export interface ManagedWorkspaceRegistration {
+  listNodes(
+    options: ManagedAgentRequestOptions,
+  ): Promise<components['schemas']['WebShellRuntimeNodePage']>;
+  checkDirectory(
+    request: components['schemas']['WebShellWorkspaceDirectoryRequest'],
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedWorkspaceDirectory>;
+  create(
+    request: Omit<
+      components['schemas']['WebShellWorkspaceRegisterRequest'],
+      'idempotencyKey' | 'requestId'
+    >,
+    options: ManagedAgentCommandOptions,
+  ): Promise<ManagedWorkspaceCreateOperation>;
+  query(
+    operationId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedWorkspaceCreateOperation>;
+}
+
 /** A Hosted tool approval waiting for the Session owner's answer. */
 export interface ManagedAgentPendingAction {
   actionId: string;
@@ -102,13 +255,62 @@ export interface ManagedAgentPendingAction {
   policyRevision: string;
   expiresAt: number;
   options: Array<{ id: string; label: string }>;
+  inputPreview?: components['schemas']['WebShellActionInputPreview'];
 }
 
 export interface ManagedAgentProvider {
   readonly kind: 'daemon' | 'java';
+  readonly lifecycle?: {
+    submit(
+      kind: ManagedLifecycleKind,
+      sessionId: string,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedLifecycleOperation>;
+    unarchive(
+      sessionId: string,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedAgentSessionSummary>;
+    query(
+      sessionId: string,
+      operationId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedLifecycleOperation>;
+  };
+  exportSnapshot?(
+    sessionId: string,
+    options: ManagedAgentRequestOptions & { cursor?: string },
+  ): Promise<ManagedExportPage>;
   readonly storageKey: string;
   readonly canCancel: boolean;
   readonly acceptsWorkspaceCwd: boolean;
+  readonly recovery?: {
+    query(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionRecovery>;
+    recheck(
+      sessionId: string,
+      turnId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionRecovery>;
+  };
+  queryCancelOperation?(
+    sessionId: string,
+    operationId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedTurnCancelOperation>;
+  readonly skills?: {
+    list(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionSkills>;
+  };
+  readonly mcp?: {
+    list(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionMcp>;
+  };
   /** Present when the provider can serve Hosted permission Actions. */
   readonly actions?: {
     listPending(
@@ -122,8 +324,107 @@ export interface ManagedAgentProvider {
     ): Promise<void>;
   };
   readonly toolResults?: ManagedToolResultReader;
+  readonly toolDetails?: {
+    get(
+      sessionId: string,
+      itemId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellToolDetails']>;
+  };
+  readonly tasks?: {
+    list(
+      sessionId: string,
+      options: ManagedAgentRequestOptions & { cursor?: string; limit?: number },
+    ): Promise<ManagedTaskPage>;
+    get(
+      sessionId: string,
+      taskId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedTask>;
+    listEvents(
+      sessionId: string,
+      taskId: string,
+      options: ManagedAgentRequestOptions & { after?: string; limit?: number },
+    ): Promise<ManagedTaskEventPage>;
+    readonly cancel?: {
+      submit(
+        sessionId: string,
+        taskId: string,
+        options: ManagedAgentCommandOptions,
+      ): Promise<ManagedTaskCancelOperation>;
+      query(
+        sessionId: string,
+        taskId: string,
+        operationId: string,
+        options: ManagedAgentRequestOptions,
+      ): Promise<ManagedTaskCancelOperation>;
+    };
+  };
+  readonly cwdChange?: {
+    submit(
+      sessionId: string,
+      request: { cwdRelative: string; expectedContextRevision: number },
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedCwdOperation>;
+    query(
+      sessionId: string,
+      operationId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedCwdOperation>;
+  };
+  readonly contextCompression?: {
+    submit(
+      sessionId: string,
+      request: { expectedCompactionRevision: number },
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedContextCompressionOperation>;
+    query(
+      sessionId: string,
+      operationId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedContextCompressionOperation>;
+  };
+  readonly approvalChange?: {
+    queryOptions(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionApproval>;
+    submit(
+      sessionId: string,
+      request: {
+        approvalMode: ManagedApprovalMode;
+        expectedRevision: number;
+        planMode?: boolean;
+      },
+      options: ManagedAgentCommandOptions & { requestId: string },
+    ): Promise<ManagedApprovalChangeResult>;
+  };
+  readonly modelChange?: {
+    queryOptions(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionModels>;
+    submit(
+      sessionId: string,
+      request: { modelId: string; expectedRevision: number },
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedModelChangeResult>;
+  };
+  readonly workspaceFiles?: {
+    query(
+      request: components['schemas']['WebShellWorkspaceFileQueryRequest'],
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFilePage']>;
+    read(
+      request: components['schemas']['WebShellWorkspaceFileReadRequest'],
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFileSnapshot']>;
+  };
   readonly workspaceBinding?: {
     readonly agentId: string;
+    readonly registration?: ManagedWorkspaceRegistration;
+    /** Host-published model-specific AgentDefinitions available for new Sessions. */
+    readonly modelPresets?: readonly { agentId: string; label: string }[];
     list(
       options: ManagedAgentRequestOptions & { cursor?: string; limit?: number },
     ): Promise<{
@@ -131,19 +432,63 @@ export interface ManagedAgentProvider {
       defaultWorkspace?: ManagedAgentWorkspace | null;
       nextCursor?: string;
       supported: boolean;
+      canCreateWorkspace?: boolean;
+      canSelectDirectory?: boolean;
+      canImportLocalDirectory?: boolean;
+      supportsApprovalModeSelection?: boolean;
     }>;
     get(
       workspaceId: string,
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedAgentWorkspace>;
+    createWorkspace?(
+      request: {
+        displayName: string;
+        sourceWorkspaceId?: string;
+        cwdRelative?: string;
+        localPath?: string;
+      },
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedAgentWorkspace>;
+    directories?(
+      request:
+        | { workspaceId: string; cwdRelative: string; localPath?: never }
+        | { localPath: string; workspaceId?: never; cwdRelative?: never },
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceDirectoryPage']>;
+    getSessionOptions?(
+      agentId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionOptions>;
     createEmpty(
-      request: { agentId: string; workspaceId: string; cwdRelative: string },
+      request: {
+        agentId: string;
+        workspaceId: string;
+        cwdRelative: string;
+        approvalMode?: ManagedApprovalMode;
+        planMode?: boolean;
+        skills?: ManagedSessionSkill[];
+      },
+      options: ManagedAgentCommandOptions,
+    ): Promise<{ sessionId: string }>;
+    createSession?(
+      request: {
+        agentId: string;
+        workspaceId: string;
+        cwdRelative: string;
+        text: string;
+        input?: ManagedInputBlock[];
+        approvalMode?: ManagedApprovalMode;
+        planMode?: boolean;
+        skills?: ManagedSessionSkill[];
+      },
       options: ManagedAgentCommandOptions,
     ): Promise<{ sessionId: string }>;
   };
   listSessions(
     options: ManagedAgentRequestOptions & {
       workspaceCwd?: string;
+      archiveState?: 'unarchived' | 'archived' | 'all';
       limit?: number;
       cursor?: string;
     },
@@ -155,6 +500,11 @@ export interface ManagedAgentProvider {
     sessionId: string,
     options: ManagedAgentRequestOptions,
   ): Promise<ManagedAgentSessionSummary>;
+  renameSession?(
+    sessionId: string,
+    displayName: string,
+    options: ManagedAgentCommandOptions,
+  ): Promise<{ displayName: string }>;
   getTranscript(
     sessionId: string,
     options: ManagedAgentRequestOptions & {
@@ -163,22 +513,47 @@ export interface ManagedAgentProvider {
     },
   ): Promise<ManagedAgentSessionTranscript>;
   createSession(
-    request: { text: string; workspaceCwd?: string },
+    request: {
+      text: string;
+      workspaceCwd?: string;
+      input?: ManagedInputBlock[];
+    },
     options: ManagedAgentCommandOptions,
   ): Promise<ManagedAgentTurnAdmission>;
   submitPrompt(
     sessionId: string,
-    request: { text: string },
+    request: { text: string; input?: ManagedInputBlock[] },
     options: ManagedAgentCommandOptions,
   ): Promise<ManagedAgentTurnAdmission>;
   cancel(
     sessionId: string,
     turnId: string,
-    options: ManagedAgentCommandOptions,
-  ): Promise<void>;
+    options: ManagedAgentCommandOptions & {
+      admissionProfile?: 'harness_confirmed' | 'java_durable';
+    },
+  ): Promise<void | {
+    sessionId: string;
+    turnId: string;
+    operationId?: string;
+  }>;
   subscribeEvents(
     sessionId: string,
-    options: ManagedAgentRequestOptions & { lastEventId?: number },
+    options: ManagedAgentRequestOptions & {
+      lastEventId?: number;
+      /**
+       * Called once the stream connection has been (re-)established. An
+       * established stream can stay silent indefinitely — heartbeats are
+       * not events — so this is the only liveness signal that does not
+       * depend on stream activity.
+       */
+      onEstablished?(): void;
+      /**
+       * Called for each complete heartbeat or comment frame the stream
+       * delivers. Heartbeats never decode into events, so on an idle
+       * Session this is the only sign of life an established stream gives.
+       */
+      onAlive?(): void;
+    },
   ): AsyncIterable<ManagedAgentSessionEvent>;
 }
 
@@ -187,4 +562,6 @@ export interface ManagedAgentWorkspace {
   displayName: string;
   state: string;
   canCreateSession: boolean;
+  defaultCwdRelative?: string;
+  canSelectDirectory?: boolean;
 }

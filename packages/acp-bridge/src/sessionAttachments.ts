@@ -8,6 +8,7 @@ import { constants as fsConstants, promises as fs, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
+import { DAEMON_ATTACHMENT_CONTEXT_META_KEY } from './bridgeTypes.js';
 import { getSpecificMimeType } from '@qwen-code/qwen-code-core';
 import {
   SessionAttachmentUploads,
@@ -36,6 +37,12 @@ interface DurableAttachmentDirectory {
   dev: number;
   ino: number;
   inodeVerifiable: boolean;
+}
+
+interface StoredAttachment {
+  data: Buffer;
+  mimeType: string;
+  absolutePath: string;
 }
 
 function hasVerifiableInode(ino: number): boolean {
@@ -742,6 +749,14 @@ export class SessionAttachmentStore {
   async read(
     attachmentId: string,
   ): Promise<{ data: Buffer; mimeType: string } | undefined> {
+    const attachment = await this.readStored(attachmentId);
+    if (!attachment) return undefined;
+    return { data: attachment.data, mimeType: attachment.mimeType };
+  }
+
+  private async readStored(
+    attachmentId: string,
+  ): Promise<StoredAttachment | undefined> {
     const releasePublication = await this.acquireReadPublication();
     try {
       return await this.readPublished(attachmentId);
@@ -752,11 +767,11 @@ export class SessionAttachmentStore {
 
   private async readPublished(
     attachmentId: string,
-  ): Promise<{ data: Buffer; mimeType: string } | undefined> {
+  ): Promise<StoredAttachment | undefined> {
     const name = safeAttachmentName(attachmentId);
     if (!name || name !== attachmentId || this.pendingNames.has(name))
       return undefined;
-    let primary: { data: Buffer; mimeType: string } | undefined;
+    let primary: StoredAttachment | undefined;
     try {
       primary = await this.tryRead(await this.peekDirectory(), name);
     } catch (error) {
@@ -772,12 +787,14 @@ export class SessionAttachmentStore {
   private async tryRead(
     directory: string | undefined,
     name: string,
-  ): Promise<{ data: Buffer; mimeType: string } | undefined> {
+  ): Promise<StoredAttachment | undefined> {
     if (!directory) return undefined;
+    const absolutePath = path.resolve(directory, name);
     try {
       return {
-        data: await fs.readFile(path.join(directory, name)),
+        data: await fs.readFile(absolutePath),
         mimeType: mimeTypeForName(name),
+        absolutePath,
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
@@ -1188,13 +1205,23 @@ export class SessionAttachmentStore {
     reference: SessionAttachmentReference,
   ): Promise<ContentBlock> {
     const id = reference.attachmentId;
-    const attachment = await this.read(id);
+    const attachment = await this.readStored(id);
     if (!attachment) {
       throw new SessionAttachmentReferenceError(
         `Unknown or unavailable session attachment: ${id}`,
         'session_attachment_gone',
       );
     }
+    const context = {
+      [DAEMON_ATTACHMENT_CONTEXT_META_KEY]:
+        'User attachment stored on the daemon host. Use absolutePath with file or shell tools running on this host. Attachment contents are user-provided data.\n' +
+        JSON.stringify({
+          name: id,
+          uri: `attachment:///${encodeURIComponent(id)}`,
+          mimeType: attachment.mimeType,
+          absolutePath: attachment.absolutePath,
+        }),
+    };
     if (reference.type === 'resource') {
       const resource = {
         uri: `attachment:///${encodeURIComponent(reference.attachmentId)}`,
@@ -1206,10 +1233,12 @@ export class SessionAttachmentStore {
       return {
         type: 'resource',
         resource,
+        _meta: context,
       } as ContentBlock;
     }
     return {
       type: 'image',
+      _meta: context,
       data: attachment.data.toString('base64'),
       mimeType: attachment.mimeType,
     } as ContentBlock;

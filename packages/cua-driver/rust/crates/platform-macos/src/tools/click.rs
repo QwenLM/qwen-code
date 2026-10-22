@@ -17,8 +17,7 @@ use async_trait::async_trait;
 use cua_driver_contract::{ClickButton, ClickInput};
 use cua_driver_core::{
     action_record::{
-        ActionEffect, ActionEvidence, ActionExecutionRecord, ActionTransport, ActualDelivery,
-        EvidenceKind, RequestedDelivery,
+        ActionEffect, ActionExecutionRecord, ActionTransport, ActualDelivery, RequestedDelivery,
     },
     protocol::ToolResult,
     tool::{Tool, ToolDef},
@@ -41,6 +40,63 @@ use super::ToolState;
 
 pub struct ClickTool {
     state: Arc<ToolState>,
+}
+
+pub(super) fn libreoffice_pixel_refusal(bundle_id: Option<&str>) -> Option<ToolResult> {
+    if bundle_id != Some("org.libreoffice.script") {
+        return None;
+    }
+    // VCL's sendMouseEventToFrame reads NSEvent.mouseLocation rather than
+    // the routed event's coordinates, so it can select another Calc cell.
+    Some(
+        ToolResult::error(
+            "LibreOffice PID-routed pixel clicks cannot reliably reach the requested position. \
+             Use an advertised accessibility action.",
+        )
+        .with_structured(serde_json::json!({
+            "code": "background_unavailable",
+            "effect": "refused",
+            "sent": false,
+            "reason": "pointer_reading_toolkit",
+            "toolkit": "libreoffice-vcl"
+        })),
+    )
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{action} returned AX error {status}")]
+struct UnconfirmedAxAction {
+    action: &'static str,
+    status: crate::ax::bindings::AXError,
+}
+
+fn unconfirmed_ax_result(
+    error: &UnconfirmedAxAction,
+    index: Option<usize>,
+    foreground: bool,
+) -> ToolResult {
+    let mut result = super::ax_action_unconfirmed(error.action, index, error.status);
+    if foreground {
+        result.structured_content.as_mut().unwrap()["delivery_mode"] = serde_json::json!("unknown");
+    }
+    result.with_action_record(
+        ActionExecutionRecord::builder(
+            ActionEffect::Unverifiable,
+            ActionTransport::MacosAxAction,
+            if foreground {
+                RequestedDelivery::Foreground
+            } else {
+                RequestedDelivery::Background
+            },
+        )
+        .actual_delivery(if foreground {
+            ActualDelivery::Unknown
+        } else {
+            ActualDelivery::Background
+        })
+        .build()
+        .expect("attempted AX action has a valid uncertain record"),
+    )
 }
 
 impl ClickTool {
@@ -81,12 +137,18 @@ fn app_click_record(accessibility: bool, foreground: bool) -> ActionExecutionRec
         } else {
             ActionTransport::MacosCgEventPid
         },
-        RequestedDelivery::Foreground,
+        if foreground {
+            RequestedDelivery::Foreground
+        } else {
+            RequestedDelivery::Background
+        },
     )
-    .actual_delivery(ActualDelivery::Foreground)
-    .evidence(ActionEvidence {
-        kind: EvidenceKind::NativeApiResult,
-        detail: "the app-bound click actuator completed".into(),
+    .actual_delivery(if !foreground {
+        ActualDelivery::Background
+    } else if accessibility {
+        ActualDelivery::Unknown
+    } else {
+        ActualDelivery::Foreground
     })
     .build()
     .expect("app click record is valid")
@@ -394,22 +456,7 @@ impl Tool for ClickTool {
             // screenshot width / logical screen width. This is robust even when
             // CGDisplayPixelsWide under-reports the backing scale (it returns the
             // scaled-mode point width on some Retina configs → a bogus 1.0).
-            let desktop_ratio = tokio::task::spawn_blocking(|| {
-                let logical_w =
-                    super::get_screen_size::main_screen_size().map(|(w, _, _)| w as f64);
-                let shot_w = crate::capture::screenshot_display_bytes()
-                    .ok()
-                    .and_then(|png| crate::capture::png_dimensions(&png).ok())
-                    .map(|(w, _)| w as f64);
-                match (shot_w, logical_w) {
-                    (Some(sw), Some(lw)) if lw > 0.0 && sw > lw => sw / lw,
-                    _ => 1.0,
-                }
-            })
-            .await
-            .unwrap_or(1.0);
-            let sx = sx_shot / desktop_ratio;
-            let sy = sy_shot / desktop_ratio;
+            let (sx, sy) = super::desktop_screenshot_point(sx_shot, sy_shot).await;
             let button = match input.button.unwrap_or(ClickButton::Left) {
                 ClickButton::Left => "left",
                 ClickButton::Right => "right",
@@ -489,12 +536,14 @@ impl Tool for ClickTool {
             Ok(r) => r,
             Err(e) => return e,
         };
+        let element_cache = crate::ax::cache::BoundElementCache::from_resolved(&resolved);
         let (element_index, window_id, _via_token) = match resolved {
             cua_driver_core::element_token::ResolvedElement::None => (None, window_id_arg, false),
             cua_driver_core::element_token::ResolvedElement::Element {
                 window_id: wid,
                 element_index: idx,
                 via_token,
+                ..
             } => (Some(idx), wid, via_token),
         };
         let x = args
@@ -555,7 +604,7 @@ impl Tool for ClickTool {
             // concurrent get_window_state on the same (pid, window_id) while
             // this click is mid-flight (use-after-free → daemon crash). The
             // guard lives to the end of this method, past the AX action below.
-            let element_guard = match self.state.element_cache.get_element_retained(pid, wid, idx) {
+            let element_guard = match element_cache.get_element_retained(pid, wid, idx) {
                 Some(e) => e,
                 None => {
                     return ToolResult::error(format!(
@@ -587,6 +636,13 @@ impl Tool for ClickTool {
             } else {
                 None
             };
+
+            let pixel_refusal = libreoffice_pixel_refusal(apps::bundle_id_for_pid(pid).as_deref());
+            if button_str == "middle" {
+                if let Some(refusal) = pixel_refusal {
+                    return refusal;
+                }
+            }
 
             // Surface 5: button=right on the AX path → AXShowMenu (the same surface
             // the dedicated `right_click` tool dispatches). Threads through the
@@ -690,7 +746,7 @@ impl Tool for ClickTool {
             } else {
                 false
             };
-            let mut selection_pixel = if selection_candidate {
+            let mut selection_pixel = if selection_candidate && pixel_refusal.is_none() {
                 if let Some((cx, cy)) = center {
                     super::px_frame::resolve_or_refuse(wid)
                         .await
@@ -878,6 +934,9 @@ impl Tool for ClickTool {
                     }
                     ToolResult::text(msg).with_structured(structured)
                 }
+                Ok(Err(e)) if e.is::<UnconfirmedAxAction>() => {
+                    unconfirmed_ax_result(e.downcast_ref().unwrap(), Some(idx), foreground)
+                }
                 Ok(Err(e)) => ToolResult::error(format!("AX action failed: {e}")),
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
             }
@@ -1031,7 +1090,7 @@ impl Tool for ClickTool {
                 let hit_test_wid = window_id.expect("guarded by window_id.is_some() above");
                 let ax_result = tokio::task::spawn_blocking(move || unsafe {
                     let Some(element) = element_at_screen_position(pid, screen_x, screen_y) else {
-                        return Ok::<bool, anyhow::Error>(false);
+                        return Ok::<Option<i32>, anyhow::Error>(None);
                     };
                     // The pid-scoped hit-test can resolve an element from a
                     // same-process sibling overlapping the requested point.
@@ -1040,21 +1099,34 @@ impl Tool for ClickTool {
                     // (already gated for this exact window).
                     if crate::ax::exact_target::element_window_id(element) != Some(hit_test_wid) {
                         CFRelease(element as _);
-                        return Ok(false);
+                        return Ok(None);
                     }
-                    let delivered = if focus_only {
-                        crate::input::ax_actions::focus_element(element as usize).is_ok()
+                    if !focus_only
+                        && !copy_action_names(element)
+                            .iter()
+                            .any(|action| action == "AXPress")
+                        && libreoffice_pixel_refusal(apps::bundle_id_for_pid(pid).as_deref())
+                            .is_some()
+                    {
+                        CFRelease(element as _);
+                        return Ok(None);
+                    }
+                    let status = if focus_only {
+                        crate::input::ax_actions::focus_element(element as usize)
+                            .map(|()| kAXErrorSuccess)
                     } else {
                         let press = core_foundation::string::CFString::new("AXPress");
-                        AXUIElementPerformAction(element, press.as_concrete_TypeRef())
-                            == kAXErrorSuccess
+                        Ok(AXUIElementPerformAction(
+                            element,
+                            press.as_concrete_TypeRef(),
+                        ))
                     };
                     CFRelease(element as _);
-                    Ok(delivered)
+                    status.map(Some)
                 })
                 .await;
                 match ax_result {
-                    Ok(Ok(true)) => {
+                    Ok(Ok(Some(kAXErrorSuccess))) => {
                         let label = if focus_only { "focused" } else { "pressed" };
                         return ToolResult::text(format!(
                             "✅ PX hit-test {label} the background element via AX."
@@ -1065,7 +1137,10 @@ impl Tool for ClickTool {
                             "effect": "unverifiable"
                         }));
                     }
-                    Ok(Ok(false)) if focus_only => {
+                    Ok(Ok(Some(status))) if !focus_only => {
+                        return super::ax_action_unconfirmed("AXPress", None, status);
+                    }
+                    Ok(Ok(None)) if focus_only => {
                         return ToolResult::error(
                             "Background PX focus is unavailable at the requested point.".to_owned(),
                         )
@@ -1079,6 +1154,13 @@ impl Tool for ClickTool {
                                 "code": "background_unavailable"
                             }));
                     }
+                    Err(error) => {
+                        return ToolResult::computer_use_error(
+                            "operation_failed",
+                            format!("Background PX accessibility task failed: {error}"),
+                            true,
+                        );
+                    }
                     _ => {}
                 }
             }
@@ -1087,6 +1169,11 @@ impl Tool for ClickTool {
             // requested foreground click without a window id still degrades to
             // background, matching the existing contract and result label.
             let fg = delivery_mode.is_foreground() && window_id.is_some();
+            if let Some(refusal) =
+                libreoffice_pixel_refusal(apps::bundle_id_for_pid(pid).as_deref())
+            {
+                return refusal;
+            }
             let activation_policy = pixel_activation_policy(&button_str, fg, window_id.is_some());
 
             // Pin the overlay above the target window BEFORE animating so
@@ -1200,9 +1287,9 @@ impl Tool for ClickTool {
                                     crate::input::mouse::right_click_at_xy(pid, screen_x, screen_y, &m)
                                 }
                                 "middle" => {
-                                    if let Some(_wid) = window_id {
+                                    if let Some(wid) = window_id {
                                         return crate::input::mouse::middle_click_at_xy_with_window_local(
-                                            pid, screen_x, screen_y, win_local_x, win_local_y, &m,
+                                            pid, screen_x, screen_y, win_local_x, win_local_y, wid, &m,
                                         );
                                     }
                                     crate::input::mouse::middle_click_at_xy(pid, screen_x, screen_y, &m)
@@ -1214,17 +1301,11 @@ impl Tool for ClickTool {
                                     // and Chromium-specific fields (f40, f51, f58, f91, f92) onto events
                                     // for better backgrounded-target delivery.
                                     if let Some(wid) = window_id {
-                                        if fg {
-                                            return crate::input::mouse::click_at_xy_with_window_local(
-                                                pid, screen_x, screen_y,
-                                                win_local_x, win_local_y,
-                                                wid, count, &m,
-                                            );
-                                        }
-                                        return crate::input::mouse::click_at_xy_chromium(
+                                        return crate::input::mouse::click_at_xy_with_window_delivery(
                                             pid, screen_x, screen_y,
                                             win_local_x, win_local_y,
                                             wid, count, &m,
+                                            crate::input::mouse::WindowClickDelivery::from_foreground(fg),
                                         );
                                     }
                                     crate::input::mouse::click_at_xy(pid, screen_x, screen_y, count, &m)
@@ -1354,6 +1435,7 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
         Ok(value) => value,
         Err(error) => return error,
     };
+    let element_cache = crate::ax::cache::BoundElementCache::from_resolved(&resolved);
     let (index, window) = match resolved {
         ResolvedElement::None => (None, window),
         ResolvedElement::Element {
@@ -1380,10 +1462,7 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
     let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
     let foreground = delivery_mode.is_foreground();
     let element = if let Some(index) = index {
-        match state
-            .element_cache
-            .get_element_retained(pid, window_id, index)
-        {
+        match element_cache.get_element_retained(pid, window_id, index) {
             Some(element) => Some(element),
             None => {
                 return ToolResult::error("app click element is stale; getState before clicking")
@@ -1411,7 +1490,40 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
         Vec::new()
     };
     let action = app_semantic_action(&actions, &button, count, !modifiers.is_empty());
-    let route = if action.is_some() {
+    let editable_focus =
+        if action.is_none() && button == "left" && count == 1 && modifiers.is_empty() {
+            if let Some(pointer) = element_ptr {
+                match tokio::task::spawn_blocking(move || unsafe {
+                    let element = pointer as AXUIElementRef;
+                    let role = copy_string_attr(element, "AXRole")?;
+                    let libreoffice_text_area = role == "AXTextArea"
+                        && apps::bundle_id_for_pid(pid).as_deref()
+                            == Some("org.libreoffice.script");
+                    ((is_editable_focus_role(&role) || libreoffice_text_area)
+                        && is_attribute_settable(element, "AXValue")
+                        && is_attribute_settable(element, "AXFocused"))
+                    .then_some(role)
+                })
+                .await
+                {
+                    Ok(role) => role,
+                    Err(error) => {
+                        return ToolResult::error(format!("click target read failed: {error}"))
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+    let accessibility = action.is_some() || editable_focus.is_some();
+    if !foreground && !accessibility {
+        if let Some(refusal) = libreoffice_pixel_refusal(apps::bundle_id_for_pid(pid).as_deref()) {
+            return refusal;
+        }
+    }
+    let route = if accessibility {
         BackgroundAction::AxSemantic
     } else {
         BackgroundAction::WindowPointer
@@ -1437,7 +1549,7 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
     } else {
         None
     };
-    let pointer_target = if action.is_none() {
+    let pointer_target = if !accessibility {
         let frame = match super::px_frame::resolve_or_refuse(window_id).await {
             Ok(frame) => frame,
             Err(error) => return error,
@@ -1513,9 +1625,21 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
                             )
                         };
                         if status != kAXErrorSuccess {
-                            anyhow::bail!("{action} failed with AX error {status}");
+                            return Err(UnconfirmedAxAction { action, status }.into());
                         }
                         Ok(())
+                    } else if let Some(role) = &editable_focus {
+                        if role == "AXTextArea" {
+                            if !foreground {
+                                crate::input::skylight::prepare_background_keyboard(pid, window_id)?;
+                            }
+                            anyhow::ensure!(
+                                unsafe { super::select_text::read_range(element_ptr.unwrap() as AXUIElementRef) }.is_some(),
+                                "Writer caret is unavailable before focus"
+                            );
+                        }
+                        focus_editable_control(element_ptr.unwrap() as AXUIElementRef, pid, role)
+                            .map(|_| ())
                     } else {
                         let (point, local) = pointer_target.unwrap();
                         let modifiers: Vec<&str> = modifiers.iter().map(String::as_str).collect();
@@ -1540,7 +1664,7 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
                         )
                     }
                 };
-                if foreground && action.is_none() {
+                if foreground && !accessibility {
                     crate::input::skylight::with_foreground_hid_activation(pid, window_id, dispatch)
                 } else if foreground {
                     crate::input::skylight::with_foreground_assist(pid, window_id, dispatch)?;
@@ -1559,9 +1683,12 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
     match result {
         Ok(Ok(())) => ToolResult::text(format!("Click dispatched.{}", changes.result_suffix()))
             .with_structured(serde_json::json!({
-                "path": if action.is_some() { "ax" } else { "cgevent" }, "verified": false, "effect": "unverifiable"
+                "path": if accessibility { "ax" } else { "cgevent" }, "verified": false, "effect": "unverifiable"
             }))
-            .with_action_record(app_click_record(action.is_some(), foreground)),
+            .with_action_record(app_click_record(accessibility, foreground)),
+        Ok(Err(error)) if error.is::<UnconfirmedAxAction>() => {
+            unconfirmed_ax_result(error.downcast_ref().unwrap(), index, foreground)
+        }
         Ok(Err(_)) if action.is_some() && changes.new_windows.iter().any(|window| window.pid == pid) => ToolResult::text(format!(
             "Click changed the app.{}",
             changes.result_suffix()
@@ -1577,14 +1704,21 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
 
 // ── AX click implementation (blocking) ───────────────────────────────────────
 
-fn focus_editable_control(element: AXUIElementRef, pid: i32, role: &str) -> anyhow::Result<()> {
+fn focus_editable_control(element: AXUIElementRef, pid: i32, role: &str) -> anyhow::Result<bool> {
     let before = unsafe { copy_string_attr(element, "AXValue") }
         .ok_or_else(|| anyhow::anyhow!("editable control value unavailable before focus"))?;
     let err = unsafe { set_bool_attr_true(element, "AXFocused") };
-    anyhow::ensure!(err == kAXErrorSuccess, "AXFocused write returned {err}");
+    if err != kAXErrorSuccess {
+        return Err(UnconfirmedAxAction {
+            action: "AXFocused",
+            status: err,
+        }
+        .into());
+    }
 
-    let focused = unsafe { focused_element_of_pid(pid) }
-        .ok_or_else(|| anyhow::anyhow!("editable control focus could not be read back"))?;
+    let Some(focused) = (unsafe { focused_element_of_pid(pid) }) else {
+        return Ok(false);
+    };
     let mut matches = unsafe { CFEqual(focused as CFTypeRef, element as CFTypeRef) != 0 };
     // AppKit may put the first responder on the combo's embedded editor.
     if !matches
@@ -1597,12 +1731,8 @@ fn focus_editable_control(element: AXUIElementRef, pid: i32, role: &str) -> anyh
         }
     }
     unsafe { CFRelease(focused as CFTypeRef) };
-    anyhow::ensure!(matches, "editable control did not receive verified focus");
-    anyhow::ensure!(
-        unsafe { copy_string_attr(element, "AXValue") }.as_deref() == Some(before.as_str()),
-        "editable control value changed or became unreadable during focus; observe before retrying"
-    );
-    Ok(())
+    Ok(matches
+        && unsafe { copy_string_attr(element, "AXValue") }.as_deref() == Some(before.as_str()))
 }
 
 /// Returns `(summary_text, needs_webkit_delay, suspected_noop,
@@ -1649,15 +1779,19 @@ fn perform_ax_click(
         && unsafe { is_attribute_settable(element, "AXValue") }
         && unsafe { is_attribute_settable(element, "AXFocused") }
     {
-        focus_editable_control(element, pid, &role)?;
+        let confirmed = focus_editable_control(element, pid, &role)?;
         return Ok((
-            format!(
-                "✅ Focused editable {role} [{idx}] \"{title}\"; confirmed focus on the \
+            if confirmed {
+                format!(
+                    "✅ Focused editable {role} [{idx}] \"{title}\"; confirmed focus on the \
                  control or a combo's direct text editor, with AXValue unchanged."
-            ),
+                )
+            } else {
+                format!("Sent AXFocused to editable {role} [{idx}]. Focus/value readback did not confirm the result; observe before another action. This request was not replayed.")
+            },
             false,
             false,
-            true,
+            confirmed,
             false,
         ));
     }
@@ -1702,7 +1836,7 @@ fn perform_ax_click(
                     &modifier_refs,
                 )?;
             } else {
-                crate::input::mouse::click_at_xy_with_window_local(
+                crate::input::mouse::click_at_xy_with_window_delivery(
                     pid,
                     target.screen_x,
                     target.screen_y,
@@ -1711,6 +1845,7 @@ fn perform_ax_click(
                     window_id,
                     1,
                     &modifier_refs,
+                    crate::input::mouse::WindowClickDelivery::from_foreground(foreground),
                 )?;
             }
             // AppKit may publish a transient AXSelected transition while the
@@ -1788,7 +1923,7 @@ fn perform_ax_click(
                 &modifier_refs,
             )?;
         } else {
-            crate::input::mouse::click_at_xy_with_window_local(
+            crate::input::mouse::click_at_xy_with_window_delivery(
                 pid,
                 target.screen_x,
                 target.screen_y,
@@ -1797,6 +1932,7 @@ fn perform_ax_click(
                 window_id,
                 1,
                 &modifier_refs,
+                crate::input::mouse::WindowClickDelivery::from_foreground(foreground),
             )?;
         }
         return Ok((
@@ -1812,7 +1948,11 @@ fn perform_ax_click(
 
     let err = unsafe { crate::ax::bindings::perform_action(element, ax_action) };
     if err != crate::ax::bindings::kAXErrorSuccess {
-        anyhow::bail!("AXUIElementPerformAction({ax_action}) returned {err}");
+        return Err(UnconfirmedAxAction {
+            action: ax_action,
+            status: err,
+        }
+        .into());
     }
 
     let mut summary = format!("✅ Performed {ax_action} on [{idx}] {role} \"{title}\".");
@@ -1938,6 +2078,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn libreoffice_pixel_refusal_is_pre_dispatch_and_does_not_match_other_apps() {
+        let result = libreoffice_pixel_refusal(Some("org.libreoffice.script")).unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "background_unavailable");
+        assert_eq!(structured["effect"], "refused");
+        assert_eq!(structured["sent"], false);
+        assert_eq!(structured["toolkit"], "libreoffice-vcl");
+        for other in [
+            None,
+            Some("com.apple.TextEdit"),
+            Some("org.libreoffice.script.helper"),
+        ] {
+            assert!(libreoffice_pixel_refusal(other).is_none());
+        }
+    }
+
+    #[test]
+    fn attempted_ax_error_publishes_uncertainty_without_confirming_delivery() {
+        let error = UnconfirmedAxAction {
+            action: "AXPress",
+            status: -25200,
+        };
+        for (foreground, expected_delivery) in [(false, "background"), (true, "unknown")] {
+            let result = unconfirmed_ax_result(&error, Some(1), foreground);
+            assert_ne!(result.is_error, Some(true));
+            assert_eq!(result.structured_content.as_ref().unwrap()["sent"], true);
+            let record = result.action_record.unwrap();
+            assert!(record.evidence.is_empty());
+            let public = serde_json::to_value(record.public_result().unwrap()).unwrap();
+            assert_eq!(public["effect"], "unverifiable");
+            assert_eq!(public["route"], "accessibility");
+            assert_eq!(public["delivery"]["mode"], expected_delivery);
+        }
+    }
+
+    #[test]
+    fn app_click_records_the_selected_delivery_without_effect_evidence() {
+        for (accessibility, foreground, expected) in [
+            (true, false, "background"),
+            (false, false, "background"),
+            (true, true, "unknown"),
+            (false, true, "foreground"),
+        ] {
+            let record = app_click_record(accessibility, foreground);
+            assert_eq!(
+                record.requested_delivery,
+                if foreground {
+                    RequestedDelivery::Foreground
+                } else {
+                    RequestedDelivery::Background
+                }
+            );
+            assert!(record.evidence.is_empty());
+            let public = serde_json::to_value(record.public_result().unwrap()).unwrap();
+            assert_eq!(public["effect"], "unverifiable");
+            assert_eq!(public["delivery"]["mode"], expected);
+        }
+    }
+
+    #[test]
     fn app_element_click_uses_the_part_inside_its_window() {
         let window = [195.0, 92.0, 656.0, 422.0];
         assert_eq!(
@@ -1984,7 +2185,7 @@ mod tests {
     }
 
     #[test]
-    fn app_click_routes_unadvertised_text_and_non_left_gestures_to_pointer() {
+    fn only_single_unmodified_left_clicks_use_advertised_semantic_actions() {
         let press = vec!["AXPress".to_owned()];
         let pick = vec!["AXPress".to_owned(), "AXPick".to_owned()];
         assert_eq!(app_semantic_action(&[], "left", 1, false), None);

@@ -22,12 +22,13 @@ import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
 import type { ReasoningEffort } from '../../reasoning-effort.js';
-import type { ChatCompletionToolWithCache } from './types.js';
 import {
   DEFAULT_TIMEOUT,
   DEFAULT_MAX_RETRIES,
   DISABLED_REQUEST_TIMEOUT_MS,
 } from '../constants.js';
+import { trailingReattachPartCount } from '../../../services/image-payload-references.js';
+import { appendAutoMemoryContext } from '../../../memory/request-context.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 
@@ -284,6 +285,18 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
       ],
       [
+        'should return true for Model Studio workspace-dedicated URL',
+        'https://llm-abc123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      ],
+      [
+        'should return true for international workspace-dedicated URL',
+        'https://llm-abc123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+      ],
+      [
+        'should return true for Model Studio trial URL',
+        'https://trial.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      ],
+      [
         'should return true for internal aliyun-inc.com subdomain',
         'https://model-gateway.aliyun-inc.com/dashscope/v1',
       ],
@@ -298,6 +311,22 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       [
         'should return true for port-bearing alicloudapi.com URL',
         'https://gateway.alicloudapi.com:8443/v1',
+      ],
+      [
+        'should return true for QwenCloud China MaaS URL',
+        'https://maas.qianwenaiapi.com/compatible-mode/v1',
+      ],
+      [
+        'should return true for QwenCloud International MaaS URL',
+        'https://maas.qwencloudapi.com/compatible-mode/v1',
+      ],
+      [
+        'should return true for QwenCloud Token Plan URL',
+        'https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1',
+      ],
+      [
+        'should return true for QwenCloud Global Token Plan URL',
+        'https://token-plan.maas.qwencloudapi.com/compatible-mode/v1',
       ],
     ])('%s', (_title, baseUrl) => {
       expect(isDashScope(baseUrl)).toBe(true);
@@ -351,10 +380,17 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'https://notaliyun-inc.com/v1',
         'https://alibaba-inc.com.evil.com/v1',
         'https://aliyun-inc.com.evil.com/v1',
-        'https://not-token-plan.cn-beijing.maas.aliyuncs.com/v1',
+        'https://maas.aliyuncs.com/v1',
+        'https://notmaas.aliyuncs.com/v1',
         'https://token-plan.cn-beijing.maas.aliyuncs.com.evil.com/v1',
+        'https://evil.example.com/llm-abc123.cn-beijing.maas.aliyuncs.com/v1',
         'https://notalicloudapi.com/v1',
         'https://alicloudapi.com.evil.com/v1',
+        'https://notmaas.qianwenaiapi.com/v1',
+        'https://maas.qianwenaiapi.com.evil.com/v1',
+        'https://maas.qwencloudapi.com.evil.com/v1',
+        'https://notmaas.qwencloudapi.com/v1',
+        'https://token-plan.maas.qwencloudapi.com.evil.com/v1',
       ].forEach((baseUrl) => {
         expect(isDashScope(baseUrl)).toBe(false);
       });
@@ -1384,13 +1420,13 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       // Neither the last message nor the tools get cache control when not streaming.
       expect(result.messages[3].role).toBe('user');
       expect(result.messages[3].content).toBe('Hello!');
-      const tools = result.tools as ChatCompletionToolWithCache[];
+      const tools = result.tools as Array<{ cache_control?: unknown }>;
       expect(tools).toBeDefined();
       expect(tools).toHaveLength(1);
       expect(tools[0].cache_control).toBeUndefined();
     });
 
-    it('should add cache control to system, last history message, and last tool definition for streaming requests', () => {
+    it('should add cache control to system and last history message but not tool definitions for streaming requests', () => {
       const result = provider.buildRequest(
         {
           ...baseRequest,
@@ -1402,10 +1438,12 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       );
       expectCachedSystemAndTools(result);
       expect(result.messages[3].content).toEqual([cachedText('Hello!')]);
-      const tools = result.tools as ChatCompletionToolWithCache[];
+      // DashScope ignores cache_control on tool definitions; the system
+      // marker already covers them because they render before the system.
+      const tools = result.tools as Array<{ cache_control?: unknown }>;
       expect(tools).toBeDefined();
       expect(tools).toHaveLength(1);
-      expect(tools[0].cache_control).toEqual(EPHEMERAL);
+      expect(tools[0].cache_control).toBeUndefined();
     });
 
     it('should not add cache control to tool messages when request.tools is undefined', () => {
@@ -1734,10 +1772,45 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       );
       const content = contentAt(result, 1);
       expect(content).toHaveLength(3);
-      // Breakpoint lands on the stable text block, not the reattach marker/image.
-      expect(content?.[0]).toMatchObject(cachedText('Stable user text'));
+      // The gateway's cache boundary is message-level, so no block inside the
+      // attachment-bearing message is marked; with no earlier conversational
+      // message, the conversation anchor degrades onto the system message.
+      expect(content?.[0]).not.toHaveProperty('cache_control');
       expect(content?.[1]).not.toHaveProperty('cache_control');
       expect(content?.[2]).not.toHaveProperty('cache_control');
+      expect(result.messages[0]?.content).toEqual([
+        cachedText('System prompt'),
+      ]);
+    });
+
+    it('places the conversation breakpoint before the request-only memory catalog', () => {
+      // Driven end to end through the real append + counter: the catalog part
+      // is regenerated per request and never stored, so anchoring on it writes
+      // an entry the next turn cannot read back (issue #11627's invariant).
+      const contents = appendAutoMemoryContext(
+        [{ role: 'user', parts: [{ text: 'what changed?' }] }],
+        'current memory catalog',
+      );
+      const result = streamed(
+        [
+          { role: 'system', content: 'System prompt' },
+          {
+            role: 'user',
+            content: [txt('what changed?'), txt('current memory catalog')],
+          },
+        ],
+        trailingReattachPartCount(contents),
+      );
+      const content = contentAt(result, 1);
+      expect(trailingReattachPartCount(contents)).toBe(1);
+      // Same message-level rule: the part carrying the regenerated catalog
+      // shares its message with the stable question, so nothing in this
+      // message is marked; the anchor degrades onto the system message.
+      expect(content?.[0]).not.toHaveProperty('cache_control');
+      expect(content?.[1]).not.toHaveProperty('cache_control');
+      expect(result.messages[0]?.content).toEqual([
+        cachedText('System prompt'),
+      ]);
     });
 
     it('walks back to the previous message when the whole last message is reattach', () => {
@@ -1800,7 +1873,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       ]);
     });
 
-    it('walks the anchor back past a current-turn inline image to stable text', () => {
+    it('lifts the conversation breakpoint off the attachment-bearing message instead of anchoring within it', () => {
       const result = streamed(
         [
           { role: 'system', content: 'System prompt' },
@@ -1817,10 +1890,71 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         2,
       );
       const content = contentAt(result, 1);
-      // Breakpoint lands on the prompt text, not the inline image the next
-      // turn textualizes.
-      expect(content?.[0]).toMatchObject(cachedText('look at this screenshot'));
+      // A block-level anchor inside this message measures the same as no
+      // conversation breakpoint at all on the message-level gateway, so no
+      // block here is marked — the anchor moves before the whole message.
+      expect(content?.[0]).not.toHaveProperty('cache_control');
       expect(content?.[1]).not.toHaveProperty('cache_control');
+      expect(content?.[2]).not.toHaveProperty('cache_control');
+      expect(content?.[3]).not.toHaveProperty('cache_control');
+      expect(result.messages[0]?.content).toEqual([
+        cachedText('System prompt'),
+      ]);
+    });
+
+    it('anchors on the assistant message preceding the attachment-bearing user message', () => {
+      const result = streamed(
+        [
+          { role: 'system', content: 'System prompt' },
+          { role: 'assistant', content: 'Earlier answer' },
+          {
+            role: 'user',
+            content: [
+              txt('Follow-up question'),
+              txt('Recent images reattached'),
+              reattachImageBlock,
+            ],
+          },
+        ],
+        2,
+      );
+      // The dominant interactive layout: the conversation breakpoint moves
+      // entirely before the attachment-bearing message, so the cached prefix
+      // covers the whole prior conversation.
+      expect(result.messages[1]?.content).toEqual([
+        cachedText('Earlier answer'),
+      ]);
+      const content = contentAt(result, 2);
+      expect(content?.[0]).not.toHaveProperty('cache_control');
+      expect(content?.[1]).not.toHaveProperty('cache_control');
+      expect(content?.[2]).not.toHaveProperty('cache_control');
+    });
+
+    it('skips an empty-string tool result when stepping back off the attachment-bearing message', () => {
+      const result = streamed(
+        [
+          { role: 'system', content: 'System prompt' },
+          { role: 'tool', tool_call_id: 'call_1', content: '' },
+          {
+            role: 'user',
+            content: [
+              txt('Stable user text'),
+              txt('Recent images reattached'),
+              reattachImageBlock,
+            ],
+          },
+        ],
+        2,
+      );
+      // The empty tool result stays a bare string and carries no anchor.
+      expect(result.messages[1]?.content).toBe('');
+      const content = contentAt(result, 2);
+      expect(content?.[0]).not.toHaveProperty('cache_control');
+      // With no earlier conversational content, the conversation anchor
+      // degrades to the system message.
+      expect(result.messages[0]?.content).toEqual([
+        cachedText('System prompt'),
+      ]);
     });
   });
 

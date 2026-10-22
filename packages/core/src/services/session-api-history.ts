@@ -5,31 +5,28 @@
  */
 
 import type { Content, Part } from '@google/genai';
+import { isTurnResultRecordPayload } from './chatRecordingService.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
   GoalTurnEndRecordPayload,
   SlashCommandRecordPayload,
+  TurnResultRecordPayload,
 } from './chatRecordingService.js';
+import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
+import { markCompressedHistory } from '../core/environmentContext.js';
+import {
+  clearApiHistoryDirectoryContext,
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
+  markApiHistoryDirectoryContext,
+} from '../utils/api-history-metadata.js';
 
-const API_HISTORY_PROMPT_ID = Symbol('apiHistoryPromptId');
-
-type IdentifiedContent = Content & {
-  [API_HISTORY_PROMPT_ID]?: string;
-};
-
-export function markApiHistoryPrompt(
-  content: Content,
-  promptId: unknown,
-): void {
-  if (typeof promptId === 'string' && promptId.length > 0) {
-    (content as IdentifiedContent)[API_HISTORY_PROMPT_ID] = promptId;
-  }
-}
-
-export function getApiHistoryPromptId(content: Content): string | undefined {
-  return (content as IdentifiedContent)[API_HISTORY_PROMPT_ID];
-}
+export {
+  cloneApiHistory,
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
+} from '../utils/api-history-metadata.js';
 
 /** Returns the unique matching entry at or after `startIndex`, or -1. */
 export function findApiHistoryPromptIndex(
@@ -44,6 +41,114 @@ export function findApiHistoryPromptIndex(
     match = index;
   }
   return match;
+}
+
+export function getLastApiHistoryPromptId(
+  history: readonly Content[],
+  trailingSystemNotifications?: number,
+): string | undefined {
+  const prompt = history
+    .slice(0, history.length - (trailingSystemNotifications ?? 0))
+    .findLast((content) => getApiHistoryPromptId(content) !== undefined);
+  return prompt && getApiHistoryPromptId(prompt);
+}
+
+export function getTurnResultCancellation(
+  result: Pick<
+    TurnResultRecordPayload,
+    'promptId' | 'state' | 'cancelledAt' | 'cancelReason'
+  >,
+  owned = true,
+): { reason: 'user' | 'unknown'; promptId: string } | undefined {
+  return result.state === 'cancelled' &&
+    typeof result.cancelledAt === 'number' &&
+    Number.isFinite(result.cancelledAt)
+    ? {
+        reason: owned && result.cancelReason === 'user' ? 'user' : 'unknown',
+        promptId: result.promptId,
+      }
+    : undefined;
+}
+
+export function getLastApiPromptCancellation(
+  history: readonly Content[],
+  records: readonly ChatRecord[],
+  trailingSystemNotifications?: number,
+):
+  | { reason: 'user' | 'unknown'; promptId: string; confirmationId?: string }
+  | undefined {
+  const promptId = getLastApiHistoryPromptId(
+    history,
+    trailingSystemNotifications,
+  );
+  const isOwner = (record: ChatRecord) =>
+    (record.type === 'user' && record.subtype === undefined) ||
+    (record.type === 'system' && record.subtype === 'turn_attempt');
+  const isResult = (record: ChatRecord) =>
+    record.type === 'system' && record.subtype === 'turn_result';
+  const cancellation = (record: ChatRecord | undefined, owned: boolean) => {
+    if (!record || !isResult(record)) return undefined;
+    const result = record.systemPayload as TurnResultRecordPayload;
+    return getTurnResultCancellation(
+      {
+        ...result,
+        promptId:
+          typeof result?.promptId === 'string' && result.promptId.length > 0
+            ? result.promptId
+            : record.uuid,
+      },
+      owned && isTurnResultRecordPayload(result),
+    );
+  };
+  const latest = records.findLast(
+    (record) => isOwner(record) || isResult(record),
+  );
+  const owner =
+    promptId &&
+    records.findLast(
+      (record) => isOwner(record) && record.promptId === promptId,
+    );
+  if (!owner) return cancellation(latest, false);
+  const results = records
+    .slice(records.indexOf(owner) + 1)
+    .filter(
+      (record) =>
+        isResult(record) &&
+        (record.promptId === promptId ||
+          (record.promptId === undefined &&
+            owner.daemonPromptId !== undefined &&
+            (record.systemPayload as TurnResultRecordPayload)?.promptId ===
+              owner.daemonPromptId)),
+    );
+  const result = results.findLast((record) => cancellation(record, false));
+  if (!result)
+    return results.length > 0 ? undefined : cancellation(latest, false);
+  const uniqueOwner =
+    records.filter(
+      (record) =>
+        isOwner(record) && record.daemonPromptId === owner.daemonPromptId,
+    ).length === 1;
+  const owned =
+    results.length === 1 && (result.promptId === promptId || uniqueOwner);
+  const cancelled = cancellation(result, owned);
+  const payload = result.systemPayload;
+  if (
+    cancelled?.reason === 'unknown' &&
+    owned &&
+    isTurnResultRecordPayload(payload) &&
+    payload.cancelReason === undefined &&
+    payload.promptId === owner.daemonPromptId &&
+    !records
+      .slice(records.indexOf(result) + 1)
+      .some((record) => cancellation(record, false)) &&
+    uniqueOwner &&
+    typeof result.uuid === 'string' &&
+    result.uuid.length > 0 &&
+    records.filter((record) => record.uuid === result.uuid).length === 1
+  ) {
+    return { ...cancelled, confirmationId: result.uuid };
+  }
+  return cancelled;
 }
 
 export interface BuildApiHistoryOptions {
@@ -102,6 +207,11 @@ function appendApiHistoryRecord(
   if (record.type === 'user' && !record.subtype) {
     markApiHistoryPrompt(message, record.promptId);
   }
+  // Session multi-agent records (`agent_mention` / `agent_message`) need no
+  // branch: their `message` is the enveloped model text, pushed below as its
+  // own user entry. This is the resume half of the contract; the live half is
+  // `Session.pendingExternalAgentContext`, which only exists in memory, so
+  // the two never double up.
   if (record.subtype === 'mid_turn_user_message') {
     const previous = history.at(-1);
     if (
@@ -113,6 +223,7 @@ function appendApiHistoryRecord(
       )
     ) {
       previous.parts = [...(previous.parts ?? []), ...(message.parts ?? [])];
+      clearApiHistoryDirectoryContext(previous);
       return;
     }
   }
@@ -188,6 +299,10 @@ export class SessionApiHistoryAccumulator {
   private lastMaterialRecord?: ChatRecord;
 
   add(record: ChatRecord): void {
+    // Internal calls have no model-emitted function-call partner.
+    if (isInternalCodeModeToolResult(record)) {
+      return;
+    }
     if (record.type === 'system') {
       if (record.subtype === 'slash_command') {
         const payload = record.systemPayload as
@@ -248,13 +363,22 @@ export class SessionApiHistoryAccumulator {
       if (!isApiHistoryCompressionCandidate(record)) return;
       const payload = record.systemPayload as ChatCompressionRecordPayload;
       this.compressionCandidate = payload.compressedHistory;
+      const directoryContextIndices = new Set(
+        Array.isArray(payload.directoryContextIndices)
+          ? payload.directoryContextIndices
+          : [],
+      );
       this.history = Array.isArray(payload.compressedHistory)
         ? payload.compressedHistory.map((content, index) => {
             const copy = copyContentForApiHistory(content);
             markApiHistoryPrompt(copy, payload.promptIds?.[index]);
+            if (directoryContextIndices.has(index)) {
+              markApiHistoryDirectoryContext(copy);
+            }
             return copy;
           })
         : [];
+      markCompressedHistory(this.history, payload.contextPrefixLength);
       // Compressed history is raw `Content[]` with no source record behind it,
       // so no entry can claim the authoritative notification stamp.
       this.systemNotificationFlags = this.history.map(() => false);

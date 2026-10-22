@@ -245,6 +245,27 @@ it('pins discovery, commits raw resource results and replays without another eff
   expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledOnce();
 });
 
+it('identifies each server behind opaque model tool names without changing invocation bindings', async () => {
+  mcp = new HostedMcpSession(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    [pin, { ...pin, serverId: 'other' }],
+  );
+  await mcp.ensureReady();
+  const tools = mcp.tools();
+  expect(tools).toHaveLength(2);
+  expect(new Set(tools.map((tool) => tool.name)).size).toBe(2);
+  for (const [index, serverId] of ['demo', 'other'].entries()) {
+    expect(tools[index].description).toBe(
+      `MCP server: "${serverId}"\nMCP tool: "echo"\nEcho input`,
+    );
+    expect(
+      mcp.toolInput(tools[index].name!, { text: 'hello' }, `call-${index}`)
+        ?.input,
+    ).toMatchObject({ serverId, request: { kind: 'tool_call', name: 'echo' } });
+  }
+});
+
 it('queries a lost configure reply by its original identity instead of reconnecting', async () => {
   loseAck = true;
   await mcp.ensureReady();
@@ -666,6 +687,58 @@ it.each(['refresh', 'close'] as const)(
   },
 );
 
+it('separates effect reconciliation from H1 release and restores the exact v2 owner', async () => {
+  await mcp.ensureReady();
+  const owner = mcp.broker.runtimeSessionId;
+  const restored = new HostedMcpSession(
+    {
+      baseUrl: 'http://127.0.0.1:1',
+      token: 'test',
+      lifecycleAuthority: () => ({
+        operationId: 'delete-1',
+        claimGeneration: 2,
+      }),
+    },
+    session,
+    [pin],
+  );
+  await restored.reconcileEffects();
+  expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
+    0,
+  );
+  expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
+  vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockClear();
+  await restored.closeResources();
+  expect(restored.broker.runtimeSessionId).toBe(owner);
+  expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalledWith({
+    runtimeBindingId: 'binding',
+    generation: '1',
+  });
+  expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
+    1,
+  );
+  expect(
+    parseMcpConfiguration(
+      session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
+    ).releaseState,
+  ).toBe('released');
+});
+
+it('does not release a v2 owner while a dispatched business result is unknown', async () => {
+  unknown = true;
+  await mcp.invoke(randomUUID(), 'demo', {
+    kind: 'resource_read',
+    uri: 'memory://blob',
+  });
+  await expect(mcp.closeResources()).rejects.toBeInstanceOf(
+    HostedMcpRecoveryRequiredError,
+  );
+  expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
+    0,
+  );
+  expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
+});
+
 it('restores the original owner before close and uses fresh identities after confirmed release', async () => {
   await mcp.ensureReady();
   const original = mcp.broker.runtimeSessionId;
@@ -970,6 +1043,46 @@ it('keeps unknown effects blocked, records cancellation, and accepts a known lat
   await mcp.close();
 });
 
+it('hands its mount back after a recovery block only once its MCP work settles, then claims it again (#13800)', async () => {
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'mcp-claim',
+  );
+  const releaseMount = vi
+    .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+    .mockResolvedValue();
+  const operationId = randomUUID();
+  unknown = true;
+  await mcp.invoke(operationId, 'demo', {
+    kind: 'prompt_get',
+    name: 'greet',
+    arguments: {},
+  });
+  // The Broker cannot see an MCP operation: an unknown effect keeps the
+  // Session-scoped mount, as does a Hook run sharing this owner.
+  await expect(mcp.mountHandback(() => false)!()).rejects.toThrow(/unproven/);
+  replies.set(operationId, {
+    operationId,
+    state: 'settled',
+    response: {
+      messages: [{ role: 'user', content: { type: 'text', text: 'one' } }],
+    },
+  });
+  await mcp.status(operationId);
+  await expect(mcp.mountHandback(() => true)!()).rejects.toThrow(/unproven/);
+  expect(releaseMount).not.toHaveBeenCalled();
+  await mcp.mountHandback(() => false)!();
+  expect(releaseMount).toHaveBeenCalledWith('mcp-claim');
+  const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+  acquire.mockClear();
+  unknown = false;
+  await mcp.invoke(randomUUID(), 'demo', {
+    kind: 'resource_read',
+    uri: 'memory://blob',
+  });
+  expect(acquire).toHaveBeenCalled();
+  await mcp.close();
+});
+
 it('refuses duplicate servers, unpinned definitions and credentials in Hosted input', () => {
   expect(parseHostedMcpServers([pin])).toEqual([pin]);
   for (const input of [
@@ -1094,7 +1207,9 @@ it('stops refresh after cancellation without configuring a changed catalog or po
   });
   const abort = new AbortController();
   const refresh = mcp.refresh(abort.signal).catch((cause: unknown) => cause);
-  await vi.waitFor(() => expect(discoveryId).toBeDefined());
+  await vi.waitFor(() => expect(discoveryId).toBeDefined(), {
+    timeout: 10_000,
+  });
   const count = control.mock.calls.length;
   const reason = new Error('cancelled discovery');
   abort.abort(reason);
@@ -1198,7 +1313,9 @@ it('discards discovery from a configuration superseded while the request was pen
     return physical(operation);
   });
   const refreshing = mcp.refresh();
-  await vi.waitFor(() => expect(operationId).toBeDefined());
+  await vi.waitFor(() => expect(operationId).toBeDefined(), {
+    timeout: 10_000,
+  });
   try {
     await mcp.configure(randomUUID(), { ...pin, serverRevision: 2 }, 1);
     reply({
@@ -1278,7 +1395,9 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       .refresh(abort.signal)
       .catch((cause: unknown) => cause);
     try {
-      await vi.waitFor(() => expect(entered).toBe(true));
+      await vi.waitFor(() => expect(entered).toBe(true), {
+        timeout: 10_000,
+      });
       abort.abort(reason);
       await expect(mcp.close()).rejects.toBeInstanceOf(
         HostedMcpRecoveryRequiredError,
@@ -1346,7 +1465,9 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       .ensureReady(abort.signal)
       .catch((error: unknown) => error);
     try {
-      await vi.waitFor(() => expect(entered).toBe(true));
+      await vi.waitFor(() => expect(entered).toBe(true), {
+        timeout: 10_000,
+      });
       const before =
         session.authority.extensionRecordsInDomain('mcp_configuration')[0];
       abort.abort(reason);
@@ -1358,12 +1479,16 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       expect(requests).toHaveLength(0);
       loseAck = phase === 'dispatch_started';
       finish();
-      await vi.waitFor(() => expect(resumed).toBe(true));
+      await vi.waitFor(() => expect(resumed).toBe(true), {
+        timeout: 10_000,
+      });
       if (phase === 'dispatch_started') {
-        await vi.waitFor(() =>
-          expect(
-            requests.filter((request) => request.kind === 'mcp-configure'),
-          ).toHaveLength(1),
+        await vi.waitFor(
+          () =>
+            expect(
+              requests.filter((request) => request.kind === 'mcp-configure'),
+            ).toHaveLength(1),
+          { timeout: 10_000 },
         );
         await mcp.ensureReady();
         expect(

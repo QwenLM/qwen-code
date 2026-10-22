@@ -549,6 +549,22 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async loadExtensionSummaries() {
+      const client = requireClient(getClient, 'Load extensions failed');
+      return withActionTimeout(
+        client.workspaceExtensionSummaries(),
+        'Load extensions timed out',
+      );
+    },
+
+    async loadExtensionDetails(name) {
+      const client = requireClient(getClient, 'Load extension details failed');
+      return withActionTimeout(
+        client.workspaceExtensionDetails(name),
+        'Load extension details timed out',
+      );
+    },
+
     async loadToolsStatus() {
       const client = requireClient(getClient, 'Load tools failed');
       return withActionTimeout(client.workspaceTools(), 'Load tools timed out');

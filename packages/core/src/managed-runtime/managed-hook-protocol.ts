@@ -95,6 +95,13 @@ export interface ManagedHookResult {
   readonly stdout?: string;
   readonly stderr?: string;
   readonly error?: string;
+  // Stamped by the Runtime only on a receipt whose callback provably never
+  // ran — the evaluation-fence republish and the pre-dispatch aborts — so a
+  // reconciler never infers non-execution from a measured duration: at
+  // millisecond resolution a callback cancelled or timed out inside its own
+  // starting millisecond publishes a receipt otherwise identical to a
+  // republish.
+  readonly notStarted?: true;
 }
 
 export interface ManagedHookOperationView {

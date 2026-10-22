@@ -13,7 +13,6 @@ import type {
   DashScopeRequestMetadata,
   ChatCompletionContentPartTextWithCache,
   ChatCompletionContentPartWithCache,
-  ChatCompletionToolWithCache,
 } from './types.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
@@ -175,6 +174,16 @@ export const DASHSCOPE_REGIONAL_HOSTS: readonly string[] = [
   'dashscope-us.aliyuncs.com',
 ];
 
+/**
+ * 千问AI平台 (China) / QwenCloud (International) MaaS hosts. Both the
+ * pay-as-you-go endpoints and the `token-plan.`-prefixed subscription
+ * endpoints are subdomains of these, so one suffix match covers all four.
+ */
+export const QWENCLOUD_MAAS_HOSTS: readonly string[] = [
+  'maas.qianwenaiapi.com',
+  'maas.qwencloudapi.com',
+];
+
 export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   constructor(
     contentGeneratorConfig: ContentGeneratorConfig,
@@ -186,7 +195,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   /**
    * Determines whether to use the DashScope-compatible provider.
    * Covers the official regional hosts (DASHSCOPE_REGIONAL_HOSTS),
-   * Token Plan endpoints under token-plan.<region>.maas.aliyuncs.com,
+   * Model Studio endpoints under *.maas.aliyuncs.com (workspace-dedicated
+   * <WorkspaceId>.<region>, trial.<region> and token-plan.<region> hosts),
+   * QwenCloud MaaS hosts (QWENCLOUD_MAAS_HOSTS),
    * internal Alibaba domains (*.alibaba-inc.com, *.aliyun-inc.com),
    * Alibaba Cloud API Gateway domains (*.alicloudapi.com),
    * and proxy matches.
@@ -224,10 +235,19 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         (host) => hostname === host || hostname.endsWith('.' + host),
       );
 
-    const isTokenPlanOrigin =
+    // Every Model Studio host under maas.aliyuncs.com serves the DashScope
+    // API: workspace-dedicated domains (the recommended production entry),
+    // trial domains and Token Plan domains.
+    const isMaasOrigin =
+      hostname !== null && hostname.endsWith('.maas.aliyuncs.com');
+
+    // 千问AI平台 / QwenCloud MaaS hosts, including their `token-plan.`
+    // subscription subdomains.
+    const isQwenCloudOrigin =
       hostname !== null &&
-      hostname.startsWith('token-plan.') &&
-      hostname.endsWith('.maas.aliyuncs.com');
+      QWENCLOUD_MAAS_HOSTS.some(
+        (host) => hostname === host || hostname.endsWith('.' + host),
+      );
 
     // Internal Alibaba domains proxying to DashScope-compatible APIs.
     // Covers *.alibaba-inc.com and *.aliyun-inc.com.
@@ -255,7 +275,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (
       normalizedProxyUrl &&
       !isDashscopeOrigin &&
-      !isTokenPlanOrigin &&
+      !isMaasOrigin &&
+      !isQwenCloudOrigin &&
       !isInternalOrigin &&
       !isAliCloudApiOrigin &&
       !isProxyMatch
@@ -279,7 +300,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
     return (
       isDashscopeOrigin ||
-      isTokenPlanOrigin ||
+      isMaasOrigin ||
+      isQwenCloudOrigin ||
       isInternalOrigin ||
       isAliCloudApiOrigin ||
       isProxyMatch
@@ -345,7 +367,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    * This method applies DashScope-specific configurations including:
    * - Cache control for the system message, last tool message (when tools are configured),
    *   and the latest history message — or, when a reattach region trails the
-   *   conversation, the last stable block before it
+   *   conversation, the last message lying entirely before it
    * - Output token limits based on model capabilities
    * - Vision model specific parameters (vl_high_resolution_images)
    * - Request metadata for session tracking
@@ -363,7 +385,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     reattachBlockCount = 0,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     let messages = request.messages;
-    let tools = request.tools;
+    const tools = request.tools;
 
     // glm-* models served via DashScope only parse structured "content parts"
     // arrays when the request is in function-calling mode. A tool-less request
@@ -383,14 +405,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       messages = this.flattenTextContent(messages);
     } else if (this.shouldEnableCacheControl()) {
       // Apply DashScope cache control if enabled (default is enabled).
-      const { messages: updatedMessages, tools: updatedTools } =
-        this.addDashScopeCacheControl(
-          request,
-          request.stream ? 'all' : 'system_only',
-          reattachBlockCount,
-        );
-      messages = updatedMessages;
-      tools = updatedTools;
+      messages = this.addDashScopeCacheControl(
+        request,
+        request.stream ? 'all' : 'system_only',
+        reattachBlockCount,
+      );
     }
 
     // Apply output token limits using parent class logic.
@@ -542,7 +561,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     }
     this.warnConflictingKnobDrop(model, reasoningEffort, [...dropped]);
     this.flattenGptReasoningEffort(merged);
-    return merged as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+    return this.flattenDeepSeekReasoningEffort(
+      merged,
+    ) as unknown as OpenAI.Chat.ChatCompletionCreateParams;
   }
 
   private getConfiguredReasoning(model: string | undefined) {
@@ -784,25 +805,25 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   /**
-   * Add cache control flag to specified message(s) for DashScope providers
+   * Add cache control flag to specified message(s) for DashScope providers.
+   * Tool definitions get no marker: DashScope ignores `cache_control` on
+   * tools, and the system marker already covers them (they render first).
    */
   private addDashScopeCacheControl(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     cacheControl: 'system_only' | 'all',
     reattachBlockCount = 0,
-  ): {
-    messages: OpenAI.Chat.ChatCompletionMessageParam[];
-    tools?: ChatCompletionToolWithCache[];
-  } {
+  ): OpenAI.Chat.ChatCompletionMessageParam[] {
     const messages = request.messages;
 
     const systemIndex = messages.findIndex((msg) => msg.role === 'system');
     const lastIndex = messages.length - 1;
 
     // With a volatile reattach region trailing the conversation, the breakpoint
-    // must sit on the last STABLE block — before the reattached images — or the
-    // cached prefix shifts every turn (issue #11627). Otherwise keep the
-    // historical "last block of the last message" anchor.
+    // must sit on the last message lying entirely before that region — the
+    // gateway's cache boundary is message-level, and an anchor inside the
+    // message carrying the region restores no reuse (issue #11627). Otherwise
+    // keep the historical "last block of the last message" anchor.
     const stableBlock =
       reattachBlockCount > 0 && lastIndex >= 0
         ? this.lastStableBlock(messages, reattachBlockCount)
@@ -839,22 +860,14 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
             } as OpenAI.Chat.ChatCompletionMessageParam;
           });
 
-    const updatedTools =
-      cacheControl === 'all' && request.tools?.length
-        ? this.addCacheControlToTools(request.tools)
-        : (request.tools as ChatCompletionToolWithCache[] | undefined);
-
-    return {
-      messages: updatedMessages,
-      tools: updatedTools,
-    };
+    return updatedMessages;
   }
 
   /**
-   * Locate the last block that is not part of the trailing reattach region,
-   * walking back through messages as needed. Returns the owning message index
-   * plus how many trailing blocks of that message to skip when stamping the
-   * conversation `cache_control` breakpoint.
+   * Locate the last message lying entirely before the trailing reattach
+   * region, walking back through messages as needed. Returns the owning
+   * message index plus how many trailing blocks of that message to skip when
+   * stamping the conversation `cache_control` breakpoint.
    */
   private lastStableBlock(
     messages: OpenAI.Chat.ChatCompletionMessageParam[],
@@ -877,28 +890,19 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
             : 0;
       if (blockCount === 0) continue;
       if (blockCount > remaining) {
+        // The gateway's cache boundary is message-level: when this message
+        // itself carries the volatile region, a block-level anchor inside it
+        // restores no reuse. Keep walking to a message lying entirely before
+        // the region (issue #11627).
+        if (remaining > 0) {
+          remaining = 0;
+          continue;
+        }
         return { messageIndex: index, excludeTail: remaining };
       }
       remaining -= blockCount;
     }
     return undefined;
-  }
-
-  private addCacheControlToTools(
-    tools: OpenAI.Chat.ChatCompletionTool[],
-  ): ChatCompletionToolWithCache[] {
-    if (tools.length === 0) {
-      return tools as ChatCompletionToolWithCache[];
-    }
-
-    const updatedTools = [...tools] as ChatCompletionToolWithCache[];
-    const lastToolIndex = tools.length - 1;
-    updatedTools[lastToolIndex] = {
-      ...updatedTools[lastToolIndex],
-      cache_control: { type: 'ephemeral' },
-    };
-
-    return updatedTools;
   }
 
   /**

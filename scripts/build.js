@@ -33,6 +33,26 @@ if (!existsSync(join(root, 'node_modules'))) {
   });
 }
 
+// The root postinstall applies patches/ink+7.0.3.patch, and packages/cli
+// compiles against ink types only that patch adds: an install that skipped
+// lifecycle scripts fails the build with ~50 errors that all blame ink. The
+// patch creates frame-controller.d.ts, which pristine ink@7.0.3 lacks.
+const inkFrameController = join(
+  root,
+  'node_modules/ink/build/frame-controller.d.ts',
+);
+if (!existsSync(inkFrameController)) {
+  execSync('npm run postinstall', { stdio: 'inherit', cwd: root });
+  if (!existsSync(inkFrameController)) {
+    console.error(
+      'build: patches/ink+7.0.3.patch is not applied to node_modules/ink, so\n' +
+        'packages/cli cannot typecheck against it. Run "npm run postinstall"\n' +
+        'and resolve what patch-package reports.',
+    );
+    process.exit(1);
+  }
+}
+
 // build all workspaces/packages in dependency order
 execSync('npm run generate', { stdio: 'inherit', cwd: root });
 
@@ -40,7 +60,7 @@ execSync('npm run generate', { stdio: 'inherit', cwd: root });
 const cliOnly = process.argv.includes('--cli-only');
 // Mobile MCP has an independent build and was never part of the root build.
 const filter = cliOnly
-  ? '--filter "{./packages/cli}..." --filter @qwen-code/node-repl-mcp --filter @qwen-code/channel-plugin-example'
+  ? '--filter "{./packages/cli}..." --filter @qwen-code/node-repl-mcp --filter @qwen-code/channel-plugin-example --filter @qwen-code/generated-ui'
   : '--filter "!@qwen-code/mobile-mcp"';
 execSync(`corepack pnpm -r ${filter} run build`, {
   stdio: 'inherit',

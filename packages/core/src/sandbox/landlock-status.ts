@@ -17,6 +17,8 @@ export function parseLandlockStatus(
     return { state: 'unconfirmed' };
   }
   if (wire === '') return { state: 'unconfirmed', payloadExitObserved: false };
+  if (wire === '{"state":"stdio-setup-failed"}\n' && exitCode === 125)
+    return { state: 'unconfirmed', payloadExitObserved: false };
 
   try {
     const records = wire

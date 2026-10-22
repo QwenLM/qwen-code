@@ -1122,6 +1122,108 @@ function setupAcpTest(
     }
   });
 
+  it('runs a write_file tool call to completion over ACP', async () => {
+    const rig = new TestRig();
+    await rig.setup('acp tool call completion');
+    const targetPath = join(rig.testDir!, 'acp-tool.txt');
+    const toolCallId = 'call_acp_write_file';
+    let streamingRequestIndex = 0;
+    const fakeServer = await startFakeOpenAIServer(({ body }) => {
+      if (body['stream'] !== true) {
+        return { content: '{"selected_memories":[]}' };
+      }
+      if (streamingRequestIndex++ === 0) {
+        return {
+          toolCalls: [
+            fakeToolCall(
+              'write_file',
+              { file_path: targetPath, content: 'written over ACP' },
+              toolCallId,
+            ),
+          ],
+        };
+      }
+      return { content: 'Done.' };
+    });
+
+    const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig, {
+      env: {
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: fakeServer.baseUrl,
+        OPENAI_MODEL: 'fake-model',
+        QWEN_MODEL: 'fake-model',
+        NO_PROXY: '127.0.0.1,localhost',
+        no_proxy: '127.0.0.1,localhost',
+      },
+    });
+
+    try {
+      await sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
+      });
+      await sendRequest('authenticate', { methodId: 'openai' });
+
+      const newSession = (await sendRequest('session/new', {
+        cwd: rig.testDir!,
+        mcpServers: [],
+      })) as { sessionId: string };
+
+      const promptResult = await sendRequest('session/prompt', {
+        sessionId: newSession.sessionId,
+        prompt: [
+          {
+            type: 'text',
+            text: 'Write "written over ACP" to acp-tool.txt',
+          },
+        ],
+      });
+      expect(promptResult).toBeDefined();
+
+      const writeFileStatuses: Array<string | undefined> = [];
+      sessionUpdates.forEach((update) => {
+        if (update.update?.sessionUpdate !== 'tool_call_update') {
+          return;
+        }
+        const toolUpdate = update.update as {
+          status?: string;
+          _meta?: { toolName?: string };
+        };
+        if (toolUpdate._meta?.toolName === 'write_file') {
+          writeFileStatuses.push(toolUpdate.status);
+        }
+      });
+      expect(
+        writeFileStatuses,
+        'expected a tool_call_update that reports the write_file call completed',
+      ).toContain('completed');
+
+      // The terminal status alone would also hold if the tool reported success
+      // without touching the disk, so assert the write itself.
+      expect(readFileSync(targetPath, 'utf8')).toBe('written over ACP');
+
+      const resultRequest = fakeServer.requests.find(({ body }) =>
+        Array.isArray(body['messages'])
+          ? (body['messages'] as Array<Record<string, unknown>>).some(
+              (message) =>
+                message['role'] === 'tool' &&
+                message['tool_call_id'] === toolCallId,
+            )
+          : false,
+      );
+      expect(
+        resultRequest,
+        'expected the write_file result to be sent back to the model',
+      ).toBeDefined();
+    } catch (e) {
+      if (stderr.length) console.error('Agent stderr:', stderr.join(''));
+      throw e;
+    } finally {
+      await cleanup();
+      await fakeServer.close();
+    }
+  });
+
   it('receives private usage metadata and standard ACP usage updates', async () => {
     const fakeServer = await startFakeOpenAIServer(() => ({
       content: 'hello',

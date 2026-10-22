@@ -53,7 +53,7 @@ Harness 在持久化参数资源中保留精确 payload 字节。Broker 只在�
 
 ## 失败与取消
 
-占用存储前明确返回 HTTP 409 `workspace_busy` 或 `workspace_unavailable` 的 acquire 拒绝以普通错误结束回合，Session 可重试或 reload。占用存储后的 acquire 失败统一使用 `runtime_session_acquire_failed`，包括后续权限复检失败，仍要求恢复。acquire 响应丢失也保持阻塞。
+回合工具执行中遇到明确返回 HTTP 409 `workspace_busy` 的 acquire 拒绝不再直接结束回合：这表示另一 Session 的工具回合持有挂卷，本回合等待持有者释放——以短轮询重试 acquire，仅受回合取消与截止时限约束——然后取得所有权并继续，因此同一 Workspace 上的第二个 Session 排队而不是丢失回合。`workspace_unavailable` 拒绝，以及恢复路径上的明确拒绝，仍以普通错误结束回合，Session 可重试或 reload。占用存储后的 acquire 失败统一使用 `runtime_session_acquire_failed`，包括后续权限复检失败，仍要求恢复。acquire 响应丢失也保持阻塞。
 
 派发前的准入或参数资源失败不会产生工具副作用。start 响应丢失后只查询原始执行。无法观察的结果、lease 丢失、结果提交失败或未验证取消会把 Session 阻塞在持久等待点。调用方可观察 recovery-required 状态。Harness 不发出正常 completed/cancelled 安全边界，也不允许新 prompt 忘记这些工作。
 
@@ -61,7 +61,7 @@ Read/Write/Edit 的无效 `file_path` 在该批次获取 Workspace 或派发工�
 
 取消会中止推理，并按原始身份请求取消每个已预留或已启动调用。取消请求不等于停止证据；只有 Runtime 终态结果允许结算和释放。无法观察出结果时保留所有权并阻塞。释放失败也阻塞后续工具，不在本地清除所有权。结果未知时仍持有 Workspace 存储，因此同一 Workspace 的其它 Session 会收到可恢复的 busy 错误，直到 W0e 恢复清除原持有者。
 
-私有循环最多运行 16 轮模型请求。Broker payload 上限为 256 KiB，但每个参数、结果和历史资源也必须满足现有 Session Store 的 64 KiB 内联限制。过大的参数和 assistant 记录在获取所有权前拒绝。对已知终态执行，同时检查序列化 outcome 和完整 tool_result 记录，包括 UTF-8、JSON 转义和元数据；任一超限时，持久化保留原 executionStatus、标记 outputOmitted=true 的小型函数错误，替代原输出，read_file 响应提示模型缩小 offset/limit 范围。这份回执不表示工具未执行。仍须提交并消费回执后才能正常结算和释放；未知结果和持久化失败仍要求恢复并保持阻塞。每个 Broker HTTP 请求超时为 30 秒，执行观察最多两分钟加上当前请求。这些是私有 profile 内部限制，不是新用户设置。
+私有循环遵循已有的 `model.maxSessionTurns` 设置（默认 `-1`），包括恢复时保存的轮数，不再额外限制为 16 轮。工具 intent/receipt 元数据无需开启发布即可展示，原始参数和输出仍遵循既有发布策略。参见[进度修复](2026-10-16-managed-webshell-progress.zh-CN.md)。Broker payload 上限为 256 KiB，但每个参数、结果和历史资源也必须满足现有 Session Store 的 64 KiB 内联限制。过大的参数和 assistant 记录在获取所有权前拒绝。对已知终态执行，同时检查序列化 outcome 和完整 tool_result 记录，包括 UTF-8、JSON 转义和元数据；任一超限时，持久化保留原 executionStatus、标记 outputOmitted=true 的小型函数错误，替代原输出，read_file 响应提示模型缩小 offset/limit 范围。这份回执不表示工具未执行。仍须提交并消费回执后才能正常结算和释放；未知结果和持久化失败仍要求恢复并保持阻塞。每个 Broker HTTP 请求超时为 30 秒，执行观察最多两分钟加上当前请求。这些是私有 profile 内部限制，不是新用户设置。
 
 冷 load 保留现有对未结算输入的拒绝。进程丢失后的自动接续、孤儿 worker 接管与旧代执行对账属于 W0e/#12766/#12670。本片记录后续所需的原始身份，但不宣称完成这些能力。
 

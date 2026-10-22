@@ -26,8 +26,12 @@ import {
   McpServerSpawnFailedError,
 } from './mcp-errors.js';
 import type { McpTransportPool } from './mcp-transport-pool.js';
-import type { ToolRegistry } from './tool-registry.js';
+import { ToolRegistry } from './tool-registry.js';
 import { MCPServerConfig, type Config } from '../config/config.js';
+import { makeFakeConfig } from '../test-utils/config.js';
+import { DiscoveredMCPTool } from './mcp-tool.js';
+import { PromptRegistry } from '../prompts/prompt-registry.js';
+import { ResourceRegistry } from '../resources/resource-registry.js';
 import { connectionIdOf } from './mcp-pool-key.js';
 import { listDescendantPids, sigtermPids } from './pid-descendants.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
@@ -2674,6 +2678,7 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
       getSessionId: () => 'test-session-1',
       getSettingsMcpServers: () => opts.settingsServers ?? {},
       getRuntimeMcpServers: () => opts.runtimeServers ?? {},
+      assertGeneratedUiServerNotReplaced: vi.fn(),
       addRuntimeMcpServer: opts.runtimeAddSpy ?? vi.fn(),
       removeRuntimeMcpServer:
         opts.runtimeRemoveSpy ?? vi.fn().mockReturnValue(true),
@@ -2692,6 +2697,93 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
   }
 
   // ───── ADD cases ──────────────────────────────────────────────────
+
+  it.each(['standalone', 'pooled replacement', 'pooled metadata refresh'])(
+    'keeps the bundled provider usable when rejecting a %s',
+    async (mode) => {
+      const name = 'generated-ui';
+      const original = { command: process.execPath, args: ['bundled-ui.js'] };
+      const config = makeFakeConfig({
+        folderTrust: true,
+        trustedFolder: true,
+        bundledGeneratedUi: {
+          enabled: true,
+          server: original,
+          skillsDir: '/bundle/generated-ui/skills',
+        },
+      });
+      (
+        config as unknown as { initializeBundledGeneratedUi(): void }
+      ).initializeBundledGeneratedUi();
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(
+        new PromptRegistry(),
+      );
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(
+        new ResourceRegistry(),
+      );
+      const registry = new ToolRegistry(config);
+      const callTool = vi.fn().mockResolvedValue({
+        content: [{ type: 'text', text: 'Still callable' }],
+      });
+      const client = asyncClient({
+        callTool,
+        getStatus: () => MCPServerStatus.CONNECTED,
+      });
+      const tool = new DiscoveredMCPTool(
+        { tool: vi.fn(), callTool: vi.fn() },
+        name,
+        'generated_ui_show',
+        'Generated UI',
+        { type: 'object', properties: {} },
+        false,
+        undefined,
+        config,
+        client,
+      );
+      registry.registerTool(tool);
+      const invoke = () =>
+        registry
+          .getTool(tool.name)!
+          .build({})
+          .execute(new AbortController().signal);
+      await expect(invoke()).resolves.toMatchObject({
+        returnDisplay: 'Still callable',
+      });
+
+      const updateConfig = vi.fn(() => registry.removeMcpToolsByServer(name));
+      const conn = mkConn(name, {
+        client,
+        transportId: connectionIdOf(name, original),
+        updateConfig,
+      });
+      const manager = mkManager({ config, toolRegistry: registry });
+      if (mode === 'standalone') {
+        priv(manager, 'clients').set(name, client);
+      } else {
+        priv(manager, 'pooledConnections').set(name, conn);
+      }
+
+      await expect(
+        manager.addRuntimeMcpServer(
+          name,
+          mode === 'pooled metadata refresh'
+            ? { ...original, includeTools: [] }
+            : { command: 'replacement' },
+          'test-client',
+        ),
+      ).rejects.toThrow('Restart the owning session');
+      expect(conn.release).not.toHaveBeenCalled();
+      expect(updateConfig).not.toHaveBeenCalled();
+      expect(client.disconnect).not.toHaveBeenCalled();
+      expect(manager.getServerStatus(name)).toBe(MCPServerStatus.CONNECTED);
+      expect(config.getRuntimeMcpServers()).toEqual({});
+      expect(config.getMcpServers()?.[name]).toBe(original);
+      await expect(invoke()).resolves.toMatchObject({
+        returnDisplay: 'Still callable',
+      });
+      expect(callTool).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it('case 1: happy fresh add → replaced=false, correct transport and toolCount', async () => {
     const acquireSpy = vi.fn().mockResolvedValue(

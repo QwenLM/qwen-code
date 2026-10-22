@@ -62,6 +62,12 @@ import type {
   ToolConfig,
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
+import { beginRetryWait } from '../../utils/retry-wait.js';
+import { DEFAULT_STALL_MS, runStallResilient } from './workflow-stall.js';
+import {
+  isWorkflowAgentFailedError,
+  WorkflowAgentFailedError,
+} from './workflow-agent-failure.js';
 import { WriteFileTool } from '../../tools/write-file.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { normalizeToolNameForProvider } from '../../utils/tool-name-utils.js';
@@ -101,8 +107,10 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
     }),
   };
 });
-vi.mock('../../core/environmentContext.js', () => ({
-  SYSTEM_REMINDER_OPEN: '<system-reminder>',
+vi.mock('../../core/environmentContext.js', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('../../core/environmentContext.js')
+  >()),
   getEnvironmentContext: vi.fn().mockResolvedValue([{ text: 'Env Context' }]),
   getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
     [
@@ -167,6 +175,8 @@ async function createMockConfig(
     cwd: process.cwd(),
     // Avoid writing any chat recording records from tests (e.g. via tool-call telemetry).
     chatRecording: false,
+    // The loop tests below pin the stop points; one test switches to `warn`.
+    loopProtection: 'stop',
   });
   await config.initialize();
   await config.refreshAuth(AuthType.USE_GEMINI);
@@ -394,28 +404,52 @@ describe('subagent.ts', () => {
         { name: 'Agent' },
         'Hello Agent. Do not write ${0} or ${1}.',
       ],
+      [
+        'should substitute a present key whose value is empty',
+        'Hook: ${hook_context}.',
+        { hook_context: '' },
+        'Hook: .',
+      ],
+      [
+        'should leave an inherited Object.prototype name literal',
+        '${toString}',
+        {},
+        '${toString}',
+      ],
     ])('%s', (_title, template, values, expected) => {
       expect(templateString(template, contextWith(values))).toBe(expected);
     });
 
-    it('should still throw for missing valid identifier placeholders', () => {
-      expect(() =>
+    it('should leave placeholders absent from the context as literal text', () => {
+      // Subagent definition bodies are ordinary markdown: a `${identifier}`
+      // inside a code fence documents a shell or JS template literal and is
+      // not a context key, so it must survive rendering untouched.
+      expect(
+        templateString(
+          'Run `curl ${baseUrl}/v1` with ${task_prompt}.',
+          contextWith({ task_prompt: 'T' }),
+        ),
+      ).toBe('Run `curl ${baseUrl}/v1` with T.');
+    });
+
+    it('should substitute known keys and leave unknown ones literal', () => {
+      expect(
         templateString(
           'Hello ${name}, missing ${missing}.',
           contextWith({ name: 'Agent' }),
         ),
-      ).toThrow('Missing context values for the following keys: missing');
+      ).toBe('Hello Agent, missing ${missing}.');
     });
 
     it('should handle mixed numeric and identifier placeholders', () => {
-      // ${var} and ${_private} are valid identifiers; ${0} is literal
-      // ${_private} is missing from context, so it should throw
-      expect(() =>
+      // ${var} is a known key and is substituted; ${0} is not an identifier
+      // and ${_private} is not in the context, so both stay literal.
+      expect(
         templateString(
           '${var} and ${0} and ${_private}',
           contextWith({ var: 'value' }),
         ),
-      ).toThrow('Missing context values for the following keys: _private');
+      ).toBe('value and ${0} and ${_private}');
     });
   });
 
@@ -1043,19 +1077,17 @@ describe('subagent.ts', () => {
         expect(system).toBe(rendered);
       });
 
-      it('should throw an error if template variables are missing', async () => {
+      it('should leave missing template variables literal instead of failing', async () => {
         const { config } = await createMockConfig();
-        const scope = await createAgent(config, {
-          prompt: {
-            systemPrompt: 'Hello ${name}, you are missing ${missing}.',
-          },
-        });
-        // 'missing' is not set: templating fails, execute rejects and the
-        // terminate reason is ERROR.
-        await expectExecuteError(
-          scope,
-          'Missing context values for the following keys: missing',
+        const { system } = await runPrompt(
+          config,
+          { systemPrompt: 'Hello ${name}, missing ${missing} and ${baseUrl}.' },
           contextWith({ name: 'Agent' }),
+        );
+        // Only 'name' is in the context. The unknown keys stay in the rendered
+        // prompt, so execute() completes instead of rejecting with ERROR.
+        expect(system).toContain(
+          'Hello Agent, missing ${missing} and ${baseUrl}.',
         );
       });
 
@@ -1636,6 +1668,46 @@ describe('subagent.ts', () => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
         expect(inv.execute).toHaveBeenCalledTimes(4);
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+        // The 3rd identical call's results carry the loop-protection
+        // reminder, after the tool response (#14828).
+        expect(sentParts(3).at(-1)?.text).toContain(
+          '`list_directory` has been called 3 times in a row',
+        );
+        expect(sentParts(3)[0].functionResponse).toBeDefined();
+        expect(
+          [1, 2, 4].some((n) =>
+            sentParts(n).some((part) => part.text?.includes('in a row')),
+          ),
+        ).toBe(false);
+      });
+
+      it('reminds without stopping consecutive identical tool calls under warn', async () => {
+        const missingPath = '/workspace/project/missing-directory';
+        const { config, inv, toolConfig } = await setupReadTool(
+          decl('list_directory', 'Lists a directory'),
+          invocation(
+            { path: missingPath },
+            'List directory',
+            toolResult('Error: ENOENT', 'Directory not found'),
+          ),
+          'List Directory',
+          'List directory contents',
+        );
+        vi.spyOn(config, 'getLoopProtection').mockReturnValue('warn');
+        respond(
+          ...rounds(6, 'list_directory', { path: missingPath }, 'call'),
+          'stop',
+        );
+        const scope = await runAgent(config, { tools: toolConfig });
+
+        expect(inv.execute).toHaveBeenCalledTimes(6);
+        expect(scope.getTerminateMode()).not.toBe(
+          AgentTerminateMode.LOOP_DETECTED,
+        );
+        const reminders = [0, 1, 2, 3, 4, 5, 6].filter((n) =>
+          sentParts(n).some((part) => part.text?.includes('in a row')),
+        );
+        expect(reminders).toEqual([3]);
       });
 
       it('keeps polling task_list while the task board changes (issue #9450)', async () => {
@@ -1972,6 +2044,792 @@ describe('subagent.ts', () => {
         const { config } = await createMockConfig();
         mockSendMessageStream.mockRejectedValue(new Error('API Failure'));
         await expectExecuteError(await createAgent(config), 'API Failure');
+      });
+
+      it('retains the failure message across the rethrow so the caller can report it (#13597)', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(new Error('API Failure'));
+        const scope = await createAgent(config);
+        expect(scope.getLastError()).toBeUndefined();
+        await expectExecuteError(scope, 'API Failure');
+        expect(scope.getLastError()).toBe('API Failure');
+      });
+
+      it('does not carry a stale failure cause into a re-executed run (#13597)', async () => {
+        const { config } = await createMockConfig();
+        // Run 1 rejects, so the instance retains a cause.
+        mockSendMessageStream.mockRejectedValue(new Error('API Failure'));
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'API Failure');
+        expect(scope.getLastError()).toBe('API Failure');
+
+        // Run 2 on the same instance (stop-hook continuation, resident turns)
+        // ends in ERROR by *returning* rather than throwing: the loop result
+        // carries the mode and executeTurn copies it without writing a message
+        // (agent-core.ts ends a run this way on the empty-tool-response-parts
+        // arm). Run 2 must not report run 1's cause — otherwise the parent
+        // reads '(terminate mode: ERROR). API Failure' for a failure that had a
+        // different one and debugs the wrong thing. This is the mirror of the
+        // stale loopType attribution #9450 fixed for the field reset below it.
+        vi.spyOn(scope.getCore(), 'runReasoningLoop').mockResolvedValue({
+          text: '',
+          terminateMode: AgentTerminateMode.ERROR,
+          turnsUsed: 1,
+          loopType: null,
+        });
+        await scope.execute(new ContextState());
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+        expect(scope.getLastError()).toBeUndefined();
+      });
+
+      it('retains the chat-creation failure message on the non-throwing ERROR path (#13597)', async () => {
+        const { config } = await createMockConfig();
+        const scope = await createAgent(config);
+        // A provider/auth initialization failure that makes `createChat`
+        // return undefined is the rare early return (workflow-orchestrator
+        // calls it "the rare `createChat` early return"). It sets ERROR by
+        // returning, so nothing rethrows and this assignment is the only thing
+        // that can tell the parent why the run stopped — without it the reason
+        // line regresses to the bare '(terminate mode: ERROR).' that #13597 set
+        // out to remove.
+        vi.spyOn(scope.getCore(), 'createChat').mockResolvedValue(
+          undefined as unknown as LlmChat,
+        );
+        await scope.execute(new ContextState());
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+        expect(scope.getLastError()).toBe(
+          'Failed to create the agent chat session.',
+        );
+      });
+
+      it('bounds and sanitizes the retained message before the model reads it (#13597)', async () => {
+        // The reason line is spliced into the parent's tool result, persisted
+        // into chat history and re-sent on every later turn, so a provider SDK
+        // that packs a whole response body into `message` must not be able to
+        // grow the parent's context without limit.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          new Error(`\u001b[31m${'x'.repeat(5000)}`),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'x'.repeat(50));
+        const retained = scope.getLastError()!;
+        // Bounded, and still carrying real message text rather than only an
+        // ellipsis. The exact 500-char outer bound is pinned by the long-cause
+        // case below — that is the shape which actually reaches it now that the
+        // message is bounded short of the total to leave the cause room.
+        expect(retained.length).toBeLessThanOrEqual(500);
+        expect(retained).toContain('x'.repeat(50));
+        expect(retained.endsWith('…')).toBe(true);
+        expect(retained).not.toContain('\u001b[31m');
+      });
+
+      it('spends the message budget on real text, not escape bytes (#13597)', async () => {
+        // Bounding the raw message charged the budget to escape sequences that
+        // `stripAnsiAndControl` then deleted: a 2 000-char colourised failure
+        // reached the parent as a 40-char stub, which is the unactionable-reason
+        // shape #13597 is about.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          new Error('\u001b[31mx\u001b[0m'.repeat(200)),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'x');
+        expect(scope.getLastError()).toContain('x'.repeat(200));
+      });
+
+      it('spends the budget on real text when the stripped message is short (#13597)', async () => {
+        // Routing only a long cleaned message through the bound left the raw
+        // error for everything shorter, and `getErrorMessage` head-caps the
+        // composed `<message> (cause: …)` at 1 000 RAW characters before the
+        // collapse: escape bytes then evicted the folded cause from a message
+        // well inside the outer 500-char bound, leaving most of it unused.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('\u001b[31mx\u001b[0m'.repeat(200)), {
+            cause: Object.assign(new Error('socket hang up'), {
+              code: 'ECONNRESET',
+            }),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'x');
+        expect(scope.getLastError()).toContain('x'.repeat(200));
+        expect(scope.getLastError()).toContain('ECONNRESET');
+        expect(scope.getLastError()).toContain('socket hang up');
+      });
+
+      it('keeps the folded cause when the cause text is ANSI-dense (#13717)', async () => {
+        // The bound is spent on the cleaned copy of `message`, but the folded
+        // `cause` was handed to `getErrorMessage` raw. A cause made mostly of
+        // escape bytes then spent that same 1 000-RAW-character cap on them,
+        // the 997-character slice landed mid-sequence, and the reason the
+        // parent needs to read was evicted long before the outer 500-char
+        // bound ever applied: a 9-character message retained a 34-char stub.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('short msg'), {
+            cause: Object.assign(
+              new Error('\u001b[31m'.repeat(200) + 'socket hang up'),
+              { code: 'ECONNRESET' },
+            ),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'short msg');
+        const retained = scope.getLastError()!;
+        expect(retained).toContain('ECONNRESET');
+        expect(retained).toContain('socket hang up');
+        expect(retained).not.toContain('\u001b');
+        expect(retained.length).toBeLessThanOrEqual(501);
+      });
+
+      it('keeps the folded cause when the message cleans to nothing (#13597)', async () => {
+        // A message made only of control characters cleans to '', and falling
+        // back to the raw Error there handed `getErrorMessage` a 2 000-character
+        // message for its 1 000-RAW-character head cap to spend on the escape
+        // bytes the cleaning removes — evicting the cause and leaving the parent
+        // the truthy stub '...', the unactionable-reason shape #13597 is about.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('\u0007'.repeat(2000)), {
+            cause: Object.assign(new Error('socket hang up'), {
+              code: 'ECONNRESET',
+            }),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expect(scope.execute(new ContextState())).rejects.toBeDefined();
+        expect(scope.getLastError()).toContain('ECONNRESET');
+      });
+
+      it('does not split a surrogate pair when bounding the message (#13597)', async () => {
+        // The bound is a length, so an astral character can straddle it. This
+        // text is persisted into chat history and the JSONL transcript, where
+        // an unpaired surrogate serializes as a lone `\udXXX` and renders as
+        // U+FFFD — mojibake in the field #13597 added to make failures
+        // readable.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          new Error('a'.repeat(399) + '\u{1f600}' + 'b'.repeat(200)),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'a'.repeat(50));
+        const retained = scope.getLastError()!;
+        expect(retained).toBe(retained.replace(/\p{Surrogate}/gu, ''));
+      });
+
+      it('does not split a surrogate pair at the outer bound either (#13597)', async () => {
+        // Same invariant at the second cut, reached when a long cause pushes
+        // the composed string past MAX_MODEL_VISIBLE_ERROR_LENGTH.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('a'.repeat(399)), {
+            cause: new Error('c'.repeat(91) + '\u{1f600}' + 'd'.repeat(100)),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'a'.repeat(50));
+        const retained = scope.getLastError()!;
+        expect(retained).toBe(retained.replace(/\p{Surrogate}/gu, ''));
+      });
+
+      it('drops format characters that reorder or hide the retained message (#13597)', async () => {
+        // Escape/control stripping leaves the Unicode format class intact: a
+        // bidi override reorders the reason wherever it is rendered (a human
+        // auditing the transcript reads different text than is stored) and a
+        // zero-width insertion makes the stored phrase unmatchable for any
+        // consumer that greps it. The text is replayed on every later turn.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          new Error('quota exceeded \u202etni \u200bfor API key'),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'quota exceeded');
+        expect(scope.getLastError()).not.toMatch(/\p{Cf}/u);
+      });
+
+      it('folds `cause` into the retained message (#13597)', async () => {
+        // Raw `error.message` drops it, and the cause is the half that tells the
+        // parent what to change — without it the reason line names only the
+        // mode, which is what #13597 set out to fix.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('upstream request failed'), {
+            cause: Object.assign(new Error('socket hang up'), {
+              code: 'ECONNRESET',
+            }),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'upstream request failed');
+        expect(scope.getLastError()).toContain('socket hang up');
+        expect(scope.getLastError()).toContain('ECONNRESET');
+      });
+
+      it('keeps the folded cause when the message alone exceeds the bound (#13597)', async () => {
+        // The bound used to be applied to `getErrorMessage`'s composed
+        // `<message> (cause: <detail>)` string head-first, so a provider body
+        // long enough to trip it deleted precisely the cause the fold adds: the
+        // parent read 500 chars of opaque body and never learned it was an
+        // ECONNRESET. Reserving headroom for the cause is what keeps the two
+        // halves of the same fix from working against each other.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('M'.repeat(600)), {
+            cause: Object.assign(new Error('socket hang up'), {
+              code: 'ECONNRESET',
+            }),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'M'.repeat(50));
+        const retained = scope.getLastError()!;
+        expect(retained).toContain('ECONNRESET');
+        expect(retained).toContain('socket hang up');
+        expect(retained.length).toBeLessThanOrEqual(501);
+      });
+
+      it('still bounds the retained message when a long cause pushes it over (#13597)', async () => {
+        // Headroom for the cause must not become an unbounded total: a cause
+        // long enough to exceed the budget still lands on the outer 500-char
+        // bound, which is the guarantee the model-visible copy exists to give.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('M'.repeat(600)), {
+            cause: new Error('C'.repeat(400)),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'M'.repeat(50));
+        const retained = scope.getLastError()!;
+        expect(retained).toHaveLength(501); // the 500-char bound plus the '…'
+        expect(retained.endsWith('…')).toBe(true);
+      });
+
+      it('keeps token boundaries in a multi-line failure message (#13597)', async () => {
+        // `stripAnsiAndControl` deletes `\n`/`\r`/`\t` outright, which would weld
+        // 'quota exceeded' onto '{"code":429}' and hand the parent a token that
+        // never existed — in the one field #13597 added to make the failure
+        // actionable. Collapsing whitespace to a single space keeps the result
+        // single-line without merging tokens (same shape as `sanitizeForStderr`
+        // in packages/cli/src/utils/errors.ts).
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          new Error('quota exceeded\n{"code":429}'),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'quota exceeded');
+        expect(scope.getLastError()).toBe('quota exceeded {"code":429}');
+        expect(scope.getLastError()).not.toContain('\n');
+      });
+
+      it.each([
+        [
+          'a plain object with a message',
+          { message: 'rate limited', code: 429 },
+          'rate limited',
+        ],
+        ['a bare string', 'socket closed', 'socket closed'],
+      ])(
+        'retains the message of a non-Error rejection: %s (#13597)',
+        async (_label, rejection, expected) => {
+          // Provider SDKs do not always reject with an Error. Narrowing the
+          // getErrorMessage call to Error instances would leave every Error-only
+          // case above green while these collapse to an empty cause, and the
+          // parent would again read the bare '(terminate mode: ERROR).'.
+          const { config } = await createMockConfig();
+          mockSendMessageStream.mockRejectedValue(rejection);
+          const scope = await createAgent(config);
+          await expect(scope.execute(new ContextState())).rejects.toBeDefined();
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+          expect(scope.getLastError()).toContain(expected);
+        },
+      );
+    });
+
+    describe('execute - retry waits', () => {
+      const promptConfig: PromptConfig = { systemPrompt: 'Execute task.' };
+      const doneChunk = {
+        type: 'chunk',
+        value: { candidates: [{ content: { parts: [{ text: 'Done.' }] } }] },
+      };
+
+      // Mirrors a retry layer's abortable backoff: announces the wait, sleeps,
+      // and rejects (ending the wait) when the round's signal aborts.
+      let onBackoff: (() => void) | undefined;
+      const backoffStarted = () =>
+        new Promise<void>((resolve) => (onBackoff = resolve));
+      const backoff = (delayMs: number, signal: AbortSignal) => {
+        const endWait = beginRetryWait(delayMs);
+        onBackoff?.();
+        return new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            endWait();
+            resolve();
+          }, delayMs);
+          signal.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(timer);
+              endWait();
+              reject(new Error('Retry aborted by signal'));
+            },
+            { once: true },
+          );
+        });
+      };
+      const signalOf = (params: unknown) =>
+        (params as { config: { abortSignal: AbortSignal } }).config.abortSignal;
+
+      const createScope = async (
+        runConfig: RunConfig,
+        emitter = new AgentEventEmitter(),
+      ) => {
+        const { config } = await createMockConfig();
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          runConfig,
+          undefined,
+          emitter,
+        );
+        const waits: Array<{ phase: string; round: number; promptId: string }> =
+          [];
+        emitter.on(AgentEventType.RETRY_WAIT, (e) => waits.push(e));
+        return { scope, emitter, waits };
+      };
+
+      it('publishes waits from send-time work and from the lazy stream with the round identity', async () => {
+        vi.useFakeTimers();
+        try {
+          mockSendMessageStream.mockImplementation(async (_m, params) => {
+            await backoff(1_000, signalOf(params)); // e.g. send-time compaction
+            return (async function* () {
+              await backoff(2_000, signalOf(params)); // the request's retry
+              yield doneChunk;
+            })();
+          });
+          const { scope, waits } = await createScope({ max_turns: 5 });
+          const run = scope.execute(new ContextState(), undefined, {
+            enforceTimeLimitDuringRetryWait: true,
+          });
+          await vi.advanceTimersByTimeAsync(3_000);
+          await run;
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+          expect(waits.map((w) => w.phase)).toEqual([
+            'start',
+            'end',
+            'start',
+            'end',
+          ]);
+          expect(new Set(waits.map((w) => w.round))).toEqual(new Set([1]));
+          expect(waits[0]!.promptId).toMatch(/#0$/);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('releases a wait the stream left open when the round ends, and drops late callbacks', async () => {
+        let lateEnd: (() => void) | undefined;
+        let call = 0;
+        mockSendMessageStream.mockImplementation(async () => {
+          call++;
+          return (async function* () {
+            if (call === 1) lateEnd = beginRetryWait(60_000);
+            yield doneChunk;
+          })();
+        });
+        const { scope, waits } = await createScope({ max_turns: 5 });
+        await scope.execute(new ContextState());
+        expect(waits.map((w) => w.phase)).toEqual(['start', 'end']);
+        lateEnd!();
+        expect(waits).toHaveLength(2);
+      });
+
+      it('keeps waits of parallel agents on the same config apart', async () => {
+        vi.useFakeTimers();
+        try {
+          mockSendMessageStream.mockImplementation(async (_m, params) =>
+            (async function* () {
+              await backoff(
+                (params as { message: Part[] }).message.some((p) =>
+                  p.text?.includes('A'),
+                )
+                  ? 1_000
+                  : 5_000,
+                signalOf(params),
+              );
+              yield doneChunk;
+            })(),
+          );
+          const a = await createScope({ max_turns: 5 });
+          const b = await createScope({ max_turns: 5 });
+          const ctxA = new ContextState();
+          ctxA.set('task_prompt', 'task A');
+          const ctxB = new ContextState();
+          ctxB.set('task_prompt', 'task B');
+          const runs = Promise.all([
+            a.scope.execute(ctxA),
+            b.scope.execute(ctxB),
+          ]);
+          await vi.advanceTimersByTimeAsync(5_000);
+          await runs;
+          const delays = (w: Array<{ phase: string }>) =>
+            w.flatMap((e) => ('delayMs' in e ? [e.delayMs] : []));
+          expect(delays(a.waits)).toEqual([1_000]);
+          expect(delays(b.waits)).toEqual([5_000]);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      describe('under the workflow stall watchdog', () => {
+        // The single-attempt shape of a workflow dispatch: a fresh agent on
+        // the attempt's emitter, failing on any non-GOAL terminate mode.
+        const dispatch = (runConfig: RunConfig, stallMs: number) => {
+          let attempts = 0;
+          const result = runStallResilient(
+            async (signal, emitter) => {
+              attempts++;
+              const { scope } = await createScope(runConfig, emitter);
+              await scope.execute(new ContextState(), signal, {
+                enforceTimeLimitDuringRetryWait: true,
+              });
+              const mode = scope.getTerminateMode();
+              if (mode === AgentTerminateMode.TIMEOUT) {
+                throw new WorkflowAgentFailedError('timed out', 'timeout');
+              }
+              if (mode !== AgentTerminateMode.GOAL) {
+                throw new Error(`did not complete (terminate mode: ${mode})`);
+              }
+              return 'ok';
+            },
+            { stallMs },
+          );
+          return { result, attempts: () => attempts };
+        };
+
+        it('keeps a backoff longer than stallMs on one attempt', async () => {
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async (_m, params) =>
+              (async function* () {
+                await backoff(240_000, signalOf(params));
+                yield doneChunk;
+              })(),
+            );
+            const started = backoffStarted();
+            const run = dispatch({ max_turns: 5 }, DEFAULT_STALL_MS);
+            await started;
+            await vi.advanceTimersByTimeAsync(240_000);
+            await expect(run.result).resolves.toBe('ok');
+            expect(run.attempts()).toBe(1);
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('still retries a request that hangs after the backoff', async () => {
+          vi.useFakeTimers();
+          try {
+            let call = 0;
+            mockSendMessageStream.mockImplementation(async (_m, params) => {
+              call++;
+              return (async function* () {
+                if (call === 1) {
+                  await backoff(2_000, signalOf(params));
+                  await new Promise((_, reject) =>
+                    signalOf(params).addEventListener('abort', () =>
+                      reject(new Error('aborted')),
+                    ),
+                  );
+                }
+                yield doneChunk;
+              })();
+            });
+            const started = backoffStarted();
+            const run = dispatch({ max_turns: 5 }, 500);
+            await started;
+            await vi.advanceTimersByTimeAsync(2_499);
+            expect(run.attempts()).toBe(1);
+            await vi.advanceTimersByTimeAsync(1);
+            await expect(run.result).resolves.toBe('ok');
+            expect(run.attempts()).toBe(2);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('reports a backoff past the agent time limit as timeout, not a stall', async () => {
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async (_m, params) =>
+              (async function* () {
+                await backoff(7_200_000, signalOf(params));
+                yield doneChunk;
+              })(),
+            );
+            const started = backoffStarted();
+            const run = dispatch({ max_turns: 5, max_time_minutes: 10 }, 500);
+            const settled = run.result.catch((e: unknown) => e);
+            await started;
+            await vi.advanceTimersByTimeAsync(600_000);
+            const error = await settled;
+            expect(isWorkflowAgentFailedError(error)).toBe(true);
+            expect((error as WorkflowAgentFailedError).kind).toBe('timeout');
+            expect(run.attempts()).toBe(1);
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('keeps the time limit guard with the watchdog disabled', async () => {
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async (_m, params) =>
+              (async function* () {
+                await backoff(7_200_000, signalOf(params));
+                yield doneChunk;
+              })(),
+            );
+            const started = backoffStarted();
+            const run = dispatch({ max_turns: 5, max_time_minutes: 1 }, 0);
+            const settled = run.result.catch((e: unknown) => e);
+            await started;
+            await vi.advanceTimersByTimeAsync(60_000);
+            expect(((await settled) as WorkflowAgentFailedError).kind).toBe(
+              'timeout',
+            );
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+      });
+
+      describe('agent time limit during a wait', () => {
+        // Each variant waits 2h after spending 30s of a 1-minute budget, so
+        // the limit passes 30s into the wait.
+        const variants = {
+          'the stream rejects': (params: unknown) =>
+            (async function* () {
+              await backoff(7_200_000, signalOf(params));
+              yield doneChunk;
+            })(),
+          'the stream yields after the abort': (params: unknown) =>
+            (async function* () {
+              await backoff(7_200_000, signalOf(params)).catch(() => {});
+              yield doneChunk;
+            })(),
+        };
+
+        it.each(Object.keys(variants))(
+          'ends with TIMEOUT when %s',
+          async (name) => {
+            vi.useFakeTimers();
+            try {
+              mockSendMessageStream.mockImplementation(async (_m, params) => {
+                await new Promise((r) => setTimeout(r, 30_000));
+                return variants[name as keyof typeof variants](params);
+              });
+              const { scope } = await createScope({
+                max_turns: 5,
+                max_time_minutes: 1,
+              });
+              let settled = false;
+              const run = scope
+                .execute(new ContextState(), undefined, {
+                  enforceTimeLimitDuringRetryWait: true,
+                })
+                .finally(() => (settled = true));
+              await vi.advanceTimersByTimeAsync(59_999);
+              expect(settled).toBe(false);
+              await vi.advanceTimersByTimeAsync(1);
+              await run;
+              expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+              expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+              expect(vi.getTimerCount()).toBe(0);
+            } finally {
+              vi.useRealTimers();
+            }
+          },
+        );
+
+        it('ends with TIMEOUT when the send itself rejects during the wait', async () => {
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async (_m, params) => {
+              await new Promise((r) => setTimeout(r, 30_000));
+              await backoff(7_200_000, signalOf(params));
+              return (async function* () {
+                yield doneChunk;
+              })();
+            });
+            const { scope } = await createScope({
+              max_turns: 5,
+              max_time_minutes: 1,
+            });
+            const run = scope.execute(new ContextState(), undefined, {
+              enforceTimeLimitDuringRetryWait: true,
+            });
+            await vi.advanceTimersByTimeAsync(60_000);
+            await run;
+            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('times out at once when the limit already passed as the wait starts', async () => {
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async (_m, params) =>
+              (async function* () {
+                // Spent the whole budget inside the round before the retry.
+                await new Promise((r) => setTimeout(r, 61_000));
+                await backoff(7_200_000, signalOf(params));
+                yield doneChunk;
+              })(),
+            );
+            const { scope } = await createScope({
+              max_turns: 5,
+              max_time_minutes: 1,
+            });
+            const run = scope.execute(new ContextState(), undefined, {
+              enforceTimeLimitDuringRetryWait: true,
+            });
+            await vi.advanceTimersByTimeAsync(61_000);
+            // The guard fires on the next tick, not after the 2h backoff.
+            await vi.advanceTimersByTimeAsync(1);
+            await run;
+            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('measures the limit from the original start and shares it across waits', async () => {
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async (_m, params) =>
+              (async function* () {
+                for (let i = 0; i < 10; i++) {
+                  await backoff(20_000, signalOf(params));
+                }
+                yield doneChunk;
+              })(),
+            );
+            const { scope, waits } = await createScope({
+              max_turns: 5,
+              max_time_minutes: 1,
+            });
+            const run = scope.execute(new ContextState(), undefined, {
+              enforceTimeLimitDuringRetryWait: true,
+            });
+            await vi.advanceTimersByTimeAsync(60_001);
+            await run;
+            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+            // The third wait is cut as the minute passes: no wait renewed the
+            // limit, and no fourth request or wait followed.
+            expect(waits.filter((w) => w.phase === 'start')).toHaveLength(3);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('clears the guard when the last wait ends early', async () => {
+          vi.useFakeTimers();
+          try {
+            let release!: () => void;
+            mockSendMessageStream.mockImplementation(async (_m, params) =>
+              (async function* () {
+                await backoff(1_000, signalOf(params));
+                await new Promise<void>((r) => (release = r));
+                yield doneChunk;
+              })(),
+            );
+            const { scope } = await createScope({
+              max_turns: 5,
+              max_time_minutes: 1,
+            });
+            const run = scope.execute(new ContextState(), undefined, {
+              enforceTimeLimitDuringRetryWait: true,
+            });
+            await vi.advanceTimersByTimeAsync(1_000);
+            expect(vi.getTimerCount()).toBe(0);
+            // Past the limit with no active wait: only the loop's own
+            // cooperative checks apply, so the round is not aborted.
+            await vi.advanceTimersByTimeAsync(120_000);
+            release();
+            await run;
+            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('lets a parent cancel during the wait win as CANCELLED', async () => {
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async (_m, params) =>
+              (async function* () {
+                await backoff(7_200_000, signalOf(params));
+                yield doneChunk;
+              })(),
+            );
+            const { scope } = await createScope({
+              max_turns: 5,
+              max_time_minutes: 1,
+            });
+            const parent = new AbortController();
+            const run = scope.execute(new ContextState(), parent.signal, {
+              enforceTimeLimitDuringRetryWait: true,
+            });
+            await vi.advanceTimersByTimeAsync(10_000);
+            parent.abort();
+            await run.catch(() => {});
+            expect(scope.getTerminateMode()).not.toBe(
+              AgentTerminateMode.TIMEOUT,
+            );
+            await vi.advanceTimersByTimeAsync(120_000);
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('leaves agents without the opt-in on their between-round checks', async () => {
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async (_m, params) =>
+              (async function* () {
+                await backoff(7_200_000, signalOf(params));
+                yield doneChunk;
+              })(),
+            );
+            const { scope } = await createScope({
+              max_turns: 5,
+              max_time_minutes: 1,
+            });
+            let settled = false;
+            const run = scope
+              .execute(new ContextState())
+              .finally(() => (settled = true));
+            await vi.advanceTimersByTimeAsync(7_199_000);
+            expect(settled).toBe(false);
+            await vi.advanceTimersByTimeAsync(1_000);
+            await run;
+            // Checked after the round, as before.
+            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
       });
     });
 

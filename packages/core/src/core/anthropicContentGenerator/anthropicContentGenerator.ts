@@ -773,11 +773,33 @@ export class AnthropicContentGenerator implements ContentGenerator {
     //                    ArenaManager / forkedAgent).
     const deepseekThinkingOn = isDeepSeek && !!thinking;
     const stripAssistantThinking = isDeepSeek && !thinking;
+    // Proxy-hosted Claude: a non-DeepSeek backend on a non-native base URL.
+    // Its wire shape is Anthropic's, while its history may carry thinking
+    // blocks recorded by another provider without a signature.
+    const isProxyHostedClaude =
+      !isDeepSeek && !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
     const dropUnsignedAssistantThinking =
-      !isDeepSeek &&
+      isProxyHostedClaude &&
       !!thinking &&
-      this.modelSupportsAdaptiveThinking(true) &&
-      !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
+      this.modelSupportsAdaptiveThinking(true);
+    // Strict Anthropic-compatible proxies (verified against SGLang v0.5.19,
+    // #11772; llama.cpp/vLLM expected to behave the same but untested)
+    // reject a `thinking` block with no `signature` field at all (HTTP 400,
+    // e.g. SGLang `thinking.signature`) while accepting an empty signature.
+    // The repaired blocks come from HISTORY, not the outgoing request, so
+    // this is deliberately not gated on `thinking`: the #11772 consumers
+    // (auto-memory extraction, prompt suggestions, skill review) fork with
+    // `includeThoughts: false` and still replay unsigned blocks. 4.6+
+    // adaptive models are excluded — that quadrant is owned by
+    // `dropUnsignedAssistantThinking` (an empty string cannot stand in for
+    // the native API's opaque signature), and the two passes must stay
+    // disjoint so the 4.6+ wire shape never changes. Unknown or unversioned
+    // model ids parse as non-adaptive and keep the fill — that is exactly
+    // what a custom SGLang model id needs. The native API's history is left
+    // untouched.
+    // https://github.com/QwenLM/qwen-code/issues/11772
+    const fillUnsignedThinkingSignature =
+      isProxyHostedClaude && !this.modelSupportsAdaptiveThinking(true);
     // Opus/Sonnet 4.6+ and every 5.x family reject a request whose final
     // message has role 'assistant' ("assistant message prefill") with a
     // hard 400 — per Anthropic's own migration guidance this is a
@@ -814,11 +836,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
       request,
       {
         // DeepSeek normalization and injection run together. Proxy-hosted
-        // Claude uses the separate unsigned-thinking cleanup below because an
-        // empty string cannot replace Claude's opaque signature.
+        // Claude is split two ways: non-4.6 models fill `signature: ''`
+        // (strict serde only requires the key to be present), while 4.6+
+        // adaptive models drop unsigned blocks, since an empty string
+        // cannot stand in for the native API's opaque signature. The two
+        // quadrants are disjoint by construction.
         normalizeAssistantThinkingSignature: deepseekThinkingOn,
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
         dropUnsignedAssistantThinking,
+        fillUnsignedThinkingSignature,
         stripAssistantThinking,
         stripTrailingAssistantPrefill,
         // Manual (non-adaptive) extended thinking requires an assistant
@@ -1006,19 +1032,17 @@ export class AnthropicContentGenerator implements ContentGenerator {
     }
     if (this.getReasoningCapabilities()?.profile) return effort;
     if (isDeepSeekAnthropicHostname(this.contentGeneratorConfig)) {
-      // DeepSeek's anthropic-compatible output_config.effort accepts only
-      // high/max. Mirror the DeepSeek OpenAI adapter (deepseek.ts): low/medium
-      // lift to high and xhigh groups to max, so a low/medium request is not
-      // passed through verbatim (which the endpoint would 400 on). Warn once
-      // when the requested tier is remapped — mirroring the real-Anthropic
-      // clamp path below — so a `/effort low` silently running at `high` is
-      // visible in debug logs.
+      // DeepSeek's anthropic-compatible output_config.effort runs low, high
+      // and max, folding medium and xhigh into high. Map on the client too so
+      // the debug log names the tier that actually runs; warn once when the
+      // requested tier is remapped — mirroring the real-Anthropic clamp path
+      // below.
       const mapped: ReasoningEffort =
-        effort === 'xhigh' || effort === 'max' ? 'max' : 'high';
+        effort === 'low' || effort === 'max' ? effort : 'high';
       if (mapped !== effort && !this.effortClampWarned) {
         debugLogger.warn(
-          `reasoning.effort='${effort}' is not accepted by the DeepSeek ` +
-            `anthropic-compatible endpoint; using '${mapped}'.`,
+          `reasoning.effort='${effort}' runs as '${mapped}' on the DeepSeek ` +
+            `anthropic-compatible endpoint.`,
         );
         this.effortClampWarned = true;
       }

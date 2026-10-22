@@ -20,6 +20,8 @@ import {
   type SandboxExecutionResult,
 } from './sandbox-execution.js';
 
+import { resolveStdinBridge } from './landlock-runner-path.js';
+
 export { sandboxAsset } from './sandbox-execution.js';
 export type BwrapPolicy = ExecutionSandboxPolicy;
 export type BwrapExecutionHandle = SandboxExecutionHandle;
@@ -35,6 +37,7 @@ export async function executeBwrap(
   options: ShellExecuteOptions = {},
 ): Promise<SandboxExecutionHandle> {
   const relay = sandboxAsset('bwrap-relay');
+  const inputBridge = payload.inheritStdin ? resolveStdinBridge() : undefined;
   const node = realpathSync(process.execPath);
   const requestedBwrap = policy.bwrapPath ?? '/usr/bin/bwrap';
   if (!path.isAbsolute(requestedBwrap))
@@ -46,7 +49,12 @@ export async function executeBwrap(
   return executeSandboxRelay(
     policy,
     payload,
-    [path.dirname(relay), path.dirname(node), path.dirname(bwrap)],
+    [
+      path.dirname(relay),
+      path.dirname(node),
+      path.dirname(bwrap),
+      ...(inputBridge ? [path.dirname(inputBridge)] : []),
+    ],
     ({
       workspace,
       cwd,
@@ -94,6 +102,7 @@ export async function executeBwrap(
           String(process.pid),
           statusPath,
           payloadEnvPath,
+          inputBridge ?? '',
           bwrap,
           ...bwrapArgs,
         ],

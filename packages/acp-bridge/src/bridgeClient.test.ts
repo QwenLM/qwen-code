@@ -2647,6 +2647,67 @@ describe('BridgeClient — artifact ingress', () => {
     ).toEqual({ toolName: 'record_artifact' });
   });
 
+  it('forwards the update-only flag of file-write tool artifacts', async () => {
+    const sessionId = 'sess:update-only-artifacts';
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [] as BridgeClientDeferredArtifactBatch[],
+      deferredArtifactInputCount: 0,
+      artifacts: {
+        inputBatchLimit: () => 400,
+        upsertMany,
+      },
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
+      promptActive: true,
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-edit',
+        status: 'completed',
+        content: [],
+        _meta: {
+          toolName: 'edit',
+          artifacts: [
+            {
+              title: 'index.ts',
+              storage: 'workspace',
+              workspacePath: 'src/index.ts',
+              updateOnly: true,
+            },
+          ],
+        },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(upsertMany).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          workspacePath: 'src/index.ts',
+          toolCallId: 'call-edit',
+          toolName: 'edit',
+          updateOnly: true,
+        }),
+      ],
+      { trustedPublisher: false },
+    );
+  });
+
   it('does not store artifact metadata from non-tool session updates', async () => {
     const sessionId = 'sess:non-tool-artifacts';
     const publish = vi.fn().mockReturnValue(true);
@@ -4155,12 +4216,13 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
   it('degrades a attachmentId reused across drained messages after its first use', async () => {
     const publish = vi.fn().mockReturnValue(true);
     const media = new SessionAttachmentStore();
+    const read = vi.spyOn(fsp, 'readFile');
     try {
       const reference = await media.putAttachment(
         Uint8Array.of(1, 2, 3),
         'image/png',
       );
-      const read = vi.spyOn(media, 'read');
+      read.mockClear();
       const entry = {
         sessionId: 'sess:shared-media',
         midTurnMessageQueue: [
@@ -4217,6 +4279,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       // serialized, so one stored blob cannot amplify the drain response.
       expect(read).toHaveBeenCalledTimes(1);
     } finally {
+      read.mockRestore();
       await media.close();
     }
   });
@@ -4413,6 +4476,112 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           { messageId: 'mid-b', content: [{ type: 'text', text: 'b' }] },
         ],
       });
+    } finally {
+      readFile.mockRestore();
+      await media.close();
+    }
+  });
+
+  it('requeues a failed send-now drain in its original order', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const media = new SessionAttachmentStore();
+    const queue: MidTurnQueueEntry[] = [];
+    const readFile = vi
+      .spyOn(fsp, 'readFile')
+      .mockImplementationOnce(async () => {
+        // Typed while the drain reads the attachment.
+        queue.push({ messageId: 'u3', text: 'u3' });
+        throw Object.assign(new Error('too many open files'), {
+          code: 'EMFILE',
+        });
+      });
+    try {
+      const reference = await media.putAttachment(
+        Uint8Array.of(1, 2, 3),
+        'image/png',
+      );
+      queue.push(
+        { messageId: 'u1', text: 'u1', content: [reference] },
+        { messageId: 'q1', text: 'q1', queueOnly: true },
+        { messageId: 'u2', text: 'u2' },
+      );
+      const entry = {
+        sessionId: 'sess:emfile-partial',
+        midTurnMessageQueue: queue,
+        settledMidTurnMessageIds: [] as string[],
+        events: { publish },
+        attachments: media,
+      };
+      const client = makeClientWithEntry('sess:emfile-partial', entry);
+
+      await expect(
+        client.extMethod('craft/drainMidTurnQueue', {
+          sessionId: 'sess:emfile-partial',
+          userInputOnly: true,
+        }),
+      ).rejects.toThrow('too many open files');
+      expect(queue.map((item) => item.messageId)).toEqual([
+        'u1',
+        'q1',
+        'u2',
+        'u3',
+      ]);
+      expect(entry.settledMidTurnMessageIds).toEqual([]);
+      expect(publish).not.toHaveBeenCalled();
+
+      await expect(
+        client.extMethod('craft/drainMidTurnQueue', {
+          sessionId: 'sess:emfile-partial',
+        }),
+      ).resolves.toMatchObject({ messages: ['u1', 'q1', 'u2', 'u3'] });
+    } finally {
+      readFile.mockRestore();
+      await media.close();
+    }
+  });
+
+  it('does not requeue a queue-only entry settled while a send-now drain failed', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const media = new SessionAttachmentStore();
+    const queue: MidTurnQueueEntry[] = [];
+    const readFile = vi
+      .spyOn(fsp, 'readFile')
+      .mockImplementationOnce(async () => {
+        // The turn ends and settles the queue-only entry meanwhile.
+        queue.splice(
+          queue.findIndex((item) => item.messageId === 'q1'),
+          1,
+        );
+        queue.push({ messageId: 'u3', text: 'u3' });
+        throw Object.assign(new Error('too many open files'), {
+          code: 'EMFILE',
+        });
+      });
+    try {
+      const reference = await media.putAttachment(
+        Uint8Array.of(1, 2, 3),
+        'image/png',
+      );
+      queue.push(
+        { messageId: 'u1', text: 'u1', content: [reference] },
+        { messageId: 'q1', text: 'q1', queueOnly: true },
+        { messageId: 'u2', text: 'u2' },
+      );
+      const client = makeClientWithEntry('sess:emfile-settled', {
+        sessionId: 'sess:emfile-settled',
+        midTurnMessageQueue: queue,
+        settledMidTurnMessageIds: [] as string[],
+        events: { publish },
+        attachments: media,
+      });
+
+      await expect(
+        client.extMethod('craft/drainMidTurnQueue', {
+          sessionId: 'sess:emfile-settled',
+          userInputOnly: true,
+        }),
+      ).rejects.toThrow('too many open files');
+      expect(queue.map((item) => item.messageId)).toEqual(['u1', 'u2', 'u3']);
     } finally {
       readFile.mockRestore();
       await media.close();
@@ -5418,5 +5587,43 @@ describe('background execution ownership', () => {
       outcome: { outcome: 'cancelled' },
     });
     expect(entry.pendingPermissionIds.size).toBe(0);
+  });
+});
+
+describe('MCP reload capability invalidation', () => {
+  it('publishes only a current owning-session invalidation', async () => {
+    const publish = vi.fn();
+    const entry = { events: { publish } };
+    const client = makeClient(undefined, {
+      resolveEntry: () => entry,
+      ownsSession: (id) => id === 'owner',
+      handler: vi.fn(),
+    });
+    const method = 'qwen/notify/session/mcp-changed';
+    for (const params of [{}, { sessionId: 42 }, { sessionId: 'foreign' }]) {
+      await client.extNotification(method, params);
+    }
+    expect(publish).not.toHaveBeenCalled();
+    await client.extNotification(method, {
+      sessionId: 'owner',
+      generatedUi: { version: 1, enabled: true },
+    });
+    expect(publish).toHaveBeenCalledExactlyOnceWith({
+      type: 'settings_changed',
+      data: { key: 'mcp' },
+    });
+    const retired = makeClient(undefined, {
+      resolveEntry: () => entry,
+      ownsSession: () => false,
+      handler: vi.fn(),
+    });
+    await retired.extNotification(method, { sessionId: 'owner' });
+    const missing = makeClient(undefined, {
+      resolveEntry: () => undefined,
+      ownsSession: () => true,
+      handler: vi.fn(),
+    });
+    await missing.extNotification(method, { sessionId: 'owner' });
+    expect(publish).toHaveBeenCalledTimes(1);
   });
 });

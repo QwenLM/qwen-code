@@ -6,6 +6,10 @@
 
 import { readSshWorkspace } from '../serve/ssh-workspace-store.js';
 import { SshExecutionEnvironment } from '@qwen-code/qwen-code-core/services/ssh-execution-environment.js';
+import {
+  isLoopProtectionMode,
+  type LoopProtectionMode,
+} from '@qwen-code/qwen-code-core/services/loop-protection.js';
 import type { SessionExecutionEngine } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import {
   type ModelProposedGoalsMode,
@@ -76,6 +80,7 @@ import { loadSettings, SettingScope } from './settings.js';
 import { getSettingsSchema } from './settingsSchema.js';
 import { resolveHookSettingsForConfig } from './hook-settings.js';
 import { createBundledMem0Server } from './mem0-settings.js';
+import { prepareBundledGeneratedUi } from './generated-ui-settings.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -102,6 +107,7 @@ import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
 import {
   BWRAP_MIGRATION_MESSAGE,
+  stripUtf8Bom,
   validateExecutionSandboxSelection,
 } from './execution-sandbox-settings.js';
 import { createExecutionSandboxPolicy } from './execution-sandbox-config.js';
@@ -110,7 +116,9 @@ import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { serveCommand } from '../commands/serve.js';
+import { daemonCommand } from '../commands/daemon.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { agentsCommand } from '../commands/agents.js';
 import { batchCommand } from '../commands/batch.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
@@ -187,6 +195,7 @@ export interface CliArgs {
   telemetryLogPrompts: boolean | undefined;
   telemetryOutfile: string | undefined;
   allowedMcpServerNames: string[] | undefined;
+  disableMcpServer: string[] | undefined;
   mcpConfig: string | undefined;
   allowedTools: string[] | undefined;
   acp: boolean | undefined;
@@ -635,6 +644,10 @@ export async function parseArguments(): Promise<CliArgs> {
         )
         .option('output-style', DEFAULT_COMMAND_OPTIONS['output-style'])
         .option('sandbox', DEFAULT_COMMAND_OPTIONS.sandbox)
+        .middleware((argv) => {
+          if (argv['sandbox'] === 'bwrap')
+            throw new FatalConfigError(BWRAP_MIGRATION_MESSAGE);
+        }, true)
         .option('sandbox-image', DEFAULT_COMMAND_OPTIONS['sandbox-image'])
         .option('yolo', DEFAULT_COMMAND_OPTIONS.yolo)
         .option('approval-mode', DEFAULT_COMMAND_OPTIONS['approval-mode'])
@@ -671,6 +684,15 @@ export async function parseArguments(): Promise<CliArgs> {
             // Handle comma-separated values
             mcpServerNames.flatMap((mcpServerName) =>
               mcpServerName.split(',').map((m) => m.trim()),
+            ),
+        })
+        .option('disable-mcp-server', {
+          ...DEFAULT_COMMAND_OPTIONS['disable-mcp-server'],
+          string: true,
+          coerce: (disabledServerNames: string[]) =>
+            // Handle comma-separated values
+            disabledServerNames.flatMap((disabledServerName) =>
+              disabledServerName.split(',').map((m) => m.trim()),
             ),
         })
         .option('mcp-config', DEFAULT_COMMAND_OPTIONS['mcp-config'])
@@ -756,26 +778,12 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('auth-type', DEFAULT_COMMAND_OPTIONS['auth-type'])
         // Ensure validation flows through .fail() for clean UX
         .fail((msg: string, err: Error | undefined, yargs: Argv) => {
+          if (err instanceof FatalConfigError) throw err;
           writeStderrLine(msg || err?.message || 'Unknown error');
           yargs.showHelp();
           process.exit(1);
         })
         .check((argv: { [x: string]: unknown }) => {
-          const optionArgs = rawArgv.slice(
-            0,
-            rawArgv.includes('--') ? rawArgv.indexOf('--') : rawArgv.length,
-          );
-          if (
-            optionArgs.some(
-              (arg, index) =>
-                arg === '--sandbox=bwrap' ||
-                arg === '-s=bwrap' ||
-                ((arg === '--sandbox' || arg === '-s') &&
-                  optionArgs[index + 1] === 'bwrap'),
-            )
-          ) {
-            return BWRAP_MIGRATION_MESSAGE;
-          }
           // The 'query' positional can be a string (for one arg) or string[] (for multiple).
           // This guard safely checks if any positional argument was provided.
           const query = argv['query'] as string | string[] | undefined;
@@ -891,8 +899,12 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(boardCommand)
     // Register `qwen serve` (Stage 1 daemon)
     .command(serveCommand)
+    // Register `qwen daemon` (local daemon inspection and control)
+    .command(daemonCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
+    // Register `qwen agents` (join a coordinator; session_send MCP server)
+    .command(agentsCommand)
     .command(batchCommand)
     // Register update command
     .command(updateCommand)
@@ -918,7 +930,13 @@ export async function parseArguments(): Promise<CliArgs> {
     .help()
     .alias('h', 'help')
     .strict()
-    .demandCommand(0, 0); // Allow base command to run with no subcommands
+    .demandCommand(0, 0)
+    .fail((message, error, parser) => {
+      if (error instanceof FatalConfigError) throw error;
+      writeStderrLine(message || error?.message || 'Unknown argument error');
+      parser.showHelp();
+      process.exit(1);
+    }); // Allow base command to run with no subcommands
 
   yargsInstance.wrap(yargsInstance.terminalWidth());
   const result = await yargsInstance.parse();
@@ -936,6 +954,8 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
+      result._[0] === 'daemon' ||
+      result._[0] === 'agents' ||
       result._[0] === 'board' ||
       result._[0] === 'batch' ||
       result._[0] === 'update' ||
@@ -944,13 +964,14 @@ export async function parseArguments(): Promise<CliArgs> {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
     // drives shutdown. Hitting `process.exit(0)` here would kill the daemon.
-    // MCP/Extensions/Auth/Hooks/Channel/Review/Batch commands handle their own
-    // execution and exit. Returning here would let the main interactive flow
-    // run, which would prompt for stdin input despite the user having already
-    // invoked a subcommand. `batch` must be here for a second reason: the main
-    // flow below relaunches the process for a larger heap, and a second parse
-    // would run the subcommand handler again — submitting (and billing) a
-    // duplicate batch job whose id the user never sees.
+    // MCP/Extensions/Auth/Hooks/Channel/Review/Daemon/Batch commands handle
+    // their own execution and exit. Returning here would let the main
+    // interactive flow run, which would prompt for stdin input despite the
+    // user having already invoked a subcommand. `batch` must be here for a
+    // second reason: the main flow below relaunches the process for a larger
+    // heap, and a second parse would run the subcommand handler again —
+    // submitting (and billing) a duplicate batch job whose id the user never
+    // sees.
     process.exit(process.exitCode ?? 0);
   }
 
@@ -1352,7 +1373,7 @@ function parseMcpConfig(
     if (fs.existsSync(mcpConfigArg)) {
       debugLogger.debug(`Reading MCP config from file: ${mcpConfigArg}`);
       const content = fs.readFileSync(mcpConfigArg, 'utf-8');
-      parsed = JSON.parse(stripJsonComments(content));
+      parsed = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
     } else {
       // Try parsing as JSON string
       debugLogger.debug('Parsing MCP config as JSON string');
@@ -1641,6 +1662,25 @@ function warnAboutOutputStyle(warning: string): void {
   console.error(`WARNING: ${warning}`);
 }
 
+// Reported once per value for the same reason as the output-style warnings.
+const loopProtectionWarningsShown = new Set<string>();
+
+/**
+ * Resolves `model.loopProtection`. An invalid value (a typo or the wrong
+ * case) falls back to the default with a warning, so a user who asked for
+ * `stop` learns that the turn will not stop.
+ */
+function resolveLoopProtection(value: unknown): LoopProtectionMode | undefined {
+  if (value === undefined || isLoopProtectionMode(value)) return value;
+  const warning = `Invalid model.loopProtection value ${JSON.stringify(value)}: expected "warn", "stop" or "off"; using the default "warn".`;
+  if (loopProtectionWarningsShown.has(warning)) return undefined;
+  loopProtectionWarningsShown.add(warning);
+  debugLogger.warn(warning);
+  // eslint-disable-next-line no-console
+  console.error(`WARNING: ${warning}`);
+  return undefined;
+}
+
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -1700,6 +1740,7 @@ export async function loadCliConfig(
    */
   hostPolicy?: {
     toolInvocationGuard?: ToolInvocationGuard;
+    workflowAncestorTrustProvider?: ConfigParameters['workflowAncestorTrustProvider'];
     shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
     /** Host-managed session whose exact private cwd is bound after bootstrap. */
     provisionalWorkspace?: true;
@@ -1712,6 +1753,10 @@ export async function loadCliConfig(
     };
     /** Engine a paired host selected; the Config persists or verifies it. */
     executionEngine?: SessionExecutionEngine;
+    /** Where a Managed session's tools execute; see `ConfigParameters`. */
+    managedRuntimeEnvironment?: ConfigParameters['managedRuntimeEnvironment'];
+    /** How the host learns an unproven worker stop; see `ConfigParameters`. */
+    onManagedEngineQuarantine?: ConfigParameters['onManagedEngineQuarantine'];
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
@@ -2186,6 +2231,22 @@ export async function loadCliConfig(
       ? new Set(settings.mcp.excluded.filter(Boolean))
       : undefined;
   }
+  // `--disable-mcp-server` is an explicit per-invocation argument, not local
+  // state, so it unions into the exclude set in its OWN block after the
+  // if/else-if chain above. Folding it into the `else if (!bareMode &&
+  // !safeMode)` branch would silently drop it twice over: under `--safe-mode`
+  // that branch does not run at all, and next to `--allowed-mcp-server-names`
+  // the first branch wins and leaves the set undefined. Precedence is
+  // allow-then-deny — a server named by both flags ends up disabled.
+  // Boot-time only: the settings-watcher and ACP reload paths rebuild the
+  // exclude set from settings alone, so a later settings.json edit drops these
+  // entries. Durable fix tracked in #14009.
+  if (argv.disableMcpServer) {
+    excludedMcpServers = new Set([
+      ...(excludedMcpServers ?? []),
+      ...argv.disableMcpServer.filter(Boolean),
+    ]);
+  }
 
   const selectedAuthType =
     (argv.authType as AuthType | undefined) ||
@@ -2315,7 +2376,12 @@ export async function loadCliConfig(
     }
 
     if (sessionId) {
-      sessionService.assertLegacySessionExecution(sessionId);
+      // A Managed host restores its own sessions; a Legacy host must not
+      // execute a Managed transcript. The reverse direction is refused when
+      // the Managed session writer lease sees a Legacy transcript.
+      if (hostPolicy?.executionEngine !== 'managed') {
+        sessionService.assertLegacySessionExecution(sessionId);
+      }
     }
 
     if (argv.forkSession && sessionId) {
@@ -2490,10 +2556,20 @@ export async function loadCliConfig(
     sessionRestoreProjection,
     sessionRestoreProjectionSource: boundSessionRestoreProjectionSource,
     sessionExecutionEngine: hostPolicy?.executionEngine,
+    managedRuntimeEnvironment: hostPolicy?.managedRuntimeEnvironment,
+    onManagedEngineQuarantine: hostPolicy?.onManagedEngineQuarantine,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,
     provisionalWorkspace,
+    workflowAncestorTrustProvider:
+      bareMode ||
+      safeMode ||
+      sshWorkspace ||
+      agentHostReadOnly ||
+      provisionalWorkspace
+        ? undefined
+        : hostPolicy?.workflowAncestorTrustProvider,
     includeDirectories,
     loadMemoryFromIncludeDirectories: provisionalWorkspace
       ? false
@@ -2596,6 +2672,17 @@ export async function loadCliConfig(
     mcpToolIdleTimeoutMs: settings.mcp?.toolIdleTimeoutMs,
     mcpServers,
     topTierMcpServers,
+    bundledGeneratedUi: prepareBundledGeneratedUi(
+      settings.experimental?.generatedUi,
+      !bareMode &&
+        !safeMode &&
+        !sshWorkspace &&
+        !agentHostReadOnly &&
+        !provisionalWorkspace &&
+        !sandboxEnabled &&
+        !sandboxConfig &&
+        hostPolicy?.executionEngine !== 'managed',
+    ),
     pendingMcpServers,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
@@ -2752,6 +2839,8 @@ export async function loadCliConfig(
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,
+    workflowKeywordTriggerEnabled:
+      settings.ui?.disableWorkflowKeywordTrigger !== true,
     workflowSizeGuideline: settings.tools?.workflowSizeGuideline,
     workflowNameOnly: settings.tools?.workflowNameOnly,
     modelProposedGoals: normalizeModelProposedGoals(
@@ -2766,6 +2855,7 @@ export async function loadCliConfig(
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     skipWorkflowUsageWarning: settings.model?.skipWorkflowUsageWarning ?? false,
     skipLoopDetection: settings.model?.skipLoopDetection ?? true,
+    loopProtection: resolveLoopProtection(settings.model?.loopProtection),
     maxToolCallsPerTurn: settings.model?.maxToolCallsPerTurn,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,

@@ -22,6 +22,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   LocalRecoveryBundle,
   recoveryJson,
+  recoveryDigest,
   type RecoveryRpc,
 } from './workspace-recovery-bundle.js';
 
@@ -321,5 +322,91 @@ describe('local offline recovery bundle', () => {
     await verifier.census();
     await writeFile(join(f.candidate, 'authority', 'extra'), 'x');
     await expect(verifier.census()).rejects.toThrow('missing_bundle_asset');
+  });
+});
+
+describe('migration target evidence', () => {
+  it.each(['bytes', 'extra', 'missing', 'hardlink'])(
+    'distinguishes source drift from a retryable target %s mismatch',
+    async (mutation) => {
+      const f = await fixture();
+      await writeFile(join(f.source, 'file'), 'original');
+      await cp(f.source, join(f.candidate, 'workspace'), { recursive: true });
+      await f.bundle.compareTree(f.source, 'workspace');
+      const target = join(f.root, 'target');
+      await cp(f.source, target, { recursive: true });
+      for (const root of [f.source, target]) {
+        if (mutation === 'bytes')
+          await writeFile(join(root, 'file'), 'changed');
+        if (mutation === 'extra') await writeFile(join(root, 'extra'), 'extra');
+        if (mutation === 'missing') await rm(join(root, 'file'));
+        if (mutation === 'hardlink')
+          await link(join(root, 'file'), join(root, 'alias'));
+      }
+      await expect(
+        f.bundle.verifyMigrationTree(f.source, 'workspace'),
+      ).rejects.toThrow('source_drift');
+      await expect(
+        f.bundle.verifyMigrationTree(target, 'workspace', {
+          digest: recoveryDigest('marker'),
+          byteLength: 6,
+        }),
+      ).rejects.toThrow('migration_tree_mismatch');
+    },
+  );
+
+  it('allows only the pinned root marker replacement and checks every other entry', async () => {
+    const f = await fixture();
+    await writeFile(
+      join(f.source, '.qwen-managed-storage.json'),
+      'source-marker',
+    );
+    await writeFile(join(f.source, '.qwen-extra'), 'retained');
+    await cp(f.source, join(f.candidate, 'workspace'), { recursive: true });
+    await f.bundle.compareTree(f.source, 'workspace');
+    const target = join(f.root, 'target');
+    await cp(f.source, target, { recursive: true });
+    const bytes = Buffer.from('target-marker');
+    const marker = { digest: recoveryDigest(bytes), byteLength: bytes.length };
+    await f.bundle.verifyMigrationTree(target, 'workspace', marker);
+    await writeFile(join(target, '.qwen-managed-storage.json'), bytes);
+    await f.bundle.verifyMigrationTree(target, 'workspace', marker);
+    await writeFile(join(target, '.qwen-extra'), 'tampered');
+    await expect(
+      f.bundle.verifyMigrationTree(target, 'workspace', marker),
+    ).rejects.toThrow('migration_tree_mismatch');
+    await writeFile(join(target, '.qwen-extra'), 'retained');
+    await writeFile(join(target, 'extra'), 'undeclared');
+    await expect(
+      f.bundle.verifyMigrationTree(target, 'workspace', marker),
+    ).rejects.toThrow('migration_tree_mismatch');
+    await rm(join(target, 'extra'));
+    await rm(join(target, '.qwen-extra'));
+    await expect(
+      f.bundle.verifyMigrationTree(target, 'workspace', marker),
+    ).rejects.toThrow('migration_tree_mismatch');
+  });
+
+  it('rejects arbitrary marker bytes and leaves sealed evidence unchanged', async () => {
+    const f = await fixture();
+    await writeFile(join(f.source, '.qwen-managed-storage.json'), 'source');
+    await cp(f.source, join(f.candidate, 'workspace'), { recursive: true });
+    await f.bundle.compareTree(f.source, 'workspace');
+    const target = join(f.root, 'target');
+    await cp(f.source, target, { recursive: true });
+    await writeFile(join(target, '.qwen-managed-storage.json'), 'conflict');
+    await expect(
+      f.bundle.verifyMigrationTree(target, 'workspace', {
+        digest: recoveryDigest('target'),
+        byteLength: 6,
+      }),
+    ).rejects.toThrow('migration_tree_mismatch');
+    expect(
+      await readFile(
+        join(f.candidate, 'workspace', '.qwen-managed-storage.json'),
+        'utf8',
+      ),
+    ).toBe('source');
+    await f.bundle.recheckTree(f.source, 'workspace');
   });
 });

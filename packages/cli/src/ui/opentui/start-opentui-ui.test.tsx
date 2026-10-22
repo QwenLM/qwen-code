@@ -14,6 +14,13 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { OpenTuiStreamEvent } from './event-adapter.js';
+import type { LiveHistoryItem } from './live-session-model.js';
+import { createInteractiveModSession } from '../../services/interactive-mod-session.js';
+import {
+  ModSession,
+  type ModTerminalHost,
+} from '../../services/mod-session.js';
 
 const mocks = vi.hoisted(() => {
   const state = {
@@ -39,8 +46,29 @@ const mocks = vi.hoisted(() => {
      * constructor installing `globalThis.window`. */
     bootOrder: [] as string[],
     warmupRejects: false,
-    waitingCalls: [] as Array<{ callId: string }>,
-    appProps: null as { renderMain?: () => unknown } | null,
+    waitingCalls: [] as Array<{
+      callId: string;
+      confirmationDetails?: { onConfirm: () => Promise<void> };
+    }>,
+    streaming: false,
+    interrupt: vi.fn(),
+    keyboard: [] as Array<
+      (key: { name: string; ctrl: boolean; eventType?: string }) => void
+    >,
+    items: [] as LiveHistoryItem[],
+    appProps: null as {
+      userMessages?: readonly string[];
+      renderMain?: () => unknown;
+      composerHandle?: {
+        current: {
+          getText: () => string;
+          setText: (text: string) => void;
+        } | null;
+      };
+    } | null,
+    resumeEvents: null as OpenTuiStreamEvent[] | null,
+    transcript: [] as OpenTuiStreamEvent[],
+    replayOrder: [] as string[],
   };
   async function buildJsxRuntime() {
     const React = await import('react');
@@ -80,7 +108,11 @@ vi.mock('@opentui/core', () => ({
 }));
 vi.mock('@opentui/react', () => ({
   createRoot: vi.fn(() => mocks.state.root),
-  useKeyboard: () => {},
+  useKeyboard: (
+    handler: (key: { name: string; ctrl: boolean; eventType?: string }) => void,
+  ) => {
+    mocks.state.keyboard.push(handler);
+  },
   useRenderer: () => mocks.state.renderer,
   useTerminalDimensions: () => ({ width: 120, height: 40 }),
 }));
@@ -114,24 +146,32 @@ vi.mock('./transcript-view.js', () => ({
 }));
 vi.mock('./live-turn.js', () => ({
   useOpenTuiLiveTurn: () => ({
-    items: [],
-    streaming: false,
+    items: mocks.state.items,
+    streaming: mocks.state.streaming,
     streamingCharsRef: { current: 0 },
     isReceivingContent: false,
     waitingCalls: mocks.state.waitingCalls,
     messageQueue: [],
     popQueue: () => null,
     submit: () => {},
-    interrupt: () => {},
-    resetTranscript: () => {},
-    applyEvent: () => {},
+    interrupt: mocks.state.interrupt,
+    resetTranscript: (events: OpenTuiStreamEvent[]) => {
+      mocks.state.replayOrder.push('reset');
+      mocks.state.transcript = [...events];
+    },
+    applyEvent: (event: OpenTuiStreamEvent) => {
+      mocks.state.replayOrder.push(event.type);
+      mocks.state.transcript.push(event);
+    },
     settleWaitingCall: () => {},
   }),
 }));
 vi.mock('../handleAutoUpdate.js', () => ({
   setUpdateHandler: () => ({ cleanup: () => {}, flush: () => {} }),
 }));
-vi.mock('../hooks/useLogger.js', () => ({ useLogger: () => null }));
+vi.mock('../hooks/useLogger.js', () => ({
+  useLogger: () => null,
+}));
 vi.mock('../../startup/startup-prefetch.js', () => ({
   startPostRenderPrefetches: () => {},
 }));
@@ -161,11 +201,13 @@ vi.mock('./early-input.js', () => ({
   armCapturedInputInjection: () => () => {},
 }));
 vi.mock('./resume-session.js', () => ({
-  resumeEventsFromConfig: () => null,
+  resumeEventsFromConfig: () => mocks.state.resumeEvents,
 }));
 
 import type { ReactElement } from 'react';
 import { render } from '@testing-library/react';
+import { act } from 'react';
+import { exitSession } from './exit-lifecycle.js';
 import { startOpenTuiUI } from './start-opentui-ui.js';
 import { createCliRenderer } from '@opentui/core';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -202,7 +244,15 @@ describe('startOpenTuiUI fallback contract', () => {
     mocks.state.bootOrder = [];
     mocks.state.warmupRejects = false;
     mocks.state.waitingCalls = [];
+    mocks.state.streaming = false;
+    mocks.state.interrupt.mockClear();
+    mocks.state.items = [];
     mocks.state.appProps = null;
+    mocks.state.keyboard = [];
+    vi.mocked(exitSession).mockClear();
+    mocks.state.resumeEvents = null;
+    mocks.state.transcript = [];
+    mocks.state.replayOrder = [];
     mocks.state.renderer.destroy.mockClear();
     mocks.state.root.unmount.mockClear();
     mocks.state.root.render.mockClear();
@@ -219,6 +269,82 @@ describe('startOpenTuiUI fallback contract', () => {
       | undefined;
     return provider?.props?.children?.props?.['initialDialog'];
   }
+
+  async function withEntryApp(check: () => void) {
+    const write = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation(() => true);
+    let view: ReturnType<typeof render> | undefined;
+    try {
+      await startOpenTuiUI(
+        buildConfig(),
+        settings,
+        [],
+        '/tmp/project',
+        {} as InitializationResult,
+      );
+      await act(async () => {
+        view = render(
+          mocks.state.root.render.mock.calls.at(-1)![0] as ReactElement,
+        );
+      });
+      check();
+    } finally {
+      view?.unmount();
+      write.mockRestore();
+    }
+  }
+
+  it('reads live composer text for Ctrl+D and only arms exit after it becomes empty', async () => {
+    await withEntryApp(() => {
+      let text = 'draft';
+      const handle = mocks.state.appProps?.composerHandle;
+      expect(handle).toBeDefined();
+      handle!.current = {
+        getText: () => text,
+        setText: (value) => {
+          text = value;
+        },
+      };
+      const press = (eventType = 'press') =>
+        act(() => {
+          mocks.state.keyboard.at(-1)!({ name: 'd', ctrl: true, eventType });
+        });
+      press();
+      press();
+      expect(exitSession).not.toHaveBeenCalled();
+      handle!.current.setText('');
+      press('release');
+      press();
+      expect(exitSession).not.toHaveBeenCalled();
+      press();
+      expect(exitSession).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it.each(['stream-c', 'confirmation-d'] as const)(
+    'arms before cleanup and exits on the second key: %s',
+    async (mode) => {
+      const confirm = vi.fn(async () => {});
+      mocks.state.streaming = true;
+      if (mode === 'confirmation-d')
+        mocks.state.waitingCalls = [
+          { callId: 'parked', confirmationDetails: { onConfirm: confirm } },
+        ];
+      await withEntryApp(() => {
+        const name = mode === 'stream-c' ? 'c' : 'd';
+        act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
+        expect(exitSession).not.toHaveBeenCalled();
+        expect(confirm).not.toHaveBeenCalled();
+        expect(mocks.state.interrupt).toHaveBeenCalledTimes(
+          mode === 'stream-c' ? 1 : 0,
+        );
+        act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
+        expect(exitSession).toHaveBeenCalledTimes(1);
+        expect(confirm).not.toHaveBeenCalled();
+      });
+    },
+  );
 
   it('returns false when the renderer cannot be created', async () => {
     vi.mocked(createCliRenderer).mockRejectedValueOnce(
@@ -323,6 +449,18 @@ describe('startOpenTuiUI fallback contract', () => {
   // here reads that tree's elements without executing them.
   it('threads the parked call and the args setting into the transcript', async () => {
     mocks.state.waitingCalls = [{ callId: 'q1' }, { callId: 'q2' }];
+    const raw = '<system-reminder>literal user text</system-reminder> workflow';
+    const recalledPaste = `${raw}\npasted body`;
+    mocks.state.items = [
+      { kind: 'user', id: 'user', text: raw },
+      {
+        kind: 'user',
+        id: 'pasted-user',
+        text: '[Pasted Content 1200 chars]',
+        recallText: recalledPaste,
+      },
+      { kind: 'info', id: 'info', text: 'machine context' },
+    ];
     const started = await startOpenTuiUI(
       buildConfig(),
       {
@@ -357,10 +495,74 @@ describe('startOpenTuiUI fallback contract', () => {
     expect(props?.['awaitingCallId']).toBe('q1');
     expect(props?.['showToolCallArgs']).toBe(true);
     expect(props?.['mouseTracking']).toBe(false);
+    expect(mocks.state.appProps?.userMessages).toEqual([raw, recalledPaste]);
     // The renderer takes no pointer events when the setting is off.
     expect(createCliRenderer).toHaveBeenLastCalledWith(
       expect.objectContaining({ useMouse: false }),
     );
+  });
+
+  it('retains pre-paint Mod warnings after restoring history and detaches on unmount', async () => {
+    const config = buildConfig();
+    config.isInteractive = () => true;
+    const warning = 'tool.call and tool.check are not supported.';
+    let host!: ModTerminalHost;
+    const factory = vi
+      .spyOn(ModSession, 'create')
+      .mockImplementation((_config, _settings, output) => {
+        host = output as ModTerminalHost;
+        return {
+          initialize: async () =>
+            host.log(
+              { to: 'transcript', text: warning },
+              'fixture',
+              config.getSessionId(),
+            ),
+          flushLogs: () => {},
+          close: async () => {},
+        } as unknown as ModSession;
+      });
+    const owner = createInteractiveModSession(config, {
+      merged: { experimental: { mods: true } },
+    } as LoadedSettings)!;
+    mocks.state.resumeEvents = [{ type: 'user', text: 'restored history' }];
+    mocks.state.runtime.writeRuntimeSidecar.mockImplementationOnce(async () => {
+      await owner.ready;
+    });
+    const write = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation(() => true);
+    let view: ReturnType<typeof render> | undefined;
+    try {
+      expect(
+        await startOpenTuiUI(
+          config,
+          settings,
+          [],
+          '/tmp/project',
+          {} as InitializationResult,
+        ),
+      ).toBe(true);
+      const calls = mocks.state.root.render.mock.calls;
+      view = render(calls[calls.length - 1]?.[0] as ReactElement);
+      expect(mocks.state.replayOrder).toEqual(['reset', 'info']);
+      expect(mocks.state.transcript).toEqual([
+        { type: 'user', text: 'restored history' },
+        { type: 'info', text: `[Mod fixture] ${warning}` },
+      ]);
+      view.unmount();
+      host.log(
+        { to: 'transcript', text: 'after unmount' },
+        'fixture',
+        config.getSessionId(),
+      );
+      expect(mocks.state.transcript).toHaveLength(2);
+    } finally {
+      view?.unmount();
+      await owner.close();
+      factory.mockRestore();
+      write.mockRestore();
+    }
   });
 
   it('warms the shell AST parser before the renderer is created', async () => {

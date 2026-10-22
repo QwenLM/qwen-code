@@ -2,6 +2,8 @@
 
 [English](workspace-session-archive-delete-l1-l2.md) | [简体中文](workspace-session-archive-delete-l1-l2.zh-CN.md)
 
+This document preserves the original L1/L2 and reliable-close protocol. Newly admitted ACTIVE files close/delete use [L3](workspace-session-active-delete-l3.md): close runs SessionEnd only, delete runs SessionEnd followed by SessionDelete, and durable Hook evidence precedes permanent draining. L2 CLOSED/ARCHIVED deletion remains independent of Harness; operations admitted before upgrade resume under their saved protocol.
+
 ## 1. Status and baseline
 
 Implemented and synchronized with main, 2026-10-02, on `codex/workspace-session-l1-l2`. This document
@@ -205,11 +207,11 @@ original mutation result in the sense of no repeated effect, and returns the
 current visible Session, matching the existing public response contract. It
 does not store an immutable Session response snapshot. If another key archives
 the Session again, replaying the old unarchive key returns that archived view
-with the replay header true and does not unarchive again. After deletion it
-returns `404`, because this response is a Session read, not an operation read.
-Check tombstone visibility before returning an unarchive replay. Archive/delete
-continue to replay their operation on a tombstone. Tests and OpenAPI must make
-this distinction explicit on both surfaces.
+with the replay header true and does not unarchive again. After deletion the
+recorded unarchive still replays its 200 with the Session as last visible —
+like every other mutation path, a recorded success must not turn into a 404
+because a later delete intervened. Tests and OpenAPI make this explicit on
+both surfaces.
 
 ## 6. L2 implementation design
 
@@ -311,11 +313,11 @@ including the prerequisite integration.
 | `.../api/WebShellAgentController.java`, `ApiModels.java`                                                  | Unarchive adapter and optional capability fields                 | Optional delete fields                                                    |
 | `.../service/SessionLifecycleCoordinator.java`                                                            | No archive dispatch                                              | Skip resource cleanup only for the admitted L2 path                       |
 | `.../store/ManagedSessionStore.java`, `ToolPublicationRetentionStore.java`, `ManagedToolResultStore.java` | No retention change                                              | Reconcile writer lock order; reuse retirement; verify projection ordering |
-| `packages/sdk-java/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json` | Routes, replay semantics, authorization and capabilities         | State restrictions, retirement and tombstone behavior                     |
+| `packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json`          | Routes, replay semantics, authorization and capabilities         | State restrictions, retirement and tombstone behavior                     |
 | `packages/web-shell/client/components/managed/generated/managed-agent-api.ts`                             | Regenerate optional fields and unarchive route types             | Regenerate delete capability                                              |
 
 The `...` Java prefix above is
-`packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent`.
+`packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent`.
 Focused tests belong beside the existing lifecycle, operation-store, API,
 retention and Hosted/MySQL tests. Audit all new capability read sites and every
 adapter/service/store caller; do not leave declared flags or options unpopulated.
@@ -385,7 +387,7 @@ not input refusal alone, establishes the retained close fence.
 | Authorization          | Creator/read success; unreadable and cross-tenant 404; readable non-creator 403; permission checked again on replay and operation read                                                                                                                                     |
 | State and proof        | Reject ACTIVE, CLOSING and DELETING fresh metadata requests as specified; reject manually seeded CLOSED/ARCHIVED without completed-close evidence; unfinished operations conflict                                                                                          |
 | Idempotency            | Concurrent same key once; cross-surface same key once; distinct actor/Session/kind domains; case-distinct valid keys; whitespace/control/oversized keys rejected without trimming; no duplicate events; digest mismatch at store level                                     |
-| Unarchive replay       | Crash before commit and lost response after commit; replay after rearchive returns current ARCHIVED without changing it; replay after tombstone 404; no orphan PENDING command                                                                                             |
+| Unarchive replay       | Crash before commit and lost response after commit; replay after rearchive returns current ARCHIVED without changing it; replay after tombstone answers the recorded outcome with the Session as last visible; no orphan PENDING command                                   |
 | Permanent closure      | After archive/unarchive, input/new writer/warm remain refused and original close receipt/fence remain; no model, Hook, provider or Runtime calls                                                                                                                           |
 | Data retention         | Original history, Artifacts and publications remain readable through L1; L2 denies public/private reads as contracted while retaining bytes, backups and shared files                                                                                                      |
 | Delete atomicity       | Faults after each retirement/tombstone/operation/event write roll everything back; no-head/no-publication Sessions still get a permanent barrier; residual live writer prevents completion; non-READY recovery allows the tombstone while preserving collection protection |
