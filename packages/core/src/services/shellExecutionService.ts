@@ -262,6 +262,12 @@ export interface ShellExecutionResult {
    * `output` is a retained prefix rather than the whole stream.
    */
   outputCaptureLimitExceeded?: boolean;
+  /**
+   * `streamStdout` only: the process exited, but its output pipes were still
+   * open when the post-exit drain ran out — something it started in the
+   * background still holds them.
+   */
+  outputHeldAfterExit?: boolean;
 }
 
 /** A handle for an ongoing shell execution. */
@@ -1048,6 +1054,7 @@ export class ShellExecutionService {
         let drainTimer: NodeJS.Timeout | null = null;
         let remainingDrainMs = POST_EXIT_STREAM_DRAIN_MS;
         let drainStartedAt = 0;
+        let drainExpired = false;
         let pendingCaptureWrites = 0;
         let stdoutEnded = false;
         let stderrEnded = false;
@@ -1065,12 +1072,14 @@ export class ShellExecutionService {
             return;
           }
           if (remainingDrainMs <= 0) {
+            drainExpired = true;
             void handleExit(recordedExit.code, recordedExit.signal);
             return;
           }
           drainStartedAt = performance.now();
           drainTimer = setTimeout(() => {
             drainTimer = null;
+            drainExpired = true;
             const recorded = recordedExit;
             if (recorded) void handleExit(recorded.code, recorded.signal);
           }, remainingDrainMs);
@@ -1368,6 +1377,7 @@ export class ShellExecutionService {
             aborted: abortSignal.aborted,
             pid: undefined,
             executionMethod: 'child_process',
+            ...(drainExpired ? { outputHeldAfterExit: true } : {}),
           });
         };
 

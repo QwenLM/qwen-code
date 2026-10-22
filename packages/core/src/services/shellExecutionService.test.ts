@@ -2545,6 +2545,7 @@ describe('ShellExecutionService child_process fallback', () => {
       const result = await handle.result;
       expect(settledEarly).toBe(true);
       expect(result.exitCode).toBe(0);
+      expect(result.outputHeldAfterExit).toBeUndefined();
       expect(onOutputEventMock).toHaveBeenCalledWith(stdoutEvent('after'));
     });
 
@@ -2564,6 +2565,8 @@ describe('ShellExecutionService child_process fallback', () => {
       );
       expect(result.exitCode).toBe(0);
       expect(result.aborted).toBe(false);
+      // Callers that need the background part's output can tell it was cut.
+      expect(result.outputHeldAfterExit).toBe(true);
       expect(onOutputEventMock).toHaveBeenCalledWith(stdoutEvent('before'));
     });
 

@@ -259,7 +259,18 @@ export function createCronGateRunner(config: Config): CronGateRunner {
       );
     }
     const durationMs = Date.now() - startedAt;
-    if (stdout.trim().length === 0) return { kind: 'quiet', durationMs };
+    if (stdout.trim().length === 0) {
+      // A part the command put in the background outlived it with its
+      // output still open: whatever it prints is lost, so "quiet" would
+      // skip every fire. Catches what the lexical `&` check misses (`eval`,
+      // a script piped into a shell, a quote it misreads).
+      if (result.outputHeldAfterExit) {
+        return failed(
+          'exited with nothing on stdout while something it started in the background still held its output open (a gate must finish in the foreground)',
+        );
+      }
+      return { kind: 'quiet', durationMs };
+    }
     return { kind: 'output', stdout, truncated, durationMs };
   };
 }

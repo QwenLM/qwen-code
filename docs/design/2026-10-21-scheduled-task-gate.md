@@ -202,13 +202,14 @@ A gate is a shell command. The scheduler runs it with:
 
 Its exit code and stdout decide the outcome:
 
-| Gate result                          | Outcome     | What happens                                                                     |
-| ------------------------------------ | ----------- | -------------------------------------------------------------------------------- |
-| exit 0, stdout empty after trimming  | `quiet`     | Nothing is queued or recorded in the transcript.                                 |
-| exit 0, stdout non-empty             | `delivered` | The fire is delivered with the output (first 16 KiB; truncation is noted).       |
-| non-zero exit, timeout, cannot start | `failed`    | A notice is delivered for the first failure of a streak; later ones are counted. |
-| binary output                        | `failed`    | The command is stopped; same as any other failure.                               |
-| not allowed to run unattended (5.4)  | `blocked`   | Same as `failed`, with the rule to add.                                          |
+| Gate result                          | Outcome     | What happens                                                                      |
+| ------------------------------------ | ----------- | --------------------------------------------------------------------------------- |
+| exit 0, stdout empty after trimming  | `quiet`     | Nothing is queued or recorded in the transcript.                                  |
+| exit 0, stdout non-empty             | `delivered` | The fire is delivered with the output (first 16 KiB; truncation is noted).        |
+| non-zero exit, timeout, cannot start | `failed`    | A notice is delivered for the first failure of a streak; later ones are counted.  |
+| binary output                        | `failed`    | The command is stopped; same as any other failure.                                |
+| exit 0, stdout empty, output held    | `failed`    | Something it started in the background still held its output 1 s after it exited. |
+| not allowed to run unattended (5.4)  | `blocked`   | Same as `failed`, with the rule to add.                                           |
 
 A probe therefore keeps its own cursor and prints only transitions: a new
 comment, a check that just failed on the current head, `mergeable` turning
@@ -294,14 +295,23 @@ the command is proposed and checked again where it runs.
   the `&` that ends a wrapper's script (`bash -c './probe.sh &'`), also behind
   a prefix (`nohup`, `sudo`, `env`), is refused before the dialog: it would
   return at once with nothing on stdout. An escaped `\&` at the end
-  (`echo done \&`) is a literal and stays accepted, and so does `$(( 5 & 3
-))`. The check is lexical and errs toward refusing: an `&` in a comment, a
-  heredoc body, `(( … ))` or an escape inside a double-quoted wrapper script
-  (`bash -c "echo \\&"`) is refused too (put such a command in a script). A
-  gate of only comments is refused for the same reason: a shell runs it as
-  nothing; `true` and `:` stay accepted as explicit no-ops. That check is
-  best-effort: a comment-only script behind a wrapper prefix (`nohup bash -c
-'# x'`) is not caught, and only leaves a task that never fires.
+  (`echo done \&`) is a literal and stays accepted, and so does
+  `$(( 5 & 3 ))`. The check is lexical and best-effort. Where it is unsure it
+  refuses: an `&` in a comment, a heredoc body, `(( … ))` or an escape inside
+  a double-quoted wrapper script (`bash -c "echo \\&"`) is refused too (put
+  such a command in a script). It does not follow every spelling: a script
+  handed to `eval`, piped into a shell, passed as `bash -c -- …` or put
+  together from several quoted pieces (`bash -c './probe.sh '\&`,
+  `bash -c $'./probe.sh &'`), or an `&` after a quote it misreads (inside
+  `"$(…)"` or `$'…'`), gets past it. The
+  runner backs it up: a gate that exits 0 with nothing on stdout while
+  something it started in the background still holds its output open is
+  `failed`, not `quiet` (the outcome table above). A gate of only comments
+  is refused for the same reason: a shell runs it as nothing; `true` and `:`
+  stay accepted as explicit no-ops. That check is best-effort too: a
+  comment-only script behind a wrapper prefix (`nohup bash -c '# x'`) or
+  after `bash -c --` is not caught, and only leaves a task that never
+  fires.
   "Always allow" therefore saves a `Monitor(...)` rule, not a `cron_create`
   rule. The classifier input for auto mode includes the gate. A bare
   `cron_create` allow rule saved before this change does not cover a gate.

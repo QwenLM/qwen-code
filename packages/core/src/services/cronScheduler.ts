@@ -1405,13 +1405,6 @@ export class CronScheduler {
     this.gateSkippedListener = listener;
   }
 
-  /**
-   * Records that `cron_create` confirmed `gate` in this process for a task
-   * another component writes to disk (the daemon's current-session creator),
-   * so this scheduler's job for it may run the gate unattended, like a job it
-   * created itself. Applies at once when the job is loaded, otherwise on the
-   * reload that installs it, and only while the task's gate is that command.
-   */
   /** Removes a durable task from disk whether or not this scheduler has
    * loaded it yet, as for a task another component just wrote. */
   async removeDurable(id: string): Promise<void> {
@@ -1419,6 +1412,13 @@ export class CronScheduler {
     if (this.projectRoot) await removeCronTasks(this.projectRoot, [id]);
   }
 
+  /**
+   * Records that `cron_create` confirmed `gate` in this process for a task
+   * another component writes to disk (the daemon's current-session creator),
+   * so this scheduler's job for it may run the gate unattended, like a job it
+   * created itself. Applies at once when the job is loaded, otherwise on the
+   * reload that installs it, and only while the task's gate is that command.
+   */
   approveGate(id: string, gate: string): void {
     const job = this.jobs.get(id);
     if (!job) {

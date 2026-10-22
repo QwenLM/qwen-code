@@ -32,6 +32,7 @@ interface ShellScript {
   signal?: number | null;
   error?: Error | null;
   aborted?: boolean;
+  outputHeldAfterExit?: boolean;
 }
 
 function scriptShell(script: ShellScript): void {
@@ -57,6 +58,7 @@ function scriptShell(script: ShellScript): void {
           signal: script.signal ?? null,
           error: script.error ?? null,
           aborted: script.aborted ?? false,
+          ...(script.outputHeldAfterExit ? { outputHeldAfterExit: true } : {}),
         }),
       };
     },
@@ -124,6 +126,29 @@ describe('createCronGateRunner', () => {
       makeConfig({ mode: ApprovalMode.AUTO }),
     )('./probe.sh', { signal: signal(), approvedInProcess: false });
     expect(result.kind).toBe('quiet');
+  });
+
+  it('fails a quiet gate whose background part still holds its output', async () => {
+    // `eval './probe.sh &'` or `echo './probe.sh &' | sh` passes the
+    // lexical check; the probe's output would be lost at every fire.
+    scriptShell({ stdout: '', outputHeldAfterExit: true });
+    const result = await createCronGateRunner(
+      makeConfig({ mode: ApprovalMode.YOLO }),
+    )('./probe.sh', { signal: signal(), approvedInProcess: false });
+    expect(result).toMatchObject({
+      kind: 'failed',
+      detail: expect.stringContaining(
+        'something it started in the background still held its output open',
+      ),
+    });
+    // Output printed in the foreground is still delivered.
+    scriptShell({ stdout: 'event: comment\n', outputHeldAfterExit: true });
+    expect(
+      await createCronGateRunner(makeConfig({ mode: ApprovalMode.YOLO }))(
+        './probe.sh',
+        { signal: signal(), approvedInProcess: false },
+      ),
+    ).toMatchObject({ kind: 'output', stdout: 'event: comment\n' });
   });
 
   it('reports a non-zero exit with the stderr it captured', async () => {
