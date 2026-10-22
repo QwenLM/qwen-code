@@ -191,6 +191,8 @@ class AgentDefinitionCompilerTest {
         String configured = base.substring(0, base.length() - 1) + pins;
         assertThat(AgentDefinitionCompiler.compile(configured, true, "yolo", List.of(WorkspaceToolProfiles.MCP))
                 .toolProfile()).isEqualTo(WorkspaceToolProfiles.MCP);
+        assertThat(AgentDefinitionCompiler.compile(configured.replace(WorkspaceToolProfiles.MCP, WorkspaceToolProfiles.SHELL),
+                true, "default", List.of(WorkspaceToolProfiles.SHELL)).toolProfile()).isEqualTo(WorkspaceToolProfiles.SHELL);
         assertThatThrownBy(() -> AgentDefinitionCompiler.compile(configured, true, "yolo", FILES_ONLY))
                 .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getDetails()).containsEntry("field", "tools"));

@@ -1,4 +1,5 @@
 import type { components } from './generated/managed-agent-api';
+import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
 import type {
   ManagedArtifact,
   ManagedArtifactPage,
@@ -265,6 +266,36 @@ export class JavaManagedAgentClient {
     return this.post('/session-options/query', { agentId }, signal);
   }
 
+  lifecycleCommand(
+    kind: 'close' | 'archive' | 'delete',
+    request: Schemas['WebShellLifecycleRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellCommandOperation']>(
+      `/sessions/${kind}`,
+      request,
+      signal,
+    );
+  }
+
+  unarchiveSession(
+    request: Schemas['WebShellLifecycleRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<JavaAgentSession>('/sessions/unarchive', request, signal);
+  }
+
+  exportSnapshot(
+    request: Schemas['WebShellExportRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellExportPage']>(
+      '/sessions/export/query',
+      request,
+      signal,
+    );
+  }
+
   getTranscript(
     request: Schemas['WebShellTranscriptRequest'],
     signal?: AbortSignal,
@@ -386,6 +417,39 @@ export class JavaManagedAgentClient {
     return this.post<Schemas['PublicMcpCatalog']>(
       '/session-mcp/query',
       { sessionId },
+      signal,
+    );
+  }
+
+  queryMcpManagement(
+    request: Schemas['WebShellMcpManagementQuery'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpManagementSnapshot>(
+      '/session-mcp/management/query',
+      request,
+      signal,
+    );
+  }
+
+  submitMcpManagement(
+    request: Schemas['WebShellMcpManagementSubmit'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpManagementSnapshot>(
+      '/session-mcp/management/submit',
+      request,
+      signal,
+    );
+  }
+
+  getMcpManagementOperation(
+    request: Schemas['WebShellMcpManagementOperationQuery'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpManagementSnapshot>(
+      '/session-mcp/management/operations/query',
+      request,
       signal,
     );
   }
