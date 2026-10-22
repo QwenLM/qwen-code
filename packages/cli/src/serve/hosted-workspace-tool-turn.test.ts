@@ -3486,15 +3486,35 @@ function actionIds(): string[] {
 // requested() polls the Turn's sequential fsynced durable writes (options
 // publish, action request, durable-wait checkpoint). A fixed budget for that
 // chain flaked on the shared pool (#13397, #15093), so budget it through the
-// slow-host policy, clamped to the per-test ceiling the runner actually sets
-// (60 s on the ecs-qwen pool, 15 s elsewhere) so a genuine hang still fails
-// on the assertion inside the test rather than as a bare runner timeout.
-const REQUESTED_TIMEOUT_MS = isSlowTestHost()
-  ? Math.min(
-      45_000,
-      process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') ? 60_000 : 15_000,
-    )
-  : 10_000;
+// slow-host policy. The budget is per wait, so the two tests that call
+// requested() twice need 2 x 20 s < 60 s on the ecs-qwen pool; the other
+// slow-host arm keeps 3 s of headroom under its 15 s ceiling so a hang still
+// fails on the assertion rather than as a bare runner timeout. The autofix
+// verification gate strips RUNNER_NAME and passes --testTimeout=60000, so
+// this lands at 12 s there; closing that needs a gate sentinel, not a local
+// change.
+function requestedWaitBudgetMs(
+  slowHost: boolean,
+  runnerName: string | undefined,
+): number {
+  if (!slowHost) return 10_000;
+  const ceiling = runnerName?.startsWith('ecs-qwen-') ? 60_000 : 15_000;
+  return Math.min(20_000, ceiling - 3_000);
+}
+
+const REQUESTED_TIMEOUT_MS = requestedWaitBudgetMs(
+  isSlowTestHost(),
+  process.env['RUNNER_NAME'],
+);
+
+it('keeps the requested() wait budget under the per-test ceiling', () => {
+  expect(requestedWaitBudgetMs(true, 'ecs-qwen-64c-01')).toBe(20_000);
+  expect(requestedWaitBudgetMs(true, 'ubuntu-latest')).toBe(12_000);
+  expect(requestedWaitBudgetMs(false, undefined)).toBe(10_000);
+  expect(requestedWaitBudgetMs(true, 'ecs-qwen-64c-01') * 2).toBeLessThan(
+    60_000,
+  );
+});
 
 async function requested(count = 1): Promise<string> {
   let requestId = '';
