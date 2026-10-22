@@ -421,6 +421,21 @@ fi
       expect(resolved.stdout).not.toContain('::warning::');
       expect(resolved.calls).toContain('commits/main');
     });
+    it('fails open when the tip of main is empty', () => {
+      // A successful read that prints nothing must not compare as a moved
+      // tip: only a non-empty sha that differs from the head suppresses.
+      const resolved = detect(
+        '1',
+        {
+          EVENT_NAME: 'push',
+          HEAD_BRANCH: 'main',
+          HEAD_SHA: 'old-head',
+        },
+        undefined,
+        '',
+      );
+      expect(resolved.output).toBe('superseded=false\n');
+    });
     it('does not compare a scheduled run with the tip of main', () => {
       // A schedule runs at its own head and is the only signal macOS and
       // Windows lanes have; suppressing it because main moved would drop that
