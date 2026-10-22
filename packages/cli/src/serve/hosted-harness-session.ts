@@ -81,11 +81,12 @@ import type { Application, Request, Response } from 'express';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { parseBridgeManagedSessionStore } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
-  parseHarnessCheckpointV1,
   type HarnessRunAuthorization,
   harnessCheckpointIsAgentWait,
   harnessCheckpointIsCommandWait,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import { readHarnessCheckpoint } from '@qwen-code/qwen-code-core/managed-runtime/managed-checkpoint-history.js';
+import { collectNestedResourceRefs } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { MANAGED_MCP_MAX_CONNECTIONS } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import {
@@ -347,6 +348,7 @@ const RESTORE_CONTAINER_KINDS = new Set([
   'managed-tool-outcome',
   'managed-tool-result-manifest',
   'managed-checkpoint',
+  'managed-checkpoint-history',
   'managed-hook-plan',
   'managed-hook-message-chunks',
 ]);
@@ -2411,13 +2413,14 @@ async function verifyWorkspaceRestore(
         );
     }
     if (ref.kind === 'managed-checkpoint') {
-      const checkpoint = parseHarnessCheckpointV1(bytes);
+      const checkpoint = await readHarnessCheckpoint(resources, ref);
+      refs.push(...collectNestedResourceRefs(ref, bytes));
       if (
         checkpoint.resume.fileHistoryRef ||
         checkpoint.output.mediaRefs.length
       )
         throw new Error('Hosted recovery layout is unsupported.');
-      const refs = [
+      const checkpointRefs = [
         checkpoint.resume.apiHistoryRef,
         checkpoint.resume.artifactRef,
         checkpoint.resume.goalRecordsRef,
@@ -2436,9 +2439,12 @@ async function verifyWorkspaceRestore(
         checkpoint.output.llmContentRef,
         checkpoint.output.hookResultRef,
       ];
-      for (const nested of refs) {
+      for (const nested of checkpointRefs) {
         if (nested) await readRef(nested);
       }
+    }
+    if (ref.kind === 'managed-checkpoint-history') {
+      refs.push(...collectNestedResourceRefs(ref, bytes));
     }
     if (ref.kind === 'managed-hook-plan') {
       const plan = object(JSON.parse(bytes.toString()));

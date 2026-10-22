@@ -488,7 +488,7 @@ public final class CsiNativeActivationProof {
         require(checkpointId.equals(id(event, "eventId")) && checkpointId.equals(id(payload, "checkpointId"))
                 && number(payload.get("coveredSequence")) == previousSequence && predecessor.equals(id(payload, "previousCheckpointId")));
         JsonNode ref = payload.path("stateRef");
-        JsonNode state = readObject(reference(ref, "managed-checkpoint", resources));
+        JsonNode state = readCheckpoint(ref, resources);
         require(id(ref, "resourceId").equals(id(metadata, "latestCheckpointResourceId"))
                 && text(ref, "digest").equals(text(metadata, "contentDigest")));
         ObjectNode expected = prior.deepCopy();
@@ -567,7 +567,6 @@ public final class CsiNativeActivationProof {
             number(item.get("partIndex"));
         }
         number(state.path("attempt").get("budgetConsumed"));
-        checkpointResources(state, resources);
         return new Checkpoint(ref.deepCopy(), state.deepCopy());
     }
 
@@ -651,7 +650,7 @@ public final class CsiNativeActivationProof {
                 && ("harness:await_runtime:" + activation.activationId() + ":" + executions + ":" + previousSequence)
                         .equals(id(metadata, "commandId")));
         JsonNode ref = payload.path("stateRef");
-        JsonNode state = readObject(reference(ref, "managed-checkpoint", resources));
+        JsonNode state = readCheckpoint(ref, resources);
         require(id(ref, "resourceId").equals(id(metadata, "latestCheckpointResourceId"))
                 && text(ref, "digest").equals(text(metadata, "contentDigest")));
         ObjectNode expected = prior.deepCopy();
@@ -708,8 +707,17 @@ public final class CsiNativeActivationProof {
         if (prior.path("attempt").isNull()) {
             require(number(state.path("attempt").get("budgetConsumed")) == 0);
         }
-        checkpointResources(state, resources);
         return new Checkpoint(ref.deepCopy(), state.deepCopy());
+    }
+
+    public static JsonNode readCheckpoint(JsonNode ref, Function<JsonNode, byte[]> resources) {
+        JsonNode physical = readObject(reference(ref, "managed-checkpoint", resources));
+        checkpointResources(physical, resources);
+        try {
+            return ManagedCheckpointHistory.hydrate(physical, resources);
+        } catch (IllegalArgumentException error) {
+            throw invalid();
+        }
     }
 
     private static void checkpointResources(JsonNode node, Function<JsonNode, byte[]> resources) {
@@ -1296,7 +1304,7 @@ public final class CsiNativeActivationProof {
         finite(budget.get("outputTokensAtTurnStart"));
         JsonNode checkpointRef = payload.path("inputCheckpointRef");
         require(canonical(checkpointRef).equals(canonical(previous.checkpoint().ref())));
-        require(canonical(readObject(reference(checkpointRef, "managed-checkpoint", resources)))
+        require(canonical(readCheckpoint(checkpointRef, resources))
                 .equals(canonical(previous.checkpoint().state())));
         if (finalOutput && previous.checkpoint().state().path("tools").isNull()) {
             require("output_committed".equals(stage)
@@ -1457,7 +1465,7 @@ public final class CsiNativeActivationProof {
                 && previousId.equals(id(checkpoint, "previousCheckpointId"))
                 && "turn_complete".equals(text(checkpoint, "boundary")));
         JsonNode stateRef = checkpoint.path("stateRef");
-        JsonNode state = readObject(reference(stateRef, "managed-checkpoint", resources));
+        JsonNode state = readCheckpoint(stateRef, resources);
         require(id(stateRef, "resourceId").equals(id(metadata, "latestCheckpointResourceId")));
         ObjectNode expected = previous.checkpoint().state().deepCopy();
         ObjectNode identity = (ObjectNode) expected.path("identity");
@@ -1574,7 +1582,7 @@ public final class CsiNativeActivationProof {
                 && ("harness:before_model:" + activation.activationId() + ":" + previousSequence)
                         .equals(id(metadata, "commandId")));
         JsonNode ref = payload.path("stateRef");
-        JsonNode state = readObject(reference(ref, "managed-checkpoint", resources));
+        JsonNode state = readCheckpoint(ref, resources);
         require(id(ref, "resourceId").equals(id(metadata, "latestCheckpointResourceId"))
                 && text(ref, "digest").equals(text(metadata, "contentDigest")));
         closed(state, Set.of("identity", "resume", "continuation", "attempt", "tools", "runtime", "approval",

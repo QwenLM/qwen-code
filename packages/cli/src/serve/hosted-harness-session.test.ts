@@ -29492,26 +29492,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
       // behind must not hold the session (plain attach + 409 streams
       // forever per round-7's probe).
       await parkToolTurn();
-      vi.spyOn(
-        LocalManagedSessionAuthority.prototype,
-        'harnessRunAuthorization',
-      ).mockResolvedValue({
-        status: 'runnable',
-        checkpoint: {
-          identity: {
-            turnId: PROMPT_ID,
-            promptId: PROMPT_ID,
-            checkpointId: 'checkpoint-await-action',
-          },
-          attempt: {},
-          continuation: { phase: 'await_action' },
-          approval: { state: 'requested', requestId: 'request-1' },
-          output: {},
-          followUp: {},
-          runtime: {},
-          tools: { items: [] },
-        },
-      } as never);
+      mockApprovalWaitAuthorization();
       vi.spyOn(
         LocalManagedSessionAuthority.prototype,
         'action',
@@ -29540,10 +29521,8 @@ describe('Hosted Harness Runtime turn takeover', () => {
 
   // A REAL checkpoint structurally read as an approval wait: the phase and
   // approval copy are overridden while identity, sequence and the rest of
-  // the underlying authority pass through — so the wait's own durable gate
-  // and the cancelled settle's close hook both drive on a coherent
-  // authority. (A wholesale mock leaves the real latest checkpoint at the
-  // tool round's await_runtime and the resolve hook would never fire.)
+  // the underlying authority pass through. The approval-only fixture clears
+  // Runtime groups so its resolved checkpoint satisfies the write schema.
   function mockApprovalWaitAuthorization() {
     const original =
       LocalManagedSessionAuthority.prototype.harnessRunAuthorization;
@@ -29562,7 +29541,8 @@ describe('Hosted Harness Runtime turn takeover', () => {
             phase: 'await_action',
           },
           approval: { state: 'requested', requestId: 'request-1' },
-          tools: { items: [] },
+          tools: null,
+          runtime: null,
         },
       } as never;
     });
