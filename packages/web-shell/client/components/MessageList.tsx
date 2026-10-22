@@ -131,9 +131,8 @@ export interface MessageListProps {
   /**
    * Identity of the session whose transcript `messages` show. Block ids are
    * per-session ordinals, so changing it resets every session-scoped UI state
-   * (collapse overrides, pagination keep-open, pending page snapshots, the
-   * scroll anchor, the settled-stale-message latch) — a direct session switch
-   * never renders empty messages.
+   * (the reading pause, collapse overrides, pagination keep-open, pending page
+   * snapshots, the scroll anchor, the settled-stale-message latch).
    */
   sessionKey?: string;
   transcriptBlockCount?: number;
