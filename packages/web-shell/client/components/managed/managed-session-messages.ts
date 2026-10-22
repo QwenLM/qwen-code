@@ -71,6 +71,36 @@ function record(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function structuredToolOutput(
+  data: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const candidates = [
+    data['functionResponse'],
+    data['response'],
+    data['output'],
+    data['result'],
+  ];
+  for (const candidate of candidates) {
+    const value = record(candidate);
+    const nestedFunctionResponse = record(value['functionResponse']);
+    const nestedResponse = record(nestedFunctionResponse['response']);
+    if (hasTodoSnapshot(nestedResponse)) return nestedResponse;
+    const response = record(value['response']);
+    if (hasTodoSnapshot(response)) return response;
+    if (hasTodoSnapshot(value)) return value;
+  }
+  return undefined;
+}
+
+function hasTodoSnapshot(value: unknown): boolean {
+  const recordValue = record(value);
+  return (
+    Array.isArray(recordValue['todos']) ||
+    Array.isArray(recordValue['entries']) ||
+    recordValue['plan'] !== undefined
+  );
+}
+
 // Only these Turn-bearing types may settle a Turn boundary. Control-plane
 // re-broadcasts (runtime_*, stream_gap, cancelling) must never settle: a
 // stale-Turn runtime_failed landing mid-stream would otherwise split one
@@ -288,6 +318,8 @@ function appendManagedEvents(
         tool.args = record(input);
         if (Object.keys(tool.args).length === 0) tool.args = { input };
       }
+      const structuredOutput = structuredToolOutput(data);
+      if (structuredOutput !== undefined) tool.rawOutput = structuredOutput;
       if (result) {
         if (
           tool.toolResult &&
@@ -322,13 +354,15 @@ function appendManagedEvents(
             data['output'] +
             (data['truncated'] === true ? `\n${truncatedLabel}` : '');
           if (
-            data['truncated'] !== true ||
-            typeof tool.rawOutput !== 'string' ||
-            output.length > tool.rawOutput.length
+            !hasTodoSnapshot(tool.rawOutput) &&
+            (data['truncated'] !== true ||
+              typeof tool.rawOutput !== 'string' ||
+              output.length > tool.rawOutput.length)
           ) {
             tool.rawOutput = output;
           }
         }
+        if (structuredOutput !== undefined) tool.rawOutput = structuredOutput;
         continue;
       }
       if (event.type === 'tool_started') {
@@ -349,6 +383,7 @@ function appendManagedEvents(
             data['output'] +
             (data['truncated'] === true ? `\n${truncatedLabel}` : '');
         }
+        if (structuredOutput !== undefined) tool.rawOutput = structuredOutput;
       }
     } else if (
       event.type === 'completed' ||

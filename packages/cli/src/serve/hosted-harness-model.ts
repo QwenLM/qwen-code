@@ -235,6 +235,7 @@ export async function runHostedHarnessTextTurn(input: {
         | 'setModelRound'
         | 'setToolOutputBudget'
         | 'planModeInstructions'
+        | 'todoInstructions'
       >
     >;
   workspaceContext?: { read(): string | undefined };
@@ -276,6 +277,7 @@ export async function runHostedHarnessTextTurn(input: {
   const outputBudget = config.getToolOutputBatchBudget?.();
   if (outputBudget !== undefined)
     input.toolTurn?.setToolOutputBudget?.(outputBudget);
+  let todoContext = await input.toolTurn?.todoInstructions?.();
   const contextWithInstructions = (context: string | undefined) =>
     [
       input.agentInstructions
@@ -283,6 +285,7 @@ export async function runHostedHarnessTextTurn(input: {
         : undefined,
       input.skills?.instructions(),
       input.toolTurn?.planModeInstructions?.(),
+      todoContext,
       context,
     ]
       .filter(Boolean)
@@ -658,6 +661,7 @@ export async function runHostedHarnessTextTurn(input: {
           declarations.length ? [{ functionDeclarations: declarations }] : [],
         );
       if (!preparedRecovery) {
+        todoContext = await input.toolTurn?.todoInstructions?.();
         const toolNames = new Set(
           declarations
             .map(({ name }) => name)

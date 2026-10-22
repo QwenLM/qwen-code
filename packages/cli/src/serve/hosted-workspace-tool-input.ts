@@ -4,11 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// #15076: the argument check for the `todo_write` tool only the `/3`
-// profiles declare. It runs before the Runtime is acquired, so a malformed
-// call costs no durable work and its refusal stays model-correctable. The
-// exact rules stay in the core tool (TodoWriteTool); this check keeps the
-// shapes that tool rejects from reaching a Runtime round trip.
+import type { TodoItem } from '@qwen-code/qwen-code-core/hooks/types.js';
+import { validateTodos } from '@qwen-code/qwen-code-core/tools/todoWrite.js';
 
 const TODO_STATUSES = new Set(['pending', 'in_progress', 'completed']);
 
@@ -88,6 +85,30 @@ export function checkHostedTodoWriteInput(
           index,
           `blockedBy as an array of ids, each at most ${TODO_ID_MAX_LENGTH} characters`,
         ),
+      };
+  }
+  const error = validateTodos(todos);
+  if (error)
+    return {
+      input,
+      error: `Hosted todo_write: ${error} Correct the list and retry.`,
+    };
+  if (Buffer.byteLength(JSON.stringify(todos), 'utf8') > 16 * 1024)
+    return {
+      input,
+      error:
+        'Hosted todo_write exceeds the 16 KiB limit. Shorten the list and retry.',
+    };
+  const items = todos as TodoItem[];
+  const statuses = new Map(items.map((item) => [item.id, item.status]));
+  for (const item of items) {
+    if (
+      item.status !== 'pending' &&
+      item.blockedBy?.some((id) => statuses.get(id) !== 'completed')
+    )
+      return {
+        input,
+        error: `Hosted todo_write: Todo ${item.id} still has unfinished dependencies. Keep it pending and retry.`,
       };
   }
   return { input };

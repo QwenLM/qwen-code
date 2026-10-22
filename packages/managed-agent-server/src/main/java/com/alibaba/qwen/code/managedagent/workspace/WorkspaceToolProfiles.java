@@ -16,8 +16,13 @@ public final class WorkspaceToolProfiles {
     private WorkspaceToolProfiles() {
     }
 
+    public static boolean isPublicFiles(String profile) {
+        return FILES.equals(profile) || "hosted-workspace-files/3".equals(profile);
+    }
+
     public static boolean isPublicShell(String profile) {
-        return SHELL.equals(profile) || "hosted-workspace-shell/2".equals(profile);
+        return SHELL.equals(profile) || "hosted-workspace-shell/2".equals(profile)
+                || "hosted-workspace-shell/3".equals(profile);
     }
 
     public static boolean isShellOrMcp(String profile) {
@@ -48,7 +53,7 @@ public final class WorkspaceToolProfiles {
                 && ("qwen-code".equals(session.agentId())
                         ? session.agentDefinitionDigest() == null
                         : session.agentDefinitionDigest() != null)
-                && (FILES.equals(session.toolProfile()) || isPublicShell(session.toolProfile()));
+                && (isPublicFiles(session.toolProfile()) || isPublicShell(session.toolProfile()));
     }
 
     public static boolean requiresApproval(String mode) {

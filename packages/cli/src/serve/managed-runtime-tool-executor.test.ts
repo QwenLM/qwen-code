@@ -2387,96 +2387,16 @@ describe('original CSI worker synchronous ACK confirmation', () => {
   });
 });
 
-// #15076: `todo_write` runs in the Worker as per-Session bookkeeping under
-// the Worker's own runtime directory. The native fetch half is held by a
-// recorded maintainer decision, so the Worker admits no fetch.
-describe('todo_write in the Worker', () => {
-  let workspace: string;
-  let runtimeDir: string;
-
-  function reference(callId: string, input: unknown): ManagedToolReference {
-    return {
-      sessionId: 'session-15076',
-      promptId: 'prompt-15076',
-      callId,
-      argsDigest: managedToolDigest(input as Record<string, unknown>),
-    };
-  }
-
-  beforeEach(async () => {
-    workspace = await mkdtemp(path.join(tmpdir(), 'qwen-15076-'));
-    runtimeDir = await mkdtemp(path.join(tmpdir(), 'qwen-15076-runtime-'));
-    Storage.setRuntimeBaseDir(runtimeDir);
-  });
-
-  afterEach(async () => {
-    Storage.setRuntimeBaseDir(undefined);
+it('keeps Hosted Todo state and web_fetch out of the Worker', async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), 'qwen-15076-'));
+  const executor = ManagedToolExecutor.forWorkspace(workspace, 'session-15076');
+  try {
+    expect(executor.hasTool('web_fetch')).toBe(false);
+    expect(executor.hasTool('todo_write')).toBe(false);
+  } finally {
+    await executor.close();
     await rm(workspace, { recursive: true, force: true });
-    await rm(runtimeDir, { recursive: true, force: true });
-  });
-
-  it('admits todo_write and not the held web_fetch half', () => {
-    const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-15076');
-    expect(exec.hasTool('todo_write')).toBe(true);
-    // #15076: a maintainer ruling defers native fetch, so the Worker admits
-    // no fetch even though the shared core still implements the tool.
-    expect(exec.hasTool('web_fetch')).toBe(false);
-  });
-
-  it('keeps a task list across calls in one Session and refuses a cycle', async () => {
-    const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-15076');
-    const first = {
-      todos: [
-        { id: 'a', content: 'first', status: 'completed' as const },
-        { id: 'b', content: 'second', status: 'in_progress' as const },
-      ],
-    };
-    const created = await exec.execute(
-      reference('todo-1', first),
-      'todo_write',
-      first,
-    );
-    expect(created.executionStatus).toBe('success');
-
-    const second = {
-      todos: [
-        { id: 'a', content: 'first', status: 'completed' as const },
-        { id: 'b', content: 'second', status: 'completed' as const },
-      ],
-    };
-    const updated = await exec.execute(
-      reference('todo-2', second),
-      'todo_write',
-      second,
-    );
-    expect(updated.executionStatus).toBe('success');
-
-    const stored = JSON.parse(
-      await readFile(
-        path.join(runtimeDir, 'todos', 'session-15076.json'),
-        'utf8',
-      ),
-    ) as { todos: Array<{ id: string; status: string }> };
-    expect(stored.todos.map((todo) => [todo.id, todo.status])).toEqual([
-      ['a', 'completed'],
-      ['b', 'completed'],
-    ]);
-
-    const cycle = {
-      todos: [
-        { id: 'a', content: 'a', status: 'pending' as const, blockedBy: ['b'] },
-        { id: 'b', content: 'b', status: 'pending' as const, blockedBy: ['a'] },
-      ],
-    };
-    const refused = await exec.execute(
-      reference('todo-3', cycle),
-      'todo_write',
-      cycle,
-    );
-    expect(refused.executionStatus).toBe('error');
-    expect(refused.error?.message).toContain('cycle');
-    await exec.close();
-  });
+  }
 });
 
 // The route-level fixtures cannot express these geometries (a Session root is

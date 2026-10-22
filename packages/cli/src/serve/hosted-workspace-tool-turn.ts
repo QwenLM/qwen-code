@@ -27,6 +27,10 @@ import {
 } from './hosted-glob-pattern.js';
 import { checkHostedTodoWriteInput } from './hosted-workspace-tool-input.js';
 import {
+  hostedTodoInstructions,
+  writeHostedTodos,
+} from './hosted-todo-session.js';
+import {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
@@ -662,14 +666,10 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
   HOSTED_GLOB_TOOL,
 ];
 
-// #15076: `todo_write`, declared only on the `/3` profiles. The Worker keeps
-// the list, which writes no Workspace file. The `web_fetch` half is held: a
-// maintainer ruling on the issue defers it, and a files-profile Session has no
-// shell, so a fetch there would open a new outbound path rather than reuse one.
 const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
   name: 'todo_write',
   description:
-    'Create or replace the task list for complex or multi-step work in this turn. Send the whole list each time: the call replaces the stored list.',
+    'Create or replace the task list of this Session for complex or multi-step work. Send the whole list each time: the call replaces the stored list.',
   parametersJsonSchema: {
     type: 'object',
     properties: {
@@ -1748,6 +1748,7 @@ interface HostedPreparedRequest {
   command: boolean;
   skill: boolean;
   planExit?: boolean;
+  todo?: boolean;
 }
 
 export class HostedWorkspaceToolTurn {
@@ -1918,6 +1919,8 @@ export class HostedWorkspaceToolTurn {
           'hosted-workspace-files/1',
           'hosted-workspace-shell/1',
           'hosted-workspace-shell/2',
+          'hosted-workspace-files/3',
+          'hosted-workspace-shell/3',
         ].includes(this.profile ?? ''))
     )
       throw new Error('Public Plan mode is unavailable for this Session.');
@@ -1947,11 +1950,6 @@ export class HostedWorkspaceToolTurn {
     return isHostedWorkspaceGlobProfile(this.profile);
   }
 
-  /**
-   * #15076: whether this Session's profile declares `todo_write`. Only the
-   * `/3` profiles do; every earlier profile keeps its exact vocabulary, so
-   * the turn refuses the name there.
-   */
   private declaresTodoTool(): boolean {
     return (
       this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
@@ -2000,8 +1998,6 @@ export class HostedWorkspaceToolTurn {
     // board commands — resolved once, both declarations follow it.
     const memberCommands = await this.memberCommandsDeclared();
     const skill = this.skills?.declaration();
-    // #15076: only a `/3` profile declares `todo_write`, so every earlier
-    // profile keeps the exact array it has always declared.
     const todoTool = this.declaresTodoTool();
     this.advertised = [
       ...(this.publication || this.shell
@@ -2129,6 +2125,14 @@ export class HostedWorkspaceToolTurn {
             HOSTED_PUBLIC_PLAN_READS.has(tool.name ?? ''),
         )
       : this.advertised;
+  }
+
+  async todoInstructions(): Promise<string> {
+    // A planning round withholds `todo_write` from `declarations()`, so it must
+    // not inject an instruction to keep the list current with it.
+    return this.declaresTodoTool() && !this.planning
+      ? hostedTodoInstructions(this.session)
+      : '';
   }
 
   planModeInstructions(): string {
@@ -3157,6 +3161,7 @@ export class HostedWorkspaceToolTurn {
           command: false,
           skill: item.call.name === 'skill' && this.skills !== undefined,
           planExit: this.publicPlanMode && item.call.name === 'exit_plan_mode',
+          todo: item.call.name === 'todo_write',
         });
       }
       this.logicalRound = plan.round;
@@ -4032,6 +4037,7 @@ export class HostedWorkspaceToolTurn {
           command,
           skill,
           planExit,
+          todo: call.name === 'todo_write',
         };
       });
     };
@@ -4092,7 +4098,11 @@ export class HostedWorkspaceToolTurn {
         throw new HostedToolRecoveryRequiredError(cause);
       }
     }
-    if (this.hooks || this.mcp || requests.some((request) => !request.skill))
+    if (
+      this.hooks ||
+      this.mcp ||
+      requests.some((request) => !request.skill && !request.todo)
+    )
       await waitForTurn(this.warmed, signal);
     // H4b: an agent-only batch runs entirely inside its own Sessions and
     // needs no Runtime at all — holding the parent's mount across the
@@ -4112,7 +4122,8 @@ export class HostedWorkspaceToolTurn {
           request.message !== true &&
           !request.team &&
           request.command !== true &&
-          !request.skill,
+          !request.skill &&
+          !request.todo,
       )
     ) {
       // Acquisition may have taken effect even when its reply is lost.
@@ -4355,6 +4366,7 @@ export class HostedWorkspaceToolTurn {
           request.command ||
           request.planExit ||
           request.skill ||
+          request.todo ||
           request.workflow
         )
           continue;
@@ -4832,6 +4844,33 @@ export class HostedWorkspaceToolTurn {
             );
           await this.commit('tool_result', converted, model);
           this.planning = false;
+          responses.push(...converted);
+          continue;
+        }
+        if (request.todo) {
+          const todos = await writeHostedTodos(
+            this.session,
+            this.promptId,
+            request.call.callId,
+            request.input,
+          );
+          const converted = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [{ text: JSON.stringify(todos) }],
+          );
+          const response = converted[0]?.functionResponse;
+          if (!response) throw new Error('Hosted Todo result is missing.');
+          response.response = {
+            ...response.response,
+            todos,
+            executionStatus: 'success',
+          };
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted Todo result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
           responses.push(...converted);
           continue;
         }

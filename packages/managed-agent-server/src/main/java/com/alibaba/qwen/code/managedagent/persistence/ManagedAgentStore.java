@@ -439,7 +439,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 requestedRevision, true), requestedApprovalMode, approvalSelectionSupported);
         boolean planMode = Boolean.TRUE.equals(requestedPlanMode);
         if (planMode && (!planModeSupported || !approvalSelectionSupported
-                || pin.hooks() || !(WorkspaceToolProfiles.FILES.equals(pin.toolProfile())
+                || pin.hooks() || !(WorkspaceToolProfiles.isPublicFiles(pin.toolProfile())
                 || WorkspaceToolProfiles.isPublicShell(pin.toolProfile())))) {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "Plan mode is unavailable");
         }
@@ -1008,7 +1008,7 @@ public class ManagedAgentStore implements AgentStateStore {
         AgentPin pin = resolveAgentPin(tenantId, agentId, null, true);
         return new WebShellSessionOptions(
                 pin.approvalMode(), availableApprovalModes(pin),
-                !pin.hooks() && (WorkspaceToolProfiles.FILES.equals(pin.toolProfile())
+                !pin.hooks() && (WorkspaceToolProfiles.isPublicFiles(pin.toolProfile())
                         || WorkspaceToolProfiles.isPublicShell(pin.toolProfile())), false);
     }
 
@@ -4636,7 +4636,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     if (("qwen-code".equals(row.getString("agent_id"))
                             ? row.getString("agent_definition_digest") != null
                             : row.getString("agent_definition_digest") == null) || row.getString("workspace_id") == null
-                            || !(WorkspaceToolProfiles.FILES.equals(row.getString("tool_profile"))
+                            || !(WorkspaceToolProfiles.isPublicFiles(row.getString("tool_profile"))
                             || WorkspaceToolProfiles.isPublicShell(row.getString("tool_profile")))) {
                         return null;
                     }
@@ -6691,17 +6691,20 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/2')"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/2',"
+                        + " 'hosted-workspace-files/3','hosted-workspace-shell/3')"
                         + " THEN COALESCE(selected_approval_mode, approval_mode) ELSE NULL END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/2')"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/2',"
+                        + " 'hosted-workspace-files/3','hosted-workspace-shell/3')"
                         + " THEN approval_revision ELSE NULL END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/2')"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/2',"
+                        + " 'hosted-workspace-files/3','hosted-workspace-shell/3')"
                         + " THEN plan_enabled ELSE NULL END"
                         + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId, turnId, promptId, writeJson(input),

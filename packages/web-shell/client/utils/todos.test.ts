@@ -8,6 +8,7 @@ import {
   extractTodosFromToolCall,
   getAgentToolsForPlan,
   getFloatingTodos,
+  getLatestSuccessfulTodos,
   getSessionWorkflowTodos,
   getActiveTodosForPlanRevision,
   getTodoStatusIcon,
@@ -1450,4 +1451,21 @@ describe('todoDetailSignature', () => {
     ]);
     expect(b).toBe(a);
   });
+});
+
+it('keeps successful Managed Todo state through failed calls and clears it on success', () => {
+  const first = todoWriteMessage('first', [todo('a', 'pending')]);
+  const failed = todoWriteMessage('failed', [todo('a', 'completed')]);
+  const pending = todoWriteMessage('pending', []);
+  if (failed.role !== 'tool_group' || pending.role !== 'tool_group')
+    throw new Error('Invalid fixture');
+  failed.tools[0].status = 'failed';
+  pending.tools[0].status = 'pending';
+  expect(getLatestSuccessfulTodos([first, failed, pending])).toEqual([
+    expect.objectContaining({ id: 'a', status: 'pending' }),
+  ]);
+  expect(
+    getLatestSuccessfulTodos([first, todoWriteMessage('clear', [])]),
+  ).toEqual([]);
+  expect(getLatestSuccessfulTodos([failed, pending])).toBeUndefined();
 });

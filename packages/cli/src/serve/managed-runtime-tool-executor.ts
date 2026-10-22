@@ -27,7 +27,6 @@ import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
 import { GlobTool } from '@qwen-code/qwen-code-core/tools/glob.js';
 import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
-import { TodoWriteTool } from '@qwen-code/qwen-code-core/tools/todoWrite.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ShellToolInvocation } from '@qwen-code/qwen-code-core/tools/shell.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
@@ -240,9 +239,6 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   EditTool.Name,
   ShellTool.Name,
   GlobTool.Name,
-  // #15076: `todo_write`, declared only by the `/3` profiles. It writes no
-  // Workspace file: the task list is the Worker's own bookkeeping.
-  TodoWriteTool.Name,
 ]);
 
 /** Live background Shells one Session may hold, by the H3 design contract. */
@@ -2683,12 +2679,6 @@ export function createManagedToolSet(
     fileCheckpointingEnabled: false,
     // The worker has no conversation history to justify cached read elision.
     fileReadCacheDisabled: true,
-    // #15076: the `/3` profiles declare `todo_write`, so the Worker opts in
-    // explicitly. Core defaults this off and the operator-facing path gates
-    // registration on it; leaving it at the default while registering the
-    // tool would give a managed Session a tool the same setting hides
-    // elsewhere.
-    todoWriteEnabled: true,
   });
   registerSessionProjectDir(sessionId, config.storage.getProjectDir());
   return {
@@ -2708,7 +2698,6 @@ export function createManagedToolSet(
           executionTimeoutMs: 5_000,
         }),
         new ShellTool(config),
-        new TodoWriteTool(config),
       ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
     ),
   };

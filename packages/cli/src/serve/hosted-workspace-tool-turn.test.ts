@@ -83,6 +83,10 @@ import {
   HostedSkillCatalog,
 } from './hosted-skill-catalog.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
+import {
+  hostedTodoInstructions,
+  writeHostedTodos,
+} from './hosted-todo-session.js';
 import * as hostedPlan from './hosted-plan-mode.js';
 
 const broker = vi.hoisted(() => ({
@@ -1794,27 +1798,13 @@ it('refuses a glob call a /1 profile never advertised', async () => {
   expect(broker.acquire).not.toHaveBeenCalled();
 });
 
-// #15076: `todo_write` ships only with the `/3` profiles.
-function createV3Turn(profile = 'hosted-workspace-files/3') {
+// #15076: `todo_write` is declared only by the `/3` profiles.
+function createV3Turn(
+  profile = 'hosted-workspace-files/3',
+  shell = false,
+  publicPlanMode = false,
+) {
   return new HostedWorkspaceToolTurn(
-    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-    session,
-    harness,
-    'prompt',
-    commit,
-    messageFitsInline,
-    undefined,
-    undefined,
-    undefined,
-    { profile },
-  );
-}
-
-it.each([
-  ['hosted-workspace-files/3', false],
-  ['hosted-workspace-shell/3', true],
-])('declares todo_write on %s', async (profile, shell) => {
-  turn = new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
     harness,
@@ -1826,16 +1816,87 @@ it.each([
       : undefined,
     undefined,
     undefined,
-    { profile },
+    { profile, publicPlanMode },
   );
-  const declarations = await turn.declarations(new AbortController().signal);
-  const names = declarations.map((tool) => tool.name);
-  expect(names).toContain('todo_write');
-  expect(names).toContain('glob');
-  // The fetch half is held for a recorded maintainer decision.
-  expect(names).not.toContain('web_fetch');
-  if (!shell) expect(names).not.toContain('run_shell_command');
-});
+}
+
+// The `/3` widening reached the boundary Plan gate, so the Turn constructor
+// admits the same profiles; a planning round still withholds the writing tool
+// and must not tell the model to use it.
+it.each([
+  ['hosted-workspace-files/3', false],
+  ['hosted-workspace-shell/3', true],
+] as const)(
+  'admits public Plan mode on %s and refuses the todo_write it withholds',
+  async (profile, shell) => {
+    vi.spyOn(hostedPlan, 'hostedPublicPlanActive').mockResolvedValue(true);
+    // Seed durable state so a withheld tool is the only thing keeping its
+    // instruction out of the round.
+    const seeded = {
+      todos: [{ id: 'a', content: 'first', status: 'pending' as const }],
+    };
+    await writeHostedTodos(session, 'prompt', 'seed-call', seeded);
+    expect(await hostedTodoInstructions(session)).toContain(
+      JSON.stringify(seeded.todos),
+    );
+    turn = createV3Turn(profile, shell, true);
+    const names = (await turn.declarations(new AbortController().signal)).map(
+      (tool) => tool.name,
+    );
+    expect(names).not.toContain('todo_write');
+    expect(names).toContain('exit_plan_mode');
+    expect(await turn.todoInstructions()).toBe('');
+    const changed = {
+      todos: [{ id: 'a', content: 'first', status: 'completed' as const }],
+    };
+    const call = { ...calls[0], name: 'todo_write', args: changed };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: changed } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toContain(
+      'Plan mode is read-only',
+    );
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    // The refusal committed nothing: the seeded list is still the latest.
+    expect(await hostedTodoInstructions(session)).toContain(
+      JSON.stringify(seeded.todos),
+    );
+    await expect(turn.finish()).resolves.toBeUndefined();
+  },
+);
+
+it.each([
+  ['hosted-workspace-files/3', ['todo_write'], false],
+  ['hosted-workspace-shell/3', ['todo_write'], true],
+])(
+  'declares todo_write without web_fetch on %s',
+  async (profile, expected, shell) => {
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      shell
+        ? { resources: session.resources, assertWritable: async () => {} }
+        : undefined,
+      undefined,
+      undefined,
+      { profile },
+    );
+    const declarations = await turn.declarations(new AbortController().signal);
+    const names = declarations.map((tool) => tool.name);
+    for (const name of expected) expect(names).toContain(name);
+    expect(names).not.toContain('web_fetch');
+    expect(names).toContain('glob');
+    if (!shell) expect(names).not.toContain('run_shell_command');
+  },
+);
 
 it.each([
   'hosted-workspace-files/1',
@@ -1880,23 +1941,32 @@ it('refuses todo_write on a /2 profile before the Broker', async () => {
   expect(broker.acquire).not.toHaveBeenCalled();
 });
 
-it('refuses web_fetch on a /3 profile before the Broker', async () => {
-  turn = createV3Turn();
-  const call = {
-    ...calls[0],
-    name: 'web_fetch',
-    args: { url: 'https://example.com', prompt: 'p' },
-  };
-  await expect(
-    turn.execute(
-      [call],
-      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
-      'model',
-      new AbortController().signal,
-    ),
-  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
-  expect(broker.acquire).not.toHaveBeenCalled();
-});
+it.each(['hosted-workspace-files/3', 'hosted-workspace-shell/3'])(
+  'refuses web_fetch on %s before acquiring a Runtime',
+  async (profile) => {
+    turn = createV3Turn(profile);
+    const call = {
+      ...calls[0],
+      name: 'web_fetch',
+      args: { url: 'https://example.com', prompt: 'read' },
+    };
+    await expect(
+      turn.execute(
+        [call],
+        [
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+        'model',
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
 
 // #15076: a malformed task-list call is refused before the Runtime is
 // acquired, so its correction costs no durable work.
@@ -1933,17 +2003,59 @@ it.each([
   },
 );
 
-it('pre-approves todo_write under default and auto-edit, and yolo never asks', () => {
-  expect(
-    hostedApprovalAsks({ mode: 'default', timeoutMs: 60_000 }, 'todo_write'),
-  ).toBe(false);
-  expect(
-    hostedApprovalAsks({ mode: 'auto-edit', timeoutMs: 60_000 }, 'todo_write'),
-  ).toBe(false);
-  expect(
-    hostedApprovalAsks({ mode: 'yolo', timeoutMs: 60_000 }, 'todo_write'),
-  ).toBe(false);
+it('persists Todo without a Worker and restores the latest state after reopen', async () => {
+  turn = createV3Turn();
+  const first = { todos: [{ id: 'a', content: 'first', status: 'pending' }] };
+  const call = { ...calls[0], name: 'todo_write', args: first };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: first } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['todos']).toEqual(
+    first.todos,
+  );
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  const latest = {
+    todos: [{ id: 'a', content: 'first', status: 'completed' }],
+  };
+  await writeHostedTodos(session, 'prompt', 'next-call', latest);
+  expect(await writeHostedTodos(session, 'prompt', call.callId, first)).toEqual(
+    first.todos,
+  );
+  await expect(
+    writeHostedTodos(session, 'prompt', call.callId, latest),
+  ).rejects.toThrow();
+  const key = session.authority.sessionHeader.sessionKey;
+  await turn.close();
+  await session.close();
+  session = await openManagedSession({
+    runtimeBaseDir: root,
+    cwd: root,
+    transcriptPath: path.join(root, 'transcript.jsonl'),
+    sessionId: key.sessionId,
+    sessionKey: key,
+    version: 'test',
+    workerId: 'reopened-worker',
+    activationLeaseDurationMs: 60_000,
+  });
+  harness = createManagedHarnessHandle(session);
+  await harness.ensureRunnable();
+  turn = createV3Turn();
+  expect(await turn.todoInstructions()).toContain(JSON.stringify(latest.todos));
 });
+
+it.each(['default', 'auto-edit', 'yolo'] as const)(
+  'pre-approves todo_write under %s',
+  (mode) => {
+    expect(hostedApprovalAsks({ mode, timeoutMs: 60_000 }, 'todo_write')).toBe(
+      false,
+    );
+  },
+);
 
 it.each([
   {},
@@ -4671,7 +4783,7 @@ it('asks before Shell in auto-edit mode and runs the edit when Shell is denied',
   ]);
 });
 
-it('admits exactly the declared native tools to the version 2 input preview', () => {
+it('admits exactly the declared native tools to the version 3 input preview', () => {
   // The Java reader admits a closed set. A name missing on either side degrades
   // to "Tool arguments are unavailable for this approval." with no error, so the
   // set is pinned here and each name must still be a declared native tool —
