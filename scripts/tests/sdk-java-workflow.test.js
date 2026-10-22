@@ -160,40 +160,39 @@ describe('SDK Java self-hosted workflow guards', () => {
     const lockedSteps = ['test', 'mysql-integration'].flatMap((name) =>
       jobs[name].steps.filter((s) => s.run?.includes('sdk-java-tests.lock')),
     );
-    // The integration job's two Maven steps are one step now (#14903), so the
+    // The MariaDB lane's two Maven steps are one step now (#14903), so the
     // lock-bearing steps are the test job's and this job's single one.
     expect(lockedSteps).toHaveLength(2);
     // The test job runs Maven under the lock, so every Maven child must drop
-    // fd 9 or a survivor keeps the host lock after the step exits.
-    const [testStep] = lockedSteps;
-    const maven = testStep.run.replace(/\\\n/g, ' ').match(/^\s*mvn .+$/gm);
-    expect(maven?.length, testStep.name).toBeGreaterThan(0);
+    // fd 9 or a survivor keeps the host lock after the step shell exits.
+    const maven = lockedSteps[0].run.match(/^\s*mvn .+$/gm);
+    expect(maven?.length, lockedSteps[0].name).toBeGreaterThan(0);
     for (const command of maven) {
-      expect(command.trim(), testStep.name).toMatch(/ 9>&-$/);
+      expect(command.trim(), lockedSteps[0].name).toMatch(/ 9>&-$/);
     }
-    // The integration lane locks only its write-back: both Maven runs are above
+    // The MariaDB lane locks only its write-back: both Maven runs are above
     // the acquisition, and the write-back children drop fd 9 so a cancelled
     // job's survivor cannot retain the lock.
     const integration = lockedSteps[1].run;
     const lockAt = integration.indexOf(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
-    expect(lockAt).toBeGreaterThan(-1);
     expect(
       integration.indexOf('-f packages/sdk-java/qwencode/pom.xml'),
     ).toBeLessThan(lockAt);
     expect(integration.indexOf('-Pmysql-integration')).toBeLessThan(lockAt);
     expect(integration).toContain('mkdir -p "${HOME}/.m2/repository" 9>&-');
-    expect(integration).toContain('9>&- || write_back=$?');
+    expect(integration).toMatch(
+      /timeout 300 find \..*-exec cp -ln --parents -t "\$\{HOME\}\/\.m2\/repository" \{\} \+ 9>&- \|\| write_back=\$\?/,
+    );
   });
 
   it.skipIf(process.platform !== 'linux')(
     'retains serialization while Maven runs and releases it with a surviving child',
     () => {
       const jobs = parse(workflow).jobs;
-      // Only the test job's Maven runs are inside the lock now; the
-      // integration lane's Maven runs resolve from a job-local repository
-      // above it.
+      // Only the test job's Maven runs are inside the lock now; the MariaDB
+      // lane's Maven runs resolve from a job-local repository above it.
       const commands = jobs.test.steps.flatMap((s) =>
         s.run?.includes('sdk-java-tests.lock')
           ? (s.run.replace(/\\\n/g, ' ').match(/^\s*mvn .+$/gm) ?? [])
@@ -1207,11 +1206,10 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
 
   it('holds the per-host sdk-java lock once around the cache write-back', () => {
     // The Maven runs resolve from the job-local repository, so the lock now
-    // guards only the host-shared cache write-back. Run 39628985638's
-    // multi-hour verify held it 15:54-18:57, while run 39754414693's MySQL
-    // job and Java 11 leg each burned their full 90-minute wait without
-    // running Maven; a long integration run must not sit between the fast
-    // tier and its hold.
+    // guards only the host-shared cache write-back. Run 39627609266's
+    // fast-tier job burned its full 90-minute wait while the previous
+    // whole-suite hold ran from 15:54 to 18:57 (run 39628985638); a
+    // multi-hour verify must not sit between the fast tier and its hold.
     const parsed = parse(workflow);
     const mavenSteps = parsed.jobs['mysql-integration'].steps.filter(
       (s) => typeof s.run === 'string' && s.run.includes('mvn '),
@@ -1265,9 +1263,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(verifyAt).toBeGreaterThan(cdAt);
     expect(verifyAt).toBeLessThan(lockAt);
     expect(writeBackAt).toBeGreaterThan(lockAt);
-    // The ceiling must absorb one full lock wait, the ~3-hour Maven run
-    // (run 39628985638 spent 15:54-18:57 in one verify), the write-back
-    // backstop and ~30 minutes of uncapped setup; 310 leaves margin.
+    // The ceiling must absorb one full lock wait, the ~3-hour Maven run,
+    // the write-back backstop and ~30 minutes of uncapped setup; 310 leaves
+    // a few minutes of margin.
     const writeBackBound = Number(
       step.run.match(/timeout (\d+) find \. /)?.[1],
     );
