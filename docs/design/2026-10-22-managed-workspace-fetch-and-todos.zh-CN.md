@@ -75,8 +75,10 @@ team lead 是控制面内部创建的会话，read profile 属于不得写入的
    `Config`。要让清单持久，需要 Harness 向 Worker 提供稳定的会话身份——这是一项
    协议变更，记在后续工作中，不由本 profile 隐含。
 5. **Worker 显式开启该工具。** 核心把 `todoWriteEnabled` 默认为 false，面向运营
-   方的路径据此决定注册。两个 Worker 配置都把它设为 true，因此工具被准入是因为
-   profile 这样声明，而不是因为绕过了默认值。
+   方的路径据此决定注册。服务 hosted profile 的那个 Worker 配置把它设为 true，
+   因此工具被准入是因为 profile 这样声明，而不是因为绕过了默认值。只有这条车道
+   注册该工具：provider 车道服务 resident 与 CSI 会话，它们的 manifest 是封闭
+   集合，因此与 `glob` 变更时一样保持不动。
 6. **审批。** `default` 与 `auto-edit` 下该工具预先批准：它只写自己的记账数据，
    不改用户拥有的文件。`yolo` 下不询问，与现状相同。
 7. **输入校验保持模型可纠正。** 被拒绝的参数从不获取挂载。`todo_write` 要求
@@ -103,16 +105,15 @@ team lead 是控制面内部创建的会话，read profile 属于不得写入的
 
 ## 涉及文件
 
-| 区域                   | 文件                                                                                                               |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| Profile                | `packages/cli/src/serve/hosted-workspace-profiles.ts`                                                              |
-| 声明、准入、预览集合   | `packages/cli/src/serve/hosted-workspace-tool-turn.ts`                                                             |
-| 参数校验               | `packages/cli/src/serve/hosted-workspace-tool-input.ts`                                                            |
-| 审批                   | `packages/cli/src/serve/hosted-tool-approval.ts`                                                                   |
-| Worker 准入与工具集    | `packages/cli/src/serve/managed-runtime-tool-executor.ts`                                                          |
-| Provider worker 工具集 | `packages/cli/src/serve/managed-runtime-provider-worker.ts`                                                        |
-| Java action 预览       | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedActionService.java` |
-| 测试                   | 同目录的 `*.test.ts`，以及 Java 预览集合的测试                                                                     |
+| 区域                 | 文件                                                                                                               |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Profile              | `packages/cli/src/serve/hosted-workspace-profiles.ts`                                                              |
+| 声明、准入、预览集合 | `packages/cli/src/serve/hosted-workspace-tool-turn.ts`                                                             |
+| 参数校验             | `packages/cli/src/serve/hosted-workspace-tool-input.ts`                                                            |
+| 审批                 | `packages/cli/src/serve/hosted-tool-approval.ts`                                                                   |
+| Worker 准入与工具集  | `packages/cli/src/serve/managed-runtime-tool-executor.ts`                                                          |
+| Java action 预览     | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedActionService.java` |
+| 测试                 | 同目录的 `*.test.ts`，以及 Java 预览集合的测试                                                                     |
 
 不改 `packages/core` 的 TypeScript。不改 Java Broker：Broker 接收 Worker 已知的
 任何工具名对应的 payload，`managed-runtime-tools/1` 保持身份不变。

@@ -91,8 +91,11 @@ read profile belongs to a snapshot child that must not write.
    change recorded below, not implied by this profile.
 5. **The Worker opts in to the tool explicitly.** Core defaults
    `todoWriteEnabled` to false and the operator-facing path gates registration
-   on it. Both Worker configs set it to true, so the tool is admitted because
-   the profile says so, not because a default was bypassed.
+   on it. The Worker config that serves the hosted profiles sets it to true,
+   so the tool is admitted because the profile says so, not because a default
+   was bypassed. Only that lane registers the tool: the provider lane serves
+   the resident and CSI sessions, whose manifests are a closed set, so it stays
+   untouched exactly as the `glob` change left it.
 6. **Approval.** Under `default` and `auto-edit` the tool is pre-approved: it
    writes only its own bookkeeping and changes no file the user owns. Under
    `yolo` nothing asks, as today.
@@ -135,7 +138,6 @@ read profile belongs to a snapshot child that must not write.
 | Argument validation                 | `packages/cli/src/serve/hosted-workspace-tool-input.ts`                                                            |
 | Approval                            | `packages/cli/src/serve/hosted-tool-approval.ts`                                                                   |
 | Worker admission and tool set       | `packages/cli/src/serve/managed-runtime-tool-executor.ts`                                                          |
-| Provider worker tool set            | `packages/cli/src/serve/managed-runtime-provider-worker.ts`                                                        |
 | Java action preview                 | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedActionService.java` |
 | Tests                               | Collocated `*.test.ts` files, and the Java test for the preview set                                                |
 
