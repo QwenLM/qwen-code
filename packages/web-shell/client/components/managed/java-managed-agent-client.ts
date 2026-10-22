@@ -1,4 +1,5 @@
 import type { components } from './generated/managed-agent-api';
+import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
 import type {
   ManagedArtifact,
   ManagedArtifactPage,
@@ -416,6 +417,39 @@ export class JavaManagedAgentClient {
     return this.post<Schemas['PublicMcpCatalog']>(
       '/session-mcp/query',
       { sessionId },
+      signal,
+    );
+  }
+
+  queryMcpManagement(
+    request: Schemas['WebShellMcpManagementQuery'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpManagementSnapshot>(
+      '/session-mcp/management/query',
+      request,
+      signal,
+    );
+  }
+
+  submitMcpManagement(
+    request: Schemas['WebShellMcpManagementSubmit'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpManagementSnapshot>(
+      '/session-mcp/management/submit',
+      request,
+      signal,
+    );
+  }
+
+  getMcpManagementOperation(
+    request: Schemas['WebShellMcpManagementOperationQuery'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpManagementSnapshot>(
+      '/session-mcp/management/operations/query',
+      request,
       signal,
     );
   }

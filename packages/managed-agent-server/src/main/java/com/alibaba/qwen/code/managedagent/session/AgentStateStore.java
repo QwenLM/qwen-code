@@ -650,6 +650,9 @@ public interface AgentStateStore {
     SessionPage listSessions(String tenantId, String actorId, Long beforeCreatedAt,
             String beforeSessionId, int limit, String archiveState);
 
+    SessionPage listSessions(String tenantId, String actorId, Long beforeCreatedAt,
+            String beforeSessionId, int limit, String archiveState, String titleQuery);
+
     Map<String, WebShellLifecycleOperation> findLatestLifecycleOperations(String tenantId, List<String> sessionIds);
 
     Optional<TurnRecord> findTurn(String tenantId, String sessionId,
@@ -683,6 +686,16 @@ public interface AgentStateStore {
             String tenantId, List<String> sessionIds) { return Map.of(); }
 
     default boolean supportsPlanMode(SessionRecord session) { return false; }
+
+    default boolean hasMcpServers(SessionRecord session) { return false; }
+
+    default SessionRecord requireMcpManagement(String tenantId, String actorId, String sessionId, String operationId) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
+    default void requireMcpSettingsCommit(String tenantId, String workspaceId, String sessionId) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
 
     default Set<String> findApprovalOwners(String tenantId, String actorId,
             List<String> sessionIds) { return Set.of(); }
