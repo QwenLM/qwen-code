@@ -6768,6 +6768,10 @@ export const useLlmStream = (
           void submitQuery(item.modelText, item.sendMessageType, undefined, {
             notificationDisplayText: item.displayText,
             todoWorkChainId: item.todoWorkChainId,
+            // A cron prompt is never a shell command, whatever mode the
+            // composer happens to be in when the queue drains — with a gate
+            // the text also carries a command's untrusted output.
+            shellMode: false,
             onDelivered: item.onDelivered,
             onDeliveryFailed: () => {
               restoreDroppedSummary();
