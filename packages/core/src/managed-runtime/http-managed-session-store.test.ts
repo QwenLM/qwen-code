@@ -5860,6 +5860,120 @@ describe('HTTP Managed Session store', () => {
     },
   );
 
+  it.each(
+    ['unsupported_feature', 'turn_active', 'session_context_busy'].flatMap(
+      (code) =>
+        [0, 1].map((uncertainAttempts) => [code, uncertainAttempts] as const),
+    ),
+  )(
+    'keeps the MCP settings writer usable after atomic %s refusal following %i uncertain attempts',
+    async (code, uncertainAttempts) => {
+      const server = new FakeManagedSessionStore();
+      const { session } = await bootStoresAndSession(server);
+      const originalFetch = server.fetch.getMockImplementation()!;
+      let refused = false;
+      let attempts = 0;
+      server.fetch.mockImplementation(async (input, init) => {
+        if (/\/transactions:commit(?:-v2)?$/.test(requestUrl(input))) {
+          const body = JSON.parse(String(init?.body)) as Record<
+            string,
+            unknown
+          >;
+          if (body['operation'] === 'manageMcp' && !refused) {
+            if (attempts++ < uncertainAttempts)
+              return jsonResponse(
+                { error: { code: 'unavailable', message: 'Not committed' } },
+                503,
+              );
+            refused = true;
+            return jsonResponse(
+              { error: { code, message: 'Session admission changed' } },
+              409,
+            );
+          }
+        }
+        return originalFetch(input, init);
+      });
+      const commit = () => {
+        const operationId = randomUUID();
+        const pin = {
+          serverId: 'docs',
+          serverRevision: 1,
+          definitionDigest: 'a'.repeat(64),
+        };
+        return session.authority.commitDomainRecord(
+          {
+            operation: 'manageMcp',
+            commandId: operationId,
+            sessionKey: SESSION_KEY,
+            contentDigest: 'c'.repeat(64),
+          },
+          {
+            domain: 'config_install',
+            content: {
+              kind: 'hosted-mcp-settings',
+              schemaVersion: 1,
+              servers: [{ ...pin, state: 'enabled' }],
+              command: {
+                operationId,
+                actorKey: 'b'.repeat(64),
+                action: 'add',
+                serverId: 'docs',
+                expectedRevision: 0,
+                server: pin,
+              },
+            },
+          },
+          { class: 'trusted_entry' },
+        );
+      };
+      try {
+        await expect(commit()).rejects.toThrow(
+          ManagedSessionCommitRejectedError,
+        );
+        expect(refused).toBe(true);
+        expect(attempts).toBe(uncertainAttempts + 1);
+        expect(session.authority.writesStopped).toBe(false);
+        expect(
+          session.authority.domainRecord('config_install'),
+        ).toBeUndefined();
+        await expect(commit()).resolves.toMatchObject({ revision: 1 });
+        expect(session.authority.writesStopped).toBe(false);
+      } finally {
+        await session.close().catch(() => undefined);
+      }
+    },
+  );
+
+  it('keeps the permanent refusal behavior for non-MCP commits with the same guard code', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const originalFetch = server.fetch.getMockImplementation()!;
+    server.fetch.mockImplementation(async (input, init) => {
+      if (
+        /\/transactions:commit(?:-v2)?$/.test(requestUrl(input)) &&
+        JSON.parse(String(init?.body)).operation === 'message.commit'
+      )
+        return jsonResponse(
+          { error: { code: 'unsupported_feature', message: 'Refused' } },
+          409,
+        );
+      return originalFetch(input, init);
+    });
+    try {
+      const messageRef = await stores.resourceStore.publish(
+        'managed-message',
+        MESSAGE_BODY,
+      );
+      await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
+        ManagedSessionStoreHttpError,
+      );
+      expect(session.authority.writesStopped).toBe(true);
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  });
+
   it('spends one contention budget across the commit retries', async () => {
     const server = new FakeManagedSessionStore();
     const { stores, session } = await bootStoresAndSession(server, 1_200);

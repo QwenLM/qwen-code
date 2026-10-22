@@ -95,6 +95,77 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void mcpManagementKeepsTheSessionAndOriginalCommandIdentityAcrossReadsAndSubmission() throws Exception {
+        createSessionRoute();
+        String command = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        AtomicReference<String> returnedCommand = new AtomicReference<>(command);
+        AtomicReference<String> received = new AtomicReference<>();
+        AtomicInteger commandStatus = new AtomicInteger(202);
+        server.createContext("/session/" + SESSION_ID + "/mcp/management", exchange -> {
+            if ("POST".equals(exchange.getRequestMethod())) {
+                received.set(readBody(exchange));
+            }
+            sendSessionJson(exchange, "POST".equals(exchange.getRequestMethod()) ? commandStatus.get() : 200, "{\"sessionId\":\"" + SESSION_ID
+                    + "\",\"revision\":1,\"supported\":true,\"servers\":[],\"availableServers\":[],"
+                    + "\"operation\":{\"operationId\":\"" + returnedCommand.get()
+                    + "\",\"action\":\"restart\",\"serverId\":\"docs\",\"revision\":1,\"state\":\"settled\"}}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertEquals(SESSION_ID, client.mcpManagement(session).get("sessionId"));
+            Map<String, Object> request = Map.of("operationId", command, "actorKey", "a".repeat(64),
+                    "action", "restart", "serverId", "docs", "expectedRevision", 0);
+            assertEquals(SESSION_ID, client.manageMcp(session, request).get("sessionId"));
+            assertEquals(request, JsonSupport.parseObject(received.get(), "MCP command"));
+            assertEquals(SESSION_ID, client.mcpManagementOperation(session, command).get("sessionId"));
+            returnedCommand.set(PROMPT_ID);
+            assertThrows(MutationOutcomeUnknownException.class, () -> client.manageMcp(session, request));
+            assertThrows(DaemonProtocolException.class, () -> client.mcpManagementOperation(session, command));
+            returnedCommand.set(command);
+            commandStatus.set(200);
+            assertThrows(MutationOutcomeUnknownException.class, () -> client.manageMcp(session, request));
+        }
+    }
+
+    @Test
+    void mcpManagementAttachmentPreservesTheRequestAndNeverEnablesOrdinaryRecovery() {
+        AtomicReference<Map<String, Object>> received = new AtomicReference<>();
+        AtomicInteger requests = new AtomicInteger();
+        AtomicInteger status = new AtomicInteger(200);
+        server.createContext("/session/" + SESSION_ID + "/load", exchange -> {
+            received.set(JsonSupport.parseObject(readBody(exchange), "MCP management attachment"));
+            requests.incrementAndGet();
+            sendSessionJson(exchange, status.get(), status.get() == 200 ? sessionJson()
+                    : "{\"code\":\"hosted_mcp_session_load_required\"}");
+        });
+        var request = new LoadHarnessSession(SESSION_ID, null, false, "hosted-workspace-shell/1")
+                .withMcpServers(List.of(Map.of("serverId", "docs", "serverRevision", 1, "definitionDigest", "a".repeat(64))))
+                .withHookCatalog(Map.of("catalogId", "review", "catalogRevision", 1, "definitionDigest", "b".repeat(64)))
+                .withAgentDefinition(Map.of("agentId", "agent_00112233445566778899aabbccddeeff", "revision", "1", "digest", "c".repeat(64)))
+                .withForegroundOnly(true).withChildWorkspaces(true);
+        Map<String, Object> original = request.toJson();
+        try (HostedHarnessClient client = newClient()) {
+            client.loadMcpManagementSession(request);
+            Map<String, Object> expected = new java.util.LinkedHashMap<>(original);
+            expected.put("mcpManagementOnly", true);
+            assertEquals(expected, received.get());
+            assertEquals(original, request.toJson());
+            client.loadSession(request);
+            assertEquals(original, received.get());
+            for (LoadHarnessSession unsafe : List.of(new LoadHarnessSession(SESSION_ID, null, true),
+                    new LoadHarnessSession(SESSION_ID, null, false, null, true), request.withStoppedMessages(),
+                    request.forLifecycle("operation", 1, 2))) {
+                assertThrows(IllegalArgumentException.class, () -> client.loadMcpManagementSession(unsafe));
+            }
+            assertEquals(2, requests.get());
+            status.set(409);
+            DaemonHttpException missing = assertThrows(DaemonHttpException.class, () -> client.loadMcpManagementSession(request));
+            assertEquals("hosted_mcp_session_load_required", missing.getErrorCode());
+            assertEquals(3, requests.get());
+        }
+    }
+
+    @Test
     void inspectsOriginalRecoveryEvidenceAndTargetsCleanupWithoutSubmitting() {
         createSessionRoute();
         server.createContext("/session/" + SESSION_ID + "/status", exchange -> {
@@ -196,6 +267,7 @@ class HostedHarnessClientTest {
 
     @Test
     void preservesOriginalCancellationTargetAcrossEveryLoadCopy() {
+        Map<String, Object> route = Map.of("authType", "openai", "endpointDigest", "a".repeat(64), "providerPin", "b".repeat(64));
         capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
                 "\"hostedHarness\":{\"features\":[\"targeted-cancel/1\"],"));
         AtomicReference<Map<String, Object>> sent = new AtomicReference<>();
@@ -205,6 +277,8 @@ class HostedHarnessClientTest {
         });
         LoadHarnessSession request = new LoadHarnessSession(SESSION_ID, null, true, null, false, true)
                 .withCancellationPromptId(PROMPT_ID)
+                .withPublicChildAgentsVersion(1)
+                .withPublicChildModelRoute(route)
                 .withAgentDefinition(Map.of("agentId", "test"))
                 .withSessionSkillsRef(Map.of("version", 1))
                 .withMcpServers(java.util.List.of(Map.of("serverId", "mcp")))
@@ -226,6 +300,8 @@ class HostedHarnessClientTest {
             client.loadSession(request);
         }
         assertEquals(PROMPT_ID, sent.get().get("cancellationPromptId"));
+        assertEquals(1, sent.get().get("publicChildAgentsVersion"));
+        assertEquals(route, sent.get().get("publicChildModelRoute"));
         assertEquals(true, sent.get().get("passiveManagedRuntimeRecovery"));
         assertEquals(true, sent.get().get("cancellationTakeover"));
         assertEquals(true, sent.get().get("childWorkspaces"));
@@ -241,6 +317,7 @@ class HostedHarnessClientTest {
 
     @Test
     void preservesCleanupOnlyTargetAndRecognizesTheRestrictedAttachment() {
+        Map<String, Object> route = Map.of("authType", "openai", "endpointDigest", "a".repeat(64), "providerPin", "b".repeat(64));
         capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
                 "\"hostedHarness\":{\"features\":[\"recovery-cleanup/1\"],"));
         AtomicReference<Map<String, Object>> sent = new AtomicReference<>();
@@ -252,6 +329,8 @@ class HostedHarnessClientTest {
         });
         LoadHarnessSession request = new LoadHarnessSession(SESSION_ID)
                 .forRecoveryCleanup(PROMPT_ID)
+                .withPublicChildAgentsVersion(1)
+                .withPublicChildModelRoute(route)
                 .withChildWorkspaces(true, true)
                 .withForegroundOnly(false)
                 .withStoppedMessages();
@@ -262,6 +341,8 @@ class HostedHarnessClientTest {
             assertTrue(client.loadSession(request).isRecoveryCleanupOnly());
         }
         assertEquals(PROMPT_ID, sent.get().get("recoveryCleanupPromptId"));
+        assertEquals(1, sent.get().get("publicChildAgentsVersion"));
+        assertEquals(route, sent.get().get("publicChildModelRoute"));
         assertFalse(sent.get().containsKey("passiveManagedRuntimeRecovery"));
         assertFalse(sent.get().containsKey("driveRuntimeRecovery"));
         assertFalse(sent.get().containsKey("cancellationTakeover"));
@@ -1322,6 +1403,7 @@ class HostedHarnessClientTest {
 
     @Test
     void extensionPinsSurviveCreateAndEveryLoadCopy() {
+        Map<String, Object> route = Map.of("authType", "openai", "endpointDigest", "a".repeat(64), "providerPin", "b".repeat(64));
         var mcp = java.util.List.<Map<String, Object>>of(Map.of("serverId", "docs", "serverRevision", 1,
                 "definitionDigest", "a".repeat(64)));
         Map<String, Object> hooks = Map.of("catalogId", "review", "catalogRevision", 1,
@@ -1330,7 +1412,8 @@ class HostedHarnessClientTest {
                 .mcpServers(mcp).hookCatalog(hooks).build().toJson();
         assertEquals(mcp, created.get("mcpServers"));
         assertEquals(hooks, created.get("hookCatalog"));
-        LoadHarnessSession load = new LoadHarnessSession(SESSION_ID).withMcpServers(mcp).withHookCatalog(hooks);
+        LoadHarnessSession load = new LoadHarnessSession(SESSION_ID).withMcpServers(mcp).withHookCatalog(hooks)
+                .withPublicChildAgentsVersion(1).withPublicChildModelRoute(route);
         for (LoadHarnessSession copy : java.util.List.of(load, load.withChildWorkspaces(true),
                 load.forLifecycle("op-1", 3, 2), load.withStoppedMessages(),
                 load.withStoppedMessages().forLifecycle("op-1", 3, 2).withChildWorkspaces(true),
@@ -1338,6 +1421,8 @@ class HostedHarnessClientTest {
                 load.withForegroundOnly(true).forLifecycle("op-1", 3, 2).withStoppedMessages())) {
             assertEquals(mcp, copy.toJson().get("mcpServers"));
             assertEquals(hooks, copy.toJson().get("hookCatalog"));
+            assertEquals(1, copy.toJson().get("publicChildAgentsVersion"));
+            assertEquals(route, copy.toJson().get("publicChildModelRoute"));
         }
         assertFalse(new LoadHarnessSession(SESSION_ID).toJson().containsKey("mcpServers"));
         assertFalse(CreateHarnessSession.builder().harnessSessionId(SESSION_ID).build().toJson().containsKey("hookCatalog"));
