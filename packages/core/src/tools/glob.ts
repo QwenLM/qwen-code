@@ -35,6 +35,7 @@ import {
   type GlobDirectoryReply,
   type GlobPath,
 } from './glob-search.js';
+import { selectPathsDeniedByPermissionRules } from '../core/permission-helpers.js';
 export type { GlobPath } from './glob-search.js';
 
 const debugLogger = createDebugLogger('GLOB');
@@ -287,11 +288,33 @@ class GlobToolInvocation extends BaseToolInvocation<
         }
       }
 
-      const filteredEntries = allFilteredEntries;
+      // Drop files a path-scoped deny rule claims. The input-side check only
+      // sees the search root, which can never match a rule that targets an
+      // individual result file (#15129).
+      const collectedPaths = allFilteredEntries.map((entry) =>
+        entry.fullpath(),
+      );
+      const deniedPaths = await selectPathsDeniedByPermissionRules(
+        this.config.getPermissionManager?.(),
+        ToolNames.GLOB,
+        this.config.getTargetDir(),
+        collectedPaths,
+      );
+      const omittedFileCount = deniedPaths.size;
+      const filteredEntries = omittedFileCount
+        ? allFilteredEntries.filter(
+            (_, index) => !deniedPaths.has(collectedPaths[index]!),
+          )
+        : allFilteredEntries;
 
       if (!filteredEntries || filteredEntries.length === 0) {
+        const noFilesMsg = `No files found matching pattern "${this.params.pattern}" ${searchLocationDescription}`;
+        const omittedFilesNote =
+          omittedFileCount > 0
+            ? ` [${omittedFileCount} ${omittedFileCount === 1 ? 'file' : 'files'} omitted by permission rules]`
+            : '';
         return {
-          llmContent: `No files found matching pattern "${this.params.pattern}" ${searchLocationDescription}`,
+          llmContent: noFilesMsg + omittedFilesNote,
           returnDisplay: `No files found`,
         };
       }
@@ -336,6 +359,9 @@ class GlobToolInvocation extends BaseToolInvocation<
         const omittedFiles = totalFileCount - fileLimit;
         const fileTerm = omittedFiles === 1 ? 'file' : 'files';
         resultMessage += `\n---\n[${omittedFiles} ${fileTerm} truncated] ...`;
+      }
+      if (omittedFileCount > 0) {
+        resultMessage += `\n---\n[${omittedFileCount} ${omittedFileCount === 1 ? 'file' : 'files'} omitted by permission rules]`;
       }
 
       return {
