@@ -18,7 +18,10 @@ import {
   TrajectoryLiveContext,
   useTrajectoryLiveSnapshot,
 } from '../../trajectory/trajectory-live-context.js';
-import { McpAppToolsContext } from '../../mcpAppHostContext.js';
+import {
+  McpAppToolsContext,
+  McpAppGeneratedUiContext,
+} from '../../mcpAppHostContext.js';
 import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 import { I18nProvider } from '../../i18n.js';
 import { SessionRecoveryBanner } from '../../components/SessionRecoveryBanner.js';
@@ -18338,6 +18341,290 @@ describe('DaemonSessionProvider', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('exposes Generated UI only from the attached session and clears it with the owner', async () => {
+    const session = createMockSession({
+      session: { generatedUi: { version: 1, enabled: true } },
+    });
+    sdkMocks.sessions.push(session);
+    let capability: ContextType<typeof McpAppGeneratedUiContext>;
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      capability = useContext(McpAppGeneratedUiContext);
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    expect(capability).toEqual({
+      sessionId: session.sessionId,
+      status: { version: 1, enabled: true },
+    });
+    await act(async () => {
+      await requireActions(actions).clearSession();
+    });
+    expect(capability).toBeUndefined();
+  });
+
+  it.each(['success', 'failure', 'wrong owner'] as const)(
+    'clears Generated UI after a %s context refresh loses its receipt',
+    async (outcome) => {
+      const start = createDeferred<void>();
+      const refresh = createDeferred<DaemonSessionContextStatus>();
+      const initial = {
+        v: 1 as const,
+        sessionId: 'session-1',
+        workspaceCwd: '/mock-workspace',
+        state: {},
+        recovery: { kind: 'clean' as const, canContinue: false },
+      };
+      const context = vi
+        .fn()
+        .mockResolvedValueOnce(initial)
+        .mockImplementation(async () => {
+          try {
+            return await refresh.promise;
+          } finally {
+            // Match DaemonSessionClient.context()'s receipt invalidation.
+            session.session!['generatedUi'] = undefined;
+          }
+        });
+      const session = createMockSession({
+        session: { generatedUi: { version: 1, enabled: true } },
+        context,
+        lastEventId: 10,
+        async *events(opts) {
+          await start.promise;
+          yield {
+            v: 1,
+            id: 11,
+            type: 'turn_complete',
+            data: { promptId: 'observed', stopReason: 'end_turn' },
+          };
+          yield* createIdleEvents()(opts);
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let capability: ContextType<typeof McpAppGeneratedUiContext>;
+      function Harness() {
+        capability = useContext(McpAppGeneratedUiContext);
+        return null;
+      }
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      expect(capability?.status.enabled).toBe(true);
+      await act(async () => {
+        start.resolve();
+        await flushPromises();
+      });
+      expect(context).toHaveBeenCalledTimes(2);
+      expect(capability?.status.enabled).toBe(true);
+      await act(async () => {
+        if (outcome === 'failure') refresh.reject(new Error('context failed'));
+        else
+          refresh.resolve({
+            ...initial,
+            sessionId:
+              outcome === 'wrong owner' ? 'other-session' : initial.sessionId,
+          });
+        await flushPromises();
+      });
+      expect(capability).toBeUndefined();
+    },
+  );
+
+  describe('idle Generated UI policy refresh', () => {
+    const reply = (enabled: boolean, sessionId = 'session-1') =>
+      new Response(
+        JSON.stringify({
+          v: 1,
+          sessionId,
+          workspaceCwd: '/mock-workspace',
+          state: { _meta: { generatedUi: { version: 1, enabled } } },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+
+    const policyEvent = {
+      v: 1,
+      type: 'settings_changed',
+      data: { key: 'mcp.allowed', scope: 'workspace', value: [] },
+    } satisfies DaemonEvent;
+
+    async function setupPolicySession(eventCount = 1) {
+      const sdk = await vi.importActual<typeof import('@qwen-code/sdk/daemon')>(
+        '@qwen-code/sdk/daemon',
+      );
+      const responses = Array.from({ length: eventCount }, () =>
+        createDeferred<Response>(),
+      );
+      const changes = Array.from({ length: eventCount }, () =>
+        createDeferred<DaemonEvent>(),
+      );
+      let reads = 0;
+      const owner = new sdk.DaemonSessionClient({
+        client: new sdk.DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch: async () =>
+            reads++ === 0 ? reply(true) : responses[reads - 2]!.promise,
+        }),
+        session: {
+          sessionId: 'session-1',
+          workspaceCwd: '/mock-workspace',
+          attached: false,
+          clientId: 'client-1',
+          generatedUi: { version: 1, enabled: true },
+        },
+      });
+      const context = vi.fn(() => owner.context());
+      sdkMocks.sessions.push(
+        createMockSession({
+          session: owner.session as unknown as Record<string, unknown>,
+          context,
+          async *events(opts) {
+            for (const change of changes) {
+              const event = await change.promise;
+              if (opts?.signal?.aborted) return;
+              yield event;
+            }
+            yield* createIdleEvents()(opts);
+          },
+        }),
+      );
+      let capability: ContextType<typeof McpAppGeneratedUiContext>;
+      let actions: DaemonSessionActions | undefined;
+      function Harness() {
+        capability = useContext(McpAppGeneratedUiContext);
+        actions = useDaemonActions();
+        return null;
+      }
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      expect(capability?.status.enabled).toBe(true);
+      expect(context).toHaveBeenCalledOnce();
+      return {
+        context,
+        responses,
+        changes,
+        capability: () => capability,
+        actions: () => requireActions(actions),
+      };
+    }
+
+    it.each([
+      policyEvent,
+      {
+        ...policyEvent,
+        data: {
+          key: 'tools.disabled',
+          scope: 'workspace',
+          value: ['generated_ui_show'],
+        },
+      },
+      { v: 1, type: 'settings_reloaded', data: {} },
+      {
+        v: 1,
+        type: 'mcp_server_changed',
+        data: { serverName: 'generated-ui', action: 'disable' },
+      },
+      {
+        v: 1,
+        type: 'mcp_server_restarted',
+        data: { serverName: 'generated-ui', durationMs: 1 },
+      },
+      {
+        v: 1,
+        type: 'tool_toggled',
+        data: { toolName: 'generated_ui_show', enabled: false },
+      },
+      { v: 1, type: 'extensions_changed', data: { refreshed: 1, failed: 0 } },
+    ] satisfies DaemonEvent[])(
+      'withholds the cached capability until the idle owner confirms a policy event: %j',
+      async (event) => {
+        const fixture = await setupPolicySession();
+        await act(async () => {
+          fixture.changes[0]!.resolve(event);
+          await flushPromises();
+        });
+        expect(fixture.context).toHaveBeenCalledTimes(2);
+        expect(fixture.capability()).toBeUndefined();
+        await act(async () => {
+          fixture.responses[0]!.resolve(reply(false));
+          await flushPromises();
+        });
+        expect(fixture.capability()?.status.enabled).toBe(false);
+      },
+    );
+
+    it.each(['ui.theme', 'experimental.generatedUi'])(
+      'does not invalidate the live owner for a non-policy setting: %s',
+      async (key) => {
+        const fixture = await setupPolicySession();
+        await act(async () => {
+          fixture.changes[0]!.resolve({
+            ...policyEvent,
+            data: { key, scope: 'workspace', value: false },
+          });
+          await flushPromises();
+        });
+        expect(fixture.context).toHaveBeenCalledOnce();
+        expect(fixture.capability()?.status.enabled).toBe(true);
+      },
+    );
+
+    it('ignores an older enabled read after a newer policy disables the idle owner', async () => {
+      const fixture = await setupPolicySession(2);
+      await act(async () => {
+        fixture.changes[0]!.resolve(policyEvent);
+        await flushPromises();
+        fixture.changes[1]!.resolve(policyEvent);
+        await flushPromises();
+      });
+      expect(fixture.context).toHaveBeenCalledTimes(3);
+      expect(fixture.capability()).toBeUndefined();
+      await act(async () => {
+        fixture.responses[1]!.resolve(reply(false));
+        await flushPromises();
+      });
+      expect(fixture.capability()?.status.enabled).toBe(false);
+      await act(async () => {
+        fixture.responses[0]!.resolve(reply(true));
+        await flushPromises();
+      });
+      expect(fixture.capability()?.status.enabled).toBe(false);
+    });
+
+    it('does not publish an idle policy read after switching to a different owner', async () => {
+      const fixture = await setupPolicySession();
+      await act(async () => {
+        fixture.changes[0]!.resolve(policyEvent);
+        await flushPromises();
+      });
+      sdkMocks.sessions.push(
+        createMockSession({
+          sessionId: 'next-owner',
+          session: { generatedUi: { version: 1, enabled: false } },
+        }),
+      );
+      let switched!: Promise<void>;
+      act(() => {
+        switched = fixture.actions().loadSession('next-owner');
+      });
+      await act(async () => {
+        await switched;
+        await flushPromises();
+      });
+      expect(fixture.capability()).toMatchObject({
+        sessionId: 'next-owner',
+        status: { enabled: false },
+      });
+      await act(async () => {
+        fixture.responses[0]!.resolve(reply(true));
+        await flushPromises();
+      });
+      expect(fixture.capability()).toMatchObject({
+        sessionId: 'next-owner',
+        status: { enabled: false },
+      });
+    });
   });
 
   it('uses the current client id after an in-place session reattach', async () => {

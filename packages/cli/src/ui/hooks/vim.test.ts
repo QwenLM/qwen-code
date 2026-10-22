@@ -2201,6 +2201,39 @@ describe('useVim hook', () => {
     });
 
     describe('p (paste after)', () => {
+      it.each(['p', 'P'])(
+        'invalidates imported text before %s inserts a register value',
+        (key) => {
+          const buffer = createMockBuffer('workflow history', [0, 0]);
+          const onPaste = vi.fn(() => {
+            expect(buffer.replaceRange).not.toHaveBeenCalled();
+          });
+          const { result } = renderHook(() =>
+            useVim(
+              buffer as unknown as TextBuffer,
+              mockHandleFinalSubmit,
+              onPaste,
+            ),
+          );
+          act(() => result.current.handleInput(makeKey('y')));
+          act(() => result.current.handleInput(makeKey('w')));
+          expect(onPaste).not.toHaveBeenCalled();
+          act(() => result.current.handleInput(makeKey(key)));
+          expect(onPaste).toHaveBeenCalledOnce();
+          expect(buffer.replaceRange).toHaveBeenCalledOnce();
+        },
+      );
+
+      it.each(['p', 'P'])('does not invalidate an empty %s paste', (key) => {
+        vi.mocked(execFileSync).mockReturnValue('');
+        const onPaste = vi.fn();
+        const { result } = renderHook(() =>
+          useVim(mockBuffer as TextBuffer, mockHandleFinalSubmit, onPaste),
+        );
+        act(() => result.current.handleInput(makeKey(key)));
+        expect(onPaste).not.toHaveBeenCalled();
+      });
+
       it('should paste after cursor', () => {
         const buffer = createMockBuffer('hello world', [0, 0]);
         const { result } = renderHook(() =>
