@@ -1288,21 +1288,28 @@ describe('AnthropicContentGenerator', () => {
       expect(req).toEqual(expect.objectContaining(expected));
     });
 
-    // DeepSeek's output_config.effort accepts only high/max (else a 400),
-    // mirroring the DeepSeek OpenAI adapter.
-    it("lifts effort: 'low'/'medium' to 'high' on the DeepSeek anthropic path", async () => {
-      for (const effort of ['low', 'medium'] as const) {
+    // DeepSeek's output_config.effort runs low/high/max and folds
+    // medium/xhigh into high.
+    it.each([
+      ['low', 'low'],
+      ['medium', 'high'],
+      ['high', 'high'],
+      ['xhigh', 'high'],
+      ['max', 'max'],
+    ] as const)(
+      "maps effort: '%s' to '%s' on the DeepSeek anthropic path",
+      async (effort, expected) => {
         const { req } = await send(
-          nativeCfg('deepseek-v4-pro', {
+          nativeCfg('deepseek-flash', {
             baseUrl: DEEPSEEK,
             reasoning: { effort },
           }),
         );
         expect(req).toEqual(
-          expect.objectContaining({ output_config: { effort: 'high' } }),
+          expect.objectContaining({ output_config: { effort: expected } }),
         );
-      }
-    });
+      },
+    );
 
     // Claude 4.8+ deprecated `temperature` (the server 400s when it is sent):
     // omit it for 4.8+ and keep it for older models.
