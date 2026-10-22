@@ -1917,8 +1917,12 @@ export class CronScheduler {
     const firedAt = new Map<string, number>(); // durable recurring fires
     const removedIds: string[] = []; // durable one-shot fires / expiries
     // Gated recurring fires book their run when the gate settles, not here;
-    // the tick persist only moves their stamp and the status summary.
-    const gated = new Map<string, CronGateStatus | undefined>();
+    // the tick persist only moves their stamp and the status summary, kept
+    // with the command it describes.
+    const gated = new Map<
+      string,
+      { gate: string; status: CronGateStatus | undefined }
+    >();
 
     for (const job of this.jobs.values()) {
       // Durable jobs fire under one of two models (see #shouldFireDurable):
@@ -1944,7 +1948,9 @@ export class CronScheduler {
         removedIds.push(job.id);
       } else {
         firedAt.set(job.id, job.lastFiredAt!);
-        if (job.gate) gated.set(job.id, job.gateStatus);
+        if (job.gate) {
+          gated.set(job.id, { gate: job.gate, status: job.gateStatus });
+        }
       }
     }
 
@@ -2010,12 +2016,17 @@ export class CronScheduler {
                 // catch-up persist's equality guard.
                 if (stamp === undefined || (t.lastFiredAt ?? 0) >= stamp)
                   return t;
-                if (gated.has(t.id)) {
-                  const status = gated.get(t.id);
+                const gate = gated.get(t.id);
+                if (gate) {
+                  // A PATCH may have replaced the command (and dropped its
+                  // status) since this session loaded the job: the old
+                  // command's summary must not come back onto the new one.
                   return {
                     ...t,
                     lastFiredAt: stamp,
-                    ...(status ? { gateStatus: status } : {}),
+                    ...(gate.status && t.gate === gate.gate
+                      ? { gateStatus: gate.status }
+                      : {}),
                   };
                 }
                 return {

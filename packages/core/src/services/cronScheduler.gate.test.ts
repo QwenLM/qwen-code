@@ -573,6 +573,53 @@ describe('CronScheduler gate', () => {
       expect(task?.gateStatus?.consecutiveFailures).toBe(1);
     });
 
+    it('keeps the tick from writing the old command’s streak onto a replaced gate', async () => {
+      // The old command already failed once; the PATCH swaps the command and
+      // drops the status; a tick lands before the watcher reloads the task.
+      // Its persist must not put the old streak back on the new gate.
+      const persisted = () =>
+        (scheduler as unknown as { pendingPersist: Promise<unknown> })
+          .pendingPersist;
+      const job = await scheduler.createDurable(
+        '* * * * *',
+        'p',
+        true,
+        './old.sh',
+      );
+      job.gateApproved = true;
+      await scheduler.enableDurable('session-1');
+      scheduler.start((j) => fired.push(j));
+      scheduler.tick(at(10, 30, 59));
+      await script.release(failed); // the old command's first failure
+      expect(fired).toHaveLength(1);
+      await persisted();
+      let [task] = await readCronTasks(tmpDir);
+      expect(task?.gateStatus?.consecutiveFailures).toBe(1);
+
+      await updateCronTasks(tmpDir, (tasks) =>
+        tasks.map(({ gateStatus: _dropped, ...t }) =>
+          withTaskGate(t, './new.sh'),
+        ),
+      );
+      scheduler.tick(at(10, 31, 59)); // the old job is still loaded
+      await persisted();
+      await reload(); // cancels the old command's run
+      await script.release(quiet); // its late answer is superseded
+      // Read after the old run settled, so a failure here leaves nothing
+      // pending for the next test; the reload itself writes nothing.
+      [task] = await readCronTasks(tmpDir);
+      expect(task?.gate).toBe('./new.sh');
+      expect(task?.gateStatus).toBeUndefined();
+
+      scheduler.tick(at(10, 32, 59));
+      await script.release(failed); // the new command's first failure
+      expect(fired).toHaveLength(2);
+      expect(fired[1]!.prompt).toContain('./new.sh');
+      await persisted();
+      [task] = await readCronTasks(tmpDir);
+      expect(task?.gateStatus?.consecutiveFailures).toBe(1);
+    });
+
     it('starts a fresh failure streak when the gate is replaced on disk', async () => {
       // The daemon's PATCH swaps the command and drops the file's status; the
       // running session must not carry the old command's streak over, or the
