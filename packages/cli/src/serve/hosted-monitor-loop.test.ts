@@ -107,6 +107,7 @@ class FakeExecutor {
     | ((failed: boolean, stopRequested?: boolean) => Promise<void> | void)
     | undefined;
   terminateCalls = 0;
+  onTerminate: (() => void) | undefined;
   /** Whether terminate answers with the worker's exit evidence. */
   provesStop = true;
   /** Holds each terminate open until the case answers it. */
@@ -128,6 +129,7 @@ class FakeExecutor {
       receipt: { watch: 'started' },
       terminate: async () => {
         this.terminateCalls += 1;
+        this.onTerminate?.();
         if (this.holdStop)
           return new Promise<boolean>((resolve) =>
             this.heldStops.push(resolve),
@@ -650,11 +652,15 @@ describe('HostedMonitorLoop', () => {
       const harness = await createHarness();
       const rig = await openLoop(harness);
       rig.executor.holdStop = true;
+      const terminating = new Promise<void>((resolve) => {
+        rig.executor.onTerminate = resolve;
+      });
       await rig.loop.start(params(bounds));
 
       if (reason === 'max_events') rig.executor.onLine?.('one');
       const fired = rig.clock.advance(firing);
-      await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+      await terminating;
+      expect(rig.executor.terminateCalls).toBe(1);
       // The worker finalizes before it answers, so the exit is this stop's
       // own evidence: its stop marker does not override the loop's reason.
       await rig.executor.exitStopped();
