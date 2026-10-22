@@ -3,8 +3,10 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.ChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.CompressSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CreateSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCommandOperation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicContextCompressionOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCwdOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
@@ -16,6 +18,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionEventRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.UpdateSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.session.ContextCompressionService;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService.SessionMutationResult;
 import com.alibaba.qwen.code.managedagent.session.ManagedEventStreamService;
@@ -48,6 +51,12 @@ public class PublicAgentController {
     private final SessionLifecycleService lifecycle;
     private final ManagedTaskService tasks;
     private final ManagedTaskCancelService taskCancels;
+    private ContextCompressionService compressions;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    void setCompressions(ContextCompressionService compressions) {
+        this.compressions = compressions;
+    }
 
     public PublicAgentController(ManagedAgentService service,
             ManagedEventStreamService streams,
@@ -161,6 +170,15 @@ public class PublicAgentController {
             @PathVariable String operationId) {
         return lifecycle.getPublicOperation(tenant.tenantId(),
                 tenant.actorId(), sessionId, operationId);
+    }
+
+    @PostMapping("/{sessionId}/compress")
+    public ResponseEntity<PublicContextCompressionOperation> compress(
+            TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            @Valid @RequestBody CompressSessionRequest request) {
+        return ResponseEntity.accepted().body(compressions.admitPublic(tenant.tenantId(),
+                tenant.actorId(), sessionId, idempotencyKey, request.expectedCompactionRevision()));
     }
 
     @PostMapping("/{sessionId}/cwd")
