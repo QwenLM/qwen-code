@@ -135,6 +135,7 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     'mcp_operation',
     'hook_registration',
     'hook_execution',
+    'history_maintenance',
     'schedule',
     'automation_run',
     'child_acceptance',
