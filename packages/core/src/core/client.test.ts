@@ -37,6 +37,7 @@ import {
 } from './client.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
+import { ChatCompressionService } from '../services/chatCompressionService.js';
 import {
   AuthType,
   createContentGenerator,
@@ -412,6 +413,7 @@ vi.mock('../telemetry/loggers.js', () => ({
   logApiRequest: vi.fn(),
   logLoopDetected: vi.fn(),
   logLoopDetectionDisabled: vi.fn(),
+  logLoopProtection: vi.fn(),
   logMemoryRecallConsumed: vi.fn(),
 }));
 
@@ -964,6 +966,7 @@ describe('Gemini Client (client.ts)', () => {
       getEffectiveInputModalities: vi.fn().mockReturnValue({}),
       getBaseLlmClient: vi.fn(),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
+      getLoopProtection: vi.fn().mockReturnValue('stop'),
       // Mimics the resolved Config getter: always a number (Infinity keeps
       // the cap out of the way of unrelated streaming tests).
       getMaxToolCallsPerTurn: vi.fn().mockReturnValue(Number.POSITIVE_INFINITY),
@@ -5321,6 +5324,24 @@ describe('Gemini Client (client.ts)', () => {
       // The top-level beforeEach stubs tryCompressChat to NOOP for unrelated
       // tests; restore the real implementation here so we can observe it.
       vi.mocked(client.tryCompressChat).mockRestore();
+    });
+
+    it('keeps the Managed compression observer on a replacement chat', async () => {
+      const observer = vi.fn(async () => {});
+      const options = { restoreRecentFiles: false };
+      client.setCompressionObserver(observer, options);
+      const previous = client.getChat();
+      await client.startChat([userText('summary'), modelText('ok')]);
+      expect(client.getChat()).not.toBe(previous);
+      const compressedHistory = [userText('compressed again'), modelText('ok')];
+      vi.spyOn(ChatCompressionService.prototype, 'compress').mockResolvedValue({
+        newHistory: compressedHistory,
+        info: compressionInfo(CompressionStatus.COMPRESSED, 1000, 200),
+      });
+      await client.getChat().tryCompress('replacement', true);
+      expect(observer).toHaveBeenCalledWith(
+        expect.objectContaining({ compressedHistory }),
+      );
     });
     /** A chat whose tryCompress NOOPs; returns the tryCompress spy. */
     const noopCompressChat = () => {
@@ -11116,6 +11137,74 @@ Other open files:
 
       expect(events.at(-1)).toEqual(consecutiveLoop);
       expect(events).toHaveLength(5);
+    });
+
+    it('lets identical tool calls through when loopProtection is off', async () => {
+      vi.mocked(mockConfig.getLoopProtection).mockReturnValue('off');
+      const events = await repeatedShellTurn(true, 'prompt-id-loop-off');
+
+      expect(events).not.toContainEqual(consecutiveLoop);
+    });
+
+    it('delivers the loop-protection reminder with the next tool results', async () => {
+      const promptId = 'prompt-id-loop-reminder';
+      const shellCall = (i: number) =>
+        toolCallRequest(`repeat-${i}`, 'run_shell_command', {
+          command: 'echo repeated',
+        });
+      installChat();
+      // The 3rd identical call queues the reminder.
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(shellCall(0), shellCall(1), shellCall(2), stopped()),
+      );
+      await run([{ text: 'repeat a tool' }], promptId);
+
+      mockTurnRunFn.mockReturnValueOnce(textTurn('done'));
+      await run(
+        [fnResponse('run_shell_command', { output: 'repeated' })],
+        promptId,
+        { type: SendMessageType.ToolResult },
+      );
+      const request = mockTurnRunFn.mock.lastCall?.[1] as Part[];
+      expect(request.at(-1)).toEqual({
+        text: expect.stringContaining(
+          '`run_shell_command` has been called 3 times in a row',
+        ),
+      });
+      expect(request[0]).toHaveProperty('functionResponse');
+    });
+
+    it('keeps the loop-protection reminder across a concurrent side query', async () => {
+      const promptId = 'prompt-id-loop-reminder-btw';
+      const shellCall = (i: number) =>
+        toolCallRequest(`repeat-${i}`, 'run_shell_command', {
+          command: 'echo repeated',
+        });
+      installChat();
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(shellCall(0), shellCall(1), shellCall(2), stopped()),
+      );
+      await run([{ text: 'repeat a tool' }], promptId);
+
+      // A /btw side query starts before the turn's tool results go out.
+      mockTurnRunFn.mockReturnValueOnce(textTurn('side answer'));
+      await run([{ text: '/btw unrelated question' }], `${promptId}-btw`, {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+      });
+
+      mockTurnRunFn.mockReturnValueOnce(textTurn('done'));
+      await run(
+        [fnResponse('run_shell_command', { output: 'repeated' })],
+        promptId,
+        { type: SendMessageType.ToolResult },
+      );
+      const request = mockTurnRunFn.mock.lastCall?.[1] as Part[];
+      expect(request.at(-1)).toEqual({
+        text: expect.stringContaining(
+          '`run_shell_command` has been called 3 times in a row',
+        ),
+      });
     });
 
     describe('retry sendMessageType', () => {

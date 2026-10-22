@@ -164,6 +164,7 @@ public final class StoreModels {
         DELETE,
         ACTION_RESPONSE,
         CWD_CHANGE,
+        CONTEXT_COMPRESSION,
         TASK_CANCEL,
         SUBMIT_INPUT,
         CANCEL

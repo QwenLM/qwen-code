@@ -51,6 +51,7 @@ export function corruptFrame(
 
 export function javaSessionPayload(lastSequence: number): string {
   const payload: JavaAgentSession = {
+    compactionRevision: 0,
     sessionId: 'session-1',
     agentId: 'dataworks_data_agent',
     status: 'active',

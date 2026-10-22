@@ -85,6 +85,7 @@ public final class ManagedAgentPreflight {
         checks.add(keyRingCheck(properties));
         checks.add(authCheck(environment, properties));
         checks.add(harnessCheck(properties));
+        checks.add(sessionStoreCheck(properties));
         checks.add(toolPathCheck(properties));
         checks.addAll(brokerChecks(properties));
         checks.add(workspaceCheck(properties));
@@ -184,13 +185,15 @@ public final class ManagedAgentPreflight {
         }
     }
 
-    private static ManagedAgentProperties bind(
+    static ManagedAgentProperties bind(
             ConfigurableEnvironment environment, List<Check> checks) {
         try {
-            return Binder.get(environment)
+            ManagedAgentProperties properties = Binder.get(environment)
                     .bind("qwen.managed-agent",
                             Bindable.of(ManagedAgentProperties.class))
                     .orElseGet(ManagedAgentProperties::new);
+            properties.setEnvironment(environment);
+            return properties;
         } catch (RuntimeException error) {
             checks.add(new Check("config", Status.FAIL,
                     "binding failed: " + rootMessage(error),
@@ -309,6 +312,31 @@ public final class ManagedAgentPreflight {
         return new Check("auth", Status.PASS,
                 "address=" + address + " mode="
                         + String.valueOf(properties.getAuth().getMode()),
+                null);
+    }
+
+    // Reads the values after the startup validation applied its defaults.
+    static Check sessionStoreCheck(ManagedAgentProperties properties) {
+        ManagedAgentProperties.SessionStore store =
+                properties.getSessionStore();
+        if (!properties.getHarness().isEnabled() || !store.isEnabled()) {
+            return new Check("session-store", Status.SKIP, "disabled", null);
+        }
+        if (StringUtils.isBlank(store.getBaseUrl())) {
+            return new Check("session-store", Status.FAIL,
+                    "base URL is empty",
+                    "set QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL to the"
+                            + " listener the Harness reaches");
+        }
+        if (StringUtils.isBlank(store.getWorkspaceId())) {
+            return new Check("session-store", Status.FAIL,
+                    "workspace ID is empty",
+                    "set QWEN_MANAGED_AGENT_WORKSPACE_CWD or"
+                            + " QWEN_MANAGED_AGENT_WORKSPACE_ID");
+        }
+        return new Check("session-store", Status.PASS,
+                store.getBaseUrl() + ", workspace "
+                        + store.getWorkspaceId(),
                 null);
     }
 
