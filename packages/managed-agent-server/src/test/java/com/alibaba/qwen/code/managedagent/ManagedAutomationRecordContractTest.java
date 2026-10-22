@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecords.InvalidRecordException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -87,9 +88,9 @@ class ManagedAutomationRecordContractTest {
             String domain = fixture.get("domain").textValue();
             String id = fixture.get("id").textValue();
             var body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
-            JsonNode record = ManagedChildRunRecordContractTest
+            JsonNode record = omit(ManagedChildRunRecordContractTest
                     .merge(fixtures.get("templates").get(domain),
-                            fixture.get("patch"));
+                            fixture.get("patch")), fixture.get("omit"));
             if (fixture.get("valid").booleanValue()) {
                 body.require().accept(record);
             } else {
@@ -112,10 +113,20 @@ class ManagedAutomationRecordContractTest {
             JsonNode template = fixtures.get("templates").get(domain);
             assertEquals(fixture.get("valid").booleanValue(),
                     ManagedExtensionProjection.RECORD_BODIES.get(domain).isSuccessor().test(
-                            ManagedChildRunRecordContractTest.merge(template, fixture.get("before")),
-                            ManagedChildRunRecordContractTest.merge(template, fixture.get("after"))),
+                            omit(ManagedChildRunRecordContractTest.merge(template, fixture.get("before")),
+                                    fixture.get("omitBefore")),
+                            omit(ManagedChildRunRecordContractTest.merge(template, fixture.get("after")),
+                                    fixture.get("omitAfter"))),
                     fixture.get("id").textValue());
         }
+    }
+
+    /** Drops {@code keys}' top-level fields: a record written before they existed. */
+    static JsonNode omit(JsonNode record, JsonNode keys) {
+        if (keys != null) {
+            keys.forEach(key -> ((ObjectNode) record).remove(key.textValue()));
+        }
+        return record;
     }
 
     static JsonNode fixtures() throws IOException {

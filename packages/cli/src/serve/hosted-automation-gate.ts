@@ -78,7 +78,9 @@ export function createHostedAutomationGateRunner(options: {
     });
     const digest = `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`;
     let acquired = false;
+    let replayed = false;
     let started = false;
+    let result: HostedAutomationGateResult;
     try {
       // The occurrence's receipt is asked for before anything is acquired:
       // the Broker answers a terminal receipt under the derived key after
@@ -87,6 +89,7 @@ export function createHostedAutomationGateRunner(options: {
       // the absence of a receipt costs an acquisition.
       let prepared = await replayableWithoutSession(broker, callId, digest);
       if (prepared === 'held') {
+        // That attempt owns the Session and its release.
         return {
           kind: 'unknown',
           reason: "the occurrence's Runtime Session is held by another attempt",
@@ -96,70 +99,104 @@ export function createHostedAutomationGateRunner(options: {
         await broker.acquire();
         acquired = true;
         prepared ??= await broker.prepareReplayable(callId, digest);
+      } else {
+        replayed = true;
       }
-      let result = prepared.settled;
-      if (result === undefined) {
+      result = await settle(broker, prepared, payloadJson, signal, () => {
         started = true;
-        result = await broker.execute(
-          prepared.executionCallId,
-          payloadJson,
-          signal,
-          GATE_OBSERVATION_MS,
-        );
-      }
-      if (result.executionStatus === 'cancelled') {
-        return {
-          kind: 'failed',
-          detail: 'was cancelled',
-          stderr: '',
-          durationMs: 0,
-        };
-      }
-      if (result.executionStatus !== 'success') {
-        return {
-          kind: 'failed',
-          detail: `could not start: ${result.error?.message ?? result.executionStatus}`,
-          stderr: '',
-          durationMs: 0,
-        };
-      }
-      const parsed = parseManagedAutomationGateResult(result.responseParts);
-      if (parsed === null) {
-        return {
-          kind: 'failed',
-          detail: 'could not start: the Runtime answered no gate result',
-          stderr: '',
-          durationMs: 0,
-        };
-      }
-      return parsed;
+      });
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       // Once the start left, the command may have run: only a settled
       // answer could say; everything else is unknown, never a second start.
-      if (
-        started ||
-        cause instanceof HostedWorkspaceBrokerExecutionUnresolved
-      ) {
-        return { kind: 'unknown', reason: message };
-      }
-      return {
-        kind: 'failed',
-        detail: `could not start: ${message}`,
-        stderr: '',
-        durationMs: 0,
-      };
-    } finally {
-      if (acquired) {
-        try {
-          await broker.release();
-        } catch {
-          // The Runtime Session is derived: a later probe re-acquires it,
-          // and the Broker's own sweeps reclaim a release that was lost.
-        }
-      }
+      result =
+        started || cause instanceof HostedWorkspaceBrokerExecutionUnresolved
+          ? { kind: 'unknown', reason: message }
+          : {
+              kind: 'failed',
+              detail: `could not start: ${message}`,
+              stderr: '',
+              durationMs: 0,
+            };
     }
+    // A replayed receipt may be all that is left of an attempt that settled
+    // the probe and then failed to release, or died before it could: this
+    // attempt inherits that release.
+    if (acquired || replayed) await releaseDerivedSession(broker);
+    return result;
   };
+}
+
+/** The probe's answer from a reservation: its receipt, or a start. */
+async function settle(
+  broker: HostedWorkspaceBroker,
+  prepared: Awaited<ReturnType<HostedWorkspaceBroker['prepareReplayable']>>,
+  payloadJson: string,
+  signal: AbortSignal,
+  onStart: () => void,
+): Promise<HostedAutomationGateResult> {
+  let result = prepared.settled;
+  if (result === undefined) {
+    onStart();
+    result = await broker.execute(
+      prepared.executionCallId,
+      payloadJson,
+      signal,
+      GATE_OBSERVATION_MS,
+    );
+  }
+  if (result.executionStatus === 'cancelled') {
+    return {
+      kind: 'failed',
+      detail: 'was cancelled',
+      stderr: '',
+      durationMs: 0,
+    };
+  }
+  if (result.executionStatus !== 'success') {
+    return {
+      kind: 'failed',
+      detail: `could not start: ${result.error?.message ?? result.executionStatus}`,
+      stderr: '',
+      durationMs: 0,
+    };
+  }
+  return (
+    parseManagedAutomationGateResult(result.responseParts) ?? {
+      kind: 'failed',
+      detail: 'could not start: the Runtime answered no gate result',
+      stderr: '',
+      durationMs: 0,
+    }
+  );
+}
+
+/**
+ * Releases the occurrence's derived Runtime Session before the answer goes
+ * out. A Session left behind stays a member of the Workspace execution and
+ * blocks its rewind, and once the scanner settles the occurrence nothing
+ * comes back for it: a release that fails therefore fails the fire, so the
+ * scanner re-drives it and the replay, which reads the settled receipt and
+ * runs nothing, releases again. A Session the Broker does not know is gone.
+ */
+async function releaseDerivedSession(
+  broker: HostedWorkspaceBroker,
+): Promise<void> {
+  try {
+    await broker.release();
+  } catch (cause) {
+    if (
+      cause instanceof HostedWorkspaceBrokerRejection &&
+      cause.status === 404 &&
+      cause.code === 'runtime_session_not_found'
+    ) {
+      return;
+    }
+    const message = cause instanceof Error ? cause.message : String(cause);
+    throw new Error(
+      `The gate's Runtime Session was not released, so the fire is retried to release it: ${message}`,
+    );
+  }
 }
 
 /**

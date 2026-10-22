@@ -1427,6 +1427,19 @@ describe('hosted automation gates', () => {
         stderr: 'boom',
         durationMs: 7,
       },
+      {
+        outcome: 'failed',
+        detail: 'exited with code 1; stderr: boom',
+        durationMs: 7,
+      },
+    ],
+    [
+      {
+        kind: 'failed',
+        detail: 'exited with code 1',
+        stderr: '',
+        durationMs: 7,
+      },
       { outcome: 'failed', detail: 'exited with code 1', durationMs: 7 },
     ],
     [
@@ -1452,6 +1465,36 @@ describe('hosted automation gates', () => {
         expect(fired.run).toBeUndefined();
         expect(fired.gate).toEqual(summary);
         expect(automations.runs()).toHaveLength(0);
+      },
+      { gate: gate.runner },
+    );
+  });
+
+  it('keeps the newest stderr of a failed gate, sanitized and within what the control plane stores', async () => {
+    // A failed gate runs no turn: the detail is the only place its reason
+    // reaches, so a long, colored stderr must not push that reason out.
+    const harness = await createHarness();
+    const stderr = [
+      ...Array.from({ length: 40 }, (_, i) => `noise ${i} ${'x'.repeat(60)}`),
+      '\u001b[31mauthentication expired\u001b[0m',
+    ].join('\n');
+    const gate = scriptedGate([
+      { kind: 'failed', detail: 'exited with code 1', stderr, durationMs: 7 },
+    ]);
+    await withSession(
+      harness,
+      async (automations) => {
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        const detail = (await automations.fire(fireParams())).gate?.detail;
+        expect(detail?.startsWith('exited with code 1; stderr: ')).toBe(true);
+        expect(detail?.endsWith('authentication expired')).toBe(true);
+        expect(detail).not.toContain('\u001b');
+        expect(detail).not.toContain('noise 0 ');
+        expect(detail!.length).toBeLessThanOrEqual(1024);
       },
       { gate: gate.runner },
     );

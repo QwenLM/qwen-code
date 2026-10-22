@@ -233,6 +233,32 @@ class AutomationScannerTest {
     }
 
     @Test
+    void everySlotOfOneScanCountsInTheGateStatus() {
+        // One scan hands every due slot the same schedule snapshot: the
+        // counters must still move once per probe.
+        PublicAutomation automation = defineGated("./probe.sh");
+        fake.gateAnswers.add("quiet");
+        fake.gateAnswers.add("quiet");
+        fake.gateAnswers.add("quiet");
+        clock.set(T0 + 3 * MINUTE + 1_000);
+        scanner.tick(clock.get());
+        assertThat(fake.probes).hasSize(3);
+        assertThat(service.get(tenant, ACTOR, automation.id()).gateStatus()
+                .quietSinceDelivery()).isEqualTo(3);
+
+        fake.gateAnswers.add("failed:exited with code 1");
+        fake.gateAnswers.add("failed:exited with code 2");
+        clock.set(T0 + 5 * MINUTE + 1_000);
+        scanner.tick(clock.get());
+        assertThat(fake.probes).hasSize(5);
+        PublicAutomation failing = service.get(tenant, ACTOR, automation.id());
+        assertThat(failing.gateStatus().consecutiveFailures()).isEqualTo(2);
+        assertThat(failing.gateStatus().quietSinceDelivery()).isEqualTo(3);
+        assertThat(failing.gateStatus().lastError())
+                .isEqualTo("exited with code 2");
+    }
+
+    @Test
     void aGateRevisionStartsItsStatusOverAndNullClearsIt() {
         PublicAutomation automation = defineGated("./probe.sh");
         fake.gateAnswers.add("quiet");

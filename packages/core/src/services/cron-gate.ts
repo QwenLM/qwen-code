@@ -275,12 +275,19 @@ function sanitizeGateText(text: string): string {
     .trim();
 }
 
-function stderrTail(stderr: string): string {
+/**
+ * The sanitized last lines of a failed gate's stderr, cut to its newest
+ * `maxChars` characters: what a failure notice shows, and what a managed
+ * automation keeps as the failure's detail.
+ */
+export function gateStderrTail(
+  stderr: string,
+  maxChars: number = CRON_GATE_STDERR_CAP_BYTES,
+): string {
+  if (maxChars <= 0) return '';
   const lines = sanitizeGateText(stderr).split('\n');
   const tail = lines.slice(-CRON_GATE_STDERR_LINES).join('\n');
-  return tail.length > CRON_GATE_STDERR_CAP_BYTES
-    ? tail.slice(-CRON_GATE_STDERR_CAP_BYTES)
-    : tail;
+  return tail.length > maxChars ? tail.slice(-maxChars) : tail;
 }
 
 function seconds(durationMs: number): string {
@@ -314,7 +321,7 @@ export function buildGateFailureNotice(
   job: GateJob,
   result: Extract<CronGateResult, { kind: 'failed' }>,
 ): string {
-  const tail = stderrTail(result.stderr);
+  const tail = gateStderrTail(result.stderr);
   const stderrBlock = tail
     ? `stderr, last ${CRON_GATE_STDERR_LINES} lines:\n<gate-stderr>\n${tail}\n</gate-stderr>\n`
     : 'It printed nothing on stderr.\n';

@@ -34,6 +34,8 @@ interface Fixture {
   start: boolean;
   /** The clause substring both validators must report on an invalid case. */
   error?: string;
+  /** Keys removed after the patch: a record written before they existed. */
+  omit?: readonly string[];
 }
 const fixtures = JSON.parse(
   readFileSync(
@@ -55,12 +57,25 @@ const fixtures = JSON.parse(
   templates: Record<Domain, Record<string, unknown>>;
   cases: Fixture[];
   successors: Array<
-    Omit<Fixture, 'patch' | 'start'> & {
+    Omit<Fixture, 'patch' | 'start' | 'omit'> & {
       before: Record<string, unknown>;
       after: Record<string, unknown>;
+      omitBefore?: readonly string[];
+      omitAfter?: readonly string[];
     }
   >;
 };
+
+/** `merge` followed by dropping `omit`'s top-level keys. */
+function record(
+  base: Record<string, unknown>,
+  patch: Record<string, unknown>,
+  omit: readonly string[] = [],
+): Record<string, unknown> {
+  const value = merge(base, patch);
+  for (const key of omit) delete value[key];
+  return value;
+}
 
 function merge(
   base: Record<string, unknown>,
@@ -188,10 +203,18 @@ describe('managed-automation-record/1 shared contract', () => {
 
   it.each(fixtures.cases)('$id', (fixture) => {
     const body = MANAGED_EXTENSION_RECORD_BODIES[fixture.domain]!;
-    const record = merge(fixtures.templates[fixture.domain], fixture.patch);
+    const candidate = record(
+      fixtures.templates[fixture.domain],
+      fixture.patch,
+      fixture.omit,
+    );
     if (fixture.valid) {
-      const parsed = body.parse(record);
-      expect(parsed.record).toEqual(record);
+      const parsed = body.parse(candidate);
+      // A key the record predates reads as null; everything else verbatim.
+      expect(parsed.record).toEqual({
+        ...candidate,
+        ...Object.fromEntries((fixture.omit ?? []).map((key) => [key, null])),
+      });
       expect(Object.isFrozen(parsed.record)).toBe(true);
       for (const value of Object.values(
         parsed.record as Record<string, unknown>,
@@ -207,17 +230,17 @@ describe('managed-automation-record/1 shared contract', () => {
     } else {
       // Every invalid case names the clause that must refuse it, so a
       // masked guard can never slip a fixture green.
-      expect(() => body.parse(record)).toThrow(fixture.error as string);
+      expect(() => body.parse(candidate)).toThrow(fixture.error as string);
     }
-    expect(body.isStart(record)).toBe(fixture.start);
+    expect(body.isStart(candidate)).toBe(fixture.start);
   });
 
   it.each(fixtures.successors)('$id', (fixture) => {
     const template = fixtures.templates[fixture.domain];
     expect(
       MANAGED_EXTENSION_RECORD_BODIES[fixture.domain]!.isSuccessor(
-        merge(template, fixture.before),
-        merge(template, fixture.after),
+        record(template, fixture.before, fixture.omitBefore),
+        record(template, fixture.after, fixture.omitAfter),
       ),
     ).toBe(fixture.valid);
   });

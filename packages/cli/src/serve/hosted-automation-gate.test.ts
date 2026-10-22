@@ -106,13 +106,69 @@ const acquired = {
 };
 
 describe('createHostedAutomationGateRunner', () => {
-  it('reads the occurrence’s receipt back without acquiring a Runtime Session', async () => {
+  const RELEASE = `/tool-sessions/${encodeURIComponent(RUNTIME_SESSION_ID)}:release`;
+
+  it.each([
+    ['released', { body: { ...identity, released: true } }],
+    ['unknown to the Broker', rejection(404, 'runtime_session_not_found')],
+  ] as const)(
+    'reads the occurrence’s receipt back without acquiring, and releases the Session it may have inherited (%s)',
+    async (_what, release) => {
+      // The attempt that settled the probe may have failed to release, or
+      // died first: the replay releases, and a Session already gone counts.
+      const { calls, probe } = await rig((path) =>
+        path === RELEASE
+          ? release
+          : { body: settled('{"kind":"quiet","durationMs":3}') },
+      );
+      await expect(probe()).resolves.toEqual({ kind: 'quiet', durationMs: 3 });
+      expect(calls.map((call) => call.path)).toEqual([
+        '/executions:prepare',
+        RELEASE,
+      ]);
+    },
+  );
+
+  it('fails the fire instead of answering while the probe’s Session is unreleased', async () => {
+    // Answering would let the scanner settle the occurrence with the Session
+    // still a Workspace execution member; failing re-drives it.
+    let prepares = 0;
     const { calls, probe } = await rig((path) => {
-      expect(path).toBe('/executions:prepare');
-      return { body: settled('{"kind":"quiet","durationMs":3}') };
+      switch (path) {
+        case '/executions:prepare':
+          prepares++;
+          return prepares === 1
+            ? rejection(404, 'runtime_session_not_found')
+            : {
+                body: {
+                  ...identity,
+                  executionCallId: 'gate-execution',
+                  status: { state: 'prepared' },
+                },
+              };
+        case '/tool-sessions:acquire':
+          return { body: acquired };
+        case '/executions/gate-execution:start':
+          return { body: settled('{"kind":"quiet","durationMs":3}') };
+        case RELEASE:
+          return rejection(503, 'runtime_unavailable');
+        default:
+          throw new Error(`unexpected ${path}`);
+      }
     });
-    await expect(probe()).resolves.toEqual({ kind: 'quiet', durationMs: 3 });
-    expect(calls.map((call) => call.path)).toEqual(['/executions:prepare']);
+    await expect(probe()).rejects.toThrow(
+      /Runtime Session was not released.*runtime_unavailable/,
+    );
+    expect(calls.at(-1)?.path).toBe(RELEASE);
+  });
+
+  it('fails a replay whose inherited Session still cannot be released', async () => {
+    const { probe } = await rig((path) =>
+      path === RELEASE
+        ? rejection(503, 'runtime_unavailable')
+        : { body: settled('{"kind":"quiet","durationMs":3}') },
+    );
+    await expect(probe()).rejects.toThrow(/Runtime Session was not released/);
   });
 
   it('acquires, reserves, starts and releases only when the Broker knows no Session for the occurrence', async () => {

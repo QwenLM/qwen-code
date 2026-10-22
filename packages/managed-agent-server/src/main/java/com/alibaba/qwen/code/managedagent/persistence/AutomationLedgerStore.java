@@ -385,18 +385,23 @@ public class AutomationLedgerStore {
             long fence, String outcome, String detail, long now) {
         boolean delivered = GATE_DELIVERED.equals(outcome);
         boolean quiet = GATE_QUIET.equals(outcome);
-        int quietSinceDelivery = delivered ? 0
-                : row.gateQuietSinceDelivery() + (quiet ? 1 : 0);
-        int failures = delivered || quiet ? 0 : row.gateFailures() + 1;
+        // The counters move from the row as stored, not from `row`: one scan
+        // hands the same snapshot to every due slot, so counting from it
+        // would let each slot's update overwrite the one before.
+        String quietSinceDelivery = delivered ? "0"
+                : quiet ? "gate_quiet_since_delivery + 1"
+                : "gate_quiet_since_delivery";
+        String failures = delivered || quiet ? "0" : "gate_failures + 1";
         String error = delivered || quiet ? null
                 : StringUtils.truncate(detail == null ? outcome : detail, 1024);
         return jdbc.update("UPDATE ma_schedule"
                         + " SET gate_last_outcome = ?, gate_last_at = ?,"
-                        + " gate_quiet_since_delivery = ?, gate_failures = ?,"
+                        + " gate_quiet_since_delivery = " + quietSinceDelivery
+                        + ", gate_failures = " + failures + ","
                         + " gate_last_error = ?, gmt_modified = ?"
                         + " WHERE tenant_id = ? AND schedule_id = ?"
                         + " AND lease_owner = ? AND fence = ?",
-                outcome, now, quietSinceDelivery, failures, error, now,
+                outcome, now, error, now,
                 row.tenantId(), row.scheduleId(), owner, fence) == 1;
     }
 

@@ -1109,6 +1109,42 @@
       "valid": false,
       "error": "gateOutputRef",
       "start": false
+    },
+    {
+      "id": "schedule-pre-gate-record",
+      "domain": "schedule",
+      "patch": {},
+      "omit": ["gate"],
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "run-pre-gate-record",
+      "domain": "automation_run",
+      "patch": {},
+      "omit": ["gateOutputRef"],
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "schedule-pre-gate-unknown-key-still-refused",
+      "domain": "schedule",
+      "patch": {
+        "gates": null
+      },
+      "omit": ["gate"],
+      "valid": false,
+      "error": "exactly",
+      "start": false
+    },
+    {
+      "id": "schedule-missing-required-key",
+      "domain": "schedule",
+      "patch": {},
+      "omit": ["enabled"],
+      "valid": false,
+      "error": "exactly",
+      "start": false
     }
   ],
   "successors": [
@@ -1528,6 +1564,61 @@
       "before": {},
       "after": {
         "scheduleId": "schedule-2"
+      },
+      "valid": false
+    },
+    {
+      "id": "schedule-pre-gate-revise",
+      "domain": "schedule",
+      "before": {},
+      "omitBefore": ["gate"],
+      "after": {
+        "definitionRevision": 2,
+        "definitionDigest": "9999999999999999999999999999999999999999999999999999999999999999",
+        "gate": null
+      },
+      "valid": true
+    },
+    {
+      "id": "schedule-pre-gate-gains-gate",
+      "domain": "schedule",
+      "before": {},
+      "omitBefore": ["gate"],
+      "after": {
+        "definitionRevision": 2,
+        "definitionDigest": "9999999999999999999999999999999999999999999999999999999999999999",
+        "gate": "./probe.sh"
+      },
+      "valid": true
+    },
+    {
+      "id": "run-pre-gate-to-intent",
+      "domain": "automation_run",
+      "before": {},
+      "omitBefore": ["gateOutputRef"],
+      "after": {
+        "run": {
+          "state": "running",
+          "execution": "intent",
+          "effectId": "effect-1"
+        },
+        "gateOutputRef": null
+      },
+      "valid": true
+    },
+    {
+      "id": "run-pre-gate-gains-output",
+      "domain": "automation_run",
+      "before": {},
+      "omitBefore": ["gateOutputRef"],
+      "after": {
+        "gateOutputRef": {
+          "resourceId": "gate-1",
+          "kind": "managed-automation-gate-output",
+          "schemaVersion": 1,
+          "byteLength": 40,
+          "digest": "7777777777777777777777777777777777777777777777777777777777777777"
+        }
       },
       "valid": false
     }

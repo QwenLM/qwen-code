@@ -45,6 +45,7 @@ import type {
   HostedAutomationGateRunner,
 } from './hosted-automation-gate.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
+import { gateStderrTail } from '@qwen-code/qwen-code-core/services/cron-gate.js';
 import type {
   CommittedExtensionOperation,
   LocalManagedSessionAuthority,
@@ -254,6 +255,10 @@ export function isAutomationScheduleId(value: unknown): value is string {
   return typeof value === 'string' && SCHEDULE_ID.test(value);
 }
 
+/** The longest gate detail the control plane keeps (`ma_schedule` and the
+ * occurrence's `last_error` are 1024 characters). */
+const AUTOMATION_GATE_DETAIL_MAX_CHARS = 1024;
+
 /** The control plane's view of a probe that withheld the fire. */
 function summarizeGate(
   result: Exclude<HostedAutomationGateResult, { kind: 'output' }>,
@@ -261,12 +266,21 @@ function summarizeGate(
   switch (result.kind) {
     case 'quiet':
       return { outcome: 'quiet', durationMs: result.durationMs };
-    case 'failed':
+    case 'failed': {
+      // A failed gate runs no turn, so its stderr has nowhere else to go:
+      // its tail rides in the detail, cut so the whole detail fits what the
+      // control plane keeps and its newest lines survive.
+      const prefix = `${result.detail}; stderr: `;
+      const tail = gateStderrTail(
+        result.stderr,
+        AUTOMATION_GATE_DETAIL_MAX_CHARS - prefix.length,
+      );
       return {
         outcome: 'failed',
-        detail: result.detail,
+        detail: tail === '' ? result.detail : prefix + tail,
         durationMs: result.durationMs,
       };
+    }
     case 'blocked':
       return { outcome: 'blocked', detail: result.reason };
     default:

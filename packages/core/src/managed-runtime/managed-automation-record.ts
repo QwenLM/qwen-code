@@ -134,6 +134,9 @@ const SCHEDULE_KEYS = [
   'targetSessionId',
   'timezone',
 ] as const;
+/** Keys added to schema version 1 after records were written: an older
+ * record has none of them and reads each as null. */
+const SCHEDULE_LATER_KEYS = ['gate'] as const;
 /** The fields that no revision of a Schedule may change. */
 const SCHEDULE_FIXED_KEYS = ['kind', 'ownerScopeId', 'scheduleId'] as const;
 const AUTOMATION_RUN_KEYS = [
@@ -147,6 +150,8 @@ const AUTOMATION_RUN_KEYS = [
   'sessionMode',
   'targetSessionId',
 ] as const;
+/** See {@link SCHEDULE_LATER_KEYS}. */
+const AUTOMATION_RUN_LATER_KEYS = ['gateOutputRef'] as const;
 /** The fields that no revision of an AutomationRun may change. */
 const AUTOMATION_RUN_FIXED_KEYS = [
   'automationRunId',
@@ -184,18 +189,24 @@ function fail(message: string): never {
   throw new ManagedSessionRecordError(message);
 }
 
+/**
+ * The body's own keys, all of them and no other. A key in `optional` may be
+ * absent: schema version 1 grew it after records were already written, and
+ * those older records stay readable (the caller reads the absence as null).
+ */
 function closed<Key extends string>(
   label: string,
   value: unknown,
   keys: readonly Key[],
+  optional: readonly Key[] = [],
 ): Record<Key, ManagedSessionJsonValue> {
   if (
     typeof value !== 'object' ||
     value === null ||
     (Object.getPrototypeOf(value) !== Object.prototype &&
       Object.getPrototypeOf(value) !== null) ||
-    Object.keys(value).length !== keys.length ||
-    Object.keys(value).some((key) => !keys.includes(key as Key))
+    Object.keys(value).some((key) => !keys.includes(key as Key)) ||
+    keys.some((key) => !optional.includes(key) && !Object.hasOwn(value, key))
   )
     fail(`${label} must have exactly the keys ${keys.join(', ')}.`);
   return { ...value } as Record<Key, ManagedSessionJsonValue>;
@@ -378,7 +389,7 @@ function targetSession(
 }
 
 export function parseScheduleRecord(value: unknown): Schedule {
-  const body = closed('Schedule', value, SCHEDULE_KEYS);
+  const body = closed('Schedule', value, SCHEDULE_KEYS, SCHEDULE_LATER_KEYS);
   if (body.kind !== SCHEDULE_KIND) {
     fail(`Schedule kind must be 'schedule' in schema version 1.`);
   }
@@ -418,7 +429,7 @@ export function parseScheduleRecord(value: unknown): Schedule {
     catchUp,
     catchUpLimit,
     enabled: boolean(body.enabled, 'enabled'),
-    gate: nullable(body.gate, gate),
+    gate: nullable(body.gate ?? null, gate),
     run,
   });
 }
@@ -495,7 +506,12 @@ function occurrenceKey(value: ManagedSessionJsonValue): string {
 }
 
 export function parseAutomationRunRecord(value: unknown): AutomationRun {
-  const body = closed('AutomationRun', value, AUTOMATION_RUN_KEYS);
+  const body = closed(
+    'AutomationRun',
+    value,
+    AUTOMATION_RUN_KEYS,
+    AUTOMATION_RUN_LATER_KEYS,
+  );
   if (body.kind !== AUTOMATION_RUN_KIND) {
     fail(`AutomationRun kind must be 'automation_run' in schema version 1.`);
   }
@@ -540,7 +556,7 @@ export function parseAutomationRunRecord(value: unknown): AutomationRun {
     occurrenceKey: occurrenceKey(body.occurrenceKey),
     sessionMode,
     targetSessionId,
-    gateOutputRef: nullable(body.gateOutputRef, (each) =>
+    gateOutputRef: nullable(body.gateOutputRef ?? null, (each) =>
       ref(each, 'gateOutputRef'),
     ),
     run,

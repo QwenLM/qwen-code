@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.math.BigDecimal;
@@ -215,12 +216,20 @@ public final class ManagedExtensionRecords {
             "catchUpLimit", "enabled", "gate", "run");
     /** The longest gate command a definition may carry, in UTF-8 bytes. */
     public static final int SCHEDULE_GATE_MAX_BYTES = 2048;
+    /**
+     * Keys added to schema version 1 after records were written: an older
+     * record has none of them and reads each as null.
+     */
+    private static final Set<String> SCHEDULE_LATER_KEYS = Set.of("gate");
     private static final List<String> SCHEDULE_FIXED = List.of("kind",
             "scheduleId", "ownerScopeId");
     private static final Set<String> AUTOMATION_RUN_KEYS = Set.of("kind",
             "automationRunId", "scheduleId", "definitionRevision",
             "occurrenceKey", "sessionMode", "targetSessionId",
             "gateOutputRef", "run");
+    /** See {@link #SCHEDULE_LATER_KEYS}. */
+    private static final Set<String> AUTOMATION_RUN_LATER_KEYS =
+            Set.of("gateOutputRef");
     private static final List<String> AUTOMATION_RUN_FIXED = List.of("kind",
             "automationRunId", "scheduleId", "definitionRevision",
             "occurrenceKey", "sessionMode", "targetSessionId",
@@ -1361,7 +1370,7 @@ public final class ManagedExtensionRecords {
      * occurrences pin (H6 decision 1).
      */
     public static void requireScheduleRecord(JsonNode schedule) {
-        closed(schedule, SCHEDULE_KEYS, "schedule");
+        closed(schedule, SCHEDULE_KEYS, SCHEDULE_LATER_KEYS, "schedule");
         require("schedule".equals(schedule.get("kind").textValue()),
                 "schedule.kind must be 'schedule' in schema version 1");
         logicalRun(schedule.get("run"), "schedule");
@@ -1405,7 +1414,7 @@ public final class ManagedExtensionRecords {
                 "schedule.enabled must be boolean");
         // The gate: bounded text under its own cap, or null for a definition
         // that fires every slot (docs/design/2026-10-22-managed-automation-gate.md).
-        JsonNode gate = schedule.get("gate");
+        JsonNode gate = orNull(schedule, "gate");
         if (!gate.isNull()) {
             boundedText(gate, "schedule.gate", SCHEDULE_GATE_MAX_BYTES);
         }
@@ -1444,7 +1453,8 @@ public final class ManagedExtensionRecords {
             return false;
         }
         if (TERMINAL.contains(text(previous.get("run"), "state"))) {
-            return same(without(previous, "run"), without(next, "run"));
+            return same(without(withLater(previous, SCHEDULE_LATER_KEYS), "run"),
+                    without(withLater(next, SCHEDULE_LATER_KEYS), "run"));
         }
         return true;
     }
@@ -1481,7 +1491,8 @@ public final class ManagedExtensionRecords {
      * and 6).
      */
     public static void requireAutomationRunRecord(JsonNode automation) {
-        closed(automation, AUTOMATION_RUN_KEYS, "automationRun");
+        closed(automation, AUTOMATION_RUN_KEYS, AUTOMATION_RUN_LATER_KEYS,
+                "automationRun");
         require("automation_run".equals(automation.get("kind").textValue()),
                 "automationRun.kind must be 'automation_run' in schema "
                         + "version 1");
@@ -1519,7 +1530,7 @@ public final class ManagedExtensionRecords {
         occurrenceKey(automation.get("occurrenceKey"));
         // The probe output that admitted the run, read by its dispatch; null
         // for a run of a definition without a gate.
-        JsonNode gateOutputRef = automation.get("gateOutputRef");
+        JsonNode gateOutputRef = orNull(automation, "gateOutputRef");
         if (!gateOutputRef.isNull()) {
             durableRef(gateOutputRef, "automationRun.gateOutputRef");
         }
@@ -1544,7 +1555,7 @@ public final class ManagedExtensionRecords {
             return false;
         }
         for (String key : AUTOMATION_RUN_FIXED) {
-            if (!same(previous.get(key), next.get(key))) {
+            if (!same(orNull(previous, key), orNull(next, key))) {
                 return false;
             }
         }
@@ -1598,8 +1609,18 @@ public final class ManagedExtensionRecords {
 
     static void closed(JsonNode node, Set<String> keys,
             String label) {
-        boolean exact = node != null && node.isObject()
-                && node.size() == keys.size();
+        closed(node, keys, Set.of(), label);
+    }
+
+    /**
+     * {@link #closed(JsonNode, Set, String)} where a key in {@code optional}
+     * may be absent: schema version 1 grew it after records were already
+     * written, and those older records stay readable (the caller reads the
+     * absence as null through {@link #orNull}).
+     */
+    static void closed(JsonNode node, Set<String> keys, Set<String> optional,
+            String label) {
+        boolean exact = node != null && node.isObject();
         if (exact) {
             for (Iterator<String> names = node.fieldNames();
                     names.hasNext();) {
@@ -1609,8 +1630,33 @@ public final class ManagedExtensionRecords {
                 }
             }
         }
+        if (exact) {
+            for (String key : keys) {
+                if (!optional.contains(key) && !node.has(key)) {
+                    exact = false;
+                    break;
+                }
+            }
+        }
         require(exact, () -> label + " must be an object with exactly "
                 + keys);
+    }
+
+    /** The field, or JSON null when an older record predates it. */
+    private static JsonNode orNull(JsonNode record, String field) {
+        JsonNode value = record.get(field);
+        return value == null ? NullNode.getInstance() : value;
+    }
+
+    /** A copy of {@code record} with every absent later key set to null. */
+    private static JsonNode withLater(JsonNode record, Set<String> later) {
+        ObjectNode copy = ((ObjectNode) record).deepCopy();
+        for (String key : later) {
+            if (!copy.has(key)) {
+                copy.putNull(key);
+            }
+        }
+        return copy;
     }
 
     static String id(JsonNode node, String label) {
