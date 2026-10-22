@@ -56,3 +56,39 @@ export function isStandaloneModelPickerUnavailable(input: {
     (input.models ?? []).filter(isVisibleComposerModel).length === 0
   );
 }
+
+export interface ComposerModelOption {
+  id: string;
+  label?: string;
+  tooltip?: string;
+  disabled?: boolean;
+}
+
+/**
+ * Append host-injected unavailable models after the daemon-available list.
+ * Available ids win. Empty, hidden, and duplicate injected ids are skipped.
+ */
+export function appendUnavailableComposerModels(
+  available: readonly { id: string; label?: string }[],
+  unavailable?: readonly { id: string; label?: string; tooltip?: string }[],
+): ComposerModelOption[] {
+  const seen = new Set<string>();
+  const merged: ComposerModelOption[] = [];
+  for (const model of available) {
+    if (!model.id || seen.has(model.id)) continue;
+    seen.add(model.id);
+    merged.push({ id: model.id, label: model.label });
+  }
+  for (const model of unavailable ?? []) {
+    const id = model.id.trim();
+    if (!id || seen.has(id) || !isVisibleComposerModel({ id })) continue;
+    seen.add(id);
+    merged.push({
+      id,
+      label: model.label,
+      tooltip: model.tooltip,
+      disabled: true,
+    });
+  }
+  return merged;
+}
