@@ -19,6 +19,7 @@ import org.apache.commons.codec.digest.DigestUtils;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.support.StaticListableBeanFactory;
@@ -26,6 +27,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
@@ -66,6 +68,8 @@ class SessionRecoveryInitialStateTest {
     private long revision;
     private long sequence;
     private JsonNode nativeFixture;
+    @TempDir
+    private Path directory;
 
     @BeforeEach
     void setup() {
@@ -340,17 +344,19 @@ class SessionRecoveryInitialStateTest {
 
     private void prepareGenesis() throws Exception {
         Path root = Path.of("").toAbsolutePath().getParent().getParent();
+        Path output = directory.resolve("initial-journal.json");
         var process = new ProcessBuilder("node", root.resolve(
                 "packages/managed-agent-server/src/test/resources/recovery-initial-journal.mjs").toString(), sessionId)
-                .directory(root.toFile()).redirectErrorStream(true).start();
-        boolean finished = process.waitFor(30, TimeUnit.SECONDS);
-        if (!finished) {
-            process.destroyForcibly();
+                .directory(root.toFile()).redirectErrorStream(true).redirectOutput(output.toFile()).start();
+        try {
+            assertThat(process.waitFor(30, TimeUnit.SECONDS)).as("Core initial journal generator completed").isTrue();
+            assertThat(process.exitValue()).as(Files.readString(output)).isZero();
+        } finally {
+            if (process.isAlive()) {
+                process.destroyForcibly().waitFor(10, TimeUnit.SECONDS);
+            }
         }
-        assertThat(finished).as("Core initial journal generator completed").isTrue();
-        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        assertThat(process.exitValue()).as(output).isZero();
-        nativeFixture = json.readTree(output);
+        nativeFixture = json.readTree(output.toFile());
         assertThat(nativeFixture.path("coldOpened").asBoolean()).isTrue();
         generation = journals.acquireWriter(TENANT, sessionId, TOKEN,
                 new AcquireWriterRequest(WORKSPACE, "writer", 60_000L)).writerGeneration();
