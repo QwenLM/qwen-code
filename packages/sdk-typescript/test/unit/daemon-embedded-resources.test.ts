@@ -711,6 +711,10 @@ describe('daemon embedded text resources', () => {
     expect(block.embeddedResources!.map((entry) => entry.resource.uri)).toEqual(
       ['context://example/scalar/0', 'context://example/scalar/1'],
     );
+    // The summed bound covers a writer-admitted prompt, so neither entry is
+    // degraded: a per-resource-sized sum would skeletonize the second.
+    expect(block.embeddedResources![0]).toHaveProperty('_meta');
+    expect(block.embeddedResources![1]).toHaveProperty('_meta');
   });
 
   it('does not skeletonize a writer-journaled scalar payload on replay', () => {
