@@ -611,9 +611,13 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       // of reach and the timeout has to name what blocked it.
       const name = `1-0000000001-${process.pid}`;
       writeFileSync(join(queue, name), '');
+      // A real publisher advances the counter with its ticket. Without it,
+      // both tickets get sequence 1 and PID sorting can move the waiter ahead.
+      writeFileSync(join(queue, '.seq'), '1\n');
       const stub = flockStub(freeFlock);
       const result = await acquire(home, 3, stub);
       expect(result.code).toBe(1);
+      expect(result.out).toContain('as queue ticket 2');
       expect(result.out).toContain(`head of queue is ${name}`);
       expect(readdirSync(queue).filter((f) => f !== '.seq')).toEqual([name]);
     },

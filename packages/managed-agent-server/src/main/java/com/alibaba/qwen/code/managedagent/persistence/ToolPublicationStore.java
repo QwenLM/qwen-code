@@ -675,7 +675,7 @@ public final class ToolPublicationStore {
             var current = sessions.readResource(text(key, "tenantId"), text(key, "workspaceId"),
                     text(key, "sessionId"), writer.checkpointId(), writerToken);
             require("managed-checkpoint".equals(current.kind()) && current.schemaVersion() == 1
-                    && current.byteLength() <= ToolPublicationContract.MAX_BODY_BYTES, "Current checkpoint is invalid");
+                    && current.byteLength() <= ManagedSessionStoreModels.MAX_EVENT_BYTES, "Current checkpoint is invalid");
             requireCheckpoint(b, ToolPublicationContract.readJson(current.bytes()), writer);
         }
         JsonNode args = readResource(b, b.get("argsRef"), writerToken);
