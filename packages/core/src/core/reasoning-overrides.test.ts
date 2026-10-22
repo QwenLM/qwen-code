@@ -399,9 +399,9 @@ describe('reasoning declarations', () => {
   });
 
   it('inherits the selected provider policy for the same model', () => {
-    // glm-5.1 declares its thinking switch on Token Plan only; the Standard
-    // preset leaves it undeclared, so the same override has nothing to extend.
-    const target = { ...route, model: 'glm-5.1' };
+    // kimi-k2.5 is a Token Plan preset model only; on the Standard endpoint
+    // the same override has no provider declaration to extend.
+    const target = { ...route, model: 'kimi-k2.5' };
     const input = { canDisable: false };
     expect(
       resolveReasoningCapabilities(
