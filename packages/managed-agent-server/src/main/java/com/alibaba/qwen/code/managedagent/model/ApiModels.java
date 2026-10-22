@@ -625,6 +625,22 @@ public final class ApiModels {
                     contextCompressionOperationId, null, null);
         }
 
+        public WebShellSession(String sessionId, String title, String agentId,
+                String status, long createdAt, long updatedAt,
+                WebShellTurn activeTurn, Object environment, long lastSequence,
+                WebShellWorkspace workspace, WebShellSessionCapabilities capabilities,
+                String approvalMode, WebShellModelContext modelContext,
+                WebShellModelSelection modelSelection, Long approvalRevision,
+                String initialApprovalMode, boolean planMode, boolean planModeSupported,
+                Long compactionRevision, String contextCompressionOperationId,
+                WebShellLifecycleOperation lifecycleOperation) {
+            this(sessionId, title, agentId, status, createdAt, updatedAt,
+                    activeTurn, environment, lastSequence, workspace, capabilities,
+                    approvalMode, modelContext, modelSelection, approvalRevision,
+                    initialApprovalMode, planMode, planModeSupported, compactionRevision,
+                    contextCompressionOperationId, lifecycleOperation, null);
+        }
+
         public WebShellSession withRecovery(SessionRecovery value) {
             return new WebShellSession(sessionId, title, agentId, status,
                     createdAt, updatedAt, activeTurn, environment, lastSequence,

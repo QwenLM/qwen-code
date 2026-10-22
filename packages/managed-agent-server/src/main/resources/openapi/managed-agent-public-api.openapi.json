@@ -4744,6 +4744,55 @@
         }
       }
     },
+    "/api/agent/web-shell/v1/sessions/export/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellExportSession",
+        "x-qwen-implementation-status": "implemented",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Immutable public item snapshot page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellExportPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "409": {
+            "$ref": "#/components/responses/CursorExpired"
+          }
+        },
+        "description": "Requires current Session read authorization on every page. Reuses the public item snapshot cursor, whose subsequent pages retain the original snapshot version and watermark. No private journal, Runtime or storage credentials are returned. The client waits for a snapshot covering its captured Session watermark before using its first page.",
+        "summary": "Read one immutable public Session snapshot page for reading exports"
+      }
+    },
     "/v1/agents/sessions/{sessionId}/recovery": {
       "parameters": [
         {
@@ -4943,55 +4992,6 @@
             }
           }
         }
-      }
-    },
-    "/api/agent/web-shell/v1/sessions/export/query": {
-      "post": {
-        "tags": ["WebShell"],
-        "operationId": "webShellExportSession",
-        "x-qwen-implementation-status": "implemented",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/WebShellExportRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Immutable public item snapshot page.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WebShellExportPage"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/BadRequest"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "404": {
-            "$ref": "#/components/responses/NotFound"
-          },
-          "403": {
-            "$ref": "#/components/responses/Forbidden"
-          },
-          "413": {
-            "$ref": "#/components/responses/PayloadTooLarge"
-          },
-          "409": {
-            "$ref": "#/components/responses/CursorExpired"
-          }
-        },
-        "description": "Requires current Session read authorization on every page. Reuses the public item snapshot cursor, whose subsequent pages retain the original snapshot version and watermark. No private journal, Runtime or storage credentials are returned. The client waits for a snapshot covering its captured Session watermark before using its first page.",
-        "summary": "Read one immutable public Session snapshot page for reading exports"
       }
     }
   },
@@ -6753,12 +6753,12 @@
             "maxLength": 64,
             "description": "Current durable context compression operation, including recovery_blocked; absent when none is active."
           },
-          "recovery": {
-            "$ref": "#/components/schemas/SessionRecovery"
-          },
           "lifecycleOperation": {
             "$ref": "#/components/schemas/WebShellLifecycleOperation",
             "description": "Current unsettled lifecycle operation, queried in batch under Session read authorization. A failed close/delete may leave the Session closing/deleting; only explicit retry starts a new operation. Settled Sessions omit this projection."
+          },
+          "recovery": {
+            "$ref": "#/components/schemas/SessionRecovery"
           }
         }
       },
@@ -12612,6 +12612,77 @@
         },
         "x-qwen-implementation-status": "implemented"
       },
+      "WebShellLifecycleOperation": {
+        "type": "object",
+        "required": ["operationId", "type", "status"],
+        "properties": {
+          "operationId": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "type": {
+            "type": "string",
+            "enum": ["close", "archive", "delete"]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "failed",
+              "recovery_blocked"
+            ]
+          },
+          "failureCode": {
+            "type": ["string", "null"]
+          }
+        }
+      },
+      "WebShellExportPage": {
+        "type": "object",
+        "required": ["items", "hasMore", "snapshotThroughSequence"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebShellItem"
+            }
+          },
+          "nextCursor": {
+            "type": ["string", "null"]
+          },
+          "hasMore": {
+            "type": "boolean"
+          },
+          "snapshotThroughSequence": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "WebShellExportRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "cursor": {
+            "type": ["string", "null"],
+            "maxLength": 4096
+          },
+          "limit": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 100,
+            "default": 100
+          }
+        }
+      },
       "SessionRecoveryActions": {
         "type": "object",
         "additionalProperties": false,
@@ -12691,77 +12762,6 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128
-          }
-        }
-      },
-      "WebShellLifecycleOperation": {
-        "type": "object",
-        "required": ["operationId", "type", "status"],
-        "properties": {
-          "operationId": {
-            "type": "string",
-            "maxLength": 64
-          },
-          "type": {
-            "type": "string",
-            "enum": ["close", "archive", "delete"]
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "pending",
-              "running",
-              "completed",
-              "failed",
-              "recovery_blocked"
-            ]
-          },
-          "failureCode": {
-            "type": ["string", "null"]
-          }
-        }
-      },
-      "WebShellExportPage": {
-        "type": "object",
-        "required": ["items", "hasMore", "snapshotThroughSequence"],
-        "properties": {
-          "items": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/WebShellItem"
-            }
-          },
-          "nextCursor": {
-            "type": ["string", "null"]
-          },
-          "hasMore": {
-            "type": "boolean"
-          },
-          "snapshotThroughSequence": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          }
-        }
-      },
-      "WebShellExportRequest": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["sessionId"],
-        "properties": {
-          "sessionId": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "cursor": {
-            "type": ["string", "null"],
-            "maxLength": 4096
-          },
-          "limit": {
-            "type": ["integer", "null"],
-            "minimum": 1,
-            "maximum": 100,
-            "default": 100
           }
         }
       }

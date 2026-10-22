@@ -1358,7 +1358,7 @@ public class ManagedAgentService {
                 approvalSelection != null && approvalSelection.planMode(), visible && approvalSupported
                         && mayChangeCwd && harness.supportsPlanMode() && store.supportsPlanMode(session),
                 compression.available() ? compression.compactionRevision() : null, compression.operationId(),
-                lifecycleOperation, null);
+                lifecycleOperation);
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
