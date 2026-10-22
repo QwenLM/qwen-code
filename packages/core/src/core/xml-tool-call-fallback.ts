@@ -215,7 +215,7 @@ function computeExampleRanges(
   quotedValueRanges: Array<[number, number]>,
 ): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
-  let ambiguousFrom = -1;
+  const ambiguous = new Map<number, number>();
   const tags = /<\/?example(?=[\s/>])(?:[^>"']|"[^"]*"|'[^']*')*>/g;
   let depth = 0;
   let start = 0;
@@ -232,12 +232,21 @@ function computeExampleRanges(
           /<\/?example(?=[\s/>])/.test(text.slice(span[0], span[1]))
         ) {
           // A value inside a documentation region carries an example tag:
-          // whether the tag is data or structure cannot be resolved. Treat
-          // everything from the open example up to the last tag that could
-          // close it as documentation — the resolution that widens the mask —
-          // so the ambiguous region stays inert without swallowing the calls
-          // that follow the documentation.
-          if (ambiguousFrom === -1) ambiguousFrom = start;
+          // whether the tag is data or structure cannot be resolved. Each
+          // opener the value leaves unclosed would, as structure, consume one
+          // more closer, so the region stays documentation through that many
+          // extra closers — and no further, so a stray closer later in the
+          // turn cannot swallow the calls that follow the documentation.
+          const value = text.slice(span[0], span[1]);
+          const unclosed =
+            (value.match(
+              /<example(?=[\s>])(?:[^>"']|"[^"]*"|'[^']*')*(?<!\/)>/g,
+            )?.length ?? 0) -
+            (value.match(/<\/example(?=[\s/>])/g)?.length ?? 0);
+          ambiguous.set(
+            start,
+            (ambiguous.get(start) ?? 0) + Math.max(0, unclosed),
+          );
         }
         parameterRanges.push(span);
       }
@@ -268,23 +277,30 @@ function computeExampleRanges(
   }
   maskValuesBefore(text.length);
   if (depth > 0) ranges.push([start, text.length]);
-  if (ambiguousFrom !== -1) {
-    let ambiguousEnd = text.length;
-    const closers = /<\/example(?=[\s/>])(?:[^>"']|"[^"]*"|'[^']*')*>/g;
-    let closer: RegExpExecArray | null;
-    while ((closer = closers.exec(text)) !== null) {
+  for (const [from, unclosed] of ambiguous) {
+    let end = -1;
+    let open = unclosed;
+    const scan = new RegExp(tags.source, 'g');
+    scan.lastIndex = from;
+    let tag: RegExpExecArray | null;
+    while ((tag = scan.exec(text)) !== null) {
       if (
-        closer.index > ambiguousFrom &&
-        !rangeContains(quotedValueRanges, closer.index) &&
-        !rangeContains(parameterRanges, closer.index) &&
-        (tagPositions === null || tagPositions.has(closer.index)) &&
-        !positionInsideFence(text, closer.index, parameterRanges) &&
-        !/\/\s*>$/.test(closer[0])
+        rangeContains(quotedValueRanges, tag.index) ||
+        rangeContains(parameterRanges, tag.index) ||
+        (tagPositions !== null && !tagPositions.has(tag.index)) ||
+        positionInsideFence(text, tag.index, parameterRanges) ||
+        /\/\s*>$/.test(tag[0])
       ) {
-        ambiguousEnd = closer.index + closer[0].length;
+        continue;
       }
+      if (!tag[0].startsWith('</')) {
+        open += 1;
+        continue;
+      }
+      end = tag.index + tag[0].length;
+      if (--open === 0) break;
     }
-    ranges.push([ambiguousFrom, ambiguousEnd]);
+    ranges.push([from, end === -1 ? text.length : end]);
   }
   return ranges;
 }

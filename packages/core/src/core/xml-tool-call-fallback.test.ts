@@ -1929,6 +1929,19 @@ describe('ambiguous documentation fences', () => {
       'read_file',
     ]);
   });
+
+  it('does not let a stray later closer widen a balanced ambiguous region', () => {
+    const quoted = invoke('b', param('p', 'w'));
+    const write = invoke(
+      'write_file',
+      param('content', `${quoted}\n<example>x</example>`),
+    );
+    const read = invoke('read_file', param('file_path', 'real.ts'));
+    const text = `<example>\n${write}\n</example>\n${read}\nClose examples with </example>.`;
+    expect(extractXmlToolCalls(text).map(({ name }) => name)).toEqual([
+      'read_file',
+    ]);
+  });
 });
 
 describe('refreshed documentation fences', () => {
