@@ -111,7 +111,7 @@ function parseTokenCounts(text: string): {
   }
 
   const inputExceedsMatch = text.match(
-    /input\s+token\s+(?:count|length)[^\d]*(\d[\d,]*)[\s\S]*?exceed(?:s|ed)?[\s\S]*?(?:maximum|limit)[^\d]*(\d[\d,]*)/i,
+    /input\s+token\s+(?:count|length)[^\d]*(\d[\d,]{0,31})[\s\S]*?exceed(?:s|ed)?[\s\S]*?(?:maximum|limit)[^\d]*(\d[\d,]{0,31})/i,
   );
   if (inputExceedsMatch) {
     return {

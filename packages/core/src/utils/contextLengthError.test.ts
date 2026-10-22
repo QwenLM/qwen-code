@@ -9,6 +9,7 @@ import {
   getContextLengthExceededInfo,
   isContextLengthExceededError,
 } from './contextLengthError.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 describe('contextLengthError', () => {
   it.each([
@@ -236,6 +237,8 @@ describe('contextLengthError', () => {
       const messages = [
         `maximum context length of 32768 tokens. You requested a total of 1 tokens: ${digits}`,
         `maximum context length of ${digits}`,
+        // Long enough that the old uncapped capture took seconds here.
+        `context_length_exceeded: input token count ${digits.repeat(4)}`,
       ];
 
       const start = performance.now();
@@ -243,7 +246,9 @@ describe('contextLengthError', () => {
         getContextLengthExceededInfo(new Error(message));
       }
 
-      expect(performance.now() - start).toBeLessThan(1000);
+      expectWithinLatencyBudget(performance.now() - start, 1000, {
+        poolMultiplier: 10,
+      });
     });
   });
 
