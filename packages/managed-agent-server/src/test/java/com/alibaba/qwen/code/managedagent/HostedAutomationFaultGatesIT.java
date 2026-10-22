@@ -1825,6 +1825,52 @@ class HostedAutomationFaultGatesIT {
         request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-cancel-retry-retire", 202);
     }
 
+    // FG11d: a second manual fire cannot join a Session that is already running
+    // this definition's turn. Admission refuses it with `overlap` — the open
+    // Turn and the definition's overlap policy each answer so, and the cell
+    // pins the answer rather than which arm produced it — so the queue the
+    // cancellation matrix would cancel never forms: the refusal is recorded
+    // where an occurrence would go, no run commits behind it and no Turn starts.
+    @Test
+    @Timeout(600)
+    void fg11dSecondFireIsRefusedWhileTheFirstRunsOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("second-fire");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11A_HOLD", "0 0 1 1 *"), "fg11d-second-base", 202).path("id").asText();
+        String run = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-second-first", 202)
+                .path("id").asText();
+        // The parked model keeps the first run non-terminal, so countActive still
+        // sees it. The refusal below is answered by the definition's default
+        // `skip` policy at one active run (AutomationScanner's count arm), not by
+        // the open-Turn arm: that arm reads public `ma_turn` rows, and none is
+        // open here — createSession's warm turn has already completed. Every
+        // admission arm answers the same reason, so this cell cannot tell them
+        // apart, and it does not pin the open-Turn guard.
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("manual:fg11d-second-first")));
+        HttpResponse<String> refused = send("POST", "/v1/agent-automations/" + id + "/runs", null,
+                "fg11d-second-refused");
+        assertThat(refused.statusCode()).as("a second fire is refused while the Turn runs: %s",
+                refused.body()).isEqualTo(409);
+        assertThat(refused.body()).as("the refusal names the overlap")
+                .contains("automation_run_skipped").contains("overlap");
+        Map<String, Object> decision = jdbc.queryForMap("SELECT outcome, reason, attempts FROM"
+                + " ma_schedule_occurrence WHERE tenant_id = ? AND schedule_id = ? AND occurrence_key = ?",
+                tenant, id, "manual:fg11d-second-refused");
+        assertThat(decision).as("the refused fire records why it did not run")
+                .containsEntry("outcome", "skipped").containsEntry("reason", "overlap");
+        assertThat(((Number) decision.get("attempts")).intValue()).as("no attempt was spent").isZero();
+        assertThat(jdbc.queryForList("SELECT record_id FROM ma_session_record WHERE tenant_id = ?"
+                + " AND session_id = ? AND domain = 'automation_run'", String.class, tenant, session))
+                .as("only the admitted run exists").containsExactly(run);
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("Automation ID: " + id))
+                .as("the refused fire starts no Turn").hasSize(1);
+        assertThat(runState(run)).as("the first run is untouched by the refusal").isEqualTo("running");
+        heldModel.countDown();
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-second-retire", 202);
+    }
+
     private void boot(String letter) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("FG11 requires real MySQL").startsWith("jdbc:mysql:");
         this.letter = letter;
