@@ -403,6 +403,15 @@ function pruneCompression(
         (index) => payload.compressedHistory[index]!,
       ),
       promptIds: retained.map((index) => payload.promptIds![index]!),
+      ...(Array.isArray(payload.directoryContextIndices)
+        ? {
+            directoryContextIndices: retained.flatMap((index, newIndex) =>
+              payload.directoryContextIndices!.includes(index)
+                ? [newIndex]
+                : [],
+            ),
+          }
+        : {}),
     },
   };
 }
