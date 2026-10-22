@@ -35,6 +35,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscriptRequest;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.session.ContextCompressionService;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.session.ManagedEventStreamService;
 import com.alibaba.qwen.code.managedagent.session.ManagedTaskCancelService;
@@ -61,6 +62,12 @@ public class WebShellAgentController {
     private final SessionLifecycleService lifecycle;
     private final ManagedTaskService tasks;
     private final ManagedTaskCancelService taskCancels;
+    private ContextCompressionService compressions;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    void setCompressions(ContextCompressionService compressions) {
+        this.compressions = compressions;
+    }
 
     public WebShellAgentController(ManagedAgentService service,
             ManagedEventStreamService streams,
@@ -155,6 +162,15 @@ public class WebShellAgentController {
         return streams.webShellStream(tenant.tenantId(), tenant.actorId(),
                 request.sessionId(),
                 after);
+    }
+
+    @PostMapping("/sessions/compress")
+    public ResponseEntity<ApiModels.WebShellContextCompressionOperation> compress(TenantContext tenant,
+            @Valid @RequestBody ApiModels.WebShellContextCompressionRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
+        return ResponseEntity.accepted().body(compressions.admitWebShell(tenant.tenantId(),
+                tenant.actorId(), request.sessionId(), request.idempotencyKey(), request.expectedCompactionRevision()));
     }
 
     @PostMapping("/sessions/create")
