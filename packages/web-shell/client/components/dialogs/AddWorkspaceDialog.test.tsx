@@ -69,6 +69,53 @@ function submit() {
 }
 
 describe('AddWorkspaceDialog', () => {
+  it('offers the owning service before directory registration without submitting on a mode change', async () => {
+    const onAdd = vi.fn();
+    const onExecutionModeChange = vi.fn();
+    mount(
+      <AddWorkspaceDialog
+        executionMode="daemon"
+        onExecutionModeChange={onExecutionModeChange}
+        onClose={vi.fn()}
+        onAdd={onAdd}
+      />,
+    );
+    const trigger = [
+      ...document.querySelectorAll<HTMLElement>('[role="combobox"]'),
+    ].find((item) => item.textContent?.includes('Local (daemon)'))!;
+    await act(async () => trigger.click());
+    const option = [
+      ...document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ].find((item) => item.textContent === 'Managed (Managed Agent)')!;
+    await act(async () => option.click());
+    expect(onExecutionModeChange).toHaveBeenCalledExactlyOnceWith('managed');
+    expect(onAdd).not.toHaveBeenCalled();
+  });
+
+  it('locks execution choice while a local directory is being registered', async () => {
+    let resolve: () => void = () => {};
+    const onAdd = vi.fn(
+      () =>
+        new Promise<void>((done) => {
+          resolve = done;
+        }),
+    );
+    mount(
+      <AddWorkspaceDialog
+        executionMode="daemon"
+        onExecutionModeChange={vi.fn()}
+        initialPath="/projects/example"
+        onClose={vi.fn()}
+        onAdd={onAdd}
+      />,
+    );
+    submit();
+    const trigger = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="combobox"]'),
+    ].find((item) => item.textContent?.includes('Local (daemon)'))!;
+    expect(trigger.disabled).toBe(true);
+    await act(async () => resolve());
+  });
   it('focuses the path input when opened', () => {
     mount(<AddWorkspaceDialog onClose={vi.fn()} onAdd={vi.fn()} />);
 
