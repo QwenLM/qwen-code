@@ -35,14 +35,20 @@ const packages = {
     'ExFgWrzyldNAMi45U9PLIOu+g/RatP+f0c/dZxaooifME6yLW32BoHveH26/TtoAjZyJrc2iL0u48pgnR1fzmg==',
 };
 
-function processes() {
-  const command = `Get-CimInstance Win32_Process | Where-Object { $_.CreationDate } | ForEach-Object { [pscustomobject]@{ pid=$_.ProcessId; ppid=$_.ParentProcessId; start=$_.CreationDate.ToUniversalTime().ToString('O'); command=$_.CommandLine } } | ConvertTo-Json -Compress`;
+function processes(ids) {
+  assert.ok(
+    ids.length > 0 && ids.every((id) => Number.isInteger(id) && id > 0),
+  );
+  const filter = [...new Set(ids)]
+    .map((id) => `ProcessId=${id} OR ParentProcessId=${id}`)
+    .join(' OR ');
+  const command = `Get-CimInstance Win32_Process -Filter '${filter}' | Where-Object { $_.CreationDate } | ForEach-Object { [pscustomobject]@{ pid=$_.ProcessId; ppid=$_.ParentProcessId; start=$_.CreationDate.ToUniversalTime().ToString('O'); command=$_.CommandLine } } | ConvertTo-Json -Compress`;
   const output = execFileSync(
     'powershell.exe',
     ['-NoProfile', '-NonInteractive', '-Command', command],
     { encoding: 'utf8', timeout: 5000 },
   );
-  return [].concat(JSON.parse(output.trim()));
+  return output.trim() ? [].concat(JSON.parse(output.trim())) : [];
 }
 
 async function controller(runtime) {
@@ -78,7 +84,6 @@ async function controller(runtime) {
     stderr = '';
   const captured = new Map();
   const sample = () => {
-    const rows = processes();
     const before = path.join(out, 'worker-before.json');
     if (fs.existsSync(before)) {
       const identity = JSON.parse(
@@ -87,26 +92,27 @@ async function controller(runtime) {
       if (identity)
         captured.set(identity.pid, captured.get(identity.pid) ?? identity);
     }
+    const queried = new Set([...captured.keys(), child.pid]);
+    const rows = processes([...queried]);
     const ids = new Set(
       rows
         .filter(
           (row) =>
             captured.get(row.pid)?.start === row.start ||
-            (!captured.has(row.pid) &&
-              row.pid === child.pid &&
-              row.command?.includes(nonce)) ||
             row.command?.includes(owned),
         )
         .map((row) => row.pid),
     );
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const row of rows)
-        if (!ids.has(row.pid) && ids.has(row.ppid)) {
-          ids.add(row.pid);
-          changed = true;
-        }
+    for (;;) {
+      for (const row of rows) if (ids.has(row.ppid)) ids.add(row.pid);
+      const parents = [...ids].filter((pid) => !queried.has(pid));
+      if (!parents.length) break;
+      parents.forEach((pid) => queried.add(pid));
+      for (const row of processes(parents)) {
+        const index = rows.findIndex((seen) => seen.pid === row.pid);
+        if (index < 0) rows.push(row);
+        else rows[index] = row;
+      }
     }
     for (const row of rows) if (ids.has(row.pid)) captured.set(row.pid, row);
     return rows.filter((row) => captured.get(row.pid)?.start === row.start);
@@ -201,6 +207,14 @@ async function controller(runtime) {
         timeout: 5000,
       }).trim(),
     };
+    facts.phase = 'process-sampler-warmup';
+    facts.processSamplerWarmup = processes([process.pid]).find(
+      (row) => row.pid === process.pid,
+    );
+    assert.ok(
+      facts.processSamplerWarmup,
+      'controller PID/start warmup required',
+    );
     facts.phase = 'worker';
     child = spawn(
       executable,
@@ -296,6 +310,12 @@ async function worker([runtime, owned, out, node, nonce]) {
   };
   let terminal,
     output = '';
+  const frames = (kind) =>
+    [
+      ...output.matchAll(
+        new RegExp(`PTY-PROBE-${kind}:(\\[[^\\r\\n]+\\])`, 'g'),
+      ),
+    ].map((match) => JSON.parse(match[1]));
   try {
     if (runtime === 'node22') assert.equal(process.version, 'v22.23.2');
     else assert.equal(process.versions.bun, runtime.slice(3));
@@ -322,7 +342,9 @@ async function worker([runtime, owned, out, node, nonce]) {
         bytes: fs.statSync(file).size,
       }));
     assert.ok(facts.native.some((file) => file.path.endsWith('.node')));
-    facts.processIdentity = processes().find((row) => row.pid === process.pid);
+    facts.processIdentity = processes([process.pid]).find(
+      (row) => row.pid === process.pid,
+    );
     assert.ok(facts.processIdentity, 'worker PID/start identity required');
     save(path.join(out, 'worker-before.json'), facts);
     const pty = require('@lydell/node-pty');
@@ -391,9 +413,33 @@ async function worker([runtime, owned, out, node, nonce]) {
     assert.equal(frame('input')[0], nonce);
     facts.phase = 'resize';
     terminal.resize(97, 31);
-    terminal.write(`SIZE ${nonce}\r`);
-    await until(() => frame('size'));
-    assert.deepEqual(frame('size')[5], [97, 31]);
+    let nextSizeQuery = 0;
+    await until(() => {
+      const sizes = frames('size');
+      for (const size of sizes)
+        assert.deepEqual(size.slice(0, 5), [
+          nonce,
+          terminal.pid,
+          true,
+          true,
+          true,
+        ]);
+      const latest = sizes.at(-1);
+      if (latest?.[5]?.[0] === 97 && latest[5][1] === 31) return true;
+      if (Date.now() >= nextSizeQuery) {
+        terminal.write(`SIZE ${nonce}\r`);
+        nextSizeQuery = Date.now() + 100;
+      }
+      return false;
+    });
+    assert.deepEqual(frames('size').at(-1), [
+      nonce,
+      terminal.pid,
+      true,
+      true,
+      true,
+      [97, 31],
+    ]);
     facts.phase = 'natural-exit';
     terminal.write(`QUIT ${nonce}\r`);
     await until(() => ended && output.includes(`PTY-PROBE-bye:${nonce}`));
@@ -402,13 +448,15 @@ async function worker([runtime, owned, out, node, nonce]) {
     facts.frames = {
       ready: frame('ready'),
       input: frame('input'),
-      size: frame('size'),
+      size: frames('size').at(-1),
     };
     facts.status = 'PASS';
   } catch (error) {
     facts.status = 'FAIL';
     facts.error = error.stack;
   } finally {
+    facts.resizeFrames = frames('size');
+    facts.firstResizeFrame = facts.resizeFrames[0] ?? null;
     fs.writeFileSync(path.join(out, 'terminal.ansi'), output);
     save(path.join(out, 'worker.json'), facts);
   }
