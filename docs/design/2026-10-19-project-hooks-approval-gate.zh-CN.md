@@ -24,7 +24,7 @@
 
 ### 审批存储
 
-`packages/cli/src/config/hook-approvals.ts` 把决定持久化到 `~/.qwen/hookApprovals.json`（可用 `QWEN_CODE_HOOK_APPROVALS_PATH` 覆盖），每个项目根目录一条记录：`{ hash, status }`，`status` 为 `approved` 或 `rejected`。`hash` 是项目 `hooks` 对象按键排序序列化后的 SHA-256（使用无原型对象，因此自有的 `__proto__` 键也会参与哈希），因此文件里的键顺序无关，但任何行为上的修改都会改变它。哈希与当前 hooks 不匹配、或状态不是这两个值之一的记录视为 `pending`。hook 注册表给每个定义的副本而非设置对象本身标注来源，因此块加载后哈希不变（ACP daemon 会在多个会话间复用同一个设置实例）。项目根目录是 hooks 所在 `.qwen/settings.json` 的目录，而不是会话的工作目录，因此 `/cd` 与 `--worktree` 不会改变键；其规范化方式与 `mcpApprovals.json` 相同。文件以 `0600` 写入（已有的更宽松权限会被收紧），`QWEN_CODE_HOOK_APPROVALS_PATH` 与同类存储路径一样不允许由项目 `.env` 设置。
+`packages/cli/src/config/hook-approvals.ts` 把决定持久化到 `~/.qwen/hookApprovals.json`（可用 `QWEN_CODE_HOOK_APPROVALS_PATH` 覆盖），每个项目根目录一条记录：`{ hash, status }`，`status` 为 `approved` 或 `rejected`。`hash` 是项目 `hooks` 对象按键排序序列化后的 SHA-256（使用无原型对象，因此自有的 `__proto__` 键也会参与哈希），因此文件里的键顺序无关，但任何行为上的修改都会改变它。哈希与当前 hooks 不匹配、或状态不是这两个值之一的记录视为 `pending`。调用方交给 Config 的是该块的副本：hook 注册表会原地给已加载的定义标注来源，而 ACP daemon 会在多个会话间复用同一个设置实例，这样设置中的块哈希保持不变。项目根目录是 hooks 所在 `.qwen/settings.json` 的目录，而不是会话的工作目录，因此 `/cd` 与 `--worktree` 不会改变键；其规范化方式与 `mcpApprovals.json` 相同。文件以 `0600` 写入（已有的更宽松权限会被收紧），`QWEN_CODE_HOOK_APPROVALS_PATH` 与同类存储路径一样不允许由项目 `.env` 设置。
 
 `isProjectHooksPendingApproval(projectHooks, projectRoot)` 在 hooks 块至少声明了一个可运行的 hook 且状态不是 `approved`（待定或已拒绝）时为 `true`。不存在、为 `null`、为空或没有可运行内容的块永远不受闸门约束。
 

@@ -177,7 +177,8 @@ describe('hook-approvals (hash-bound approval store)', () => {
       getProjectHooks: () => block,
       workspace: { path: path.join('/work', 'repo', '.qwen', 'settings.json') },
     });
-    expect(separated.projectHooks).toBe(block);
+    expect(separated.projectHooks).toEqual(block);
+    if (block) expect(separated.projectHooks).not.toBe(block);
     expect('projectHooksRoot' in separated).toBe(rooted);
     if (rooted) {
       expect(separated.projectHooksRoot).toBe(path.join('/work', 'repo'));

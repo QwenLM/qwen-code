@@ -54,7 +54,9 @@ export function getSeparatedHookSettings(settings: {
   getProjectHooks(): Record<string, unknown> | undefined;
   workspace: { path: string };
 }) {
-  const projectHooks = settings.getProjectHooks();
+  // A copy: the hook registry tags loaded definitions in place, and an ACP
+  // daemon reuses one settings instance, whose block must keep its hash.
+  const projectHooks = structuredClone(settings.getProjectHooks());
   return {
     systemHooks: settings.getSystemHooks(),
     userHooks: settings.getUserHooks(),
