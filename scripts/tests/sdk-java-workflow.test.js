@@ -177,6 +177,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     const lockAt = integration.indexOf(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
+    expect(lockAt).toBeGreaterThan(-1);
     expect(
       integration.indexOf('-f packages/sdk-java/qwencode/pom.xml'),
     ).toBeLessThan(lockAt);
