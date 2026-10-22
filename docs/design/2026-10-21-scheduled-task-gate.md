@@ -355,13 +355,13 @@ the command is proposed and checked again where it runs.
   notice naming the exact rule to add. Plan mode blocks. The daemon's default
   is auto mode, so a gated task created in a daemon conversation keeps working
   after a restart.
-- **Output is data.** Gate output is sanitized like `Monitor` lines (control
-  characters stripped, envelope tag names defanged, `gate-output` and
-  `gate-stderr` added to that list). The block is not XML-escaped, so the
-  gate's own wrapper names are defanged in every form a parser reads as a
-  tag (`</gate-output x>`, `</gate-output/ >`, a `>` on the next line, a name
-  split by an invisible character), not only as `<name>`. It is then
-  wrapped in the text of Section 4.2, and
+- **Output is data.** Gate output is sanitized like `Monitor` lines (ANSI
+  and control characters stripped), its tag characters (U+E0000–E007F)
+  dropped, and every `<` written `&lt;`, as the text says, so no tag can
+  open or close the block however it is spelled or hidden (attributes,
+  joiners or bidi marks in the name, a tag spelled in tag characters).
+  Defanging tag names alone kept missing forms. It is then wrapped in the
+  text of Section 4.2, and
   delivered on the existing cron path, which cannot answer a pending
   permission prompt and skips the `UserPromptSubmit` hook. One fix rides
   along: the TUI drain passes an explicit non-shell intent for cron fires, so
