@@ -1052,6 +1052,18 @@ class ManagedSessionStoreHttpClient {
         break;
       } catch (error) {
         await this.annotateWriterRefusal(error);
+        // The store replays committed commands before evaluating these atomic guards.
+        if (
+          descriptor.operation === 'manageMcp' &&
+          error instanceof ManagedSessionStoreHttpError &&
+          error.status === 409 &&
+          [
+            'unsupported_feature',
+            'turn_active',
+            'session_context_busy',
+          ].includes(error.remoteCode)
+        )
+          throw new ManagedSessionCommitRejectedError(error);
         if (
           attempt === 0 &&
           error instanceof ManagedSessionStoreHttpError &&

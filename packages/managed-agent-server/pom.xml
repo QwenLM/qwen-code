@@ -231,6 +231,15 @@
                 <configuration>
                     <failIfNoTests>true</failIfNoTests>
                     <excludedGroups>fault-gate</excludedGroups>
+                    <!-- Runtime worker launch tests read these back from a spawned worker. -->
+                    <environmentVariables>
+                        <QWEN_MANAGED_AGENT_WORKER_ENV_PROBE>present</QWEN_MANAGED_AGENT_WORKER_ENV_PROBE>
+                        <spring_worker_env_probe>present</spring_worker_env_probe>
+                        <QWEN_MANAGEDAGENT_WORKER_ENV_PROBE>present</QWEN_MANAGEDAGENT_WORKER_ENV_PROBE>
+                        <OSS_WORKER_ENV_PROBE>present</OSS_WORKER_ENV_PROBE>
+                        <WORKER_ENV_PASSTHROUGH_PROBE>present</WORKER_ENV_PASSTHROUGH_PROBE>
+                        <ALIBABA_CLOUD_WORKER_ENV_PROBE>present</ALIBABA_CLOUD_WORKER_ENV_PROBE>
+                    </environmentVariables>
                 </configuration>
             </plugin>
             <plugin>
@@ -614,8 +623,12 @@
                                  healthy 10612 s, fork 11212 s, Verify 197 minutes. The FG11d
                                  cancel-isolation cell adds 11 s (2x its measured 5.1 s):
                                  healthy 10623 s, fork 11223 s, Verify 198 minutes
-                                 (11823 s of fork plus wrap no longer fit 197). -->
-                            <forkedProcessTimeoutInSeconds>11223</forkedProcessTimeoutInSeconds>
+                                 (11823 s of fork plus wrap no longer fit 197). The FG11d queue-one cell
+                                 adds 13 s (2x its measured 6.5 s): healthy 10636 s, fork 11236 s,
+                                 Verify 198 minutes. The FG12e Runtime connection replacement cell
+                                 adds 28 s (2x its measured 13.8 s): healthy 10664 s, fork 11264 s,
+                                 Verify 198 minutes. -->
+                            <forkedProcessTimeoutInSeconds>11264</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

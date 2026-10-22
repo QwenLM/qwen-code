@@ -54,7 +54,12 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
   会放行第一次 run 仍活跃时的第二次手动 fire，因为 `hasOpenTurn` 只读公开的
   `ma_turn` 行，而自动化 wake turn 记在 journal 侧；`countRefusal` 对 `queue_one`
   在一个活跃 run 时即放行。第二个 run 会提交，其 input 停在 journal 里——正是「在任何
-  尝试前取消、且不调用模型地结算」要处理的对象。目前没有格子覆盖它。
+  尝试前取消、且不调用模型地结算」要处理的对象。可达性这一半已交付：
+  `fg11dQueueOneAdmitsASecondFireOnMySql` 钉住第二次 fire 在 `queue_one` 下被放行
+  ——独立的 run id 与 `fired` 的 occurrence——并钉住第一个 turn 保持被扣住期间
+  不出现它的 prompt。该空集由被扣住的 turn 产生、不是 overlap 臂的性质，本格用有界
+  驻留给它一个观测窗。取消那一半仍未结清：对该排队 run 发 task cancel 会被接受，
+  而 run 仍为 `running`（本地实测，未入门禁），因为队列由 turn 结算、不由取消结算。
   `fg11dSecondFireIsRefusedWhileTheFirstRunsOnMySql` 钉的范围更窄：在默认 `skip`
   策略下，一个活跃 run 时的第二次 fire 被 `409 automation_run_skipped` 拒绝，记
   `skipped`/`overlap`，其后不提交 run——钉的是这次拒绝，不是那条准入臂；
