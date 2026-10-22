@@ -20,6 +20,7 @@ import {
 import type { WebShellComposerInput } from '../customization';
 import { TOUCH_COMPOSER_QUERY } from './useIsTouchComposer';
 import { createFakeIndexedDB } from '../test/fake-indexeddb';
+import { getComposerDraftSession } from './composer-draft-session';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -205,6 +206,37 @@ function typeText(text: string) {
     } as React.ChangeEvent<HTMLTextAreaElement>);
   });
 }
+
+it('hoists live desktop references when a touch composer joins the draft', async () => {
+  mockTouchDevice();
+  const tag = {
+    id: 'file:notes',
+    kind: 'file' as const,
+    value: 'notes',
+    serialized: '@notes',
+  };
+  const shared = getComposerDraftSession(
+    getSessionDraftKey('desktop'),
+    {
+      text: 'read @notes',
+      inlineTags: [{ start: 5, end: 11, tag }],
+      tags: [],
+      inputAnnotations: [],
+    },
+    null,
+  );
+  const leave = shared.subscribe(() => {});
+  try {
+    await mount({ sessionId: 'desktop', persistFileReferences: true });
+    expect(latest!.getText()).toBe('read ');
+    expect(latest!.composerTags).toEqual([tag]);
+    act(() => shared.setContent({ ...shared.content, text: 'edit @notes' }));
+    expect(latest!.getText()).toBe('edit ');
+    expect(latest!.composerTags).toEqual([tag]);
+  } finally {
+    leave();
+  }
+});
 
 afterEach(() => {
   act(() => root?.unmount());
@@ -1085,6 +1117,11 @@ describe('mobile composer draft attachment restore', () => {
       );
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
+    const otherImage = { data: 'other-mobile', media_type: 'image/png' };
+    act(() => {
+      views.other.setText('other draft');
+      views.other.handle.restoreImages([otherImage]);
+    });
     const image = { data: 'shared-mobile', media_type: 'image/png' };
     act(() => {
       views.main.setText('shared text');
@@ -1092,13 +1129,15 @@ describe('mobile composer draft attachment restore', () => {
     });
     expect(views.pane.mobileComposer?.value).toBe('shared text');
     expect(views.pane.pastedImages).toEqual([image]);
-    expect(views.other.getText()).toBe('');
-    expect(views.other.pastedImages).toEqual([]);
+    expect(views.other.getText()).toBe('other draft');
+    expect(views.other.pastedImages).toEqual([otherImage]);
     act(() => views.pane.setText('updated in pane'));
     expect(views.main.getText()).toBe('updated in pane');
     act(() => views.pane.handle.clear());
     expect(views.main.getText()).toBe('');
     expect(views.main.pastedImages).toEqual([]);
+    expect(views.other.getText()).toBe('other draft');
+    expect(views.other.pastedImages).toEqual([otherImage]);
   });
 
   it.each(['attachment', 'text'])(
@@ -1155,6 +1194,28 @@ describe('mobile composer draft attachment restore', () => {
       expect(latest!.pastedImages).toEqual(edit === 'text' ? [x] : [x, y]);
     },
   );
+
+  it('clears attachments when capability changes on the same mobile draft', async () => {
+    mockTouchDevice();
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const mounted = await mount({ sessionId: 'a', attachmentsEnabled: true });
+    act(() =>
+      latest!.handle.restoreImages([
+        { data: 'mobile', media_type: 'image/png' },
+      ]),
+    );
+    mounted.switchSession('a', undefined, false);
+    expect(latest!.pastedImages).toEqual([]);
+    mounted.switchSession('a', undefined, true);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(fake.stores.get('attachments')?.has(getSessionDraftKey('a'))).toBe(
+      false,
+    );
+    expect(latest!.pastedImages).toEqual([]);
+  });
 
   it('preserves the outgoing mobile archive during an atomic capability switch', async () => {
     mockTouchDevice();
@@ -1223,6 +1284,9 @@ describe('mobile composer draft attachment restore', () => {
           'mobile host prompt',
           [image],
         ]);
+        expect(
+          fake.stores.get('attachments')?.has(getSessionDraftKey('a')),
+        ).toBe(false);
       } else {
         expect(onSubmit).not.toHaveBeenCalled();
         if (action === 'edit') {

@@ -3,6 +3,7 @@ import type { WebShellComposerTag } from '../customization';
 import type { InlineTagPlacement } from './useComposerCore';
 import {
   mergeDraftAttachments,
+  subtractDraftAttachments,
   type ComposerDraftAttachments,
   type ComposerDraftAttachmentStore,
 } from './composer-draft-attachments';
@@ -42,6 +43,7 @@ export class ComposerDraftSession {
   loaded: Promise<void> = Promise.resolve();
   private restored = false;
   private pending: ComposerDraftAttachments | undefined;
+  private removed: ComposerDraftAttachments = { images: [], files: [] };
   private discardStored = false;
   private ingestionCounts = new Map<Listener, number>();
 
@@ -105,13 +107,16 @@ export class ComposerDraftSession {
   }
 
   setAttachments(attachments: ComposerDraftAttachments, clear = false) {
-    this.attachments = attachments;
     if (this.loading) {
+      const removed = subtractDraftAttachments(this.attachments, attachments);
+      this.removed.images.push(...removed.images);
+      this.removed.files.push(...removed.files);
       this.pending = attachments;
       this.discardStored ||= clear;
     } else {
       this.persist(attachments);
     }
+    this.attachments = attachments;
     this.emit(clear ? 'clear' : 'attachments');
   }
 
@@ -127,10 +132,14 @@ export class ComposerDraftSession {
         this.pending ?? { images: [], files: [] },
         this.discardStored
           ? { images: [], files: [] }
-          : (stored ?? { images: [], files: [] }),
+          : subtractDraftAttachments(
+              stored ?? { images: [], files: [] },
+              this.removed,
+            ),
       );
       if (this.pending) this.persist(this.attachments);
       this.pending = undefined;
+      this.removed = { images: [], files: [] };
       this.loading = false;
       this.restored = true;
       this.emit('attachments');

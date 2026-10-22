@@ -12,7 +12,8 @@
  * values are stored by reference (no structured clone, so aliasing bugs are
  * invisible), a closed database still transacts, an unknown store yields a
  * throwaway map instead of throwing `NotFoundError`, the database name and
- * version are ignored, and requests settle in a microtask rather than a task.
+ * version and transaction mode are ignored, and requests settle in a microtask
+ * rather than a task.
  */
 
 type Handler = (() => void) | null;
@@ -49,7 +50,7 @@ class FakeRequest<T> {
     defer = false,
   ) {
     this.result = result;
-    this.error = error;
+    this.error = error ?? null;
     this.settle = settle;
     // The store attaches its handlers synchronously after issuing the request,
     // and the real IndexedDB never settles before that.

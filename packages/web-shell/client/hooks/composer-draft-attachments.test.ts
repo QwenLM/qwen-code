@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createComposerDraftAttachmentStore,
   mergeDraftAttachments,
@@ -84,9 +84,9 @@ describe('createComposerDraftAttachmentStore', () => {
 
     await store.save(DRAFT_KEY, attachments);
     expect(db.objectStoreNames.contains('attachments')).toBe(true);
+    const close = vi.spyOn(db, 'close');
     await store.load(DRAFT_KEY);
-    // A leaked connection would block any future version upgrade.
-    expect(db.closed).toBe(true);
+    expect(close).toHaveBeenCalledTimes(1);
   });
 
   it('ignores a record that does not look like attachments', async () => {
@@ -123,12 +123,14 @@ describe('createComposerDraftAttachmentStore', () => {
   });
 
   it('fails soft when a request fails, including delete', async () => {
-    const { factory } = createFakeIndexedDB({ failRequests: true });
+    const { factory, db } = createFakeIndexedDB({ failRequests: true });
+    const close = vi.spyOn(db, 'close');
     const store = createComposerDraftAttachmentStore(factory)!;
 
     expect(await store.save(DRAFT_KEY, attachments)).toBe(false);
     expect(await store.load(DRAFT_KEY)).toBeUndefined();
     expect(await store.delete(DRAFT_KEY)).toBe(false);
+    expect(close).toHaveBeenCalledTimes(3);
   });
 
   it('closes a connection whose open succeeds after being blocked', async () => {
@@ -142,7 +144,12 @@ describe('createComposerDraftAttachmentStore', () => {
   });
 
   it('reports an unavailable store as null', () => {
-    expect(createComposerDraftAttachmentStore(undefined)).toBeNull();
+    vi.stubGlobal('indexedDB', undefined);
+    try {
+      expect(createComposerDraftAttachmentStore()).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
@@ -183,6 +190,31 @@ describe('mergeDraftAttachments', () => {
         files: [],
       }),
     ).toBe(current);
+  });
+  it('merges identical text payloads without duplicating their cards', () => {
+    expect(
+      mergeDraftAttachments(current, {
+        images: [],
+        files: [{ ...current.files[0]! }],
+      }),
+    ).toBe(current);
+  });
+
+  it('preserves repeated payloads within either snapshot', () => {
+    const image = current.images[0]!;
+    const file = current.files[0]!;
+    const repeated = { images: [image, image], files: [file, file] };
+    expect(mergeDraftAttachments(repeated, repeated)).toBe(repeated);
+    expect(
+      mergeDraftAttachments({ images: [image], files: [file] }, repeated),
+    ).toEqual({
+      images: [image, image],
+      files: [file, { ...file, name: 'current (1).txt' }],
+    });
+    expect(mergeDraftAttachments({ images: [], files: [] }, repeated)).toEqual({
+      images: [image, image],
+      files: [file, { ...file, name: 'current (1).txt' }],
+    });
   });
   it('preserves binary files with matching names and metadata', () => {
     const older = new File(['old'], 'notes.bin', {

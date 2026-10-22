@@ -8,6 +8,8 @@ import { I18nProvider } from '../i18n';
 import { WebShellPortalRootContext } from '../portalRoot';
 import {
   type ComposerSubmitCommit,
+  clearComposerDraftIfMatches,
+  captureComposerDraftGuard,
   getInlineComposerTags,
   useComposerCore,
   type UseComposerCoreOptions,
@@ -3472,6 +3474,39 @@ describe('composer draft attachment races', () => {
     fake.db.seed('attachments', getSessionDraftKey(session), attachments);
   }
 
+  it('clears an attachment-only archive when a host accepts after unmount', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    await mount({ sessionId: 'session-a' });
+    await flushDraftAttachments();
+    act(() =>
+      latest!.handle.restoreImages([{ data: 'sent', media_type: 'image/png' }]),
+    );
+    await flushDraftAttachments();
+    act(() => root!.unmount());
+    clearComposerDraftIfMatches(SESSION_A_DRAFT_KEY, '');
+    await flushDraftAttachments();
+    expect(fake.stores.get('attachments')?.has(SESSION_A_DRAFT_KEY)).toBe(
+      false,
+    );
+    root = null;
+  });
+
+  it('invalidates a host cleanup guard when a newer attachment is staged', async () => {
+    vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
+    await mount({ sessionId: 'session-a' });
+    await flushDraftAttachments();
+    act(() => latest!.setText('same text'));
+    const isDraftUnchanged = captureComposerDraftGuard(SESSION_A_DRAFT_KEY);
+    expect(isDraftUnchanged()).toBe(true);
+    act(() =>
+      latest!.handle.restoreFiles([
+        { name: 'new.txt', media_type: 'text/plain', text: 'unsent' },
+      ]),
+    );
+    expect(isDraftUnchanged()).toBe(false);
+  });
+
   it.each([
     'switch',
     'new pending',
@@ -3529,6 +3564,8 @@ describe('composer draft attachment races', () => {
       await flushDraftAttachments();
     });
     const keepDraft = editedBefore || action === 'text' || action === 'file';
+    if (cwd)
+      expect(localStorage.getItem(getPendingTaskDraftKey(cwd))).toBeNull();
     expect(
       fake.stores
         .get('attachments')
@@ -3555,6 +3592,87 @@ describe('composer draft attachment races', () => {
       keepDraft ? (action === 'file' ? [file, newer] : [file]) : [],
     );
   });
+
+  it('keeps a reader busy through allocation for every submission entry', async () => {
+    vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
+    const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(() => false);
+    localStorage.setItem(
+      getPromptHistoryStorageKey('/work'),
+      JSON.stringify(['prior prompt']),
+    );
+    const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work' });
+    await flushDraftAttachments();
+    act(() => {
+      latest!.setText('submitted');
+      latest!.submitText();
+    });
+    const metadata = onSubmit.mock.calls[0][4]!;
+    let release!: () => void;
+    const read = FileReader.prototype.readAsDataURL;
+    const held = vi
+      .spyOn(FileReader.prototype, 'readAsDataURL')
+      .mockImplementation(function (this: FileReader, blob: Blob) {
+        release = () => read.call(this, blob);
+      });
+    try {
+      act(() =>
+        latest!.ingestFiles([
+          new File(['png'], 'loading.png', { type: 'image/png' }),
+        ]),
+      );
+      await flushDraftAttachments();
+      await metadata.retainDraftDuringSessionCreation!(async (allocated) => {
+        allocated('created-session');
+        mounted.switchSession('created-session', '/work');
+        await flushDraftAttachments();
+        expect(latest!.pendingImageBatchCount).toBe(1);
+        expect(latest!.canSubmit).toBe(false);
+        act(() => {
+          latest!.submitText();
+          latest!.handle.retryLast();
+          latest!.searchState.submitSearchMatch('history');
+        });
+        expect(onSubmit).toHaveBeenCalledTimes(1);
+        release();
+        await waitForImageIngestion();
+        expect(latest!.canSubmit).toBe(true);
+        expect(latest!.pastedImages).toHaveLength(1);
+      });
+    } finally {
+      held.mockRestore();
+    }
+  });
+
+  it.each([false, true])(
+    'clears an accepted draft after removing its submitted image (leave: %s)',
+    async (leave) => {
+      vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
+      let accepted: ComposerSubmitCommit | undefined;
+      const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+        (_text, _images, _files, commit) => {
+          accepted = commit;
+          return false;
+        },
+      );
+      const mounted = await mount({ sessionId: 'session-a', onSubmit });
+      await flushDraftAttachments();
+      act(() => {
+        latest!.setText('sent text');
+        latest!.handle.restoreImages([
+          { data: 'sent-X', media_type: 'image/png' },
+        ]);
+        latest!.submitText();
+        latest!.removeImage(0);
+      });
+      if (leave) mounted.switchSession('session-b', undefined);
+      act(() => accepted!());
+      await flushDraftAttachments();
+      expect(localStorage.getItem(SESSION_A_DRAFT_KEY)).toBeNull();
+      if (leave) mounted.switchSession('session-a', undefined);
+      expect(latest!.getText()).toBe('');
+      expect(latest!.pastedImages).toEqual([]);
+    },
+  );
 
   it.each([false, true])(
     'preserves host attachments restored during layout (storage available: %s)',
@@ -3603,7 +3721,13 @@ describe('composer draft attachment races', () => {
     },
   );
 
-  it.each(['add', 'clear', 'submit', 'search submit'] as const)(
+  it.each([
+    'add',
+    'clear',
+    'submit',
+    'search submit',
+    'managed accept',
+  ] as const)(
     'shares the session draft between retained main and split composers (%s)',
     async (edit) => {
       const fake = createFakeIndexedDB();
@@ -3659,6 +3783,9 @@ describe('composer draft attachment races', () => {
       await flushDraftAttachments();
       expect(composers.pane.pastedImages).toEqual([x]);
       expect(composers.pane.getText()).toBe('main text');
+      act(() => undo(composers.pane.viewRef.current!));
+      expect(composers.pane.getText()).toBe('main text');
+      expect(composers.main.getText()).toBe('main text');
       expect(composers.main.pastedFiles).toEqual([y]);
       act(() => composers.pane.removeFile(0));
       expect(composers.main.pastedFiles).toEqual([]);
@@ -3678,7 +3805,7 @@ describe('composer draft attachment races', () => {
             release = () => read.call(this, blob);
           });
         act(() =>
-          composers.main.ingestFiles([
+          composers.pane.ingestFiles([
             new File(['png'], 'loading.png', { type: 'image/png' }),
           ]),
         );
@@ -3687,10 +3814,19 @@ describe('composer draft attachment races', () => {
         expect(composers.pane.canSubmit).toBe(false);
         act(() => composers.pane.submitText());
         expect(submissions.pane).not.toHaveBeenCalled();
-        await act(async () => {
-          release();
-          await new Promise((resolve) => setTimeout(resolve, 20));
+        const abort = vi.spyOn(FileReader.prototype, 'abort');
+        act(() => acceptOldMain!());
+        expect(abort).not.toHaveBeenCalled();
+        release();
+        await vi.waitFor(async () => {
+          await flushDraftAttachments();
+          expect(composers.main.pendingImageBatchCount).toBe(0);
+          expect(composers.pane.pendingImageBatchCount).toBe(0);
+          expect(composers.main.canSubmit).toBe(true);
+          expect(composers.pane.canSubmit).toBe(true);
+          expect(composers.pane.pastedImages).toHaveLength(2);
         });
+        abort.mockRestore();
         held.mockRestore();
         act(() => composers.main.removeImage(1));
         expect(composers.pane.pastedImages).toEqual([x]);
@@ -3722,6 +3858,14 @@ describe('composer draft attachment races', () => {
         composers.pane.handle.restoreFiles([y]);
       });
       expect(composers.main.getText()).toBe('pane text');
+      act(() => {
+        composers.pane.viewRef.current!.dispatch({ selection: { anchor: 4 } });
+        composers.main.setText('pane text!');
+      });
+      expect(composers.pane.viewRef.current!.state.selection.main.anchor).toBe(
+        4,
+      );
+      act(() => composers.main.setText('pane text'));
       expect(getInlineComposerTags(composers.main.viewRef.current!)).toEqual(
         [],
       );
@@ -3746,6 +3890,8 @@ describe('composer draft attachment races', () => {
           composers.pane.handle.restoreFiles([y]);
           expect(acceptOldMain).toBeTypeOf('function');
           acceptOldMain!();
+        } else if (edit === 'managed accept') {
+          clearComposerDraftIfMatches(SESSION_A_DRAFT_KEY, 'pane text');
         } else if (edit === 'submit') composers.pane.submitText();
         else if (edit === 'search submit') {
           composers.pane.searchState.openHistorySearch();

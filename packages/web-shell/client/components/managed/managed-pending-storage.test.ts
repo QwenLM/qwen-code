@@ -46,6 +46,22 @@ describe('managed-pending-storage', () => {
     );
   });
 
+  it('removes overwritten spilled requests and deletes the last one on clear', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const first = { text: 'x'.repeat(200 * 1024) };
+    const second = { text: 'y'.repeat(200 * 1024) };
+    await saveManagedPending('draft', first);
+    const { pendingId } = JSON.parse(sessionStorage.getItem('draft')!);
+    await saveManagedPending('draft', second);
+    expect(fake.stores.get('requests')?.has(pendingId)).toBe(false);
+    expect(await readManagedPending('draft')).toEqual(second);
+    expect(fake.stores.get('requests')?.size).toBe(1);
+    await saveManagedPending('draft');
+    expect(sessionStorage.getItem('draft')).toBeNull();
+    expect(fake.stores.get('requests')?.size).toBe(0);
+  });
+
   it('fails soft when the database cannot be opened', async () => {
     vi.stubGlobal('indexedDB', createFakeIndexedDB({ failOpen: true }).factory);
     const value = { text: 'x'.repeat(200 * 1024) };

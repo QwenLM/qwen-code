@@ -134,6 +134,7 @@ import {
 } from '../utils/imageIngestion';
 import {
   createComposerDraftAttachmentStore,
+  subtractDraftAttachments,
   type ComposerDraftAttachments,
 } from './composer-draft-attachments';
 import {
@@ -1286,13 +1287,37 @@ function validDraftReferences(draft: ComposerReferenceDraft) {
   );
 }
 
+function hoistInlineDraftReferences(
+  draft: ComposerReferenceDraft,
+): ComposerReferenceDraft {
+  const inlineTags = validDraftReferences(draft);
+  let nextText = draft.text;
+  for (const { start, end } of [...inlineTags].sort(
+    (a, b) => b.start - a.start,
+  ))
+    nextText = nextText.slice(0, start) + nextText.slice(end);
+  return {
+    text: nextText,
+    inlineTags: [],
+    tags: [
+      ...new Map(
+        [...draft.tags, ...inlineTags.map(({ tag }) => tag)].map((tag) => [
+          tag.id,
+          tag,
+        ]),
+      ).values(),
+    ],
+  };
+}
+
 function loadComposerDraftData(
   storageKey: string | undefined,
   moveInlineToTop = false,
 ): ComposerReferenceDraft | null {
   if (!storageKey) return null;
   const shared = findComposerDraftSession(storageKey)?.content;
-  if (shared) return shared;
+  if (shared)
+    return moveInlineToTop ? hoistInlineDraftReferences(shared) : shared;
   try {
     const text = localStorage.getItem(storageKey);
     if (text === null) return null;
@@ -1313,23 +1338,7 @@ function loadComposerDraftData(
       ) {
         const draft = saved as ComposerReferenceDraft;
         if (!moveInlineToTop) return draft;
-        const inlineTags = validDraftReferences(draft);
-        let nextText = draft.text;
-        for (const { start, end } of [...inlineTags].sort(
-          (a, b) => b.start - a.start,
-        ))
-          nextText = nextText.slice(0, start) + nextText.slice(end);
-        return {
-          text: nextText,
-          inlineTags: [],
-          tags: [
-            ...new Map(
-              [...draft.tags, ...inlineTags.map(({ tag }) => tag)].map(
-                (tag) => [tag.id, tag],
-              ),
-            ).values(),
-          ],
-        };
+        return hoistInlineDraftReferences(draft);
       }
     }
     return { text, inlineTags: [], tags: [] };
@@ -1367,14 +1376,25 @@ function saveComposerDraft(
   }
 }
 
+export function captureComposerDraftGuard(storageKey: string | undefined) {
+  const edits = storageKey ? composerDraftEdits.get(storageKey) : undefined;
+  return () =>
+    (!storageKey || composerDraftEdits.get(storageKey) === edits) &&
+    !findComposerDraftSession(storageKey)?.pendingBatches;
+}
+
 export function clearComposerDraftIfMatches(
   storageKey: string | undefined,
   text: string,
 ): void {
   if (!storageKey) return;
-  if (loadComposerDraft(storageKey) === text) {
+  if ((loadComposerDraft(storageKey) ?? '') === text) {
     saveComposerDraft(storageKey, '');
-    findComposerDraftSession(storageKey)?.setContent({
+    markComposerDraftEdited(storageKey);
+    const shared = findComposerDraftSession(storageKey);
+    if (shared) shared.setAttachments(EMPTY_ATTACHMENTS, true);
+    else void createComposerDraftAttachmentStore()?.delete(storageKey);
+    shared?.setContent({
       text: '',
       inlineTags: [],
       tags: [],
@@ -2049,6 +2069,10 @@ export function useComposerCore(
           listener,
           unsubscribe: session.subscribe(listener),
         };
+        session.setIngestionCount(
+          listener,
+          imageIngestionLaneRef.current.pendingBatches,
+        );
         applySharedDraftRef.current(session, 'content');
       }
       if (attachmentsEnabledRef.current) session.restoreAttachments();
@@ -2084,11 +2108,16 @@ export function useComposerCore(
   const syncDraftAttachments = useCallback(
     (key: string | undefined, attachments?: ComposerDraftAttachments): void => {
       if (!key) return;
-      markComposerDraftEdited(key);
       const value = attachments ?? {
         images: [...pastedImagesRef.current],
         files: [...pastedFilesRef.current],
       };
+      const previous = findComposerDraftSession(key)?.attachments;
+      const added = previous
+        ? subtractDraftAttachments(value, previous)
+        : value;
+      if (added.images.length || added.files.length)
+        markComposerDraftEdited(key);
       enqueueDraftAttachments(
         key,
         value.images.length === 0 && value.files.length === 0 ? null : value,
@@ -2189,6 +2218,7 @@ export function useComposerCore(
       if (disabledRef.current) return true;
 
       const lane = imageIngestionLaneRef.current;
+      markComposerDraftEdited(draftIdentityRef.current.storageKey);
       lane.pendingBatches += 1;
       setPendingImageBatchCount(lane.pendingBatches);
       publishDraftIngestionRef.current();
@@ -2964,7 +2994,13 @@ export function useComposerCore(
   applySharedDraftRef.current = (session, change) => {
     if (session.key !== draftIdentityRef.current.storageKey) return;
     if (change === 'content') {
-      const draft = session.content;
+      const draft =
+        isTouchComposer && persistFileReferencesRef.current
+          ? {
+              ...session.content,
+              ...hoistInlineDraftReferences(session.content),
+            }
+          : session.content;
       applyingSharedDraftRef.current = true;
       try {
         historyBrowseActiveRef.current = false;
@@ -2985,6 +3021,16 @@ export function useComposerCore(
                     from: 0,
                     to: view.state.doc.length,
                     insert: draft.text,
+                  },
+                  selection: {
+                    anchor: Math.min(
+                      view.state.selection.main.anchor,
+                      draft.text.length,
+                    ),
+                    head: Math.min(
+                      view.state.selection.main.head,
+                      draft.text.length,
+                    ),
                   },
                 }
               : {}),
@@ -3324,7 +3370,9 @@ export function useComposerCore(
       pastedFilesRef.current === pastedFilesAtSubmit &&
       restoredInputAnnotationsRef.current ===
         restoredInputAnnotationsAtSubmit &&
-      shellModeRef.current === shellModeAtSubmit;
+      shellModeRef.current === shellModeAtSubmit &&
+      (sharedDraftRef.current?.session.pendingBatches ??
+        imageIngestionLaneRef.current.pendingBatches) === 0;
     const draftAssignment: ComposerDraftAssignment = {
       storageKey: submissionIdentity.draftStorageKey,
       editsAtSubmit: submissionIdentity.draftStorageKey
@@ -3411,7 +3459,9 @@ export function useComposerCore(
         ) &&
         restoredInputAnnotationsRef.current ===
           restoredInputAnnotationsAtSubmit &&
-        shellModeRef.current === shellModeAtSubmit;
+        shellModeRef.current === shellModeAtSubmit &&
+        (sharedDraftRef.current?.session.pendingBatches ??
+          imageIngestionLaneRef.current.pendingBatches) === 0;
       historyBrowseActiveRef.current = false;
       if (!composerUnchanged) return;
 
@@ -4266,6 +4316,7 @@ export function useComposerCore(
       if (composerDraftStorageKey)
         enqueueDraftAttachments(composerDraftStorageKey, previousAttachments);
       if (assignment.storageKey !== composerDraftStorageKey) {
+        saveComposerDraft(assignment.storageKey, '');
         forgetDraftAttachments(assignment.storageKey);
       }
       if (assignment.isCurrentDraft()) {

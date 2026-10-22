@@ -35,8 +35,38 @@ export interface ComposerDraftAttachmentStore {
   delete(key: string): Promise<boolean>;
 }
 
-function imageIdentity(image: PromptImage): string {
-  return `${image.media_type}\u0000${image.data}`;
+function sameImage(left: PromptImage, right: PromptImage): boolean {
+  return left.media_type === right.media_type && left.data === right.data;
+}
+
+function sameFile(left: PromptFile, right: PromptFile): boolean {
+  return (
+    left.name === right.name &&
+    left.media_type === right.media_type &&
+    left.text === right.text &&
+    left.data === right.data &&
+    (left.text !== undefined || left.data !== undefined)
+  );
+}
+
+function subtract<T>(items: T[], overlap: T[], same: (a: T, b: T) => boolean) {
+  const remaining = [...overlap];
+  return items.filter((item) => {
+    const index = remaining.findIndex((other) => same(item, other));
+    if (index < 0) return true;
+    remaining.splice(index, 1);
+    return false;
+  });
+}
+
+export function subtractDraftAttachments(
+  attachments: ComposerDraftAttachments,
+  overlap: ComposerDraftAttachments,
+): ComposerDraftAttachments {
+  return {
+    images: subtract(attachments.images, overlap.images, sameImage),
+    files: subtract(attachments.files, overlap.files, sameFile),
+  };
 }
 
 /**
@@ -51,17 +81,11 @@ export function mergeDraftAttachments(
   current: ComposerDraftAttachments,
   stored: ComposerDraftAttachments,
 ): ComposerDraftAttachments {
-  const imageKeys = new Set(current.images.map(imageIdentity));
+  const additions = subtractDraftAttachments(stored, current);
   const fileNames = new Set(current.files.map((file) => file.name));
-  const images = [...current.images];
-  for (const image of stored.images) {
-    const key = imageIdentity(image);
-    if (imageKeys.has(key)) continue;
-    imageKeys.add(key);
-    images.push(image);
-  }
+  const images = [...current.images, ...additions.images];
   const files = [...current.files];
-  for (const file of stored.files) {
+  for (const file of additions.files) {
     const name = dedupeAttachmentName(file.name, fileNames);
     fileNames.add(name);
     files.push(name === file.name ? file : { ...file, name });

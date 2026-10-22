@@ -38,8 +38,10 @@ describe('same-session composer draft', () => {
     a.setIngestionCount(main, 1);
     a.setIngestionCount(pane, 2);
     expect(a.pendingBatches).toBe(3);
+    pane.mockClear();
     leaveMain();
     expect(a.pendingBatches).toBe(2);
+    expect(pane).toHaveBeenCalledWith('attachments');
     a.setIngestionCount(pane, 0);
     expect(a.pendingBatches).toBe(0);
     leavePane();
@@ -97,6 +99,37 @@ describe('same-session composer draft', () => {
     store.resolve({ images: [image], files: [] });
     await a.loaded;
     expect(a.attachments).toEqual({ images: [], files: [file] });
+    leave();
+  });
+
+  it('keeps removals of overlapping host payloads while restoration is pending', async () => {
+    const store = heldStore();
+    const a = getComposerDraftSession('remove-overlap', content, store);
+    const leave = a.subscribe(vi.fn());
+    a.restoreAttachments();
+    const other = { ...file, name: 'Z.txt', text: 'Z bytes' };
+    a.setAttachments({ images: [image], files: [file, other] });
+    a.setAttachments({ images: [], files: [other] });
+    store.resolve({
+      images: [{ ...image }],
+      files: [{ ...file }, { ...other }],
+    });
+    await a.loaded;
+    expect(a.attachments).toEqual({ images: [], files: [other] });
+    expect(store.save).toHaveBeenCalledWith(a.key, a.attachments);
+    leave();
+  });
+
+  it('keeps the unread archive when only a different new chip was removed', async () => {
+    const store = heldStore();
+    const a = getComposerDraftSession('remove-new-chip', content, store);
+    const leave = a.subscribe(vi.fn());
+    a.restoreAttachments();
+    a.setAttachments({ images: [], files: [file] });
+    a.setAttachments({ images: [], files: [] });
+    store.resolve({ images: [image], files: [] });
+    await a.loaded;
+    expect(a.attachments).toEqual({ images: [image], files: [] });
     leave();
   });
 
