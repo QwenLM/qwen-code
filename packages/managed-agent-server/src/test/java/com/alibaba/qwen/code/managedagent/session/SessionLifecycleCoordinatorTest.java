@@ -46,6 +46,55 @@ import static org.awaitility.Awaitility.await;
 
 class SessionLifecycleCoordinatorTest {
     @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void shellClosePreservesOrdinaryDrainAndKeepsMcpOwnerUntilTransportDrains(boolean mcp) throws Exception {
+        var store = Mockito.mock(AgentStateStore.class);
+        var session = Mockito.mock(StoreModels.SessionRecord.class);
+        Mockito.when(session.workspace()).thenReturn(Mockito.mock(com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding.class));
+        Mockito.when(session.toolProfile()).thenReturn("hosted-workspace-shell/1");
+        Mockito.when(store.requireSession("tenant", "session")).thenReturn(session);
+        Mockito.when(store.hasMcpServers(session)).thenReturn(mcp);
+        var operation = new StoreModels.OperationRecord("tenant", "session", "operation", OperationKind.DELETE,
+                "digest", "DELIVERING", "ACCEPTED", "DRAINING", "ACTIVE", "receipt", "server", 1, 1, null, 2);
+        var lifecycle = Mockito.mock(com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.class);
+        Mockito.when(lifecycle.recoverEffects(operation)).thenReturn(new ObjectMapper().createObjectNode().put("neverInitialized", false));
+        var harness = Mockito.mock(HarnessConnector.class);
+        var warmer = Mockito.mock(RuntimeWarmer.class);
+        Mockito.when(warmer.supportsWorkspaceClose(session.workspace())).thenReturn(true);
+        var authority = com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.authority(operation);
+        Mockito.when(warmer.prepareWorkspaceResources("tenant", "session", authority)).thenReturn(CompletableFuture.completedFuture(null));
+        Mockito.when(warmer.drainWorkspaceResources("tenant", "session", authority)).thenReturn(CompletableFuture.completedFuture(null));
+        Mockito.when(warmer.closeWorkspace("tenant", "session")).thenReturn(CompletableFuture.completedFuture(null));
+        var relay = Mockito.mock(ChildResultRelayStore.class);
+        Mockito.when(relay.findLiveScopes("tenant", "session")).thenReturn(List.of());
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(store, Mockito.mock(ManagedSessionStore.class), harness, warmer,
+                    relay, new ObjectMapper(), admissions(store, warmer), noTurnCancels(), brokerProvider(null), executor, Clock.systemUTC(), new ManagedAgentProperties());
+            coordinator.setWorkspaceLifecycleStore(lifecycle);
+            try {
+                var settle = SessionLifecycleCoordinator.class.getDeclaredMethod("settle", StoreModels.OperationRecord.class,
+                        java.util.concurrent.atomic.AtomicBoolean.class);
+                settle.setAccessible(true);
+                assertThat(settle.invoke(coordinator, operation, new AtomicBoolean())).isEqualTo(true);
+                var order = Mockito.inOrder(harness, warmer, lifecycle);
+                order.verify(harness).prepareLifecycleResources(operation);
+                if (mcp) {
+                    order.verify(warmer).prepareWorkspaceResources("tenant", "session", authority);
+                } else {
+                    order.verify(warmer).drainWorkspaceResources("tenant", "session", authority);
+                    Mockito.verify(warmer, Mockito.never()).prepareWorkspaceResources("tenant", "session", authority);
+                }
+                order.verify(harness).settleLifecycleResources(operation);
+                order.verify(warmer).drainWorkspaceResources("tenant", "session", authority);
+                order.verify(lifecycle).verifyResources(operation);
+                order.verify(harness).detachLifecycle(operation);
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.CsvSource({
         "hosted-workspace-mcp/1,workspace_close_identity_unverified,true",
         "hosted-workspace-shell/1,workspace_close_identity_unverified,false",

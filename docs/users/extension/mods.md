@@ -203,9 +203,13 @@ In headless runs, additional attempts count against `--max-tool-calls`; catch re
 attempt. Interactive terminals retain their existing usage counters and do not add a run-budget setting. Sessions with tool middleware serialize tool calls, including parallel
 next calls, because rewritten arguments may introduce side effects. One root
 call permits at most 64 native attempts and 32 outstanding host operations.
-The 60-second root limit includes native execution and time spent waiting for
-approval. Returning before an outstanding next completes cancels that work and
-waits for it to settle.
+The tool root has a cumulative 60-second Mod budget. Native execution and
+approval waiting do not consume it while the host owns the active attempt and
+no guest work is running or awaiting without lending its budget. Guest checks,
+callbacks, continuations and log observers still consume the root budget, even
+while another native attempt is active. Starting another attempt never resets
+the remaining budget. Returning before an outstanding next completes cancels
+that work and waits for it to settle.
 
 `tool.check` receives `{tool, input, tool_use_id}` after native validation and
 classic input rewrites. All fields are pinned. Its next returns a declarative
@@ -353,12 +357,21 @@ queued notifications before returning output.
 A normal plugin layer has 10 seconds of its own time, excluding time waiting for
 cross-plugin `next` or API calls. Pending void `ui.log` notifications do not pause
 the caller's budget. Catch recovery uses a one-second budget.
-Qwen additionally caps each root dispatch at 60 seconds and each
-uninterrupted guest execution slice at 10 seconds. All `session.end` work shares
-1.5 seconds. An outer handler that finishes early abandons pending downstream
-work; cancellation never starts a fallback operation. Retained next/API functions
-cannot perform work after their invocation ends. A worker that cannot acknowledge
-cancellation within 250 milliseconds is terminated; restart the CLI to reload Mods.
+Qwen additionally caps each root dispatch at 60 seconds of charged time and each
+uninterrupted guest execution slice at 10 seconds. Only tool roots exclude the
+trusted native waits described above; load and command roots retain continuous
+60-second limits. All `session.end` work shares 1.5 seconds. Native tool timeouts
+and permission decisions still apply. The scheduler's optional execution timeout
+defaults to disabled and does not impose an approval deadline; individual tools
+retain their own timeout policies.
+
+An outer handler that finishes early abandons pending downstream work;
+cancellation never starts a fallback operation. Retained next/API functions cannot
+perform work after their invocation ends. Cancellation immediately revokes the
+current root, including during an excluded native wait. A worker that cannot
+acknowledge cancellation within 250 milliseconds is terminated; this watchdog
+continues independently of the Mod budget. Native process cleanup and task drain
+can take longer. Restart the CLI to reload a terminated Mod worker.
 
 There are at most 32 Mod environments, 64 registered commands, 128 registrations
 per plugin, and 4,096 root/API event chains per root call. Passing through another

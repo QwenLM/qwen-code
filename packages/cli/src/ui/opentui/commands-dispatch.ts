@@ -754,15 +754,6 @@ export class OpenTuiSlashDispatcher {
                   toolArgs: result.toolArgs,
                 };
               case 'message': {
-                let messageContent = result.content;
-                // The OpenTUI renderer has no vim key mode; the toggle host
-                // reports the real (off) state, and the ink command would
-                // render that as "Exited Vim mode." — actively misleading.
-                // Replace it with the faithful notice (audit 01 G-11b).
-                if (commandToExecute.name === 'vim') {
-                  messageContent =
-                    'Vim mode is not yet available in the OpenTUI renderer.';
-                }
                 // Picker-shaped commands can still reject their arguments
                 // before opening a dialog. Keep those failures paired with
                 // the invocation in both live and reconstructed history, and
@@ -776,7 +767,7 @@ export class OpenTuiSlashDispatcher {
                       ? MessageType.WARNING
                       : MessageType.ERROR;
                 addItemWithRecording(
-                  { type: messageType, text: messageContent },
+                  { type: messageType, text: result.content },
                   Date.now(),
                 );
                 return { kind: 'handled' };
