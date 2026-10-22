@@ -3945,9 +3945,9 @@ export const MessageList = memo(
       setSuppressOlderHistoryLoadingStatus,
     ] = useState(false);
 
-    // The render-phase session switch below and the /clear effect drop the
-    // same per-session view state; keep the shared subset in one place so the
-    // two lists cannot drift apart again.
+    // Shared subset of the per-session reset performed by the render-phase
+    // session switch below and the /clear effect; each caller keeps its
+    // remaining resets at the call site.
     const resetSessionScopedViewState = useCallback(() => {
       followPausedByUserRef.current = false;
       pendingPaginationTurnCompares.current.clear();
@@ -3955,13 +3955,14 @@ export const MessageList = memo(
       setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
     }, []);
 
-    // A direct session switch never renders empty messages (the provider
-    // batches the store reset and the replay into one notification), so the
-    // /clear reset never runs for it. Block ids are per-session ordinals, so
-    // every session-scoped state must drop when the displayed session
-    // changes: stale keep-open and snapshot entries would collide with the
-    // new session's reused ids, and an old anchor would restore the previous
-    // session's scroll metrics into the new transcript.
+    // Shipped routes either remount this list on a session change or, on the
+    // managed route, render an empty transcript first so the /clear leg below
+    // also resets; three other render sites pass no `sessionKey` at all. The
+    // reset below is the component contract for any consumer that keeps one
+    // instance mounted across a `sessionKey` change: block ids are
+    // per-session ordinals, so stale keep-open and snapshot entries would
+    // collide with the new session's reused ids, and an old anchor would
+    // restore the previous session's scroll metrics into the new transcript.
     const [trackedSessionKey, setTrackedSessionKey] = useState(sessionKey);
     if (trackedSessionKey !== sessionKey) {
       setTrackedSessionKey(sessionKey);
