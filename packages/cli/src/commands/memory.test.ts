@@ -157,9 +157,9 @@ it('flushes the --json preview envelope before completing', async () => {
       .then(() => {
         settled = true;
       });
-    for (let i = 0; i < 1000 && callbacks.length + unflushedWrites === 0; i++)
-      await new Promise((resolve) => setImmediate(resolve));
-    expect(callbacks.length + unflushedWrites).toBeGreaterThan(0);
+    await vi.waitFor(() =>
+      expect(callbacks.length + unflushedWrites).toBeGreaterThan(0),
+    );
     expect(settled).toBe(false);
     for (const callback of callbacks) callback();
     await parsing;
