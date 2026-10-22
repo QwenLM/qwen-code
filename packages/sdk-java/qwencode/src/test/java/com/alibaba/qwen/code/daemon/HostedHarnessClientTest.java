@@ -95,6 +95,77 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void mcpManagementKeepsTheSessionAndOriginalCommandIdentityAcrossReadsAndSubmission() throws Exception {
+        createSessionRoute();
+        String command = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        AtomicReference<String> returnedCommand = new AtomicReference<>(command);
+        AtomicReference<String> received = new AtomicReference<>();
+        AtomicInteger commandStatus = new AtomicInteger(202);
+        server.createContext("/session/" + SESSION_ID + "/mcp/management", exchange -> {
+            if ("POST".equals(exchange.getRequestMethod())) {
+                received.set(readBody(exchange));
+            }
+            sendSessionJson(exchange, "POST".equals(exchange.getRequestMethod()) ? commandStatus.get() : 200, "{\"sessionId\":\"" + SESSION_ID
+                    + "\",\"revision\":1,\"supported\":true,\"servers\":[],\"availableServers\":[],"
+                    + "\"operation\":{\"operationId\":\"" + returnedCommand.get()
+                    + "\",\"action\":\"restart\",\"serverId\":\"docs\",\"revision\":1,\"state\":\"settled\"}}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertEquals(SESSION_ID, client.mcpManagement(session).get("sessionId"));
+            Map<String, Object> request = Map.of("operationId", command, "actorKey", "a".repeat(64),
+                    "action", "restart", "serverId", "docs", "expectedRevision", 0);
+            assertEquals(SESSION_ID, client.manageMcp(session, request).get("sessionId"));
+            assertEquals(request, JsonSupport.parseObject(received.get(), "MCP command"));
+            assertEquals(SESSION_ID, client.mcpManagementOperation(session, command).get("sessionId"));
+            returnedCommand.set(PROMPT_ID);
+            assertThrows(MutationOutcomeUnknownException.class, () -> client.manageMcp(session, request));
+            assertThrows(DaemonProtocolException.class, () -> client.mcpManagementOperation(session, command));
+            returnedCommand.set(command);
+            commandStatus.set(200);
+            assertThrows(MutationOutcomeUnknownException.class, () -> client.manageMcp(session, request));
+        }
+    }
+
+    @Test
+    void mcpManagementAttachmentPreservesTheRequestAndNeverEnablesOrdinaryRecovery() {
+        AtomicReference<Map<String, Object>> received = new AtomicReference<>();
+        AtomicInteger requests = new AtomicInteger();
+        AtomicInteger status = new AtomicInteger(200);
+        server.createContext("/session/" + SESSION_ID + "/load", exchange -> {
+            received.set(JsonSupport.parseObject(readBody(exchange), "MCP management attachment"));
+            requests.incrementAndGet();
+            sendSessionJson(exchange, status.get(), status.get() == 200 ? sessionJson()
+                    : "{\"code\":\"hosted_mcp_session_load_required\"}");
+        });
+        var request = new LoadHarnessSession(SESSION_ID, null, false, "hosted-workspace-shell/1")
+                .withMcpServers(List.of(Map.of("serverId", "docs", "serverRevision", 1, "definitionDigest", "a".repeat(64))))
+                .withHookCatalog(Map.of("catalogId", "review", "catalogRevision", 1, "definitionDigest", "b".repeat(64)))
+                .withAgentDefinition(Map.of("agentId", "agent_00112233445566778899aabbccddeeff", "revision", "1", "digest", "c".repeat(64)))
+                .withForegroundOnly(true).withChildWorkspaces(true);
+        Map<String, Object> original = request.toJson();
+        try (HostedHarnessClient client = newClient()) {
+            client.loadMcpManagementSession(request);
+            Map<String, Object> expected = new java.util.LinkedHashMap<>(original);
+            expected.put("mcpManagementOnly", true);
+            assertEquals(expected, received.get());
+            assertEquals(original, request.toJson());
+            client.loadSession(request);
+            assertEquals(original, received.get());
+            for (LoadHarnessSession unsafe : List.of(new LoadHarnessSession(SESSION_ID, null, true),
+                    new LoadHarnessSession(SESSION_ID, null, false, null, true), request.withStoppedMessages(),
+                    request.forLifecycle("operation", 1, 2))) {
+                assertThrows(IllegalArgumentException.class, () -> client.loadMcpManagementSession(unsafe));
+            }
+            assertEquals(2, requests.get());
+            status.set(409);
+            DaemonHttpException missing = assertThrows(DaemonHttpException.class, () -> client.loadMcpManagementSession(request));
+            assertEquals("hosted_mcp_session_load_required", missing.getErrorCode());
+            assertEquals(3, requests.get());
+        }
+    }
+
+    @Test
     void inspectsOriginalRecoveryEvidenceAndTargetsCleanupWithoutSubmitting() {
         createSessionRoute();
         server.createContext("/session/" + SESSION_ID + "/status", exchange -> {

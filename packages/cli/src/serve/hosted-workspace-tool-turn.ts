@@ -1894,6 +1894,10 @@ export class HostedWorkspaceToolTurn {
     return isHostedWorkspaceGlobProfile(this.profile);
   }
 
+  private get fileBackupsEnabled(): boolean {
+    return !this.mcp || this.profile === 'hosted-workspace-shell/1';
+  }
+
   /**
    * H4b: an Agent call is admitted exactly when this Shell-laned Session
    * owns its child orchestrator (a child Session's own turn does not),
@@ -1958,7 +1962,10 @@ export class HostedWorkspaceToolTurn {
               parametersJsonSchema: schema,
             };
           }
-          return hostedWorkspaceDeclarations([tool], Boolean(this.mcp))[0];
+          return hostedWorkspaceDeclarations(
+            [tool],
+            !this.fileBackupsEnabled,
+          )[0];
         }),
       ...(this.mcp?.tools() ?? []),
       ...(skill ? [skill] : []),
@@ -2479,7 +2486,7 @@ export class HostedWorkspaceToolTurn {
         }
       }
       this.acquired = true;
-      if (!this.mcp) {
+      if (this.fileBackupsEnabled) {
         const saved = await readHostedFileHistory(this.session);
         if (saved?.pendingUndo)
           throw new Error('Hosted file history requires recovery.');
@@ -2494,7 +2501,7 @@ export class HostedWorkspaceToolTurn {
         } catch (cause) {
           // A saved continuation still needs this original runtime ID.
           if (recovering || !isHostedFileHistoryRefusal(cause)) throw cause;
-          if (!this.hooks) await this.broker.release();
+          if (!this.hooks && !this.mcp) await this.broker.release();
           this.acquired = false;
           throw new HostedFileHistoryRefusedError(
             cause.reason ?? cause.message,
@@ -4197,7 +4204,7 @@ export class HostedWorkspaceToolTurn {
           );
     };
     const paths = requests.flatMap((request, index) =>
-      !this.mcp &&
+      this.fileBackupsEnabled &&
       refusals[index] === undefined &&
       ['write_file', 'edit'].includes(request.call.name)
         ? [request.input['file_path'] as string]

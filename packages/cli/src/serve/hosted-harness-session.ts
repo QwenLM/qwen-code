@@ -73,6 +73,12 @@ import {
   type HostedFileHistoryRecord,
 } from './hosted-file-history.js';
 import { parseHostedFileHistoryState } from './hosted-file-history-protocol.js';
+import {
+  HostedMcpManager,
+  parseHostedMcpCommand,
+  readHostedMcpSettings,
+  validateHostedMcpHistory,
+} from './hosted-mcp-settings.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
@@ -122,6 +128,7 @@ import {
   parseChildRun,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
+import { parseMcpConfiguration } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-record.js';
 import {
   ResourceToolResultSegmentStore,
   type DurableToolResultResourceStore,
@@ -142,6 +149,7 @@ import {
   assertManagedSessionStableId,
   isChildNotificationSource,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { ManagedSessionCommitRejectedError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { WorkflowStartCancelledError } from '@qwen-code/qwen-code-core/agents/runtime/workflow-runner.js';
 import {
@@ -346,6 +354,7 @@ const RESTORE_CONTAINER_KINDS = new Set([
   'hosted-turn-cleanup',
   'managed-definition',
   'managed-session_metadata',
+  'managed-config_install',
   'managed-file_history',
   'managed-tool-outcome',
   'managed-tool-result-manifest',
@@ -2470,16 +2479,27 @@ async function verifyWorkspaceRestore(
     }
   }
   const header = authority.sessionHeader;
+  for (const entry of authority.extensionRecordsInDomain('mcp_configuration')) {
+    const configuration = parseMcpConfiguration(entry.record);
+    if (
+      !session.mcp?.servers.some(
+        (server) => server.serverId === configuration.serverId,
+      )
+    )
+      throw new Error('Hosted MCP configuration is not pinned.');
+  }
   const events = authority.eventsInSequenceRange(1, throughSequence);
   for (const event of events) {
     if (
       event.kind === 'domain.committed' &&
       ![
         'session_metadata',
+        ...(session.mcp ? ['config_install'] : []),
         'hook_registration',
         'hook_execution',
         'file_history',
         'history_maintenance',
+        ...(session.mcp ? ['mcp_configuration', 'mcp_operation'] : []),
         // H3 families: an admitted child_run or monitor_run journal is
         // exactly what a workspace-profile load must restore, driven by
         // their own record parsers up front.
@@ -4019,8 +4039,14 @@ export function registerHostedHarnessSessionRoutes(
           body?.['mcpServers'] !== undefined)
       )
         mcpServers = parseHostedMcpServers(body?.['mcpServers']);
-      else if (body?.['mcpServers'] !== undefined)
-        throw new Error('MCP requires its explicit profile.');
+      else if (body?.['mcpServers'] !== undefined) {
+        if (
+          toolProfile !== 'hosted-workspace-shell/1' ||
+          !contract.lifecycleV2Profiles?.includes(toolProfile)
+        )
+          throw new Error('MCP requires a supported Workspace profile.');
+        mcpServers = parseHostedMcpServers(body['mcpServers']);
+      }
       if (
         create &&
         mcpServers &&
@@ -4151,6 +4177,55 @@ export function registerHostedHarnessSessionRoutes(
     }
     const passiveRecovery = body?.['passiveManagedRuntimeRecovery'] === true;
     const driveRecovery = body?.['driveRuntimeRecovery'] === true;
+    // Even a passive cold load may resume a model or pay cleanup debt.
+    if (body?.['mcpManagementOnly'] === true) {
+      if (
+        create ||
+        lifecycle ||
+        passiveRecovery ||
+        driveRecovery ||
+        stopMessages ||
+        body?.['cancellationTakeover'] === true ||
+        cleanupPromptId !== undefined
+      )
+        return error(res, 400, 'invalid_mcp_management_attachment');
+      if (!resident || resident.recoveryCleanupOnly)
+        return error(res, 409, 'hosted_mcp_session_load_required');
+      const key = resident.managed.authority.sessionHeader.sessionKey;
+      if (
+        key.tenantId !== store.tenantId ||
+        key.workspaceId !== store.workspaceId
+      )
+        return error(res, 409, 'hosted_session_already_attached');
+      if (resident.storeBaseUrl !== store.baseUrl)
+        return error(res, 409, 'hosted_session_store_mismatch');
+      const definition = resident.definition;
+      if (
+        !['hosted-workspace-shell/1', HOSTED_MCP_PROFILE].includes(
+          toolProfile as string,
+        ) ||
+        resident.foregroundOnly ||
+        (resident.childDepth ?? 0) !== 0 ||
+        definition?.['toolProfile'] !== toolProfile ||
+        JSON.stringify(definition?.['mcpServers']) !==
+          JSON.stringify(mcpServers) ||
+        !isDeepStrictEqual(
+          definition?.['hookCatalog'],
+          hookCatalog ?? definition?.['hookCatalog'],
+        ) ||
+        (captureBytes !== undefined &&
+          definition?.['captureBytes'] !== captureBytes)
+      )
+        return error(res, 409, 'hosted_tool_profile_conflict');
+      if (resident.lifecycle || resident.mcpClosing)
+        return error(res, 409, 'hosted_session_closing');
+      const attachedSession = resident;
+      await attachedSession.stores!.assertWritable().then(
+        () => sendAttachment(res, sessionId, attachedSession),
+        () => error(res, 503, 'managed_session_open_failed'),
+      );
+      return;
+    }
     const takeoverFlags = passiveRecovery || driveRecovery;
     if (resident && typeof cancellationPromptId === 'string') {
       const key = resident.managed.authority.sessionHeader.sessionKey;
@@ -5044,7 +5119,9 @@ export function registerHostedHarnessSessionRoutes(
       if (
         !create &&
         lifecycle &&
-        toolProfile === HOSTED_MCP_PROFILE &&
+        (toolProfile === HOSTED_MCP_PROFILE ||
+          (toolProfile === 'hosted-workspace-shell/1' &&
+            definition?.['mcpServers'] !== undefined)) &&
         mcpServers === undefined
       ) {
         mcpServers = parseHostedMcpServers(definition?.['mcpServers']);
@@ -5175,6 +5252,19 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 409, 'hosted_tool_profile_conflict');
         return;
       }
+      const mcpSettings = await readHostedMcpSettings(managed);
+      validateHostedMcpHistory(mcpServers ?? [], mcpSettings);
+      if (
+        mcpSettings.length &&
+        (foregroundOnly ||
+          !['hosted-workspace-shell/1', HOSTED_MCP_PROFILE].includes(
+            toolProfile ?? '',
+          ) ||
+          (session.childDepth ?? 0) !== 0)
+      )
+        throw new Error(
+          'Hosted MCP management is unavailable for this Session.',
+        );
       if (
         typeof cancellationPromptId === 'string' &&
         cleanupPromptId === undefined &&
@@ -5190,6 +5280,7 @@ export function registerHostedHarnessSessionRoutes(
           !workspaceProfile ||
           hookCatalog ||
           mcpServers ||
+          mcpSettings.length > 0 ||
           !status.inputSettled ||
           !status.continuationReady ||
           !['ready', 'cleanup_pending'].includes(status.state)
@@ -5210,11 +5301,12 @@ export function registerHostedHarnessSessionRoutes(
         sendAttachment(res, sessionId, session);
         return;
       }
-      if (mcpServers && brokerOptions)
+      if ((mcpServers || mcpSettings.length) && brokerOptions)
         session.mcp = new HostedMcpSession(
           { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
           managed,
-          mcpServers,
+          mcpServers ?? [],
+          mcpSettings.at(-1),
         );
       if (hookCatalog && brokerOptions)
         session.hooks = new HostedHookSession(
@@ -7735,6 +7827,111 @@ export function registerHostedHarnessSessionRoutes(
       .finally(() => {
         session.hooksBusy = false;
       });
+  });
+
+  const mcpManager = (session: HostedSession) => {
+    if (
+      !brokerOptions ||
+      session.foregroundOnly ||
+      (session.childDepth ?? 0) !== 0 ||
+      !['hosted-workspace-shell/1', HOSTED_MCP_PROFILE].includes(
+        session.toolProfile ?? '',
+      ) ||
+      !contract.lifecycleV2Profiles?.some(
+        (profile) => profile === session.toolProfile,
+      )
+    )
+      throw new Error('Hosted MCP management is unavailable.');
+    const pins = session.definition?.['mcpServers'];
+    return new HostedMcpManager(
+      session.managed,
+      pins === undefined ? [] : parseHostedMcpServers(pins),
+      { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
+      session.mcp,
+      () => session.hooks?.broker,
+    );
+  };
+
+  app.get('/session/:id/mcp/management', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.recoveryCleanupOnly)
+      return error(res, 409, 'hosted_mcp_session_load_required');
+    void (async () => {
+      const manager = mcpManager(session);
+      await manager.open();
+      res.json(await manager.snapshot());
+    })().catch(() => error(res, 409, 'hosted_mcp_management_unavailable'));
+  });
+
+  app.get('/session/:id/mcp/management/operations/:operationId', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.recoveryCleanupOnly)
+      return error(res, 409, 'hosted_mcp_session_load_required');
+    void (async () => {
+      const manager = mcpManager(session);
+      await manager.open();
+      if (!manager.status(req.params['operationId']))
+        return error(res, 404, 'hosted_mcp_command_not_found');
+      res.json(await manager.snapshot(false, req.params['operationId']));
+    })().catch(() => error(res, 409, 'hosted_mcp_recovery_required'));
+  });
+
+  app.post('/session/:id/mcp/management', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.recoveryCleanupOnly)
+      return error(res, 409, 'hosted_mcp_session_load_required');
+    if (
+      session.active ||
+      session.hooksBusy ||
+      session.mcpBusy ||
+      session.mcpRecovering ||
+      session.mcpClosing ||
+      session.lifecycle ||
+      session.blocked ||
+      session.hooks?.mountWorkUnproven()
+    )
+      return error(res, 409, 'hosted_turn_active');
+    let command;
+    let manager: HostedMcpManager;
+    try {
+      command = parseHostedMcpCommand(req.body);
+      manager = mcpManager(session);
+    } catch {
+      return error(res, 400, 'invalid_mcp_command');
+    }
+    session.mcpBusy = true;
+    void (async () => {
+      try {
+        await manager.open();
+        await manager.submit(command);
+        res
+          .status(202)
+          .json(await manager.snapshot(false, command.operationId));
+      } catch (cause) {
+        if (
+          cause instanceof HostedMcpConflictError ||
+          cause instanceof ManagedSessionConflictError ||
+          cause instanceof ManagedSessionCommitRejectedError
+        )
+          error(res, 409, 'hosted_mcp_configuration_conflict');
+        else if (manager.status(command.operationId))
+          res
+            .status(202)
+            .json(await manager.snapshot(false, command.operationId));
+        else error(res, 503, 'hosted_mcp_recovery_required');
+      } finally {
+        session.mcp = manager.mcp;
+        if (session.mcp && session.hooks?.broker === session.mcp.broker)
+          session.hooks.delegateBrokerToMcp();
+        session.mcpBusy = false;
+      }
+    })().catch(() => {
+      session.mcpBusy = false;
+      if (!res.headersSent) error(res, 503, 'hosted_mcp_recovery_required');
+    });
   });
 
   app.get('/session/:id/mcp-catalog', (req, res) => {
@@ -10722,6 +10919,7 @@ export function registerHostedHarnessSessionRoutes(
         return error(res, 409, 'hosted_file_history_capacity_exceeded');
       }
       const broker =
+        session.mcp?.broker ??
         session.hooks?.broker ??
         new HostedWorkspaceBroker(
           brokerOptions,
@@ -10730,7 +10928,8 @@ export function registerHostedHarnessSessionRoutes(
         );
       try {
         await broker.warm();
-        if (session.hooks) await session.hooks.acquire();
+        if (session.mcp) await session.mcp.acquireOwner();
+        else if (session.hooks) await session.hooks.acquire();
         else await broker.acquire();
       } catch (cause) {
         if (isRetryableWorkspaceAcquisition(cause))
@@ -10751,7 +10950,7 @@ export function registerHostedHarnessSessionRoutes(
         });
       } catch (cause) {
         if (!isHostedFileHistoryRefusal(cause)) throw cause;
-        if (!session.hooks) await broker.release();
+        if (!session.hooks && !session.mcp) await broker.release();
         return error(res, 409, 'hosted_file_history_refused');
       }
       await commitHostedFileHistory(session.managed, pending);
@@ -10779,7 +10978,7 @@ export function registerHostedHarnessSessionRoutes(
         pendingUndo: { requestId, promptId },
         undoReceipts: [...(saved.undoReceipts ?? []), undo],
       });
-      if (!session.hooks) await broker.release();
+      if (!session.hooks && !session.mcp) await broker.release();
       await commitHostedFileHistory(session.managed, {
         schemaVersion: 1,
         state: result.state,
@@ -10888,6 +11087,12 @@ export function registerHostedHarnessSessionRoutes(
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (compressionBusy(session))
       return error(res, 409, 'session_context_busy');
+    if (
+      session.mcp &&
+      session.toolProfile === 'hosted-workspace-shell/1' &&
+      session.lifecycleProtocolVersion !== 2
+    )
+      return error(res, 409, 'hosted_lifecycle_required');
     if (
       session.active ||
       session.mcpBusy ||
