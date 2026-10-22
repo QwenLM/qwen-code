@@ -58,6 +58,9 @@ p {
   color: light-dark(#a32616, #ffafa3);
   opacity: 1;
 }
+#notice {
+  color: light-dark(#785000, #f0ce89);
+}
 iframe {
   display: block;
   width: 100%;

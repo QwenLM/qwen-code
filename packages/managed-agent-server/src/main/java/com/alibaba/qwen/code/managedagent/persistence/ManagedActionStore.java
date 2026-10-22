@@ -399,6 +399,30 @@ public class ManagedActionStore {
                 .findFirst();
     }
 
+    public record ScopedAction(String sessionId, Action action) { }
+
+    public List<ScopedAction> listWithChildren(String tenant, String parent, Long before,
+            String beforeSession, String beforeId, int limit) {
+        List<Object> args = new ArrayList<>(List.of(tenant, parent, parent));
+        String cursor = "";
+        if (before != null) {
+            cursor = " AND (r.gmt_create < ? OR r.gmt_create = ? AND (r.session_id < ?"
+                    + " OR r.session_id = ? AND r.action_id < ?))";
+            args.addAll(List.of(before, before, beforeSession, beforeSession, beforeId));
+        }
+        args.add(limit);
+        return jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns("r")
+                        + " FROM ma_session_record r JOIN ma_session s ON s.tenant_id=r.tenant_id"
+                        + " AND s.session_id=r.session_id WHERE r.tenant_id=? AND r.record_kind='ACTION'"
+                        + " AND r.state='requested' AND s.deleted_at IS NULL AND (s.session_id=?"
+                        + " OR s.parent_session_id=? AND s.public_child_agents_version=1)" + cursor
+                        + " ORDER BY r.gmt_create DESC, r.session_id DESC, r.action_id DESC LIMIT ?",
+                (row, index) -> new ScopedAction(row.getString("session_id"),
+                        new Action(row.getString("action_id"), row.getString("state"),
+                                read(row.getString("options_json")), row.getString("decision_receipt_id"),
+                                row.getString("decision_digest"))), args.toArray());
+    }
+
     public List<Action> list(
             String tenantId, String sessionId, Long before, String beforeId, int limit) {
         List<Object> args = new ArrayList<>(List.of(ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId));
