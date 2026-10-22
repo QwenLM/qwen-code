@@ -102,10 +102,22 @@ cannot retain the lock. A hold now measures the copy instead of the suite, and
 the fast tier's 90-minute budget is again far above one hold.
 
 The test job was the other long hold. Its suite ran under the same lock, so a
-full-tier Java 21 leg could hold it for roughly 90 minutes while a fast-tier
-job arriving on that host waited out its 5400-second budget and failed before
-Maven printed a test result. Its Maven runs now resolve from the job-local
-repository seeded from `~/.m2`, and only its write-back takes the lock.
+full-tier Java 21 leg held it for the 925 s suite (the sdk-java suite plus the
+managed-agent H2 suite, longer under contention). The 2026-10-21 starvation
+runs spent their budgets in queue position, not behind one 90-minute holder:
+65m47s and 86m50s behind other tickets before becoming head with no holder
+visible from the host. Shortening every hold from a suite to a ≤300 s
+write-back is what shortens that queue. Its Maven runs now resolve from the
+job-local repository seeded from `~/.m2`, and only its write-back takes the
+lock.
+
+Retiring the per-host suite serialization #10552 introduced is deliberate.
+That contract treated concurrent suites on one physical host as unsafe after
+a pool OOM; since #14903 the MariaDB lane has run its suite unlocked on the
+same pool without that failure mode returning, and both suites now resolve
+from job-local repositories, so the only host-shared state left is the cache
+write-back the queue serializes. The sharding alternative below is rejected
+for queue overhead, not because concurrent suites are assumed unsafe.
 
 ### Fast-tier priority
 
@@ -174,9 +186,10 @@ order this section exists to prevent.
 
 ### Why fairness over the alternatives
 
-- Shard the lock by suite: reduces queue frequency but each shard is still a
-  bare flock, and it rides on an untested assumption that concurrent suites
-  share the host safely on a pool that just OOMed a build.
+- Shard the lock by suite: the lock now covers only the cache write-back, so
+  per-suite shards would fragment one bounded hold; concurrent suites are
+  accepted as safe (both resolve from job-local repositories, and the MariaDB
+  lane has run unlocked since #14903), not rejected as an untested assumption.
 - Cap registrations per host: needs pool topology changes outside the repo
   and leaves the same lost-place race per host.
 - Second host: at least three hosts starved simultaneously; host count is
@@ -198,6 +211,12 @@ order this section exists to prevent.
   the kernel releases that lock when the holder dies, so there is no aging
   path to clear; a kill inside the read-increment-write costs at most one
   retry.
+- Both jobs' suites now run concurrently on one physical host. #10552's
+  per-host suite serialization is retired: each suite resolves from a
+  job-local repository and only the bounded cache write-back shares host
+  state. If suite concurrency does surface a failure, bound it with a
+  suite-scoped shard or a registration cap rather than restoring the
+  whole-suite hold.
 
 ## Validation plan
 
