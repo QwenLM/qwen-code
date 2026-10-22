@@ -154,7 +154,7 @@ async function writeTodosToFile(
 const TODO_DEPENDENCY_CYCLE_ERROR =
   'Todo dependencies must not contain a cycle.';
 
-function validateTodos(value: unknown): string | null {
+export function validateTodos(value: unknown): string | null {
   if (!Array.isArray(value)) {
     return 'Parameter "todos" must be an array.';
   }

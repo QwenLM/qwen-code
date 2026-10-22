@@ -27,7 +27,6 @@ import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
 import { GlobTool } from '@qwen-code/qwen-code-core/tools/glob.js';
 import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
-import { TodoWriteTool } from '@qwen-code/qwen-code-core/tools/todoWrite.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ShellToolInvocation } from '@qwen-code/qwen-code-core/tools/shell.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
@@ -240,7 +239,6 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   EditTool.Name,
   ShellTool.Name,
   GlobTool.Name,
-  TodoWriteTool.Name,
 ]);
 
 /** Live background Shells one Session may hold, by the H3 design contract. */
@@ -2700,7 +2698,6 @@ export function createManagedToolSet(
           executionTimeoutMs: 5_000,
         }),
         new ShellTool(config),
-        new TodoWriteTool(config),
       ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
     ),
   };

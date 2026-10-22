@@ -39,7 +39,8 @@ export function parseTodoItemsFromEntries(
     if (!content) return [];
     const meta = getRecord(item?.['_meta']);
     const qwenTodo = getRecord(meta?.['qwenTodo']);
-    const blockedBy = getStringArray(qwenTodo, 'blockedBy');
+    const blockedBy =
+      getStringArray(qwenTodo, 'blockedBy') ?? getStringArray(item, 'blockedBy');
     return [
       {
         id:
@@ -170,6 +171,35 @@ export function getFloatingTodos(
   messages: readonly Message[],
 ): FloatingTodosState {
   return getLatestTodos(messages);
+}
+
+/**
+ * The durable Managed session view only shows a Todo snapshot after its tool
+ * call has completed successfully. A pending or failed call can still carry
+ * the model's full input, but it must not replace the last committed list.
+ * Keep the empty array as a real snapshot so a successful clear can remove
+ * the panel while an absent snapshot remains distinguishable during loading.
+ */
+export function getLatestSuccessfulTodos(
+  messages: readonly Message[],
+): TodoItem[] | undefined {
+  let latest: TodoItem[] | undefined;
+  for (const message of messages) {
+    if (message.role !== 'tool_group') continue;
+    for (const tool of message.tools) {
+      if (!isTodoWriteToolName(tool.toolName) || tool.status !== 'completed')
+        continue;
+      const executionStatus = tool.toolResult?.execution_status;
+      if (executionStatus !== undefined && executionStatus !== 'success')
+        continue;
+      const outputTodos = getTodoArray(getRecord(tool.rawOutput));
+      const todos = outputTodos
+        ? parseTodoItemsFromEntries(outputTodos)
+        : extractTodosFromToolCall(tool);
+      if (todos !== undefined) latest = todos;
+    }
+  }
+  return latest;
 }
 
 export function getSessionWorkflowTodos(

@@ -27,6 +27,10 @@ import {
 } from './hosted-glob-pattern.js';
 import { checkHostedTodoWriteInput } from './hosted-workspace-tool-input.js';
 import {
+  hostedTodoInstructions,
+  writeHostedTodos,
+} from './hosted-todo-session.js';
+import {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
@@ -1744,6 +1748,7 @@ interface HostedPreparedRequest {
   command: boolean;
   skill: boolean;
   planExit?: boolean;
+  todo?: boolean;
 }
 
 export class HostedWorkspaceToolTurn {
@@ -2118,6 +2123,10 @@ export class HostedWorkspaceToolTurn {
             HOSTED_PUBLIC_PLAN_READS.has(tool.name ?? ''),
         )
       : this.advertised;
+  }
+
+  async todoInstructions(): Promise<string> {
+    return this.declaresTodoTool() ? hostedTodoInstructions(this.session) : '';
   }
 
   planModeInstructions(): string {
@@ -3146,6 +3155,7 @@ export class HostedWorkspaceToolTurn {
           command: false,
           skill: item.call.name === 'skill' && this.skills !== undefined,
           planExit: this.publicPlanMode && item.call.name === 'exit_plan_mode',
+          todo: item.call.name === 'todo_write',
         });
       }
       this.logicalRound = plan.round;
@@ -4021,6 +4031,7 @@ export class HostedWorkspaceToolTurn {
           command,
           skill,
           planExit,
+          todo: call.name === 'todo_write',
         };
       });
     };
@@ -4081,7 +4092,11 @@ export class HostedWorkspaceToolTurn {
         throw new HostedToolRecoveryRequiredError(cause);
       }
     }
-    if (this.hooks || this.mcp || requests.some((request) => !request.skill))
+    if (
+      this.hooks ||
+      this.mcp ||
+      requests.some((request) => !request.skill && !request.todo)
+    )
       await waitForTurn(this.warmed, signal);
     // H4b: an agent-only batch runs entirely inside its own Sessions and
     // needs no Runtime at all — holding the parent's mount across the
@@ -4101,7 +4116,8 @@ export class HostedWorkspaceToolTurn {
           request.message !== true &&
           !request.team &&
           request.command !== true &&
-          !request.skill,
+          !request.skill &&
+          !request.todo,
       )
     ) {
       // Acquisition may have taken effect even when its reply is lost.
@@ -4344,6 +4360,7 @@ export class HostedWorkspaceToolTurn {
           request.command ||
           request.planExit ||
           request.skill ||
+          request.todo ||
           request.workflow
         )
           continue;
@@ -4821,6 +4838,33 @@ export class HostedWorkspaceToolTurn {
             );
           await this.commit('tool_result', converted, model);
           this.planning = false;
+          responses.push(...converted);
+          continue;
+        }
+        if (request.todo) {
+          const todos = await writeHostedTodos(
+            this.session,
+            this.promptId,
+            request.call.callId,
+            request.input,
+          );
+          const converted = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [{ text: JSON.stringify(todos) }],
+          );
+          const response = converted[0]?.functionResponse;
+          if (!response) throw new Error('Hosted Todo result is missing.');
+          response.response = {
+            ...response.response,
+            todos,
+            executionStatus: 'success',
+          };
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted Todo result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
           responses.push(...converted);
           continue;
         }

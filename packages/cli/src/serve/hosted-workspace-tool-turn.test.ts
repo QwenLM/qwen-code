@@ -83,6 +83,7 @@ import {
   HostedSkillCatalog,
 } from './hosted-skill-catalog.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
+import { writeHostedTodos } from './hosted-todo-session.js';
 import * as hostedPlan from './hosted-plan-mode.js';
 
 const broker = vi.hoisted(() => ({
@@ -1941,6 +1942,49 @@ it.each([
     await expect(turn.finish()).resolves.toBeUndefined();
   },
 );
+
+it('persists Todo without a Worker and restores the latest state after reopen', async () => {
+  turn = createV3Turn();
+  const first = { todos: [{ id: 'a', content: 'first', status: 'pending' }] };
+  const call = { ...calls[0], name: 'todo_write', args: first };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: first } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['todos']).toEqual(
+    first.todos,
+  );
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  const latest = { todos: [{ id: 'a', content: 'first', status: 'completed' }] };
+  await writeHostedTodos(session, 'prompt', 'next-call', latest);
+  expect(await writeHostedTodos(session, 'prompt', call.callId, first)).toEqual(
+    first.todos,
+  );
+  await expect(
+    writeHostedTodos(session, 'prompt', call.callId, latest),
+  ).rejects.toThrow();
+  const key = session.authority.sessionHeader.sessionKey;
+  await turn.close();
+  await session.close();
+  session = await openManagedSession({
+    runtimeBaseDir: root,
+    cwd: root,
+    transcriptPath: path.join(root, 'transcript.jsonl'),
+    sessionId: key.sessionId,
+    sessionKey: key,
+    version: 'test',
+    workerId: 'reopened-worker',
+    activationLeaseDurationMs: 60_000,
+  });
+  harness = createManagedHarnessHandle(session);
+  await harness.ensureRunnable();
+  turn = createV3Turn();
+  expect(await turn.todoInstructions()).toContain(JSON.stringify(latest.todos));
+});
 
 it.each(['default', 'auto-edit', 'yolo'] as const)(
   'pre-approves todo_write under %s',

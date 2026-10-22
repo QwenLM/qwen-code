@@ -399,7 +399,7 @@ public class ManagedSessionStore {
         if (row.get("workspace_id") == null
                 || ("qwen-code".equals(row.get("agent_id"))
                         ? row.get("agent_definition_digest") != null : row.get("agent_definition_digest") == null)
-                || !(com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.FILES.equals(profile)
+                || !(com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.isPublicFiles(profile)
                         || com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.isPublicShell(profile))) {
             return null;
         }

@@ -57,6 +57,8 @@ import { ManagedToolResultPanel } from './ManagedToolResultPanel';
 import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
 import { useManagedTaskCancel } from './use-managed-task-cancel';
+import { TodoFullList } from '../messages/TodoView';
+import { getLatestSuccessfulTodos } from '../../utils/todos';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
@@ -423,6 +425,10 @@ function ManagedSessionsContent({
   const messages = useMemo(
     () => messageProjector(detail.events, truncatedLabel),
     [messageProjector, detail.events, truncatedLabel],
+  );
+  const latestSuccessfulTodos = useMemo(
+    () => getLatestSuccessfulTodos(messages),
+    [messages],
   );
   // The caveat sits beside the card rather than inside the panel, so the panel
   // is told about it: without this the dialog describes only the tool name and
@@ -1319,6 +1325,36 @@ function ManagedSessionsContent({
                 onAbandoned={() => setListRevision((current) => current + 1)}
               />
             )}
+          {(detail.loading ||
+            (latestSuccessfulTodos !== undefined &&
+              latestSuccessfulTodos.length > 0)) && (
+            <section
+              className="shrink-0 rounded-md border px-3 py-2"
+              aria-label={t('todo.title')}
+              data-managed-todo-list
+            >
+              <div className="mb-2 flex items-center justify-between gap-2 text-sm">
+                <span className="font-medium">{t('todo.title')}</span>
+                {detail.loading && (
+                  <span role="status" className="text-muted-foreground">
+                    {t('managed.loading')}
+                  </span>
+                )}
+              </div>
+              {latestSuccessfulTodos !== undefined ? (
+                <TodoFullList todos={latestSuccessfulTodos} numbered />
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  {t('managed.loading')}
+                </p>
+              )}
+              {detail.olderCursor && latestSuccessfulTodos !== undefined && (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {t('managed.todo.loadedWindow')}
+                </p>
+              )}
+            </section>
+          )}
           {!(!sessionId && provider.workspaceBinding) && (
             <div className={shellStyles.content} style={{ flex: '1 1 auto' }}>
               <ToolDetailsContext.Provider value={loadToolDetails}>
