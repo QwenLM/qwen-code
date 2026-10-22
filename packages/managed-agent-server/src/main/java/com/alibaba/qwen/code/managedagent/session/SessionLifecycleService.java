@@ -39,6 +39,12 @@ public class SessionLifecycleService {
             OperationKind.DELETE, "DELETE_SESSION");
     private final AgentStateStore store;
     private ManagedActionService actions;
+    private ContextCompressionService compressions;
+
+    @Autowired
+    void setCompressions(ContextCompressionService compressions) {
+        this.compressions = compressions;
+    }
 
     @Autowired
     void setActions(ManagedActionService actions) {
@@ -87,6 +93,9 @@ public class SessionLifecycleService {
             String sessionId, String operationId) {
         OperationRecord operation = operation(tenantId, actorId, sessionId,
                 operationId);
+        if (operation.kind() == OperationKind.CONTEXT_COMPRESSION) {
+            return compressions.publicOperation(operation, false);
+        }
         return operation.kind() == OperationKind.CWD_CHANGE
                 ? publicCwdOperation(operation, false)
                 : publicOperation(operation, false);
@@ -96,6 +105,9 @@ public class SessionLifecycleService {
             String sessionId, String operationId) {
         OperationRecord operation = operation(tenantId, actorId, sessionId,
                 operationId);
+        if (operation.kind() == OperationKind.CONTEXT_COMPRESSION) {
+            return compressions.webOperation(operation, false);
+        }
         return operation.kind() == OperationKind.CWD_CHANGE
                 ? webShellCwdOperation(operation, false)
                 : webShellOperation(operation, false);
