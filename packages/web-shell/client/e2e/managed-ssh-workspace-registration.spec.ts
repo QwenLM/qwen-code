@@ -127,7 +127,7 @@ for (const width of [1280, 390]) {
     await expect(dialog).toHaveCount(0);
     await expect(
       page.getByRole('button', { name: 'Workspace', exact: true }),
-    ).toHaveText('Remote project');
+    ).toHaveText('Remote project · Managed');
     expect(creates).toHaveLength(width === 390 ? 2 : 1);
     expect(creates[0]).toMatchObject({
       nodeId: 'mac',
