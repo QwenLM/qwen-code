@@ -121,7 +121,7 @@ public class WebShellAgentController {
             @RequestBody WebShellListRequest request) {
         return service.listWebShellSessions(tenant.tenantId(),
                 tenant.actorId(), request.cursor(), request.limit() == null ? 20
-                        : request.limit(), request.archiveState());
+                        : request.limit(), request.archiveState(), request.titleQuery());
     }
 
     @PostMapping("/sessions/export/query")

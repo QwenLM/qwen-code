@@ -111,9 +111,12 @@ public class PublicAgentController {
     @GetMapping
     public PublicList<PublicSession> list(TenantContext tenant,
             @RequestParam(required = false) String cursor,
-            @RequestParam(defaultValue = "20") int limit) {
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestParam(name = "archive_state", required = false) String archiveState,
+            @RequestParam(name = "include_archived", required = false) Boolean includeArchived,
+            @RequestParam(name = "title_query", required = false) String titleQuery) {
         return service.listPublicSessions(tenant.tenantId(), tenant.actorId(),
-                cursor, limit);
+                cursor, limit, archiveState, includeArchived, titleQuery);
     }
 
     @GetMapping("/{sessionId}")

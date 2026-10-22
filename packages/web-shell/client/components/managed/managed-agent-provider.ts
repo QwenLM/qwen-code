@@ -468,6 +468,7 @@ export interface ManagedAgentProvider {
     options: ManagedAgentRequestOptions & {
       workspaceCwd?: string;
       archiveState?: 'unarchived' | 'archived' | 'all';
+      titleQuery?: string;
       limit?: number;
       cursor?: string;
     },

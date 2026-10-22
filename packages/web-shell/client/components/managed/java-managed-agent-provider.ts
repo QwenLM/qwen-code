@@ -645,6 +645,7 @@ export function createJavaManagedAgentProvider(
           cursor: request.cursor,
           limit: request.limit,
           archiveState: request.archiveState,
+          titleQuery: request.titleQuery,
         },
         request.signal,
       );
