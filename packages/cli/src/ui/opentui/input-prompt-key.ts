@@ -5,67 +5,123 @@
  */
 
 import type { KeyEvent, TextareaRenderable } from '@opentui/core';
-import { getCachedStringWidth } from '../utils/textUtils.js';
-import { getWordMovePosition } from '../components/shared/text-buffer.js';
+import type { TextBuffer } from '../components/shared/text-buffer.js';
+import { cpLen } from '../utils/textUtils.js';
 import { toOriginalKey } from './key-map.js';
 import {
-  displayColToCodePointIndex,
-  codePointIndexToDisplayCol,
-} from './input-prompt-model.js';
+  nativeOffsetToCodePoint,
+  replaceNativeSelection,
+} from './text-buffer-view.js';
 
-/** Qwen's Ink bindings over the native editor's single text/undo owner. */
+/** Native selection is visual; all edits and undo remain in the Ink buffer. */
 export function handleEditorKey(
   editor: TextareaRenderable,
+  buffer: TextBuffer,
   key: KeyEvent,
+  includeNavigation = false,
 ): boolean {
   if (key.eventType === 'release') return false;
   const original = toOriginalKey(key);
+  const name = original.name;
   const wordLeft =
     ((original.ctrl || original.meta) && original.name === 'left') ||
     (original.meta && !original.ctrl && original.name === 'b');
   const wordRight =
     ((original.ctrl || original.meta) && original.name === 'right') ||
     (original.meta && !original.ctrl && original.name === 'f');
+  const nativeSelection =
+    (key.shift &&
+      (['left', 'right', 'up', 'down', 'home', 'end'].includes(name) ||
+        ((key.ctrl || key.meta) && ['a', 'e', 'b', 'f'].includes(name)))) ||
+    (key.super && ['left', 'right', 'up', 'down', 'a'].includes(name));
   if (wordLeft || wordRight) {
-    const lines = editor.plainText.split('\n');
-    const cursor = editor.logicalCursor;
-    const target = getWordMovePosition(
-      lines,
-      cursor.row,
-      displayColToCodePointIndex(lines[cursor.row] ?? '', cursor.col),
-      wordLeft ? 'wordLeft' : 'wordRight',
-    );
-    editor.setCursor(
-      target.row,
-      codePointIndexToDisplayCol(lines[target.row] ?? '', target.col),
-    );
-    key.preventDefault();
-    return true;
-  }
-  if (key.meta || key.super || key.option) {
-    return false;
-  }
-  if (
-    !key.shift &&
-    ((!key.ctrl && key.name === 'home') || (key.ctrl && key.name === 'a'))
-  ) {
-    editor.gotoVisualLineHome();
+    editor.clearSelection();
+    buffer.move(wordLeft ? 'wordLeft' : 'wordRight');
+  } else if (nativeSelection) {
+    // These native bindings only move the caret or extend the selection.
+    if (!editor.handleKeyPress(key)) return false;
+    buffer.moveToOffset(nativeOffsetToCodePoint(editor, editor.cursorOffset));
+  } else if ((key.ctrl || key.super) && name === 'z') {
+    editor.clearSelection();
+    if (key.shift) buffer.redo();
+    else buffer.undo();
+  } else if (key.ctrl && (name === '-' || name === '.')) {
+    editor.clearSelection();
+    if (name === '.') buffer.redo();
+    else buffer.undo();
   } else if (
     !key.shift &&
-    ((!key.ctrl && key.name === 'end') || (key.ctrl && key.name === 'e'))
+    ((!key.ctrl && name === 'home') || ((key.ctrl || key.meta) && name === 'a'))
   ) {
-    editor.gotoVisualLineEnd();
-  } else if (key.ctrl && !key.shift && key.name === 'k') {
-    const cursor = editor.logicalCursor;
-    const line = editor.plainText.split('\n')[cursor.row] ?? '';
-    if (cursor.col === getCachedStringWidth(line)) editor.deleteChar();
-    else editor.deleteToLineEnd();
-  } else if (key.ctrl && !key.shift && key.name === 'u') {
-    if (editor.logicalCursor.col === 0) editor.deleteCharBackward();
-    else editor.deleteToLineStart();
-  } else if (key.ctrl && key.name === 'z') {
-    if (key.shift) editor.redo();
-    else editor.undo();
+    const selection = editor.getSelection();
+    if (selection)
+      buffer.moveToOffset(nativeOffsetToCodePoint(editor, selection.start));
+    else buffer.move('home');
+    editor.clearSelection();
+  } else if (
+    !key.shift &&
+    ((!key.ctrl && name === 'end') || ((key.ctrl || key.meta) && name === 'e'))
+  ) {
+    const selection = editor.getSelection();
+    if (selection)
+      buffer.moveToOffset(nativeOffsetToCodePoint(editor, selection.end));
+    else buffer.move('end');
+    editor.clearSelection();
+  } else if (key.ctrl && !key.shift && name === 'k') {
+    editor.clearSelection();
+    buffer.killLineRight();
+  } else if (key.ctrl && !key.shift && name === 'u') {
+    editor.clearSelection();
+    buffer.killLineLeft();
+  } else if (key.ctrl && key.shift && name === 'd') {
+    editor.clearSelection();
+    const {
+      lines,
+      cursor: [row],
+    } = buffer;
+    if (row + 1 < lines.length) {
+      buffer.replaceRange(row, 0, row + 1, 0, '');
+    } else if (row > 0) {
+      buffer.replaceRange(
+        row - 1,
+        cpLen(lines[row - 1]),
+        row,
+        cpLen(lines[row]),
+        '',
+      );
+    } else if (lines[0].length > 0) {
+      buffer.replaceRange(0, 0, 0, cpLen(lines[0]), '');
+    }
+  } else if (
+    includeNavigation &&
+    ((!key.meta &&
+      !key.ctrl &&
+      ['left', 'right', 'up', 'down'].includes(name)) ||
+      (key.ctrl && ['b', 'f'].includes(name)))
+  ) {
+    const direction = name === 'b' ? 'left' : name === 'f' ? 'right' : name;
+    const selection = editor.getSelection();
+    if (selection && (direction === 'left' || direction === 'right')) {
+      buffer.moveToOffset(
+        nativeOffsetToCodePoint(
+          editor,
+          direction === 'left' ? selection.start : selection.end,
+        ),
+      );
+    } else {
+      buffer.move(direction as 'left' | 'right' | 'up' | 'down');
+    }
+    editor.clearSelection();
+  } else if (
+    includeNavigation &&
+    (['backspace', 'delete'].includes(name) ||
+      (key.ctrl && ['h', 'd', 'w'].includes(name)) ||
+      (key.meta && name === 'd'))
+  ) {
+    if (!replaceNativeSelection(editor, buffer, ''))
+      buffer.handleInput(original);
+  } else if (includeNavigation && name === 'linefeed') {
+    if (!replaceNativeSelection(editor, buffer, '\n')) buffer.newline();
   } else {
     return false;
   }

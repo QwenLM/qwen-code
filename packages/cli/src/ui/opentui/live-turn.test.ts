@@ -13,7 +13,8 @@
  * steering batch the stream layer could not resolve.
  */
 
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeEach, describe, it, expect, vi } from 'vitest';
@@ -1251,5 +1252,114 @@ describe('useOpenTuiLiveTurn streaming counters', () => {
     await vi.waitFor(() =>
       expect(result.current.streamingCharsRef.current).toBe(2),
     );
+  });
+});
+
+describe('live-turn dual-output ownership', () => {
+  beforeEach(() => {
+    live.turns.length = 0;
+    live.waiters.length = 0;
+    live.signals.length = 0;
+    live.script.clear();
+    live.holds.clear();
+    live.declines.clear();
+    live.errors.clear();
+  });
+
+  it.each(['reset', 'unmount'] as const)(
+    'finalizes before %s invalidation and writer shutdown',
+    async (action) => {
+      const root = mkdtempSync(join(tmpdir(), 'opentui-output-owner-'));
+      const file = join(root, 'events.jsonl');
+      const config = {
+        getSessionId: () => 'owner',
+        getModel: () => 'model',
+      } as unknown as Config;
+      const bridge = new DualOutputBridge(config, { filePath: file });
+      const hook = renderHook(() =>
+        useOpenTuiLiveTurn({ config, dualOutput: bridge }),
+      );
+      try {
+        act(() => {
+          expect(hook.result.current.submit('first')).toBe(true);
+        });
+        const options = live.turns[0].options as LivePromptOptions;
+        expect(options.dualOutput).toBe(bridge);
+        expect(options.isCurrentTurn?.()).toBe(true);
+        bridge.startAssistantMessage();
+        bridge.processEvent({
+          type: 'content',
+          value: 'accepted-partial',
+        } as Parameters<DualOutputBridge['processEvent']>[0]);
+        if (action === 'reset')
+          act(() => hook.result.current.resetTranscript([]));
+        else hook.unmount();
+        expect(options.isCurrentTurn?.()).toBe(false);
+        expect(live.signals[0].aborted).toBe(true);
+        await bridge.shutdown();
+        await act(async () => {
+          live.waiters.shift()?.();
+        });
+        const raw = readFileSync(file, 'utf8');
+        expect(raw.endsWith('\n')).toBe(true);
+        const frames = raw
+          .trimEnd()
+          .split('\n')
+          .map((line) => JSON.parse(line));
+        expect(
+          frames.filter((frame) => frame.type === 'assistant'),
+        ).toMatchObject([
+          {
+            message: { content: [{ type: 'text', text: 'accepted-partial' }] },
+          },
+        ]);
+        expect(
+          frames.filter(
+            (frame) =>
+              frame.type === 'stream_event' &&
+              frame.event.type === 'message_stop',
+          ),
+        ).toHaveLength(1);
+        expect(frames.at(-1)).toMatchObject({
+          type: 'system',
+          subtype: 'session_end',
+        });
+      } finally {
+        hook.unmount();
+        await bridge.shutdown();
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('does not emit queued, restored or replayed user rows directly', async () => {
+    const config = { getSessionId: () => 'owner' } as unknown as Config;
+    const emitUserMessage = vi.fn();
+    const dualOutput = {
+      emitUserMessage,
+      finalizeAssistantMessage: vi.fn(),
+    } as unknown as DualOutputBridge;
+    const hook = renderHook(() => useOpenTuiLiveTurn({ config, dualOutput }));
+    try {
+      act(() => {
+        hook.result.current.submit('first');
+        hook.result.current.submit('queued');
+      });
+      const options = live.turns[0].options as LivePromptOptions;
+      const drained = options.drainSteering?.() ?? [];
+      act(() => options.restoreSteering?.(drained));
+      expect(emitUserMessage).not.toHaveBeenCalled();
+      act(() =>
+        hook.result.current.resetTranscript([
+          { type: 'user', text: 'replayed' },
+        ]),
+      );
+      expect(emitUserMessage).not.toHaveBeenCalled();
+      await act(async () => {
+        live.waiters.shift()?.();
+      });
+    } finally {
+      hook.unmount();
+    }
   });
 });

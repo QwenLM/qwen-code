@@ -271,7 +271,7 @@ describe('reasoning declarations', () => {
     );
     expect(resolved).toMatchObject({
       profile: 'dashscope-effort',
-      efforts: ['low', 'medium', 'xhigh'],
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
       defaultEffort: 'medium',
     });
     expect(getEffectiveReasoning(route, resolved)).toEqual({
@@ -280,7 +280,7 @@ describe('reasoning declarations', () => {
     expect(route.reasoning).toBeUndefined();
     expect(
       getEffectiveReasoning({ reasoning: { effort: 'high' } }, resolved),
-    ).toEqual({ effort: 'xhigh' });
+    ).toEqual({ effort: 'high' });
     expect(getEffectiveReasoning({ reasoning: false }, resolved)).toBe(false);
   });
 
