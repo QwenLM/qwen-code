@@ -566,6 +566,11 @@ describe('gateCommandError', () => {
       'a wrapper comment then a command',
       "bash -c '# comment' && printf 'ready\\n'",
     ],
+    // A newline after the script starts the next command, not an argument.
+    [
+      'a wrapper comment, a newline, then a command',
+      "bash -c '# setup'\n./probe.sh",
+    ],
     ['a command at the cap', 'x'.repeat(MAX_CRON_GATE_CHARS)],
   ])('accepts %s', (_what, gate) => {
     expect(gateCommandError(gate)).toBeNull();

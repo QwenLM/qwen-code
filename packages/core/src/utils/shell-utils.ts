@@ -1544,7 +1544,9 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
         wrapperTokens,
         innerCommand,
         innerQuote,
-        innerArgsSuffix: commandToken.rest.trimStart(),
+        // Blanks only: a newline right after the script separates the
+        // next command, which the script's positional words are not.
+        innerArgsSuffix: commandToken.rest.replace(/^[ \t]+/, ''),
       };
     }
 
