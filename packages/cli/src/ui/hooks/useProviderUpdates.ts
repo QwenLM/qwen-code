@@ -17,6 +17,7 @@ import {
   getModelsForProviderProtocol,
   buildProviderTemplate,
   computeModelListVersion,
+  discoverProviderModels,
   getDefaultModelIds,
   PROVIDER_METADATA_NS,
   providerMatchesCredentials,
@@ -158,7 +159,15 @@ interface PendingUpdate {
   metadataKey: string;
   baseUrl: string;
   currentVersion: string;
+  existingModelIds: string[];
   diff: ModelUpdateDiff;
+  /** Key for `/models`, set only for providers that support discovery. */
+  discoveryApiKey?: string;
+  /**
+   * Model ids served to the stored key, when discovery succeeded. Built-in
+   * models outside this set are not installed.
+   */
+  servedModelIds?: ReadonlySet<string>;
 }
 
 function readInstalledOwnedIds(
@@ -179,6 +188,28 @@ function readInstalledOwnedIds(
   return ownsFn
     ? allModels.filter(ownsFn).map((m) => m.id)
     : allModels.map((m) => m.id);
+}
+
+function resolveDiscoveryApiKey(
+  settings: LoadedSettings,
+  provider: ProviderConfig,
+  baseUrl: string,
+): string | undefined {
+  if (!provider.supportsModelDiscovery) return undefined;
+  const mergedSettings = settings.merged as Record<string, unknown>;
+  const modelProviders = mergedSettings['modelProviders'] as
+    | Record<string, ProviderModelConfig[]>
+    | undefined;
+  const ownsFn = resolveOwnsModel(provider);
+  const installedEnvKey = (modelProviders?.[provider.protocol] ?? []).find(
+    (model) => model.envKey && (!ownsFn || ownsFn(model)),
+  )?.envKey;
+  const envKey =
+    installedEnvKey ??
+    (typeof provider.envKey === 'function'
+      ? provider.envKey(provider.protocol, resolveBaseUrl(provider, baseUrl))
+      : provider.envKey);
+  return process.env[envKey]?.trim() || undefined;
 }
 
 function getInstalledOwnedModelIds(
@@ -230,10 +261,52 @@ function findAllPendingUpdates(
     const existingModelIds = getInstalledOwnedModelIds(settings, provider);
     const newModelIds = provider.models!.map((s) => s.id);
     const diff = computeModelDiff(existingModelIds, newModelIds, currentModel);
+    const discoveryApiKey = resolveDiscoveryApiKey(settings, provider, baseUrl);
 
-    results.push({ provider, metadataKey, baseUrl, currentVersion, diff });
+    results.push({
+      provider,
+      metadataKey,
+      baseUrl,
+      currentVersion,
+      existingModelIds,
+      diff,
+      ...(discoveryApiKey ? { discoveryApiKey } : {}),
+    });
   }
   return results;
+}
+
+/**
+ * Narrow a pending update to the built-in models served to the stored key,
+ * the same filter the setup wizard applies at install time. Without it, an
+ * update would install every built-in model, including ones the key's plan
+ * or region rejects (403/404). Falls back to the full built-in list when
+ * discovery fails or matches no built-in model.
+ */
+async function narrowToServedModels(
+  pending: PendingUpdate,
+  currentModel: string,
+  signal: AbortSignal,
+): Promise<PendingUpdate> {
+  if (!pending.discoveryApiKey) return pending;
+  const builtInModels = pending.provider.models ?? [];
+  const discovered = await discoverProviderModels({
+    baseUrl: resolveBaseUrl(pending.provider, pending.baseUrl),
+    apiKey: pending.discoveryApiKey,
+    staticModels: builtInModels,
+    signal,
+  });
+  if (!discovered) return pending;
+  const servedModelIds = new Set(discovered.map((model) => model.id));
+  const newModelIds = builtInModels
+    .map((model) => model.id)
+    .filter((id) => servedModelIds.has(id));
+  if (newModelIds.length === 0) return pending;
+  return {
+    ...pending,
+    servedModelIds,
+    diff: computeModelDiff(pending.existingModelIds, newModelIds, currentModel),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +335,11 @@ export function useProviderUpdates(
       try {
         const providerCfg = pending.provider;
         const resolved = resolveBaseUrl(providerCfg, pending.baseUrl);
-        const defaultIds = getDefaultModelIds(providerCfg);
+        const builtInIds = getDefaultModelIds(providerCfg);
+        const servedIds = pending.servedModelIds;
+        const defaultIds = servedIds
+          ? builtInIds.filter((id) => servedIds.has(id))
+          : builtInIds;
         const ownsModel = resolveOwnsModel(providerCfg);
         const existingModels = getModelsForProviderProtocol(
           settings.merged.modelProviders,
@@ -288,8 +365,10 @@ export function useProviderUpdates(
             );
           },
         );
+        // Keep user-added models; a built-in model no longer served to the
+        // key is dropped rather than kept as if it were custom.
         prebuiltModels.push(
-          ...existingModels.filter((model) => !defaultIds.includes(model.id)),
+          ...existingModels.filter((model) => !builtInIds.includes(model.id)),
         );
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,
@@ -373,78 +452,101 @@ export function useProviderUpdates(
     [settings, config, addItem],
   );
 
-  const checkForUpdates = useCallback(() => {
-    if (!migrated.current) {
-      migrated.current = true;
-      migrateProviderMetadata(settings);
-    }
+  const showUpdatePrompt = useCallback(
+    (pendingList: PendingUpdate[]) => {
+      const entries: ProviderUpdateEntry[] = pendingList.map((p) => ({
+        providerLabel: t(p.provider.label),
+        diff: p.diff,
+      }));
 
-    const currentModel = config.getModel();
-    const pendingList = findAllPendingUpdates(settings, currentModel);
-
-    if (pendingList.length === 0) return;
-
-    const entries: ProviderUpdateEntry[] = pendingList.map((p) => ({
-      providerLabel: t(p.provider.label),
-      diff: p.diff,
-    }));
-
-    setUpdateRequest({
-      entries,
-      onConfirm: async (choice: UpdateChoice) => {
-        setUpdateRequest(undefined);
-        if (choice === 'update') {
-          for (const p of pendingList) {
-            await executeUpdate(p);
-          }
-        } else if (choice === 'skip') {
-          const persistScope = getPersistScopeForModelSelection(settings);
-          for (const p of pendingList) {
-            settings.setValue(
-              persistScope,
-              `${PROVIDER_METADATA_NS}.${p.metadataKey}.ignoredVersion`,
-              p.currentVersion,
-            );
-          }
-        } else if (choice === 'later') {
-          // Persist a cooldown so "later" does not re-prompt on every launch.
-          // One batched write keeps the version/timestamp pair atomic, so a
-          // partial persist cannot invalidate the cooldown guard on next launch.
-          const persistScope = getPersistScopeForModelSelection(settings);
-          const postponedAt = Date.now();
-          try {
-            settings.setValues(
-              pendingList.flatMap((p) => [
+      setUpdateRequest({
+        entries,
+        onConfirm: async (choice: UpdateChoice) => {
+          setUpdateRequest(undefined);
+          if (choice === 'update') {
+            for (const p of pendingList) {
+              await executeUpdate(p);
+            }
+          } else if (choice === 'skip') {
+            const persistScope = getPersistScopeForModelSelection(settings);
+            for (const p of pendingList) {
+              settings.setValue(
+                persistScope,
+                `${PROVIDER_METADATA_NS}.${p.metadataKey}.ignoredVersion`,
+                p.currentVersion,
+              );
+            }
+          } else if (choice === 'later') {
+            // Persist a cooldown so "later" does not re-prompt on every launch.
+            // One batched write keeps the version/timestamp pair atomic, so a
+            // partial persist cannot invalidate the cooldown guard on next launch.
+            const persistScope = getPersistScopeForModelSelection(settings);
+            const postponedAt = Date.now();
+            try {
+              settings.setValues(
+                pendingList.flatMap((p) => [
+                  {
+                    scope: persistScope,
+                    key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedVersion`,
+                    value: p.currentVersion,
+                  },
+                  {
+                    scope: persistScope,
+                    key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedAt`,
+                    value: postponedAt,
+                  },
+                ]),
+              );
+            } catch (error) {
+              addItem(
                 {
-                  scope: persistScope,
-                  key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedVersion`,
-                  value: p.currentVersion,
+                  type: 'error',
+                  text: t('Failed to save update postponement: {{message}}', {
+                    message: getErrorMessage(error),
+                  }),
                 },
-                {
-                  scope: persistScope,
-                  key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedAt`,
-                  value: postponedAt,
-                },
-              ]),
-            );
-          } catch (error) {
-            addItem(
-              {
-                type: 'error',
-                text: t('Failed to save update postponement: {{message}}', {
-                  message: getErrorMessage(error),
-                }),
-              },
-              Date.now(),
-            );
+                Date.now(),
+              );
+            }
           }
-        }
-      },
-    });
-  }, [settings, config, executeUpdate, addItem]);
+        },
+      });
+    },
+    [settings, executeUpdate, addItem],
+  );
+
+  const checkForUpdates = useCallback(
+    (signal: AbortSignal) => {
+      if (!migrated.current) {
+        migrated.current = true;
+        migrateProviderMetadata(settings);
+      }
+
+      const currentModel = config.getModel();
+      const pendingList = findAllPendingUpdates(settings, currentModel);
+
+      if (pendingList.length === 0) return;
+
+      if (!pendingList.some((p) => p.discoveryApiKey)) {
+        showUpdatePrompt(pendingList);
+        return;
+      }
+
+      // Providers with model discovery compare against the models served to
+      // the stored key, so the prompt's diff matches what Update installs.
+      void Promise.all(
+        pendingList.map((p) => narrowToServedModels(p, currentModel, signal)),
+      ).then((narrowed) => {
+        if (!signal.aborted) showUpdatePrompt(narrowed);
+      });
+    },
+    [settings, config, showUpdatePrompt],
+  );
 
   useEffect(() => {
-    checkForUpdates();
+    const controller = new AbortController();
+    checkForUpdates(controller.signal);
+    return () => controller.abort();
   }, [checkForUpdates]);
 
   const dismissProviderUpdate = useCallback(() => {
