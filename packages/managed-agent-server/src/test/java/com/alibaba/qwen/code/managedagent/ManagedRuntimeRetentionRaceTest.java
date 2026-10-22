@@ -55,7 +55,7 @@ class ManagedRuntimeRetentionRaceTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     enum Reference {
-        PUBLICATION("ma_output_capture"), HOLDER("ma_storage_owner"),
+        PUBLICATION("ma_output_capture"), HOLDER("ma_runtime_session"),
         OPERATOR("ma_operation"), CSI_RETIREMENT("ma_operation");
         final String table;
         Reference(String table) { this.table = table; }
@@ -81,7 +81,7 @@ class ManagedRuntimeRetentionRaceTest {
                                     assertThat(connection.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_READ_COMMITTED);
                                     // Establish a real table-read snapshot before the writer commits.
                                     try (var query = connection.prepareStatement("SELECT COUNT(*) FROM " + reference.table
-                                            + (reference == Reference.HOLDER ? " WHERE binding_id IS NOT NULL" : ""));
+                                            + (reference == Reference.HOLDER ? " WHERE execution_storage_key IS NOT NULL" : ""));
                                             var rows = query.executeQuery()) {
                                         assertThat(rows.next()).isTrue();
                                         assertThat(rows.getInt(1)).isZero();
@@ -126,6 +126,7 @@ class ManagedRuntimeRetentionRaceTest {
         fixture.retire();
         fixture.jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL, binding_id = NULL,"
                 + " runtime_generation = NULL, runtime_session_id = NULL");
+        fixture.jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL, execution_exclusive = FALSE");
         var locked = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         var first = new AtomicBoolean(true);
@@ -280,12 +281,14 @@ class ManagedRuntimeRetentionRaceTest {
             if (reference == Reference.OPERATOR || reference == Reference.CSI_RETIREMENT) {
                 jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL, binding_id = NULL,"
                         + " runtime_generation = NULL, runtime_session_id = NULL");
+                jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL, execution_exclusive = FALSE");
             }
         }
 
         long count(String table) {
             String where = switch (table) {
                 case "ma_storage_owner" -> " WHERE binding_id IS NOT NULL";
+                case "ma_runtime_session" -> " WHERE execution_storage_key IS NOT NULL";
                 case "ma_operation" -> " WHERE operation_kind = '" + (reference == Reference.OPERATOR
                         ? "WORKSPACE_OPERATOR_RECOVERY" : "CSI_RETIREMENT") + "'";
                 case "ma_operation_work" -> " WHERE work_kind = 'CSI_WORKER_ACK'";

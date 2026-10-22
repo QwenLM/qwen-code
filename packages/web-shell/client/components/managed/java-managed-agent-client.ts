@@ -127,6 +127,42 @@ export class JavaManagedAgentClient {
     return this.post<JavaAgentSession>('/sessions/get', { sessionId }, signal);
   }
 
+  getRecovery(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['SessionRecovery']>(
+      '/session-recovery/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  recheckRecovery(sessionId: string, turnId: string, signal?: AbortSignal) {
+    return this.post<Schemas['SessionRecovery']>(
+      '/session-recovery/recheck',
+      { sessionId, turnId },
+      signal,
+    );
+  }
+
+  async renameSession(
+    request: Schemas['WebShellRenameRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellRenameResult']> {
+    const response = await this.request(
+      '/sessions/rename',
+      request,
+      signal,
+      false,
+    );
+    if (response.status !== 200) {
+      throw new JavaManagedAgentHttpError(
+        response.status,
+        'session_rename_unconfirmed',
+        'Managed Agent rename was not confirmed',
+      );
+    }
+    return (await response.json()) as Schemas['WebShellRenameResult'];
+  }
+
   listWorkspaces(
     request: Schemas['WebShellWorkspaceQueryRequest'],
     signal?: AbortSignal,
@@ -321,6 +357,13 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ): Promise<Schemas['WebShellCwdOperation']> {
     return this.post('/sessions/cwd/change', request, signal);
+  }
+
+  compressContext(
+    request: Schemas['WebShellContextCompressionRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellContextCompressionOperation']> {
+    return this.post('/sessions/compress', request, signal);
   }
 
   getSessionModels(sessionId: string, signal?: AbortSignal) {
