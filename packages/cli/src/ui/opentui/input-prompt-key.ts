@@ -4,6 +4,75 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { KeyEvent, TextareaRenderable } from '@opentui/core';
+import { getCachedStringWidth } from '../utils/textUtils.js';
+import { getWordMovePosition } from '../components/shared/text-buffer.js';
+import { toOriginalKey } from './key-map.js';
+import {
+  displayColToCodePointIndex,
+  codePointIndexToDisplayCol,
+} from './input-prompt-model.js';
+
+/** Qwen's Ink bindings over the native editor's single text/undo owner. */
+export function handleEditorKey(
+  editor: TextareaRenderable,
+  key: KeyEvent,
+): boolean {
+  if (key.eventType === 'release') return false;
+  const original = toOriginalKey(key);
+  const wordLeft =
+    ((original.ctrl || original.meta) && original.name === 'left') ||
+    (original.meta && !original.ctrl && original.name === 'b');
+  const wordRight =
+    ((original.ctrl || original.meta) && original.name === 'right') ||
+    (original.meta && !original.ctrl && original.name === 'f');
+  if (wordLeft || wordRight) {
+    const lines = editor.plainText.split('\n');
+    const cursor = editor.logicalCursor;
+    const target = getWordMovePosition(
+      lines,
+      cursor.row,
+      displayColToCodePointIndex(lines[cursor.row] ?? '', cursor.col),
+      wordLeft ? 'wordLeft' : 'wordRight',
+    );
+    editor.setCursor(
+      target.row,
+      codePointIndexToDisplayCol(lines[target.row] ?? '', target.col),
+    );
+    key.preventDefault();
+    return true;
+  }
+  if (key.meta || key.super || key.option) {
+    return false;
+  }
+  if (
+    !key.shift &&
+    ((!key.ctrl && key.name === 'home') || (key.ctrl && key.name === 'a'))
+  ) {
+    editor.gotoVisualLineHome();
+  } else if (
+    !key.shift &&
+    ((!key.ctrl && key.name === 'end') || (key.ctrl && key.name === 'e'))
+  ) {
+    editor.gotoVisualLineEnd();
+  } else if (key.ctrl && !key.shift && key.name === 'k') {
+    const cursor = editor.logicalCursor;
+    const line = editor.plainText.split('\n')[cursor.row] ?? '';
+    if (cursor.col === getCachedStringWidth(line)) editor.deleteChar();
+    else editor.deleteToLineEnd();
+  } else if (key.ctrl && !key.shift && key.name === 'u') {
+    if (editor.logicalCursor.col === 0) editor.deleteCharBackward();
+    else editor.deleteToLineStart();
+  } else if (key.ctrl && key.name === 'z') {
+    if (key.shift) editor.redo();
+    else editor.undo();
+  } else {
+    return false;
+  }
+  key.preventDefault();
+  return true;
+}
+
 /**
  * Raw-input classification for the OpenTUI input prompt.
  *

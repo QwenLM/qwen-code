@@ -9,6 +9,7 @@ import {
   measureToolOutput,
 } from '../tools/tool-output-size.js';
 import { logToolResultSize } from '../telemetry/loggers.js';
+import { markApiHistoryPrompt } from '../services/session-api-history.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type OpenAI from 'openai';
 import type {
@@ -12480,6 +12481,65 @@ describe('LlmChat', async () => {
       expect(chat.getHistory()).toHaveLength(3);
       expect(chat.getHistory()[0]).toEqual(userText('summary'));
       expect(chat.getLastPromptTokenCount()).toBe(200);
+    });
+
+    it('awaits the Managed checkpoint including pending input before applying compressed history', async () => {
+      const compress = mockCompressionService('compressed');
+      const before = [userText('old question'), modelText('old answer')];
+      chat.setHistory(before);
+      let release: () => void = () => {};
+      let observed: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const ready = new Promise<void>((resolve) => {
+        observed = resolve;
+      });
+      const observer = vi.fn(async () => {
+        observed();
+        await gate;
+      });
+      chat.setCompressionObserver(observer, { restoreRecentFiles: false });
+      const pending = userText('new question');
+      markApiHistoryPrompt(pending, 'hosted');
+      const running = chat.tryCompress('hosted', false, undefined, {
+        pendingUserMessage: pending,
+      });
+      await ready;
+      expect(chat.getHistory()).toEqual(before);
+      expect(observer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          compressedHistory: [
+            userText('summary'),
+            modelText('ok'),
+            userText('latest'),
+            pending,
+          ],
+          summaryPrefixLength: 3,
+          promptIds: [null, null, null, 'hosted'],
+        }),
+      );
+      expect(compress.mock.calls[0][1].restoreRecentFiles).toBe(false);
+      release();
+      await running;
+      expect(chat.getHistory()).toEqual([
+        userText('summary'),
+        modelText('ok'),
+        userText('latest'),
+      ]);
+    });
+
+    it('keeps live history unchanged when the Managed compression checkpoint is refused', async () => {
+      mockCompressionService('compressed');
+      const before = [userText('old question'), modelText('old answer')];
+      chat.setHistory(before);
+      chat.setCompressionObserver(async () => {
+        throw new Error('checkpoint refused');
+      });
+      await expect(chat.tryCompress('hosted', true)).rejects.toThrow(
+        'checkpoint refused',
+      );
+      expect(chat.getHistory()).toEqual(before);
     });
 
     it('mirrors lastPromptTokenCount to the global telemetry only when wired', async () => {
