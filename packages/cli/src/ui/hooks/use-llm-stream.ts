@@ -5002,6 +5002,10 @@ export const useLlmStream = (
 
   const handleCompletedTools = useCallback(
     async (completedToolCallsFromScheduler: TrackedToolCall[]) => {
+      const sessionId = config.getSessionId();
+      const chat = llmClient?.getChat();
+      const isCurrentSession = () =>
+        config.getSessionId() === sessionId && llmClient?.getChat() === chat;
       const completedAndReadyToSubmitTools =
         completedToolCallsFromScheduler.filter(
           (
@@ -5483,6 +5487,10 @@ export const useLlmStream = (
           });
         }
       }
+      if (!isCurrentSession()) {
+        if (toolGoalBinding) releaseGoalTurn(toolGoalBinding);
+        return;
+      }
       if (newSuccessfulMemorySaves.length > 0) {
         if (!didRefreshManagedMemory) {
           // Perform the legacy save_memory refresh only when the managed-memory
@@ -5634,6 +5642,10 @@ export const useLlmStream = (
       const responsesToSend = finalizedResponses.flatMap(
         (entry) => entry.responseParts,
       );
+      if (!isCurrentSession()) {
+        if (toolGoalBinding) releaseGoalTurn(toolGoalBinding);
+        return;
+      }
       orderedResponses.forEach(({ request, response, status }, index) => {
         config.getChatRecordingService?.()?.recordToolResult?.(
           finalizedResponses[index].responseParts,
@@ -5656,18 +5668,23 @@ export const useLlmStream = (
       });
 
       if (continuationWasCancelled()) {
-        // This is the branch a cancelled Goal tool batch actually takes: the
+        // This is the branch a cancelled tool batch actually takes: the
         // controller retained across tool execution feeds the continuation
         // owner's signal, so pressing Esc while tools run aborts it here
         // rather than at either of the branches below. `markToolsAsSubmitted`
         // stops these callIds ever being submitted, so unless the responses
         // are written now the model's function calls stay unanswered and the
-        // next `/goal resume` sends a history with an unpaired call. The
+        // next turn sends a history with an unpaired call. The
         // all-cancelled branch below writes them for the batch it handles;
         // this branch owes its own batch the same pairing, whether or not
         // every tool in it was cancelled.
-        if (toolGoalBinding && llmClient) {
-          llmClient.addHistory({ role: 'user', parts: responsesToSend });
+        if (llmClient) {
+          const pairedCallIds = llmClient.getHistoryFunctionResponseIds();
+          const unpairedParts = finalizedResponses
+            .filter((entry) => !pairedCallIds.has(entry.callId))
+            .flatMap((entry) => entry.responseParts);
+          if (unpairedParts.length > 0)
+            llmClient.addHistory({ role: 'user', parts: unpairedParts });
         }
         markToolsAsSubmitted(
           llmTools.map((toolCall) => toolCall.request.callId),

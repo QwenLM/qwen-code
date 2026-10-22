@@ -324,6 +324,33 @@ describe('OpenTuiLoadingIndicator', () => {
 });
 
 describe('OpenTuiFooter', () => {
+  it.each(['NORMAL', 'INSERT'] as const)(
+    'shows %s in the existing hint slot below exit warnings',
+    (vimMode) => {
+      const { container, rerender } = render(
+        <Footer
+          config={fakeConfig()}
+          streaming={true}
+          shellModeActive={true}
+          vimMode={vimMode}
+        />,
+      );
+      expect(container.textContent).toContain(`-- ${vimMode} --`);
+      expect(container.textContent).not.toContain('shell mode enabled');
+      expect(container.textContent).not.toContain('Enter to steer');
+      rerender(
+        <Footer
+          config={fakeConfig()}
+          streaming={true}
+          vimMode={vimMode}
+          exitHint="Press Ctrl+C again to exit."
+        />,
+      );
+      expect(container.textContent).toContain('Press Ctrl+C again to exit.');
+      expect(container.textContent).not.toContain(`-- ${vimMode} --`);
+    },
+  );
+
   beforeEach(() => {
     mocks.state.promptTokens = 0;
     mocks.styleText.mockClear();
