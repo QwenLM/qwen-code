@@ -305,7 +305,10 @@ test('bootstrap renders matching credentials and a 32-byte key', () => {
   const secrets = generateSecrets('reference-test');
   assert.match(secrets.digest, /^sha256:[0-9a-f]{64}$/);
   assert.equal(Buffer.from(secrets.credentialKey, 'base64').length, 32);
-  assert.ok(renderHarnessEnv(secrets).includes(secrets.token));
+  const harness = renderHarnessEnv(secrets);
+  assert.ok(harness.includes(secrets.token));
+  // The control plane refuses a `;` comment, which a shell stops reading the file at.
+  assert.doesNotMatch(harness, /^\s*;/m);
   const server = renderServerEnv(
     secrets,
     '/tmp/application.yml',

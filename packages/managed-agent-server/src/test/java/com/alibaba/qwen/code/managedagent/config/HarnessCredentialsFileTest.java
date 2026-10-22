@@ -106,11 +106,20 @@ class HarnessCredentialsFileTest {
                 "# Generated\r\nQWEN_SERVER_TOKEN=" + TOKEN + "\r\n" + digest + "\r\n");
         assertThatThrownBy(withFile(crlf)::validateWorkspaceFiles)
                 .hasMessageStartingWith("Hosted Harness credentials file " + crlf + " line 1 uses a carriage return;");
-        // A shell stops at a `;` comment even after both keys, losing every later line.
-        Path semicolon = Files.writeString(directory.resolve("semicolon.env"),
-                "QWEN_SERVER_TOKEN=" + TOKEN + "\n" + digest + "\n; rotated\n");
-        assertThatThrownBy(withFile(semicolon)::validateWorkspaceFiles).hasMessageStartingWith(
-                "Hosted Harness credentials file " + semicolon + " line 3 uses a comment starting with `;`");
+        // A shell stops at a `;` comment and loses every later line, so it is refused above both
+        // keys, between them and after them.
+        String[] semicolons = {
+            "; rotated\nQWEN_SERVER_TOKEN=" + TOKEN + "\n" + digest + "\n",
+            "QWEN_SERVER_TOKEN=" + TOKEN + "\n; rotated\n" + digest + "\n",
+            "QWEN_SERVER_TOKEN=" + TOKEN + "\n" + digest + "\n; rotated\n",
+        };
+        for (int line = 1; line <= semicolons.length; line++) {
+            Path semicolon = Files.writeString(directory.resolve("semicolon.env"), semicolons[line - 1]);
+            assertThatThrownBy(withFile(semicolon)::validateWorkspaceFiles).as("line %d", line)
+                    .hasMessageStartingWith("Hosted Harness credentials file " + semicolon + " line " + line
+                            + " uses a comment starting with `;`")
+                    .message().doesNotContain(TOKEN);
+        }
         // An ignored key may use anything that keeps to a single line.
         Path ignored = Files.writeString(directory.resolve("ignored.env"), "QWEN_SERVER_TOKEN=" + TOKEN + "\n"
                 + digest + "\nQWEN_HOSTED_HARNESS_BROKER_ARGS = --a $B --c;~\n");
