@@ -2387,9 +2387,6 @@ describe('original CSI worker synchronous ACK confirmation', () => {
   });
 });
 
-// The route-level fixtures cannot express these geometries (a Session root is
-// always a deep unique tmpdir path), so the anchoring invariants are pinned
-// against the function directly.
 // #15076: `todo_write` runs in the Worker as per-Session bookkeeping under
 // the Worker's own runtime directory. The native fetch half is held by a
 // recorded maintainer decision, so the Worker admits no fetch.
@@ -2482,6 +2479,9 @@ describe('todo_write in the Worker', () => {
   });
 });
 
+// The route-level fixtures cannot express these geometries (a Session root is
+// always a deep unique tmpdir path), so the anchoring invariants are pinned
+// against the function directly.
 describe('relativizeGlobText', () => {
   it('strips the root at token starts but keeps a tail that repeats it', () => {
     // The hit carries the root string twice: once as the path prefix and once

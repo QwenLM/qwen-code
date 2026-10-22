@@ -20,9 +20,10 @@ export interface HostedToolInputCheck {
 }
 
 /**
- * Checks a `todo_write` call. The list must be an array of items the core
- * tool accepts. A dependency cycle and a blocked item's own state are left to
- * the tool: it owns the rules and reports them with its own message.
+ * Checks a `todo_write` call. Every item's shape is checked here; the
+ * list-level rules — duplicate ids, duplicate `blockedBy` references and a
+ * dependency cycle — stay with the tool, which reports them with its own
+ * message.
  */
 export function checkHostedTodoWriteInput(
   args: Record<string, unknown>,

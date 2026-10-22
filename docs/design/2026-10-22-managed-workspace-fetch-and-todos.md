@@ -69,12 +69,13 @@ read profile belongs to a snapshot child that must not write.
    ruling the technical answer here as well. First, the egress argument does
    not hold for a files-profile Session: it has no shell, so a fetch there
    would open a new outbound path rather than reuse an existing one. Second,
-   nothing in the Hosted path contains the destination — admission checks the
-   scheme, credentials and length but not the host, `isPrivateHost` is only
-   used to skip the https upgrade, and under `yolo` neither the Worker (built
-   with `ApprovalMode.YOLO`) nor the Harness asks. A files/3 Session would
-   therefore reach link-local and metadata endpoints unattended. Delivering it
-   needs a destination policy first, which is follow-up work.
+   nothing in the Hosted path constrained the destination: the admission check
+   that revision carried covered the scheme, credentials and length but not the
+   host, `isPrivateHost` was only used to skip the https upgrade, and under
+   `yolo` neither the Worker (built with `ApprovalMode.YOLO`) nor the Harness
+   would have asked. A files/3 Session would therefore have reached link-local
+   and metadata endpoints unattended. Delivering it needs a destination policy
+   first, which is follow-up work.
 3. **`todo_write` runs inside the Worker and writes no Workspace file.** The
    list is bookkeeping in the Worker's runtime directory. It does not touch
    the Session Store schema, Java storage, or the Workspace, which is also why
@@ -95,7 +96,9 @@ read profile belongs to a snapshot child that must not write.
    so the tool is admitted because the profile says so, not because a default
    was bypassed. Only that lane registers the tool: the provider lane serves
    the resident and CSI sessions, whose manifests are a closed set, so it stays
-   untouched exactly as the `glob` change left it.
+   untouched exactly as the `glob` change left it. No code running inside the
+   Worker reads the flag today, so this keeps the Config truthful and records
+   the intent rather than switching behaviour.
 6. **Approval.** Under `default` and `auto-edit` the tool is pre-approved: it
    writes only its own bookkeeping and changes no file the user owns. Under
    `yolo` nothing asks, as today.

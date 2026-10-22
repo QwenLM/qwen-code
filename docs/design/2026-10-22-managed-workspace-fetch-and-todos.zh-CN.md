@@ -59,11 +59,11 @@ team lead 是控制面内部创建的会话，read profile 属于不得写入的
 2. **`web_fetch` 不交付，依据已记录的决定。** issue 上有维护者裁定暂缓原生抓取，
    Managed 会话继续用 `run_shell_command` 访问网页。两条事实使该裁定同时是技术
    结论。第一，出站理由对 files profile 不成立：该 profile 没有 shell，抓取会
-   新开出站路径而不是复用已有的。第二，Hosted 路径不约束目标地址——准入只校验
-   协议、凭据与长度，不校验主机；`isPrivateHost` 仅用于跳过 https 升级；`yolo`
-   下 Worker（以 `ApprovalMode.YOLO` 构建）与 Harness 都不询问。因此 files/3
-   会话会在无人值守下访问链路本地与 metadata 端点。交付它需要先有目标地址策略，
-   这属于后续工作。
+   新开出站路径而不是复用已有的。第二，Hosted 路径当时也不约束目标地址：那一版
+   准入只校验协议、凭据与长度，不校验主机；`isPrivateHost` 仅用于跳过 https
+   升级；`yolo` 下 Worker（以 `ApprovalMode.YOLO` 构建）与 Harness 都不会询问。
+   因此 files/3 会话本会在无人值守下访问链路本地与 metadata 端点。交付它需要先有
+   目标地址策略，这属于后续工作。
 3. **`todo_write` 在 Worker 内执行，不写 Workspace 文件。** 清单是 Worker 运行
    目录里的记账数据，不触碰 Session Store schema、Java 存储或 Workspace，这也
    是它可以预先批准的原因。
@@ -78,7 +78,8 @@ team lead 是控制面内部创建的会话，read profile 属于不得写入的
    方的路径据此决定注册。服务 hosted profile 的那个 Worker 配置把它设为 true，
    因此工具被准入是因为 profile 这样声明，而不是因为绕过了默认值。只有这条车道
    注册该工具：provider 车道服务 resident 与 CSI 会话，它们的 manifest 是封闭
-   集合，因此与 `glob` 变更时一样保持不动。
+   集合，因此与 `glob` 变更时一样保持不动。Worker 内部目前没有任何代码读取这个
+   开关，所以它是让 Config 说实话并记录意图，而不是切换行为。
 6. **审批。** `default` 与 `auto-edit` 下该工具预先批准：它只写自己的记账数据，
    不改用户拥有的文件。`yolo` 下不询问，与现状相同。
 7. **输入校验保持模型可纠正。** 被拒绝的参数从不获取挂载。`todo_write` 要求

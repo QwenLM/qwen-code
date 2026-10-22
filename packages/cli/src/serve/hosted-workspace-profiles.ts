@@ -12,10 +12,10 @@ export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
 export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
 export const HOSTED_WORKSPACE_FILE_PROFILE_V2 = 'hosted-workspace-files/2';
 export const HOSTED_WORKSPACE_SHELL_PROFILE_V2 = 'hosted-workspace-shell/2';
-// #15076: the `/3` profiles add `web_fetch` and `todo_write` to their `/2`
-// counterpart. A new version rather than a wider `/2`: admission rests on
-// what a Session's own profile offered, so widening `/2` would make a saved
-// `/2` Session expose tools its earlier turns never had.
+// #15076: the `/3` profiles add `todo_write` to their `/2` counterpart. A new
+// version rather than a wider `/2`: admission rests on what a Session's own
+// profile offered, so widening `/2` would make a saved `/2` Session expose a
+// tool its earlier turns never had.
 export const HOSTED_WORKSPACE_FILE_PROFILE_V3 = 'hosted-workspace-files/3';
 export const HOSTED_WORKSPACE_SHELL_PROFILE_V3 = 'hosted-workspace-shell/3';
 export const HOSTED_WORKSPACE_TEAM_LEAD_PROFILE =

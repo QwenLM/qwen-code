@@ -1862,11 +1862,13 @@ it.each([
   expect(names).not.toContain('todo_write');
 });
 
-it.each([
-  ['todo_write', { todos: [{ id: 'a', content: 'a', status: 'pending' }] }],
-])('refuses %s on a /2 profile before the Broker', async (name, args) => {
+it('refuses todo_write on a /2 profile before the Broker', async () => {
   turn = createSearchTurn();
-  const call = { ...calls[0], name, args };
+  const call = {
+    ...calls[0],
+    name: 'todo_write',
+    args: { todos: [{ id: 'a', content: 'a', status: 'pending' }] },
+  };
   await expect(
     turn.execute(
       [call],
@@ -1931,7 +1933,7 @@ it.each([
   },
 );
 
-it('pre-approves todo_write under default and auto-edit, and never under yolo alone', () => {
+it('pre-approves todo_write under default and auto-edit, and yolo never asks', () => {
   expect(
     hostedApprovalAsks({ mode: 'default', timeoutMs: 60_000 }, 'todo_write'),
   ).toBe(false);
