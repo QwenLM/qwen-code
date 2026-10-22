@@ -98,6 +98,8 @@ import {
   SLASH_COMMANDS_SKIP_RECORDING,
 } from './commands-output.js';
 
+import { normalizeQuitSubmission } from './slash-gateway.js';
+
 const debugLogger = createDebugLogger('OPENTUI_SLASH_DISPATCH');
 
 /**
@@ -471,7 +473,7 @@ export class OpenTuiSlashDispatcher {
       return false;
     }
     this.services.onInputProcessed?.();
-    if (this.services.logger) {
+    if (this.services.logger && normalizeQuitSubmission(trimmed) !== '/quit') {
       const sessionId = this.services.config?.getSessionId();
       await this.services.logger.logMessage(MessageSenderType.USER, trimmed);
       if (sessionId !== this.services.config?.getSessionId())

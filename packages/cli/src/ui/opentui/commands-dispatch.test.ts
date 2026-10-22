@@ -43,7 +43,10 @@ import * as interactiveMods from '../../services/interactive-mod-session.js';
 import { helpCommand } from '../commands/helpCommand.js';
 import { clearCommand } from '../commands/clearCommand.js';
 import { vimCommand } from '../commands/vimCommand.js';
-import { OpenTuiSlashGateway } from './slash-gateway.js';
+import {
+  OpenTuiSlashGateway,
+  normalizeQuitSubmission,
+} from './slash-gateway.js';
 
 const { logSlashCommandSpy, loadInteractiveCommandsMock } = vi.hoisted(() => ({
   logSlashCommandSpy: vi.fn(),
@@ -2047,5 +2050,103 @@ describe('isIdleRef parity (command actions see pre-dispatch idle state)', () =>
 
     expect(linkedHost.isStreaming()).toBe(true);
     expect(host.items.some((item) => item.type === 'goal_state')).toBe(false);
+  });
+});
+
+describe('durable slash recall admission', () => {
+  it.each(['/quit', '/exit', 'exit', 'quit', ':q', ':q!', ':wq', ':wq!'])(
+    'keeps the latest real prompt after bare quit token %s',
+    async (token) => {
+      const { Logger, MessageSenderType } = await import(
+        '@qwen-code/qwen-code-core/core/logger.js'
+      );
+      const { Storage } = await import(
+        '@qwen-code/qwen-code-core/config/storage.js'
+      );
+      const owned = fs.mkdtempSync(path.join(os.tmpdir(), 'quit-recall-'));
+      try {
+        const storage = new Storage(
+          path.join(owned, 'project'),
+          path.join(owned, 'runtime'),
+        );
+        const logger = new Logger('before-quit', storage);
+        await logger.initialize();
+        await logger.logMessage(MessageSenderType.USER, 'latest real prompt');
+        const gateway = new OpenTuiSlashGateway();
+        gateway.attach(
+          new OpenTuiSlashDispatcher(
+            createFakeHost(),
+            { ...services, logger },
+            [quitCommand],
+          ),
+        );
+        expect(
+          await gateway.dispatch(normalizeQuitSubmission(token)),
+        ).toMatchObject({
+          kind: 'dispatched',
+          outcome: { kind: 'quit' },
+        });
+        const cold = new Logger('after-quit', storage);
+        await cold.initialize();
+        expect(await cold.getPreviousUserMessages()).toEqual([
+          'latest real prompt',
+        ]);
+      } finally {
+        fs.rmSync(owned, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([
+    '/quit extra',
+    '/exit --help',
+    '/ quit',
+    '/help',
+    '/clear',
+    '/reset',
+    '/new',
+  ])('preserves exact trimmed durable recall for %s', async (query) => {
+    const { Logger, MessageSenderType } = await import(
+      '@qwen-code/qwen-code-core/core/logger.js'
+    );
+    const { Storage } = await import(
+      '@qwen-code/qwen-code-core/config/storage.js'
+    );
+    const owned = fs.mkdtempSync(path.join(os.tmpdir(), 'slash-recall-'));
+    try {
+      const storage = new Storage(
+        path.join(owned, 'project'),
+        path.join(owned, 'runtime'),
+      );
+      const logger = new Logger('before-command', storage);
+      await logger.initialize();
+      await logger.logMessage(MessageSenderType.USER, 'latest real prompt');
+      const dispatcher = new OpenTuiSlashDispatcher(
+        createFakeHost(),
+        { ...services, logger },
+        [
+          helpCommand,
+          quitCommand,
+          ...['clear', 'reset', 'new'].map((name) =>
+            stub({
+              name,
+              action: () => ({
+                type: 'message',
+                messageType: 'info',
+                content: 'control',
+              }),
+            }),
+          ),
+        ],
+      );
+      await dispatcher.handle(`  ${query}  `);
+      const cold = new Logger('after-command', storage);
+      await cold.initialize();
+      expect((await cold.getPreviousUserMessages()).sort()).toEqual(
+        [query, 'latest real prompt'].sort(),
+      );
+    } finally {
+      fs.rmSync(owned, { recursive: true, force: true });
+    }
   });
 });

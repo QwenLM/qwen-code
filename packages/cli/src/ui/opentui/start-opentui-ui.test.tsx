@@ -762,6 +762,45 @@ describe('startOpenTuiUI fallback contract', () => {
     expect(config.trackSessionRegistration).toHaveBeenCalled();
   });
 
+  it('leaves SIGINT confirmation to the application and destroys during exit cleanup', async () => {
+    expect(
+      await startOpenTuiUI(
+        buildConfig(),
+        settings,
+        [],
+        '/tmp/project',
+        {} as InitializationResult,
+      ),
+    ).toBe(true);
+    expect(createCliRenderer).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        exitOnCtrlC: false,
+        exitSignals: [
+          'SIGTERM',
+          'SIGQUIT',
+          'SIGABRT',
+          'SIGHUP',
+          'SIGPIPE',
+          'SIGBREAK',
+          'SIGBUS',
+        ],
+      }),
+    );
+    expect(mocks.state.renderer.destroy).not.toHaveBeenCalled();
+
+    for (const cleanup of mocks.state.cleanups) await cleanup();
+
+    expect(mocks.state.root.unmount).toHaveBeenCalledTimes(1);
+    expect(mocks.state.renderer.destroy).toHaveBeenCalledTimes(1);
+    expect(mocks.state.runtime.shutdown).toHaveBeenCalledTimes(1);
+    expect(mocks.state.root.unmount.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.state.renderer.destroy.mock.invocationCallOrder[0],
+    );
+    expect(
+      mocks.state.renderer.destroy.mock.invocationCallOrder[0],
+    ).toBeLessThan(mocks.state.runtime.shutdown.mock.invocationCallOrder[0]);
+  });
+
   it('threads the boot auth auto-open into the shell (U-6)', async () => {
     // Unauthenticated: ink useAuth opens the dialog with no error message.
     expect(

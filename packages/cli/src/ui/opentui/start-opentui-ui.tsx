@@ -530,6 +530,17 @@ export async function startOpenTuiUI(
   try {
     renderer = await createCliRenderer({
       exitOnCtrlC: false,
+      // The shared SIGINT handler confirms exit before running renderer cleanup.
+      // Preserve the other OpenTUI 0.5.10 defaults.
+      exitSignals: [
+        'SIGTERM',
+        'SIGQUIT',
+        'SIGABRT',
+        'SIGHUP',
+        'SIGPIPE',
+        'SIGBREAK',
+        'SIGBUS',
+      ],
       // ink's ui.mouseTracking gate: off means no SGR mouse mode, so the
       // terminal keeps native right-click menus and OSC 8 link clicks.
       useMouse: settings.merged.ui?.mouseTracking !== false,
