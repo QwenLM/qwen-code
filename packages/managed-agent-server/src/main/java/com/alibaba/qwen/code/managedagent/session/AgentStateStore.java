@@ -64,6 +64,8 @@ public interface AgentStateStore {
      */
     String RUNTIME_RECOVERY_BLOCKED = "hosted_runtime_recovery_blocked";
 
+    String HARNESS_RECOVERY_BLOCKED = "hosted_harness_recovery_blocked";
+
     // The annotation must sit on the default itself: the delegating body runs
     // on the target instance, so without it the self-call bypasses the proxy.
     @org.springframework.transaction.annotation.Transactional
@@ -648,6 +650,9 @@ public interface AgentStateStore {
     SessionPage listSessions(String tenantId, String actorId, Long beforeCreatedAt,
             String beforeSessionId, int limit, String archiveState);
 
+    SessionPage listSessions(String tenantId, String actorId, Long beforeCreatedAt,
+            String beforeSessionId, int limit, String archiveState, String titleQuery);
+
     Map<String, WebShellLifecycleOperation> findLatestLifecycleOperations(String tenantId, List<String> sessionIds);
 
     Optional<TurnRecord> findTurn(String tenantId, String sessionId,
@@ -798,7 +803,9 @@ public interface AgentStateStore {
      * the error code stays on the still-active row for the child result
      * relay to classify from, and the dispatch lease is released so the
      * drive ends without settling the Turn. Never a terminal status: the
-     * unwitnessed execution's outcome was never observed.
+     * unwitnessed execution's outcome was never observed. A Harness park
+     * backs off before read-only journal observation; it may still settle
+     * from later authoritative evidence without replaying execution.
      */
     boolean markTurnRecoveryBlocked(String tenantId, String sessionId,
             String turnId, String owner, String errorCode,

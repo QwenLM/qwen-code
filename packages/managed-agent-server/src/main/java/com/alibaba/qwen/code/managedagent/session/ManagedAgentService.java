@@ -62,6 +62,7 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -957,6 +958,29 @@ public class ManagedAgentService {
                 page.hasMore(), nextCursor(page));
     }
 
+    public PublicList<PublicSession> listPublicSessions(String tenantId,
+            String actorId, String cursor, int requestedLimit, String requestedArchiveState,
+            Boolean includeArchived, String requestedTitleQuery) {
+        String archiveState = archiveState(requestedArchiveState);
+        if (includeArchived != null) {
+            String alias = includeArchived ? "all" : "unarchived";
+            if (requestedArchiveState != null && !alias.equals(archiveState)) {
+                throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
+                        "invalid_archive_state", "Archive filters conflict.");
+            }
+            archiveState = alias;
+        }
+        String titleQuery = titleQuery(requestedTitleQuery);
+        if ("all".equals(archiveState) && titleQuery.isEmpty()) {
+            return listPublicSessions(tenantId, actorId, cursor, requestedLimit);
+        }
+        int limit = limit(requestedLimit);
+        SessionCursor decoded = decodeCursor(cursor, archiveState, titleQuery);
+        SessionPage page = filteredSessions(tenantId, actorId, decoded, limit, archiveState, titleQuery);
+        return new PublicList<>("list", publicSessions(page.sessions()), page.hasMore(),
+                nextSessionCursor(page, archiveState, titleQuery));
+    }
+
     public WebShellPage<WebShellSession> listWebShellSessions(
             String tenantId, String actorId, String cursor,
             int requestedLimit) {
@@ -965,18 +989,56 @@ public class ManagedAgentService {
 
     public WebShellPage<WebShellSession> listWebShellSessions(
             String tenantId, String actorId, String cursor, int requestedLimit, String requestedArchiveState) {
-        String archiveState = requestedArchiveState == null ? "all" : requestedArchiveState;
-        if (!List.of("all", "unarchived", "archived").contains(archiveState)) {
-            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "invalid_archive_state", "Unknown archive state.");
-        }
+        return listWebShellSessions(tenantId, actorId, cursor, requestedLimit, requestedArchiveState, null);
+    }
+
+    public WebShellPage<WebShellSession> listWebShellSessions(
+            String tenantId, String actorId, String cursor, int requestedLimit,
+            String requestedArchiveState, String requestedTitleQuery) {
+        String archiveState = archiveState(requestedArchiveState);
+        String titleQuery = titleQuery(requestedTitleQuery);
         int limit = limit(requestedLimit);
-        SessionCursor decoded = decodeCursor(cursor, archiveState);
-        SessionPage page = store.listSessions(tenantId, actorId,
-                decoded == null ? null : decoded.createdAt(),
-                decoded == null ? null : decoded.sessionId(), limit, archiveState);
+        SessionCursor decoded = decodeCursor(cursor, archiveState, titleQuery);
+        SessionPage page = filteredSessions(tenantId, actorId, decoded, limit, archiveState, titleQuery);
         return new WebShellPage<>(webShellSessions(page.sessions(), actorId),
-                page.hasMore() ? encodeCursor("v2:" + archiveState + ":" + page.sessions().getLast().createdAt()
-                        + ":" + page.sessions().getLast().sessionId()) : null, page.hasMore());
+                nextSessionCursor(page, archiveState, titleQuery), page.hasMore());
+    }
+
+    private SessionPage filteredSessions(String tenantId, String actorId, SessionCursor cursor,
+            int limit, String archiveState, String titleQuery) {
+        Long createdAt = cursor == null ? null : cursor.createdAt();
+        String sessionId = cursor == null ? null : cursor.sessionId();
+        return titleQuery.isEmpty()
+                ? store.listSessions(tenantId, actorId, createdAt, sessionId, limit, archiveState)
+                : store.listSessions(tenantId, actorId, createdAt, sessionId, limit, archiveState, titleQuery);
+    }
+
+    private static String archiveState(String requested) {
+        String state = requested == null ? "all" : requested;
+        if (!List.of("all", "unarchived", "archived").contains(state)) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
+                    "invalid_archive_state", "Unknown archive state.");
+        }
+        return state;
+    }
+
+    private static String titleQuery(String requested) {
+        if (requested != null && requested.codePointCount(0, requested.length()) > 512) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
+                    "invalid_title_query", "Title query must not exceed 512 characters.");
+        }
+        if (requested == null) {
+            return "";
+        }
+        int start = 0;
+        int end = requested.length();
+        while (start < end && titleWhitespace(requested.codePointAt(start))) {
+            start += Character.charCount(requested.codePointAt(start));
+        }
+        while (end > start && titleWhitespace(requested.codePointBefore(end))) {
+            end -= Character.charCount(requested.codePointBefore(end));
+        }
+        return requested.substring(start, end);
     }
 
     /**
@@ -1432,7 +1494,9 @@ public class ManagedAgentService {
 
     private static WebShellTurn webShellTurn(TurnSummary turn) {
         return new WebShellTurn(turn.turnId(), turn.sessionId(),
-                turn.status().toLowerCase(Locale.ROOT), turn.createdAt(),
+                AgentStateStore.HARNESS_RECOVERY_BLOCKED.equals(turn.errorCode())
+                        && ("RUNNING".equals(turn.status()) || "ACCEPTED".equals(turn.status()))
+                        ? "recovery_blocked" : turn.status().toLowerCase(Locale.ROOT), turn.createdAt(),
                 turn.completedAt(), turn.errorCode());
     }
 
@@ -2050,8 +2114,12 @@ public class ManagedAgentService {
     // worked around — plus the control-character rule. A title the API
     // accepts must stay writable through every path.
     private static boolean unicodeBlank(String title) {
-        return title.codePoints().allMatch(character -> Character.isWhitespace(character)
-                || Character.isSpaceChar(character) || character == 0xfeff);
+        return title.codePoints().allMatch(ManagedAgentService::titleWhitespace);
+    }
+
+    private static boolean titleWhitespace(int character) {
+        return Character.isWhitespace(character) || Character.isSpaceChar(character)
+                || character == 0xfeff;
     }
 
     private static String validTitle(String title) {
@@ -2112,22 +2180,38 @@ public class ManagedAgentService {
                 raw.getBytes(StandardCharsets.UTF_8));
     }
 
+    private static String nextSessionCursor(SessionPage page, String archiveState, String titleQuery) {
+        if (!page.hasMore() || page.sessions().isEmpty()) {
+            return null;
+        }
+        SessionRecord last = page.sessions().getLast();
+        String prefix = titleQuery.isEmpty() ? "v2:" + archiveState + ":"
+                : "v3:" + archiveState + ":" + DigestUtils.sha256Hex(titleQuery) + ":";
+        return encodeCursor(prefix + last.createdAt() + ":" + last.sessionId());
+    }
+
     private static String encodeCursor(String raw) {
         return Base64.getUrlEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
     }
 
     private static SessionCursor decodeCursor(String cursor) {
-        return decodeCursor(cursor, "all");
+        return decodeCursor(cursor, "all", "");
     }
 
-    private static SessionCursor decodeCursor(String cursor, String archiveState) {
+    private static SessionCursor decodeCursor(String cursor, String archiveState, String titleQuery) {
         if (StringUtils.isBlank(cursor)) {
             return null;
         }
         try {
             String decoded = new String(Base64.getUrlDecoder().decode(cursor),
                     StandardCharsets.UTF_8);
-            if (decoded.startsWith("v2:")) {
+            if (!titleQuery.isEmpty()) {
+                String prefix = "v3:" + archiveState + ":" + DigestUtils.sha256Hex(titleQuery) + ":";
+                if (!decoded.startsWith(prefix)) {
+                    throw new IllegalArgumentException();
+                }
+                decoded = decoded.substring(prefix.length());
+            } else if (decoded.startsWith("v2:")) {
                 String prefix = "v2:" + archiveState + ":";
                 if (!decoded.startsWith(prefix)) {
                     throw new IllegalArgumentException();
