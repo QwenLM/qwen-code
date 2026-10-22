@@ -595,18 +595,30 @@ function joinTextParts(parts: readonly unknown[]): string {
 const TAIL_READ_SIZE = 64 * 1024;
 
 /**
- * Hard ceiling on readLastRecordUuid's widening tail window. It must stay
- * above the largest single record the writers can legitimately journal or the
+ * Inline media parts a single user record may journal. The writers clamp each
+ * part independently (`clampInlineMediaPart` is applied per part), so a
+ * multi-image prompt journals several parts at the configured decoded limit.
+ * Two full-size parts is the recovery bound this ceiling covers.
+ */
+const MAX_INLINE_MEDIA_PARTS_PER_RECORD = 2;
+
+/**
+ * Hard ceiling on readLastRecordUuid's widening tail window. It must cover
+ * the multi-part inline media records the writers journal or the
  * oversized-record recovery regresses; without it a corrupt tail with no
  * uuid-bearing line escalates into a whole-file read that re-parses every
- * line at every doubling. One inline media part at the configured decoded
+ * line at every doubling. Each inline media part at the configured decoded
  * limit (10 MiB by default) is journaled as base64, which inflates it by
  * 4/3, plus JSON framing — so resolve the ceiling from that limit per call
  * rather than pinning it below what the writer accepts.
  */
 function maxTailWindowSize(): number {
   const inlineMediaBase64Bytes = Math.ceil((getMaxInlineMediaBytes() * 4) / 3);
-  return Math.max(4 * 1024 * 1024, inlineMediaBase64Bytes + 1024 * 1024);
+  return Math.max(
+    4 * 1024 * 1024,
+    MAX_INLINE_MEDIA_PARTS_PER_RECORD * inlineMediaBase64Bytes +
+      2 * 1024 * 1024,
+  );
 }
 
 const readGoalStateObjective: MatchingRecordFieldReader = (record) => {

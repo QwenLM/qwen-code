@@ -6787,13 +6787,13 @@ export class Session implements SessionContext {
               .join(' ');
             const promptDisplayTextValue =
               promptMetadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
-            // Mirror #beginTurnRecording: an empty client projection is
-            // absent, not a visible empty text. Keeping '' here writes a
-            // `displayText: ''` marker that hides the turn from the
-            // navigation index and flips core into projection mode.
+            // An empty string is a valid client projection: it hides the
+            // turn's text on the display path and must stay a projection
+            // marker, or the raw model text (what the client projected
+            // away) becomes the user-visible transcript text and the title
+            // falls back to the hidden history.
             const promptDisplayText =
-              typeof promptDisplayTextValue === 'string' &&
-              promptDisplayTextValue !== ''
+              typeof promptDisplayTextValue === 'string'
                 ? promptDisplayTextValue
                 : undefined;
             const inputAnnotations = readDaemonInputAnnotations(

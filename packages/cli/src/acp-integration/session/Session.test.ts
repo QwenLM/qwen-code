@@ -13852,7 +13852,7 @@ describe('Session', () => {
       },
     );
 
-    it('treats an empty client display projection as absent', async () => {
+    it('keeps an empty client display projection as a projection marker', async () => {
       mockChat.sendMessageStream = vi
         .fn()
         .mockResolvedValue(createEmptyStream());
@@ -13882,7 +13882,46 @@ describe('Session', () => {
         undefined,
         expect.objectContaining({
           displayText: '',
-          displayProjection: false,
+          displayProjection: true,
+        }),
+        expect.any(String),
+        undefined,
+      );
+    });
+
+    it('keeps an empty projection over hidden model text and its embedded resources', async () => {
+      // R16-1: the image-only fixture above cannot catch the regression,
+      // because its promptText is '' too. A non-empty text block proves the
+      // record keeps the client's empty projection instead of falling back
+      // to the model-bound text the channel hid.
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const embeddedResource = {
+        type: 'resource' as const,
+        resource: {
+          uri: 'context://example/hidden',
+          mimeType: 'text/plain',
+          text: 'resource contents',
+        },
+      };
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text' as const, text: 'hidden channel instructions' },
+          embeddedResource,
+        ],
+        _meta: { 'qwen.daemon.promptDisplayText': '' },
+      });
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        'hidden channel instructions',
+        undefined,
+        expect.objectContaining({
+          displayText: '',
+          displayProjection: true,
+          embeddedResources: [embeddedResource],
         }),
         expect.any(String),
         undefined,

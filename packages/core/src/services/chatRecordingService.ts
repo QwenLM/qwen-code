@@ -1144,6 +1144,16 @@ export interface BranchCheckpointCursor {
 export interface ChatRecordingRestoreState {
   lastCompletedUuid: string;
   turnParentUuids: Array<string | null>;
+  /**
+   * Per-turn projection state, index-aligned with `turnParentUuids`.
+   * `rewindRecording` prunes this array by turn index, so a restored
+   * recorder without it would re-derive the projection flag from an empty
+   * or offset slice.
+   */
+  turnTitleStates?: Array<{
+    projection: boolean;
+    displayText: string | undefined;
+  }>;
   /** Projection mode of the restored session; see `restoreProjectedState`. */
   displayProjectionForTitle?: boolean;
   /** Surviving title texts, oldest first (already 20-capped). */
@@ -1582,6 +1592,14 @@ export class ChatRecordingService {
     // A re-bound recorder must never inherit the previous session's marker.
     this.userDisplayTextsForTitle.length = 0;
     this.turnTitleStates.length = 0;
+    if (
+      state.turnTitleStates !== undefined &&
+      state.turnTitleStates.length === state.turnParentUuids.length
+    ) {
+      for (const turn of state.turnTitleStates) {
+        this.turnTitleStates.push({ ...turn });
+      }
+    }
     this.displayProjectionForTitle = false;
     this.lastProjectionTextForTitle = undefined;
     if (state.userDisplayTextsForTitle !== undefined) {
@@ -3476,21 +3494,26 @@ export class ChatRecordingService {
       // Prune the per-turn projection state with the same boundary and
       // re-derive the flag: a rewind past the only projected turn must not
       // leave the session in projection mode with an all-undefined ring.
-      this.turnTitleStates.length = Math.min(
-        this.turnTitleStates.length,
-        targetTurnIndex,
-      );
-      this.displayProjectionForTitle = this.turnTitleStates.some(
-        (turn) => turn.projection,
-      );
-      this.lastProjectionTextForTitle = undefined;
-      for (const turn of this.turnTitleStates) {
-        if (
-          turn.projection &&
-          turn.displayText !== undefined &&
-          turn.displayText !== ''
-        ) {
-          this.lastProjectionTextForTitle = turn.displayText;
+      // A restore state that pre-dates the per-turn array leaves the two
+      // arrays misaligned; fail closed by keeping the restored flag rather
+      // than clearing it, since dropping it titles from hidden raw context.
+      if (this.turnTitleStates.length === this.turnParentUuids.length) {
+        this.turnTitleStates.length = Math.min(
+          this.turnTitleStates.length,
+          targetTurnIndex,
+        );
+        this.displayProjectionForTitle = this.turnTitleStates.some(
+          (turn) => turn.projection,
+        );
+        this.lastProjectionTextForTitle = undefined;
+        for (const turn of this.turnTitleStates) {
+          if (
+            turn.projection &&
+            turn.displayText !== undefined &&
+            turn.displayText !== ''
+          ) {
+            this.lastProjectionTextForTitle = turn.displayText;
+          }
         }
       }
       // Trim future boundaries — they no longer exist in the active branch.

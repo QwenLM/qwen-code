@@ -401,36 +401,73 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
     expect(svc.readLastRecordUuid(file)).toBe('oversized-inline');
   });
 
+  it('recovers a legitimate record with two inline media parts', () => {
+    // The writers clamp each inline media part independently, so a prompt
+    // with two full-size images journals both on one JSONL line. The
+    // ceiling must cover the whole record, not one part.
+    const record = {
+      ...recordFor('oversized-two-inline', 'user', null),
+      message: {
+        role: 'user',
+        parts: [
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'A'.repeat(14 * 1024 * 1024),
+            },
+          },
+          {
+            inlineData: {
+              mimeType: 'image/jpeg',
+              data: 'B'.repeat(14 * 1024 * 1024),
+            },
+          },
+        ],
+      },
+    };
+    const line = JSON.stringify(record);
+    expect(Buffer.byteLength(line, 'utf8')).toBeGreaterThan(28 * 1024 * 1024);
+    const file = writeJsonl('oversized-two-inline.jsonl', `${line}\n`);
+
+    expect(svc.readLastRecordUuid(file)).toBe('oversized-two-inline');
+  });
+
   it('gives up at the tail-window ceiling instead of escalating to a whole-file read', () => {
     // A post-crash garbage flood with no uuid-bearing line: without the
     // ceiling the doubling loop re-reads and re-parses the whole file at
-    // every step, stalling renameSession on the daemon route.
-    const MAX_TAIL_WINDOW_SIZE = Math.max(
-      4 * 1024 * 1024,
-      Math.ceil((getMaxInlineMediaBytes() * 4) / 3) + 1024 * 1024,
-    );
-    const garbage = `${'y'.repeat(4096)}\n`.repeat(
-      Math.ceil(MAX_TAIL_WINDOW_SIZE / 4097) + 100,
-    );
-    const file = writeJsonl('huge-garbage-tail.jsonl', garbage);
-    expect(fs.statSync(file).size).toBeGreaterThan(MAX_TAIL_WINDOW_SIZE);
-
-    const readSpy = vi.spyOn(fs, 'readSync');
+    // every step, stalling renameSession on the daemon route. Shrink the
+    // per-part media limit so the mirrored ceiling stays a small file.
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
     try {
-      expect(svc.readLastRecordUuid(file)).toBeNull();
-      const requestedLengths = readSpy.mock.calls.map(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (call) => (call as any[])[3] as number,
+      const MAX_TAIL_WINDOW_SIZE = Math.max(
+        4 * 1024 * 1024,
+        Math.ceil((getMaxInlineMediaBytes() * 4) / 3) * 2 + 2 * 1024 * 1024,
       );
-      expect(Math.max(...requestedLengths)).toBeLessThanOrEqual(
-        MAX_TAIL_WINDOW_SIZE,
+      const garbage = `${'y'.repeat(4096)}\n`.repeat(
+        Math.ceil(MAX_TAIL_WINDOW_SIZE / 4097) + 100,
       );
-      // The probe must reach the ceiling before giving up — a fixed-window
-      // reader would also satisfy the length cap while never recovering the
-      // oversized records this loop exists for.
-      expect(requestedLengths).toContain(MAX_TAIL_WINDOW_SIZE);
+      const file = writeJsonl('huge-garbage-tail.jsonl', garbage);
+      expect(fs.statSync(file).size).toBeGreaterThan(MAX_TAIL_WINDOW_SIZE);
+
+      const readSpy = vi.spyOn(fs, 'readSync');
+      try {
+        expect(svc.readLastRecordUuid(file)).toBeNull();
+        const requestedLengths = readSpy.mock.calls.map(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (call) => (call as any[])[3] as number,
+        );
+        expect(Math.max(...requestedLengths)).toBeLessThanOrEqual(
+          MAX_TAIL_WINDOW_SIZE,
+        );
+        // The probe must reach the ceiling before giving up — a fixed-window
+        // reader would also satisfy the length cap while never recovering the
+        // oversized records this loop exists for.
+        expect(requestedLengths).toContain(MAX_TAIL_WINDOW_SIZE);
+      } finally {
+        readSpy.mockRestore();
+      }
     } finally {
-      readSpy.mockRestore();
+      vi.unstubAllEnvs();
     }
   });
 });

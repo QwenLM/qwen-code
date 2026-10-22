@@ -282,6 +282,11 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   recording: {
     lastCompletedUuid: string;
     turnParentUuids: Array<string | null>;
+    /** Per-turn projection state, index-aligned with `turnParentUuids`. */
+    turnTitleStates?: Array<{
+      projection: boolean;
+      displayText: string | undefined;
+    }>;
     customTitle?: string;
     titleSource?: TitleSource;
     parentSessionId?: string;
@@ -323,13 +328,29 @@ const MAX_TITLE_USER_DISPLAY_TEXTS = 20;
 function deriveTitleProjectionState(records: readonly ChatRecord[]): {
   displayProjectionForTitle: boolean;
   userDisplayTexts: Array<string | undefined>;
+  turnTitleStates: Array<{
+    projection: boolean;
+    displayText: string | undefined;
+  }>;
   lastProjectionText?: string;
 } {
   const userDisplayTexts: Array<string | undefined> = [];
+  const turnTitleStates: Array<{
+    projection: boolean;
+    displayText: string | undefined;
+  }> = [];
   let displayProjectionForTitle = false;
   let lastProjectionText: string | undefined;
   for (const record of records) {
-    if (record.type !== 'user' || record.subtype !== undefined) continue;
+    // Match `SessionTurnStateAccumulator`'s turn boundary exactly so this
+    // array stays index-aligned with `turnParentUuids`; the recorder prunes
+    // both by the same turn index on rewind.
+    if (
+      getSessionTurnRecordHint(record, record.sessionId).turnParentUuid ===
+      undefined
+    ) {
+      continue;
+    }
     const payload = record.systemPayload as UserPromptRecordPayload | undefined;
     const projection =
       payload !== undefined && payload.displayProjection !== false;
@@ -337,6 +358,7 @@ function deriveTitleProjectionState(records: readonly ChatRecord[]): {
       payload?.displayProjection === false && payload.displayText === ''
         ? undefined
         : payload?.displayText;
+    turnTitleStates.push({ projection, displayText });
     if (projection) {
       displayProjectionForTitle = true;
       if (displayText !== undefined && displayText !== '') {
@@ -351,6 +373,7 @@ function deriveTitleProjectionState(records: readonly ChatRecord[]): {
   return {
     displayProjectionForTitle,
     userDisplayTexts,
+    turnTitleStates,
     ...(lastProjectionText !== undefined ? { lastProjectionText } : {}),
   };
 }
@@ -457,6 +480,9 @@ function buildManagedSessionRestoreProjection(
       lastCompletedUuid:
         records[records.length - 1]?.uuid ?? input.fallbackLastCompletedUuid,
       turnParentUuids: turnStateValue.turnParentUuids,
+      ...(titleProjection.turnTitleStates.length > 0
+        ? { turnTitleStates: titleProjection.turnTitleStates }
+        : {}),
       ...(titleProjection.displayProjectionForTitle
         ? { displayProjectionForTitle: true }
         : {}),
@@ -3591,6 +3617,9 @@ export class SessionTranscriptReader {
       recording: {
         lastCompletedUuid: index.leafUuid,
         turnParentUuids: turnStateValue.turnParentUuids,
+        ...(titleProjection.turnTitleStates.length > 0
+          ? { turnTitleStates: titleProjection.turnTitleStates }
+          : {}),
         ...(titleProjection.displayProjectionForTitle
           ? { displayProjectionForTitle: true }
           : {}),

@@ -473,13 +473,13 @@ function applyDaemonTranscriptEvent(
       // compare first, so the per-entry scan stays cheap and full
       // serialization runs only for a same-uri same-content candidate.
       const incomingText = event.resource.resource.text;
-      // Fingerprint on divergence, not on a length gate: the cascade can
-      // rewrite the stored text past the real-byte ceiling the code-unit
-      // gate never sees (including emptying it), and a length-gated
-      // fingerprint then compares the emptied stored text against the
-      // full echo and retains every copy.
+      // Fingerprint on divergence of the *stored* text, not on a length
+      // gate: the cascade can rewrite or empty the stored text past the
+      // real-byte ceiling, and admission can empty it again when the block
+      // is already full. Comparing the bounded text against a full echo
+      // would retain every copy of an admission-degraded skeleton.
       const incomingFingerprint =
-        retained.resource.text !== incomingText
+        (stored?.resource.text ?? retained.resource.text) !== incomingText
           ? fingerprintResourceText(incomingText)
           : undefined;
       const incomingUri = event.resource.resource.uri;
@@ -2867,6 +2867,14 @@ function boundEmbeddedResource(
     if (overEmbeddedResourceBounds(skeleton) && skeleton.resource.text !== '') {
       skeleton.resource.text = '';
       clipped = true;
+    }
+    // Emptying the text can leave uri/mimeType owning a residual overflow
+    // their earlier cuts refused while the text still held the larger share.
+    if (overEmbeddedResourceBounds(skeleton)) {
+      clipped = cutSkeletonFieldToByteBudget(skeleton, 'uri') || clipped;
+      if (overEmbeddedResourceBounds(skeleton)) {
+        clipped = cutSkeletonFieldToByteBudget(skeleton, 'mimeType') || clipped;
+      }
     }
   }
   if (clipped) {

@@ -2890,6 +2890,80 @@ describe('ChatRecordingService', () => {
       expect(service.getUserDisplayTextsForTitle()).toEqual(['visible prompt']);
     });
 
+    it('keeps projection mode when a rewind leaves restored projected turns', () => {
+      // R15-2: the reduced restore path used to restore the flag but not
+      // the per-turn states, so rewind re-derived it from an empty array and
+      // dropped projection mode for a session whose surviving turns still
+      // project.
+      const turnTitleStates = Array.from({ length: 8 }, (_, index) => ({
+        projection: true,
+        displayText: `visible ${index}`,
+      }));
+      const service = activateReduced({
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: Array.from({ length: 8 }, () => null),
+        turnTitleStates,
+        displayProjectionForTitle: true,
+        userDisplayTextsForTitle: turnTitleStates.map(
+          (turn) => turn.displayText,
+        ),
+        lastProjectionTextForTitle: 'visible 7',
+      });
+
+      service.rewindRecording(6, { truncatedCount: 2 });
+
+      expect(service.hasDisplayProjectionForTitle()).toBe(true);
+      expect(service.getUserDisplayTextsForTitle()).toEqual(
+        turnTitleStates.slice(0, 6).map((turn) => turn.displayText),
+      );
+    });
+
+    it('prunes a post-restore projected turn by its aligned index', () => {
+      // R15-2 mirror case: restored turns did not project, so a rewind past
+      // the only newly recorded projected turn must leave projection mode.
+      // The restored per-turn array keeps the new state at index 2 instead
+      // of letting `min(length, targetTurnIndex)` retain it.
+      const service = activateReduced({
+        lastCompletedUuid: 'plain-leaf',
+        turnParentUuids: [null, null],
+        turnTitleStates: [
+          { projection: false, displayText: 'restored one' },
+          { projection: false, displayText: undefined },
+        ],
+        userDisplayTextsForTitle: ['restored one', undefined],
+      });
+      service.recordUserMessage([{ text: 'visible new' }], undefined, {
+        displayText: 'visible new',
+        hookContext: '',
+      });
+      expect(service.hasDisplayProjectionForTitle()).toBe(true);
+
+      service.rewindRecording(2, { truncatedCount: 1 });
+
+      expect(service.hasDisplayProjectionForTitle()).toBe(false);
+      expect(service.getUserDisplayTextsForTitle()).toEqual([
+        'restored one',
+        undefined,
+      ]);
+    });
+
+    it('keeps the restored projection flag when per-turn state is unavailable', () => {
+      // A legacy restore state carries no per-turn array. Re-deriving the
+      // flag from an empty array would drop projection mode and title from
+      // the hidden raw history, so a rewind must fail closed here.
+      const service = activateReduced({
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null, null],
+        displayProjectionForTitle: true,
+        userDisplayTextsForTitle: ['visible prompt', undefined],
+        lastProjectionTextForTitle: 'visible prompt',
+      });
+
+      service.rewindRecording(1, { truncatedCount: 1 });
+
+      expect(service.hasDisplayProjectionForTitle()).toBe(true);
+    });
+
     it('does not inherit projection mode when the restore state carries none', () => {
       const service = activateReduced({
         lastCompletedUuid: 'plain-leaf',

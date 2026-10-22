@@ -1686,6 +1686,46 @@ describe('SessionTranscriptReader', () => {
     expect(recording?.lastAssistantModel).toBe('other-turn-model');
   });
 
+  it('restores per-turn title projection state aligned with turnParentUuids', async () => {
+    const projected: ChatRecord = {
+      ...record('u1', null, 'visible one'),
+      systemPayload: { displayText: 'visible one', hookContext: '' },
+    };
+    const raw: ChatRecord = {
+      ...record('u2', 'a1', ''),
+      systemPayload: {
+        displayText: '',
+        hookContext: '',
+        displayProjection: false,
+      },
+    };
+    const emptyProjection: ChatRecord = {
+      ...record('u3', 'a2', ''),
+      systemPayload: {
+        displayText: '',
+        hookContext: '',
+        displayProjection: true,
+      },
+    };
+    await writeRecords([
+      projected,
+      record('a1', 'u1', 'answer'),
+      raw,
+      record('a2', 'u2', 'answer'),
+      emptyProjection,
+      record('a3', 'u3', 'answer'),
+    ]);
+
+    const recording = (await coldProjection())?.runtime.recording;
+
+    expect(recording?.turnParentUuids).toEqual([null, 'a1', 'a2']);
+    expect(recording?.turnTitleStates).toEqual([
+      { projection: true, displayText: 'visible one' },
+      { projection: false, displayText: undefined },
+      { projection: true, displayText: '' },
+    ]);
+  });
+
   it('restores the last valid session approval state independently of replay', async () => {
     const yolo: ChatRecord = {
       ...record('approval-1', null, ''),
