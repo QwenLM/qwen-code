@@ -279,6 +279,19 @@ public class BrokerSecurity {
         if (!properties.getHarness().isEnabled()) {
             return;
         }
+        if (properties.getHarness().getPool().isEnabled()) {
+            if (!properties.getSessionStore().isEnabled() || StringUtils.isBlank(properties.getSessionStore().getBindingKey())) {
+                throw new IllegalStateException("Harness pool requires an enabled Session Store and binding key");
+            }
+            for (var instance : properties.getHarness().getPool().getInstances()) {
+                java.net.URI endpoint = java.net.URI.create(instance.getBaseUrl());
+                if (!"https".equals(endpoint.getScheme())
+                        && !("http".equals(endpoint.getScheme()) && isLoopback(hostOf(endpoint)))) {
+                    throw new IllegalStateException("Harness pool requires TLS for remote endpoints");
+                }
+            }
+            return;
+        }
         String baseUrl = properties.getHarness().getBaseUrl();
         if (StringUtils.isBlank(baseUrl)) {
             return;

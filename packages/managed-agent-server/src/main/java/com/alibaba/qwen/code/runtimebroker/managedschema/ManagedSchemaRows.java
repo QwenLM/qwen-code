@@ -102,6 +102,8 @@ public final class ManagedSchemaRows {
                     "encryption_key_id",
                     "publish_command_id",
                     "harness_boot_id",
+                    "harness_instance_id",
+                    "harness_owner_boot_id",
                     "harness_event_epoch",
                     "workspace_storage_id",
                     "context_config_ref",

@@ -2254,6 +2254,7 @@ export async function recoverHostedRuntimeTurn(input: {
   promptId: string;
   brokerOptions: HostedWorkspaceBrokerOptions;
   passive: boolean;
+  canStart?: () => boolean;
   /** The evidence funnels of the interrupted-Turn settlement (#13847): a
    * model-start park whose open round holds only journal-only calls
    * answers them by what committed through these — the same shapes the
@@ -2587,6 +2588,8 @@ export async function recoverHostedRuntimeTurn(input: {
           ) as { payloadJson?: unknown };
           if (typeof stored.payloadJson !== 'string')
             throw new RecoveryDeclined();
+          if (input.canStart?.() === false)
+            throw new Error('The Harness is quiescing.');
           const result = await broker
             .execute(
               item.executionCallId,

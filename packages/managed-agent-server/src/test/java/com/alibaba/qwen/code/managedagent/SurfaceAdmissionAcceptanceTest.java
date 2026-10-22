@@ -1558,6 +1558,14 @@ class SurfaceAdmissionAcceptanceTest {
 
     private String bodyFor(SurfaceRegistry entry, String tenant,
             String session) {
+        if (entry == SurfaceRegistry.INTERNAL_WRITER_QUIESCE_OWNERSHIP
+                || entry == SurfaceRegistry.INTERNAL_WRITER_RELEASE_OWNERSHIP) {
+            String scope = "\"workspaceId\":\"ws\",\"writerId\":\"boot-probe\",\"writerGeneration\":1,"
+                    + "\"instanceId\":\"pod-probe\",\"bootId\":\"boot-probe\",\"placementEpoch\":1";
+            return "{" + scope + (entry == SurfaceRegistry.INTERNAL_WRITER_RELEASE_OWNERSHIP
+                    ? ",\"operationId\":\"release-probe\",\"journalRevision\":1,\"commitProof\":{\"lastCommitSequence\":1,"
+                            + "\"committedPrefixHash\":\"" + "a".repeat(64) + "\"}" : "") + "}";
+        }
         Capability capability = entry.capabilities().iterator().next();
         boolean publicSurface = entry.surface() == Surface.PUBLIC;
         return switch (capability) {

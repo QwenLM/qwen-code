@@ -2310,6 +2310,8 @@ export function createServeApp(
         req.path === '/health' ||
         req.path === '/capabilities' ||
         req.path === '/session' ||
+        (process.env['QWEN_HOSTED_HARNESS_INSTANCE_ID'] !== undefined &&
+          req.path.startsWith('/internal/hosted-harness/v1/')) ||
         req.path.startsWith('/session/')
       )
         next();
