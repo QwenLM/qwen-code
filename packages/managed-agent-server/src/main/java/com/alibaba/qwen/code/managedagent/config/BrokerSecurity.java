@@ -122,6 +122,12 @@ public class BrokerSecurity {
         } else {
             this.signingKey = null;
         }
+        if (properties.getRuntimeBroker().isLocalDirectoryImportEnabled()
+                && (!publicLoopback || (mode == Mode.OPEN
+                        && StringUtils.isBlank(properties.getTrustedActorHeader())))) {
+            throw new IllegalStateException("Local directory import requires a loopback listener"
+                    + " with signed authentication or a trusted actor header for a single-user deployment.");
+        }
         this.allowedDrift = auth.getAllowedDrift() == null
                 ? Duration.ofMinutes(5) : auth.getAllowedDrift();
         // Sub-second windows truncate to zero at the SignatureAuthFilter

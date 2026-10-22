@@ -25,6 +25,8 @@ pub mod focus_steal;
 #[cfg(target_os = "macos")]
 pub mod input;
 #[cfg(target_os = "macos")]
+pub mod key_focus_guard;
+#[cfg(target_os = "macos")]
 pub mod permissions;
 #[cfg(target_os = "macos")]
 pub mod pip;
@@ -150,3 +152,7 @@ mod cursor_overlay_host_tests {
         assert!(!cursor_overlay_facility_available(false, false));
     }
 }
+
+pub mod apple_events;
+
+pub mod document_edit;

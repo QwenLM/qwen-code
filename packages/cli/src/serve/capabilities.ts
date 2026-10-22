@@ -90,6 +90,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
   session_artifacts_persistence: { since: 'v1' },
+  session_artifact_library: { since: 'v1' },
   session_sources: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
@@ -437,6 +438,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_branch_worktree: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
+  workspace_model_reload: { since: 'v1' },
   // Immediate best-effort channel delivery for prompt/scheduled finals and
   // direct workspace notifications. Presence describes the route/event
   // contract; current worker availability is reported per delivery.
@@ -766,6 +768,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'session_shell_command',
     (toggles) => toggles.sessionShellCommandEnabled === true,
+  ],
+  [
+    'session_artifact_library',
+    (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
   ],
   [
     'session_artifacts_persistence',

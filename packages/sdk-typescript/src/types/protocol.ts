@@ -95,6 +95,7 @@ export interface APIAssistantMessage {
 
 export interface SDKUserMessage {
   type: 'user';
+  origin?: { kind: 'human' };
   uuid?: string;
   session_id: string;
   message: APIUserMessage;

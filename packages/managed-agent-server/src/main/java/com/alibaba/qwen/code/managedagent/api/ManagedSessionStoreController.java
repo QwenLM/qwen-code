@@ -43,6 +43,14 @@ public class ManagedSessionStoreController {
         this.store = store;
     }
 
+    @PostMapping("/approval:query")
+    public Object approvalSelection(TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ManagedSessionStoreModels.AuthorizeLifecycleRequest request) {
+        var selected = store.approvalSelection(tenant.tenantId(), sessionId, writerToken, request);
+        return selected == null ? com.fasterxml.jackson.databind.node.NullNode.getInstance() : selected;
+    }
+
     static com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycleAuthority(HttpHeaders headers) {
         String operation = headers.getFirst(com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.OPERATION_HEADER);
         String generation = headers.getFirst(com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.GENERATION_HEADER);
