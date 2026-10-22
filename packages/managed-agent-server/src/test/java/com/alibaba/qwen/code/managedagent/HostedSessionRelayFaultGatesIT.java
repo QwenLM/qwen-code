@@ -75,6 +75,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.LongStream;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.camel;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
@@ -1440,19 +1441,6 @@ class HostedSessionRelayFaultGatesIT {
         return json.readTree(json.writeValueAsString(node));
     }
 
-    private static String camel(String key) {
-        StringBuilder out = new StringBuilder();
-        for (int i = 0; i < key.length(); i++) {
-            char c = key.charAt(i);
-            if (c == '_' && i + 1 < key.length()) {
-                out.append(Character.toUpperCase(key.charAt(++i)));
-            } else {
-                out.append(c);
-            }
-        }
-        return out.toString();
-    }
-
     private void awaitTerminal(String session, String turn) {
         waiting().atMost(Duration.ofSeconds(90))
                 .pollInterval(Duration.ofMillis(500)).untilAsserted(() ->
@@ -1849,10 +1837,6 @@ class HostedSessionRelayFaultGatesIT {
                     temporary.resolve("workspace-" + i));
             Files.createDirectory(workspace.resolve("child"));
         }
-        // Spring and the embedded broker bind ephemeral ports and are read
-        // back after boot: a port picked ahead of a multi-second boot can
-        // be taken by any connection opened meanwhile.
-        harnessPort = freePort();
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelThreads = Executors.newCachedThreadPool();
         model.setExecutor(modelThreads);
@@ -1875,12 +1859,16 @@ class HostedSessionRelayFaultGatesIT {
         // FG9d's lost cancel reply: only the client's own request passes it.
         publicProxy = HostedSessionRelayForwardingProxy.start("public",
                 casesRoot.resolve("public-proxy.log"));
-        startSpring(cli, node, caseCount, letter);
-        port = spring.getWebServer().getPort();
-        brokerPort = spring.getBean(EmbeddedRuntimeBroker.class).getBaseUri()
-                .getPort();
-        storeProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
-        publicProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
+        // Reserve the Harness port while the other fixture listeners bind.
+        try (ServerSocket reservation = new ServerSocket(0)) {
+            harnessPort = reservation.getLocalPort();
+            startSpring(cli, node, caseCount, letter);
+            port = spring.getWebServer().getPort();
+            brokerPort = spring.getBean(EmbeddedRuntimeBroker.class).getBaseUri()
+                    .getPort();
+            storeProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
+            publicProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
+        }
         startHarness();
     }
 
@@ -2355,12 +2343,6 @@ class HostedSessionRelayFaultGatesIT {
             }
         }
         return "";
-    }
-
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
     }
 
     private static void deleteRecursively(Path root) throws IOException {

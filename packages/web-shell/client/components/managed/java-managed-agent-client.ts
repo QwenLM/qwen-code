@@ -1,4 +1,5 @@
 import type { components } from './generated/managed-agent-api';
+import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
 import type {
   ManagedArtifact,
   ManagedArtifactPage,
@@ -127,6 +128,42 @@ export class JavaManagedAgentClient {
     return this.post<JavaAgentSession>('/sessions/get', { sessionId }, signal);
   }
 
+  getRecovery(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['SessionRecovery']>(
+      '/session-recovery/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  recheckRecovery(sessionId: string, turnId: string, signal?: AbortSignal) {
+    return this.post<Schemas['SessionRecovery']>(
+      '/session-recovery/recheck',
+      { sessionId, turnId },
+      signal,
+    );
+  }
+
+  async renameSession(
+    request: Schemas['WebShellRenameRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellRenameResult']> {
+    const response = await this.request(
+      '/sessions/rename',
+      request,
+      signal,
+      false,
+    );
+    if (response.status !== 200) {
+      throw new JavaManagedAgentHttpError(
+        response.status,
+        'session_rename_unconfirmed',
+        'Managed Agent rename was not confirmed',
+      );
+    }
+    return (await response.json()) as Schemas['WebShellRenameResult'];
+  }
+
   listWorkspaces(
     request: Schemas['WebShellWorkspaceQueryRequest'],
     signal?: AbortSignal,
@@ -229,6 +266,36 @@ export class JavaManagedAgentClient {
     return this.post('/session-options/query', { agentId }, signal);
   }
 
+  lifecycleCommand(
+    kind: 'close' | 'archive' | 'delete',
+    request: Schemas['WebShellLifecycleRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellCommandOperation']>(
+      `/sessions/${kind}`,
+      request,
+      signal,
+    );
+  }
+
+  unarchiveSession(
+    request: Schemas['WebShellLifecycleRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<JavaAgentSession>('/sessions/unarchive', request, signal);
+  }
+
+  exportSnapshot(
+    request: Schemas['WebShellExportRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellExportPage']>(
+      '/sessions/export/query',
+      request,
+      signal,
+    );
+  }
+
   getTranscript(
     request: Schemas['WebShellTranscriptRequest'],
     signal?: AbortSignal,
@@ -323,6 +390,13 @@ export class JavaManagedAgentClient {
     return this.post('/sessions/cwd/change', request, signal);
   }
 
+  compressContext(
+    request: Schemas['WebShellContextCompressionRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellContextCompressionOperation']> {
+    return this.post('/sessions/compress', request, signal);
+  }
+
   getSessionModels(sessionId: string, signal?: AbortSignal) {
     return this.post<Schemas['WebShellSessionModels']>(
       '/session-models/query',
@@ -343,6 +417,39 @@ export class JavaManagedAgentClient {
     return this.post<Schemas['PublicMcpCatalog']>(
       '/session-mcp/query',
       { sessionId },
+      signal,
+    );
+  }
+
+  queryMcpManagement(
+    request: Schemas['WebShellMcpManagementQuery'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpManagementSnapshot>(
+      '/session-mcp/management/query',
+      request,
+      signal,
+    );
+  }
+
+  submitMcpManagement(
+    request: Schemas['WebShellMcpManagementSubmit'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpManagementSnapshot>(
+      '/session-mcp/management/submit',
+      request,
+      signal,
+    );
+  }
+
+  getMcpManagementOperation(
+    request: Schemas['WebShellMcpManagementOperationQuery'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpManagementSnapshot>(
+      '/session-mcp/management/operations/query',
+      request,
       signal,
     );
   }

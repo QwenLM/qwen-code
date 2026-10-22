@@ -3001,6 +3001,8 @@ export class McpClientManager {
     config: MCPServerConfig,
     originatorClientId: string,
   ): Promise<AddRuntimeMcpServerResult> {
+    this.cliConfig.assertGeneratedUiServerNotReplaced({ [name]: config });
+
     // Reject explicitly excluded servers
     if (this.cliConfig.isMcpServerDisabled(name)) {
       throw new InvalidMcpConfigError(

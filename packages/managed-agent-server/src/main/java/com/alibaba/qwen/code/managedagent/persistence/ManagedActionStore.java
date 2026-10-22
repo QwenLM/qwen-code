@@ -305,8 +305,8 @@ public class ManagedActionStore {
                             && continuation.path("calls").get(0).path("actionId").asText().equals(id));
                     jdbc.update("UPDATE ma_session SET plan_enabled=FALSE, approval_revision=approval_revision+1,"
                                     + " version=version+1, gmt_modified=? WHERE tenant_id=? AND session_id=? AND plan_enabled=TRUE"
-                                    + " AND approval_revision=(SELECT approval_revision FROM ma_turn WHERE tenant_id=?"
-                                    + " AND session_id=? AND prompt_id=? AND plan_enabled=TRUE)",
+                                    + " AND EXISTS (SELECT 1 FROM ma_turn WHERE tenant_id=? AND session_id=?"
+                                    + " AND prompt_id=? AND plan_enabled=TRUE AND status IN ('ACCEPTED','RUNNING'))",
                             event.path("occurredAt").asLong(), tenantId, sessionId, tenantId, sessionId,
                             options.path("turnId").asText());
                 }
@@ -397,6 +397,30 @@ public class ManagedActionStore {
                         ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, id)
                 .stream()
                 .findFirst();
+    }
+
+    public record ScopedAction(String sessionId, Action action) { }
+
+    public List<ScopedAction> listWithChildren(String tenant, String parent, Long before,
+            String beforeSession, String beforeId, int limit) {
+        List<Object> args = new ArrayList<>(List.of(tenant, parent, parent));
+        String cursor = "";
+        if (before != null) {
+            cursor = " AND (r.gmt_create < ? OR r.gmt_create = ? AND (r.session_id < ?"
+                    + " OR r.session_id = ? AND r.action_id < ?))";
+            args.addAll(List.of(before, before, beforeSession, beforeSession, beforeId));
+        }
+        args.add(limit);
+        return jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns("r")
+                        + " FROM ma_session_record r JOIN ma_session s ON s.tenant_id=r.tenant_id"
+                        + " AND s.session_id=r.session_id WHERE r.tenant_id=? AND r.record_kind='ACTION'"
+                        + " AND r.state='requested' AND s.deleted_at IS NULL AND (s.session_id=?"
+                        + " OR s.parent_session_id=? AND s.public_child_agents_version=1)" + cursor
+                        + " ORDER BY r.gmt_create DESC, r.session_id DESC, r.action_id DESC LIMIT ?",
+                (row, index) -> new ScopedAction(row.getString("session_id"),
+                        new Action(row.getString("action_id"), row.getString("state"),
+                                read(row.getString("options_json")), row.getString("decision_receipt_id"),
+                                row.getString("decision_digest"))), args.toArray());
     }
 
     public List<Action> list(

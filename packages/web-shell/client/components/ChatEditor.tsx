@@ -1,5 +1,6 @@
 import {
   ModelRefreshControl,
+  ModelRefreshError,
   type ModelRefreshState,
 } from './ModelRefreshControl';
 import {
@@ -75,8 +76,14 @@ import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { getContextUsageLevel } from '../utils/contextUsage';
 import { pastedTextTitle } from '../utils/largePaste';
-import type { ContextUsageControls } from '../hooks/useContextUsageControls';
+import type { ContextCompressionControls } from '../hooks/useContextUsageControls';
 import { ContextUsagePopover } from './ContextUsagePopover';
+import { UnavailableModelTooltip } from './UnavailableModelTooltip';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from '../unavailableModels';
+import { appendUnavailableComposerModels } from '../utils/composerModels';
 import { VoiceButton } from '../voice/VoiceButton';
 import { LiveVoiceButton } from '../live/LiveVoiceButton';
 import type {
@@ -226,6 +233,7 @@ interface ChatEditorProps {
   availableModes?: readonly string[];
   planMode?: boolean;
   modeControlsDisabled?: boolean;
+  planControlsDisabled?: boolean;
   onTogglePlan?: () => void;
   sessionWorkflowEnabled?: boolean;
   currentModel?: string;
@@ -281,9 +289,11 @@ interface ChatEditorProps {
   /** Show the context-usage breakdown, exactly like typing /context. */
   onShowContextUsage?: () => void;
   onOpenContextUsage?: () => void;
-  contextUsageControls?: ContextUsageControls;
+  contextUsageControls?: ContextCompressionControls;
   modelRefresh?: ModelRefreshState;
   availableModels?: Array<{ id: string; label?: string }>;
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
   reasoning?: DaemonReasoningControls;
@@ -295,6 +305,7 @@ interface ChatEditorProps {
   selectedWorkspaceCwd?: string;
   workspaceSelectionDisabled?: boolean;
   workspaceSelectorAlwaysVisible?: boolean;
+  workspaceMenuItems?: ReactNode;
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
   /** Host-aware variant; see WorkspaceSelector. */
   onSelectHostedWorkspace?: (
@@ -708,6 +719,8 @@ function ModelIcon() {
 interface DropdownItem extends ToolbarDropdownItem {
   description?: string;
   icon?: ReactNode;
+  disabled?: boolean;
+  tooltip?: string;
 }
 
 function CheckIcon() {
@@ -720,6 +733,34 @@ function CheckIcon() {
         strokeWidth="1.8"
         strokeLinecap="round"
         strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function LockIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      data-web-shell-unavailable-model-lock=""
+    >
+      <rect
+        x="3.5"
+        y="7"
+        width="9"
+        height="7"
+        rx="1.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+      />
+      <path
+        d="M5.5 7V5.2a2.5 2.5 0 0 1 5 0V7"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
       />
     </svg>
   );
@@ -759,11 +800,13 @@ function ToolbarPopover({
   searchable = false,
   searchLabel,
   noResultsLabel,
-  footer,
+  searchAction,
+  searchStatus,
   header,
   submenu,
   compact = false,
   modePopover = false,
+  itemTooltipMount,
 }: {
   open: boolean;
   items: DropdownItem[];
@@ -776,7 +819,8 @@ function ToolbarPopover({
   searchable?: boolean;
   searchLabel?: string;
   noResultsLabel?: (query: string) => string;
-  footer?: ReactNode;
+  searchAction?: ReactNode;
+  searchStatus?: ReactNode;
   header?: ReactNode;
   submenu?: {
     triggerLabel: string;
@@ -785,6 +829,7 @@ function ToolbarPopover({
   };
   compact?: boolean;
   modePopover?: boolean;
+  itemTooltipMount?: WebShellUnavailableModelTooltipMount;
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [submenuOpen, setSubmenuOpen] = useState(false);
@@ -831,41 +876,72 @@ function ToolbarPopover({
             : ''
       } ${searchable ? styles.dropdownListConstrained : ''}`}
     >
-      {visibleItems.map((item) => (
-        <button
-          key={item.id}
-          type="button"
-          className={`${styles.dropdownItem} ${
-            item.id === activeId ? styles.dropdownItemActive : ''
-          }`}
-          title={item.label}
-          onClick={() => {
-            selectionRef.current = true;
-            onSelect(item.id);
-          }}
-        >
-          {hasCheckItems ? (
-            <>
-              {hasRichItems && (
-                <span className={styles.dropdownItemIcon}>{item.icon}</span>
-              )}
-              <span className={styles.dropdownItemContent}>
-                <span className={styles.dropdownItemLabel}>{item.label}</span>
-                {item.description && (
-                  <span className={styles.dropdownItemDesc}>
-                    {item.description}
-                  </span>
+      {visibleItems.map((item) => {
+        const button = (
+          <button
+            key={item.disabled ? undefined : item.id}
+            type="button"
+            className={`${styles.dropdownItem} ${
+              item.id === activeId && !item.disabled
+                ? styles.dropdownItemActive
+                : ''
+            }`}
+            title={item.disabled ? undefined : item.label}
+            aria-disabled={item.disabled || undefined}
+            data-disabled={item.disabled ? '' : undefined}
+            data-web-shell-unavailable-model={item.disabled ? '' : undefined}
+            data-model-id={item.id}
+            onClick={(event) => {
+              if (item.disabled) {
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+              }
+              selectionRef.current = true;
+              onSelect(item.id);
+            }}
+          >
+            {hasCheckItems ? (
+              <>
+                {hasRichItems && (
+                  <span className={styles.dropdownItemIcon}>{item.icon}</span>
                 )}
-              </span>
-              <span className={styles.dropdownItemCheck}>
-                {item.id === activeId ? <CheckIcon /> : null}
-              </span>
-            </>
-          ) : (
-            item.label
-          )}
-        </button>
-      ))}
+                <span className={styles.dropdownItemContent}>
+                  <span className={styles.dropdownItemLabel}>{item.label}</span>
+                  {item.description && (
+                    <span className={styles.dropdownItemDesc}>
+                      {item.description}
+                    </span>
+                  )}
+                </span>
+                <span className={styles.dropdownItemCheck}>
+                  {item.disabled ? (
+                    <LockIcon />
+                  ) : item.id === activeId ? (
+                    <CheckIcon />
+                  ) : null}
+                </span>
+              </>
+            ) : (
+              item.label
+            )}
+          </button>
+        );
+        if (!item.disabled) return button;
+        return (
+          <UnavailableModelTooltip
+            key={item.id}
+            model={{
+              id: item.id,
+              label: item.label,
+              tooltip: item.tooltip,
+            }}
+            mount={itemTooltipMount}
+          >
+            {button}
+          </UnavailableModelTooltip>
+        );
+      })}
       {visibleItems.length === 0 && noResultsLabel && (
         <div className={styles.dropdownEmpty} role="status">
           {noResultsLabel(searchQuery)}
@@ -873,27 +949,38 @@ function ToolbarPopover({
       )}
     </div>
   );
+  const searchInput = searchable ? (
+    <Input
+      ref={searchInputRef}
+      type="search"
+      value={searchQuery}
+      aria-label={searchLabel}
+      placeholder={searchLabel}
+      autoComplete="off"
+      onChange={(event) => setSearchQuery(event.target.value)}
+      onKeyDown={(event) => {
+        if (!submenu || event.key !== 'ArrowLeft' || searchQuery) return;
+        event.preventDefault();
+        returningFromSubmenuRef.current = true;
+        setSubmenuOpen(false);
+      }}
+    />
+  ) : null;
   const searchableItems = (
     <>
-      {searchable && (
-        <Input
-          ref={searchInputRef}
-          type="search"
-          value={searchQuery}
-          aria-label={searchLabel}
-          placeholder={searchLabel}
-          autoComplete="off"
-          onChange={(event) => setSearchQuery(event.target.value)}
-          onKeyDown={(event) => {
-            if (!submenu || event.key !== 'ArrowLeft' || searchQuery) return;
-            event.preventDefault();
-            returningFromSubmenuRef.current = true;
-            setSubmenuOpen(false);
-          }}
-        />
-      )}
+      {searchable &&
+        (searchAction ? (
+          <div className={styles.dropdownSearch}>
+            <div className={styles.dropdownSearchRow}>
+              {searchInput}
+              {searchAction}
+            </div>
+            {searchStatus}
+          </div>
+        ) : (
+          searchInput
+        ))}
       {dropdownItems}
-      {footer}
     </>
   );
 
@@ -945,11 +1032,21 @@ function ToolbarPopover({
         }}
         onPointerDownOutside={(event) => {
           const target = event.target;
+          if (!(target instanceof Element)) return;
+          if (target.closest('[data-web-shell-toolbar-popover-trigger]')) {
+            handoffRef.current = true;
+          }
+          if (target.closest('[data-web-shell-unavailable-model-tooltip]')) {
+            event.preventDefault();
+          }
+        }}
+        onInteractOutside={(event) => {
+          const target = event.target;
           if (
             target instanceof Element &&
-            target.closest('[data-web-shell-toolbar-popover-trigger]')
+            target.closest('[data-web-shell-unavailable-model-tooltip]')
           ) {
-            handoffRef.current = true;
+            event.preventDefault();
           }
         }}
         onCloseAutoFocus={(event) => {
@@ -1015,6 +1112,28 @@ function ToolbarPopover({
                   data-web-shell-toolbar-popover
                   data-web-shell-model-submenu
                   onClick={(event) => event.stopPropagation()}
+                  onPointerDownOutside={(event) => {
+                    const target = event.target;
+                    if (
+                      target instanceof Element &&
+                      target.closest(
+                        '[data-web-shell-unavailable-model-tooltip]',
+                      )
+                    ) {
+                      event.preventDefault();
+                    }
+                  }}
+                  onInteractOutside={(event) => {
+                    const target = event.target;
+                    if (
+                      target instanceof Element &&
+                      target.closest(
+                        '[data-web-shell-unavailable-model-tooltip]',
+                      )
+                    ) {
+                      event.preventDefault();
+                    }
+                  }}
                 >
                   {searchableItems}
                 </PopoverContent>
@@ -1432,6 +1551,7 @@ export const ChatEditor = memo(
       availableModes = EXECUTION_APPROVAL_MODES,
       planMode = false,
       modeControlsDisabled = false,
+      planControlsDisabled = modeControlsDisabled,
       onTogglePlan,
       currentModel = '',
       modelControlsDisabled = false,
@@ -1463,6 +1583,8 @@ export const ChatEditor = memo(
       contextUsageControls,
       modelRefresh,
       availableModels = [],
+      unavailableModels,
+      mountUnavailableModelTooltip,
       onSelectMode,
       onSelectModel,
       reasoning,
@@ -1471,6 +1593,7 @@ export const ChatEditor = memo(
       selectedWorkspaceCwd,
       workspaceSelectionDisabled = false,
       workspaceSelectorAlwaysVisible = false,
+      workspaceMenuItems,
       onSelectWorkspace,
       onSelectHostedWorkspace,
       scratchWorkspaceSupported = false,
@@ -2287,12 +2410,16 @@ export const ChatEditor = memo(
     const showCommandAction = showToolbarAction('commands');
     const modelItems = useMemo<DropdownItem[]>(
       () =>
-        availableModels.map((m) => ({
-          id: m.id,
-          label: getModelDisplayName(m.label || m.id),
-          searchText: `${m.label ?? ''}\n${m.id}`,
-        })),
-      [availableModels],
+        appendUnavailableComposerModels(availableModels, unavailableModels).map(
+          (m) => ({
+            id: m.id,
+            label: getModelDisplayName(m.label || m.id),
+            searchText: `${m.label ?? ''}\n${m.id}`,
+            disabled: m.disabled,
+            tooltip: m.tooltip,
+          }),
+        ),
+      [availableModels, unavailableModels],
     );
 
     const handleModeSelect = useCallback(
@@ -2309,18 +2436,22 @@ export const ChatEditor = memo(
     // entry is not selectable while mode controls are busy, and the host
     // rejects a toggle that races a mode transition.
     const handlePlanMenuToggle = useCallback(() => {
+      if (planControlsDisabled) return;
       onTogglePlan?.();
       core.focus();
-    }, [onTogglePlan, core]);
+    }, [onTogglePlan, core, planControlsDisabled]);
 
     const handleModelSelect = useCallback(
       (modelId: string) => {
         if (modelControlsDisabled) return;
+        if (modelItems.some((item) => item.id === modelId && item.disabled)) {
+          return;
+        }
         onSelectModel?.(modelId);
         setModelDropdownOpen(false);
         core.focus();
       },
-      [onSelectModel, core, modelControlsDisabled],
+      [onSelectModel, core, modelControlsDisabled, modelItems],
     );
     const showCancelButton = isRunning && !core.hasContent;
     const composerPreparing = isPreparing || core.pendingImageBatchCount > 0;
@@ -2482,6 +2613,7 @@ export const ChatEditor = memo(
         onSelectWorkspace &&
         showToolbarAction('workspace') &&
         (workspaceSelectorAlwaysVisible ||
+          workspaceMenuItems ||
           workspaces.length > 1 ||
           scratchWorkspaceSupported ||
           existingFolderWorkspaceSupported ||
@@ -2527,6 +2659,7 @@ export const ChatEditor = memo(
           disabled={workspaceSelectionDisabled}
           busy={workspaceMutationBusy}
           alwaysVisible={workspaceSelectorAlwaysVisible}
+          menuItems={workspaceMenuItems}
           scratchSupported={scratchWorkspaceSupported}
           existingFolderSupported={existingFolderWorkspaceSupported}
           standaloneSupported={standaloneTargetSupported}
@@ -3510,7 +3643,7 @@ export const ChatEditor = memo(
                         showPlanInAddMenu
                           ? {
                               checked: planMode,
-                              disabled: modeControlsDisabled,
+                              disabled: planControlsDisabled,
                               onToggle: handlePlanMenuToggle,
                             }
                           : undefined
@@ -3606,7 +3739,7 @@ export const ChatEditor = memo(
                             // inside the chip's own click, and a focused button
                             // that becomes disabled loses focus to the body
                             // there and then.
-                            aria-disabled={modeControlsDisabled || undefined}
+                            aria-disabled={planControlsDisabled || undefined}
                             onFocus={() => {
                               planChipHadFocusRef.current = true;
                             }}
@@ -3617,7 +3750,7 @@ export const ChatEditor = memo(
                               // Inert while busy; the click still reaches the
                               // composer surface, as one on a bare part of the
                               // toolbar would.
-                              if (modeControlsDisabled) return;
+                              if (planControlsDisabled) return;
                               onTogglePlan?.();
                               // The chip unmounts once Plan is off, so it
                               // hands focus on rather than dropping it to the
@@ -3670,7 +3803,7 @@ export const ChatEditor = memo(
                             className={`${styles.toolBtn} ${styles.planControl}`}
                             data-web-shell-plan-control
                             data-disabled={
-                              modeControlsDisabled ? '' : undefined
+                              planControlsDisabled ? '' : undefined
                             }
                           >
                             {showPlanLabel ? (
@@ -3689,7 +3822,7 @@ export const ChatEditor = memo(
                               aria-label={planLabel}
                               aria-describedby={planDescriptionId}
                               checked={planMode}
-                              disabled={modeControlsDisabled}
+                              disabled={planControlsDisabled}
                               onCheckedChange={onTogglePlan}
                             />
                           </label>
@@ -3713,13 +3846,21 @@ export const ChatEditor = memo(
                         compact={compactOverlays}
                         open={modelDropdownOpen}
                         items={modelItems}
-                        footer={<ModelRefreshControl state={modelRefresh} />}
+                        searchAction={
+                          modelRefresh?.refresh ? (
+                            <ModelRefreshControl state={modelRefresh} />
+                          ) : undefined
+                        }
+                        searchStatus={
+                          <ModelRefreshError state={modelRefresh} />
+                        }
                         activeId={currentModel}
                         onOpenChange={(open) => {
                           setModelDropdownOpen(open);
                           if (open) setModeDropdownOpen(false);
                         }}
                         onSelect={handleModelSelect}
+                        itemTooltipMount={mountUnavailableModelTooltip}
                         tooltip={modelLabel}
                         showCheck
                         searchable
