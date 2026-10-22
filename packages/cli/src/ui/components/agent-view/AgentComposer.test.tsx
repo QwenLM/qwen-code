@@ -10,6 +10,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AgentStatus,
   ApprovalMode,
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
   tokenLimit,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -28,7 +30,7 @@ import { usePreferredEditor } from '../../hooks/usePreferredEditor.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { StreamingState } from '../../types.js';
 import { useTextBuffer } from '../shared/text-buffer.js';
-import { AgentComposer } from './AgentComposer.js';
+import { AgentComposer, getAgentContextWindowSize } from './AgentComposer.js';
 
 vi.mock('../../contexts/AgentViewContext.js');
 vi.mock('../../contexts/ConfigContext.js');
@@ -167,8 +169,13 @@ describe('AgentComposer', () => {
       setAgentMessageQueue: vi.fn(),
     } as never);
     vi.mocked(useConfig).mockReturnValue({
-      getContentGeneratorConfig: () => sessionConfig,
-      getModel: () => 'qwen3-coder-plus',
+      // Like the real Config, these answer with the agent's own config from
+      // inside its runtime frame.
+      getContentGeneratorConfig: () =>
+        getRuntimeContentGenerator()?.contentGeneratorConfig ?? sessionConfig,
+      getModel: () =>
+        getRuntimeContentGenerator()?.contentGeneratorConfig.model ??
+        'qwen3-coder-plus',
       getModelsConfig: () => ({
         getResolvedModel: (
           authType: string,
@@ -370,6 +377,50 @@ describe('AgentComposer', () => {
       render(<AgentComposer agentId="agent-1" />);
 
       expect(agentFooterProps.contextWindowSize).toBe(128_000);
+    });
+
+    it("reads the session's window from inside the agent's runtime frame", async () => {
+      const agentRoute = {
+        model: 'gpt-4o',
+        authType: 'openai',
+        baseUrl: 'https://session.example/v1',
+        contextWindowSize: 1_000_000,
+      };
+      const core = {
+        modelConfig: { model: 'gpt-4o' },
+        runtimeView: { contentGeneratorConfig: agentRoute },
+      };
+
+      const size = await runWithRuntimeContentGenerator(
+        { contentGeneratorConfig: agentRoute } as never,
+        async () =>
+          getAgentContextWindowSize(useConfig() as never, core as never),
+      );
+
+      expect(size).toBe(tokenLimit('gpt-4o', 'input'));
+    });
+
+    it("does not take another endpoint's entry when the route names no base URL", () => {
+      agentModel = 'gpt-4o';
+      agentRuntimeView = { contentGeneratorConfig: { authType: 'openai' } };
+      registryWindows = { 'openai|gpt-4o|https://third.example/v1': 32_000 };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(
+        tokenLimit('gpt-4o', 'input'),
+      );
+    });
+
+    it('ignores a declared window of 0', () => {
+      agentModel = 'gpt-4o';
+      registryWindows = { 'openai|gpt-4o|https://session.example/v1': 0 };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(
+        tokenLimit('gpt-4o', 'input'),
+      );
     });
 
     it('uses the session window when the agent names no model', () => {

@@ -27,6 +27,7 @@ import {
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { AgentCore } from '@qwen-code/qwen-code-core/agents/runtime/agent-core.js';
 import { tokenLimit } from '@qwen-code/qwen-code-core/core/tokenLimits.js';
+import { runOutsideAgentContext } from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import {
   useAgentViewState,
   useAgentViewActions,
@@ -94,8 +95,16 @@ export function getAgentContextWindowSize(
     Partial<Pick<Config, 'getModelsConfig'>>,
   core: Pick<AgentCore, 'modelConfig' | 'runtimeView'> | undefined,
 ): number | undefined {
-  const sessionConfig = config.getContentGeneratorConfig();
+  // The footer can render from inside the agent's own runtime frame, where
+  // these getters answer with the agent's config, so read them outside it.
+  const sessionConfig = runOutsideAgentContext(() =>
+    config.getContentGeneratorConfig(),
+  );
   const agentModel = core?.modelConfig.model;
+  if (!agentModel) {
+    return sessionConfig?.contextWindowSize;
+  }
+  const sessionModel = runOutsideAgentContext(() => config.getModel());
   const ownRoute = core?.runtimeView?.contentGeneratorConfig;
   // The same model id on another provider or endpoint is a different model,
   // so the session window only applies when the agent also shares its route.
@@ -103,25 +112,28 @@ export function getAgentContextWindowSize(
     !ownRoute ||
     (ownRoute.authType === sessionConfig?.authType &&
       ownRoute.baseUrl === sessionConfig?.baseUrl);
-  if (!agentModel || (agentModel === config.getModel() && onSessionRoute)) {
+  if (agentModel === sessionModel && onSessionRoute) {
     return sessionConfig?.contextWindowSize;
   }
   const route = ownRoute ?? sessionConfig;
   const modelsConfig = config.getModelsConfig?.();
-  // A registry entry declared without a base URL still names this model, so
-  // look that entry up when the exact endpoint has none. `null` keeps the
-  // retry from taking an entry declared for some other endpoint.
+  // Look up the entry for the route's own endpoint, then the one declared
+  // without a base URL. `null` stops either lookup from taking an entry
+  // declared for some other endpoint.
   const declared =
     route?.authType && modelsConfig
       ? (
           modelsConfig.getResolvedModel(
             route.authType,
             agentModel,
-            route.baseUrl,
+            route.baseUrl ?? null,
           ) ?? modelsConfig.getResolvedModel(route.authType, agentModel, null)
         )?.generationConfig.contextWindowSize
       : undefined;
-  return declared ?? tokenLimit(agentModel, 'input');
+  // A declared window of 0 would divide the usage by zero.
+  return declared !== undefined && declared > 0
+    ? declared
+    : tokenLimit(agentModel, 'input');
 }
 
 // ─── Component ──────────────────────────────────────────────
