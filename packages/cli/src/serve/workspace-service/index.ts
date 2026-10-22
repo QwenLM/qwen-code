@@ -298,6 +298,8 @@ export function createDaemonWorkspaceService(
   let lastWorkspaceSkillsStatusAt = 0;
   let lastWorkspaceSkillsReadStartedAt: number | undefined;
   let workspaceSkillsGeneration = 0;
+  let workspaceSkillsReadSequence = 0;
+  let publishedWorkspaceSkillsReadSequence = 0;
   let inFlightWorkspaceSkillsStatus:
     | {
         generation: number;
@@ -408,13 +410,28 @@ export function createDaemonWorkspaceService(
         return inFlightWorkspaceSkillsStatus.promise;
       }
       const startedAt = Date.now();
+      const sequence = ++workspaceSkillsReadSequence;
       lastWorkspaceSkillsReadStartedAt = startedAt;
       // A foreground read needs an observation. Let ACP's configured timeout
       // run before local enumeration, even when either takes more than 5s.
       const background = lastWorkspaceSkillsStatus !== undefined;
-      const observation = Promise.resolve().then(() =>
-        readWorkspaceSkillsStatus(),
-      );
+      const observation = Promise.resolve()
+        .then(() => readWorkspaceSkillsStatus())
+        .then((status) => {
+          assertActiveGeneration();
+          // Releasing a slow task's slot must not prevent eventual updates.
+          // Order publication by start sequence, independently of the clock.
+          if (
+            generation === workspaceSkillsGeneration &&
+            sequence > publishedWorkspaceSkillsReadSequence &&
+            status.initialized
+          ) {
+            lastWorkspaceSkillsStatus = status;
+            lastWorkspaceSkillsStatusAt = startedAt;
+            publishedWorkspaceSkillsReadSequence = sequence;
+          }
+          return status;
+        });
       const read: NonNullable<typeof inFlightWorkspaceSkillsStatus> = {
         generation,
         promise: (background
@@ -426,26 +443,11 @@ export function createDaemonWorkspaceService(
           : observation
         )
           .catch((error: unknown) => {
+            assertActiveGeneration();
             writeStderrLineSafe(
               `qwen serve: workspace skills revalidation failed: ${error instanceof Error ? error.message : String(error)}`,
             );
             return unavailableWorkspaceSkillsStatus();
-          })
-          .then((status) => {
-            assertActiveGeneration();
-            const overdue =
-              background &&
-              Date.now() - startedAt >= WORKSPACE_SKILLS_REVALIDATE_TIMEOUT_MS;
-            if (
-              inFlightWorkspaceSkillsStatus === read &&
-              generation === workspaceSkillsGeneration &&
-              !overdue &&
-              status.initialized
-            ) {
-              lastWorkspaceSkillsStatus = status;
-              lastWorkspaceSkillsStatusAt = startedAt;
-            }
-            return overdue ? unavailableWorkspaceSkillsStatus() : status;
           })
           .finally(() => {
             if (inFlightWorkspaceSkillsStatus === read) {

@@ -172,30 +172,80 @@ describe('Skill snapshot correctness regressions', () => {
     expect(result.snapshot).toBeDefined();
   });
 
-  it('keeps usable inventory across repeated six-second ACP responses', async () => {
-    const query = vi.fn().mockImplementation(
-      () =>
-        new Promise<ServeWorkspaceSkillsStatus>((resolve) => {
-          setTimeout(() => resolve(inventory(['child-review'])), 6_000);
-        }),
-    );
-    const local = vi.fn().mockResolvedValue(inventory(['local-review']));
-    const svc = service({
-      queryWorkspaceStatus: query,
-      workspaceSkillsStatusProvider: local,
-    });
+  it.each([2_500, 6_000])(
+    'advances inventory across three warm polls with %i ms responses',
+    async (delayMs) => {
+      let count = 0;
+      const query = vi.fn().mockImplementation(() => {
+        const name = `child-${++count}`;
+        return new Promise<ServeWorkspaceSkillsStatus>((resolve) => {
+          setTimeout(() => resolve(inventory([name])), delayMs);
+        });
+      });
+      const svc = service({ queryWorkspaceStatus: query });
+      const initial = svc.getWorkspaceSkillsStatus(ctx);
+      await vi.advanceTimersByTimeAsync(delayMs);
+      expect((await initial).skills[0]?.name).toBe('child-1');
+      for (let cycle = 0; cycle < 3; cycle++) {
+        await svc.getWorkspaceSkillsStatus(ctx);
+        await vi.advanceTimersByTimeAsync(delayMs);
+        expect((await svc.getWorkspaceSkillsStatus(ctx)).skills[0]?.name).toBe(
+          `child-${cycle + 2}`,
+        );
+      }
+    },
+  );
 
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const read = svc.getWorkspaceSkillsStatus(ctx);
-      await vi.advanceTimersByTimeAsync(6_000);
-      const result = await read;
-      expect(result.initialized).toBe(true);
-      expect(result.skills.map((skill) => skill.name)).toEqual([
-        'child-review',
-      ]);
+  it('advances slow observations while one-second polling starts retries', async () => {
+    let count = 0;
+    const query = vi.fn().mockImplementation(() => {
+      const name = `child-${++count}`;
+      return new Promise<ServeWorkspaceSkillsStatus>((resolve) => {
+        setTimeout(() => resolve(inventory([name])), 6_000);
+      });
+    });
+    const svc = service({ queryWorkspaceStatus: query });
+    const initial = svc.getWorkspaceSkillsStatus(ctx);
+    await vi.advanceTimersByTimeAsync(6_000);
+    await initial;
+    for (let second = 0; second < 16; second++) {
+      await svc.getWorkspaceSkillsStatus(ctx);
+      await vi.advanceTimersByTimeAsync(1_000);
     }
-    expect(local).not.toHaveBeenCalled();
+    const current = await svc.getWorkspaceSkillsStatus(ctx);
+    expect(current.skills[0]?.name).toBe('child-4');
+    expect(current.snapshot?.refreshing).toBe(true);
+    expect(query).toHaveBeenCalledTimes(5);
   });
+
+  it.each([false, true])(
+    'does not replace a newer published observation with a late result (clock rollback: %s)',
+    async (rollback) => {
+      const late = deferred<ServeWorkspaceSkillsStatus>();
+      const newer = deferred<ServeWorkspaceSkillsStatus>();
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce(inventory(['initial']))
+        .mockImplementationOnce(() => late.promise)
+        .mockImplementationOnce(() => newer.promise);
+      const svc = service({ queryWorkspaceStatus: query });
+      await svc.getWorkspaceSkillsStatus(ctx);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await svc.getWorkspaceSkillsStatus(ctx);
+      await vi.advanceTimersByTimeAsync(5_000);
+      if (rollback) vi.setSystemTime(9_000);
+      await svc.getWorkspaceSkillsStatus(ctx);
+      newer.resolve(inventory(['newer']));
+      await vi.advanceTimersByTimeAsync(0);
+      const published = await svc.getWorkspaceSkillsStatus(ctx);
+      late.resolve(inventory(['late']));
+      await vi.advanceTimersByTimeAsync(0);
+      const afterLate = await svc.getWorkspaceSkillsStatus(ctx);
+      expect(afterLate.skills[0]?.name).toBe('newer');
+      expect(afterLate.snapshot).toEqual(published.snapshot);
+      expect(query).toHaveBeenCalledTimes(3);
+    },
+  );
 
   it('waits for slow local enumeration after the child is unavailable', async () => {
     const local = vi.fn(

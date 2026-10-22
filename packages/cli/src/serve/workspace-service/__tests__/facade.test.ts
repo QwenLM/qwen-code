@@ -1248,7 +1248,7 @@ describe('createDaemonWorkspaceService', () => {
       });
 
       it.each(['resolve', 'reject'] as const)(
-        'isolates a timed-out task that later %ss while a retry is running',
+        'preserves a retry when a timed-out observation later %ss',
         async (outcome) => {
           const late = deferred<ServeWorkspaceSkillsStatus>();
           const retry = deferred<ServeWorkspaceSkillsStatus>();
@@ -1273,11 +1273,13 @@ describe('createDaemonWorkspaceService', () => {
           const cached = await svc.getWorkspaceSkillsStatus(makeCtx());
           expect(cached.snapshot?.ageMs).toBe(6_000);
           expect(cached.skills[0]?.name).toBe('old');
-          if (outcome === 'resolve') late.resolve(status('obsolete'));
+          if (outcome === 'resolve') late.resolve(status('late'));
           else late.reject(new Error('late failure'));
           await vi.advanceTimersByTimeAsync(0);
           const duringRetry = await svc.getWorkspaceSkillsStatus(makeCtx());
-          expect(duringRetry.skills[0]?.name).toBe('old');
+          expect(duringRetry.skills[0]?.name).toBe(
+            outcome === 'resolve' ? 'late' : 'old',
+          );
           expect(duringRetry.snapshot?.refreshing).toBe(true);
           expect(query).toHaveBeenCalledTimes(3);
           retry.resolve(status('new'));
@@ -1371,7 +1373,7 @@ describe('createDaemonWorkspaceService', () => {
         expect(query).toHaveBeenCalledTimes(2);
       });
 
-      it('rejects an overdue background result even before the deadline timer can run', async () => {
+      it('publishes a slow observation even before the deadline timer can run', async () => {
         const pending = deferred<ServeWorkspaceSkillsStatus>();
         const query = vi
           .fn()
@@ -1391,8 +1393,8 @@ describe('createDaemonWorkspaceService', () => {
           svc.getWorkspaceSkillsStatus(makeCtx()),
         ).resolves.toMatchObject({
           initialized: true,
-          skills: [{ name: 'retained' }],
-          snapshot: { observedAt: 10_000, ageMs: 7_000 },
+          skills: [{ name: 'late' }],
+          snapshot: { observedAt: 11_000, ageMs: 6_000 },
         });
       });
 

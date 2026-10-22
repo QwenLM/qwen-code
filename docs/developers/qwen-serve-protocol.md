@@ -1726,21 +1726,27 @@ Recommended poll cadence: aligned with whatever already polls `/workspace/mcp`; 
 
 The primary and workspace-qualified inventory routes return a retained snapshot
 immediately while revalidating in the background. Starts are throttled to once
-per second and concurrent readers share a task. Warm background revalidation
-has a five-second deadline; timeout allows retry but does not cancel ACP work.
+per second, measured from task start, and concurrent readers share a task.
+Warm background revalidation releases its slot after five seconds; timeout
+allows retry but does not cancel the observation or ACP work.
 Cold reads honor ACP's configured request timeout (ten seconds by default),
 then daemon-local enumeration if ACP is unavailable. They do not impose the
-background deadline on either source. After a failed cold read, another read
-inside the one-second throttle window returns an unavailable status immediately.
-Timed-out background tasks and invalidated tasks cannot publish late results;
-a successful invalidated observation can still answer its original caller.
+background deadline on either source. A cold read that fails within one second
+of its start leaves the remainder of that window returning unavailable status
+immediately; slower failures leave no throttle window, so clients need their
+own retry backoff. A late successful background observation can publish while
+a retry is pending, but cannot replace an observation started later that has
+already published. Invalidated tasks cannot publish; a successful invalidated
+observation can still answer its original caller.
 Explicit invalidation drops known-invalid inventory and clears the throttle.
-Successful ACP preheat also invalidates pre-child inventory so the subsequent
-read sees the child. Skill deletion and enablement identity reads bypass the
-snapshot and throttle, awaiting a new observation with local fallback.
+Successful ACP preheat also invalidates retained inventory, including when the
+child was already live, so the subsequent read sees the child. Skill deletion
+and enablement identity reads bypass the snapshot and throttle, awaiting a new
+observation with local fallback.
 
 Initialized inventory responses additionally include optional observation
-metadata (older daemons and direct config/runtime status reads omit it):
+metadata. Older daemons, direct config/runtime status reads, and successful
+cold observations superseded by invalidation before publication omit it:
 
 ```json
 {
@@ -1756,8 +1762,10 @@ metadata (older daemons and direct config/runtime status reads omit it):
 `observedAt` is the Unix-millisecond start time of the successful observation;
 `ageMs` is recalculated per response, conservatively including collection time.
 `stale` means that observation is at least one second old. `refreshing` reports
-whether a revalidation is currently pending. Failed reads, timeouts, and replay
-after the runtime stops do not renew the timestamp. Clients may display this
+whether a revalidation occupies the shared slot; timed-out observations may
+still finish after the slot is released. Failed reads, slot timeouts, and replay
+after the runtime stops do not renew the timestamp; a later successful
+publication records its own observation start time. Clients may display this
 age, but it is not a filesystem revision or proof that every session is current.
 If no initialized snapshot exists and both sources are unavailable (or the cold
 read is throttled), the response has `initialized: false`, an `errors` entry,
@@ -4007,7 +4015,7 @@ Counts describe the selected sessions and the shared/session configurations refr
 
 Capability tag: `workspace_skill_settings_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/:name/enable`.
 
-Update the workspace Skill settings for a name without consulting the loaded Skill catalog. The trimmed request name is passed to persistence and returned in the response. Enabling any name records a workspace `skills.enabled` opt-in, even before installation; disabling removes that opt-in and adds a workspace `skills.disabled` entry. Existing entries for Skills that are no longer loaded are preserved, and duplicate/case-variant entries for the target are collapsed. A hard `skills.disabled` entry inherited from a higher scope remains authoritative for effective availability, but does not prevent the workspace scope from recording or removing its own declaration. Workspace declarations otherwise participate in the usual `skills.disabled > skills.enabled > skills.defaultDisabled` resolution and can override higher-scope `skills.defaultDisabled` or `skills.enabled` entries.
+Update the workspace Skill settings for a name. On enable, the daemon first resolves extension-authored names against a fresh catalog observation, bypassing retained data and read throttling and awaiting ACP plus daemon-local fallback if needed. An unavailable catalog falls back to the legacy name heuristic; names are not validated against the catalog. Disable does not read the catalog. The trimmed request name is passed to persistence and returned in the response. Enabling any name records a workspace `skills.enabled` opt-in, even before installation; disabling removes that opt-in and adds a workspace `skills.disabled` entry. Existing entries for Skills that are no longer loaded are preserved, and duplicate/case-variant entries for the target are collapsed. A hard `skills.disabled` entry inherited from a higher scope remains authoritative for effective availability, but does not prevent the workspace scope from recording or removing its own declaration. Workspace declarations otherwise participate in the usual `skills.disabled > skills.enabled > skills.defaultDisabled` resolution and can override higher-scope `skills.defaultDisabled` or `skills.enabled` entries.
 
 This is different from the ACP `qwen/skills/setEnabled` managed-skill operation and the `disable-model-invocation` frontmatter field. For an active Extension parent, effective Skill availability follows `skills.disabled` > `skills.enabled` > `skills.defaultDisabled` > workspace internal override > manifest `skillStates` > enabled. Both hard and default disables remove the skill from slash-command/model availability and reject later skill execution. `disable-model-invocation: true` keeps direct user invocation available and only hides the skill from model invocation.
 
@@ -4044,7 +4052,7 @@ The mutation reuses the workspace-scoped `settings_changed` event for each chang
 
 Capability tag: `workspace_skill_settings_batch_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/enable`.
 
-Update workspace Skill settings for up to 100 names in one request; the cap counts the raw `skillNames` entries before deduplication. Names are trimmed and deduplicated case-insensitively while preserving first-seen order and casing. The daemon does not consult the loaded Skill catalog. It applies all resulting declaration changes in at most one locked settings write and, when anything changed, refreshes active sessions once. Enabling always records an explicit workspace `skills.enabled` opt-in, including names not yet installed, so it can override an Extension's internal disablement. Repeating an identical declaration remains a no-op. Unexpected persistence or runtime-generation failures fail the whole request.
+Update workspace Skill settings for up to 100 names in one request; the cap counts the raw `skillNames` entries before deduplication. Names are trimmed and deduplicated case-insensitively while preserving first-seen order and casing. On enable, the daemon first resolves extension-authored names against a fresh catalog observation, bypassing retained data and read throttling and awaiting ACP plus daemon-local fallback if needed. An unavailable catalog falls back to the legacy name heuristic; names are not validated against the catalog. Disable does not read the catalog. It applies all resulting declaration changes in at most one locked settings write and, when anything changed, refreshes active sessions once. Enabling always records an explicit workspace `skills.enabled` opt-in, including names not yet installed, so it can override an Extension's internal disablement. Repeating an identical declaration remains a no-op. Unexpected persistence or runtime-generation failures fail the whole request.
 
 Request:
 

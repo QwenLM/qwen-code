@@ -15,40 +15,48 @@ resets its timestamp, hiding how old it is.
 Both the primary and workspace-qualified skills inventory queries return an
 existing snapshot immediately. At most once per second, measured from task
 start, a query starts background revalidation. Concurrent queries reuse the
-current task. Cold queries share and await a foreground observation. Following a
-failed cold observation, ordinary reads inside the one-second throttle window
-return an unavailable status without starting another query.
+current task. Cold queries share and await a foreground observation. If a cold
+observation fails within one second of its start, ordinary reads
+return an unavailable status for the remainder of that window. A slower failure
+leaves no throttle window; clients must apply their own retry backoff.
 
-Warm background revalidation has a five-second deadline. Timeout releases the
-slot so a subsequent query can retry. This stops waiting, not child execution.
+Warm background revalidation releases its shared slot after five seconds so a
+subsequent query can retry. This stops waiting, not observation or child execution.
 Cold observations and mutation reads instead await ACP's configured request
 timeout (ten seconds by default), then daemon-local enumeration if ACP is
 unavailable. There is no facade deadline on that foreground sequence: a slow
 but successful ACP or local result must remain usable.
 
-Only the current task may publish; the generation check is deliberately
-redundant with task identity. Timed-out background work and superseded work
-cannot overwrite or clear a replacement task. Superseded successful cold
-observations can still answer their original callers without being cached.
-Publication also checks that the owning workspace runtime generation is open.
+A successful observation may publish after its slot times out, even while a
+retry is pending. Publication requires the same invalidation generation, an
+open owning workspace runtime, and a read start sequence newer than the last
+published observation. Sequence numbers, rather than wall-clock timestamps,
+prevent late results from replacing newer observations during clock rollback.
+Invalidated observations cannot publish. Only the task occupying the shared
+slot may clear it. Superseded successful cold observations can still answer
+their original callers without being cached or carrying snapshot metadata.
 
 Successful initialized observations atomically replace the snapshot. The
 observation timestamp is the task start, conservatively including collection
-time. Replaying retained data, failing, or timing out never resets it. When
+time. Replaying retained data, failing, or releasing a slot never resets it;
+a later successful publication records that observation's start time. When
 neither source can enumerate, cold reads return `initialized: false` with an
 error and no snapshot. Clients must treat this as unavailable and retryable,
 not as an initialized empty inventory.
 
 The optional `snapshot` response object contains `observedAt` (Unix milliseconds),
 `ageMs`, `refreshing`, and `stale`. Age is recomputed per response; stale means
-the last observation is at least one second old. The fields describe the daemon
+the last observation is at least one second old. `refreshing` reports occupancy
+of the shared slot, excluding work that continues after slot timeout.
+The fields describe the daemon
 observation, not the age of files or a guarantee that every session is current.
 They are optional in ACP and SDK types because direct runtime/config status
 responses and older daemons do not supply this metadata.
 
 Explicit invalidation drops known-invalid inventory, clears the throttle, and
 supersedes prior work. Successful explicit ACP preheat also invalidates the
-pre-child snapshot, allowing the next inventory read to see the child.
+retained snapshot, even if the child was already live, allowing the next
+inventory read to see the child.
 Destructive Skill deletion and Skill-toggle identity resolution bypass both
 the retained snapshot and read throttling. They await an independent observation
 and try local enumeration if ACP is unavailable, even if a snapshot exists.
@@ -60,7 +68,8 @@ session-affecting Skill refresh control command.
 
 ## Scope and constraints
 
-Task identity enforces supersession; a separate runtime guard checks ownership. External
+Generation and publication order guard the snapshot; task identity guards slot
+cleanup, and a separate runtime guard checks ownership. External
 filesystem changes continue to rely on Skill watchers and extension source
 revalidation; this change introduces no cross-process filesystem revision.
 There is no idle polling, automatic session mutation, or frontend timer. Clients
@@ -74,7 +83,8 @@ consumer, ACP/SDK status types, focused facade tests, and protocol documentation
 Fake-time tests must cover immediate stale responses, the exact one-second
 boundary, shared cold observations beyond five seconds, five-second background
 timeouts, ACP timeout followed by slow local fallback, retry, late background
-success/rejection, invalidation, runtime closure, clock rollback, and unchanged
+success/rejection, changing six-second observations under continuous polling,
+out-of-order completion, invalidation, runtime closure, clock rollback, and unchanged
 age during idle fallback. Cover concurrent different-name deletions, refused
 deletion retention, cold-throttled single/batch enables, and post-preheat reads.
 Existing mutation and fallback tests
