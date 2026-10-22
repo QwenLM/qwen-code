@@ -44,6 +44,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.regex.Pattern;
 
 /**
@@ -98,7 +99,13 @@ public final class ManagedAgentPreflight {
                     properties.getRuntimeBroker().getHost(),
                     properties.getRuntimeBroker().getPort()));
         }
-        checks.add(databaseCheck(environment));
+        Check database = databaseCheck(environment);
+        checks.add(database);
+        checks.add(database.status() == Status.PASS
+                ? capacityCheck(environment)
+                : new Check("capacity", Status.SKIP,
+                        "database check did not pass; capacity not measured",
+                        null));
         print(checks);
         return checks.stream().anyMatch(check ->
                 check.status() == Status.FAIL) ? 1 : 0;
@@ -617,22 +624,11 @@ public final class ManagedAgentPreflight {
 
     static Check databaseCheck(ConfigurableEnvironment environment) {
         String url = environment.getProperty("spring.datasource.url");
-        String user = environment.getProperty("spring.datasource.username", "");
-        String password =
-                environment.getProperty("spring.datasource.password", "");
         if (StringUtils.isBlank(url)) {
             return new Check("database", Status.FAIL,
                     "no datasource URL", "set SPRING_DATASOURCE_URL");
         }
-        Properties credentials = new Properties();
-        credentials.setProperty("user", user);
-        credentials.setProperty("password", password);
-        credentials.setProperty("connectTimeout",
-                String.valueOf(TIMEOUT_MILLIS));
-        credentials.setProperty("socketTimeout",
-                String.valueOf(TIMEOUT_MILLIS));
-        try (Connection connection =
-                DriverManager.getConnection(url, credentials)) {
+        try (Connection connection = databaseConnection(environment)) {
             try (Statement statement = connection.createStatement()) {
                 statement.execute("SELECT 1");
             }
@@ -665,6 +661,75 @@ public final class ManagedAgentPreflight {
                     "check the datasource settings, grants and that MySQL 8 "
                             + "is running");
         }
+    }
+
+    /**
+     * Reports durable counts that are useful for capacity triage. These are
+     * logical SQL records, not physical process or memory measurements. The
+     * report deliberately does not infer idle work or reclaim anything.
+     */
+    static Check capacityCheck(ConfigurableEnvironment environment) {
+        try (Connection connection = databaseConnection(environment)) {
+            return capacityCheck(connection);
+        } catch (SQLException error) {
+            return new Check("capacity", Status.WARN,
+                    "durable capacity facts unavailable: "
+                            + rootMessage(error),
+                    "check the datasource and managed schema");
+        }
+    }
+
+    static Check capacityCheck(Connection connection) {
+        try {
+            Map<String, Long> bindings = stateCounts(connection,
+                    "ma_runtime_binding", "binding_state");
+            Map<String, Long> sessions = stateCounts(connection,
+                    "ma_runtime_session", "session_state");
+            Map<String, Long> operations = stateCounts(connection,
+                    "ma_operation", "state");
+            String detail = "runtime-bindings=" + bindings
+                    + "; runtime-sessions=" + sessions
+                    + "; operations=" + operations
+                    + "; physical-processes=unknown"
+                    + "; memory=unknown; idle-reclamation=not measured";
+            return new Check("capacity", Status.PASS, detail, null);
+        } catch (SQLException error) {
+            return new Check("capacity", Status.WARN,
+                    "durable capacity facts unavailable: "
+                            + rootMessage(error),
+                    "check the managed schema");
+        }
+    }
+
+    private static Map<String, Long> stateCounts(Connection connection,
+            String table, String stateColumn) throws SQLException {
+        Map<String, Long> counts = new TreeMap<>();
+        String sql = "SELECT " + stateColumn + ", COUNT(*) FROM " + table
+                + " GROUP BY " + stateColumn;
+        try (Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery(sql)) {
+            while (result.next()) {
+                counts.put(result.getString(1), result.getLong(2));
+            }
+        }
+        return counts;
+    }
+
+    private static Connection databaseConnection(
+            ConfigurableEnvironment environment) throws SQLException {
+        String user = environment.getProperty("spring.datasource.username", "");
+        String password =
+                environment.getProperty("spring.datasource.password", "");
+        Properties credentials = new Properties();
+        credentials.setProperty("user", user);
+        credentials.setProperty("password", password);
+        credentials.setProperty("connectTimeout",
+                String.valueOf(TIMEOUT_MILLIS));
+        credentials.setProperty("socketTimeout",
+                String.valueOf(TIMEOUT_MILLIS));
+        return DriverManager.getConnection(
+                environment.getRequiredProperty("spring.datasource.url"),
+                credentials);
     }
 
     private static void requirePerformanceSchemaGrant(Connection connection)
