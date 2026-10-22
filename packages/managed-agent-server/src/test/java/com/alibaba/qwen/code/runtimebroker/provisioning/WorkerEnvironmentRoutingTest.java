@@ -6,12 +6,17 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -24,8 +29,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class WorkerEnvironmentRoutingTest {
     private static final List<String> REMOVED = List.of("QWEN_MANAGED_AGENT_WORKER_ENV_PROBE",
-            "spring_worker_env_probe");
-    private static final String KEPT = "WORKER_ENV_PASSTHROUGH_PROBE";
+            "spring_worker_env_probe", "QWEN_MANAGEDAGENT_WORKER_ENV_PROBE", "OSS_WORKER_ENV_PROBE");
+    private static final List<String> KEPT = List.of("WORKER_ENV_PASSTHROUGH_PROBE",
+            "ALIBABA_CLOUD_WORKER_ENV_PROBE");
 
     @TempDir
     Path directory;
@@ -34,28 +40,34 @@ class WorkerEnvironmentRoutingTest {
     void nonDurableWorkersStartWithoutControlPlaneSettings() throws Exception {
         assumeProbes();
         Path names = directory.resolve("names");
+        Throwable launchFailure;
         try (var provisioner = new LocalProcessRuntimeProvisioner(worker(names), directory,
                 new HttpRuntimeTransport(), ignored -> "storage:a")) {
-            awaitFailure(provisioner.provision(request(), RuntimeProvisionSeed.create("binding", 1)));
+            launchFailure = awaitFailure(provisioner.provision(request(), RuntimeProvisionSeed.create("binding", 1)));
         }
-        assertFiltered(names);
+        assertFiltered(names, launchFailure);
     }
 
+    @DisabledOnOs(OS.WINDOWS)
     @Test
     void durableWorkersStartWithoutControlPlaneSettings() throws Exception {
         assumeProbes();
         Path names = directory.resolve("names");
         var store = new LocalRuntimeStore(directory.toRealPath(), DurableLocalProcessRuntimeProvisionerTest.HOST);
+        Throwable launchFailure;
         try (var provisioner = new LocalProcessRuntimeProvisioner(worker(names), directory,
                 new HttpRuntimeTransport(), ignored -> "storage:a", store)) {
             // Without a seed the store records the launch intent the durable path requires.
-            awaitFailure(provisioner.provision(request()));
+            launchFailure = awaitFailure(provisioner.provision(request()));
         }
-        assertFiltered(names);
+        assertFiltered(names, launchFailure);
     }
 
     private static void assumeProbes() {
-        assumeTrue(System.getenv(KEPT) != null && REMOVED.stream().allMatch(name -> System.getenv(name) != null),
+        LocalProcessRuntimeProvisionerTest.requireNode();
+        // Without the probes this skips rather than fails, so the surefire block is the real pin.
+        assumeTrue(KEPT.stream().allMatch(name -> System.getenv(name) != null)
+                        && REMOVED.stream().allMatch(name -> System.getenv(name) != null),
                 "the surefire configuration sets the worker environment probes");
     }
 
@@ -71,20 +83,30 @@ class WorkerEnvironmentRoutingTest {
                 "harness", LocalProcessRuntimeProvisioner.KIND, "storage:a");
     }
 
-    private static void awaitFailure(java.util.concurrent.CompletionStage<?> launch) {
+    private static Throwable awaitFailure(CompletionStage<?> launch) {
         try {
-            launch.toCompletableFuture().get(30, TimeUnit.SECONDS);
-        } catch (Exception expected) {
-            // The worker exits after recording its environment, so the launch fails.
+            launch.toCompletableFuture().get(
+                    LocalProcessRuntimeProvisioner.READY_TIMEOUT.plusSeconds(10).toMillis(),
+                    TimeUnit.MILLISECONDS);
+        } catch (InterruptedException expected) {
+            Thread.currentThread().interrupt();
+            return expected;
+        } catch (ExecutionException | TimeoutException expected) {
+            // The worker records its environment and exits non-zero, so the launch fails.
+            return expected;
         }
+        return null;
     }
 
-    private static void assertFiltered(Path names) throws Exception {
-        assertTrue(Files.isRegularFile(names), "the worker was spawned");
+    private static void assertFiltered(Path names, Throwable launchFailure) throws Exception {
+        assertTrue(Files.isRegularFile(names), () -> "the worker was spawned and recorded its environment;"
+                + " the launch failed with " + launchFailure);
         List<String> inherited = Files.readAllLines(names);
         for (String name : REMOVED) {
             assertFalse(inherited.contains(name), name + " reached the worker");
         }
-        assertTrue(inherited.contains(KEPT), "an unrelated variable must still reach the worker");
+        for (String name : KEPT) {
+            assertTrue(inherited.contains(name), name + " must still reach the worker");
+        }
     }
 }
