@@ -14,6 +14,10 @@ import type {
   TurnResultRecordPayload,
 } from './chatRecordingService.js';
 import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
+import {
+  appendAutoMemorySnapshot,
+  AUTO_MEMORY_SNAPSHOT_METADATA,
+} from '../memory/request-context.js';
 import { markCompressedHistory } from '../core/environmentContext.js';
 import {
   clearApiHistoryDirectoryContext,
@@ -304,6 +308,30 @@ export class SessionApiHistoryAccumulator {
       return;
     }
     if (record.type === 'system') {
+      if (record.subtype === 'memory_catalog_snapshot') {
+        const snapshot = record.message?.parts?.[0];
+        if (
+          snapshot?.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true &&
+          typeof snapshot.text === 'string'
+        ) {
+          for (let i = this.history.length - 1; i >= 0; i--) {
+            const latest = this.history[i].parts?.findLast(
+              (part) =>
+                part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true,
+            );
+            if (latest) {
+              if (latest.text === snapshot.text) return;
+              break;
+            }
+          }
+          const length = this.history.length;
+          appendAutoMemorySnapshot(this.history, { ...snapshot });
+          if (this.history.length > length) {
+            this.systemNotificationFlags.push(false);
+          }
+        }
+        return;
+      }
       if (record.subtype === 'slash_command') {
         const payload = record.systemPayload as
           | SlashCommandRecordPayload
