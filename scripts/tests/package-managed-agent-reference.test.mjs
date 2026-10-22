@@ -568,9 +568,13 @@ test('ships the Harness credential keys the control plane reads', async () => {
     ),
     'utf8',
   );
-  // The control plane matches these keys exactly, from the start of a line.
-  assert.match(template, /^QWEN_SERVER_TOKEN=/m);
-  assert.match(template, /^QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=sha256:/m);
+  // The control plane matches these keys exactly, from the start of a line,
+  // and accepts only these characters in their values.
+  assert.match(template, /^QWEN_SERVER_TOKEN=[A-Za-z0-9._:/+=-]+$/m);
+  assert.match(
+    template,
+    /^QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=sha256:[A-Za-z0-9._:/+=-]+$/m,
+  );
 });
 
 test('rejects a stable distribution version', async () => {

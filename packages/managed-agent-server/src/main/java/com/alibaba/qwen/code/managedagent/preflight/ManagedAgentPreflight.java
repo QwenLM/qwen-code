@@ -74,6 +74,13 @@ public final class ManagedAgentPreflight {
      * Runs the checks and returns a process exit code: 0 unless a check fails.
      */
     public static int run(String[] args) {
+        List<Check> checks = checks(args);
+        print(checks);
+        return checks.stream().anyMatch(check ->
+                check.status() == Status.FAIL) ? 1 : 0;
+    }
+
+    static List<Check> checks(String[] args) {
         List<Check> checks = new ArrayList<>();
         ConfigurableEnvironment environment = baseEnvironment(args);
         List<String> locations = configLocations(args, environment);
@@ -100,9 +107,7 @@ public final class ManagedAgentPreflight {
                     properties.getRuntimeBroker().getPort()));
         }
         checks.add(databaseCheck(environment));
-        print(checks);
-        return checks.stream().anyMatch(check ->
-                check.status() == Status.FAIL) ? 1 : 0;
+        return checks;
     }
 
     static ConfigurableEnvironment baseEnvironment(String[] args) {
@@ -390,6 +395,15 @@ public final class ManagedAgentPreflight {
             return new Check("harness", Status.SKIP, "disabled", null);
         }
         String file = harness.getCredentialsFile();
+        // Probing with whatever startup left bound would test credentials
+        // it just refused.
+        if (StringUtils.isNotBlank(file)
+                && !properties.harnessCredentialsApplied()) {
+            return new Check("harness", Status.SKIP,
+                    "credentials were not read from " + file
+                            + "; see the validation row",
+                    null);
+        }
         String tokenSetting = StringUtils.isBlank(file)
                 ? "QWEN_MANAGED_AGENT_HARNESS_TOKEN"
                 : "QWEN_SERVER_TOKEN in " + file;

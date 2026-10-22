@@ -38,7 +38,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
     private static final Set<String> HARNESS_CREDENTIAL_KEYS =
             Set.of("QWEN_SERVER_TOKEN", "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST");
-    private static final Pattern PLAIN_CREDENTIAL = Pattern.compile("[^\\s\"'\\\\$`]*");
+    // `-` stays last, where it is literal inside the character class.
+    private static final String CREDENTIAL_PUNCTUATION = "._:/+=-";
+    private static final Pattern PLAIN_CREDENTIAL =
+            Pattern.compile("[A-Za-z0-9" + CREDENTIAL_PUNCTUATION + "]*");
 
     private final Harness harness = new Harness();
     private final SessionStore sessionStore = new SessionStore();
@@ -191,25 +194,36 @@ public class ManagedAgentProperties implements EnvironmentAware {
                     + " harness.credentials-file or directly, not both");
         }
         Map<String, String> values = readHarnessEnvironmentFile(file);
-        harness.setToken(credential(values, "QWEN_SERVER_TOKEN", file));
-        harness.setCapabilityDigest(credential(values, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", file));
+        String token = credential(values, "QWEN_SERVER_TOKEN", file);
+        String digest = credential(values, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", file);
+        harness.setToken(token);
+        harness.setCapabilityDigest(digest);
         harnessCredentialsApplied = true;
+    }
+
+    /** Whether startup validation has bound the credentials from the Harness credentials file. */
+    public boolean harnessCredentialsApplied() {
+        return harnessCredentialsApplied;
     }
 
     // systemd and a shell `source` both read this file for the Harness, so
     // accept only lines both read the way this parser does and refuse the
     // rest, instead of silently taking a different value.
     private static Map<String, String> readHarnessEnvironmentFile(String file) {
-        List<String> lines;
+        String[] lines;
         try {
-            lines = Files.readAllLines(Path.of(file), StandardCharsets.UTF_8);
+            lines = Files.readString(Path.of(file), StandardCharsets.UTF_8).split("\n", -1);
         } catch (IOException | RuntimeException error) {
             throw new IllegalStateException("Hosted Harness credentials file " + file + " cannot be read ("
                     + error.getClass().getSimpleName() + ")");
         }
         Map<String, String> values = new LinkedHashMap<>();
-        for (int index = 0; index < lines.size(); index++) {
-            String line = lines.get(index).strip();
+        for (int index = 0; index < lines.length; index++) {
+            // A shell keeps a carriage return in the value.
+            if (lines[index].indexOf('\r') >= 0) {
+                throw unsupportedCredentialLine(file, index, "a carriage return");
+            }
+            String line = lines[index].strip();
             if (line.endsWith("\\")) {
                 throw unsupportedCredentialLine(file, index, "a line continuation");
             }
@@ -218,7 +232,13 @@ public class ManagedAgentProperties implements EnvironmentAware {
                 continue;
             }
             String key = line.substring(0, separator).strip();
-            String value = line.substring(separator + 1).strip();
+            String value = line.substring(separator + 1);
+            boolean credential = HARNESS_CREDENTIAL_KEYS.contains(key);
+            // A shell runs `KEY = value` or `KEY= value` as a command instead.
+            if (credential && (key.length() != separator || !value.equals(value.stripLeading()))) {
+                throw unsupportedCredentialLine(file, index, "whitespace around `=` in " + key);
+            }
+            value = value.strip();
             char quote = value.isEmpty() ? 0 : value.charAt(0);
             if (quote == '"' && value.indexOf('\\') >= 0) {
                 throw unsupportedCredentialLine(file, index, "an escape inside double quotes");
@@ -233,9 +253,11 @@ public class ManagedAgentProperties implements EnvironmentAware {
                 }
                 value = value.substring(1, close);
             }
-            if (HARNESS_CREDENTIAL_KEYS.contains(key) && !PLAIN_CREDENTIAL.matcher(value).matches()) {
+            // Both readers take these characters literally anywhere in a
+            // value; a shell gives others, such as `;`, `&` or `~`, meaning.
+            if (credential && !PLAIN_CREDENTIAL.matcher(value).matches()) {
                 throw unsupportedCredentialLine(file, index,
-                        "whitespace, a quote, a backslash, `$` or a backtick in " + key);
+                        "a character other than letters, digits and `" + CREDENTIAL_PUNCTUATION + "` in " + key);
             }
             values.put(key, value);
         }

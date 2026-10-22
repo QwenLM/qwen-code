@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ManagedAgentPreflightTest {
@@ -155,7 +156,8 @@ class ManagedAgentPreflightTest {
     }
 
     @Test
-    void explainsARejectedHarnessToken() throws IOException {
+    void explainsARejectedHarnessToken(@TempDir Path directory)
+            throws IOException {
         HttpServer server = HttpServer.create(
                 new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/capabilities", exchange -> {
@@ -172,10 +174,10 @@ class ManagedAgentPreflightTest {
             assertTrue(check.detail().contains("401"));
             assertTrue(check.fix().contains(
                     "QWEN_MANAGED_AGENT_HARNESS_TOKEN"));
-            ManagedAgentProperties fromFile = harness(
+            Path file = credentialsFile(directory, "f".repeat(64), DIGEST);
+            ManagedAgentProperties fromFile = fromFile(file,
                     "http://127.0.0.1:" + server.getAddress().getPort());
-            fromFile.getHarness().setCredentialsFile("/etc/harness.env");
-            assertEquals("set QWEN_SERVER_TOKEN in /etc/harness.env to the"
+            assertEquals("set QWEN_SERVER_TOKEN in " + file + " to the"
                     + " token the Harness accepts",
                     ManagedAgentPreflight.harnessCheck(fromFile).fix());
         } finally {
@@ -386,10 +388,7 @@ class ManagedAgentPreflightTest {
     void sendsTheTokenTheStartupValidationReadFromTheFile(
             @TempDir Path directory) throws IOException {
         String token = "f".repeat(64);
-        Path file = Files.writeString(directory.resolve("harness.env"),
-                "QWEN_SERVER_TOKEN=" + token
-                        + "\nQWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=" + DIGEST
-                        + "\n");
+        Path file = credentialsFile(directory, token, DIGEST);
         HttpServer server = HttpServer.create(
                 new InetSocketAddress("127.0.0.1", 0), 0);
         AtomicReference<String> authorization = new AtomicReference<>();
@@ -414,9 +413,54 @@ class ManagedAgentPreflightTest {
             assertEquals(ManagedAgentPreflight.Status.PASS,
                     ManagedAgentPreflight.harnessCheck(properties).status());
             assertEquals("Bearer " + token, authorization.get());
+            // A direct token beside the file is refused, so it is not sent.
+            authorization.set(null);
+            ManagedAgentProperties conflicting = new ManagedAgentProperties();
+            conflicting.getHarness().setEnabled(true);
+            conflicting.getSessionStore().setEnabled(true);
+            conflicting.getHarness().setCredentialsFile(file.toString());
+            conflicting.getHarness().setToken("e".repeat(64));
+            conflicting.getHarness().setBaseUrl(
+                    "http://127.0.0.1:" + server.getAddress().getPort());
+            assertEquals(ManagedAgentPreflight.Status.FAIL,
+                    ManagedAgentPreflight.startupValidationCheck(conflicting)
+                            .status());
+            ManagedAgentPreflight.Check skipped =
+                    ManagedAgentPreflight.harnessCheck(conflicting);
+            assertEquals(ManagedAgentPreflight.Status.SKIP, skipped.status());
+            assertEquals("credentials were not read from " + file
+                    + "; see the validation row", skipped.detail());
+            assertNull(authorization.get());
         } finally {
             server.stop(0);
         }
+    }
+
+    @Test
+    void listsTheCredentialsRowAfterTheHarnessRow(@TempDir Path directory)
+            throws IOException {
+        Path file = credentialsFile(directory, "f".repeat(64), DIGEST);
+        Files.setPosixFilePermissions(file,
+                java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+        List<ManagedAgentPreflight.Check> checks = ManagedAgentPreflight
+                .checks(new String[] {
+                    "--qwen.managed-agent.harness.enabled=true",
+                    "--qwen.managed-agent.harness.credentials-file=" + file,
+                    "--qwen.managed-agent.harness.token=" + "e".repeat(64),
+                    "--qwen.managed-agent.runtime-broker.enabled=false",
+                    "--server.port=0",
+                    "--spring.datasource.url=",
+                });
+        List<String> rows = checks.stream()
+                .map(ManagedAgentPreflight.Check::name).toList();
+        int harness = rows.indexOf("harness");
+        assertEquals(harness + 1, rows.indexOf("credentials"), rows.toString());
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                checks.get(rows.indexOf("validation")).status());
+        assertEquals(ManagedAgentPreflight.Status.SKIP,
+                checks.get(harness).status());
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                checks.get(harness + 1).status());
     }
 
     @Test
@@ -431,20 +475,26 @@ class ManagedAgentPreflightTest {
     }
 
     @Test
-    void pointsHarnessCredentialFixesAtTheCredentialsFile() {
+    void pointsHarnessCredentialFixesAtTheCredentialsFile(
+            @TempDir Path directory) throws IOException {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setEnabled(true);
         assertEquals("set QWEN_MANAGED_AGENT_HARNESS_TOKEN",
                 ManagedAgentPreflight.harnessCheck(properties).fix());
-        properties.getHarness().setCredentialsFile("/etc/harness.env");
-        assertEquals("set QWEN_SERVER_TOKEN in /etc/harness.env",
-                ManagedAgentPreflight.harnessCheck(properties).fix());
         properties.getHarness().setToken("token");
-        assertEquals("set QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST in /etc/harness.env",
-                ManagedAgentPreflight.harnessCheck(properties).fix());
-        properties.getHarness().setCredentialsFile("");
         assertEquals("set QWEN_MANAGED_AGENT_CAPABILITY_DIGEST",
                 ManagedAgentPreflight.harnessCheck(properties).fix());
+        Path placeholderToken = credentialsFile(directory,
+                "replace-with-a-private-random-token", DIGEST);
+        assertEquals("set QWEN_SERVER_TOKEN in " + placeholderToken,
+                ManagedAgentPreflight.harnessCheck(
+                        fromFile(placeholderToken, "http://127.0.0.1:1")).fix());
+        Path placeholderDigest = credentialsFile(directory, "token",
+                "sha256:replace-with-64-lowercase-hex");
+        assertEquals("set QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST in "
+                + placeholderDigest,
+                ManagedAgentPreflight.harnessCheck(
+                        fromFile(placeholderDigest, "http://127.0.0.1:1")).fix());
     }
 
     @Test
@@ -706,6 +756,26 @@ class ManagedAgentPreflightTest {
         properties.getHarness().setApprovalMode("yolo");
         properties.getSessionStore().setEnabled(true);
         properties.getRuntimeBroker().setEnabled(true);
+        return properties;
+    }
+
+    private static Path credentialsFile(Path directory, String token,
+            String digest) throws IOException {
+        return Files.writeString(Files.createTempFile(directory, "harness", ".env"),
+                "QWEN_SERVER_TOKEN=" + token
+                        + "\nQWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=" + digest
+                        + "\n");
+    }
+
+    // Binds the file the way startup validation does before run()'s
+    // Harness row.
+    private static ManagedAgentProperties fromFile(Path file, String baseUrl) {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getHarness().setCredentialsFile(file.toString());
+        properties.getHarness().setBaseUrl(baseUrl);
+        properties.validateForPreflight();
         return properties;
     }
 

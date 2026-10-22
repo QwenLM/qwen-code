@@ -34,7 +34,7 @@ Hosted Harness 和 Java 控制面必须共享同一个 bearer token 和同一个
 
 其他键（如 `QWEN_HOSTED_HARNESS_BROKER_ARGS`）被忽略。这些值只保存在绑定后的配置中，从不写入日志。
 
-systemd 和 shell 的 `source` 都会为 Harness 读取这个文件，因此控制面只接受两种读取方式都按字面理解的行，其余一律拒绝，而不是读出不同的值。每行先去掉首尾空白。以 `\` 结尾的行会被拒绝（注释行也一样），因为两种读取方式都会把它续接到下一行。其余以 `#` 或 `;` 开头的行、以及没有 `=` 的行被跳过。每行在第一个 `=` 处拆分，键和值都去掉首尾空白。值可以用一对相同的单引号或双引号包围。只有开引号没有闭引号、闭引号之后还有文字、双引号内出现反斜杠，都会被拒绝。两个键的值不得包含空白、引号、反斜杠、`$` 或反引号，从而排除转义、变量展开和命令替换。与 systemd 一样，后出现的赋值覆盖先出现的。拒绝信息给出文件、行号和写法，从不包含该行内容。
+systemd 和 shell 的 `source` 都会为 Harness 读取这个文件，因此控制面只接受两种读取方式都按字面理解的行，其余一律拒绝，而不是读出不同的值。含回车符的行会被拒绝（注释行也一样），因为 shell 会把它保留在值里；因此以 CRLF 换行保存的文件会在第 1 行失败。随后每行去掉首尾空白。以 `\` 结尾的行会被拒绝（注释行也一样），因为两种读取方式都会把它续接到下一行。其余以 `#` 或 `;` 开头的行、以及没有 `=` 的行被跳过。每行在第一个 `=` 处拆分。对这两个键，`=` 任一侧有空白都会被拒绝，因为 shell 会把这样的行当作命令而不是赋值来执行；其他键则去掉首尾空白。值可以用一对相同的单引号或双引号包围。只有开引号没有闭引号、闭引号之后还有文字、双引号内出现反斜杠，都会被拒绝。两个键的值只能包含字母、数字和 `._:/+=-`，这些字符两种读取方式都按字面理解。这排除了转义、变量展开、命令替换，以及 `;`、`&`、`~` 等 shell 的其他运算符。与 systemd 一样，后出现的赋值覆盖先出现的。拒绝信息给出文件、行号和写法，从不包含该行内容。
 
 ### 失败语义
 
@@ -44,7 +44,7 @@ systemd 和 shell 的 `source` 都会为 Harness 读取这个文件，因此控�
 - 必需的键缺失或为空：启动失败，并给出键名和路径。
 - Harness 关闭：不读取该文件。
 
-解析发生在 preflight 也会调用的同一个启动校验中，因此 `--check` 会在任何监听启动之前，于 `validation` 行报告这些失败。随后已有的 `harness` 行照旧检查解析出的 token 和 digest，并且当 token 仍是随包模板中以 `replace-` 开头的占位符（Harness 会接受它）时报告失败。新增的 `credentials` 行在 Harness 关闭或未设置文件时为 `SKIP`；服务账号无法读取该文件时为 `FAIL` 并给出 `chown` 修复；文件对 group 或 others 可读时为 `WARN` 并给出 `chmod 600` 修复，与 `config` 行对 `application.yml` 采用的策略和措辞相同；其余情况为 `PASS`。
+解析发生在 preflight 也会调用的同一个启动校验中，因此 `--check` 会在任何监听启动之前，于 `validation` 行报告这些失败。随后已有的 `harness` 行照旧检查解析出的 token 和 digest。若启动校验拒绝了该文件、凭据从未绑定，`harness` 行报告 `SKIP` 并指向 `validation` 行，而不是用残留的绑定值去探测。此外，当 token 仍是随包模板中以 `replace-` 开头的占位符（Harness 会接受它）时报告失败。新增的 `credentials` 行在 Harness 关闭或未设置文件时为 `SKIP`；服务账号无法读取该文件时为 `FAIL` 并给出 `chown` 修复；文件对 group 或 others 可读时为 `WARN` 并给出 `chmod 600` 修复，与 `config` 行对 `application.yml` 采用的策略和措辞相同；其余情况为 `PASS`。
 
 ### 模板、bootstrap 与 systemd
 
@@ -55,16 +55,16 @@ systemd 和 shell 的 `source` 都会为 Harness 读取这个文件，因此控�
 
 ## 兼容性与风险
 
-- 直接设置 token 和 digest 的部署不受影响。
+- 直接设置 token 和 digest 的部署照常启动。只有一处 preflight 变化同样作用于它们：token 仍是随包模板中以 `replace-` 开头的占位符时，`harness` 行现在会报告失败，而此前 `--check` 会通过。
 - 新增该文件但仍保留直接配置值的部署会在启动时失败，直到删掉其中一个来源。这是有意的：两个可能漂移的来源正是要解决的问题。
 - 该文件必须对服务账号可读。开启 Shell 的 Runtime worker 以同一账号运行，可以读取它，正如它已经能读取 `config/application.yml`；文件隔离仍依赖操作系统。
 
 ## 验证计划
 
-- `ManagedAgentProperties` 单元测试：从随包格式的文件（含注释、引号、被忽略的额外键、重复键和含 `=` 的值）中解析出两个键；每种被拒绝的写法都以行号失败，且不包含值；文件缺失、键缺失、键为空分别以路径和键名失败；直接配置的 token 或 digest 与文件同时存在时失败；Harness 关闭时忽略文件；第二次校验不产生任何影响；不设文件时直接配置的值不变；`application.yml` 绑定 `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`。
-- preflight 测试：`credentials` 行分别报告 `SKIP`、权限 `0600` 时的 `PASS`、group 或 others 可读以及路径不可用时的 `WARN`，以及文件不可读时的 `FAIL`；`harness` 行发送校验从文件读到的 token，并对模板占位符报告失败；指向文件的修复提示覆盖 401 分支。
+- `ManagedAgentProperties` 单元测试：从随包格式的文件（含注释、引号、被忽略的额外键、重复键和含 `=` 的值）中解析出两个键；每种被拒绝的写法（包括回车符、任一键 `=` 两侧的空白、允许范围之外的字符）都以行号失败，且不包含值；所有允许的字符都被接受；被拒绝的文件不绑定任何一项凭据；文件缺失、键缺失、键为空分别以路径和键名失败；直接配置的 token 或 digest 与文件同时存在时失败；Harness 关闭时忽略文件；第二次校验不产生任何影响；不设文件时直接配置的值不变；`application.yml` 绑定 `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`。
+- preflight 测试：`credentials` 行分别报告 `SKIP`、权限 `0600` 时的 `PASS`、group 或 others 可读以及路径不可用时的 `WARN`，以及文件不可读时的 `FAIL`；`harness` 行发送校验从文件读到的 token，在启动校验拒绝该文件时跳过探测，并对模板占位符报告失败；`run()` 把 `credentials` 行列在 `harness` 行之后；指向文件的修复提示覆盖 401 分支。
 - 模板测试：bootstrap 生成的 `server.env` 和 `server.env.example` 引用 `harness.env`，且不包含任何一项凭据，并且 `harness.env.example` 的两个键都从行首开始。
-- 端到端：用 bootstrap 生成文件，从 `harness.env` 启动真实 Harness，从 `server.env` 启动打包后的服务端，运行 `--check` 并完成一个 Turn。再分别以冲突的直接 token 和缺失的键重复，观察拒绝行为。
+- 端到端：用 bootstrap 生成文件，从 `harness.env` 启动真实 Harness，从 `server.env` 启动打包后的服务端，运行 `--check` 并完成一个 Turn。再分别以冲突的直接 token、缺失的键、token 中的 `$`、digest 的 `=` 两侧空白和 CRLF 换行重复，观察拒绝行为。
 
 ## 验收标准
 

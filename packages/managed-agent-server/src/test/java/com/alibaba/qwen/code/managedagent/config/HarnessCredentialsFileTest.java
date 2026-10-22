@@ -31,7 +31,7 @@ class HarnessCredentialsFileTest {
                 "; a systemd comment",
                 "QWEN_SERVER_TOKEN=replaced-by-the-later-line",
                 "",
-                "  QWEN_SERVER_TOKEN = '" + TOKEN + "'  ",
+                "  QWEN_SERVER_TOKEN='" + TOKEN + "'  ",
                 "# QWEN_SERVER_TOKEN='commented out, don't",
                 "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=\"" + DIGEST + "\"",
                 "QWEN_HOSTED_HARNESS_BROKER_ARGS=--managed-runtime-broker-token=ignored",
@@ -40,6 +40,7 @@ class HarnessCredentialsFileTest {
         properties.validateWorkspaceFiles();
         assertThat(properties.getHarness().getToken()).isEqualTo(TOKEN);
         assertThat(properties.getHarness().getCapabilityDigest()).isEqualTo(DIGEST);
+        assertThat(properties.harnessCredentialsApplied()).isTrue();
         // Validation may run again, as preflight's public entry allows.
         properties.validateWorkspaceFiles();
         assertThat(properties.getHarness().getToken()).isEqualTo(TOKEN);
@@ -55,18 +56,40 @@ class HarnessCredentialsFileTest {
     }
 
     @Test
+    void acceptsEveryCharacterBothReadersTakeLiterally(@TempDir Path directory) throws IOException {
+        String token = "AZaz09._:/+=-";
+        Path file = Files.writeString(directory.resolve("harness.env"),
+                "QWEN_SERVER_TOKEN=" + token + "\nQWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=" + DIGEST + "\n");
+        ManagedAgentProperties properties = withFile(file);
+        properties.validateWorkspaceFiles();
+        assertThat(properties.getHarness().getToken()).isEqualTo(token);
+    }
+
+    @Test
     void refusesConstructsTheTwoReadersDisagreeOn(@TempDir Path directory) throws IOException {
         String digest = "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=" + DIGEST;
         String secret = "abcdef0123";
+        String plain = "a character other than letters, digits and `._:/+=-` in QWEN_SERVER_TOKEN";
         String[][] cases = {
             {"QWEN_SERVER_TOKEN=" + secret + "\\", "a line continuation"},
             {"# a comment that continues\\", "a line continuation"},
             {"QWEN_SERVER_TOKEN=\"" + secret + "\\\"x\"", "an escape inside double quotes"},
             {"QWEN_SERVER_TOKEN='" + secret, "an unterminated quote"},
             {"QWEN_SERVER_TOKEN='" + secret + "' # rotated", "text after a closing quote"},
-            {"QWEN_SERVER_TOKEN=$SHARED_" + secret, "whitespace, a quote, a backslash, `$` or a backtick in QWEN_SERVER_TOKEN"},
-            {"QWEN_SERVER_TOKEN=`cat " + secret + "`", "whitespace, a quote, a backslash, `$` or a backtick in QWEN_SERVER_TOKEN"},
-            {"QWEN_SERVER_TOKEN=" + secret + " " + secret, "whitespace, a quote, a backslash, `$` or a backtick in QWEN_SERVER_TOKEN"},
+            {"QWEN_SERVER_TOKEN=" + secret + "\r", "a carriage return"},
+            {"QWEN_SERVER_TOKEN = " + secret, "whitespace around `=` in QWEN_SERVER_TOKEN"},
+            {"QWEN_SERVER_TOKEN\t=" + secret, "whitespace around `=` in QWEN_SERVER_TOKEN"},
+            {"QWEN_SERVER_TOKEN= " + secret, "whitespace around `=` in QWEN_SERVER_TOKEN"},
+            // The Harness row probes only the token, so a digest line must not slip through either.
+            {"QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST =sha256:" + secret,
+                "whitespace around `=` in QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST"},
+            {"QWEN_SERVER_TOKEN=$SHARED_" + secret, plain},
+            {"QWEN_SERVER_TOKEN=`cat " + secret + "`", plain},
+            {"QWEN_SERVER_TOKEN=" + secret + " " + secret, plain},
+            {"QWEN_SERVER_TOKEN=" + secret + ";" + secret, plain},
+            {"QWEN_SERVER_TOKEN=" + secret + "&", plain},
+            {"QWEN_SERVER_TOKEN=a:~/" + secret, plain},
+            {"QWEN_SERVER_TOKEN='" + secret + " " + secret + "'", plain},
         };
         for (String[] refused : cases) {
             Path file = Files.writeString(directory.resolve("harness.env"),
@@ -77,9 +100,14 @@ class HarnessCredentialsFileTest {
                             + "; write KEY=value without continuations, escapes, expansions or trailing text")
                     .message().doesNotContain(secret);
         }
+        // A file saved with CRLF endings stops at its first line, comments included.
+        Path crlf = Files.writeString(directory.resolve("crlf.env"),
+                "# Generated\r\nQWEN_SERVER_TOKEN=" + TOKEN + "\r\n" + digest + "\r\n");
+        assertThatThrownBy(withFile(crlf)::validateWorkspaceFiles)
+                .hasMessageStartingWith("Hosted Harness credentials file " + crlf + " line 1 uses a carriage return;");
         // An ignored key may use anything that keeps to a single line.
         Path ignored = Files.writeString(directory.resolve("ignored.env"), "QWEN_SERVER_TOKEN=" + TOKEN + "\n"
-                + digest + "\nQWEN_HOSTED_HARNESS_BROKER_ARGS=--a $B --c\n");
+                + digest + "\nQWEN_HOSTED_HARNESS_BROKER_ARGS = --a $B --c;~\n");
         ManagedAgentProperties properties = withFile(ignored);
         properties.validateWorkspaceFiles();
         assertThat(properties.getHarness().getToken()).isEqualTo(TOKEN);
@@ -106,10 +134,14 @@ class HarnessCredentialsFileTest {
     @Test
     void namesTheMissingOrBlankKey(@TempDir Path directory) throws IOException {
         Path noDigest = Files.writeString(directory.resolve("token-only.env"), "QWEN_SERVER_TOKEN=" + TOKEN + "\n");
-        assertThatThrownBy(withFile(noDigest)::validateWorkspaceFiles)
+        ManagedAgentProperties tokenOnly = withFile(noDigest);
+        assertThatThrownBy(tokenOnly::validateWorkspaceFiles)
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("Hosted Harness credentials file " + noDigest
                         + " does not set QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST");
+        // A refused file binds neither credential.
+        assertThat(tokenOnly.getHarness().getToken()).isEmpty();
+        assertThat(tokenOnly.harnessCredentialsApplied()).isFalse();
         Path blankToken = Files.writeString(directory.resolve("blank.env"),
                 "QWEN_SERVER_TOKEN=''\nQWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=" + DIGEST + "\n");
         assertThatThrownBy(withFile(blankToken)::validateWorkspaceFiles)
