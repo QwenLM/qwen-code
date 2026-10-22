@@ -358,6 +358,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       height: 8,
     },
     onChange: onBufferChange,
+    pasteHistory: {
+      capture: () => pendingPastesRef.current,
+      restore: (snapshot) => restorePasteMap(snapshot),
+    },
     isValidPath: noPathInference,
     shellModeActive,
   });
@@ -380,9 +384,40 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   }, []);
   const backspace = useCallback(() => {
     const editor = editorRef.current;
-    if (!editor || !replaceNativeSelection(editor, bufferRef.current, '')) {
-      bufferRef.current.backspace();
+    if (editor && replaceNativeSelection(editor, bufferRef.current, '')) return;
+    if (pendingPastesRef.current.size > 0) {
+      const plainText = bufferRef.current.text;
+      const codePoints = toCodePoints(plainText);
+      const cursorCpOffset = logicalPosToOffset(
+        bufferRef.current.lines,
+        ...bufferRef.current.cursor,
+      );
+      for (const placeholder of pendingPastesRef.current.keys()) {
+        const placeholderStart = cursorCpOffset - placeholder.length;
+        if (
+          placeholderStart >= 0 &&
+          codePoints.slice(placeholderStart, cursorCpOffset).join('') ===
+            placeholder
+        ) {
+          bufferRef.current.replaceRangeByOffset(
+            placeholderStart,
+            cursorCpOffset,
+            '',
+          );
+          pendingPastesRef.current.delete(placeholder);
+          const parsedPlaceholder = parsePastePlaceholder(placeholder);
+          if (parsedPlaceholder) {
+            freePastePlaceholderId(
+              activePlaceholderIdsRef.current,
+              parsedPlaceholder.charCount,
+              parsedPlaceholder.id,
+            );
+          }
+          return;
+        }
+      }
     }
+    bufferRef.current.backspace();
   }, []);
   const vimBuffer = useMemo(() => {
     const forwarding = createVimBuffer(() => bufferRef.current);
@@ -571,22 +606,30 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       ? (followupState.suggestion ?? promptSuggestion ?? null)
       : null;
 
-  const restoreQueuedDraft = useCallback((draft: OpenTuiRestoredDraft) => {
-    const snapshot = draft.pasteExpansions ?? new Map<string, string>();
-    pendingPastesRef.current = new Map(snapshot);
-    unknownHistoryInputRef.current = draft.hasUnknownInput;
-    restoredQueueDraftRef.current = draft;
-    activePlaceholderIdsRef.current.clear();
-    for (const placeholder of snapshot.keys()) {
-      const parsed = parsePastePlaceholder(placeholder);
-      if (!parsed) continue;
-      const ids =
-        activePlaceholderIdsRef.current.get(parsed.charCount) ??
-        new Set<number>();
-      ids.add(parsed.id);
-      activePlaceholderIdsRef.current.set(parsed.charCount, ids);
-    }
-  }, []);
+  const restorePasteMap = useCallback(
+    (snapshot: ReadonlyMap<string, string>) => {
+      pendingPastesRef.current = new Map(snapshot);
+      activePlaceholderIdsRef.current.clear();
+      for (const placeholder of snapshot.keys()) {
+        const parsed = parsePastePlaceholder(placeholder);
+        if (!parsed) continue;
+        const ids =
+          activePlaceholderIdsRef.current.get(parsed.charCount) ??
+          new Set<number>();
+        ids.add(parsed.id);
+        activePlaceholderIdsRef.current.set(parsed.charCount, ids);
+      }
+    },
+    [],
+  );
+  const restoreQueuedDraft = useCallback(
+    (draft: OpenTuiRestoredDraft) => {
+      restorePasteMap(draft.pasteExpansions ?? new Map());
+      unknownHistoryInputRef.current = draft.hasUnknownInput;
+      restoredQueueDraftRef.current = draft;
+    },
+    [restorePasteMap],
+  );
 
   // Shell mode overrides the approval chrome (ink InputPrompt order: `!` wins
   // over the approval-mode prefix). The label itself lives in the footer, as
@@ -869,8 +912,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         pendingPastesRef.current,
       );
       const text = restored.text;
-      restoreQueuedDraft(restored.restoredDraft!);
       replaceText(text);
+      restoreQueuedDraft(restored.restoredDraft!);
       bufferRef.current.moveToOffset(cpLen(bufferRef.current.text));
       draftRef.current.attachments.unshift(
         ...(submission.imagePaths ?? []).map((imagePath) => ({
@@ -927,20 +970,21 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   }, [onInterrupt, onPopQueue, restoreSubmission]);
 
   const submitDraft = useCallback(
-    async (raw: string, deferUntilIdle = false) => {
+    async (
+      raw: string,
+      deferUntilIdle = false,
+      pastes = pendingPastesRef.current,
+    ) => {
       const el = editorRef.current;
       if (!el || !raw.trim() || claimedDraftRef.current) return;
       const draft = draftRef.current;
       claimedDraftRef.current = draft;
-      const text = expandPendingPastePlaceholders(
-        raw.trim(),
-        pendingPastesRef.current,
-      );
+      const text = expandPendingPastePlaceholders(raw.trim(), pastes);
       const submittedPrompt =
         restoredProvenanceRef.current?.text === raw
           ? restoredProvenanceRef.current.submittedPrompt
           : raw;
-      const pasteExpansions = new Map(pendingPastesRef.current);
+      const pasteExpansions = new Map(pastes);
       const hasUnknownInput = unknownHistoryInputRef.current;
       const restoredDraft = restoredQueueDraftRef.current ?? undefined;
       draftRef.current = newDraft();
@@ -1215,42 +1259,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       if (deleteSelectedAttachment()) return true;
       const el = editorRef.current;
       if (!el) return false;
-      // Placeholder-aware deletion (ink parity): backspace at the end of a
-      // collapsed-paste placeholder removes the whole placeholder, not one
-      // character.
-      if (pendingPastesRef.current.size > 0) {
-        const plainText = bufferRef.current.text;
-        const codePoints = toCodePoints(plainText);
-        const cursorCpOffset = logicalPosToOffset(
-          bufferRef.current.lines,
-          ...bufferRef.current.cursor,
-        );
-        for (const placeholder of pendingPastesRef.current.keys()) {
-          const placeholderStart = cursorCpOffset - placeholder.length;
-          if (
-            placeholderStart >= 0 &&
-            codePoints.slice(placeholderStart, cursorCpOffset).join('') ===
-              placeholder
-          ) {
-            bufferRef.current.replaceRangeByOffset(
-              placeholderStart,
-              cursorCpOffset,
-              '',
-            );
-            pendingPastesRef.current.delete(placeholder);
-            const parsedPlaceholder = parsePastePlaceholder(placeholder);
-            if (parsedPlaceholder) {
-              freePastePlaceholderId(
-                activePlaceholderIdsRef.current,
-                parsedPlaceholder.charCount,
-                parsedPlaceholder.id,
-              );
-            }
-            setTextVersion((v) => v + 1);
-            return true;
-          }
-        }
-      }
       backspace();
       setTextVersion((v) => v + 1);
       return true;
@@ -1292,8 +1300,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         charCount,
         activePlaceholderIdsRef.current,
       );
-      pendingPastesRef.current.set(placeholder, pasted);
       insertText(placeholder);
+      pendingPastesRef.current.set(placeholder, pasted);
       setTextVersion((v) => v + 1);
     };
     renderer.keyInput.on('paste', onPaste);
@@ -1516,16 +1524,16 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       ) {
         key.preventDefault();
         const value = item?.value ?? bufferRef.current.text;
-        if (item) {
-          invalidateImportedInput();
-          pendingPastesRef.current.clear();
-          activePlaceholderIdsRef.current.clear();
-        }
+        if (item) invalidateImportedInput();
         setSearchActive(false);
         search.resetCompletionState();
-        if (enter) void submitDraft(value);
+        if (enter) void submitDraft(value, false, item ? new Map() : undefined);
         else {
           replaceText(value);
+          if (item) {
+            pendingPastesRef.current.clear();
+            activePlaceholderIdsRef.current.clear();
+          }
           bufferRef.current.moveToOffset(cpLen(bufferRef.current.text));
           historyRestoredTextRef.current = value;
           setTextVersion((v) => v + 1);
