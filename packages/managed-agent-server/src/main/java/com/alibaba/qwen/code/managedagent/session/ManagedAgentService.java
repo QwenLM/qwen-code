@@ -21,7 +21,9 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalChange
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellContentPart;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellEvent;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellExportPage;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellItem;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelContext;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelSelection;
@@ -60,6 +62,7 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -116,6 +119,7 @@ public class ManagedAgentService {
     private final HarnessConnector harness;
     private RuntimeWarmer runtimeWarmer;
     private JavaDurableAdmission javaDurableAdmission;
+    private org.springframework.beans.factory.ObjectProvider<SessionRecoveryService> recoveryServices;
     private ManagedAgentProperties.Dispatch renameDispatch = new ManagedAgentProperties.Dispatch();
     private Clock renameClock = Clock.systemUTC();
 
@@ -136,6 +140,11 @@ public class ManagedAgentService {
     @Autowired(required = false)
     void setJavaDurableAdmission(JavaDurableAdmission javaDurableAdmission) {
         this.javaDurableAdmission = javaDurableAdmission;
+    }
+
+    @Autowired
+    void setRecoveryServices(org.springframework.beans.factory.ObjectProvider<SessionRecoveryService> recoveryServices) {
+        this.recoveryServices = recoveryServices;
     }
 
     private boolean supportsClose(SessionRecord session) {
@@ -924,14 +933,18 @@ public class ManagedAgentService {
 
     public PublicSession getPublicSession(String tenantId, String actorId,
             String sessionId) {
-        return publicSession(requireReadableSession(tenantId, actorId,
-                sessionId));
+        SessionRecord session = requireReadableSession(tenantId, actorId, sessionId);
+        var recovery = recoveryServices == null ? null : recoveryServices.getIfAvailable();
+        return publicSession(session).withRecovery(recovery == null
+                ? null : recovery.projection(session, actorId));
     }
 
     public WebShellSession getWebShellSession(String tenantId, String actorId,
             String sessionId) {
-        return webShellSession(requireReadableSession(tenantId, actorId,
-                sessionId), actorId);
+        SessionRecord session = requireReadableSession(tenantId, actorId, sessionId);
+        var recovery = recoveryServices == null ? null : recoveryServices.getIfAvailable();
+        return webShellSession(session, actorId).withRecovery(recovery == null
+                ? null : recovery.projection(session, actorId));
     }
 
     public PublicList<PublicSession> listPublicSessions(String tenantId,
@@ -945,16 +958,87 @@ public class ManagedAgentService {
                 page.hasMore(), nextCursor(page));
     }
 
+    public PublicList<PublicSession> listPublicSessions(String tenantId,
+            String actorId, String cursor, int requestedLimit, String requestedArchiveState,
+            Boolean includeArchived, String requestedTitleQuery) {
+        String archiveState = archiveState(requestedArchiveState);
+        if (includeArchived != null) {
+            String alias = includeArchived ? "all" : "unarchived";
+            if (requestedArchiveState != null && !alias.equals(archiveState)) {
+                throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
+                        "invalid_archive_state", "Archive filters conflict.");
+            }
+            archiveState = alias;
+        }
+        String titleQuery = titleQuery(requestedTitleQuery);
+        if ("all".equals(archiveState) && titleQuery.isEmpty()) {
+            return listPublicSessions(tenantId, actorId, cursor, requestedLimit);
+        }
+        int limit = limit(requestedLimit);
+        SessionCursor decoded = decodeCursor(cursor, archiveState, titleQuery);
+        SessionPage page = filteredSessions(tenantId, actorId, decoded, limit, archiveState, titleQuery);
+        return new PublicList<>("list", publicSessions(page.sessions()), page.hasMore(),
+                nextSessionCursor(page, archiveState, titleQuery));
+    }
+
     public WebShellPage<WebShellSession> listWebShellSessions(
             String tenantId, String actorId, String cursor,
             int requestedLimit) {
+        return listWebShellSessions(tenantId, actorId, cursor, requestedLimit, null);
+    }
+
+    public WebShellPage<WebShellSession> listWebShellSessions(
+            String tenantId, String actorId, String cursor, int requestedLimit, String requestedArchiveState) {
+        return listWebShellSessions(tenantId, actorId, cursor, requestedLimit, requestedArchiveState, null);
+    }
+
+    public WebShellPage<WebShellSession> listWebShellSessions(
+            String tenantId, String actorId, String cursor, int requestedLimit,
+            String requestedArchiveState, String requestedTitleQuery) {
+        String archiveState = archiveState(requestedArchiveState);
+        String titleQuery = titleQuery(requestedTitleQuery);
         int limit = limit(requestedLimit);
-        SessionCursor decoded = decodeCursor(cursor);
-        SessionPage page = store.listSessions(tenantId, actorId,
-                decoded == null ? null : decoded.createdAt(),
-                decoded == null ? null : decoded.sessionId(), limit);
+        SessionCursor decoded = decodeCursor(cursor, archiveState, titleQuery);
+        SessionPage page = filteredSessions(tenantId, actorId, decoded, limit, archiveState, titleQuery);
         return new WebShellPage<>(webShellSessions(page.sessions(), actorId),
-                nextCursor(page), page.hasMore());
+                nextSessionCursor(page, archiveState, titleQuery), page.hasMore());
+    }
+
+    private SessionPage filteredSessions(String tenantId, String actorId, SessionCursor cursor,
+            int limit, String archiveState, String titleQuery) {
+        Long createdAt = cursor == null ? null : cursor.createdAt();
+        String sessionId = cursor == null ? null : cursor.sessionId();
+        return titleQuery.isEmpty()
+                ? store.listSessions(tenantId, actorId, createdAt, sessionId, limit, archiveState)
+                : store.listSessions(tenantId, actorId, createdAt, sessionId, limit, archiveState, titleQuery);
+    }
+
+    private static String archiveState(String requested) {
+        String state = requested == null ? "all" : requested;
+        if (!List.of("all", "unarchived", "archived").contains(state)) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
+                    "invalid_archive_state", "Unknown archive state.");
+        }
+        return state;
+    }
+
+    private static String titleQuery(String requested) {
+        if (requested != null && requested.codePointCount(0, requested.length()) > 512) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
+                    "invalid_title_query", "Title query must not exceed 512 characters.");
+        }
+        if (requested == null) {
+            return "";
+        }
+        int start = 0;
+        int end = requested.length();
+        while (start < end && titleWhitespace(requested.codePointAt(start))) {
+            start += Character.charCount(requested.codePointAt(start));
+        }
+        while (end > start && titleWhitespace(requested.codePointBefore(end))) {
+            end -= Character.charCount(requested.codePointBefore(end));
+        }
+        return requested.substring(start, end);
     }
 
     /**
@@ -1020,6 +1104,14 @@ public class ManagedAgentService {
         var page = store.findSnapshotPage(tenantId, sessionId, cursor, afterSequence, limit(requestedLimit));
         return new PublicItemList("list", page.items().stream().map(this::publicItem).toList(), page.hasMore(),
                 page.nextCursor(), page.coveredSequence());
+    }
+
+    public WebShellExportPage exportPage(String tenantId, String actorId,
+            String sessionId, String cursor, int requestedLimit) {
+        requireReadableSession(tenantId, actorId, sessionId);
+        var page = store.findSnapshotPage(tenantId, sessionId, cursor, 0, limit(requestedLimit));
+        return new WebShellExportPage(page.items().stream().map(this::webShellItem).toList(),
+                page.nextCursor(), page.hasMore(), page.coveredSequence());
     }
 
     public WebShellTranscript transcript(String tenantId, String actorId,
@@ -1192,10 +1284,11 @@ public class ManagedAgentService {
                 .findLatestEnvironmentEvents(tenantId, latestTurns);
         List<String> boundIds = sessions.stream().filter(session -> session.workspace() != null)
                 .map(SessionRecord::sessionId).toList();
+        Set<String> lifecycleOwners = store.findApprovalOwners(tenantId, actorId, boundIds);
+        var lifecycleOperations = store.findLatestLifecycleOperations(tenantId, ids);
         List<String> approvalIds = sessions.stream().filter(WorkspaceToolProfiles::supportsApprovalSelection)
                 .map(SessionRecord::sessionId).toList();
         Map<String, WebShellApprovalSelection> approvalSelections = store.findApprovalSelections(tenantId, approvalIds);
-        Set<String> approvalOwners = store.findApprovalOwners(tenantId, actorId, approvalIds);
         boolean approvalSupported = !approvalIds.isEmpty() && harness.supportsApprovalSelection();
         boolean definitionApprovalSupported = approvalSupported
                 && sessions.stream().anyMatch(session -> session.agentDefinitionDigest() != null)
@@ -1245,6 +1338,8 @@ public class ManagedAgentService {
                         latestTurns.get(session.sessionId()),
                         environmentEvents.get(session.sessionId()),
                         retention(session, closed),
+                        session.workspace() == null || lifecycleOwners.contains(session.sessionId()),
+                        lifecycleOperations.get(session.sessionId()),
                         maySubmitWorkspaceTurn(session, grants, executable),
                         mayChangeCwd(session, grants, executable),
                         modelContexts.get(session.sessionId()),
@@ -1253,8 +1348,9 @@ public class ManagedAgentService {
                         compressions.getOrDefault(session.sessionId(),
                                 new AgentStateStore.ContextCompressionState(0, null)),
                         approvalSelections.get(session.sessionId()), approvalSupported
+                                && WorkspaceToolProfiles.supportsApprovalSelection(session)
                                 && (session.agentDefinitionDigest() == null || definitionApprovalSupported)
-                                && approvalOwners.contains(session.sessionId())))
+                                && lifecycleOwners.contains(session.sessionId())))
                 .toList();
     }
 
@@ -1277,14 +1373,15 @@ public class ManagedAgentService {
 
     private WebShellSession webShellSession(SessionRecord session,
             TurnSummary latestTurn, EventRecord environmentEvent,
-            boolean retention, boolean maySubmit, boolean mayChangeCwd,
+            boolean retention, boolean lifecycleOwner, WebShellLifecycleOperation lifecycleOperation,
+            boolean maySubmit, boolean mayChangeCwd,
             WebShellModelContext modelContext, WebShellModelSelection modelSelection,
             boolean modelSelectionSupported, boolean renameSupported,
             boolean compressionSupported, AgentStateStore.ContextCompressionState compression,
             WebShellApprovalSelection approvalSelection, boolean approvalSupported) {
         boolean visible = session.deletedAt() == null;
-        boolean close = visible && supportsClose(session);
-        boolean keep = visible && retention;
+        boolean close = visible && lifecycleOwner && supportsClose(session);
+        boolean keep = visible && lifecycleOwner && retention;
         boolean approvalExecutable = approvalSelection == null || approvalSelection.revision() == 0
                 || supportsApprovalSelection(session);
         approvalExecutable = approvalExecutable && (approvalSelection == null
@@ -1307,7 +1404,7 @@ public class ManagedAgentService {
                 new WebShellSessionCapabilities(visible,
                         hasArtifacts(session),
                         hasActions(session), maySubmit && approvalExecutable, close, keep, keep,
-                        visible && supportsDelete(session, retention),
+                        visible && lifecycleOwner && supportsDelete(session, retention),
                         mayChangeCwd && approvalExecutable, foregroundShell(session),
                         visible && modelSelectionSupported && mayChangeCwd,
                         visible && approvalSupported && mayChangeCwd && !Boolean.FALSE.equals(foregroundShell(session)),
@@ -1322,7 +1419,8 @@ public class ManagedAgentService {
                 session.workspace() != null || session.agentDefinitionDigest() != null ? session.approvalMode() : null,
                 approvalSelection != null && approvalSelection.planMode(), visible && approvalSupported
                         && mayChangeCwd && harness.supportsPlanMode() && store.supportsPlanMode(session),
-                compression.available() ? compression.compactionRevision() : null, compression.operationId());
+                compression.available() ? compression.compactionRevision() : null, compression.operationId(),
+                lifecycleOperation);
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
@@ -1396,7 +1494,9 @@ public class ManagedAgentService {
 
     private static WebShellTurn webShellTurn(TurnSummary turn) {
         return new WebShellTurn(turn.turnId(), turn.sessionId(),
-                turn.status().toLowerCase(Locale.ROOT), turn.createdAt(),
+                AgentStateStore.HARNESS_RECOVERY_BLOCKED.equals(turn.errorCode())
+                        && ("RUNNING".equals(turn.status()) || "ACCEPTED".equals(turn.status()))
+                        ? "recovery_blocked" : turn.status().toLowerCase(Locale.ROOT), turn.createdAt(),
                 turn.completedAt(), turn.errorCode());
     }
 
@@ -1575,6 +1675,11 @@ public class ManagedAgentService {
         if (session.workspace() != null && !maySubmitShape(session)) {
             requireLegacyWorkspace(session, actorId);
         }
+    }
+
+    void requireRecoveryOperator(SessionRecord session, String actorId) {
+        requireCancellerRole(session, actorId);
+        requireCancellerShape(session, actorId);
     }
 
     // The tenant-wide command namespace is shared with callers' keys,
@@ -2009,8 +2114,12 @@ public class ManagedAgentService {
     // worked around — plus the control-character rule. A title the API
     // accepts must stay writable through every path.
     private static boolean unicodeBlank(String title) {
-        return title.codePoints().allMatch(character -> Character.isWhitespace(character)
-                || Character.isSpaceChar(character) || character == 0xfeff);
+        return title.codePoints().allMatch(ManagedAgentService::titleWhitespace);
+    }
+
+    private static boolean titleWhitespace(int character) {
+        return Character.isWhitespace(character) || Character.isSpaceChar(character)
+                || character == 0xfeff;
     }
 
     private static String validTitle(String title) {
@@ -2071,13 +2180,46 @@ public class ManagedAgentService {
                 raw.getBytes(StandardCharsets.UTF_8));
     }
 
+    private static String nextSessionCursor(SessionPage page, String archiveState, String titleQuery) {
+        if (!page.hasMore() || page.sessions().isEmpty()) {
+            return null;
+        }
+        SessionRecord last = page.sessions().getLast();
+        String prefix = titleQuery.isEmpty() ? "v2:" + archiveState + ":"
+                : "v3:" + archiveState + ":" + DigestUtils.sha256Hex(titleQuery) + ":";
+        return encodeCursor(prefix + last.createdAt() + ":" + last.sessionId());
+    }
+
+    private static String encodeCursor(String raw) {
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+    }
+
     private static SessionCursor decodeCursor(String cursor) {
+        return decodeCursor(cursor, "all", "");
+    }
+
+    private static SessionCursor decodeCursor(String cursor, String archiveState, String titleQuery) {
         if (StringUtils.isBlank(cursor)) {
             return null;
         }
         try {
             String decoded = new String(Base64.getUrlDecoder().decode(cursor),
                     StandardCharsets.UTF_8);
+            if (!titleQuery.isEmpty()) {
+                String prefix = "v3:" + archiveState + ":" + DigestUtils.sha256Hex(titleQuery) + ":";
+                if (!decoded.startsWith(prefix)) {
+                    throw new IllegalArgumentException();
+                }
+                decoded = decoded.substring(prefix.length());
+            } else if (decoded.startsWith("v2:")) {
+                String prefix = "v2:" + archiveState + ":";
+                if (!decoded.startsWith(prefix)) {
+                    throw new IllegalArgumentException();
+                }
+                decoded = decoded.substring(prefix.length());
+            } else if (!"all".equals(archiveState)) {
+                throw new IllegalArgumentException();
+            }
             int separator = decoded.indexOf(':');
             if (separator <= 0 || separator == decoded.length() - 1) {
                 throw new IllegalArgumentException();

@@ -162,9 +162,14 @@ class ManagedApprovalChangeTest {
             assertCode(() -> change("actor", "blocked-" + state, "yolo", 0), "session_context_busy");
         }
         for (String code : List.of(com.alibaba.qwen.code.managedagent.session.AgentStateStore.RUNTIME_RECOVERY_BLOCKED,
-                com.alibaba.qwen.code.managedagent.session.AgentStateStore.WORKFLOW_RECOVERY_BLOCKED)) {
+                com.alibaba.qwen.code.managedagent.session.AgentStateStore.WORKFLOW_RECOVERY_BLOCKED,
+                com.alibaba.qwen.code.managedagent.session.AgentStateStore.HARNESS_RECOVERY_BLOCKED)) {
             jdbc.update("UPDATE ma_turn SET status='RUNNING', error_code=? WHERE tenant_id=?", code, tenant);
             assertCode(() -> change("actor", "blocked-" + code, "yolo", 0), "session_context_busy");
+            assertThat(jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id=? AND session_id=?",
+                    Long.class, tenant, session)).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id=?"
+                    + " AND operation='SET_APPROVAL'", Integer.class, tenant)).isZero();
         }
     }
 

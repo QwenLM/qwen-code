@@ -326,7 +326,7 @@ async function worker(root, node, bun, expectedHost) {
         run('gzip', ['-1', '-f', uncompressedArchive]);
         sums = `${sha(archive)}  ${filename}\n`;
       };
-      const pack = (source, version = '1.2.3') => {
+      const writePayload = (source, version = '1.2.3') => {
         fs.writeFileSync(
           path.join(payload, 'manifest.json'),
           JSON.stringify({
@@ -337,6 +337,9 @@ async function worker(root, node, bun, expectedHost) {
           }),
         );
         fs.writeFileSync(cli, source);
+      };
+      const pack = (source, version) => {
+        writePayload(source, version);
         packArchive();
       };
       pack(
@@ -490,12 +493,15 @@ async function worker(root, node, bun, expectedHost) {
       }
       delete process.env.NODE_OPTIONS;
       delete process.env.BUN_OPTIONS;
-      for (const mode of ['direct', 'prepared']) {
-        for (const actualVersion of ['0.0.9', '9.9.9']) {
+      // Both update paths consume the same archive. Build each payload once;
+      // repeatedly compressing real runtime binaries can exhaust CI's budget.
+      for (const actualVersion of ['0.0.9', '9.9.9']) {
+        phase = `${runtime}/mismatch/${actualVersion}`;
+        pack(
+          `if(process.env.QWEN_UPDATE_TEST_ENV!=='preserved')process.exit(19);console.log(${JSON.stringify(actualVersion)});`,
+        );
+        for (const mode of ['direct', 'prepared']) {
           phase = `${runtime}/${mode}/mismatch/${actualVersion}`;
-          pack(
-            `if(process.env.QWEN_UPDATE_TEST_ENV!=='preserved')process.exit(19);console.log(${JSON.stringify(actualVersion)});`,
-          );
           const dir = path.join(root, `${runtime}-${mode}-${actualVersion}`);
           const live = installFixture(dir, {
             version: '1.0.0',
@@ -535,12 +541,15 @@ async function worker(root, node, bun, expectedHost) {
             }),
           );
         }
-        for (const [requested, manifest, actual] of [
-          ['v1.2.3', '1.2.3', 'v1.2.3'],
-          ['1.2.3-rc.1', '1.2.3-rc.1', 'v1.2.3-rc.1'],
-        ]) {
+      }
+      for (const [requested, manifest, actual] of [
+        ['v1.2.3', '1.2.3', 'v1.2.3'],
+        ['1.2.3-rc.1', '1.2.3-rc.1', 'v1.2.3-rc.1'],
+      ]) {
+        phase = `${runtime}/normalized/${requested}`;
+        pack(`console.log(${JSON.stringify(actual)});`, manifest);
+        for (const mode of ['direct', 'prepared']) {
           phase = `${runtime}/${mode}/normalized/${requested}`;
-          pack(`console.log(${JSON.stringify(actual)});`, manifest);
           const dir = path.join(root, `${runtime}-${mode}-${requested}`);
           const live = installFixture(dir, {
             version: '1.0.0',
@@ -595,22 +604,23 @@ async function worker(root, node, bun, expectedHost) {
         'utf8',
       );
       fs.writeFileSync(launcher, wrapper);
-      for (const mode of ['direct', 'prepared']) {
-        for (const actualVersion of ['1.2.3', '0.0.9', '9.9.9']) {
+      for (const actualVersion of ['1.2.3', '0.0.9', '9.9.9']) {
+        phase = `${runtime}/ambient/${actualVersion}`;
+        const ambientVersion = actualVersion === '1.2.3' ? '9.9.9' : '1.2.3';
+        fs.writeFileSync(
+          path.join(payload, 'lib/package.json'),
+          JSON.stringify({
+            name: '@qwen-code/qwen-code',
+            type: 'module',
+            version: actualVersion,
+          }),
+        );
+        pack(
+          `console.log(process.env.CLI_VERSION || ${JSON.stringify(actualVersion)});`,
+        );
+        for (const mode of ['direct', 'prepared']) {
           phase = `${runtime}/${mode}/ambient/${actualVersion}`;
           const legStarted = performance.now();
-          const ambientVersion = actualVersion === '1.2.3' ? '9.9.9' : '1.2.3';
-          fs.writeFileSync(
-            path.join(payload, 'lib/package.json'),
-            JSON.stringify({
-              name: '@qwen-code/qwen-code',
-              type: 'module',
-              version: actualVersion,
-            }),
-          );
-          pack(
-            `console.log(process.env.CLI_VERSION || ${JSON.stringify(actualVersion)});`,
-          );
           const controlEnv = { ...process.env };
           for (const key of Object.keys(controlEnv))
             if (
@@ -737,28 +747,27 @@ async function worker(root, node, bun, expectedHost) {
           );
         }
       }
-      for (const mode of ['direct', 'prepared']) {
-        for (const state of ['missing', 'syntax-error', 'launcher-error']) {
+      for (const state of ['missing', 'syntax-error', 'launcher-error']) {
+        phase = `${runtime}/${state}`;
+        fs.writeFileSync(launcher, wrapper);
+        fs.writeFileSync(
+          path.join(payload, 'lib/package.json'),
+          JSON.stringify({ type: 'module', version: '1.2.3' }),
+        );
+        writePayload(
+          state === 'launcher-error'
+            ? 'console.log("1.2.3");'
+            : 'export const invalid = ;',
+        );
+        if (state === 'launcher-error') {
+          fs.writeFileSync(launcher, 'export const invalid = ;');
+        }
+        if (state === 'missing') {
+          fs.rmSync(cli);
+        }
+        packArchive();
+        for (const mode of ['direct', 'prepared']) {
           phase = `${runtime}/${mode}/${state}`;
-          fs.writeFileSync(launcher, wrapper);
-          fs.writeFileSync(
-            path.join(payload, 'lib/package.json'),
-            JSON.stringify({ type: 'module', version: '1.2.3' }),
-          );
-          pack(
-            state === 'launcher-error'
-              ? 'console.log("1.2.3");'
-              : 'export const invalid = ;',
-          );
-          if (state === 'launcher-error') {
-            fs.writeFileSync(launcher, 'export const invalid = ;');
-          }
-          if (state === 'missing') {
-            fs.rmSync(cli);
-          }
-          if (state !== 'syntax-error') {
-            packArchive();
-          }
           if (state !== 'launcher-error')
             assert.equal(
               run(binaries[runtime], [launcher, '--version']),
