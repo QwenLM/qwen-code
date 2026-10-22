@@ -48,16 +48,16 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
 按 run 的公开 `TASK_CANCEL` 只能停止目标 occurrence。矩阵断言：
 
 - 被取消的 run 依据其已提交的证明进入 `cancelled`，occurrence 恰好结算一次；
-- schedule、未来 slot、兄弟 run 与前台工作不受影响——兄弟 run 已交付：扣住的 run
-  被取消后，下一次手动 fire 被准入并跑到 `completed`，schedule 保持 `live`，两个 key
-  各保留自己的 Turn（`fg11dSiblingRunSurvivesACancelOnMySql`）。排定的未来 slot 与
-  前台 Turn 不在该格覆盖范围内；
-- 在任何尝试之前被取消的排队 input 结算且不调用模型——两条公开点火路径都不会在
-  开启的 Turn 之后形成排队 run，因此那一支没有可执行的对象：当 Session 正在跑本
-  定义的 Turn 时，第二次手动 fire 被 `409 automation_run_skipped`（`The manual run
-was skipped: overlap.`）拒绝，该决定以 `skipped`/`overlap`、attempts 为 0 落库，
-  其后不提交 run、也不起 Turn——已交付：
-  `fg11dSecondFireIsRefusedWhileTheFirstRunsOnMySql`；
+- schedule、未来 slot、兄弟 run 与前台工作不受影响；
+- 在任何尝试之前被取消的排队 input 结算且不调用模型——**仍未结清**。公开面上确实
+  会形成队列：在 `queue_one` overlap 策略下（以及 `allow` 在并发额度未满时），准入
+  会放行第一次 run 仍活跃时的第二次手动 fire，因为 `hasOpenTurn` 只读公开的
+  `ma_turn` 行，而自动化 wake turn 记在 journal 侧；`countRefusal` 对 `queue_one`
+  在一个活跃 run 时即放行。第二个 run 会提交，其 input 停在 journal 里——正是「在任何
+  尝试前取消、且不调用模型地结算」要处理的对象。目前没有格子覆盖它。
+  `fg11dSecondFireIsRefusedWhileTheFirstRunsOnMySql` 钉的范围更窄：在默认 `skip`
+  策略下，一个活跃 run 时的第二次 fire 被 `409 automation_run_skipped` 拒绝，记
+  `skipped`/`overlap`，其后不提交 run——钉的是这次拒绝，不是那条准入臂；
 - 自然完成的 run 保留其结果——已交付：结算之后到达的取消被
   `409 task_action_unavailable`（`The task does not accept a cancellation now.`）
   拒绝，run 保持 `completed`、occurrence 保持 `fired`；
@@ -93,14 +93,14 @@ was skipped: overlap.`）拒绝，该决定以 `skipped`/`overlap`、attempts �
   状态目录、`verified-workspace-recovery-enabled`，以及存储 guard 的注册——第三件才让
   注册在 guard 不自启用的宿主上生效。四者齐备后关闭会完成，下一个 slot 记
   `skipped`/`session_not_active`。turn 在飞时的关闭请求被 `409 turn_active` 拒绝，
-  这正是排队输入那一支的边界：队列的命运由 turn 决定，从不由关闭决定。
-- 排队输入那一支的边界在准入，而不在某条取消路径：Session 正在跑本定义的 Turn 时，
-  第二次手动 fire 被 `409 automation_run_skipped` + `overlap` 拒绝，并以
-  `skipped`/`overlap`、attempts 为 0 落库，不提交 run。两处准入判断都回答
-  `overlap`——开启的 Turn 与定义自身的 overlap 策略——因此
-  `fg11dSecondFireIsRefusedWhileTheFirstRunsOnMySql` 钉的是这个回答，而不是它出自
-  哪一处。与另一个 turn 在同一瞬间被准入的 fire 属本车道不钉的竞态；只有这种 fire
-  才会留下队列，也才是该支唯一可被执行的形态。
+  因此关闭从不会决定排队输入的命运：那个队列由 turn 决定，不由关闭决定。
+- 排队输入那一支是可达的，因此本车道把它留作未结清，而不是用一次拒绝把它关掉。
+  `fg11dSecondFireIsRefusedWhileTheFirstRunsOnMySql` 跑在默认 `skip` 策略下，此时
+  `countRefusal` 在一个活跃 run 时即拒绝：它钉的是这次拒绝，不是 open-Turn 臂——
+  这里 `hasOpenTurn` 根本走不到（`ma_turn` 只存公开 turn，本格唯一的公开 turn 是
+  `createSession` 完成的预热 turn）。在 `queue_one` 下同一次 fire 会被准入，队列
+  §确定形成——不需要竞态——这正是上面那条 criterion 仍未结清的原因。所有准入臂
+  都回答同一个理由 `overlap`，因此任何基于拒绝正文的断言都分辨不出是哪一条臂。
 - task cancel 需要投影的任务 id，而不是 run 记录 id：传 `arun_…` 会得到
   `task_not_found`，而 `GET /v1/agents/sessions/{id}/tasks` 返回的 id 会被
   接受。把 wake turn 一直扣在模型上时，取消会赢：task 与 run 都在一秒内结算为

@@ -811,9 +811,11 @@ jobs:
     # registration-settle ack-loss cell adds 150 s, moving the fork to
     # 11133 s and Verify to 196 minutes; the FG11e stream cells add 42 s,
     # moving the fork to 11175 s and Verify to 197 minutes; the FG11d
-    # cancel-retry cell adds 12 s, moving the fork to 11187 s and leaving
-    # Verify at 197 minutes, wrapping fork + 600 s plus margin (11787 s of
-    # fork plus wrap);
+    # cancel-retry cell adds 12 s, moving the fork to 11187 s; the FG11d
+    # second-fire refusal cell adds 25 s, moving the fork to 11212 s; the FG11d
+    # cancel-isolation cell adds 11 s, moving the fork to 11223 s and raising
+    # Verify to 198 minutes, wrapping fork + 600 s plus margin (11823 s of fork
+    # plus wrap, 0 s left: the next cell must raise the step);
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report

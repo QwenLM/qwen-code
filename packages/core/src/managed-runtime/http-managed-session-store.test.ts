@@ -1023,10 +1023,11 @@ describe('HTTP Managed Session store', () => {
     session: Awaited<ReturnType<typeof openManagedSession>>,
     index: number,
     contentRef: ManagedSessionDurableRef,
+    operation = 'message.commit',
   ): Promise<void> {
     await session.authority.appendExecutionEvent(
       {
-        operation: 'message.commit',
+        operation,
         commandId: `m-${index}`,
         sessionKey: SESSION_KEY,
         contentDigest: 'e'.repeat(64),
@@ -3672,11 +3673,13 @@ describe('HTTP Managed Session store', () => {
   // A claim fenced refusal reaches an ordinary write that was sent before
   // the Harness set the lifecycle claim; it is a non-commit either way.
   it.each([
-    'workspace_lifecycle_admission_closed',
-    'workspace_lifecycle_claim_fenced',
+    ['workspace_lifecycle_admission_closed', 'message.commit'],
+    ['workspace_lifecycle_claim_fenced', 'message.commit'],
+    ['context_compression_authorization_revoked', 'contextCompression'],
+    ['workspace_unavailable', 'contextCompression'],
   ])(
-    'keeps writer renewal after a rollbackable %s append rejection',
-    async (code) => {
+    'keeps writer renewal after a rollbackable %s append rejection (%s)',
+    async (code, operation) => {
       vi.useFakeTimers({ now: 1_790_000_000_000 });
       const server = new FakeManagedSessionStore();
       const { stores, session } = await bootStoresAndSession(server);
@@ -3688,7 +3691,7 @@ describe('HTTP Managed Session store', () => {
             string,
             unknown
           >;
-          if (body['operation'] === 'message.commit' && !refused) {
+          if (body['operation'] === operation && !refused) {
             refused = true;
             return jsonResponse(
               {
@@ -3708,18 +3711,16 @@ describe('HTTP Managed Session store', () => {
           'managed-message',
           MESSAGE_BODY,
         );
-        await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
-          ManagedSessionCommitRejectedError,
-        );
+        await expect(
+          appendMessage(session, 1, messageRef, operation),
+        ).rejects.toThrow(ManagedSessionCommitRejectedError);
         expect(session.authority.writesStopped).toBe(false);
         await vi.advanceTimersByTimeAsync(30_000);
         expect(server.renewCount).toBe(1);
-        await appendMessage(session, 2, messageRef);
+        await appendMessage(session, 2, messageRef, operation);
         expect(session.authority.writesStopped).toBe(false);
         expect(
-          server.commits.filter(
-            (commit) => commit['operation'] === 'message.commit',
-          ),
+          server.commits.filter((commit) => commit['operation'] === operation),
         ).toHaveLength(1);
         expect(
           server.fetch.mock.calls.filter(([input]) =>

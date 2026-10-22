@@ -1840,8 +1840,13 @@ class HostedAutomationFaultGatesIT {
                 definition(session, "FG11A_HOLD", "0 0 1 1 *"), "fg11d-second-base", 202).path("id").asText();
         String run = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-second-first", 202)
                 .path("id").asText();
-        // The parked model is the proof that the first turn is open: admission
-        // reads the Session's turn, so the refusal below needs it to exist.
+        // The parked model keeps the first run non-terminal, so countActive still
+        // sees it. The refusal below is answered by the definition's default
+        // `skip` policy at one active run (AutomationScanner's count arm), not by
+        // the open-Turn arm: that arm reads public `ma_turn` rows, and none is
+        // open here — createSession's warm turn has already completed. Every
+        // admission arm answers the same reason, so this cell cannot tell them
+        // apart, and it does not pin the open-Turn guard.
         waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
                 .anyMatch(prompt -> prompt.contains("manual:fg11d-second-first")));
         HttpResponse<String> refused = send("POST", "/v1/agent-automations/" + id + "/runs", null,
