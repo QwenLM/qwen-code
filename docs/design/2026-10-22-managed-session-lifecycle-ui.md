@@ -20,6 +20,8 @@ WebShell lifecycle capabilities include current actor authority. A batched optio
 
 The browser persists frozen per-Session intents in the provider identity scope before submission. HTTP 202 is admission, not completion. Lost responses replay the same key. Pending/running operations are polled; recovery-blocked operations wait for reconciliation. Only an explicit retry after a failed operation gets a new key. Close-and-archive retains both keys and its current stage across refresh. If archive fails after close, report the closed state and unfinished archive. A definitively refused archive without an admitted operation restores that failure after refresh and waits for explicit retry; it must not automatically submit again. Selection changes do not discard operations; identity changes abort old requests.
 
+Original-Turn recovery evidence is independent of Session lifecycle. A single-Session response retains both `recovery` and an unsettled `lifecycleOperation`; adding recovery evidence must not erase the operation identity needed after refresh. Native readiness cannot override a closed or archived Session's send capability. Recovery rechecks do not confirm lifecycle completion or reopen a Session. The combined contract is 1.83.0, following recovery's 1.82.0.
+
 ## Reading exports
 
 Add read-authorized `POST /api/agent/web-shell/v1/sessions/export/query`, adapting existing immutable snapshot pages into WebShell items. Capture the Session watermark and wait up to 30 seconds for a published snapshot to cover it, then use only that snapshot's cursors. Cursor expiry, changed watermark or failed reads abort the export. Never merge different snapshots or silently omit the tail.

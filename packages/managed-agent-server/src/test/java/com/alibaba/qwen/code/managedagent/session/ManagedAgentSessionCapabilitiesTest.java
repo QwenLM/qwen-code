@@ -1,6 +1,9 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecovery;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecoveryActions;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleOperation;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
@@ -13,6 +16,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.springframework.beans.factory.support.StaticListableBeanFactory;
 
 import java.util.HashSet;
 import java.util.List;
@@ -29,6 +33,31 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class ManagedAgentSessionCapabilitiesTest {
+    @Test
+    void recoveryProjectionKeepsAnUnsettledLifecycleOperationOnSingleSessionReads() {
+        var store = mock(AgentStateStore.class);
+        var service = new ManagedAgentService(store, new RequestDigests(),
+                mock(HarnessCoordinator.class), mock(HarnessConnector.class), mock(ManagedWorkspaceRegistry.class));
+        var session = new SessionRecord("tenant", "session", "qwen-code", "title", "CLOSING",
+                null, null, 0, 0, 1, 1, null, 1);
+        var operation = new WebShellLifecycleOperation("op-close", "close", "running", null);
+        var recovery = new SessionRecovery("operator_required", "session_not_active", null, false,
+                new SessionRecoveryActions(false, false, false), null);
+        var recoveries = mock(SessionRecoveryService.class);
+        var services = new StaticListableBeanFactory(Map.of("recovery", recoveries));
+        service.setRecoveryServices(services.getBeanProvider(SessionRecoveryService.class));
+        when(store.requireSession("tenant", "session")).thenReturn(session);
+        when(store.findLatestLifecycleOperations("tenant", List.of("session")))
+                .thenReturn(Map.of("session", operation));
+        when(recoveries.projection(session, "actor")).thenReturn(recovery);
+
+        var view = service.getWebShellSession("tenant", "actor", "session");
+
+        assertThat(view.lifecycleOperation()).isEqualTo(operation);
+        assertThat(view.recovery()).isEqualTo(recovery);
+        assertThat(view.capabilities().workspaceTurns()).isFalse();
+    }
+
     @Test
     void mixedPageDoesNotGrantApprovalSelectionToAnUnsupportedProfile() {
         var store = mock(AgentStateStore.class);

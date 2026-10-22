@@ -118,6 +118,7 @@ public class ManagedAgentService {
     private final HarnessConnector harness;
     private RuntimeWarmer runtimeWarmer;
     private JavaDurableAdmission javaDurableAdmission;
+    private org.springframework.beans.factory.ObjectProvider<SessionRecoveryService> recoveryServices;
     private ManagedAgentProperties.Dispatch renameDispatch = new ManagedAgentProperties.Dispatch();
     private Clock renameClock = Clock.systemUTC();
 
@@ -138,6 +139,11 @@ public class ManagedAgentService {
     @Autowired(required = false)
     void setJavaDurableAdmission(JavaDurableAdmission javaDurableAdmission) {
         this.javaDurableAdmission = javaDurableAdmission;
+    }
+
+    @Autowired
+    void setRecoveryServices(org.springframework.beans.factory.ObjectProvider<SessionRecoveryService> recoveryServices) {
+        this.recoveryServices = recoveryServices;
     }
 
     private boolean supportsClose(SessionRecord session) {
@@ -926,14 +932,18 @@ public class ManagedAgentService {
 
     public PublicSession getPublicSession(String tenantId, String actorId,
             String sessionId) {
-        return publicSession(requireReadableSession(tenantId, actorId,
-                sessionId));
+        SessionRecord session = requireReadableSession(tenantId, actorId, sessionId);
+        var recovery = recoveryServices == null ? null : recoveryServices.getIfAvailable();
+        return publicSession(session).withRecovery(recovery == null
+                ? null : recovery.projection(session, actorId));
     }
 
     public WebShellSession getWebShellSession(String tenantId, String actorId,
             String sessionId) {
-        return webShellSession(requireReadableSession(tenantId, actorId,
-                sessionId), actorId);
+        SessionRecord session = requireReadableSession(tenantId, actorId, sessionId);
+        var recovery = recoveryServices == null ? null : recoveryServices.getIfAvailable();
+        return webShellSession(session, actorId).withRecovery(recovery == null
+                ? null : recovery.projection(session, actorId));
     }
 
     public PublicList<PublicSession> listPublicSessions(String tenantId,
@@ -1348,7 +1358,7 @@ public class ManagedAgentService {
                 approvalSelection != null && approvalSelection.planMode(), visible && approvalSupported
                         && mayChangeCwd && harness.supportsPlanMode() && store.supportsPlanMode(session),
                 compression.available() ? compression.compactionRevision() : null, compression.operationId(),
-                lifecycleOperation);
+                lifecycleOperation, null);
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
@@ -1601,6 +1611,11 @@ public class ManagedAgentService {
         if (session.workspace() != null && !maySubmitShape(session)) {
             requireLegacyWorkspace(session, actorId);
         }
+    }
+
+    void requireRecoveryOperator(SessionRecord session, String actorId) {
+        requireCancellerRole(session, actorId);
+        requireCancellerShape(session, actorId);
     }
 
     // The tenant-wide command namespace is shared with callers' keys,

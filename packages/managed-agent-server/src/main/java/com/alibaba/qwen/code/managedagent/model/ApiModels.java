@@ -193,7 +193,8 @@ public final class ApiModels {
             SessionCapabilities capabilities,
             @JsonProperty("workspace") PublicWorkspace workspace,
             @JsonProperty("compaction_revision") Long compactionRevision,
-            @JsonProperty("context_compression_operation_id") String contextCompressionOperationId) {
+            @JsonProperty("context_compression_operation_id") String contextCompressionOperationId,
+            SessionRecovery recovery) {
         public PublicSession(String id, String object, String agentId, String agentRevision,
                 String agentDefinitionDigest, String status, long createdAt, long updatedAt,
                 Map<String, Object> metadata, PublicTurn activeTurn, long lastEventId,
@@ -201,8 +202,50 @@ public final class ApiModels {
                 PublicWorkspace workspace) {
             this(id, object, agentId, agentRevision, agentDefinitionDigest, status, createdAt, updatedAt,
                     metadata, activeTurn, lastEventId, replayFloorSequence, snapshotThroughSequence,
-                    capabilities, workspace, 0L, null);
+                    capabilities, workspace, 0L, null, null);
         }
+
+        public PublicSession(String id, String object, String agentId,
+                String agentRevision, String agentDefinitionDigest,
+                String status, long createdAt, long updatedAt,
+                Map<String, Object> metadata, PublicTurn activeTurn,
+                long lastEventId, long replayFloorSequence,
+                long snapshotThroughSequence, SessionCapabilities capabilities,
+                PublicWorkspace workspace, Long compactionRevision,
+                String contextCompressionOperationId) {
+            this(id, object, agentId, agentRevision, agentDefinitionDigest,
+                    status, createdAt, updatedAt, metadata, activeTurn,
+                    lastEventId, replayFloorSequence, snapshotThroughSequence,
+                    capabilities, workspace, compactionRevision,
+                    contextCompressionOperationId, null);
+        }
+
+        public PublicSession withRecovery(SessionRecovery value) {
+            return new PublicSession(id, object, agentId, agentRevision,
+                    agentDefinitionDigest, status, createdAt, updatedAt,
+                    metadata, activeTurn, lastEventId, replayFloorSequence,
+                    snapshotThroughSequence, capabilities, workspace,
+                    compactionRevision, contextCompressionOperationId, value);
+        }
+    }
+
+    public record SessionRecoveryActions(boolean recheck, boolean cancel,
+            boolean continueInNewSession) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record SessionRecovery(String state, String reasonCode,
+            String turnId, boolean nextTurnAllowed,
+            SessionRecoveryActions actions, Long nextRecheckAt) {
+    }
+
+    public record RecoveryRecheckRequest(@NotBlank @Size(max = 128)
+            String turnId) {
+    }
+
+    public record WebShellRecoveryRecheckRequest(
+            @NotBlank @Size(max = 128) String sessionId,
+            @NotBlank @Size(max = 128) String turnId) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -556,7 +599,7 @@ public final class ApiModels {
             WebShellModelContext modelContext, WebShellModelSelection modelSelection,
             Long approvalRevision, String initialApprovalMode, boolean planMode, boolean planModeSupported,
             Long compactionRevision, String contextCompressionOperationId,
-            WebShellLifecycleOperation lifecycleOperation) {
+            WebShellLifecycleOperation lifecycleOperation, SessionRecovery recovery) {
         public WebShellSession(String sessionId, String title, String agentId, String status,
                 long createdAt, long updatedAt, WebShellTurn activeTurn, Object environment,
                 long lastSequence, WebShellWorkspace workspace, WebShellSessionCapabilities capabilities,
@@ -564,7 +607,31 @@ public final class ApiModels {
                 Long approvalRevision, String initialApprovalMode, boolean planMode, boolean planModeSupported) {
             this(sessionId, title, agentId, status, createdAt, updatedAt, activeTurn, environment, lastSequence,
                     workspace, capabilities, approvalMode, modelContext, modelSelection, approvalRevision,
-                    initialApprovalMode, planMode, planModeSupported, 0L, null, null);
+                    initialApprovalMode, planMode, planModeSupported, 0L, null, null, null);
+        }
+
+        public WebShellSession(String sessionId, String title, String agentId,
+                String status, long createdAt, long updatedAt,
+                WebShellTurn activeTurn, Object environment, long lastSequence,
+                WebShellWorkspace workspace, WebShellSessionCapabilities capabilities,
+                String approvalMode, WebShellModelContext modelContext,
+                WebShellModelSelection modelSelection, Long approvalRevision,
+                String initialApprovalMode, boolean planMode, boolean planModeSupported,
+                Long compactionRevision, String contextCompressionOperationId) {
+            this(sessionId, title, agentId, status, createdAt, updatedAt,
+                    activeTurn, environment, lastSequence, workspace, capabilities,
+                    approvalMode, modelContext, modelSelection, approvalRevision,
+                    initialApprovalMode, planMode, planModeSupported, compactionRevision,
+                    contextCompressionOperationId, null, null);
+        }
+
+        public WebShellSession withRecovery(SessionRecovery value) {
+            return new WebShellSession(sessionId, title, agentId, status,
+                    createdAt, updatedAt, activeTurn, environment, lastSequence,
+                    workspace, capabilities, approvalMode, modelContext,
+                    modelSelection, approvalRevision, initialApprovalMode,
+                    planMode, planModeSupported, compactionRevision, contextCompressionOperationId,
+                    lifecycleOperation, value);
         }
     }
 
