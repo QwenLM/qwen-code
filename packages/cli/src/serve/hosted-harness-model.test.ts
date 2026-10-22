@@ -6,6 +6,7 @@
 
 import {
   LlmEventType,
+  CompressionStatus,
   Turn,
   type ToolCallRequestInfo,
 } from '@qwen-code/qwen-code-core/core/turn.js';
@@ -558,6 +559,146 @@ describe('Hosted Harness model boundary', () => {
     expect(history[1]!.message!.parts).toEqual(thoughtOnly);
     expect(history[3]!.message!.parts).toEqual(visible);
   });
+
+  it('restores the compressed snapshot and excludes a cancelled prompt embedded in its raw tail', async () => {
+    const model = config([{ type: LlmEventType.Finished }]);
+    const history: ChatRecord[] = [
+      {
+        uuid: 'compaction',
+        parentUuid: null,
+        sessionId: input.sessionId,
+        timestamp: '2026-10-22T00:00:00.000Z',
+        cwd: input.cwd,
+        version: 'test',
+        type: 'system',
+        subtype: 'chat_compression',
+        systemPayload: {
+          info: {
+            compressionStatus: CompressionStatus.COMPRESSED,
+            originalTokenCount: 100,
+            newTokenCount: 10,
+          },
+          compressedHistory: [
+            { role: 'user', parts: [{ text: 'compressed summary' }] },
+            { role: 'model', parts: [{ text: 'Understood.' }] },
+            { role: 'user', parts: [{ text: 'cancelled secret' }] },
+            { role: 'model', parts: [{ text: 'partial answer' }] },
+          ],
+          promptIds: [null, null, 'cancelled-prompt', null],
+          summaryPrefixLength: 2,
+        },
+      },
+    ];
+    await runHostedHarnessTextTurn({
+      ...input,
+      history,
+      excludedPromptIds: new Set(['cancelled-prompt']),
+    });
+    const restored = model.setHistory.mock.calls[0]![0] as Content[];
+    expect(restored[0]?.parts).toEqual([{ text: 'compressed summary' }]);
+    expect(JSON.stringify(restored)).not.toContain('cancelled secret');
+  });
+
+  it.each([false, true])(
+    'preserves compression around a recovered tool round without duplicating its pending response (current snapshot=%s)',
+    async (currentSnapshot) => {
+      const model = config([{ type: LlmEventType.Finished }]);
+      state.config['getEffectiveInputModalities'] = () => ({ image: true });
+      const response: Part = {
+        functionResponse: {
+          id: 'current-call',
+          name: 'read_file',
+          response: {},
+        },
+      };
+      const prefix: Content[] = [
+        { role: 'user', parts: [{ text: 'compressed summary' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'Understood.' },
+            { functionCall: { id: 'old-call', name: 'read_file' } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'old-call',
+                name: 'read_file',
+                response: {},
+              },
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'prior round completed' }] },
+      ];
+      const envelope = {
+        parentUuid: null,
+        sessionId: input.sessionId,
+        timestamp: '2026-10-22T00:00:00.000Z',
+        cwd: input.cwd,
+        version: 'test',
+      };
+      const call: ChatRecord = {
+        ...envelope,
+        uuid: 'call',
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            { text: 'current tool round' },
+            { functionCall: { id: 'current-call', name: 'read_file' } },
+          ],
+        },
+      };
+      if (currentSnapshot) prefix.push(call.message!);
+      const snapshot: ChatRecord = {
+        ...envelope,
+        uuid: 'snapshot',
+        type: 'system',
+        subtype: 'chat_compression',
+        systemPayload: {
+          info: {
+            compressionStatus: CompressionStatus.COMPRESSED,
+            originalTokenCount: 100,
+            newTokenCount: 10,
+          },
+          compressedHistory: currentSnapshot
+            ? [
+                ...prefix,
+                {
+                  role: 'user',
+                  parts: [
+                    response,
+                    { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+                  ],
+                },
+              ]
+            : prefix,
+          summaryPrefixLength: prefix.length,
+          completedToolCallIds: ['old-call'],
+        },
+      };
+      const history = currentSnapshot ? [call, snapshot] : [snapshot, call];
+      const original = structuredClone(history);
+      await runHostedHarnessTextTurn({
+        ...input,
+        history,
+        resumeFromToolResults: [response],
+      });
+      const restored = model.setHistory.mock.calls[0]![0] as Content[];
+      expect(restored).toEqual(
+        currentSnapshot ? prefix : [...prefix, call.message],
+      );
+      expect(JSON.stringify(restored)).not.toContain(
+        '"functionResponse":{"id":"current-call"',
+      );
+      expect(model.requests[0]).toEqual([response]);
+      expect(history).toEqual(original);
+    },
+  );
 
   it.each([
     { history: [] },

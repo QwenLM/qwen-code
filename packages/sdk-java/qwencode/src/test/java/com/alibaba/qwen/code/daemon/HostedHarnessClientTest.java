@@ -9097,6 +9097,58 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void contextCompressionUsesItsOwnOperationRoutesWithoutPromptAdmission() {
+        server.createContext("/session", exchange -> sendSessionJson(exchange, 200, sessionJson()));
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                "\"hostedHarness\":{\"features\":[\"context-compression/1\"],"));
+        AtomicReference<String> sent = new AtomicReference<>();
+        AtomicInteger prompts = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/prompt", exchange -> {
+            prompts.incrementAndGet();
+            sendSessionJson(exchange, 500, "{}");
+        });
+        server.createContext("/session/" + SESSION_ID + "/context/compress", exchange -> {
+            sent.set(readBody(exchange));
+            sendSessionJson(exchange, 202, "{\"operationId\":\"op_context\",\"status\":\"running\"}");
+        });
+        server.createContext("/session/" + SESSION_ID + "/context/compressions/op_context", exchange ->
+                sendSessionJson(exchange, 200,
+                        "{\"operationId\":\"op_context\",\"status\":\"completed\",\"outcome\":\"compressed\",\"compactionRevision\":42}"));
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertEquals("running", client.compressContext(session,
+                    Map.of("operationId", "op_context", "expectedCompactionRevision", 0)).get("status"));
+            assertTrue(sent.get().contains("\"expectedCompactionRevision\":0"));
+            assertEquals("compressed", client.readContextCompression(session, "op_context").get("outcome"));
+            assertEquals(0, prompts.get());
+        }
+    }
+
+    @Test
+    void contextCompressionRejectsOldHarnessesBeforeSending() {
+        server.createContext("/session", exchange -> sendSessionJson(exchange, 200, sessionJson()));
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(DaemonProtocolException.class, () -> client.compressContext(session,
+                    Map.of("operationId", "op_context", "expectedCompactionRevision", 0)));
+        }
+    }
+
+    @Test
+    void contextCompressionTreatsAnInvalidSuccessReplyAsUnknownAcceptance() {
+        server.createContext("/session", exchange -> sendSessionJson(exchange, 200, sessionJson()));
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                "\"hostedHarness\":{\"features\":[\"context-compression/1\"],"));
+        server.createContext("/session/" + SESSION_ID + "/context/compress", exchange ->
+                sendSessionJson(exchange, 202, "{\"operationId\":\"other\",\"status\":\"completed\"}"));
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(MutationOutcomeUnknownException.class, () -> client.compressContext(session,
+                    Map.of("operationId", "op_context", "expectedCompactionRevision", 0)));
+        }
+    }
+
+    @Test
     void modelSelectionIsOptionalNegotiatedAndPartOfActivePromptIdentity() {
         server.createContext("/session", exchange -> sendSessionJson(exchange, 200, sessionJson()));
         capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
