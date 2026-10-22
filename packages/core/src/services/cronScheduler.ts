@@ -1596,7 +1596,13 @@ export class CronScheduler {
             ? t
             : {
                 ...t,
-                ...(status ? { gateStatus: status } : {}),
+                // Only onto the command that produced it: a PATCH that
+                // replaced the gate (and dropped its status) before this
+                // session reloaded the task must not inherit the old
+                // command's streak. The run itself still happened.
+                ...(status && t.gate === job.gate
+                  ? { gateStatus: status }
+                  : {}),
                 ...(run
                   ? {
                       runs: appendCronRun(t.runs, {

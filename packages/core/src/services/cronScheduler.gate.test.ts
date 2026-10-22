@@ -533,6 +533,46 @@ describe('CronScheduler gate', () => {
       expect(approved('swapped')).toBe(true);
     });
 
+    it('keeps a late result of the replaced command off the new gate', async () => {
+      // The old command settles after the PATCH rewrote the file and before
+      // the watcher reloads the task: its status must not land on the new
+      // gate, or the new command's first failure is counted silently.
+      const job = await scheduler.createDurable(
+        '* * * * *',
+        'p',
+        true,
+        './old.sh',
+      );
+      job.gateApproved = true;
+      await scheduler.enableDurable('session-1');
+      scheduler.start((j) => fired.push(j));
+      scheduler.tick(at(10, 30, 59)); // ./old.sh starts and stays running
+      await updateCronTasks(tmpDir, (tasks) =>
+        tasks.map(({ gateStatus: _dropped, ...t }) =>
+          withTaskGate(t, './new.sh'),
+        ),
+      );
+      await script.release(failed); // the old command's late failure
+      expect(fired).toHaveLength(1);
+      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+      let [task] = await readCronTasks(tmpDir);
+      expect(task?.gate).toBe('./new.sh');
+      expect(task?.gateStatus).toBeUndefined();
+      // The fire still happened and keeps its run record.
+      expect(task?.runs).toEqual([expect.objectContaining({ gate: 'failed' })]);
+
+      await reload();
+      scheduler.tick(at(10, 31, 59));
+      await script.release(failed); // the new command's first failure
+      expect(fired).toHaveLength(2);
+      expect(fired[1]!.prompt).toContain('./new.sh');
+      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+      [task] = await readCronTasks(tmpDir);
+      expect(task?.gateStatus?.consecutiveFailures).toBe(1);
+    });
+
     it('starts a fresh failure streak when the gate is replaced on disk', async () => {
       // The daemon's PATCH swaps the command and drops the file's status; the
       // running session must not carry the old command's streak over, or the
