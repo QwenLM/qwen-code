@@ -1666,8 +1666,8 @@ class HostedAutomationFaultGatesIT {
     }
 
     // failing-gate: a probe that exits 1 withholds every slot as gate_failed,
-    // carries its exit in last_error, grows the definition's failure streak,
-    // and never commits a run.
+    // carries its exit and its stderr tail in last_error, grows the
+    // definition's failure streak, and never commits a run.
     private Clocked gateFailing() throws Exception {
         String session = createShellSession("gate-failing");
         String gate = gateScript("fg11g-failing", "echo nope >&2; exit 1");
@@ -1678,7 +1678,7 @@ class HostedAutomationFaultGatesIT {
             List<Map<String, Object>> rows = decidedSlots(id);
             assertThat(rows).allSatisfy(row -> assertThat(row)
                     .containsEntry("outcome", "skipped").containsEntry("reason", "gate_failed")
-                    .containsEntry("last_error", "exited with code 1"));
+                    .containsEntry("last_error", "exited with code 1; stderr: nope"));
             assertThat(executions("fg11g-failing")).isEqualTo(rows.size());
             assertThat(jdbc.queryForList("SELECT record_id FROM ma_session_record WHERE tenant_id = ?"
                     + " AND session_id = ? AND domain = 'automation_run'", String.class, tenant, session))
@@ -1688,7 +1688,8 @@ class HostedAutomationFaultGatesIT {
             assertThat(read.path("gate_status").path("last_outcome").asText()).isEqualTo("failed");
             assertThat(read.path("gate_status").path("consecutive_failures").asInt())
                     .isGreaterThanOrEqualTo(2);
-            assertThat(read.path("gate_status").path("last_error").asText()).isEqualTo("exited with code 1");
+            assertThat(read.path("gate_status").path("last_error").asText())
+                    .isEqualTo("exited with code 1; stderr: nope");
             request("DELETE", "/v1/agent-automations/" + id, null, "fg11g-failing-retire", 202);
         };
     }
