@@ -6,6 +6,7 @@
 
 import { Turn, LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
 import { parseAndFormatApiError } from '@qwen-code/qwen-code-core/utils/errorParsing.js';
+import { getErrorStatus } from '@qwen-code/qwen-code-core/utils/errors.js';
 import {
   LlmRequestPreparationError,
   llmPreparedProviderPin,
@@ -78,6 +79,49 @@ export interface HostedHarnessModelResult {
   text: string;
   parts?: Part[];
   model: string;
+}
+
+export const HOSTED_MODEL_API_ERROR_MESSAGES = {
+  model_payment_required:
+    'Model API payment required (HTTP 402). Check the provider account balance and billing before retrying.',
+  model_authentication_failed:
+    'Model API authentication failed (HTTP 401). Check the configured provider credentials.',
+  model_access_denied:
+    'Model API access denied (HTTP 403). Check the provider account and model permissions.',
+  model_request_timeout: 'The model API request timed out. Try again later.',
+  model_rate_limited:
+    'Model API rate limit exceeded (HTTP 429). Wait and try again later.',
+  model_request_rejected:
+    'The model API rejected the request. Check the model configuration and input.',
+  model_service_unavailable:
+    'The model API service is unavailable. Try again later.',
+  model_request_failed:
+    'Model API request failed. Check the server logs for this session before retrying.',
+} as const;
+
+export class HostedModelApiError extends Error {
+  readonly code: keyof typeof HOSTED_MODEL_API_ERROR_MESSAGES;
+
+  constructor(error: unknown) {
+    super(parseAndFormatApiError(error));
+    const status = getErrorStatus(error);
+    this.code =
+      status === 402
+        ? 'model_payment_required'
+        : status === 401
+          ? 'model_authentication_failed'
+          : status === 403
+            ? 'model_access_denied'
+            : status === 408 || status === 504
+              ? 'model_request_timeout'
+              : status === 429
+                ? 'model_rate_limited'
+                : status !== undefined && status >= 500
+                  ? 'model_service_unavailable'
+                  : status !== undefined && status >= 400
+                    ? 'model_request_rejected'
+                    : 'model_request_failed';
+  }
 }
 
 export class HostedModelRoundLimitError extends Error {
@@ -775,7 +819,7 @@ export async function runHostedHarnessTextTurn(input: {
             // request id on the message, so the daemon stderr line and the
             // StopFailure hook's error_details keep an id the operator can
             // quote to their provider.
-            throw new Error(parseAndFormatApiError(event.value.error));
+            throw new HostedModelApiError(event.value.error);
           } else if (event.type === LlmEventType.UserCancelled) {
             modelFailure = false;
             throw new Error('Hosted Harness turn was cancelled.');

@@ -17234,6 +17234,39 @@ describe('useLlmStream', () => {
       expect(mockSendMessageStream).not.toHaveBeenCalled();
     });
 
+    it('routes a cron fire to the model while shell mode is on', async () => {
+      const handleShellCommand = vi.fn().mockReturnValue(true);
+      vi.mocked(useShellCommandProcessor).mockReturnValue({
+        handleShellCommand,
+        activeShellPtyId: null,
+      } as unknown as ReturnType<typeof useShellCommandProcessor>);
+      const scheduler = {
+        hasPendingWork: true,
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(
+          (callback: (job: { prompt: string; cronExpr?: string }) => void) => {
+            callback({
+              prompt: 'gh pr view 15057 --json mergeable',
+              cronExpr: '*/2 * * * *',
+            });
+          },
+        ),
+        stop: vi.fn(),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      (mockConfig.isCronEnabled as unknown as Mock).mockReturnValue(true);
+      (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue(
+        scheduler,
+      );
+
+      renderWithShellMode(true);
+
+      // A fire is never a shell command, whatever the composer's mode: it
+      // reaches the model, and a gated one also carries a command's output.
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(handleShellCommand).not.toHaveBeenCalled();
+    });
+
     it('routes to the model when the entry was submitted outside shell mode, even if shell mode is on at drain', async () => {
       const handleShellCommand = vi.fn().mockReturnValue(true);
       vi.mocked(useShellCommandProcessor).mockReturnValue({

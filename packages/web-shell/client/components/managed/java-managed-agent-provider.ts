@@ -1,3 +1,4 @@
+import type { components } from './generated/managed-agent-api';
 import {
   isJavaAgentResyncRequired,
   JavaManagedAgentClient,
@@ -151,6 +152,44 @@ export function createJavaManagedAgentProvider(
   }
   return {
     kind: 'java',
+    lifecycle: {
+      submit: (kind, sessionId, command) =>
+        client.lifecycleCommand(
+          kind,
+          {
+            sessionId,
+            idempotencyKey: command.idempotencyKey,
+            requestId: managedRequestId(),
+          },
+          command.signal,
+        ),
+      async unarchive(sessionId, command) {
+        return toSessionSummary(
+          await client.unarchiveSession(
+            {
+              sessionId,
+              idempotencyKey: command.idempotencyKey,
+              requestId: managedRequestId(),
+            },
+            command.signal,
+          ),
+        );
+      },
+      async query(sessionId, operationId, request) {
+        const operation = await client.queryOperation(
+          { sessionId, operationId },
+          request.signal,
+        );
+        if (!['close', 'archive', 'delete'].includes(operation.type))
+          throw new Error('Unexpected lifecycle operation type');
+        return operation as components['schemas']['WebShellCommandOperation'];
+      },
+    },
+    exportSnapshot: (sessionId, request) =>
+      client.exportSnapshot(
+        { sessionId, cursor: request.cursor, limit: 100 },
+        request.signal,
+      ),
     storageKey: storageKey(options),
     workspaceFiles: {
       query: (request, command) =>
@@ -160,6 +199,27 @@ export function createJavaManagedAgentProvider(
     },
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    titleSearch: true,
+    recovery: {
+      query: (sessionId, request) =>
+        client.getRecovery(sessionId, request.signal),
+      recheck: (sessionId, turnId, request) =>
+        client.recheckRecovery(sessionId, turnId, request.signal),
+    },
+    async queryCancelOperation(sessionId, operationId, request) {
+      const operation = await client.queryOperation(
+        { sessionId, operationId },
+        request.signal,
+      );
+      if (
+        operation.type !== 'cancel' ||
+        operation.sessionId !== sessionId ||
+        operation.operationId !== operationId
+      ) {
+        throw new Error('Managed Turn cancellation identity mismatch');
+      }
+      return operation;
+    },
     async renameSession(sessionId, displayName, command) {
       const result = await client.renameSession(
         {
@@ -602,7 +662,12 @@ export function createJavaManagedAgentProvider(
       : {}),
     async listSessions(request) {
       const page = await client.listSessions(
-        { cursor: request.cursor, limit: request.limit },
+        {
+          cursor: request.cursor,
+          limit: request.limit,
+          archiveState: request.archiveState,
+          titleQuery: request.titleQuery,
+        },
         request.signal,
       );
       return {
@@ -673,15 +738,22 @@ export function createJavaManagedAgentProvider(
       return { sessionId: result.sessionId, turnId: result.turnId };
     },
     async cancel(sessionId, turnId, command) {
-      await client.cancelTurn(
+      const result = await client.cancelTurn(
         {
           requestId: managedRequestId(),
           idempotencyKey: command.idempotencyKey,
           sessionId,
           turnId,
+          ...(command.admissionProfile
+            ? { admissionProfile: command.admissionProfile }
+            : {}),
         },
         command.signal,
       );
+      if (result.sessionId !== sessionId || result.turnId !== turnId) {
+        throw new Error('Managed Turn cancellation identity mismatch');
+      }
+      return { sessionId, turnId, operationId: result.operationId };
     },
     async *subscribeEvents(sessionId, request) {
       for await (const event of client.streamEvents(
@@ -713,6 +785,7 @@ function toSessionSummary(
   session: JavaAgentSession,
 ): ManagedAgentSessionSummary {
   const turnStatus = session.activeTurn?.status.toLowerCase();
+  const recoveryBlocked = turnStatus === 'recovery_blocked';
   const runtimeState = toRuntimeState(session.environment?.state);
   const phase = toPhase(turnStatus, runtimeState);
   const active =
@@ -754,7 +827,11 @@ function toSessionSummary(
     ...(session.contextCompressionOperationId
       ? { contextCompressionOperationId: session.contextCompressionOperationId }
       : {}),
+    lifecycleStatus: session.status.toLowerCase(),
+    lastSequence: session.lastSequence,
+    lifecycleOperation: session.lifecycleOperation,
     activeTurnId: session.activeTurn?.turnId,
+    ...(session.recovery ? { recovery: session.recovery } : {}),
     title: session.title || session.sessionId,
     workspace: session.workspace,
     createdAt: toTimestamp(session.createdAt),
@@ -766,6 +843,18 @@ function toSessionSummary(
     runtimeReady: runtimeState === 'ready',
     runtimeState,
     capabilities: {
+      ...(session.capabilities?.sessionClose === true
+        ? { sessionClose: true }
+        : {}),
+      ...(session.capabilities?.sessionArchive === true
+        ? { sessionArchive: true }
+        : {}),
+      ...(session.capabilities?.sessionUnarchive === true
+        ? { sessionUnarchive: true }
+        : {}),
+      ...(session.capabilities?.sessionDelete === true
+        ? { sessionDelete: true }
+        : {}),
       ...(session.capabilities?.rename === true ? { canRename: true } : {}),
       ...(session.capabilities?.tasks === true ? { tasks: true } : {}),
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
@@ -773,12 +862,21 @@ function toSessionSummary(
         sessionActive &&
         !active &&
         !session.contextCompressionOperationId &&
+        !recoveryBlocked &&
+        session.recovery?.nextTurnAllowed !== false &&
         (!session.workspace ||
           (workspaceTurns && session.capabilities?.foregroundShell !== false)),
       // The creator may cancel a running bound Turn after the Workspace stops
       // admitting new work, so cancel is not tied to workspaceTurns; the
       // server refuses anyone else.
-      canCancel: sessionActive && active && turnStatus !== 'cancelling',
+      canCancel:
+        sessionActive &&
+        (active || recoveryBlocked) &&
+        turnStatus !== 'cancelling' &&
+        session.recovery?.actions.cancel !== false,
+      ...(session.capabilities?.durableOperations === true
+        ? { durableOperations: true }
+        : {}),
       ...(workspaceTurns ? { workspaceTurns: true } : {}),
       ...(session.capabilities?.cwdChange === true ? { cwdChange: true } : {}),
       ...(session.capabilities?.modelChange === true

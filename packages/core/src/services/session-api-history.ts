@@ -16,8 +16,10 @@ import type {
 import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
 import { markCompressedHistory } from '../core/environmentContext.js';
 import {
+  clearApiHistoryDirectoryContext,
   getApiHistoryPromptId,
   markApiHistoryPrompt,
+  markApiHistoryDirectoryContext,
 } from '../utils/api-history-metadata.js';
 
 export {
@@ -221,6 +223,7 @@ function appendApiHistoryRecord(
       )
     ) {
       previous.parts = [...(previous.parts ?? []), ...(message.parts ?? [])];
+      clearApiHistoryDirectoryContext(previous);
       return;
     }
   }
@@ -360,10 +363,18 @@ export class SessionApiHistoryAccumulator {
       if (!isApiHistoryCompressionCandidate(record)) return;
       const payload = record.systemPayload as ChatCompressionRecordPayload;
       this.compressionCandidate = payload.compressedHistory;
+      const directoryContextIndices = new Set(
+        Array.isArray(payload.directoryContextIndices)
+          ? payload.directoryContextIndices
+          : [],
+      );
       this.history = Array.isArray(payload.compressedHistory)
         ? payload.compressedHistory.map((content, index) => {
             const copy = copyContentForApiHistory(content);
             markApiHistoryPrompt(copy, payload.promptIds?.[index]);
+            if (directoryContextIndices.has(index)) {
+              markApiHistoryDirectoryContext(copy);
+            }
             return copy;
           })
         : [];
