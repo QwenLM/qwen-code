@@ -1479,14 +1479,21 @@ class ManagedAgentServerIntegrationTest {
                     .andExpect(jsonPath("$.activeTurn.errorCode").value(recoveryCode));
         }
 
-        // The parked Turn leaves the dispatch sweep entirely — no
-        // claim-refuse-release spin — until a cancel: settling the Turn
-        // cancelled is the cancel's own act, so a CANCELLING row is
-        // scanned despite the mark.
         DispatchTarget target = new DispatchTarget(tenant,
                 session.sessionId(), turn.turnId());
-        assertThat(store.findDispatchable(Long.MAX_VALUE, 100))
-                .doesNotContain(target);
+        if ("hosted_harness_recovery_blocked".equals(recoveryCode)) {
+            long due = store.findTurn(tenant, session.sessionId(), turn.turnId()).orElseThrow().retryAfter();
+            assertThat(store.findDispatchable(due - 1, 100)).doesNotContain(target);
+            assertThat(store.findDispatchable(due, 100)).contains(target);
+            assertThat(store.claimTurn(tenant, session.sessionId(), turn.turnId(),
+                    "too-soon", Duration.ofMinutes(1))).isEmpty();
+            assertThatThrownBy(() -> store.beginOperation(tenant, session.sessionId(),
+                    OperationKind.CLOSE, "", "blocked-close", "close-digest"))
+                    .isInstanceOfSatisfying(ManagedAgentException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("turn_active"));
+        } else {
+            assertThat(store.findDispatchable(Long.MAX_VALUE, 100)).doesNotContain(target);
+        }
         store.insertCancelCommand(tenant, "CANCEL_TURN", "blocked-cancel",
                 "sha256:" + "4".repeat(64), session.sessionId(),
                 turn.turnId());
@@ -1522,6 +1529,40 @@ class ManagedAgentServerIntegrationTest {
                 "the Harness generation was lost")).isFalse();
         assertThat(store.findTurn(tenant, session2.sessionId(),
                 turn2.turnId()).get().errorCode()).isNull();
+    }
+
+    @Test
+    void aHarnessParkSettlesOnlyFromItsOriginalLeasedJournal() {
+        pauseRecoveryScanning();
+        String tenant = "tenant-harness-recheck-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant, "CREATE_SESSION", "create",
+                "sha256:" + "1".repeat(64), "qwen-code", null, null, List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN", "turn", "sha256:" + "2".repeat(64),
+                session.sessionId(), List.of(), "sha256:" + "3".repeat(64));
+        store.claimTurn(tenant, session.sessionId(), turn.turnId(), "first", Duration.ofMinutes(1)).orElseThrow();
+        assertThat(store.bindHarness(tenant, session.sessionId(), turn.turnId(), "first", "boot")).isTrue();
+        store.recordAdmission(tenant, session.sessionId(), turn.turnId(), "first", "epoch", 1);
+        assertThat(store.markTurnRecoveryBlocked(tenant, session.sessionId(), turn.turnId(), "first",
+                "hosted_harness_recovery_blocked", "Awaiting original result")).isTrue();
+        jdbc.update("UPDATE ma_turn SET retry_after=0 WHERE tenant_id=?", tenant);
+        var recheck = store.claimTurn(tenant, session.sessionId(), turn.turnId(), "observer", Duration.ofMinutes(1))
+                .orElseThrow();
+        assertThat(recheck.retryCount()).isZero();
+        var terminal = List.of(new HarnessEvent(2, "boot:epoch:2",
+                new ProjectedEvent("turn.completed", Map.of(), true, "COMPLETED", null, null)));
+        assertThatThrownBy(() -> store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(),
+                "first", "epoch", terminal)).hasMessageContaining("lease was lost");
+        assertThatThrownBy(() -> store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(),
+                "observer", "other-epoch", terminal)).hasMessageContaining("epoch changed");
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(), "observer", "epoch", terminal);
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()).orElseThrow())
+                .satisfies(record -> {
+                    assertThat(record.status()).isEqualTo("COMPLETED");
+                    assertThat(record.errorCode()).isNull();
+                    assertThat(record.completedAt()).isNotNull();
+                });
+        assertThat(store.beginOperation(tenant, session.sessionId(), OperationKind.CLOSE,
+                "", "close", "close-digest").replayed()).isFalse();
     }
 
     // The terminal retry budget counts consecutive failures without

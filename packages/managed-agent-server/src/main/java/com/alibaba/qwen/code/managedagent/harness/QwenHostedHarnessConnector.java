@@ -702,7 +702,27 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private SourceStream doStream(String tenantId, String sessionId,
             long lastEventId, String eventEpoch) {
         HarnessSessionRef ref = attachment(tenantId, sessionId, false);
-        HarnessEventStream stream = client().streamEvents(
+        return openStream(client(), ref, lastEventId, eventEpoch);
+    }
+
+    @Override
+    public SourceStream observeStream(String tenantId, String sessionId, String bootId,
+            long lastEventId, String eventEpoch) {
+        requireShellApproval(sessions.requireSession(tenantId, sessionId));
+        HarnessSessionRef ref = attachments.get(new AttachmentKey(tenantId, sessionId));
+        if (bootId == null || ref == null || !bootId.equals(ref.getHarnessBootId())) {
+            throw new IllegalStateException("Original Harness attachment is unavailable");
+        }
+        HostedHarnessClient source = client();
+        if (!bootId.equals(source.capabilities().getBootId())) {
+            throw new IllegalStateException("Original Harness generation is unavailable");
+        }
+        return openStream(source, ref, lastEventId, eventEpoch);
+    }
+
+    private SourceStream openStream(HostedHarnessClient source, HarnessSessionRef ref,
+            long lastEventId, String eventEpoch) {
+        HarnessEventStream stream = source.streamEvents(
                 StreamHarnessEvents.builder()
                         .session(ref)
                         .lastEventId(lastEventId)
@@ -724,14 +744,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
             @Override
             public boolean recoveryBlocked(long afterEventId) {
-                var status = client().getStatus(ref);
+                var status = source.getStatus(ref);
                 Object blocked = status.getRaw().get("recoveryBlocked");
                 if (blocked != null && !(blocked instanceof Boolean)) {
                     throw new IllegalStateException(
                             "Hosted Harness recoveryBlocked is not a boolean");
                 }
                 return !status.hasActivePrompt() && Boolean.TRUE.equals(blocked)
-                        && client().getTranscript(GetHarnessTranscript.builder()
+                        && source.getTranscript(GetHarnessTranscript.builder()
                                 .session(ref).cursor(Long.toString(afterEventId)).limit(1).build())
                                 .getEvents().isEmpty();
             }

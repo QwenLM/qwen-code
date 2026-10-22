@@ -442,7 +442,7 @@ public class HarnessCoordinator {
                 claimed.sessionId());
         if (!"CANCELLING".equals(claimed.status())
                 && AgentStateStore.HARNESS_RECOVERY_BLOCKED.equals(claimed.errorCode())) {
-            return false;
+            return observeBlockedHarness(claimed, session, leaseLost);
         }
         // A bound Session re-attaches through the takeover load: failures
         // here wait on the prior generation's lease, a wait bounded by that
@@ -850,6 +850,32 @@ public class HarnessCoordinator {
             return consumeStream(current, attachment.bootId(), stream,
                     leaseLost);
         }
+    }
+
+    private boolean observeBlockedHarness(TurnRecord turn, SessionRecord session,
+            AtomicBoolean leaseLost) {
+        long lastEventId = turn.harnessLastEventId() == null ? 0 : turn.harnessLastEventId();
+        try (SourceStream stream = harness.observeStream(turn.tenantId(), turn.sessionId(),
+                session.harnessBootId(), lastEventId, turn.harnessEventEpoch())) {
+            requireLease(leaseLost);
+            if (!Objects.equals(turn.harnessEventEpoch(), stream.eventEpoch())) {
+                throw new IllegalStateException("Hosted Harness event epoch changed");
+            }
+            if (!stream.recoveryBlocked(lastEventId)) {
+                return consumeStream(turn, session.harnessBootId(), stream, leaseLost);
+            }
+        } catch (RuntimeException error) {
+            LOG.warn("Managed Harness recovery observation deferred tenant={} session={} turn={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId(), error);
+        }
+        // No execution takeover, submit or continuation belongs to this
+        // lane. Unavailable evidence retains the original unsettled park.
+        if (leaseLost.get()) {
+            return false;
+        }
+        return store.markTurnRecoveryBlocked(turn.tenantId(), turn.sessionId(),
+                turn.turnId(), owner, AgentStateStore.HARNESS_RECOVERY_BLOCKED,
+                "The Hosted Harness outcome remains unconfirmed; awaiting its journal.");
     }
 
     private boolean consumeStream(TurnRecord turn, String bootId,

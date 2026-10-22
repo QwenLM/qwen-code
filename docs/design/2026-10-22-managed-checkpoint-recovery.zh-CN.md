@@ -8,9 +8,9 @@
 
 ## 决策
 
-在 TypeScript 发布端和 Java Session Store 中，将 `managed-checkpoint` 资源的预算对齐现有检查点解析上限 1 MiB。保留所有收据身份、ordinal、引用、摘要，以及现有资源和事务边界。其他普通资源保持 64 KiB。无需新增资源编码、数据库表结构、对象存储依赖或配置项。超限错误写明资源类型、实际字节数与上限。
+在 TypeScript 发布端、Java Session Store、工具发布引用和 CSI 原生回读授权中，将 `managed-checkpoint` 资源的预算对齐现有检查点解析上限 1 MiB。保留所有收据身份、ordinal、引用、摘要，以及现有资源和事务边界。其他普通资源保持 64 KiB。无需新增资源编码、数据库表结构、对象存储依赖或配置项。TypeScript 发布端超限错误写明资源类型、实际字节数与上限。
 
-每 15 秒读取同一 tenant/session/generation 附着的状态，不受 opaque journal 控制记录续期影响。只有同时满足 `recoveryBlocked=true` 和 `hasActivePrompt=false` 才认定运行中的恢复阻塞。正常模型执行和审批等待继续保持活动。先消费并刷新已读取事件，再通过现有 transcript API 确认权威 journal 在已消费 cursor 之后没有待处理记录；探测后再次检查本地事件队列，让刚到达的完成事件优先。仅在当前 dispatch 租约约束下停放 Turn。保存具名的恢复阻塞错误，并将该 Turn 排除出自动 dispatch 和幂等命令重试；保留未结算输入和 Runtime 所有权，不宣称成功完成，也不重放工具。显式取消仍可用。
+每 15 秒读取同一 tenant/session/generation 附着的状态，不受 opaque journal 控制记录续期影响。只有同时满足 `recoveryBlocked=true` 和 `hasActivePrompt=false` 才认定运行中的恢复阻塞。正常模型执行和审批等待继续保持活动。先消费并刷新已读取事件，再通过现有 transcript API 确认权威 journal 在已消费 cursor 之后没有待处理记录；探测后再次检查本地事件队列，让刚到达的完成事件优先。仅在当前 dispatch 租约约束下停放 Turn。保存具名的恢复阻塞错误，禁止重新 dispatch 执行和幂等命令重试。至少等待 15 秒后，调度器只可 claim 该 Turn，按原 epoch 和 cursor 只读观测状态与 journal；此分支不预热 Runtime、不接管执行、不提交输入，也不继续检查点。观察必须使用原有缓存附着，并让所有读取固定使用同一个 client；缓存缺失时不加载或接管 Session。缺失、不可读或世代变化的证据继续保持停放，不消耗执行重试预算。随后到达的权威终态事件可结算原 Turn。在此之前保留未结算输入、Runtime 所有权、策略变更屏障、生命周期屏障和子任务结果观察。一次阻塞采样本身不能关闭 Session，也不能将子任务结果认定为 unknown。显式取消仍可用。
 
 WebShell 读取适配器将这个具名停放呈现为 `recovery_blocked`。浏览器通过现有 summary 轮询更新页面，不把事件流心跳当作业务进展。该 Session 禁止再次提交，保留取消能力。内部 Turn 仍为可取消、可恢复的活动记录；这项变更不伪造物理停止回执。
 
@@ -22,4 +22,4 @@ WebShell 读取适配器将这个具名停放呈现为 `recovery_blocked`。浏�
 
 使用微小工具输出复现原始拒绝，再让同一个 100 次调用的 fixture 完成，且不删除收据。验证冷加载、调用身份保持、超过 1 MiB 的拒绝，以及普通资源仍限制在 64 KiB。覆盖真实 Java 资源提交、读取和 reader 兼容性。
 
-验证只有心跳的阻塞 Harness 能结束 Java 消费等待、持久化停放，并通过 WebShell 适配器和浏览器 provider 显示阻塞。正常的无活动 prompt 审批等待、活动模型执行、取消竞争与 dispatch 租约丢失均不得被误判。执行相关 TypeScript 测试、build/typecheck/bundle、Java 验证、适用的 MySQL/Hosted 恢复检查和独立端到端验证，并明确记录环境中无法执行的门禁。
+验证只有心跳的阻塞 Harness 能结束 Java 消费等待、持久化停放，并通过 WebShell 适配器和浏览器 provider 显示阻塞。正常的无活动 prompt 审批等待、活动模型执行、取消竞争与 dispatch 租约丢失均不得被误判。验证有界的重复观测能在不重放执行的情况下消费稍后到达的终态；证据不可读时继续停放且不消耗重试预算。执行相关 TypeScript 测试、build/typecheck/bundle、Java 验证、适用的 MySQL/Hosted 恢复检查和独立端到端验证，并明确记录环境中无法执行的门禁。

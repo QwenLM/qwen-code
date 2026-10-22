@@ -1167,8 +1167,10 @@ class HarnessCoordinatorTest {
     // — the mark cannot park a CANCELLING row (findDispatchable re-admits
     // it by design), so writing it would re-open the claim-refuse-release
     // spin this fix exists to close (P1 review finding on #14461).
-    @Test
-    void aCancellingWorkflowTurnKeepsItsBoundedPathWhenTheTakeoverDeclines() {
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.NullSource
+    @ValueSource(strings = AgentStateStore.HARNESS_RECOVERY_BLOCKED)
+    void aCancellingWorkflowTurnKeepsItsBoundedPathWhenTheTakeoverDeclines(String recoveryCode) {
         AgentStateStore store = mock(AgentStateStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
@@ -1178,7 +1180,7 @@ class HarnessCoordinatorTest {
                 List.of(Map.of("type", "workflow_launch", "script",
                         "return 1;")),
                 "sha256:" + "a".repeat(64), "CANCELLING", true, "epoch-old",
-                1L, "previous-owner", Long.MAX_VALUE, 0, 0, 0, null, null,
+                1L, "previous-owner", Long.MAX_VALUE, 0, 0, 0, null, recoveryCode,
                 null, 1, 1, null, 1);
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), any(Duration.class)))
@@ -1200,6 +1202,8 @@ class HarnessCoordinatorTest {
         } finally {
             coordinator.close();
         }
+        verify(harness).recoverManagedRuntime("tenant", "session", true);
+        verify(harness, never()).observeStream(anyString(), anyString(), anyString(), anyLong(), anyString());
         // The cancel keeps its bounded retry path — the mark that cannot
         // park a CANCELLING row is never written, and no terminal is forged.
         verify(store, never()).markTurnRecoveryBlocked(anyString(),
@@ -1323,19 +1327,16 @@ class HarnessCoordinatorTest {
     // Once refused, the durable mark ends every later re-claim before any
     // attach: the scan stays a cheap claim-skip-release until the child
     // Session's close settles the Turn.
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {
-            AgentStateStore.WORKFLOW_RECOVERY_BLOCKED, AgentStateStore.HARNESS_RECOVERY_BLOCKED})
-    void aMarkedTurnEndsItsDriveBeforeAnyAttach(String errorCode) {
+    @Test
+    void aMarkedWorkflowTurnEndsItsDriveBeforeAnyAttach() {
+        String errorCode = AgentStateStore.WORKFLOW_RECOVERY_BLOCKED;
         AgentStateStore store = mock(AgentStateStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         when(runtimeWarmer.isEnabled()).thenReturn(false);
         TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
                 "prompt",
-                List.of(AgentStateStore.WORKFLOW_RECOVERY_BLOCKED.equals(errorCode)
-                        ? Map.of("type", "workflow_launch", "script", "return 1;")
-                        : Map.of("type", "text", "text", "recover")),
+                List.of(Map.of("type", "workflow_launch", "script", "return 1;")),
                 "sha256:" + "a".repeat(64), "RUNNING", true, "epoch-old", 1L,
                 "previous-owner", Long.MAX_VALUE, 0, 0, 0, null,
                 errorCode,
@@ -1362,6 +1363,64 @@ class HarnessCoordinatorTest {
                 anyString());
         verify(store, never()).failTurn(anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"blocked", "terminal", "unavailable", "epoch-changed", "park-cas-lost"})
+    void aHarnessParkOnlyObservesTheOriginalExecution(String mode) {
+        AgentStateStore store = boundCancellingStore();
+        TurnRecord parked = new TurnRecord("tenant", "session", "turn", "prompt",
+                List.of(Map.of("type", "text", "text", "recover")),
+                "sha256:" + "a".repeat(64), "RUNNING", true, "epoch", 1L,
+                "previous-owner", Long.MAX_VALUE, 0, 0, 0, null,
+                AgentStateStore.HARNESS_RECOVERY_BLOCKED, "Awaiting journal", 1, 1, null, 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class))).thenReturn(Optional.of(parked));
+        when(store.markTurnRecoveryBlocked(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString())).thenReturn(true);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        SourceStream stream = mock(SourceStream.class);
+        when(stream.eventEpoch()).thenReturn("epoch-changed".equals(mode) ? "other" : "epoch");
+        when(stream.recoveryBlocked(1)).thenReturn("blocked".equals(mode));
+        if ("park-cas-lost".equals(mode)) {
+            when(stream.recoveryBlocked(1)).thenThrow(new IllegalStateException("journal unavailable"));
+            when(store.markTurnRecoveryBlocked(anyString(), anyString(), anyString(),
+                    anyString(), anyString(), anyString())).thenReturn(false);
+        }
+        when(stream.next()).thenReturn(new SourceEvent(2L, "turn_complete",
+                Map.of("stopReason", "end_turn"), "prompt", Map.of()), null);
+        if ("unavailable".equals(mode)) {
+            when(harness.observeStream("tenant", "session", "boot", 1, "epoch"))
+                    .thenThrow(new IllegalStateException("journal unavailable"));
+        } else {
+            when(harness.observeStream("tenant", "session", "boot", 1, "epoch")).thenReturn(stream);
+        }
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class), directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(harness).observeStream("tenant", "session", "boot", 1, "epoch");
+        verifyNoMoreInteractions(harness);
+        if ("terminal".equals(mode)) {
+            verify(store).recordHarnessEvents(eq("tenant"), eq("session"), eq("turn"),
+                    anyString(), eq("epoch"), argThat(events -> events.size() == 1
+                            && events.get(0).sourceId() == 2 && events.get(0).projection().terminal()));
+            verify(store, never()).markTurnRecoveryBlocked(anyString(), anyString(), anyString(),
+                    anyString(), anyString(), anyString());
+        } else {
+            verify(store).markTurnRecoveryBlocked(eq("tenant"), eq("session"), eq("turn"),
+                    anyString(), eq(AgentStateStore.HARNESS_RECOVERY_BLOCKED), anyString());
+            verify(store, never()).recordHarnessEvents(anyString(), anyString(), anyString(),
+                    anyString(), anyString(), anyList());
+        }
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(), anyString(),
+                anyString(), anyLong(), anyBoolean());
     }
 
     // `managed_session_writer_conflict` is the only wait that ends on its
