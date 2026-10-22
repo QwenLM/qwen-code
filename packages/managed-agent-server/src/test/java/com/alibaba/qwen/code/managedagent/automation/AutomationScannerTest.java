@@ -1923,6 +1923,35 @@ class AutomationScannerTest {
     }
 
     @Test
+    void aGateTheSessionCannotRunReleasesTheClaim() {
+        // No Shell, or a pinned Hook catalog: the Harness refuses before it
+        // commits, so the key goes back for a retry without the gate.
+        String key = "unsupported-" + UUID.randomUUID();
+        fake.gateUnsupported = true;
+        try {
+            assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
+                    new AutomationDefinitionRequest(sessionId, "Goal",
+                            "* * * * *", "UTC", "Run it.", null, "skip", "none",
+                            null, true, TextNode.valueOf("./probe.sh"))))
+                    .isInstanceOfSatisfying(ManagedAgentException.class,
+                            error -> {
+                                assertThat(error.getStatus())
+                                        .isEqualTo(HttpStatus.CONFLICT);
+                                assertThat(error.getCode()).isEqualTo(
+                                        "automation_gate_unsupported");
+                            });
+            assertThat(ledger.findCommand(tenant, key)).isEmpty();
+            PublicAutomation ungated = service.create(tenant, ACTOR, key,
+                    new AutomationDefinitionRequest(sessionId, "Goal",
+                            "* * * * *", "UTC", "Run it.", null, "skip", "none",
+                            null, true)).body();
+            assertThat(ungated.gate()).isNull();
+        } finally {
+            fake.gateUnsupported = false;
+        }
+    }
+
+    @Test
     void aDefinitiveRefusalReleasesTheClaimSoAFixedRetrySucceeds() {
         String key = "fix-" + UUID.randomUUID();
         // The mode gate refuses per_run: a definitive 4xx, nothing

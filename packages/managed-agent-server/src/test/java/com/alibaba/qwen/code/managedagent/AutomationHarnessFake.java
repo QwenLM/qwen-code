@@ -77,6 +77,11 @@ public final class AutomationHarnessFake {
     /** The gate probes the fake ran, as `scheduleId|occurrenceKey`. */
     public final List<String> probes = new ArrayList<>();
 
+    /**
+     * A test seam: the Session cannot run gates (no Shell, or a pinned Hook
+     * catalog), so a definition naming one is refused before it commits.
+     */
+    public volatile boolean gateUnsupported;
     /** A test seam: thrown once by the next fire_run, then cleared. */
     public volatile RuntimeException failNextFire;
     /** A test seam: the next fire_run commits its run, then loses its answer. */
@@ -124,6 +129,10 @@ public final class AutomationHarnessFake {
                 if (definition != null && definition.get("gate") instanceof String gate
                         && gate.trim().endsWith("&")) {
                     throw refusal(400, "automation_gate_invalid");
+                }
+                if (gateUnsupported && definition != null
+                        && definition.get("gate") instanceof String) {
+                    throw refusal(409, "automation_gate_unsupported");
                 }
                 if (prior != null) {
                     replayCheck(prior, scheduleId, definition);

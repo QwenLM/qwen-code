@@ -541,31 +541,83 @@ describe('createHostedAutomationGateRunner', () => {
     },
   );
 
-  it('adopts the Session a restarted Broker holds only on record, then releases it', async () => {
+  it('leaves a Session a restarted Broker holds only on record to the Workspace cascade', async () => {
     // The replay never acquires; a Broker that restarted cannot prove the
-    // release of a Session it no longer holds in memory until it adopts it.
-    let releases = 0;
-    const { calls, probe } = await rig((path) => {
-      switch (path) {
-        case '/executions:prepare':
-          return { body: settled('{"kind":"quiet","durationMs":3}') };
-        case RELEASE:
-          releases++;
-          return releases === 1
-            ? rejection(503, 'runtime_reconciliation_required')
-            : { body: { ...identity, released: true } };
-        case '/tool-sessions:acquire':
-          return { body: acquired };
-        default:
-          throw new Error(`unexpected ${path}`);
-      }
-    });
+    // release of a Session it does not hold in memory. Acquiring it to
+    // release it could provision a Runtime: the answer goes out instead.
+    const { calls, probe } = await rig((path) =>
+      path === RELEASE
+        ? rejection(503, 'runtime_reconciliation_required')
+        : { body: settled('{"kind":"quiet","durationMs":3}') },
+    );
     await expect(probe()).resolves.toEqual({ kind: 'quiet', durationMs: 3 });
     expect(calls.map((call) => call.path)).toEqual([
       '/executions:prepare',
       RELEASE,
+    ]);
+  });
+
+  it.each([
+    [
+      'the Broker restarted and knows no live Session',
+      'reread',
+      rejection(404, 'runtime_session_not_found'),
+    ],
+    [
+      "the cancel's answer is lost",
+      'cancel',
+      rejection(503, 'runtime_store_unavailable'),
+    ],
+  ] as const)(
+    'retries rather than answers when it cannot tell how a started probe ended: %s',
+    async (_what, where, failure) => {
+      // An answer here could publish unknown or "never started" for a
+      // probe whose receipt says output; a later attempt reads it.
+      let prepares = 0;
+      const { calls, probe } = await rig((path) => {
+        switch (path) {
+          case '/executions:prepare':
+            prepares++;
+            if (prepares === 1)
+              return rejection(404, 'runtime_session_not_found');
+            if (prepares === 3 && where === 'reread') return failure;
+            return {
+              body: {
+                ...identity,
+                executionCallId: 'gate-execution',
+                status: { state: 'prepared' },
+              },
+            };
+          case '/tool-sessions:acquire':
+            return { body: acquired };
+          case '/executions/gate-execution:start':
+          case '/executions/gate-execution':
+            return rejection(503, 'runtime_store_unavailable');
+          case '/executions/gate-execution:cancel':
+            return failure;
+          default:
+            throw new Error(`unexpected ${path}`);
+        }
+      });
+      await expect(probe()).rejects.toBeInstanceOf(HostedAutomationGateHeld);
+      expect(calls.map((call) => call.path)).not.toContain(RELEASE);
+    },
+  );
+
+  it('retries a fire whose Workspace cannot admit the probe yet', async () => {
+    // A turn running in a resident Workspace keeps the probe's Session out
+    // for now: a tool turn retries this acquire, and so does the fire.
+    const { calls, probe } = await rig((path) =>
+      path === '/executions:prepare'
+        ? rejection(404, 'runtime_session_not_found')
+        : rejection(409, 'workspace_busy'),
+    );
+    await expect(probe()).rejects.toThrow(
+      'the Workspace cannot admit the probe yet: workspace_busy',
+    );
+    expect(calls.map((call) => call.path)).toEqual([
+      '/executions:prepare',
       '/tool-sessions:acquire',
-      RELEASE,
     ]);
   });
 

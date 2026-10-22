@@ -22,7 +22,10 @@ import {
   HostedWorkspaceBrokerRejection,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
-import { hostedRuntimeSessionId } from './hosted-workspace-tool-turn.js';
+import {
+  hostedRuntimeSessionId,
+  isRetryableWorkspaceAcquisition,
+} from './hosted-workspace-tool-turn.js';
 import { isHostedWorkspaceShellProfile } from './hosted-workspace-profiles.js';
 import {
   MANAGED_AUTOMATION_GATE_TIMEOUT_MS,
@@ -159,6 +162,14 @@ export function createHostedAutomationGateRunner(
           try {
             await broker.acquire();
           } catch (cause) {
+            // A Workspace busy with another Session (a turn running in a
+            // resident Workspace) or briefly unavailable admits the probe
+            // later: retry the fire, as a tool turn retries its acquire.
+            if (isRetryableWorkspaceAcquisition(cause)) {
+              throw new HostedAutomationGateHeld(
+                `the Workspace cannot admit the probe yet: ${cause.code}`,
+              );
+            }
             // Only the Broker's own refusal proves nothing was acquired. A
             // lost or unreadable answer may follow a committed acquisition,
             // whose Session would stay a Workspace execution member with
@@ -304,28 +315,24 @@ async function releaseDerivedSession(
   { notFoundIsFinal }: { notFoundIsFinal: boolean },
 ): Promise<void> {
   try {
-    try {
-      await broker.release();
-    } catch (cause) {
-      if (
-        !(cause instanceof HostedWorkspaceBrokerRejection) ||
-        cause.status !== 503 ||
-        cause.code !== 'runtime_reconciliation_required'
-      ) {
-        throw cause;
-      }
-      // A Broker that restarted holds the Session only on record and
-      // cannot prove its release: acquiring adopts it into this Broker
-      // process, and the release then can.
-      await broker.acquire();
-      await broker.release();
-    }
+    await broker.release();
   } catch (cause) {
     if (
       notFoundIsFinal &&
       cause instanceof HostedWorkspaceBrokerRejection &&
       cause.status === 404 &&
       cause.code === 'runtime_session_not_found'
+    ) {
+      return;
+    }
+    // A Broker that restarted holds the Session only on record and cannot
+    // prove its release; as on the Harness's close path, the Workspace-level
+    // cascade owns that Runtime from here. Acquiring it to release it could
+    // provision a Runtime nobody asked for.
+    if (
+      cause instanceof HostedWorkspaceBrokerRejection &&
+      cause.status === 503 &&
+      cause.code === 'runtime_reconciliation_required'
     ) {
       return;
     }
@@ -368,16 +375,25 @@ async function afterLostWatch(
   }
   if (now === 'unknown' || now === 'superseded') return unreadable(now);
   if (now === undefined || now.executionCallId !== executionCallId) {
-    return {
-      kind: 'unknown',
-      reason: "the Broker no longer holds the occurrence's probe",
-    };
+    // A Broker that restarted knows no live Session yet still holds the
+    // probe's record: a later attempt acquires, which reconciles it, and
+    // reads how it ended.
+    throw new HostedAutomationGateHeld(
+      "the Broker no longer holds the occurrence's Session live",
+    );
   }
   if (now.settled !== undefined) return fromReceipt(broker, now);
   const after = await broker
     .cancelReading(executionCallId)
     .catch(() => undefined);
-  if (after !== undefined && after.settled === undefined) {
+  if (after === undefined) {
+    // The cancel's answer is unknown: a late start may have run the probe
+    // to its end meanwhile, so a later attempt reads it.
+    throw new HostedAutomationGateHeld(
+      "the cancel of the occurrence's prepared probe went unanswered",
+    );
+  }
+  if (after.settled === undefined) {
     // The start landed after all, and the probe was running when the
     // cancel reached it: a later attempt reads how it ended.
     throw new HostedAutomationGateHeld(
@@ -385,7 +401,6 @@ async function afterLostWatch(
     );
   }
   if (
-    after?.settled !== undefined &&
     after.settled.executionStatus !== 'cancelled' &&
     after.settled.executionStatus !== 'not_started'
   ) {

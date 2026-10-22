@@ -239,9 +239,16 @@ the route wires the real one:
    not confirmed, or the Broker reports it live), it releases the Session
    before answering, and a release that fails fails the fire for a
    re-drive. A Broker that restarted holds a live Session only on record
-   and answers `503 runtime_reconciliation_required` to its release; the
-   attempt then acquires it, which adopts it into the new Broker process,
-   and releases it again.
+   and answers `503 runtime_reconciliation_required` to its release; as on
+   the Harness's close path, the Workspace-level cascade owns that Runtime
+   from there, and the attempt answers (acquiring the Session only to
+   release it could provision a Runtime nobody asked for). An attempt that
+   cannot tell how a started probe ended — the Broker no longer holds its
+   Session live after a restart, or a cancel goes unanswered — retries
+   instead: the next attempt acquires, which reconciles the record, and
+   reads the receipt. A Workspace busy with another Session (a turn in a
+   resident Workspace) or briefly unavailable retries the fire too, as a
+   tool turn retries its acquire.
 4. The Runtime worker runs the worker-internal tool
    `managed_automation_gate` — admitted beside the model tools, never
    declared to a model — which runs the command with the shared
@@ -427,9 +434,10 @@ file on every execution:
   updates the definition's gate status; a fired gate answers like a plain
   fire; the manual run surfaces `gate_quiet`; an answer under an earlier
   revision (a probe the definition was revised under, a replayed delivery)
-  leaves the new command's status alone.
-- `ManagedAgentApiContractTest`: create and revise with `gate`, the
-  `409 automation_gate_unsupported` refusal, the public shapes.
+  leaves the new command's status alone; `400 automation_gate_invalid` and
+  `409 automation_gate_unsupported` release the caller's Idempotency-Key.
+- `ManagedAgentApiContractTest`: create and revise with `gate`, the public
+  shapes.
 - `HostedAutomationFaultGatesIT`: the FG11g cells of Section 5.6, on real
   MySQL with a real Harness and Runtime worker. They cover lost replies; a
   Harness restart or a worker replaced mid-probe (`gate_unknown`) are
