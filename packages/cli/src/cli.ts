@@ -48,6 +48,10 @@ type BootstrapRoute =
 
 export const TOP_LEVEL_COMMANDS = [
   ['agents <command>', 'Session agents: join a coordinator as a runtime'],
+  [
+    'attach --session <session-id>',
+    'Attach a terminal to a running daemon session',
+  ],
   ['auth', 'Configure authentication (removed)'],
   [
     'batch <command>',
