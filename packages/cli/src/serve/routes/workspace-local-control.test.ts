@@ -558,6 +558,8 @@ describe('Local Control routes', () => {
       interfaceName: 'utun4',
       address: '10.8.0.2',
     });
+    // The recorded grant is provenance, reported beside the liveness probe.
+    expect(held.body.grantedAddress).toBe('10.8.0.2');
     // The grant is surfaced as its own field, never folded into the
     // automatic-candidate list the QR button resolves against.
     expect(held.body.interfaces).toEqual([]);
@@ -573,6 +575,9 @@ describe('Local Control routes', () => {
     const gone = await request(app).get('/workspace/local-control');
     expect(gone.status).toBe(200);
     expect(gone.body.explicitCandidate).toBeUndefined();
+    // Provenance outlives the host's hold on the address: the card needs it
+    // to keep offering the granted pick after a VPN/DHCP flap.
+    expect(gone.body.grantedAddress).toBe('10.8.0.2');
     expect(findExplicitCandidate).toHaveBeenCalledWith(
       '10.8.0.2',
       networkInterfaces(),

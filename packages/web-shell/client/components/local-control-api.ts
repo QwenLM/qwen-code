@@ -32,6 +32,13 @@ export interface LocalControlStatus {
    * automatic-candidate set other clients resolve against.
    */
   explicitCandidate?: LanCandidate;
+  /**
+   * The address the operator granted with `--local-control-address`, reported
+   * from the daemon's recorded grant rather than from live interface state.
+   * Unlike `explicitCandidate` it survives the host temporarily losing the
+   * address (VPN down, DHCP move) while the listener stays bound to it.
+   */
+  grantedAddress?: string;
 }
 
 function resolveLocalControlUrl(baseUrl: string, path: string): URL {

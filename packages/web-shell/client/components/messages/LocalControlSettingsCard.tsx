@@ -45,10 +45,10 @@ interface SelectionState {
   selected: string;
   /**
    * The address the daemon last committed to — reported by an active status,
-   * or vouched for by the daemon's `explicitCandidate` grant. Kept out of
-   * `interfaces` (the automatic-candidate list) so a Disable→Enable round
-   * trip re-posts the operator's pick instead of silently falling back to an
-   * automatic candidate (#14136).
+   * or vouched for by the daemon's grant (`grantedAddress` /
+   * `explicitCandidate`). Kept out of `interfaces` (the automatic-candidate
+   * list) so a Disable→Enable round trip re-posts the operator's pick instead
+   * of silently falling back to an automatic candidate (#14136).
    */
   retained: RetainedSelection | undefined;
 }
@@ -81,15 +81,18 @@ function reconcileRetained(
   retained: RetainedSelection | undefined,
   next: LocalControlStatus,
 ): RetainedSelection | undefined {
-  // What the daemon is serving right now is the strongest truth. It is
-  // granted when the daemon also reports it as its explicit candidate.
+  // What the daemon is serving right now is the strongest truth. `granted`
+  // reads provenance (`grantedAddress`), not the liveness probe: the host can
+  // stop holding a granted address while the listener stays bound to it.
   if (next.active && next.address) {
     return {
       candidate: {
         interfaceName: next.interfaceName ?? '',
         address: next.address,
       },
-      granted: next.explicitCandidate?.address === next.address,
+      granted:
+        next.grantedAddress === next.address ||
+        next.explicitCandidate?.address === next.address,
     };
   }
   // The daemon vouches for its CLI-granted address only while the host still

@@ -190,6 +190,67 @@ describe('LocalControlSettingsCard', () => {
     expect(enableBodies[0]).toMatchObject({ address: '10.8.0.2' });
   });
 
+  it('keeps the CLI-granted pick when the host stopped holding the address before mount (#14140)', async () => {
+    // The grant is provenance, not a liveness probe: a VPN drop while the
+    // daemon keeps serving the address must not downgrade the retained pick.
+    // A card-side latch cannot cover a mount after the drop, so the daemon
+    // reports the recorded grant (`grantedAddress`) beside the liveness-gated
+    // `explicitCandidate` — and the pick still drops on the daemon's refusal
+    // if the address really cannot be bound.
+    const enableBodies: Array<Record<string, unknown>> = [];
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if ((init?.method ?? 'GET') === 'GET') {
+        return localControlResponse({
+          active: true,
+          address: '10.8.0.2',
+          interfaceName: 'utun4',
+          interfaces: [{ interfaceName: 'en0', address: '192.168.1.10' }],
+          grantedAddress: '10.8.0.2',
+        });
+      }
+      if (url.includes('/workspace/local-control/disable')) {
+        return localControlResponse({
+          active: false,
+          interfaces: [{ interfaceName: 'en0', address: '192.168.1.10' }],
+          grantedAddress: '10.8.0.2',
+        });
+      }
+      enableBodies.push(
+        JSON.parse(String(init?.body)) as Record<string, unknown>,
+      );
+      return localControlResponse({
+        active: true,
+        address: '10.8.0.2',
+        interfaceName: 'utun4',
+        interfaces: [{ interfaceName: 'en0', address: '192.168.1.10' }],
+        explicitCandidate: { interfaceName: 'utun4', address: '10.8.0.2' },
+        grantedAddress: '10.8.0.2',
+      });
+    });
+
+    const container = mount();
+    await flush();
+
+    act(() => {
+      buttonWithText(container, 'Disconnect phone access').click();
+    });
+    await flush();
+
+    // The retained row keeps the picker mounted with a lone automatic
+    // candidate that would otherwise collapse it.
+    expect(container.querySelector('[aria-label="Local network"]')).not.toBe(
+      null,
+    );
+    act(() => {
+      buttonWithText(container, 'Turn on Local Control').click();
+    });
+    await flush();
+
+    expect(enableBodies).toHaveLength(1);
+    expect(enableBodies[0]).toMatchObject({ address: '10.8.0.2' });
+  });
+
   it('drops the retained pick when the daemon refuses it and recovers from the fresh candidate list', async () => {
     // Stale-DHCP recovery must survive retention: an empty candidate list
     // proves nothing (the pick may live on a filtered tunnel interface), so

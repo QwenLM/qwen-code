@@ -67,8 +67,11 @@ async function withUiData(
   // Surface the operator's CLI-granted explicit address (#14136) as its own
   // field — never inside `interfaces`, which is the automatic-candidate list
   // the QR button resolves against listLanCandidates(). The card renders it
-  // as a labelled row and re-posts it on re-enable; omitting it once the
-  // host stops holding the address is what lets the card drop a stale grant.
+  // as a labelled row and re-posts it on re-enable. `explicitCandidate` is a
+  // liveness view, present only while the host holds the address, so it
+  // cannot tell a stale pick from a VPN/DHCP flap; `grantedAddress` reports
+  // the recorded grant. A pick that is truly gone is dropped by the card on
+  // the daemon's refusal to bind it, which returns the fresh candidate list.
   const grant = service.grantedExplicitCandidate;
   const explicitCandidate = grant
     ? findExplicitCandidate(grant.address, networkInterfaces())
@@ -78,6 +81,12 @@ async function withUiData(
     qrText,
     interfaces: listLanCandidates(),
     explicitCandidate,
+    // Provenance, not liveness: the host can stop holding a granted address
+    // (VPN down, DHCP move) while the listener stays bound to it, and the
+    // grant survives until a successful enable elsewhere supersedes it.
+    // `explicitCandidate` alone therefore cannot tell the card whether a
+    // retained pick is stale.
+    grantedAddress: grant?.address,
   };
 }
 
