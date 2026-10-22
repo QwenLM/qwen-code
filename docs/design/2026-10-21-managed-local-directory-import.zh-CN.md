@@ -11,10 +11,15 @@ Workspace。受信任的本机单用户部署应在用户选择项目时自动�
 ## 权限边界
 
 新增 `runtime-broker.local-directory-import-enabled`，默认 `false`。启动时要求
-公共监听地址为回环地址、OPEN 认证并配置受信任 actor 头，同时启用 Workspace
-文件、持久化 local-process 执行和验证恢复。这是一项显式的本机单用户能力。
+公共监听地址为回环地址，并使用 SIGNED 认证或配置受信任 actor 头的 OPEN 认证，
+同时启用 Workspace 文件、持久化 local-process 执行和验证恢复。这是一项显式的本机单用户能力。
 独立发布 `localDirectoryImport`，不与已有目录选择、空 Workspace 创建混用。
 每次请求仍要求经过认证的 tenant actor。
+
+单用户 `serve --managed` 启动器在受控 Java 环境中启用该能力。浏览器 bearer
+认证、固定的本机 tenant/actor、代理请求签名和私有回环 Java 监听保持生效。
+SIGNED 模式通过现有签名过滤器认证 actor，不接受可信请求头代替验签。
+非回环监听即使启用 insecure-bind 覆盖也不能启用目录导入。
 
 ## 导入生命周期
 
@@ -81,3 +86,7 @@ Git 清理范围之外，项目本身作为初始工作目录。
 浏览器重试，以及关闭新增导入后的重启。未在本地执行原生 Linux 验收。专项 Java/MySQL
 和 TypeScript/浏览器检查与中断的 Java 全量测试分别记录在 `.qwen/e2e-tests/`。
 没有未决产品选择。普通创建回执省略未使用的导入字段，继续支持旧 Java 版本读取。
+
+本机启动器后续验收还覆盖原生 macOS 上的回环 SIGNED 启动、保留的 bearer/签名
+拒绝、浏览器绝对路径导入、真实 Read 工具 Turn 和重启保留。详细命令结果与测试
+产物限制记录在 `.qwen/e2e-tests/managed-local-import.md`。

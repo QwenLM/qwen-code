@@ -17,6 +17,7 @@ import type {
   GenerateContentResponse,
   Part,
   SendMessageParameters,
+  Tool,
 } from '@google/genai';
 import { ApiError } from '@google/genai';
 import { AuthType, type ContentGenerator } from './contentGenerator.js';
@@ -881,6 +882,51 @@ describe('LlmChat', async () => {
       );
       expect(instruction).toContain('Legitimate content');
       expect(instruction).toContain(block('Ctx1'));
+    });
+  });
+
+  describe('setTools', () => {
+    const toolNamed = (name: string): Tool => ({
+      functionDeclarations: [{ name, description: `${name} description` }],
+    });
+
+    // `setTools` is the only writer of `generationConfig.tools`, and nothing
+    // else in this suite reaches it — the ACP-level suites only assert that a
+    // *mocked* `setTools` was called. Without this pin, dropping the write
+    // left all 592 tests green while every request went out tool-less.
+    it('writes the declarations into the config sent to the model', () => {
+      const isolatedChat = newChat({ chatConfig: {} });
+
+      isolatedChat.setTools([toolNamed('read_file')]);
+
+      expect(isolatedChat['generationConfig'].tools).toEqual([
+        toolNamed('read_file'),
+      ]);
+    });
+
+    it('replaces the previous declarations instead of appending to them', () => {
+      const isolatedChat = newChat({
+        chatConfig: { tools: [toolNamed('stale_tool')] },
+      });
+
+      isolatedChat.setTools([toolNamed('read_file'), toolNamed('shell')]);
+
+      expect(isolatedChat['generationConfig'].tools).toEqual([
+        toolNamed('read_file'),
+        toolNamed('shell'),
+      ]);
+    });
+
+    // A tool-restricted registry refresh hands `setTools` an empty list, so
+    // the clear has to land rather than keep advertising stale declarations.
+    it('clears previously-set declarations when given an empty list', () => {
+      const isolatedChat = newChat({
+        chatConfig: { tools: [toolNamed('stale_tool')] },
+      });
+
+      isolatedChat.setTools([]);
+
+      expect(isolatedChat['generationConfig'].tools).toEqual([]);
     });
   });
 

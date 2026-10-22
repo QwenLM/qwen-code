@@ -216,7 +216,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "retirement_generation:BIGINT,retired_at:BIGINT,recovery_protected:BOOLEAN,"
                     + "resource_gc_completed:BOOLEAN,runtime_request_key:CHAR,csi_guard:BOOLEAN,"
                     + "model_id:VARBINARY,model_revision:BIGINT,selected_approval_mode:VARCHAR,approval_revision:BIGINT,"
-                    + "plan_enabled:BOOLEAN"),
+                    + "plan_enabled:BOOLEAN,public_child_agents_version:INT"),
             declaration("ma_session_head", "tenant_key,harness_key",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,session_id:VARBINARY,storage_version:INT,state:VARCHAR,"
                     + "writer_generation:BIGINT,writer_id:VARBINARY,writer_lease_until:BIGINT,lease_token_hash:CHAR,"
@@ -1481,7 +1481,7 @@ final class WorkspaceCsiApplicationInventory {
             } else if ("managed-input".equals(kind)) {
                 value = CsiNativeActivationProof.inputBlocks(raw);
             } else if (Set.of("managed-activation-boundary", "managed-activation-install", "managed-admission",
-                    "managed-checkpoint", "managed-definition", "managed-file_history", "managed-hosted-model-route",
+                    "managed-checkpoint", "managed-checkpoint-history", "managed-definition", "managed-file_history", "managed-hosted-model-route",
                     "managed-hosted-model-usage", "managed-root",
                     "managed-tool-definition", "managed-tool-input", "managed-turn-result").contains(kind)) {
                 value = CsiNativeActivationProof.readObject(raw);
@@ -2974,6 +2974,7 @@ final class WorkspaceCsiApplicationInventory {
                             && row.cell("model_id").isNull() && Objects.equals(0L, row.number("model_revision"))
                             && row.cell("selected_approval_mode").isNull() && Objects.equals(0L, row.number("approval_revision"))
                             && Boolean.FALSE.equals(row.bool("plan_enabled"))
+                            && Objects.equals(0L, row.number("public_child_agents_version"))
                             && original.request().requestKey().equals(row.text("runtime_request_key"))
                             && workspace.equals(row.text("workspace_id")) && storage.equals(row.text("workspace_storage_id"))
                             && original.request().getScope().getWorkspaceGeneration().equals(String.valueOf(row.number("workspace_generation")))

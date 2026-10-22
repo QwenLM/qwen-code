@@ -162,6 +162,52 @@ describe('generated markup display', () => {
     expect(h.surface.inputs()['plan-a'].checked).toBe(true);
   });
 
+  it('returns live normalized values, including controls created by the batch', () => {
+    const h = harness(
+      '<input id="number" type="number" value="3"><input id="range" type="range" min="0" max="100" value="20"><select id="choice"><option value="a">A</option></select><input id="plan-a" type="radio" name="plan" checked><input id="plan-b" type="radio" name="plan"><div id="dynamic"></div>',
+    );
+    (h.content.getElementById('plan-b') as HTMLInputElement).click();
+    const outcome = h.surface.apply([
+      { kind: 'value', id: 'number', value: 'invalid' },
+      { kind: 'value', id: 'range', value: '500' },
+      { kind: 'value', id: 'choice', value: 'missing' },
+      {
+        kind: 'html',
+        id: 'dynamic',
+        value: '<input id="added" value="Initial">',
+      },
+      { kind: 'value', id: 'added', value: 'Updated' },
+    ]);
+    expect(outcome).toEqual({
+      kind: 'applied',
+      inputs: {
+        number: { value: '', checked: false },
+        range: { value: '100', checked: false },
+        choice: { value: '', checked: false },
+        'plan-a': { value: 'on', checked: false },
+        'plan-b': { value: 'on', checked: true },
+        added: { value: 'Updated', checked: false },
+      },
+    });
+    expect(outcome).toEqual({ kind: 'applied', inputs: h.surface.inputs() });
+    (h.content.getElementById('range') as HTMLInputElement).value = '7';
+    expect(outcome.kind === 'applied' && outcome.inputs['range'].value).toBe(
+      '100',
+    );
+    expect(
+      h.surface.apply([{ kind: 'html', id: 'dynamic', value: '' }]),
+    ).toEqual({
+      kind: 'applied',
+      inputs: {
+        number: { value: '', checked: false },
+        range: { value: '7', checked: false },
+        choice: { value: '', checked: false },
+        'plan-a': { value: 'on', checked: false },
+        'plan-b': { value: 'on', checked: true },
+      },
+    });
+  });
+
   it('keeps a newer checkbox edit and all outputs when old markup would replace it', () => {
     const h = harness(
       '<div id="controls"><input id="enabled" type="checkbox"></div><output id="out">Original</output>',
@@ -169,7 +215,7 @@ describe('generated markup display', () => {
     const before = h.surface.inputs();
     const checkbox = h.content.getElementById('enabled') as HTMLInputElement;
     checkbox.checked = true;
-    h.surface.apply(
+    const outcome = h.surface.apply(
       [
         { kind: 'text', id: 'out', value: 'Stale' },
         {
@@ -180,9 +226,51 @@ describe('generated markup display', () => {
       ],
       before,
     );
+    expect(outcome).toEqual({
+      kind: 'superseded',
+      inputs: { enabled: { value: 'on', checked: true } },
+    });
     expect(h.content.getElementById('enabled')).toBe(checkbox);
     expect(h.surface.inputs()['enabled'].checked).toBe(true);
     expect(h.content.getElementById('out')?.textContent).toBe('Original');
+  });
+
+  it('applies an old batch when it preserves newer control values', () => {
+    const h = harness(
+      '<input id="rate" value="3"><div id="out">Original</div>',
+    );
+    const before = h.surface.inputs();
+    (h.content.getElementById('rate') as HTMLInputElement).value = '7';
+    expect(
+      h.surface.apply(
+        [{ kind: 'html', id: 'out', value: '<span>Updated</span>' }],
+        before,
+      ),
+    ).toEqual({
+      kind: 'applied',
+      inputs: { rate: { value: '7', checked: false } },
+    });
+    expect(h.content.getElementById('out')?.textContent).toBe('Updated');
+  });
+
+  it('rejects an invalid batch before treating its value update as superseded', () => {
+    const h = harness(
+      '<input id="rate" value="3"><output id="out">Original</output>',
+    );
+    const before = h.surface.inputs();
+    (h.content.getElementById('rate') as HTMLInputElement).value = '7';
+    expect(() =>
+      h.surface.apply(
+        [
+          { kind: 'text', id: 'out', value: 'Changed' },
+          { kind: 'value', id: 'rate', value: '9' },
+          { kind: 'text', id: 'missing', value: 'Invalid' },
+        ],
+        before,
+      ),
+    ).toThrow(/missing/);
+    expect(h.content.getElementById('out')?.textContent).toBe('Original');
+    expect(h.surface.inputs()['rate'].value).toBe('7');
   });
 
   it('rejects duplicate IDs, unsupported controls and excessive markup or input data', () => {
@@ -491,7 +579,7 @@ describe('generated markup display', () => {
 
   it('updates elements created earlier in a valid batch and preserves table wrappers', () => {
     const h = harness('<div id="view"></div>');
-    h.surface.apply([
+    const outcome = h.surface.apply([
       {
         kind: 'html',
         id: 'view',
@@ -501,6 +589,10 @@ describe('generated markup display', () => {
       { kind: 'value', id: 'rate', value: '7' },
       { kind: 'text', id: 'score', value: '14' },
     ]);
+    expect(outcome).toEqual({
+      kind: 'applied',
+      inputs: { rate: { value: '7', checked: false } },
+    });
     expect(h.surface.inputs()['rate'].value).toBe('7');
     expect(
       h.content.querySelector('table > tbody > tr > td')?.textContent,
@@ -541,10 +633,21 @@ describe('generated markup display', () => {
     h.content
       .getElementById('go')!
       .dispatchEvent(new Event('click', { bubbles: true }));
-    h.surface.apply([{ kind: 'text', id: 'out', value: 'Late' }]);
+    expect(
+      h.surface.apply([{ kind: 'text', id: 'out', value: 'Late' }]),
+    ).toEqual({ kind: 'stopped' });
     expect(h.onEvent).not.toHaveBeenCalled();
     expect(h.content.getElementById('out')?.textContent).toBe('Initial');
     expect(h.content.body.inert).toBe(true);
+  });
+
+  it('returns stopped without accessing content before a frame is attached', () => {
+    const frame = document.createElement('iframe');
+    const surface = new ViewSurface(frame, vi.fn(), vi.fn());
+    surface.stop();
+    expect(
+      surface.apply([{ kind: 'text', id: 'missing', value: 'Late' }]),
+    ).toEqual({ kind: 'stopped' });
   });
 
   it('mounts a script-disabled frame with an independent restrictive CSP', async () => {
