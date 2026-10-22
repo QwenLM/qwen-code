@@ -119,6 +119,17 @@ export class ManagedSessionMessageProjection {
    * (`ChatRecordingService.readActiveTranscriptChain`).
    */
   async project(throughSequence?: number): Promise<ChatRecord[]> {
+    return this.projectRecords(throughSequence, false);
+  }
+
+  async projectModelRecords(throughSequence?: number): Promise<ChatRecord[]> {
+    return this.projectRecords(throughSequence, true);
+  }
+
+  private async projectRecords(
+    throughSequence: number | undefined,
+    includeCompactions: boolean,
+  ): Promise<ChatRecord[]> {
     const records: ChatRecord[] = [];
     const checkpoints = new Map<string, number>();
     let after = 0;
@@ -146,12 +157,17 @@ export class ManagedSessionMessageProjection {
         }
         if (branch !== undefined) {
           records.push(branch);
-        } else if (event.kind === 'message.committed') {
+        } else if (
+          event.kind === 'message.committed' ||
+          (includeCompactions && event.kind === 'context.compacted')
+        ) {
           records.push(
             await readRecordBody(
               this.resources,
-              event.payload['contentRef'],
-              `message.committed event ${event.eventId} contentRef`,
+              event.payload[
+                event.kind === 'context.compacted' ? 'summaryRef' : 'contentRef'
+              ],
+              `${event.kind} event ${event.eventId} body`,
             ),
           );
         }
