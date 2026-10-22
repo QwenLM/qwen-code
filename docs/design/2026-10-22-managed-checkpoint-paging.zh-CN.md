@@ -6,11 +6,13 @@
 
 实现已完成，本地专项验收通过；完整回归的保留失败及原生路径限制见下文。本次承接 #15094 的有界预算和恢复修复。一个尚未结束的 Turn 会在检查点中累积已完成工具收据与 Runtime 绑定。将物理上限从 64 KiB 提高到 1 MiB 只能推迟超限；删除已消费条目会移除持久化的重复执行保护。HTTP 事务还会重新枚举所有传递依赖，并受 1,024 个资源的限制。没有已提交历史复用的分页列表不能解决第二个限制。
 
+这个以 main 为目标的后续改动依赖 #15094 提供 1 MiB 物理根和 publication/readback 引用预算。在该前置 PR 合入之前，main 仍拒绝超过 64 KiB 的检查点资源；48 KiB 的有界历史页没有消除活动根的预算前置。预算与恢复补丁继续由 #15094 跟进，本 PR 不重复包含它们。上线前需 rebase 并验证组合后的部署。
+
 ## 目标与边界
 
 让物理检查点和不可变历史页保持有界，增量追加历史，保留每个执行身份与结果引用，恢复时不重放已完成工具。待完成、未消费调用保留在活动检查点。新页、引用、检查点根与 journal/head 推进沿用既有原子事务提交。
 
-本次改变检查点持久化，不重构整个 Session 的保留模型。逻辑执行视图仍完整物化工具和绑定数组，保留现有状态转换校验及重复执行保护的权威性。单个检查点的加载和逻辑校验仍为 O(历史量)。完整 journal 重放可能反复访问历史前缀，代价更高；不声明进程内存有界或恢复耗时恒定。journal 压缩、对象存储、UI 历史分页及未知物理执行的自动续跑不在范围内。现有 Session/CSI inventory 与 snapshot 的总行数、字节上限仍作为显式容量保护，包括 4,096 项 history/inventory 限制；本功能不证明 10,000 次原生 CSI 调用可用。活动批次和工具发布 profile 保留现有上限，包括发布 profile 对检查点引用的 64 KiB 限制；codec 的 1 MiB 根保护不代表每种执行 profile 都接受该大小的根。
+本次改变检查点持久化，不重构整个 Session 的保留模型。逻辑执行视图仍完整物化工具和绑定数组，保留现有状态转换校验及重复执行保护的权威性。单个检查点的加载和逻辑校验仍为 O(历史量)。完整 journal 重放可能反复访问历史前缀，代价更高；不声明进程内存有界或恢复耗时恒定。journal 压缩、对象存储、UI 历史分页及未知物理执行的自动续跑不在范围内。现有 Session/CSI inventory 与 snapshot 的总行数、字节上限仍作为显式容量保护，包括 4,096 项 history/inventory 限制；本功能不证明 10,000 次原生 CSI 调用可用。活动批次和工具发布 profile 保留现有上限。在 #15094 合入前，main 的发布 profile 仍保留 64 KiB 检查点引用限制；仅有 codec 的 1 MiB 根保护不足以部署该大小的根。
 
 ## 逻辑与物理格式
 
@@ -43,7 +45,7 @@ Native CSI 必须将物理根解码为完整逻辑状态，再执行现有 canon
 | SQL 准入与 Hosted closure   | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionStore.java`、`ManagedHostedRecoveryRecords.java`                                                                                                                                                               |
 | 原生 proof 与历史应用校验   | `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/runtimebroker/ManagedCheckpointHistory.java`、`CsiNativeActivationProof.java`、`JdbcCsiActivationAdmission.java`、`JdbcCsiExecutionAdmission.java`；persistence 下的 `WorkspaceCsiApplicationHistory.java` 和 `WorkspaceCsiApplicationInventory.java` |
 
-生成分页根前，一并部署兼容的 Java 校验器/读取器与 Harness。既有内联检查点无需迁移；下一次成功提交可封存其消费前缀。分页后降级会明确阻塞。保持 #15094 可独立评审；本次在基于该修复的独立工作树实现。功能验证不重启或修改用户预览和 Session。
+生成分页根前，一并部署兼容的 Java 校验器/读取器与 Harness。既有内联检查点无需迁移；下一次成功提交可封存其消费前缀。分页后降级会明确阻塞。保持 #15094 可独立评审，在前置合入后验证组合部署。功能验证不重启或修改用户预览和 Session。
 
 ## 验证与验收
 
@@ -55,6 +57,8 @@ Native CSI 必须将物理根解码为完整逻辑状态，再执行现有 canon
 6. 执行根目录 build/typecheck/bundle、相关包测试、Java 验证、独立 MySQL 及对应原生 Hosted/恢复门禁。明确记录无法执行的外部模型和平台检查；本地确定性成功不等于生产验收。
 
 ## 本地验证观察
+
+以下记录来自之前包含预算与恢复修复的集成预览，并非独立的 main 目标分支。抽取后 PR 的最新检查及保留失败会记录在独立的 E2E 报告中。
 
 在 macOS、Node 24.19.0、JDK 21 和独立 MySQL 8.4.11 上，独立协议历史测试从 256 条增长到 2,560 条逻辑收据。真实 Java/MySQL 路径的当前 census 保持 35 个资源，最终物理根为 24,211 字节，逻辑状态达到 1,763,787 字节。Java 重启及第二个 Node 进程能读回全部结果，并在最早执行已被进程内缓存淘汰后仍拒绝重复执行。本轮冷读取加上逐项 HTTP 结果校验用时 171,563 毫秒；这不是独立的检查点解码或 Turn 延迟基准。这些是合成逻辑收据，不是 2,560 次原生 worker 执行。
 
