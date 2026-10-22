@@ -251,6 +251,16 @@ export QWEN_MANAGED_AGENT_WORKSPACE_ID='local-dev-workspace'
 mvn spring-boot:run
 ```
 
+Instead of the token and digest, `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`
+can name the Harness's own environment file. The server then reads
+`QWEN_SERVER_TOKEN` and `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` from it into its
+configuration, never into its process environment, and refuses to start when
+either direct value is also set. Write each credential as `KEY=value` on one
+line, with no whitespace around the `=` and only letters, digits and `._:/+=-`
+in the value. The server refuses, by file and line, any line it might read
+differently from systemd or a shell, such as a continuation, a carriage return
+from CRLF line endings, an unterminated quote or text after a closing quote.
+
 Create a Session:
 
 ```bash
