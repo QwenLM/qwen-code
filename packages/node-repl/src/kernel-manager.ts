@@ -995,6 +995,8 @@ export class NodeReplKernelManager {
   }
 
   private async terminateHandle(handle: KernelHandle): Promise<void> {
+    const running =
+      handle.child.exitCode === null && handle.child.signalCode === null;
     try {
       handle.toKernel.write(encodeFrame({ type: 'shutdown' }));
       // The kernel's pending read on this pipe keeps its process.exit()
@@ -1006,6 +1008,13 @@ export class NodeReplKernelManager {
     }
     let exited = await this.waitForExit(handle.child, TERMINATE_GRACE_MS);
     let hardKill = false;
+    if (exited && running && !IS_WINDOWS) {
+      // Processes the session started without detaching outlive a kernel
+      // that exits on its own. They are still in its process group, which
+      // keeps its ID while any of them lives, so stop them the way a
+      // signalled shutdown would have.
+      hardKill = await this.stopLeftoverProcessGroup(handle.pid);
+    }
     if (!exited) {
       this.signalProcessTree(handle, false);
       exited = await this.waitForExit(handle.child, 500);
@@ -1018,6 +1027,23 @@ export class NodeReplKernelManager {
     debugLogger.debug(
       `[node-repl] process tree termination completed (generation=${handle.generation}, pid=${handle.pid}, hardKill=${hardKill}, exited=${exited})`,
     );
+  }
+
+  private async stopLeftoverProcessGroup(pgid: number): Promise<boolean> {
+    const signalGroup = (signal: NodeJS.Signals | 0): boolean => {
+      try {
+        process.kill(-pgid, signal);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if (!signalGroup('SIGTERM')) return false;
+    for (let waited = 0; waited < 500; waited += 50) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      if (!signalGroup(0)) return false;
+    }
+    return signalGroup('SIGKILL');
   }
 
   private signalProcessTree(handle: KernelHandle, hard: boolean): void {

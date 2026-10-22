@@ -5,6 +5,7 @@
  */
 
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -73,6 +74,59 @@ function createEsmPackage(
 
 async function run(code: string, timeoutMs = EXEC_TIMEOUT) {
   return manager.exec({ code, timeoutMs });
+}
+
+// Starts a process from session code. It holds a connection to this test,
+// so its exit is seen even if nothing reaps it.
+async function startSessionProcess(script = '') {
+  const server = net.createServer();
+  const connection = new Promise<net.Socket>((resolve) =>
+    server.once('connection', resolve),
+  );
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as net.AddressInfo;
+  let pid = 0;
+  let exited = false;
+  const stop = () => {
+    if (pid > 0 && !exited) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // Already gone.
+      }
+    }
+    server.close();
+  };
+  try {
+    const started = await run(
+      `const { spawn } = await import('node:child_process');
+      const child = spawn(${JSON.stringify(process.execPath)}, ['-e', ${JSON.stringify(
+        `require('node:net').connect(${port}, '127.0.0.1'); ${script} setInterval(() => {}, 1000);`,
+      )}], { stdio: 'ignore' });
+      nodeRepl.write(String(child.pid));`,
+    );
+    expect(started.status).toBe('ok');
+    pid = Number(texts(started)[0]);
+    const socket = await connection;
+    socket.on('error', () => undefined);
+    const closed = new Promise<boolean>((resolve) =>
+      socket.once('close', () => {
+        exited = true;
+        resolve(true);
+      }),
+    );
+    const exitedWithin = (timeoutMs: number) =>
+      Promise.race([
+        closed,
+        new Promise<boolean>((resolve) =>
+          setTimeout(resolve, timeoutMs, false),
+        ),
+      ]);
+    return { exitedWithin, stop };
+  } catch (error) {
+    stop();
+    throw error;
+  }
 }
 
 beforeEach(() => {
@@ -1619,17 +1673,73 @@ describe('NodeReplKernelManager', () => {
   );
 
   it.skipIf(process.platform === 'win32')(
-    'lets an idle kernel exit on reset and disposal without a signal',
+    'lets an idle kernel exit on reset and disposal before any signal',
     async () => {
       await run('nodeRepl.write("up");');
-      const kill = vi.spyOn(process, 'kill');
+      const realKill = process.kill.bind(process);
+      const signalledRunningKernels: number[] = [];
+      const kill = vi
+        .spyOn(process, 'kill')
+        .mockImplementation((pid, signal) => {
+          try {
+            realKill(Math.abs(pid), 0);
+            signalledRunningKernels.push(pid);
+          } catch {
+            // The kernel had already exited.
+          }
+          return realKill(pid, signal);
+        });
       try {
         await manager.reset();
         await run('nodeRepl.write("up");');
         await manager.dispose();
-        expect(kill).not.toHaveBeenCalled();
+        expect(signalledRunningKernels).toEqual([]);
       } finally {
         kill.mockRestore();
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === 'win32').each([
+    { name: 'reset', terminate: () => manager.reset() },
+    { name: 'disposal', terminate: () => manager.dispose() },
+    {
+      name: 'a timed-out cancellation barrier',
+      terminate: async () => {
+        const outcome = await run(
+          'await nodeRepl.signal.waitUntil(new Promise(() => {}));',
+          2_000,
+        );
+        expect(outcome.status).toBe('timeout');
+        expect(outcome.stats.kernelReplaced).toBe(true);
+      },
+    },
+  ])(
+    'stops processes the session started on $name',
+    async ({ terminate }) => {
+      const child = await startSessionProcess();
+      try {
+        await terminate();
+        await expect(child.exitedWithin(10_000)).resolves.toBe(true);
+      } finally {
+        child.stop();
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'kills a session process that ignores SIGTERM on reset',
+    async () => {
+      const child = await startSessionProcess(
+        "process.on('SIGTERM', () => {});",
+      );
+      try {
+        await manager.reset();
+        await expect(child.exitedWithin(10_000)).resolves.toBe(true);
+      } finally {
+        child.stop();
       }
     },
     TEST_TIMEOUT,
