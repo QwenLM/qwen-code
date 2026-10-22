@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecovery;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellAdmission;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCancelRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellChangeCwdRequest;
@@ -15,6 +16,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellListRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellOperationRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellPage;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellRecoveryRecheckRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellRenameRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellRenameResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSession;
@@ -35,11 +37,13 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscriptRequest;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.session.ContextCompressionService;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.session.ManagedEventStreamService;
 import com.alibaba.qwen.code.managedagent.session.ManagedTaskCancelService;
 import com.alibaba.qwen.code.managedagent.session.ManagedTaskService;
 import com.alibaba.qwen.code.managedagent.session.SessionLifecycleService;
+import com.alibaba.qwen.code.managedagent.session.SessionRecoveryService;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -61,16 +65,24 @@ public class WebShellAgentController {
     private final SessionLifecycleService lifecycle;
     private final ManagedTaskService tasks;
     private final ManagedTaskCancelService taskCancels;
+    private final SessionRecoveryService recovery;
+    private ContextCompressionService compressions;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    void setCompressions(ContextCompressionService compressions) {
+        this.compressions = compressions;
+    }
 
     public WebShellAgentController(ManagedAgentService service,
             ManagedEventStreamService streams,
             SessionLifecycleService lifecycle, ManagedTaskService tasks,
-            ManagedTaskCancelService taskCancels) {
+            ManagedTaskCancelService taskCancels, SessionRecoveryService recovery) {
         this.service = service;
         this.streams = streams;
         this.lifecycle = lifecycle;
         this.tasks = tasks;
         this.taskCancels = taskCancels;
+        this.recovery = recovery;
     }
 
     @PostMapping("/tasks/query")
@@ -125,6 +137,20 @@ public class WebShellAgentController {
                 request.sessionId());
     }
 
+    @PostMapping("/session-recovery/query")
+    public ResponseEntity<SessionRecovery> recovery(TenantContext tenant,
+            @Valid @RequestBody WebShellSessionRequest request) {
+        return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore())
+                .body(recovery.query(tenant.tenantId(), tenant.actorId(), request.sessionId()));
+    }
+
+    @PostMapping("/session-recovery/recheck")
+    public ResponseEntity<SessionRecovery> recheckRecovery(TenantContext tenant,
+            @Valid @RequestBody WebShellRecoveryRecheckRequest request) {
+        return ResponseEntity.accepted().body(recovery.recheck(tenant.tenantId(),
+                tenant.actorId(), request.sessionId(), request.turnId()));
+    }
+
     @PostMapping("/sessions/rename")
     public ResponseEntity<WebShellRenameResult> rename(TenantContext tenant,
             @Valid @RequestBody WebShellRenameRequest request,
@@ -155,6 +181,15 @@ public class WebShellAgentController {
         return streams.webShellStream(tenant.tenantId(), tenant.actorId(),
                 request.sessionId(),
                 after);
+    }
+
+    @PostMapping("/sessions/compress")
+    public ResponseEntity<ApiModels.WebShellContextCompressionOperation> compress(TenantContext tenant,
+            @Valid @RequestBody ApiModels.WebShellContextCompressionRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
+        return ResponseEntity.accepted().body(compressions.admitWebShell(tenant.tenantId(),
+                tenant.actorId(), request.sessionId(), request.idempotencyKey(), request.expectedCompactionRevision()));
     }
 
     @PostMapping("/sessions/create")

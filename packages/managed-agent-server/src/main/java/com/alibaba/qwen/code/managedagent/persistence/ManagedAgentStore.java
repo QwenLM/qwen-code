@@ -2043,7 +2043,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     private static final String SESSION_OPERATION_KINDS =
-            "('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL')";
+            "('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL', 'CONTEXT_COMPRESSION')";
     // D7-1: a Turn input or cancel command targets its Turn, never the
     // Session, so no Session barrier above counts it: the Turn row is its
     // barrier, and the Turn dispatcher, which holds the only lease that may
@@ -2579,6 +2579,365 @@ public class ManagedAgentStore implements AgentStateStore {
                         archive ? "completed" : "requested"), now);
         return new OperationAdmission(findOperation(tenantId, sessionId,
                 operationId).orElseThrow(), false);
+    }
+
+    @Override
+    @Transactional
+    public OperationAdmission beginContextCompression(String tenantId, String sessionId,
+            String actorId, String actorDigest, String key, String digest,
+            long expectedCompactionRevision, boolean supported) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        ContextBinding binding = session.workspace();
+        if (binding == null) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature",
+                    "Context compression requires a Workspace Session.");
+        }
+        WorkspaceAccess access = workspaces.accessOf(tenantId, actorId, binding.getWorkspaceId());
+        if (!access.canRead()) {
+            throw new ManagedAgentException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
+        }
+        Optional<OperationRecord> replay = replayOperation(tenantId, sessionId,
+                OperationKind.CONTEXT_COMPRESSION, actorDigest, key);
+        if (replay.isPresent()) {
+            if (!digest.equals(replay.get().requestDigest())) {
+                throw new ManagedAgentException(HttpStatus.CONFLICT, "idempotency_conflict",
+                        "The idempotency key was reused with different content.");
+            }
+            return new OperationAdmission(replay.get(), true);
+        }
+        if (!access.atLeast(WorkspaceAccess.OPERATOR)) {
+            throw new ManagedAgentException(HttpStatus.FORBIDDEN, "session_operation_forbidden",
+                    "Only a Workspace operator may compress Session context.");
+        }
+        if (!supported || !workspaceFilesEnabled) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature",
+                    "Hosted context compression is unavailable.");
+        }
+        requireSessionStatus(session.status(), "ACTIVE");
+        WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, binding.getStorageId());
+        requireCwdChangeRegistryFacts(session);
+        if (contextCompressionState(tenantId, sessionId).compactionRevision() != expectedCompactionRevision) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "compaction_revision_conflict",
+                    "The Session compaction revision has changed.");
+        }
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        if (hasOpenOperation(tenantId, sessionId) || hasPendingRenameDelivery(tenantId, sessionId)
+                || hasActiveTurn(tenantId, sessionId) || hasDecidableAction(session)
+                || !jdbc.queryForList("SELECT 1 FROM ma_session_record WHERE session_scope_key = ?"
+                        + " AND record_kind = 'DOMAIN' AND domain IN ('hook_execution', 'history_maintenance')"
+                        + " AND settled_at IS NULL LIMIT 1", scope).isEmpty()
+                || !jdbc.queryForList("SELECT 1 FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
+                        + " AND status = 'RECOVERY_BLOCKED' LIMIT 1", tenantId, sessionId).isEmpty()
+                || !jdbc.queryForList("SELECT 1 FROM ma_session_head WHERE tenant_id = ? AND session_id = ?"
+                        + " AND head_kind = 'MANAGED_SESSION' AND (state <> 'ACTIVE' OR recovery_status <> 'READY')",
+                        tenantId, sessionId).isEmpty()) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "session_context_busy",
+                    "The Session has an active Turn, approval, Hook, recovery or context operation.");
+        }
+        String operationId = publicId("op");
+        long now = lifecycleDatabaseTime();
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("operationId", operationId);
+        request.put("expectedCompactionRevision", expectedCompactionRevision);
+        var model = findModelSelections(tenantId, List.of(sessionId)).get(sessionId);
+        if (model != null && model.modelId() != null) {
+            request.put("modelSelection", Map.of("modelId", model.modelId(), "revision", model.revision()));
+        }
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_kind,"
+                + " target_key, target_id, phase, request_json, idempotency_digest, tenant_id, session_id,"
+                + " operation_id, operation_kind, actor_digest, idempotency_key, request_digest, state,"
+                + " admission_stage, delivery_state, session_status_before, actor_key, available_at,"
+                + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'SESSION', ?, ?, 'PENDING', ?, ?, ?, ?, ?,"
+                + " 'CONTEXT_COMPRESSION', ?, ?, ?, 'PENDING', 'JAVA_DURABLE', 'PENDING', ?, ?, ?, ?, ?)",
+                sessionOperationKey(tenantId, sessionId, OperationKind.CONTEXT_COMPRESSION, operationId),
+                scope, scope, sessionOperationTarget(sessionId), sessionId, writeJson(request),
+                ManagedSchemaKeys.key(key), tenantId, sessionId, operationId, actorDigest, key, digest,
+                session.status(), ManagedWorkspaceRegistry.actorKey(tenantId, actorId), now, now, now);
+        return new OperationAdmission(findOperation(tenantId, sessionId, operationId).orElseThrow(), false);
+    }
+
+    @Override
+    public ContextCompressionState contextCompressionState(String tenantId, String sessionId) {
+        ensureCompactionProjection(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        List<Long> revisions = jdbc.queryForList("SELECT revision FROM ma_session_record WHERE"
+                + " session_scope_key = ? AND record_key = ? AND record_kind = 'DOMAIN'", Long.class,
+                scope, ManagedExtensionProjection.recordKey(sessionId, "hosted_context_compaction", "latest"));
+        List<String> operations = jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE"
+                + " scope_key = ? AND operation_kind = 'CONTEXT_COMPRESSION' AND target_key = ?"
+                + " AND state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED') ORDER BY gmt_create LIMIT 1",
+                String.class, scope, sessionOperationTarget(sessionId));
+        return new ContextCompressionState(revisions.isEmpty() ? 0 : revisions.getFirst(),
+                operations.isEmpty() ? null : operations.getFirst());
+    }
+
+    @Override
+    public Map<String, ContextCompressionState> contextCompressionStates(String tenantId, List<String> sessionIds) {
+        if (sessionIds.isEmpty()) {
+            return Map.of();
+        }
+        List<Object> arguments = new ArrayList<>();
+        arguments.add(tenantId);
+        sessionIds.forEach(id -> arguments.add(ManagedSessionStore.sessionScopeKey(tenantId, id)));
+        Map<String, ContextCompressionState> result = new HashMap<>();
+        Set<String> indexed = new HashSet<>();
+        sessionIds.forEach(id -> result.put(id, new ContextCompressionState(0, null)));
+        jdbc.query("SELECT session_id, revision FROM ma_session_record WHERE tenant_id = ?"
+                + " AND session_scope_key IN (" + placeholders(sessionIds.size()) + ")"
+                + " AND record_kind = 'DOMAIN' AND domain = 'hosted_context_compaction'",
+                (RowCallbackHandler) row -> {
+                    indexed.add(row.getString("session_id"));
+                    result.put(row.getString("session_id"), new ContextCompressionState(row.getLong("revision"), null));
+                }, arguments.toArray());
+        List<String> missing = sessionIds.stream().filter(id -> !indexed.contains(id)).toList();
+        if (!missing.isEmpty()) {
+            List<Object> heads = new ArrayList<>();
+            heads.add(tenantId);
+            heads.addAll(missing);
+            for (String id : jdbc.queryForList("SELECT session_id FROM ma_session_head WHERE tenant_id = ?"
+                    + " AND session_id IN (" + placeholders(missing.size()) + ") AND head_kind = 'MANAGED_SESSION'",
+                    String.class, heads.toArray())) {
+                try {
+                    result.put(id, contextCompressionState(tenantId, id));
+                } catch (ManagedAgentException unavailable) {
+                    if (!"context_compression_state_unavailable".equals(unavailable.getCode())) {
+                        throw unavailable;
+                    }
+                    result.put(id, new ContextCompressionState(0, null, false));
+                }
+            }
+        }
+        jdbc.query("SELECT session_id, operation_id FROM ma_operation WHERE tenant_id = ?"
+                + " AND scope_key IN (" + placeholders(sessionIds.size()) + ")"
+                + " AND operation_kind = 'CONTEXT_COMPRESSION' AND state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED')",
+                (RowCallbackHandler) row -> {
+                    String id = row.getString("session_id");
+                    result.put(id, new ContextCompressionState(result.get(id).compactionRevision(),
+                            row.getString("operation_id"), result.get(id).available()));
+                }, arguments.toArray());
+        return result;
+    }
+
+    private void ensureCompactionProjection(String tenantId, String sessionId) {
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String key = ManagedExtensionProjection.recordKey(sessionId, "hosted_context_compaction", "latest");
+        if (!jdbc.queryForList("SELECT 1 FROM ma_session_record WHERE session_scope_key = ? AND record_key = ?",
+                scope, key).isEmpty()) {
+            return;
+        }
+        var transactions = new org.springframework.transaction.support.TransactionTemplate(
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()));
+        transactions.executeWithoutResult(status -> backfillCompactionProjection(tenantId, sessionId, scope, key));
+    }
+
+    private void backfillCompactionProjection(String tenantId, String sessionId, String scope, String key) {
+        var heads = jdbc.queryForList("SELECT workspace_id, journal_revision, compacted_through_revision FROM"
+                + " ma_session_head WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
+                tenantId, sessionId);
+        if (heads.isEmpty() || ((Number) heads.getFirst().get("journal_revision")).longValue() == 0) {
+            return;
+        }
+        var head = heads.getFirst();
+        if (((Number) head.get("compacted_through_revision")).longValue() != 0) {
+            throw compressionStateUnavailable();
+        }
+        long through = ((Number) head.get("journal_revision")).longValue();
+        long scanned = 0;
+        com.fasterxml.jackson.databind.JsonNode latest = null;
+        while (scanned < through) {
+            var page = jdbc.queryForList("SELECT journal_revision, record_bytes, byte_length, record_digest FROM"
+                    + " ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? AND journal_revision > ?"
+                    + " AND journal_revision <= ? ORDER BY journal_revision LIMIT 16", tenantId, sessionId, scanned, through);
+            if (page.isEmpty()) {
+                throw compressionStateUnavailable();
+            }
+            for (var row : page) {
+                byte[] bytes = (byte[]) row.get("record_bytes");
+                long revision = ((Number) row.get("journal_revision")).longValue();
+                if (revision != scanned + 1 || bytes == null
+                        || bytes.length != ((Number) row.get("byte_length")).longValue()
+                        || !DigestUtils.sha256Hex(bytes).equals(row.get("record_digest"))) {
+                    throw compressionStateUnavailable();
+                }
+                for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
+                    var record = ManagedExtensionRecordStore.parse(line);
+                    if (record == null) {
+                        throw compressionStateUnavailable();
+                    }
+                    var event = record.path("managedSession");
+                    if ("context.compacted".equals(event.path("kind").asText())) {
+                        latest = event;
+                    }
+                }
+                scanned = revision;
+            }
+        }
+        String workspace = (String) head.get("workspace_id");
+        long revision = latest == null ? 0 : latest.path("sequence").asLong();
+        String resourceId;
+        if (latest == null) {
+            byte[] empty = "{}".getBytes(StandardCharsets.UTF_8);
+            String digest = DigestUtils.sha256Hex(empty);
+            resourceId = "compaction-state:" + digest;
+            jdbc.update("INSERT IGNORE INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id,"
+                    + " session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes,"
+                    + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 2, ?, 'MYSQL_INLINE', ?,"
+                    + " 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
+                    ManagedSchemaKeys.key(scope, resourceId), scope, tenantId, workspace, sessionId, resourceId,
+                    "managed-context-compaction-empty", digest, empty);
+        } else {
+            var ref = latest.path("payload").path("summaryRef");
+            try {
+                ManagedExtensionRecords.durableRef(ref, "compaction.summaryRef");
+            } catch (IllegalArgumentException error) {
+                throw compressionStateUnavailable();
+            }
+            resourceId = ref.path("resourceId").asText();
+            var resources = jdbc.queryForList("SELECT sha256, byte_length, kind FROM ma_resource WHERE"
+                    + " session_scope_key = ? AND resource_id = ? AND state IN ('REFERENCED', 'PUBLISHED')",
+                    scope, resourceId);
+            if (resources.size() != 1 || !ref.path("digest").asText().equals(resources.getFirst().get("sha256"))
+                    || !ref.path("kind").asText().equals(resources.getFirst().get("kind"))
+                    || ref.path("byteLength").asLong() != ((Number) resources.getFirst().get("byte_length")).longValue()) {
+                throw compressionStateUnavailable();
+            }
+        }
+        long now = lifecycleDatabaseTime();
+        int inserted = jdbc.update("INSERT IGNORE INTO ma_session_record (session_scope_key, record_key, tenant_id,"
+                + " workspace_id, session_id, domain, record_id, revision, record_resource_id, gmt_create, settled_at,"
+                + " first_sequence) VALUES (?, ?, ?, ?, ?, 'hosted_context_compaction', ?, ?, ?, ?, ?, ?)",
+                scope, key, tenantId, workspace, sessionId, "latest", revision, resourceId, now, now, revision);
+        if (inserted == 1) {
+            jdbc.update("INSERT IGNORE INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision,"
+                    + " resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES"
+                    + " (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, ?)", scope, key, revision,
+                    ManagedSchemaKeys.key(scope, resourceId), tenantId, workspace, sessionId, resourceId, now);
+        }
+    }
+
+    private static ManagedAgentException compressionStateUnavailable() {
+        return new ManagedAgentException(HttpStatus.CONFLICT, "context_compression_state_unavailable",
+                "The retained journal cannot establish the Session compaction revision.");
+    }
+
+    @Override
+    public Map<String, Object> contextCompressionRequest(String tenantId, String sessionId, String operationId) {
+        return jdbc.queryForList("SELECT request_json FROM ma_operation WHERE scope_key = ?"
+                + " AND operation_kind = 'CONTEXT_COMPRESSION' AND operation_id = ?", String.class,
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), operationId).stream()
+                .findFirst().map(this::readMap).orElse(Map.of());
+    }
+
+    @Override
+    public List<OperationTarget> findContextCompressions(int limit) {
+        return jdbc.query("SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE"
+                + " operation_kind = 'CONTEXT_COMPRESSION' AND state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED')"
+                + " AND available_at <= " + ManagedSchemaTime.SQL_NOW + " AND (claim_owner IS NULL OR claim_until < "
+                + ManagedSchemaTime.SQL_NOW + ") ORDER BY available_at LIMIT ?", operationTargetMapper, limit);
+    }
+
+    @Override
+    @Transactional
+    public Optional<OperationRecord> claimContextCompression(String tenantId, String sessionId,
+            String operationId, String owner, Duration duration) {
+        requireLegacyMutation(tenantId, sessionId);
+        int changed = jdbc.update("UPDATE ma_operation SET state = 'RUNNING', delivery_state = 'LEASED',"
+                + " claim_owner = ?, claim_until = (" + ManagedSchemaTime.SQL_NOW + " + ?),"
+                + " claim_generation = claim_generation + 1, attempt_count = attempt_count + 1 WHERE"
+                + " scope_key = ? AND operation_kind = 'CONTEXT_COMPRESSION' AND operation_id = ?"
+                + " AND state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED') AND available_at <= "
+                + ManagedSchemaTime.SQL_NOW + " AND (claim_owner IS NULL OR claim_until < " + ManagedSchemaTime.SQL_NOW + ")",
+                owner, duration.toMillis(), ManagedSessionStore.sessionScopeKey(tenantId, sessionId), operationId);
+        return changed == 1 ? findOperation(tenantId, sessionId, operationId) : Optional.empty();
+    }
+
+    @Override
+    public void requireContextCompressionCommit(String tenantId, String sessionId, String operationId) {
+        OperationRecord operation = findOperation(tenantId, sessionId, operationId).orElse(null);
+        if (operation == null || operation.kind() != OperationKind.CONTEXT_COMPRESSION) {
+            return;
+        }
+        SessionRecord session = requireSession(tenantId, sessionId);
+        if (!List.of("PENDING", "RUNNING", "RECOVERY_BLOCKED").contains(operation.state())
+                || session.workspace() == null || !"ACTIVE".equals(session.status())
+                || operation.actorKey() == null || !initiatorKeepsOperate(session, operation)) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "context_compression_authorization_revoked",
+                    "The compression initiator no longer has execution authority.");
+        }
+        requireCwdChangeRegistryFacts(session);
+    }
+
+    @Override
+    @Transactional
+    public boolean markContextCompressionSubmitted(OperationRecord operation, String owner) {
+        SessionRecord session = requireLegacySessionForUpdate(operation.tenantId(), operation.sessionId());
+        if (!"ACTIVE".equals(session.status()) || session.workspace() == null
+                || !initiatorKeepsOperate(session, operation)
+                || !hasExecutionRegistryFacts(session.tenantId(), session.sessionId())) {
+            settleContextCompression(operation, owner, "failed", null, "workspace_unavailable");
+            return false;
+        }
+        return jdbc.update("UPDATE ma_operation SET admission_stage = 'HARNESS_SUBMITTED' WHERE"
+                + compressionClaim(), compressionArguments(operation, owner)) == 1;
+    }
+
+    @Override
+    @Transactional
+    public boolean settleContextCompression(OperationRecord operation, String owner,
+            String outcome, Long revision, String failureCode) {
+        boolean failed = "failed".equals(outcome);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("outcome", outcome);
+        if (revision != null) {
+            result.put("compactionRevision", revision);
+        }
+        List<Object> args = new ArrayList<>(List.of(failed ? "FAILED" : "COMPLETED",
+                failed ? "FAILED" : "COMPLETED", writeJson(result), publicId("rcpt")));
+        args.add(failureCode);
+        args.addAll(List.of(compressionArguments(operation, owner)));
+        return jdbc.update("UPDATE ma_operation SET state = ?, phase = ?, result_json = ?, receipt_id = ?,"
+                + " failure_code = ?, admission_stage = 'HARNESS_CONFIRMED', delivery_state = 'CONFIRMED',"
+                + " claim_owner = NULL, claim_until = NULL, completed_at = " + ManagedSchemaTime.SQL_NOW
+                + ", gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE" + compressionClaim(), args.toArray()) == 1;
+    }
+
+    @Override
+    @Transactional
+    public void retryContextCompressionPreparation(OperationRecord operation, String owner, long retryAt) {
+        List<Object> args = new ArrayList<>();
+        args.add(retryAt);
+        args.addAll(List.of(compressionArguments(operation, owner)));
+        jdbc.update("UPDATE ma_operation SET state = 'PENDING', admission_stage = 'JAVA_DURABLE',"
+                + " delivery_state = 'BLOCKED', available_at = ?, claim_owner = NULL, claim_until = NULL,"
+                + " gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE" + compressionClaim()
+                + " AND admission_stage = 'JAVA_DURABLE'", args.toArray());
+    }
+
+    @Override
+    @Transactional
+    public void awaitContextCompression(OperationRecord operation, String owner,
+            boolean acceptanceKnown, String failureCode, long retryAt) {
+        List<Object> args = new ArrayList<>();
+        args.add(acceptanceKnown && failureCode == null ? "RUNNING" : "RECOVERY_BLOCKED");
+        args.add(acceptanceKnown ? "HARNESS_ACCEPTED" : "HARNESS_SUBMITTED");
+        args.add(acceptanceKnown ? failureCode : "context_compression_acceptance_unknown");
+        args.add(retryAt);
+        args.addAll(List.of(compressionArguments(operation, owner)));
+        jdbc.update("UPDATE ma_operation SET state = ?, admission_stage = ?, failure_code = ?,"
+                + " delivery_state = 'BLOCKED', available_at = ?, claim_owner = NULL, claim_until = NULL,"
+                + " gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE" + compressionClaim(), args.toArray());
+    }
+
+    private static String compressionClaim() {
+        return " operation_kind = 'CONTEXT_COMPRESSION' AND tenant_id = ? AND session_id = ?"
+                + " AND operation_id = ? AND state = 'RUNNING' AND claim_owner = ? AND claim_generation = ?"
+                + " AND claim_until > " + ManagedSchemaTime.SQL_NOW;
+    }
+
+    private static Object[] compressionArguments(OperationRecord operation, String owner) {
+        return new Object[] {operation.tenantId(), operation.sessionId(), operation.operationId(), owner,
+                operation.claimGeneration()};
     }
 
     @Override
@@ -3425,7 +3784,7 @@ public class ManagedAgentStore implements AgentStateStore {
         Integer operations = jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " ma_operation WHERE scope_key = ? AND"
                         + " target_key = ? AND operation_kind IN"
-                        + " ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE') AND state IN"
+                        + " ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE', 'CONTEXT_COMPRESSION') AND state IN"
                         + " ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED', 'UNKNOWN')",
                 Integer.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionOperationTarget(sessionId));
         return operations != null && operations > 0;
@@ -4867,6 +5226,44 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " 'CANCELLING')",
                 errorCode, errorMessage, now, tenantId, sessionId, turnId,
                 owner, now) == 1;
+    }
+
+    @Override
+    @Transactional
+    public boolean markTurnFailureRecovery(String tenantId, String sessionId,
+            String turnId, String owner, String message) {
+        requireLegacySessionForUpdate(tenantId, sessionId);
+        TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
+        long now = clock.millis();
+        String diagnostic = AgentStateStore.RUNTIME_RECOVERY_BLOCKED.equals(turn.errorCode())
+                && turn.errorMessage() != null ? turn.errorMessage() : message;
+        return jdbc.update("UPDATE ma_turn SET error_code = ?, error_message = ?,"
+                        + " gmt_modified = ?, version = version + 1 WHERE tenant_id = ?"
+                        + " AND session_id = ? AND turn_id = ? AND dispatch_owner = ?"
+                        + " AND dispatch_lease_until >= ? AND submission_attempted = TRUE"
+                        + " AND status IN ('ACCEPTED', 'RUNNING')",
+                AgentStateStore.RUNTIME_RECOVERY_BLOCKED, diagnostic, now,
+                tenantId, sessionId, turnId, owner, now) == 1;
+    }
+
+    @Override
+    @Transactional
+    public boolean requestRecoveryRecheck(String tenantId, String sessionId,
+            String turnId) {
+        requireLegacySessionForUpdate(tenantId, sessionId);
+        long now = clock.millis();
+        return jdbc.update("UPDATE ma_turn SET retry_after = ?, gmt_modified = ?,"
+                        + " version = version + 1 WHERE tenant_id = ? AND session_id = ?"
+                        + " AND turn_id = ? AND (retry_after IS NULL OR retry_after > ?)"
+                        + " AND (status = 'CANCELLING' OR status IN ('ACCEPTED', 'RUNNING')"
+                        + " AND error_code = ?)",
+                now, now, tenantId, sessionId, turnId, now,
+                AgentStateStore.RUNTIME_RECOVERY_BLOCKED) == 1
+                || jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ?"
+                        + " AND session_id = ? AND turn_id = ? AND (status = 'CANCELLING'"
+                        + " OR status IN ('ACCEPTED', 'RUNNING') AND error_code = ?)",
+                        Long.class, tenantId, sessionId, turnId,
+                        AgentStateStore.RUNTIME_RECOVERY_BLOCKED) == 1;
     }
 
     @Override
@@ -6470,7 +6867,7 @@ public class ManagedAgentStore implements AgentStateStore {
             case CLOSE -> "CLOSING";
             case ARCHIVE -> "ARCHIVING";
             case DELETE -> "DELETING";
-            case ACTION_RESPONSE, CWD_CHANGE, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
+            case ACTION_RESPONSE, CWD_CHANGE, CONTEXT_COMPRESSION, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
                     throw new IllegalArgumentException("Not a lifecycle operation");
         };
     }
@@ -6480,7 +6877,7 @@ public class ManagedAgentStore implements AgentStateStore {
             case CLOSE -> "session.close.requested";
             case ARCHIVE -> "session.archive.requested";
             case DELETE -> "session.delete.requested";
-            case ACTION_RESPONSE, CWD_CHANGE, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
+            case ACTION_RESPONSE, CWD_CHANGE, CONTEXT_COMPRESSION, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
                     throw new IllegalArgumentException("Not a lifecycle operation");
         };
     }
@@ -6490,7 +6887,7 @@ public class ManagedAgentStore implements AgentStateStore {
             case CLOSE -> "session.closed";
             case ARCHIVE -> "session.archived";
             case DELETE -> "session.deleted";
-            case ACTION_RESPONSE, CWD_CHANGE, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
+            case ACTION_RESPONSE, CWD_CHANGE, CONTEXT_COMPRESSION, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
                     throw new IllegalArgumentException("Not a lifecycle operation");
         };
     }

@@ -51,8 +51,13 @@ import type { LoadedSettings } from '../../config/settings.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
+import { useWorktreeSession } from '../hooks/useWorktreeSession.js';
+import { useGitBranchName } from '../hooks/useGitBranchName.js';
+import { useStatusLineState } from '../hooks/useStatusLine.js';
+import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 import {
   MessageType,
+  StreamingState,
   type HistoryItem,
   type HistoryItemWithoutId,
 } from '../types.js';
@@ -70,6 +75,12 @@ import {
   type WaitingCallInfo,
 } from './live-session.js';
 import type { OpenTuiSubmitOptions } from './live-turn.js';
+import {
+  restoreInputSubmissions,
+  type OpenTuiInputSubmission,
+  type OpenTuiCancelSettled,
+  type OpenTuiComposerHandle,
+} from './input-submission.js';
 import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
@@ -114,6 +125,8 @@ export interface OpenTuiAppProps {
   commands?: readonly SlashCommand[];
   /** Owned by a Batch-6 stats provider; commands read it through the host. */
   getSessionStats: () => SessionStatsState;
+  /** Reactive provider snapshot; the getter remains for imperative commands. */
+  sessionStats?: SessionStatsState;
   /** Runtime sidecar, created by the entry and passed straight through. */
   runtime?: OpenTuiRuntime;
   extensionRefreshState?: ExtensionRefreshState;
@@ -128,6 +141,7 @@ export interface OpenTuiAppProps {
   // --- seams owned by the renderer / entry layer ---------------------------
   /** Renders the transcript + status line (needs the real OpenTUI renderer). */
   renderMain?: () => ReactNode;
+  userMessages?: readonly string[];
   /**
    * Runs a model turn for a plain prompt or a `submit_prompt` outcome. A
    * composer prompt passes its pasted image paths as a second, structured
@@ -139,7 +153,7 @@ export interface OpenTuiAppProps {
     content: PartListUnion,
     imagePaths?: readonly string[],
     options?: OpenTuiSubmitOptions,
-  ) => void;
+  ) => boolean;
   /** Reaches the entry after `/quit`; receives the closing history rows. */
   onQuit?: (messages: readonly HistoryItem[]) => void;
   /** Replays a transcript batch (session switch / resume). */
@@ -179,11 +193,11 @@ export interface OpenTuiAppProps {
   /** False while waiting on the API (↑), true once content arrives (↓). */
   isReceivingContent?: boolean;
   /** Aborts the in-flight turn (Esc while streaming). */
-  onInterrupt?: () => void;
+  onInterrupt?: (onSettled?: OpenTuiCancelSettled) => void;
   approvalMode?: ApprovalMode;
   /** Mid-turn queued prompts (queue rows + badge + Esc pop-back). */
   messageQueue?: readonly string[];
-  onPopQueue?: () => string | null;
+  onPopQueue?: () => OpenTuiInputSubmission | null;
   /**
    * Scheduler calls parked in `awaiting_approval`. The shell renders the
    * first one as a modal dialog; settlement flows through the call's own
@@ -196,7 +210,7 @@ export interface OpenTuiAppProps {
   onRenderError?: (error: Error) => void;
   /** Entry-owned composer buffer handle (early-input injection). */
   composerHandle?: {
-    current: { getText: () => string; setText: (text: string) => void } | null;
+    current: OpenTuiComposerHandle | null;
   };
   /** U-7: finished follow-up suggestion, shown as the ghost placeholder. */
   promptSuggestion?: string | null;
@@ -253,8 +267,6 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onPromptSuggestionDismiss,
     onPromptSuggestionAbort,
   } = props;
-
-  const queueLength = messageQueue?.length ?? 0;
 
   const [dialog, setDialog] = useState<OpenTuiDialogRequest | null>(
     props.initialDialog ?? null,
@@ -572,11 +584,47 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     useCallback(() => host.getVersion(), [host]),
   );
 
+  const worktree = useWorktreeSession(config);
+  const activeWorktree = worktree
+    ? {
+        slug: worktree.slug,
+        path: worktree.worktreePath,
+        branch: worktree.worktreeBranch,
+        originalCwd: worktree.originalCwd,
+        originalBranch: worktree.originalBranch,
+        originalHeadCommit: worktree.originalHeadCommit,
+      }
+    : null;
+  const branchName = useGitBranchName(config.getTargetDir());
+  const [currentModel, setCurrentModel] = useState(() => config.getModel());
+  useEffect(() => config.onModelChange(setCurrentModel), [config]);
+  const statusLineState = {
+    sessionStats: props.sessionStats ?? getSessionStats(),
+    currentModel,
+    branchName,
+    activeWorktree,
+    streamingState: props.waitingToolCalls?.length
+      ? StreamingState.WaitingForConfirmation
+      : streaming
+        ? StreamingState.Responding
+        : StreamingState.Idle,
+  };
+  const statusLine = useStatusLineState(
+    { settings, config, state: statusLineState, terminalWidth },
+    isNarrowWidth(terminalWidth),
+  );
+
   // Mirror the live-turn state onto the host so command gating (isIdle)
   // reflects an in-flight model turn, not just dispatcher processing.
   useEffect(() => {
     host.setStreaming(!!streaming);
   }, [host, streaming]);
+
+  useEffect(() => {
+    config.setWorkflowKeywordTriggerEnabled?.(
+      settings.merged.ui?.disableWorkflowKeywordTrigger !== true,
+    );
+  }, [config, settings.merged.ui?.disableWorkflowKeywordTrigger]);
 
   const gateway = useMemo(() => new OpenTuiSlashGateway(), []);
   const reloadRef = useRef<(() => void | Promise<void>) | null>(null);
@@ -588,7 +636,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       text: string;
       shell?: boolean;
       prompt?: boolean;
-      imagePaths?: string[];
+      imagePaths?: readonly string[];
+      options?: OpenTuiSubmitOptions;
     }>
   >([]);
   // Push nonce for the drain (ink's queueDrainNonce). The queue itself stays a
@@ -597,6 +646,39 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // verdict that lands after the idle edge would otherwise strand the command
   // until some future streaming transition.
   const [deferredRevision, setDeferredRevision] = useState(0);
+  const deferredPrompts = deferredCommandsRef.current.filter(
+    (entry) => entry.prompt,
+  );
+  const displayedQueue = [
+    ...(messageQueue ?? []),
+    ...deferredPrompts.map((entry) => entry.text),
+  ];
+  const queueLength = displayedQueue.length;
+  const popQueue = useCallback((): OpenTuiInputSubmission | null => {
+    const live = onPopQueue?.();
+    const prompts = deferredCommandsRef.current.filter((entry) => entry.prompt);
+    deferredCommandsRef.current = deferredCommandsRef.current.filter(
+      (entry) => !entry.prompt,
+    );
+    setDeferredRevision((revision) => revision + 1);
+    if (!live && prompts.length === 0) return null;
+    return restoreInputSubmissions([
+      ...(live ? [live] : []),
+      ...prompts.map((entry) => ({
+        ...entry.options,
+        text: entry.text,
+        imagePaths: entry.imagePaths,
+      })),
+    ]);
+  }, [onPopQueue]);
+  const queueSessionId = config.getSessionId();
+  const queueSessionRef = useRef(queueSessionId);
+  useEffect(() => {
+    if (queueSessionRef.current === queueSessionId) return;
+    queueSessionRef.current = queueSessionId;
+    deferredCommandsRef.current = [];
+    setDeferredRevision((revision) => revision + 1);
+  }, [queueSessionId]);
   // Guards one drain instance at a time (R5-6).
   const drainingRef = useRef(false);
   // Render-mirrored gate state for the drain's mid-loop re-check (R6-4): the
@@ -652,29 +734,26 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     (outcome: OpenTuiDispatchOutcome) => {
       switch (outcome.kind) {
         case 'handled':
-          return;
+          return true;
         case 'open_dialog':
           setDialog(outcome.request);
-          return;
+          return true;
         case 'submit_prompt':
           if (onSubmitPrompt)
-            onSubmitPrompt(outcome.content, undefined, {
+            return onSubmitPrompt(outcome.content, undefined, {
               modelOverride: outcome.modelOverride,
               refreshContextFilesOnWrite: outcome.refreshContextFilesOnWrite,
               onComplete: outcome.onComplete,
               invocationEchoed: true,
             });
-          else notify('The live prompt turn is not wired in this shell.');
-          return;
+          notify('The live prompt turn is not wired in this shell.');
+          return false;
         case 'schedule_tool':
           notify(`Tool scheduling (${outcome.toolName}) is not wired.`);
-          return;
+          return false;
         case 'quit':
-          // Nothing queued may run behind an exit: the interrupt below creates
-          // the idle edge that wakes the drain, and the same abort promotes
-          // the live turn's steering queue into a fresh model turn. Both are
-          // discarded first, or the session spends another turn after the user
-          // asked to leave.
+          // Clear both queues before interrupt creates the shell's idle edge.
+          // The live turn also suppresses late restored steering after abort.
           deferredCommandsRef.current = [];
           onPopQueue?.();
           // A running `!` shell command dies with the session too — every
@@ -688,7 +767,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           // that is still writing. A no-op when nothing is in flight.
           onInterrupt?.();
           onQuit?.(outcome.messages);
-          return;
+          return true;
         default: {
           const exhaustive: never = outcome;
           return exhaustive;
@@ -699,7 +778,19 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   );
 
   const onSubmit = useCallback(
-    async (text: string, imagePaths?: string[]) => {
+    async (
+      text: string,
+      imagePaths?: readonly string[],
+      options?: OpenTuiSubmitOptions,
+    ): Promise<boolean> => {
+      const sessionId = config.getSessionId();
+      const hasImages = !!imagePaths?.length;
+      if (hasImages && shellModeActive) {
+        notify(
+          'Image attachments cannot be submitted in shell mode. Exit shell mode and try again.',
+        );
+        return false;
+      }
       setNoticeText(null);
       // Ahead of the gate and the dispatch, exactly where ink's
       // handleFinalSubmit puts it: a quit has to be able to stop the stream, so
@@ -716,7 +807,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       // a concurrent submission would race the command's LLM-history write
       // into a live turn's chat.
       if (streaming || shellControllersRef.current.size > 0) {
-        const takesAsSlash = await gateway.takesAsSlashCommand(submission);
+        const takesAsSlash =
+          !hasImages && (await gateway.takesAsSlashCommand(submission));
         const shellEntry = shellModeActive && !takesAsSlash;
         // A plain prompt submitted while a `!` command runs must not start a
         // turn even when shell mode was toggled off meanwhile (Esc): the
@@ -730,8 +822,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         if (
           shellEntry ||
           blockedByRunningShell ||
-          (await gateway.mustDeferDuringStreaming(submission))
+          (!hasImages && (await gateway.mustDeferDuringStreaming(submission)))
         ) {
+          if (isExitInProgress() || sessionId !== config.getSessionId())
+            return false;
+          if (shellEntry && !props.onTranscriptEvent) {
+            notify('The shell command owner is not wired in this shell.');
+            return false;
+          }
           const command = submission.trim();
           deferredCommandsRef.current.push({
             text: command,
@@ -741,20 +839,24 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             // running-`!` gate held back must not lose them in the queue
             // (R5-5 fix-induced).
             ...(blockedByRunningShell && !shellEntry
-              ? { prompt: true, imagePaths }
+              ? { prompt: true, imagePaths, options }
               : {}),
           });
           setDeferredRevision((revision) => revision + 1);
           notify(
             `Queued ${command} — it will run when the current response ends.`,
           );
-          return;
+          return true;
         }
       }
-      const settlement = await gateway.dispatch(submission);
+      if (isExitInProgress() || sessionId !== config.getSessionId())
+        return false;
+      const settlement = hasImages
+        ? { kind: 'settled' as const, outcome: false as const }
+        : await gateway.dispatch(submission);
       if (settlement.kind === 'rejected') {
         notify(settlement.reason);
-        return;
+        return false;
       }
       if (settlement.outcome === false) {
         // ink order (use-llm-stream): slash commands dispatch first; a
@@ -781,22 +883,26 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           }
         }
         if (shellModeActive && query) {
-          void runShellCommand(query);
-          return;
+          const started = runShellCommand(query);
+          if (!started)
+            notify('The shell command owner is not wired in this shell.');
+          return started !== undefined;
         }
         if (!onSubmitPrompt) {
           notify('The live prompt turn is not wired in this shell.');
-          return;
+          return false;
         }
         // The raw typed text is both the prompt and the `UserPromptSubmit`
         // provenance; `@path` expansion happens where the prompt enters the
         // stream (live-session), so text queued mid-turn expands too.
-        onSubmitPrompt(query, imagePaths, {
-          submittedPrompt: query || undefined,
+        if (isExitInProgress() || sessionId !== config.getSessionId())
+          return false;
+        return onSubmitPrompt(query, imagePaths, {
+          ...options,
+          submittedPrompt: options?.submittedPrompt ?? (query || undefined),
         });
-        return;
       }
-      applyOutcome(settlement.outcome);
+      return applyOutcome(settlement.outcome);
     },
     [
       gateway,
@@ -809,6 +915,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       config,
       commandList,
       addInfoItem,
+      props.onTranscriptEvent,
     ],
   );
 
@@ -840,6 +947,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     // a live drain strand.
     if (drainingRef.current) return;
     drainingRef.current = true;
+    const drainSessionId = config.getSessionId();
     const pending = deferredCommandsRef.current;
     deferredCommandsRef.current = [];
     void (async () => {
@@ -848,7 +956,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       let paused = false;
       try {
         for (const [i, entry] of pending.entries()) {
-          if (isExitInProgress()) return;
+          if (isExitInProgress() || drainSessionId !== config.getSessionId())
+            return;
           // Re-read the gate after the previous iteration's await (R6-4): the
           // re-queue mirrors the holdsUi branch — paused, no re-arm — so the
           // dep change that closed the gate is what resumes the batch.
@@ -871,11 +980,23 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             // the drain drops that silently.
             if (!onSubmitPrompt) {
               notify('The live prompt turn is not wired in this shell.');
-              continue;
+              deferredCommandsRef.current.unshift(...pending.slice(i));
+              paused = true;
+              return;
             }
-            onSubmitPrompt(entry.text, entry.imagePaths, {
-              submittedPrompt: entry.text || undefined,
+            const accepted = onSubmitPrompt(entry.text, entry.imagePaths, {
+              ...entry.options,
+              submittedPrompt:
+                entry.options?.submittedPrompt ?? (entry.text || undefined),
             });
+            if (!accepted) {
+              deferredCommandsRef.current.unshift(...pending.slice(i));
+              paused = true;
+              notify(
+                'Queued prompt was not accepted. Press Up to restore it and retry.',
+              );
+              return;
+            }
             // The turn it starts owns the drain until it ends, exactly like a
             // dispatched submit_prompt outcome below.
             if (i + 1 < pending.length) {
@@ -923,9 +1044,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     applyOutcome,
     onSubmitPrompt,
     runShellCommand,
+    config,
   ]);
 
-  const userMessages = useMemo(
+  const hostUserMessages = useMemo(
     () =>
       host
         .getHistory()
@@ -1069,6 +1191,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 }
                 onApprovalModeChanged={adoptApprovalMode}
                 availableTerminalHeight={dialogRegionHeight}
+                statusLineState={statusLineState}
               />
             </box>
           ) : (
@@ -1079,12 +1202,13 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 isReceivingContent={isReceivingContent}
                 showPhrase={showLoadingPhrases}
               />
-              <OpenTuiQueuedMessageDisplay messageQueue={messageQueue ?? []} />
+              <OpenTuiQueuedMessageDisplay messageQueue={displayedQueue} />
               <OpenTuiInputPrompt
-                onSubmit={(text, imagePaths) => {
-                  void onSubmit(text, imagePaths);
-                }}
-                userMessages={userMessages}
+                onSubmit={onSubmit}
+                onNotice={notify}
+                preferredEditor={settings.merged.general?.preferredEditor}
+                topRightLabel={host.sessionName ?? undefined}
+                userMessages={props.userMessages ?? hostUserMessages}
                 config={config}
                 focus
                 streaming={streaming}
@@ -1096,7 +1220,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 }}
                 approvalMode={currentApprovalMode}
                 queueLength={queueLength}
-                onPopQueue={onPopQueue}
+                onPopQueue={popQueue}
                 composerHandle={props.composerHandle}
                 promptSuggestion={promptSuggestion}
                 onPromptSuggestionDismiss={onPromptSuggestionDismiss}
@@ -1121,10 +1245,13 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             !showSuggestions) ? (
             <OpenTuiFooter
               config={config}
+              settings={settings}
+              statusLine={statusLine}
+              sessionStats={statusLineState.sessionStats}
+              activeWorktree={activeWorktree}
               streaming={Boolean(streaming)}
               approvalMode={currentApprovalMode}
               queueLength={queueLength}
-              sessionName={host.sessionName}
               shellModeActive={shellModeActive}
               exitHint={exitHint}
             />

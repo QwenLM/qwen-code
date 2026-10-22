@@ -6309,6 +6309,49 @@ describe('loadCliConfig chatCompression', () => {
     });
   });
 
+  it('passes model.loopProtection to the core config, defaulting to warn', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const load = (loopProtection?: unknown) =>
+      loadCliConfig(
+        { model: { loopProtection } } as Settings,
+        argv,
+        undefined,
+        [],
+      );
+    expect((await load('stop')).getLoopProtection()).toBe('stop');
+    expect((await load('off')).getLoopProtection()).toBe('off');
+    expect((await load()).getLoopProtection()).toBe('warn');
+    expect((await load('never')).getLoopProtection()).toBe('warn');
+  });
+
+  it('warns once about an invalid model.loopProtection value', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      for (let i = 0; i < 2; i++) {
+        const config = await loadCliConfig(
+          { model: { loopProtection: 'Stop' } } as unknown as Settings,
+          argv,
+          undefined,
+          [],
+        );
+        expect(config.getLoopProtection()).toBe('warn');
+      }
+      const warnings = errorSpy.mock.calls.filter(([message]) =>
+        String(message).includes('model.loopProtection'),
+      );
+      expect(warnings).toEqual([
+        [
+          'WARNING: Invalid model.loopProtection value "Stop": expected "warn", "stop" or "off"; using the default "warn".',
+        ],
+      ]);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it('should have undefined chatCompression if not in settings', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -6422,6 +6465,23 @@ describe('loadCliConfig workflowsEnabled', () => {
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.isWorkflowsEnabled()).toBe(false);
   });
+
+  it.each([undefined, false, true])(
+    'DW03: maps the public keyword opt-out %s into the Core gate',
+    async (disableWorkflowKeywordTrigger) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { ui: { disableWorkflowKeywordTrigger } },
+        argv,
+        undefined,
+        [],
+      );
+      expect(config.getWorkflowKeywordTriggerEnabled()).toBe(
+        disableWorkflowKeywordTrigger !== true,
+      );
+    },
+  );
 
   // The regression this whole setting exists to prevent: `workflowsEnabled`
   // was declared on ConfigParameters and read by isWorkflowsEnabled(), but

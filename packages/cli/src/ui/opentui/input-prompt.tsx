@@ -46,6 +46,7 @@ import {
   useTerminalDimensions,
 } from '@opentui/react';
 import {
+  handleEditorKey,
   isDeleteWordBackwardSequence,
   isPrintableKeyInput,
   isUnmodifiedBackspaceSequence,
@@ -59,6 +60,21 @@ import {
   cleanupOldClipboardImages,
 } from '../utils/clipboardUtils.js';
 import path from 'node:path';
+import { copyFile, mkdir, stat, unlink } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { classifyPastedImagePaths } from '../utils/pasted-image-paths.js';
+import { editTextInExternalEditor } from '../utils/external-editor.js';
+import {
+  allowEditorTypeInSandbox,
+  isValidEditorType,
+} from '@qwen-code/qwen-code-core/utils/editor.js';
+import {
+  restoreInputSubmissions,
+  type OpenTuiRestoredDraft,
+  type OpenTuiInputSubmission,
+  type OpenTuiCancelSettled,
+  type OpenTuiComposerHandle,
+} from './input-submission.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
 import { normalizeDescription, type Suggestion } from '../utils/suggestions.js';
@@ -183,29 +199,50 @@ function promptChrome(approvalMode: ApprovalMode | undefined): {
   }
 }
 
+type Attachment = { id: string; path: string; filename: string };
+type Draft = {
+  attachments: Attachment[];
+  pending: Promise<void> | null;
+  fallback: string[];
+  valid: boolean;
+};
+const newDraft = (): Draft => ({
+  attachments: [],
+  pending: null,
+  fallback: [],
+  valid: true,
+});
+
 export interface InputPromptProps {
-  onSubmit: (text: string, imagePaths?: string[]) => void;
+  onSubmit: (
+    text: string,
+    imagePaths?: readonly string[],
+    options?: Omit<OpenTuiInputSubmission, 'text' | 'imagePaths'>,
+  ) => boolean | Promise<boolean>;
+  onNotice?: (text: string) => void;
+  preferredEditor?: string;
   /** Submitted prompts (chronological) feeding history navigation. */
   userMessages: readonly string[];
   config?: Config;
   /** Live agent turn in flight: Esc interrupts instead of clearing. */
   streaming?: boolean;
   /** Esc-while-streaming hook (aborts the live turn in the parent). */
-  onInterrupt?: () => void;
+  onInterrupt?: (onSettled?: OpenTuiCancelSettled) => void;
   onCancelCommand?: () => boolean;
   approvalMode?: ApprovalMode;
   placeholder?: string;
+  topRightLabel?: string;
   focus?: boolean;
   /** Reports the double-Esc armed state (the footer hint). */
   onEscapeArmedChange?: (armed: boolean) => void;
   /** Lets the parent read/clear the composer buffer (Ctrl+Q queue). */
   composerHandle?: {
-    current: { getText: () => string; setText: (t: string) => void } | null;
+    current: OpenTuiComposerHandle | null;
   };
   /** Queued prompts awaiting the next turn (drives Esc/↑ pop-back parity). */
   queueLength?: number;
-  /** Pops all queued prompts into the composer (returns joined text). */
-  onPopQueue?: () => string | null;
+  /** Returns editable queued payloads with their attachments and source. */
+  onPopQueue?: () => OpenTuiInputSubmission | null;
   /** Recently used slash commands feeding recency-weighted ranking. */
   recentSlashCommands?: ReadonlyMap<string, RecentSlashCommand>;
   /** U-7: finished follow-up suggestion published by the entry layer. */
@@ -239,6 +276,7 @@ export interface InputPromptProps {
 export function OpenTuiInputPrompt(props: InputPromptProps) {
   const {
     onSubmit,
+    onNotice,
     userMessages,
     config,
     streaming = false,
@@ -246,6 +284,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     onCancelCommand,
     approvalMode,
     placeholder = DEFAULT_PLACEHOLDER,
+    topRightLabel,
     focus = true,
     onEscapeArmedChange,
     queueLength = 0,
@@ -262,19 +301,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
   const { width } = useTerminalDimensions();
   const renderer = useRenderer();
+  const focusRef = useRef(focus);
+  focusRef.current = focus;
   const editorRef = useRef<TextareaRenderable | null>(null);
-  useEffect(() => {
-    if (!props.composerHandle) return;
-    props.composerHandle.current = {
-      getText: () => editorRef.current?.plainText ?? '',
-      setText: (t: string) => {
-        editorRef.current?.setText(t);
-      },
-    };
-    return () => {
-      if (props.composerHandle) props.composerHandle.current = null;
-    };
-  }, [props.composerHandle]);
   const userMessagesRef = useRef(userMessages);
   userMessagesRef.current = userMessages;
   // Read through a ref inside refreshCompletion so recency updates never
@@ -317,13 +346,29 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   } = useBatchSafeCursor();
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [escapeArmed, setEscapeArmed] = useState(false);
-  const [attachments, setAttachments] = useState<
-    Array<{ id: string; path: string; filename: string }>
-  >([]);
+  const draftRef = useRef<Draft>(newDraft());
+  const claimedDraftRef = useRef<Draft | null>(null);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const {
+    value: selectedAttachment,
+    ref: selectedAttachmentRef,
+    setValue: setSelectedAttachment,
+  } = useBatchSafeState(-1);
+  const restoredProvenanceRef = useRef<{
+    text: string;
+    submittedPrompt: string;
+  } | null>(null);
+  const clipboardUnavailableShownRef = useRef(false);
+  const showAttachments = useCallback(
+    () => setAttachments([...draftRef.current.attachments]),
+    [],
+  );
   const completionModeRef = useRef<CompletionMode>(CompletionMode.IDLE);
   // History-restored text suppresses re-opening the dropdown, like the
   // original's isHistoryRestoredText.
   const historyRestoredTextRef = useRef<string | null>(null);
+  const unknownHistoryInputRef = useRef(false);
+  const restoredQueueDraftRef = useRef<OpenTuiRestoredDraft | null>(null);
   const dismissedUntilChangeRef = useRef<string | null>(null);
   const commandsRef = useRef<readonly SlashCommand[]>([]);
   // Query-relative replacement range for the current buffer's SLASH target.
@@ -340,6 +385,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   // submit (ink pendingPastes).
   const pendingPastesRef = useRef<Map<string, string>>(new Map());
   const activePlaceholderIdsRef = useRef<Map<number, Set<number>>>(new Map());
+  useLayoutEffect(
+    () => () => {
+      restoredQueueDraftRef.current = null;
+    },
+    [],
+  );
 
   // U-7: follow-up suggestion lifecycle, shared with ink via the
   // renderer-neutral controller hook. Acceptance inserts into the composer
@@ -370,6 +421,23 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     followupState.isVisible || promptSuggestion
       ? (followupState.suggestion ?? promptSuggestion ?? null)
       : null;
+
+  const restoreQueuedDraft = useCallback((draft: OpenTuiRestoredDraft) => {
+    const snapshot = draft.pasteExpansions ?? new Map<string, string>();
+    pendingPastesRef.current = new Map(snapshot);
+    unknownHistoryInputRef.current = draft.hasUnknownInput;
+    restoredQueueDraftRef.current = draft;
+    activePlaceholderIdsRef.current.clear();
+    for (const placeholder of snapshot.keys()) {
+      const parsed = parsePastePlaceholder(placeholder);
+      if (!parsed) continue;
+      const ids =
+        activePlaceholderIdsRef.current.get(parsed.charCount) ??
+        new Set<number>();
+      ids.add(parsed.id);
+      activePlaceholderIdsRef.current.set(parsed.charCount, ids);
+    }
+  }, []);
 
   // Shell mode overrides the approval chrome (ink InputPrompt order: `!` wins
   // over the approval-mode prefix). The label itself lives in the footer, as
@@ -527,6 +595,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   useEffect(() => {
     const el = editorRef.current;
     if (!el || textVersion === 0) return;
+    if (el.plainText.length === 0) {
+      unknownHistoryInputRef.current = false;
+      restoredQueueDraftRef.current = null;
+      pendingPastesRef.current.clear();
+      activePlaceholderIdsRef.current.clear();
+    }
     // Any real edit that moves away from a restored history entry re-enables
     // completions, mirroring the original's historyRestoredText handling.
     if (
@@ -559,6 +633,233 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     setTextVersion((v) => v + 1);
   }, []);
 
+  const clearDraft = useCallback(() => {
+    draftRef.current.valid = false;
+    draftRef.current = newDraft();
+    editorRef.current?.clear();
+    unknownHistoryInputRef.current = false;
+    restoredQueueDraftRef.current = null;
+    pendingPastesRef.current.clear();
+    activePlaceholderIdsRef.current.clear();
+    restoredProvenanceRef.current = null;
+    setSelectedAttachment(-1);
+    showAttachments();
+    setTextVersion((v) => v + 1);
+  }, [showAttachments, setSelectedAttachment]);
+
+  const sessionId = config?.getSessionId?.();
+  const sessionRef = useRef(sessionId);
+  const cancelPendingRef = useRef(false);
+  useLayoutEffect(() => {
+    if (sessionRef.current !== sessionId) {
+      // Session rotation invalidates asynchronous owners, while the mounted
+      // editor keeps its visible text and its matching paste/source snapshot.
+      draftRef.current = newDraft();
+      setSelectedAttachment(-1);
+      showAttachments();
+      cancelPendingRef.current = false;
+      sessionRef.current = sessionId;
+    }
+    draftRef.current.valid = true;
+    return () => {
+      draftRef.current.valid = false;
+      if (claimedDraftRef.current) claimedDraftRef.current.valid = false;
+    };
+  }, [sessionId, showAttachments, setSelectedAttachment]);
+
+  const restoreSubmission = useCallback(
+    (submission: OpenTuiInputSubmission, separator = '\n\n') => {
+      const el = editorRef.current;
+      if (!el) return;
+      const current = el.plainText;
+      const expandedCurrent = expandPendingPastePlaceholders(
+        current,
+        pendingPastesRef.current,
+      );
+      const restored = restoreInputSubmissions(
+        [
+          submission,
+          ...(current
+            ? [
+                {
+                  text: expandedCurrent,
+                  displayText: current,
+                  submittedPrompt:
+                    restoredProvenanceRef.current?.text === current
+                      ? restoredProvenanceRef.current.submittedPrompt
+                      : current,
+                  humanInput: unknownHistoryInputRef.current
+                    ? undefined
+                    : { text: expandedCurrent },
+                  hasUnknownInput: unknownHistoryInputRef.current,
+                  pasteExpansions: new Map(pendingPastesRef.current),
+                  restoredDraft: restoredQueueDraftRef.current ?? undefined,
+                },
+              ]
+            : []),
+        ],
+        separator,
+        pendingPastesRef.current,
+      );
+      const text = restored.text;
+      restoreQueuedDraft(restored.restoredDraft!);
+      el.setText(text);
+      el.gotoBufferEnd();
+      draftRef.current.attachments.unshift(
+        ...(submission.imagePaths ?? []).map((imagePath) => ({
+          id: randomUUID(),
+          path: imagePath,
+          filename: path.basename(imagePath),
+        })),
+      );
+      restoredProvenanceRef.current =
+        !current && submission.submittedPrompt !== undefined
+          ? { text, submittedPrompt: submission.submittedPrompt }
+          : null;
+      showAttachments();
+      setTextVersion((v) => v + 1);
+    },
+    [showAttachments, restoreQueuedDraft],
+  );
+
+  const cancelTurn = useCallback(() => {
+    if (!onInterrupt || cancelPendingRef.current) return;
+    const draft = draftRef.current;
+    const empty =
+      !editorRef.current?.plainText &&
+      !draft.attachments.length &&
+      !draft.pending &&
+      !claimedDraftRef.current;
+    const session = sessionRef.current;
+    cancelPendingRef.current = true;
+    onInterrupt((settlement) => {
+      if (session !== sessionRef.current || !draftRef.current.valid) return;
+      cancelPendingRef.current = false;
+      if (settlement.kind === 'reset') return;
+      const { queued, prompt } = settlement;
+      const popped = onPopQueue?.();
+      const pending = [queued, popped].filter((entry) => entry != null);
+      if (pending.length) {
+        restoreSubmission(restoreInputSubmissions(pending), '\n');
+      } else if (
+        empty &&
+        prompt &&
+        draft === draftRef.current &&
+        draft.valid &&
+        !editorRef.current?.plainText &&
+        !draft.attachments.length &&
+        !draft.pending &&
+        !claimedDraftRef.current
+      ) {
+        restoreSubmission(prompt);
+      }
+    });
+  }, [onInterrupt, onPopQueue, restoreSubmission]);
+
+  useEffect(() => {
+    if (!props.composerHandle) return;
+    props.composerHandle.current = {
+      getText: () => editorRef.current?.plainText ?? '',
+      setText: (text) => {
+        editorRef.current?.setText(text);
+      },
+      cancelTurn,
+    };
+    return () => {
+      if (props.composerHandle) props.composerHandle.current = null;
+    };
+  }, [props.composerHandle, cancelTurn]);
+
+  const submitDraft = useCallback(
+    async (raw: string, deferUntilIdle = false) => {
+      const el = editorRef.current;
+      if (!el || !raw.trim() || claimedDraftRef.current) return;
+      const draft = draftRef.current;
+      claimedDraftRef.current = draft;
+      const text = expandPendingPastePlaceholders(
+        raw.trim(),
+        pendingPastesRef.current,
+      );
+      const submittedPrompt =
+        restoredProvenanceRef.current?.text === raw
+          ? restoredProvenanceRef.current.submittedPrompt
+          : raw;
+      const pasteExpansions = new Map(pendingPastesRef.current);
+      const hasUnknownInput = unknownHistoryInputRef.current;
+      const restoredDraft = restoredQueueDraftRef.current ?? undefined;
+      draftRef.current = newDraft();
+      el.clear();
+      unknownHistoryInputRef.current = false;
+      restoredQueueDraftRef.current = null;
+      pendingPastesRef.current.clear();
+      activePlaceholderIdsRef.current.clear();
+      restoredProvenanceRef.current = null;
+      setSelectedAttachment(-1);
+      showAttachments();
+      historyRef.current?.reset();
+      historyRestoredTextRef.current = null;
+      setRawSuggestions([]);
+      setLoadingSuggestions(false);
+      setTextVersion((v) => v + 1);
+      dismissFollowup();
+      onPromptSuggestionDismiss?.();
+      let submission: OpenTuiInputSubmission | undefined;
+      try {
+        if (draft.pending) await draft.pending;
+        if (!draft.valid) return;
+        submission = {
+          text: [text, ...draft.fallback].filter(Boolean).join('\n\n'),
+          imagePaths: draft.attachments.map((attachment) => attachment.path),
+          submittedPrompt: [submittedPrompt, ...draft.fallback]
+            .filter(Boolean)
+            .join('\n\n'),
+          deferUntilIdle,
+          displayText: [raw.trim(), ...draft.fallback]
+            .filter(Boolean)
+            .join('\n\n'),
+          humanInput: hasUnknownInput
+            ? undefined
+            : {
+                text: [text, ...draft.fallback].filter(Boolean).join('\n\n'),
+              },
+          hasUnknownInput,
+          ...(pasteExpansions.size ? { pasteExpansions } : {}),
+          ...(restoredDraft ? { restoredDraft } : {}),
+        };
+        const accepted = await onSubmit(
+          submission.text,
+          submission.imagePaths?.length ? submission.imagePaths : undefined,
+          {
+            submittedPrompt: submission.submittedPrompt,
+            deferUntilIdle,
+            displayText: submission.displayText,
+            humanInput: submission.humanInput,
+            hasUnknownInput: submission.hasUnknownInput,
+            pasteExpansions: submission.pasteExpansions,
+            restoredDraft: submission.restoredDraft,
+          },
+        );
+        if (!accepted && draft.valid) restoreSubmission(submission);
+      } catch (error) {
+        if (draft.valid) {
+          if (submission) restoreSubmission(submission);
+          onNotice?.(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        if (claimedDraftRef.current === draft) claimedDraftRef.current = null;
+      }
+    },
+    [
+      onSubmit,
+      onNotice,
+      restoreSubmission,
+      showAttachments,
+      setSelectedAttachment,
+      dismissFollowup,
+      onPromptSuggestionDismiss,
+    ],
+  );
+
   const acceptSuggestion = useCallback(
     (index: number, viaEnter: boolean): void => {
       const el = editorRef.current;
@@ -579,33 +880,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           : undefined,
       );
       if (applied.submitNow) {
-        // Same cleanup as the submit path (the global Enter handler): expand
-        // pending paste placeholders, collect attachments, then clear
-        // everything — an accepted completion must not leave placeholders or
-        // chips behind.
-        let finalText = applied.submitNow;
-        if (pendingPastesRef.current.size > 0) {
-          finalText = expandPendingPastePlaceholders(
-            finalText,
-            pendingPastesRef.current,
-          );
-          pendingPastesRef.current.clear();
-          activePlaceholderIdsRef.current.clear();
-        }
-        const images = attachments.map((a) => a.path);
-        el.clear();
-        setTextVersion((v) => v + 1);
-        historyRef.current?.reset();
-        historyRestoredTextRef.current = null;
-        setRawSuggestions([]);
-        setAttachments([]);
-        onSubmit(finalText, images.length > 0 ? images : undefined);
-        // Same dismissal as the real submit path below: a submitOnAccept
-        // command that only opens a dialog never flips streaming, so without
-        // this the consumed suggestion survives as the ghost placeholder
-        // (R6-1).
-        dismissFollowup();
-        onPromptSuggestionDismiss?.();
+        void submitDraft(applied.submitNow);
         return;
       }
       // Directory accepts keep the dropdown closed until the query changes
@@ -619,36 +894,119 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       };
       apply();
     },
-    [
-      suggestions,
-      applyTextToEditor,
-      onSubmit,
-      attachments,
-      currentCompletionTarget,
-      dismissFollowup,
-      onPromptSuggestionDismiss,
-    ],
+    [suggestions, applyTextToEditor, submitDraft, currentCompletionTarget],
   );
 
-  // ── Ctrl+V / Cmd+V: clipboard image → temp file → attachment chip ──────
-  const handleClipboardImage = useCallback(async () => {
-    try {
-      if (!(await clipboardHasImage())) return;
+  const queuePaste = useCallback(
+    (
+      operation: (
+        notify: (text: string) => void,
+      ) => Promise<{ paths: string[]; fallback?: string }>,
+    ) => {
+      const draft = draftRef.current;
+      const notify = (text: string) => {
+        if (draft.valid) onNotice?.(text);
+      };
+      const result = operation(notify).catch((error: unknown) => {
+        if (draft.valid)
+          onNotice?.(error instanceof Error ? error.message : String(error));
+        return { paths: [] };
+      });
+      const pending = (draft.pending ?? Promise.resolve()).then(async () => {
+        const pasted = await result;
+        if (!draft.valid) return;
+        draft.attachments.push(
+          ...pasted.paths.map((imagePath) => ({
+            id: randomUUID(),
+            path: imagePath,
+            filename: path.basename(imagePath),
+          })),
+        );
+        if ('fallback' in pasted && pasted.fallback) {
+          if (draftRef.current === draft) {
+            editorRef.current?.insertText(pasted.fallback);
+            setTextVersion((v) => v + 1);
+          } else draft.fallback.push(pasted.fallback);
+        }
+        if (draftRef.current === draft) showAttachments();
+      });
+      draft.pending = pending;
+      void pending.finally(() => {
+        if (draft.pending === pending) draft.pending = null;
+      });
+    },
+    [onNotice, showAttachments],
+  );
+
+  const handleClipboardImage = useCallback(() => {
+    queuePaste(async (notify) => {
+      const reportUnavailable = () => {
+        if (clipboardUnavailableShownRef.current) return;
+        clipboardUnavailableShownRef.current = true;
+        notify(
+          t(
+            process.platform === 'linux'
+              ? 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.'
+              : 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+          ),
+        );
+      };
+      if (!(await clipboardHasImage(reportUnavailable))) return { paths: [] };
       const imagePath = await saveClipboardImage(Storage.getGlobalTempDir());
-      if (!imagePath) return;
+      if (!imagePath) {
+        notify('Could not save clipboard image. Paste the image again.');
+        return { paths: [] };
+      }
       cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {});
-      setAttachments((prev) => [
-        ...prev,
-        {
-          id: `${Date.now()}-${prev.length}`,
-          path: imagePath,
-          filename: path.basename(imagePath),
-        },
-      ]);
-    } catch {
-      // Native clipboard module unavailable: leave the paste as plain text.
-    }
-  }, []);
+      return { paths: [imagePath] };
+    });
+  }, [queuePaste]);
+
+  const promoteImagePaths = useCallback(
+    (paths: string[], original: string) => {
+      queuePaste(async (notify) => {
+        const copied: string[] = [];
+        try {
+          const directory = path.join(Storage.getGlobalTempDir(), 'clipboard');
+          await mkdir(directory, { recursive: true });
+          for (const imagePath of paths) {
+            const source = path.resolve(
+              config?.getTargetDir() ?? process.cwd(),
+              imagePath,
+            );
+            if (!(await stat(source)).isFile())
+              throw new Error(`Not an image file: ${imagePath}`);
+            const destination = path.join(
+              directory,
+              `clipboard-${randomUUID()}${path.extname(source)}`,
+            );
+            await copyFile(source, destination);
+            copied.push(destination);
+          }
+          cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {});
+          return { paths: copied };
+        } catch (error) {
+          await Promise.all(copied.map((file) => unlink(file).catch(() => {})));
+          notify(
+            `Could not attach images; original paths kept: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return { paths: [], fallback: original };
+        }
+      });
+    },
+    [config, queuePaste],
+  );
+
+  const deleteSelectedAttachment = useCallback(() => {
+    const selected = selectedAttachmentRef.current;
+    if (selected < 0) return false;
+    draftRef.current.attachments.splice(selected, 1);
+    setSelectedAttachment(
+      Math.min(selected, draftRef.current.attachments.length - 1),
+    );
+    showAttachments();
+    return true;
+  }, [selectedAttachmentRef, setSelectedAttachment, showAttachments]);
 
   // ── raw Backspace: consumed before parsed-key dispatch so legacy DEL/BS
   //    and unmodified kitty encodings delete exactly once via the editor API
@@ -666,6 +1024,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         return true;
       }
       if (!isUnmodifiedBackspaceSequence(sequence)) return false;
+      if (deleteSelectedAttachment()) return true;
       const el = editorRef.current;
       if (!el) return false;
       // Placeholder-aware deletion (ink parity): backspace at the end of a
@@ -714,7 +1073,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     };
     renderer.addInputHandler(onRawInput);
     return () => renderer.removeInputHandler(onRawInput);
-  }, [renderer, focus]);
+  }, [renderer, focus, deleteSelectedAttachment]);
 
   // ── large-paste collapsing: bracketed pastes over the thresholds fold
   //    into a `[Pasted Content N chars]` placeholder (ink useBracketedPaste
@@ -732,6 +1091,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       if (el.plainText.length === 0 && availableSuggestion) {
         dismissFollowup();
         onPromptSuggestionDismiss?.();
+      }
+      const classification = classifyPastedImagePaths(pasted);
+      if (classification.allImages) {
+        event.preventDefault();
+        promoteImagePaths(classification.imagePaths, pasted);
+        return;
       }
       if (!isLargePaste(pasted)) return; // small pastes insert verbatim
       event.preventDefault();
@@ -756,12 +1121,78 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     availableSuggestion,
     dismissFollowup,
     onPromptSuggestionDismiss,
+    promoteImagePaths,
   ]);
+
+  const editorRequestRef = useRef<Draft | null>(null);
+  const openExternalEditor = useCallback(async () => {
+    if (editorRequestRef.current) return;
+    const draft = draftRef.current;
+    editorRequestRef.current = draft;
+    let suspended = false;
+    try {
+      while (draft.pending) await draft.pending;
+      const el = editorRef.current;
+      if (
+        !el ||
+        !focusRef.current ||
+        !draft.valid ||
+        draftRef.current !== draft
+      )
+        return;
+      const before = expandPendingPastePlaceholders(
+        el.plainText,
+        pendingPastesRef.current,
+      );
+      const preferred = props.preferredEditor;
+      const after = editTextInExternalEditor(before, {
+        preferredEditor:
+          preferred &&
+          isValidEditorType(preferred) &&
+          allowEditorTypeInSandbox(preferred)
+            ? preferred
+            : undefined,
+        beforeLaunch: () => {
+          suspended = true;
+          renderer.suspend();
+        },
+      });
+      if (
+        draft.valid &&
+        draftRef.current === draft &&
+        editorRef.current === el &&
+        after !== before
+      ) {
+        el.replaceText(after);
+        el.gotoBufferEnd();
+        restoredProvenanceRef.current = null;
+        historyRestoredTextRef.current = null;
+        setTextVersion((v) => v + 1);
+      }
+    } catch (error) {
+      if (draft.valid && draftRef.current === draft) {
+        onNotice?.(
+          `Could not open external editor: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    } finally {
+      if (editorRequestRef.current === draft) editorRequestRef.current = null;
+      if (suspended) {
+        try {
+          renderer.resume();
+        } catch (error) {
+          onNotice?.(
+            `Could not resume terminal: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    }
+  }, [props.preferredEditor, renderer, onNotice]);
 
   // ── keyboard: global handlers run BEFORE the focused editor, so
   //    preventDefault here keeps the editor from double-handling a key ─────
   useKeyboard((key: KeyEvent) => {
-    if (!focus) return;
+    if (!focus || key.eventType === 'release') return;
     const el = editorRef.current;
 
     // Any non-Esc key disarms the double-Esc clear window.
@@ -772,6 +1203,51 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     }
 
     if (!el) return;
+    if (key.ctrl && key.name === 'x') {
+      setSelectedAttachment(-1);
+      key.preventDefault();
+      void openExternalEditor();
+      return;
+    }
+    const selected = selectedAttachmentRef.current;
+    if (selected >= 0) {
+      let handled = true;
+      if (key.name === 'left' || key.name === 'right') {
+        setSelectedAttachment(
+          Math.max(
+            0,
+            Math.min(
+              draftRef.current.attachments.length - 1,
+              selected + (key.name === 'right' ? 1 : -1),
+            ),
+          ),
+        );
+      } else if (key.name === 'delete' || key.name === 'backspace') {
+        deleteSelectedAttachment();
+      } else if (
+        key.name === 'down' ||
+        key.name === 'return' ||
+        key.name === 'escape'
+      ) {
+        setSelectedAttachment(-1);
+      } else {
+        setSelectedAttachment(-1);
+        handled = false;
+      }
+      if (handled) {
+        key.preventDefault();
+        return;
+      }
+    }
+    if (handleEditorKey(el, key)) {
+      setTextVersion((v) => v + 1);
+      return;
+    }
+    if (key.name === 'q' && key.ctrl) {
+      key.preventDefault();
+      void submitDraft(el.plainText, true);
+      return;
+    }
 
     // Force-capture Enter + printable keys at the global level so input works
     // even when the editor's native capture doesn't fire (focus quirks).
@@ -845,28 +1321,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         return;
       }
 
-      let finalText = decision.text.trim();
-      if (pendingPastesRef.current.size > 0) {
-        finalText = expandPendingPastePlaceholders(
-          finalText,
-          pendingPastesRef.current,
-        );
-        pendingPastesRef.current.clear();
-        activePlaceholderIdsRef.current.clear();
-      }
-      const images = attachments.map((a) => a.path);
-      el.clear();
-      setTextVersion((v) => v + 1);
-      setAttachments([]);
-      historyRef.current?.reset();
-      historyRestoredTextRef.current = null;
-      setRawSuggestions([]);
-      setLoadingSuggestions(false);
-      onSubmit(finalText, images.length > 0 ? images : undefined);
-      // Ink dismisses on submit so a synchronous command (/clear, /help)
-      // can't leave the stale suggestion as the ghost placeholder.
-      dismissFollowup();
-      onPromptSuggestionDismiss?.();
+      void submitDraft(decision.text);
       key.preventDefault();
       return;
     }
@@ -878,8 +1333,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     }
     if (
       key.name === 'backspace' &&
-      (key.ctrl || key.super || key.meta || key.option) &&
-      key.eventType !== 'release'
+      (key.ctrl || key.super || key.meta || key.option)
     ) {
       // DELETE_WORD_BACKWARD parity (keyBindings.ts: ctrl/command+backspace;
       // the legacy \x1f byte is consumed on the raw-input path). Kitty
@@ -897,7 +1351,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     // next Enter/Tab.
     if (
       key.sequence === '!' &&
-      key.eventType !== 'release' &&
       el.plainText.length === 0 &&
       suggestions.length === 0 &&
       onToggleShellMode
@@ -924,9 +1377,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     if (key.name === 'c' && key.ctrl) {
       // Parity with CLEAR_INPUT: a non-empty buffer is cleared first; the
       // app-level quit only fires on an empty prompt.
-      if (el.plainText.length > 0) {
-        el.clear();
-        setTextVersion((v) => v + 1);
+      if (
+        el.plainText.length > 0 ||
+        draftRef.current.attachments.length > 0 ||
+        draftRef.current.pending
+      ) {
+        clearDraft();
         key.preventDefault();
       }
       return;
@@ -940,11 +1396,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       // is streaming it interrupts too — one keypress does both.
       if (shellModeActive) {
         onToggleShellMode?.();
-        if (streaming) onInterrupt?.();
+        if (streaming) cancelTurn();
         return;
       }
       if (streaming) {
-        onInterrupt?.();
+        cancelTurn();
         return;
       }
       const commandCancelled = onCancelCommand?.() ?? false;
@@ -968,19 +1424,16 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       if (queueLength > 0) {
         const popped = onPopQueue?.();
         if (popped) {
-          const current = el.plainText;
-          el.setText(current ? `${popped}\n${current}` : popped);
-          setTextVersion((v) => v + 1);
+          restoreSubmission(popped, '\n');
+          return;
         }
-        return;
       }
       const effect = escapeRef.current!.handleEscape(el.plainText);
       if (effect === 'arm') {
         setEscapeArmed(true);
         onEscapeArmedChange?.(true);
       } else if (effect === 'clear') {
-        el.clear();
-        setTextVersion((v) => v + 1);
+        clearDraft();
         setEscapeArmed(false);
         onEscapeArmedChange?.(false);
       }
@@ -1026,7 +1479,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       return;
     }
 
-    if (showing && (navigationUp || navigationDown)) {
+    if (suggestions.length > 1 && (navigationUp || navigationDown)) {
       key.preventDefault();
       // Navigation marks the dropdown as user-driven: with a perfect command
       // match, Enter then accepts the highlighted suggestion instead of
@@ -1041,6 +1494,20 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         next = prev >= last ? 0 : prev + 1;
       }
       setActiveIndex(next);
+      return;
+    }
+
+    if (
+      selected < 0 &&
+      !shellModeActive &&
+      key.name === 'up' &&
+      !key.ctrl &&
+      !key.shift &&
+      el.scrollY + el.visualCursor.visualRow === 0 &&
+      draftRef.current.attachments.length > 0
+    ) {
+      setSelectedAttachment(draftRef.current.attachments.length - 1);
+      key.preventDefault();
       return;
     }
 
@@ -1105,9 +1572,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       if (topCursor.row === 0 && topCursor.col === 0) {
         const popped = onPopQueue?.();
         if (popped) {
-          const current = el.plainText;
-          el.setText(current ? `${popped}\n${current}` : popped);
-          setTextVersion((v) => v + 1);
+          restoreSubmission(popped, '\n');
           key.preventDefault();
           return;
         }
@@ -1132,7 +1597,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         el.setCursor(0, 0);
         return;
       }
+      restoredQueueDraftRef.current = null;
       historyRestoredTextRef.current = decision.text;
+      unknownHistoryInputRef.current = decision.text.length > 0;
       el.setText(decision.text);
       el.setCursor(0, 0);
       setTextVersion((v) => v + 1);
@@ -1158,7 +1625,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         el.gotoLineEnd();
         return;
       }
+      restoredQueueDraftRef.current = null;
       historyRestoredTextRef.current = decision.text;
+      unknownHistoryInputRef.current = decision.text.length > 0;
       el.setText(decision.text);
       setTextVersion((v) => v + 1);
       return;
@@ -1190,7 +1659,17 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   }, []);
 
   const columns = Math.max(width, 1);
-  const dashLine = '─'.repeat(columns);
+  const renderedLabel = truncateToWidth(
+    sanitizeTerminalLine(topRightLabel ?? ''),
+    columns - 5,
+  );
+  const labelWidth = renderedLabel
+    ? getCachedStringWidth(renderedLabel) + 4
+    : 0;
+  const dashLine = '─'.repeat(columns - labelWidth);
+  const topBorderLine = renderedLabel
+    ? `${dashLine} ${renderedLabel} ──`
+    : dashLine;
   const { visible, startIndex, hasMoreAbove, hasMoreBelow } = suggestionWindow(
     suggestions,
     activeIndex,
@@ -1250,12 +1729,15 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     <box flexDirection="column">
       {attachments.length > 0 && (
         <box flexDirection="column" paddingLeft={2}>
-          {attachments.map((a) => (
-            <text key={a.id} fg={C.purple}>{`📎 ${a.filename}`}</text>
+          {attachments.map((a, index) => (
+            <text
+              key={a.id}
+              fg={index === selectedAttachment ? C.accent : C.purple}
+            >{`${index === selectedAttachment ? '>' : '📎'} ${a.filename}`}</text>
           ))}
         </box>
       )}
-      <text fg={borderColor}>{dashLine}</text>
+      <text fg={borderColor}>{topBorderLine}</text>
       <box
         flexDirection="row"
         border={['bottom']}

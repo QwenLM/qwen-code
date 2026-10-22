@@ -149,6 +149,10 @@ const EN: Messages = {
     'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
   'managed.title': 'Managed Agents',
   'managed.executionMode': 'Execution mode',
+  'workspace.executionDaemon': 'Local (daemon)',
+  'workspace.executionManaged': 'Managed (Managed Agent)',
+  'workspace.executionHint':
+    'New tasks in this workspace use the selected service.',
   'managed.localMode': 'Local',
   'managed.managedMode': 'Managed',
   'managed.sessions': 'Managed sessions',
@@ -3438,6 +3442,20 @@ const EN: Messages = {
   'contextUsage.compress': 'Compress context',
   'contextUsage.compressing': 'Compressing…',
   'contextUsage.compressed': 'Compression completed. Context usage refreshed.',
+  'contextUsage.compressedUnknown':
+    'Compression completed. Context usage will be observed on the next turn.',
+  'managed.compression.unconfirmed':
+    'Compression is unconfirmed. Check its status before continuing.',
+  'managed.compression.recoveryBlocked': 'Compression is waiting for recovery.',
+  'managed.compression.confirm': 'Check compression status',
+  'managed.compression.storage':
+    'Could not save the compression request. Compression was not started.',
+  'managed.compression.storageUpdate':
+    'Could not save the latest compression status. Check it again after refreshing.',
+  'managed.compression.conflict':
+    'The context changed. Review its latest state and try again.',
+  'managed.compression.busy':
+    'The session is busy. Wait until it is idle before compressing.',
   'contextUsage.compressCancelled':
     'Cancellation requested. Refresh to check current usage.',
   'contextUsage.compressInterrupted':
@@ -3446,7 +3464,7 @@ const EN: Messages = {
   'contextUsage.compressRefreshFailed':
     'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
   'contextUsage.compressUnavailable':
-    'Requires an idle, connected, writable session with the built-in compression command and no active goal.',
+    'Requires an idle, connected session with permission to compress context.',
   'contextCompression.result': (v) =>
     `Context compressed ${v?.from ?? ''} → ${v?.to ?? ''}`,
   'contextCompression.instructionsTruncated': (v) =>
@@ -3535,7 +3553,6 @@ const EN: Messages = {
     'Main model total: sum of main-session model request durations, excluding subagent requests and tools. Failed attempts may count.',
   'trajectory.metric.missing.help':
     'Unplotted requests and tools remain in the list. An em dash means unrecorded; zero is a measured zero.',
-  'trajectory.unrecorded': 'unrecorded',
   'trajectory.unplotted': (v) =>
     `Unplotted: ${v?.starts ?? 0} without start · ${v?.timing ?? 0} without duration`,
   'trajectory.noStart':
@@ -3546,20 +3563,12 @@ const EN: Messages = {
   'trajectory.lifecycleIncomplete':
     'Lifecycle details may be incomplete or outside the retained limit.',
   'trajectory.inspector.title': 'Record details',
-  'trajectory.inspector.open': 'View details',
   'trajectory.inspector.close': 'Close details',
   'trajectory.inspector.selectRecord': 'Select a record to inspect.',
-  'trajectory.inspector.selectRowInTurn':
-    'Turn selected. Select a record to inspect.',
   'trajectory.inspector.stale':
     'The record window changed. Select a record again.',
   'trajectory.inspector.hiddenByRange':
     'This record is outside the selected time.',
-  'trajectory.inspector.tab.summary': 'Summary',
-  'trajectory.inspector.tab.input': 'Input',
-  'trajectory.inspector.tab.output': 'Output',
-  'trajectory.inspector.tab.metrics': 'Metrics',
-  'trajectory.inspector.tab.body': 'Body',
   'trajectory.inspector.model': 'Model',
   'trajectory.inspector.status': 'Status',
   'trajectory.inspector.permissionTitle': 'Title',
@@ -3573,22 +3582,10 @@ const EN: Messages = {
   'trajectory.inspector.start': 'Recorded start',
   'trajectory.inspector.end': 'Calculated end',
   'trajectory.inspector.ttft': 'First token',
-  'trajectory.inspector.afterFirst': 'After first token',
   'trajectory.inspector.invalidTtft':
     'Recorded first-token timing is inconsistent',
-  'trajectory.inspector.inputTokens': 'Input tokens',
-  'trajectory.inspector.outputTokens': 'Output tokens',
-  'trajectory.inspector.cachedTokens':
-    'Cached input tokens (included in input)',
   'trajectory.inspector.tool': 'Tool',
   'trajectory.inspector.callId': 'Call ID',
-  'trajectory.inspector.details': 'Recorded details',
-  'trajectory.inspector.preview': 'Recorded preview',
-  'trajectory.inspector.input': 'Recorded input',
-  'trajectory.inspector.output': 'Recorded output',
-  'trajectory.inspector.contentFallback':
-    'Tool content (no separate raw output)',
-  'trajectory.inspector.body': 'Recorded text',
   'trajectory.inspector.kind': 'Kind',
   'trajectory.inspector.images': 'Image types',
   'trajectory.inspector.files': 'Files',
@@ -3598,8 +3595,7 @@ const EN: Messages = {
   'trajectory.inspector.truncated': 'Content truncated',
   'trajectory.inspector.formatFailed': 'Could not format recorded field',
   'trajectory.inspector.expand': 'Show more',
-  'trajectory.inspector.copy': 'Copy displayed content',
-  'trajectory.inspector.copied': 'Copied displayed content',
+  'trajectory.inspector.copied': 'Copied',
   'trajectory.inspector.copyFailed': 'Could not copy content',
   'trajectory.mode.group': 'Time scale',
   'trajectory.mode.active': 'Active time, idle removed',
@@ -4589,6 +4585,9 @@ const ZH: Messages = {
     '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
   'managed.title': '托管 Agent',
   'managed.executionMode': '执行方式',
+  'workspace.executionDaemon': '本地（daemon）',
+  'workspace.executionManaged': '托管（Managed Agent）',
+  'workspace.executionHint': '此工作区中新建的任务将使用所选服务。',
   'managed.localMode': '本地',
   'managed.managedMode': '托管',
   'managed.sessions': '托管会话',
@@ -7703,6 +7702,16 @@ const ZH: Messages = {
   'contextUsage.compress': '手动压缩',
   'contextUsage.compressing': '正在压缩…',
   'contextUsage.compressed': '压缩完成，已刷新上下文用量。',
+  'contextUsage.compressedUnknown': '压缩完成，下一轮会重新观测上下文用量。',
+  'managed.compression.unconfirmed':
+    '尚未确认压缩结果，请先查询状态再继续操作。',
+  'managed.compression.recoveryBlocked': '压缩正在等待恢复。',
+  'managed.compression.confirm': '查询压缩状态',
+  'managed.compression.storage': '无法保存压缩请求，尚未开始压缩。',
+  'managed.compression.storageUpdate':
+    '无法保存最新压缩状态，刷新后请重新查询。',
+  'managed.compression.conflict': '上下文已变化，请确认最新状态后重试。',
+  'managed.compression.busy': '会话忙碌，请等待空闲后再压缩。',
   'contextUsage.compressCancelled': '已请求取消压缩，请刷新确认当前用量。',
   'contextUsage.compressInterrupted':
     '压缩期间连接发生变化，请刷新查看当前使用量。',
@@ -7710,7 +7719,7 @@ const ZH: Messages = {
   'contextUsage.compressRefreshFailed':
     '压缩已完成，但用量刷新失败。请点击刷新重试。',
   'contextUsage.compressUnavailable':
-    '会话连接正常、空闲、可写、没有活动目标且支持内置压缩命令时可用。',
+    '会话连接正常、空闲且有上下文压缩权限时可用。',
   'contextCompression.result': (v) =>
     `上下文已压缩 ${v?.from ?? ''} → ${v?.to ?? ''}`,
   'contextCompression.instructionsTruncated': (v) =>
@@ -7789,7 +7798,6 @@ const ZH: Messages = {
     '主模型请求累计：主会话模型请求耗时之和，不含子代理请求和工具；可能包含失败尝试。',
   'trajectory.metric.missing.help':
     '未绘制的请求和工具仍保留在列表。破折号表示未记录，零表示真实零值。',
-  'trajectory.unrecorded': '未记录',
   'trajectory.unplotted': (v) =>
     `未绘制：有耗时无起点 ${v?.starts ?? 0} 条 · 无耗时 ${v?.timing ?? 0} 条`,
   'trajectory.noStart': '已记录耗时，但均无起点，无法绘制条带。',
@@ -7797,17 +7805,10 @@ const ZH: Messages = {
   'trajectory.historyGap': '断线期间历史记录可能已变化，请刷新最新窗口。',
   'trajectory.lifecycleIncomplete': '生命周期详情可能不完整或超出保留上限。',
   'trajectory.inspector.title': '记录详情',
-  'trajectory.inspector.open': '查看详情',
   'trajectory.inspector.close': '关闭详情',
   'trajectory.inspector.selectRecord': '请选择一条记录查看。',
-  'trajectory.inspector.selectRowInTurn': '已选择轮次，请选择一条记录查看。',
   'trajectory.inspector.stale': '记录窗口已更新，请重新选择记录。',
   'trajectory.inspector.hiddenByRange': '此记录不在所选时间内。',
-  'trajectory.inspector.tab.summary': '摘要',
-  'trajectory.inspector.tab.input': '输入',
-  'trajectory.inspector.tab.output': '输出',
-  'trajectory.inspector.tab.metrics': '指标',
-  'trajectory.inspector.tab.body': '正文',
   'trajectory.inspector.model': '模型',
   'trajectory.inspector.status': '状态',
   'trajectory.inspector.permissionTitle': '标题',
@@ -7821,19 +7822,9 @@ const ZH: Messages = {
   'trajectory.inspector.start': '记录起点',
   'trajectory.inspector.end': '推算结束',
   'trajectory.inspector.ttft': '首 token',
-  'trajectory.inspector.afterFirst': '首 token 后耗时',
   'trajectory.inspector.invalidTtft': '记录的首 token 时间与总耗时不一致',
-  'trajectory.inspector.inputTokens': '输入 token',
-  'trajectory.inspector.outputTokens': '输出 token',
-  'trajectory.inspector.cachedTokens': '缓存输入 token（包含在输入中）',
   'trajectory.inspector.tool': '工具',
   'trajectory.inspector.callId': '调用 ID',
-  'trajectory.inspector.details': '记录详情',
-  'trajectory.inspector.preview': '记录预览',
-  'trajectory.inspector.input': '记录输入',
-  'trajectory.inspector.output': '记录输出',
-  'trajectory.inspector.contentFallback': '工具内容（无独立原始输出）',
-  'trajectory.inspector.body': '记录正文',
   'trajectory.inspector.kind': '类型',
   'trajectory.inspector.images': '图片类型',
   'trajectory.inspector.files': '文件',
@@ -7843,8 +7834,7 @@ const ZH: Messages = {
   'trajectory.inspector.truncated': '内容已截断',
   'trajectory.inspector.formatFailed': '无法格式化这项记录',
   'trajectory.inspector.expand': '展开更多',
-  'trajectory.inspector.copy': '复制显示内容',
-  'trajectory.inspector.copied': '已复制显示内容',
+  'trajectory.inspector.copied': '已复制',
   'trajectory.inspector.copyFailed': '无法复制内容',
   'trajectory.mode.group': '时间模式',
   'trajectory.mode.active': '活跃时间，去除间隔',
