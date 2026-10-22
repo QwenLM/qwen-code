@@ -60,15 +60,26 @@ class WorkerEnvironmentRoutingTest {
             // Without a seed the store records the launch intent the durable path requires.
             launchFailure = awaitFailure(provisioner.provision(request()));
         }
+        assertTrue(recordedLaunch(directory), "the durable path records its launch in the store");
         assertFiltered(names, launchFailure);
+    }
+
+    private static boolean recordedLaunch(Path directory) throws Exception {
+        try (var entries = Files.list(directory)) {
+            return entries.anyMatch(entry -> entry.getFileName().toString().endsWith(".json"));
+        }
     }
 
     private static void assumeProbes() {
         LocalProcessRuntimeProvisionerTest.requireNode();
-        // Without the probes this skips rather than fails, so the surefire block is the real pin.
-        assumeTrue(KEPT.stream().allMatch(name -> System.getenv(name) != null)
-                        && REMOVED.stream().allMatch(name -> System.getenv(name) != null),
-                "the surefire configuration sets the worker environment probes");
+        boolean present = KEPT.stream().allMatch(name -> System.getenv(name) != null)
+                && REMOVED.stream().allMatch(name -> System.getenv(name) != null);
+        // The surefire block is the only writer of these names. An IDE run should
+        // skip, but a CI run without them means the pin was dropped, so it fails.
+        if (!present && "true".equals(System.getenv("GITHUB_ACTIONS"))) {
+            throw new AssertionError("the surefire configuration sets the worker environment probes");
+        }
+        assumeTrue(present, "the surefire configuration sets the worker environment probes");
     }
 
     private List<String> worker(Path names) throws Exception {
