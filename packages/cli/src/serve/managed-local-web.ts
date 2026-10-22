@@ -17,6 +17,7 @@ export interface ManagedLocalWebOptions {
   actorId: string;
   productScope: string;
   agentId: string;
+  modelPresets?: ReadonlyArray<{ agentId: string; label: string }>;
 }
 
 export function signedManagedHeaders(options: {
@@ -88,6 +89,7 @@ export function mountManagedLocalWeb(
       productScope: options.productScope,
       agentId: options.agentId,
       enableWorkspaceBinding: true,
+      modelPresets: options.modelPresets,
     });
   });
   app.use(

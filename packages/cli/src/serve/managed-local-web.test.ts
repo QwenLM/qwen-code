@@ -128,6 +128,7 @@ describe('Managed local front door', () => {
       actorId: 'owner',
       productScope: 'local:installation-1',
       agentId: 'qwen-code',
+      modelPresets: [{ agentId: 'agent_local', label: 'Local model' }],
     };
   }
 
@@ -177,6 +178,7 @@ describe('Managed local front door', () => {
       productScope: 'local:installation-1',
       agentId: 'qwen-code',
       enableWorkspaceBinding: true,
+      modelPresets: [{ agentId: 'agent_local', label: 'Local model' }],
     });
     const capabilities = await (await get('/capabilities')).json();
     expect(capabilities).toHaveProperty('workspaces');

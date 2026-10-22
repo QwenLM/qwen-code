@@ -21,6 +21,8 @@ const mocks = vi.hoisted(() => ({
   openState: vi.fn(),
   startWeb: vi.fn(),
   stdout: vi.fn(),
+  loadModels: vi.fn(),
+  registerModels: vi.fn(),
 }));
 
 vi.mock('node:child_process', () => ({ spawn: mocks.spawn }));
@@ -36,6 +38,10 @@ vi.mock('./managed-local-state.js', () => ({
 }));
 vi.mock('./managed-local-web.js', () => ({
   signedManagedHeaders: () => ({}),
+}));
+vi.mock('./managed-local-models.js', () => ({
+  loadManagedLocalModels: mocks.loadModels,
+  registerManagedLocalModels: mocks.registerModels,
 }));
 vi.mock('./run-qwen-serve.js', () => ({
   runQwenServe: mocks.startWeb,
@@ -70,10 +76,23 @@ describe('Managed local service environment', () => {
       harnessPort: 5012,
       brokerPort: 5013,
     };
-    const environment = managedLocalJavaEnvironment(state, '/private/data', {
-      java: '/package/jre/bin/java',
-      serverJar: '/package/server.jar',
-      cliEntry: '/package/cli.js',
+    const models = [{ modelId: 'a,comma-model', label: 'Local model' }];
+    const environment = managedLocalJavaEnvironment(
+      state,
+      '/private/data',
+      {
+        java: '/package/jre/bin/java',
+        serverJar: '/package/server.jar',
+        cliEntry: '/package/cli.js',
+      },
+      models,
+    );
+    expect(JSON.parse(environment['SPRING_APPLICATION_JSON']!)).toEqual({
+      'qwen.managed-agent.model-catalog': models,
+      'qwen.managed-agent.definition-models': ['a,comma-model'],
+      'qwen.managed-agent.definition-tool-profiles': [
+        'hosted-workspace-shell/1',
+      ],
     });
     expect(environment['SPRING_DATASOURCE_URL']).toBeUndefined();
     expect(
@@ -110,9 +129,12 @@ describe('Managed local service environment', () => {
 });
 
 describe('Managed local startup supervision', () => {
-  it.each(['child exit', 'termination signal'])(
-    'closes a listener created after %s during binding',
-    async (interruption) => {
+  it.each([
+    { interruption: 'child exit', defaultModelId: undefined },
+    { interruption: 'termination signal', defaultModelId: 'model-b' },
+  ])(
+    'closes a listener created after $interruption during binding',
+    async ({ interruption, defaultModelId }) => {
       const directory = await mkdtemp(path.join(os.tmpdir(), 'managed-start-'));
       const release = vi.fn(async () => {});
       const close = vi.fn(async () => {});
@@ -127,6 +149,10 @@ describe('Managed local startup supervision', () => {
         harnessPort: 5012,
         brokerPort: 5013,
       };
+      const models = [{ modelId: 'model-b', label: 'Model B' }];
+      const modelPresets = [{ agentId: 'agent_local_b', label: 'Model B' }];
+      mocks.loadModels.mockReturnValue({ models, defaultModelId });
+      mocks.registerModels.mockResolvedValue([...modelPresets]);
       await mkdir(path.join(directory, 'logs'));
       mocks.stdout.mockClear();
       mocks.openState.mockResolvedValue({ state, directory, release });
@@ -193,9 +219,27 @@ describe('Managed local startup supervision', () => {
             managedLocalWeb: expect.objectContaining({
               javaUrl: 'http://127.0.0.1:5011',
               productScope: 'local:installation',
+              modelPresets: defaultModelId
+                ? modelPresets
+                : [
+                    { agentId: 'qwen-code', label: 'Server default model' },
+                    ...modelPresets,
+                  ],
             }),
           }),
         );
+        expect(mocks.registerModels).toHaveBeenCalledWith(
+          expect.objectContaining({
+            javaUrl: 'http://127.0.0.1:5011',
+            tenantId: 'local-installation',
+          }),
+          models,
+        );
+        expect(
+          JSON.parse(mocks.spawn.mock.calls[1]![2].env.SPRING_APPLICATION_JSON)[
+            'qwen.managed-agent.model-catalog'
+          ],
+        ).toEqual(models);
         expect(children[0].kill).toHaveBeenCalledWith('SIGTERM');
         expect(mocks.stdout.mock.calls.flat().join('\n')).not.toContain(
           'WebShell:',

@@ -56,12 +56,35 @@ export function ManagedStandaloneApp({
         ) {
           throw new Error('Managed application returned invalid boot options.');
         }
+        const rawPresets = 'modelPresets' in boot ? boot.modelPresets : [];
+        if (
+          !Array.isArray(rawPresets) ||
+          rawPresets.some(
+            (item: unknown) =>
+              typeof item !== 'object' ||
+              item === null ||
+              !('agentId' in item) ||
+              typeof item.agentId !== 'string' ||
+              !item.agentId.trim() ||
+              !('label' in item) ||
+              typeof item.label !== 'string' ||
+              !item.label.trim(),
+          ) ||
+          new Set(rawPresets.map((item: { agentId: string }) => item.agentId))
+            .size !== rawPresets.length
+        ) {
+          throw new Error(
+            'Managed application returned invalid model presets.',
+          );
+        }
+        const modelPresets = rawPresets as { agentId: string; label: string }[];
         if (!controller.signal.aborted) {
           const provider = createJavaManagedAgentProvider({
             baseUrl: window.location.origin,
             productScope: boot.productScope,
             agentId: boot.agentId,
             enableWorkspaceBinding: true,
+            modelPresets,
             getHeaders: (): HeadersInit =>
               daemonToken ? { Authorization: `Bearer ${daemonToken}` } : {},
           });

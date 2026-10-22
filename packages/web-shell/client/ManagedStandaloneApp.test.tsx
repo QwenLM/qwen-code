@@ -132,6 +132,21 @@ describe('Managed standalone application', () => {
     expect(fetch).toHaveBeenCalledOnce();
   });
 
+  it('supplies admitted local model presets to the new-task picker', async () => {
+    const modelPresets = [{ agentId: 'agent_model_b', label: 'Model B' }];
+    fetch.mockResolvedValue(Response.json({ ...BOOT, modelPresets }));
+    await act(async () =>
+      root.render(
+        <ManagedStandaloneApp daemonToken="browser-token">
+          {renderShell}
+        </ManagedStandaloneApp>,
+      ),
+    );
+    expect(
+      renderShell.mock.calls.at(-1)?.[0]?.workspaceBinding?.modelPresets,
+    ).toEqual(modelPresets);
+  });
+
   it('waits for authenticated boot before composing the shell', async () => {
     fetch.mockReturnValue(new Promise(() => {}));
     await act(async () =>
@@ -153,6 +168,20 @@ describe('Managed standalone application', () => {
     new Response(JSON.stringify({ ...BOOT, productScope: '' })),
     new Response(JSON.stringify({ ...BOOT, agentId: '' })),
     new Response(JSON.stringify({ ...BOOT, enableWorkspaceBinding: false })),
+    Response.json({ ...BOOT, modelPresets: null }),
+    Response.json({
+      ...BOOT,
+      modelPresets: [{ modelId: 'model-a', label: 'A' }],
+    }),
+    Response.json({ ...BOOT, modelPresets: [{ agentId: ' ', label: 'A' }] }),
+    Response.json({ ...BOOT, modelPresets: [{ agentId: 'a', label: ' ' }] }),
+    Response.json({
+      ...BOOT,
+      modelPresets: [
+        { agentId: 'a', label: 'A' },
+        { agentId: 'a', label: 'B' },
+      ],
+    }),
   ])(
     'fails closed on unavailable or invalid boot options',
     async (response) => {

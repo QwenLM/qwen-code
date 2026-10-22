@@ -21,6 +21,11 @@ import {
 import { signedManagedHeaders } from './managed-local-web.js';
 import { runQwenServe, type RunHandle } from './run-qwen-serve.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
+import {
+  loadManagedLocalModels,
+  registerManagedLocalModels,
+  type ManagedLocalModel,
+} from './managed-local-models.js';
 
 export interface ManagedLocalServeOptions {
   port: number;
@@ -31,6 +36,7 @@ export function managedLocalJavaEnvironment(
   state: ManagedLocalState,
   directory: string,
   runtime: ManagedLocalRuntime,
+  models: readonly ManagedLocalModel[] = [],
 ): NodeJS.ProcessEnv {
   const environment = Object.fromEntries(
     Object.entries(process.env).filter(
@@ -43,6 +49,15 @@ export function managedLocalJavaEnvironment(
   );
   return {
     ...environment,
+    SPRING_APPLICATION_JSON: JSON.stringify({
+      'qwen.managed-agent.model-catalog': models,
+      'qwen.managed-agent.definition-models': models.map(
+        (model) => model.modelId,
+      ),
+      'qwen.managed-agent.definition-tool-profiles': [
+        'hosted-workspace-shell/1',
+      ],
+    }),
     SPRING_PROFILES_ACTIVE: 'managed-local',
     SERVER_PORT: String(state.javaPort),
     QWEN_MANAGED_AGENT_LOCAL_DATA_DIRECTORY: directory,
@@ -232,6 +247,7 @@ export async function runManagedLocalServe(
   };
 
   try {
+    const { models, defaultModelId } = loadManagedLocalModels();
     if (
       [state.javaPort, state.harnessPort, state.brokerPort].includes(
         options.port,
@@ -276,7 +292,7 @@ export async function runManagedLocalServe(
       'server',
       runtime.java,
       ['-jar', runtime.serverJar],
-      managedLocalJavaEnvironment(state, directory, runtime),
+      managedLocalJavaEnvironment(state, directory, runtime, models),
       false,
     );
     await waitFor('Hosted Harness', async () => {
@@ -314,6 +330,16 @@ export async function runManagedLocalServe(
     });
     const tenantId = `local-${state.installationId}`;
     const actorId = 'local-user';
+    const modelPresets = await registerManagedLocalModels(
+      { javaUrl, signingKey: state.signingKey, tenantId, actorId },
+      models,
+    );
+    if (models.length && !defaultModelId) {
+      modelPresets.unshift({
+        agentId: 'qwen-code',
+        label: 'Server default model',
+      });
+    }
     const route = '/api/agent/web-shell/v1/workspaces/create';
     const body = Buffer.from(
       JSON.stringify({
@@ -367,6 +393,7 @@ export async function runManagedLocalServe(
           actorId,
           productScope: `local:${state.installationId}`,
           agentId: 'qwen-code',
+          modelPresets,
         },
       },
     );
