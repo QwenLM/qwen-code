@@ -361,13 +361,7 @@ describe('no-AK integration CI wiring', () => {
       'interactive/mid-turn-submit-interactive.test.ts': 'Runtime budget',
       'interactive/mixed-input-crash.test.ts': 'Runtime budget',
       'interactive/protocol-tags-interactive.test.ts': 'Runtime budget',
-      'interactive/statusline-parity.test.ts':
-        'TUI parity gate; runtime budget',
       'interactive/submitted-prompt-provenance.test.ts': 'Runtime budget',
-      'interactive/tui-editor-parity.test.ts':
-        'TUI parity gate; runtime budget',
-      'interactive/tui-input-ownership.test.ts':
-        'TUI parity gate; runtime budget',
       'interactive/tui-migration.test.ts': 'Runtime budget',
       'renderer-matrix.test.ts': 'Runtime budget',
       'scratch-dir.test.ts': 'Runtime budget',
