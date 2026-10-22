@@ -174,6 +174,13 @@ public final class HarnessEventStream implements AutoCloseable {
                 "HarnessEventStream is closed");
     }
 
+    // A tenth of the budget keeps the abort within 10% of the bound, so a
+    // supervisor can sit just above it; the floor bounds the single
+    // scheduler thread's wake rate when the budget is short.
+    static long idleWatchdogIntervalMillis(long idleMillis) {
+        return Math.max(100L, idleMillis / 10L);
+    }
+
     void startIdleWatchdog() {
         if (client.sseIdleTimeout().isZero()) {
             // Builder.sseIdleTimeout(Duration.ZERO): the caller owns the
@@ -189,9 +196,7 @@ public final class HarnessEventStream implements AutoCloseable {
         }
         long idleMillis = HostedHarnessClient.saturatedMillis(
                 client.sseIdleTimeout());
-        // A tenth of the budget keeps the abort within 10% of the bound,
-        // so a supervisor can sit just above it.
-        long intervalMillis = Math.max(100L, idleMillis / 10L);
+        long intervalMillis = idleWatchdogIntervalMillis(idleMillis);
         long idleNanos = TimeUnit.MILLISECONDS.toNanos(idleMillis);
         try {
             idleWatchdog = client.scheduler().scheduleAtFixedRate(() -> {

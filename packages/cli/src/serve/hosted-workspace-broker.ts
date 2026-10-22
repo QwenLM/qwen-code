@@ -31,6 +31,14 @@ import type {
   ManagedMcpControl,
   ManagedMcpOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
+import {
+  parseHostedMcpServers,
+  type HostedMcpServerPin,
+} from './hosted-mcp-definitions.js';
+
+export interface HostedPublishedMcpServer extends HostedMcpServerPin {
+  readonly transport: 'stdio' | 'streamable-http' | 'sse';
+}
 
 import type {
   ManagedHookControl,
@@ -201,6 +209,35 @@ export class HostedWorkspaceBroker {
   async warm(): Promise<void> {
     const response = await this.harnessRequest('/runtimes:warm', {});
     if (response['runtime'] !== undefined) this.readRuntime(response);
+  }
+
+  async mcpDefinitions(
+    originalOwner = false,
+  ): Promise<readonly HostedPublishedMcpServer[]> {
+    const response = await this.harnessRequest(
+      `/harness-sessions/${encodeURIComponent(this.key.sessionId)}/mcp-definitions`,
+      originalOwner ? { runtimeSessionId: this.runtimeSessionId } : {},
+    );
+    const servers = response['servers'];
+    if (!Array.isArray(servers) || servers.length > 128)
+      throw new Error('Invalid published MCP definitions.');
+    const identities = new Set<string>();
+    return servers.map((value: unknown) => {
+      const server = object(value);
+      const { transport, ...pin } = server;
+      const [parsed] = parseHostedMcpServers([pin]);
+      const identity = `${parsed.serverId}\0${parsed.serverRevision}`;
+      if (
+        !['stdio', 'streamable-http', 'sse'].includes(String(transport)) ||
+        identities.has(identity)
+      )
+        throw new Error('Invalid published MCP definition.');
+      identities.add(identity);
+      return {
+        ...parsed,
+        transport: transport as HostedPublishedMcpServer['transport'],
+      };
+    });
   }
 
   async authorizeLifecycle(): Promise<void> {
