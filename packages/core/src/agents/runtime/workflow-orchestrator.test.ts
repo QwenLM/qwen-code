@@ -1866,6 +1866,22 @@ describe('createProductionDispatch', () => {
     });
   });
 
+  it('suffixes the spawning Workflow tool call id onto the agent id', async () => {
+    await createProductionDispatch(
+      fakeConfig(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'call_wf',
+    )('hello', { label: 'h1' });
+    expect(created[0]!.agentId).toMatch(
+      /^workflow-agent-[0-9a-f]{16}-call_wf$/,
+    );
+    expect(created[0]!.subagentId).toBe(created[0]!.agentId);
+  });
+
   it('does not suppress env bootstrap with an empty initial history', async () => {
     await dispatchHello();
     expect(created[0]!.promptConfigInitialMessages).toBeUndefined();
