@@ -3434,6 +3434,20 @@ const EN: Messages = {
   'contextUsage.compress': 'Compress context',
   'contextUsage.compressing': 'Compressing…',
   'contextUsage.compressed': 'Compression completed. Context usage refreshed.',
+  'contextUsage.compressedUnknown':
+    'Compression completed. Context usage will be observed on the next turn.',
+  'managed.compression.unconfirmed':
+    'Compression is unconfirmed. Check its status before continuing.',
+  'managed.compression.recoveryBlocked': 'Compression is waiting for recovery.',
+  'managed.compression.confirm': 'Check compression status',
+  'managed.compression.storage':
+    'Could not save the compression request. Compression was not started.',
+  'managed.compression.storageUpdate':
+    'Could not save the latest compression status. Check it again after refreshing.',
+  'managed.compression.conflict':
+    'The context changed. Review its latest state and try again.',
+  'managed.compression.busy':
+    'The session is busy. Wait until it is idle before compressing.',
   'contextUsage.compressCancelled':
     'Cancellation requested. Refresh to check current usage.',
   'contextUsage.compressInterrupted':
@@ -3442,7 +3456,7 @@ const EN: Messages = {
   'contextUsage.compressRefreshFailed':
     'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
   'contextUsage.compressUnavailable':
-    'Requires an idle, connected, writable session with the built-in compression command and no active goal.',
+    'Requires an idle, connected session with permission to compress context.',
   'contextCompression.result': (v) =>
     `Context compressed ${v?.from ?? ''} → ${v?.to ?? ''}`,
   'contextCompression.instructionsTruncated': (v) =>
@@ -7674,6 +7688,16 @@ const ZH: Messages = {
   'contextUsage.compress': '手动压缩',
   'contextUsage.compressing': '正在压缩…',
   'contextUsage.compressed': '压缩完成，已刷新上下文用量。',
+  'contextUsage.compressedUnknown': '压缩完成，下一轮会重新观测上下文用量。',
+  'managed.compression.unconfirmed':
+    '尚未确认压缩结果，请先查询状态再继续操作。',
+  'managed.compression.recoveryBlocked': '压缩正在等待恢复。',
+  'managed.compression.confirm': '查询压缩状态',
+  'managed.compression.storage': '无法保存压缩请求，尚未开始压缩。',
+  'managed.compression.storageUpdate':
+    '无法保存最新压缩状态，刷新后请重新查询。',
+  'managed.compression.conflict': '上下文已变化，请确认最新状态后重试。',
+  'managed.compression.busy': '会话忙碌，请等待空闲后再压缩。',
   'contextUsage.compressCancelled': '已请求取消压缩，请刷新确认当前用量。',
   'contextUsage.compressInterrupted':
     '压缩期间连接发生变化，请刷新查看当前使用量。',
@@ -7681,7 +7705,7 @@ const ZH: Messages = {
   'contextUsage.compressRefreshFailed':
     '压缩已完成，但用量刷新失败。请点击刷新重试。',
   'contextUsage.compressUnavailable':
-    '会话连接正常、空闲、可写、没有活动目标且支持内置压缩命令时可用。',
+    '会话连接正常、空闲且有上下文压缩权限时可用。',
   'contextCompression.result': (v) =>
     `上下文已压缩 ${v?.from ?? ''} → ${v?.to ?? ''}`,
   'contextCompression.instructionsTruncated': (v) =>
