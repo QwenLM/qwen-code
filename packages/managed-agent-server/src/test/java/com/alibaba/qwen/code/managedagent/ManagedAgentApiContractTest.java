@@ -204,6 +204,10 @@ class ManagedAgentApiContractTest {
                     entry(WebShellWorkspace.class,
                             List.of("WebShellWorkspaceContext")),
                     entry(PublicSession.class, List.of("PublicSession")),
+                    entry(ApiModels.SessionRecovery.class, List.of("SessionRecovery")),
+                    entry(ApiModels.SessionRecoveryActions.class, List.of("SessionRecoveryActions")),
+                    entry(ApiModels.RecoveryRecheckRequest.class, List.of("RecoveryRecheckRequest")),
+                    entry(ApiModels.WebShellRecoveryRecheckRequest.class, List.of("WebShellRecoveryRecheckRequest")),
                     entry(PublicCommandOperation.class,
                             List.of("PublicCommandOperation")),
                     entry(SessionCapabilities.class,
@@ -778,6 +782,17 @@ class ManagedAgentApiContractTest {
                 {"agent_id":"qwen-code","metadata":{"title":"contract"},
                  "input":[{"type":"input_text","text":"hello"}]}
                 """)).get("id").asText();
+        exchange(drift, "getSessionRecovery", 200,
+                get("/v1/agents/sessions/{id}/recovery", sessionId).header(TENANT, tenant), null);
+        exchange(drift, "queryWebShellSessionRecovery", 200,
+                post(WEB_SHELL + "/session-recovery/query").header(TENANT, tenant),
+                "{\"sessionId\":\"" + sessionId + "\"}");
+        exchange(drift, "recheckSessionRecovery", 409,
+                post("/v1/agents/sessions/{id}/recovery/recheck", sessionId).header(TENANT, tenant),
+                "{\"turnId\":\"turn_stale\"}");
+        exchange(drift, "recheckWebShellSessionRecovery", 409,
+                post(WEB_SHELL + "/session-recovery/recheck").header(TENANT, tenant),
+                "{\"sessionId\":\"" + sessionId + "\",\"turnId\":\"turn_stale\"}");
         exchange(drift, "listArtifacts", 401,
                 get("/v1/agents/sessions/%s/artifacts".formatted(sessionId))
                         .header(TENANT, tenant), null);
