@@ -77,6 +77,8 @@ const debugLogger = createDebugLogger('CLIENT');
 // Core modules
 import {
   LlmChat,
+  type ChatCompressionObserver,
+  type ChatCompressionObserverOptions,
   type RepairOrphanedToolUseOptions,
   userContentPushSnapshotKey,
 } from './llm-chat.js';
@@ -186,6 +188,7 @@ import {
 import type { DeferredToolSummary } from '../tools/tool-registry.js';
 import { replayUiTelemetryFromConversation } from '../services/sessionService.js';
 import { buildSessionHistoryFromConversation } from '../services/session-api-history.js';
+import { markApiHistoryDirectoryContext } from '../utils/api-history-metadata.js';
 import { reportError } from '../utils/errorReporting.js';
 import {
   getErrorMessage,
@@ -653,6 +656,18 @@ export class LlmClient {
 
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
+  }
+
+  private compressionObserver?: ChatCompressionObserver;
+  private compressionObserverOptions?: ChatCompressionObserverOptions;
+
+  setCompressionObserver(
+    observer?: ChatCompressionObserver,
+    options?: ChatCompressionObserverOptions,
+  ): void {
+    this.compressionObserver = observer;
+    this.compressionObserverOptions = options;
+    this.chat?.setCompressionObserver(observer, options);
   }
 
   async initialize(
@@ -2005,10 +2020,12 @@ export class LlmClient {
       return;
     }
 
-    this.getChat().addHistory({
+    const chat = this.getChat();
+    const context: Content = {
       role: 'user',
       parts: [{ text: await getDirectoryContextString(this.config) }],
-    });
+    };
+    chat.addHistory(markApiHistoryDirectoryContext(context));
   }
 
   async addWorkingDirectoryChangedContext(
@@ -2026,7 +2043,7 @@ export class LlmClient {
     this.cachedGitStatus = undefined;
     await this.refreshSystemInstruction();
     const gitStatus = this.getCachedGitStatus();
-    this.getChat().addHistory({
+    const context: Content = {
       role: 'user',
       parts: [
         {
@@ -2036,7 +2053,8 @@ export class LlmClient {
         },
         ...(gitStatus ? [{ text: wrapSystemReminder(gitStatus) }] : []),
       ],
-    });
+    };
+    this.getChat().addHistory(markApiHistoryDirectoryContext(context));
     await this.addDirectoryContext();
   }
 
@@ -2865,6 +2883,10 @@ export class LlmClient {
           ),
       );
       chat.enableManualPlanExitNotices();
+      chat.setCompressionObserver(
+        this.compressionObserver,
+        this.compressionObserverOptions,
+      );
       this.chat = chat;
 
       // Repair any dangling `model[functionCall]` whose `functionResponse`
