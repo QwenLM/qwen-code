@@ -306,6 +306,69 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
+  it.each([false, true])(
+    'keeps the selected unarchived session out of archived navigation (workspaceBinding=%s)',
+    async (withWorkspaceBinding) => {
+      const active = summary('s1', {
+        lifecycleStatus: 'active',
+        title: 'Unarchived selected session',
+      });
+      const archived = summary('s2', {
+        lifecycleStatus: 'archived',
+        title: 'Archived session',
+      });
+      provider = {
+        ...provider,
+        lifecycle: {
+          submit: vi.fn(),
+          unarchive: vi.fn(),
+          query: vi.fn(),
+        },
+      };
+      mocks.client.getSession.mockResolvedValue(active);
+      mocks.client.listSessions.mockImplementation(
+        async (options: { archiveState?: string }) => ({
+          sessions: options.archiveState === 'archived' ? [archived] : [active],
+        }),
+      );
+      if (withWorkspaceBinding) {
+        provider.workspaceBinding = {
+          agentId: 'agent',
+          list: vi.fn().mockResolvedValue({ data: [], supported: true }),
+          get: vi.fn(),
+          createEmpty: vi.fn(),
+        };
+      }
+      const slot = document.createElement('aside');
+      container.appendChild(slot);
+      await render(
+        's1',
+        'en',
+        provider,
+        withWorkspaceBinding ? slot : undefined,
+      );
+      const nav = (withWorkspaceBinding ? slot : container).querySelector(
+        'nav[aria-label="Managed sessions"]',
+      )!;
+      expect(nav.textContent).toContain(active.title);
+      expect(nav.textContent).not.toContain(archived.title);
+      await act(async () => {
+        [...nav.querySelectorAll('button')]
+          .find((button) => button.textContent === 'Archived')!
+          .click();
+        await flush();
+      });
+      expect(
+        mocks.client.listSessions.mock.calls.map(
+          ([options]) => options.archiveState,
+        ),
+      ).toEqual(['unarchived', 'archived']);
+      expect(nav.textContent).toContain(archived.title);
+      expect(nav.textContent).not.toContain(active.title);
+      expect(onSelect).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(['closed', 'archived'])(
     'keeps %s history read only when native recovery is ready',
     async (lifecycleStatus) => {

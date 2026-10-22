@@ -217,6 +217,33 @@ describe('Managed workspace navigation', () => {
     );
   });
 
+  it('keeps lifecycle actions independent from selecting a running session', async () => {
+    const archive = vi.fn();
+    await render({
+      sessions: [{ ...session('one', 'a'), phase: 'agent_running' }],
+      renderSessionActions: (item) => (
+        <button onClick={archive} aria-label={`Archive ${item.sessionId}`}>
+          Archive
+        </button>
+      ),
+    });
+    const row = container.querySelector<HTMLButtonElement>(
+      '[data-managed-session-id="one"]',
+    )!;
+    const action = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Archive one"]',
+    )!;
+    expect(
+      row.querySelector('[data-web-shell-session-running]'),
+    ).not.toBeNull();
+    expect(row.contains(action)).toBe(false);
+    await act(async () => action.click());
+    expect(archive).toHaveBeenCalledOnce();
+    expect(selectSession).not.toHaveBeenCalled();
+    await act(async () => row.click());
+    expect(selectSession).toHaveBeenCalledWith('one', 'a');
+  });
+
   it('filters by common workspace or session search without reloading the catalog', async () => {
     list.mockResolvedValue({
       data: [

@@ -791,7 +791,14 @@ function ManagedSessionsContent({
 
   useEffect(() => {
     const current = detail.summary;
-    if (!current || current.sessionId !== sessionId) return;
+    if (
+      !current ||
+      current.sessionId !== sessionId ||
+      (provider.lifecycle &&
+        (current.lifecycleStatus === 'archived') !==
+          (archiveState === 'archived'))
+    )
+      return;
     setSessions((rows) => {
       const previous = rows.find((row) => row.sessionId === current.sessionId);
       if (previous === current) return rows;
@@ -801,7 +808,7 @@ function ManagedSessionsContent({
           )
         : [...rows, current];
     });
-  }, [detail.summary, sessionId, sessions]);
+  }, [detail.summary, sessionId, sessions, provider.lifecycle, archiveState]);
 
   const backgroundSessionIds = JSON.stringify(
     sessions

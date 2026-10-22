@@ -279,13 +279,18 @@ function ManagedWorkspaceGroup({
           {sessions.map((session) => {
             const running = isManagedSessionRunning(session.phase);
             return (
-              <div key={session.sessionId} className="flex min-w-0 items-center">
+              <div
+                key={session.sessionId}
+                className="flex min-w-0 items-center"
+              >
                 <button
                   type="button"
                   className={`${sidebarStyles.sessionRow} min-w-0 flex-1 text-left ${active && sessionId === session.sessionId ? sidebarStyles.currentSession : ''} ${running ? sidebarStyles.runningSession : ''}`}
                   data-managed-session-id={session.sessionId}
                   aria-current={
-                    active && sessionId === session.sessionId ? 'page' : undefined
+                    active && sessionId === session.sessionId
+                      ? 'page'
+                      : undefined
                   }
                   title={t(
                     session.lifecycleStatus &&
@@ -293,7 +298,9 @@ function ManagedWorkspaceGroup({
                       ? `managed.sessionState.${session.lifecycleStatus}`
                       : `managed.phase.${session.phase}`,
                   )}
-                  onClick={() => onSelectSession(session.sessionId, workspaceId)}
+                  onClick={() =>
+                    onSelectSession(session.sessionId, workspaceId)
+                  }
                 >
                   <span
                     className={sidebarStyles.sessionStatusSlot}
