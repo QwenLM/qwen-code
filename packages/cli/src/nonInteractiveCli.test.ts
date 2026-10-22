@@ -3363,18 +3363,14 @@ describe('runNonInteractive', () => {
     );
 
     expect(exitCode).toBe(1);
-    // The consecutive guard is always-on, so the headless message must flag it
-    // as always-on and must NOT suggest the skipLoopDetection escape hatch,
-    // which cannot disable it.
+    // The consecutive guard runs before the skipLoopDetection gate, so the
+    // headless message must point at model.loopProtection, which governs it,
+    // and must NOT suggest skipLoopDetection, which cannot disable it.
     expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'always-on guard and cannot be disabled via `model.skipLoopDetection`',
-      ),
+      expect.stringContaining('Set `model.loopProtection` to "warn"'),
     );
     expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining(
-        'Set the `model.skipLoopDetection` setting to true',
-      ),
+      expect.stringContaining('`model.skipLoopDetection`'),
     );
   });
 
@@ -3552,7 +3548,7 @@ describe('runNonInteractive', () => {
     // always-on hint the provider-id breaker gets would be wrong here.
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(
-        'Set the `model.skipLoopDetection` setting to true',
+        '`model.skipLoopDetection` to true to disable this check',
       ),
     );
     expect(processStderrSpy).not.toHaveBeenCalledWith(

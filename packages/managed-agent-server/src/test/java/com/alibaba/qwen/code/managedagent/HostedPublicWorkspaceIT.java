@@ -57,6 +57,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -1762,7 +1763,7 @@ class HostedPublicWorkspaceIT {
                     String producer = "const fs = require('fs'); fs.appendFileSync('proof.txt', 'x');"
                             + " process.stdout.write(Buffer.alloc(1024 * 1024, 0x61), () => {"
                             + " process.stdout.write('stdout-tail\\n'); process.stderr.write('stderr-tail\\n'); });";
-                    args = Map.of("command", shellQuote(node) + " -e " + shellQuote(producer), "timeout", 60000);
+                    args = Map.of("command", quote(node) + " -e " + quote(producer), "timeout", 60000);
                 }
                 delta.putArray("tool_calls").addObject().put("index", 0).put("id", "g0-tool-" + step)
                         .put("type", "function").putObject("function").put("name", name)
@@ -1837,10 +1838,6 @@ class HostedPublicWorkspaceIT {
                 receiptResponses.incrementAndGet();
             }
         }
-    }
-
-    private static String shellQuote(String value) {
-        return "'" + value.replace("'", "'\"'\"'") + "'";
     }
 
     private HttpResponse<String> rawRequest(String method, String path, Object body, String key, String actor)
