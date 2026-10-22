@@ -706,6 +706,18 @@ class ManagedAgentApiContractTest {
             assertThat(web.path("data")).hasSize(state.equals("all") ? 2 : 1);
             assertThat(api.path("data")).hasSize(state.equals("all") ? 2 : 1);
         }
+        for (String query : List.of("\u00a0\ufeff _% \u00a0", "\u00a0\ufeff")) {
+            int expected = query.contains("_%") ? 2 : 3;
+            JsonNode web = json(mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
+                            "titleQuery", query))))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+            JsonNode api = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
+                    .param("title_query", query))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+            assertThat(web.path("data")).hasSize(expected);
+            assertThat(api.path("data")).hasSize(expected);
+        }
         JsonNode alias = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
                 .param("include_archived", "false").param("title_query", "_%"))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());

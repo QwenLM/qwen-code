@@ -7,8 +7,9 @@
 Issue #15077 needs server-side title search and archive filtering before pagination.
 PR #15100 supplies WebShell archive views and export. This dependent slice adds the
 missing public API filters and title query contract shared with the Java provider.
-The existing navigation search also matches Session IDs and Workspace names; this
-change does not replace it with a title-only query or claim the complete UI done.
+An independent title-search input uses this contract; the existing navigation
+search continues to match Session IDs and Workspace names. Runtime/UI acceptance
+remains separate from the implemented input.
 
 ## Contract and decisions
 
@@ -18,9 +19,10 @@ preserve the current `all` default. Public `include_archived=true` aliases `all`
 `false` aliases `unarchived`. Conflicting explicit filters return 400.
 
 Title search is a case-insensitive literal substring over the stored title.
-Queries have at most 512 Unicode code points; surrounding Java `String.strip()`
-whitespace is removed. Null or empty means no title filter. `%`, `_` and backslash
-are literal. SQL applies both filters before the limit while retaining tenant,
+Queries have at most 512 Unicode code points. Surrounding whitespace uses the same
+predicate as title blankness: Java whitespace, space characters (including NBSP),
+and BOM are removed. Internal characters remain literal. Null or empty means no
+title filter. `%`, `_` and backslash are literal. SQL applies both filters before the limit while retaining tenant,
 Workspace grant, public Session kind and deletion predicates. Case folding follows
 the database's `LOWER` behavior; locale-specific equivalence is not promised.
 
