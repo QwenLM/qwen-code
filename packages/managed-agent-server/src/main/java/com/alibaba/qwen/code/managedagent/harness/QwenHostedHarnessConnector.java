@@ -69,6 +69,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             ConcurrentHashMap.newKeySet();
     private final Map<AttachmentKey, HarnessSessionRef> attachments =
             new ConcurrentHashMap<>();
+    // A management-only ref carries no takeover proof for ordinary recovery or cancellation.
+    private final Map<AttachmentKey, HarnessSessionRef> mcpManagementAttachments =
+            new ConcurrentHashMap<>();
     // Single flight for the first attachment of a Session. computeIfAbsent
     // would run the blocking Harness call under the map bin monitor, which
     // pins the caller virtual thread to its carrier on JDK 21. Entries are
@@ -314,6 +317,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
         }
         attachments.remove(key);
+        mcpManagementAttachments.remove(key);
         pendingRecovery.remove(key);
     }
 
@@ -372,8 +376,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
         requireApprovalSelectionSupport(session);
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+        if (!mcpManagementOnly && !loadExisting && !attachments.containsKey(key)
+                && mcpManagementAttachments.containsKey(key)) {
+            return doCreateOrLoad(tenantId, sessionId, true, true, actionResponse, false);
+        }
+        Map<AttachmentKey, HarnessSessionRef> selectedAttachments =
+                mcpManagementOnly ? mcpManagementAttachments : attachments;
         HarnessSessionRef attached = passiveManagedRuntimeRecovery && loadExisting
-                ? load(session, true, false, false, mcpManagementOnly) : attachments.get(key);
+                ? load(session, true, false, false, mcpManagementOnly) : selectedAttachments.get(key);
         boolean minted = false;
         if (attached == null) {
             AttachmentLock slot = attachmentLocks.compute(key,
@@ -385,11 +395,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     });
             slot.lock.lock();
             try {
-                attached = attachments.get(key);
+                attached = selectedAttachments.get(key);
                 if (attached == null) {
                     attached = loadExisting ? load(session, passiveManagedRuntimeRecovery, false, false, mcpManagementOnly)
                             : create(session, passiveManagedRuntimeRecovery, mcpManagementOnly);
-                    attachments.put(key, attached);
+                    selectedAttachments.put(key, attached);
                     minted = true;
                 }
             } finally {
@@ -398,11 +408,22 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         --held.holders == 0 ? null : held);
             }
         }
-        if (session.workspace() != null
-                && !approvalModeConfirmed(session, attached, minted)) {
-            attachments.remove(key, attached);
-            throw new IllegalStateException(
-                    "Hosted Harness did not confirm the Session approval mode");
+        try {
+            if (session.workspace() != null
+                    && !approvalModeConfirmed(session, attached, minted && !mcpManagementOnly)) {
+                selectedAttachments.remove(key, attached);
+                throw new IllegalStateException(
+                        "Hosted Harness did not confirm the Session approval mode");
+            }
+        } catch (RuntimeException error) {
+            if (mcpManagementOnly) {
+                selectedAttachments.remove(key, attached);
+            }
+            throw error;
+        }
+        if (mcpManagementOnly) {
+            return new Attachment(attached.getHarnessBootId(), null,
+                    attached.getHarnessLastEventId(), attached.getHarnessEventEpoch());
         }
         HarnessSessionRef loaded = attached;
         attachments.compute(key, (ignored, held) -> {
@@ -1084,6 +1105,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     private String doCloseSession(String tenantId, String sessionId) {
         attachments.remove(new AttachmentKey(tenantId, sessionId));
+        mcpManagementAttachments.remove(new AttachmentKey(tenantId, sessionId));
         pendingRecovery.remove(new AttachmentKey(tenantId, sessionId));
         HostedHarnessClient current = client();
         current.closeSession(sessionId);
@@ -1111,6 +1133,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             current.close();
         }
         attachments.clear();
+        mcpManagementAttachments.clear();
         pendingRecovery.clear();
     }
 
@@ -1150,7 +1173,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (attached == null) {
             SessionRecord session = sessions.requireSession(tenantId, sessionId);
             doCreateOrLoad(tenantId, sessionId, !initialize || session.harnessBootId() != null, false, false, true);
-            attached = attachments.get(key);
+            attached = mcpManagementAttachments.get(key);
         }
         return attached;
     }
@@ -1729,6 +1752,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         // recovery path hand out a null report).
         String liveBootId = error.getActualBootId();
         attachments.entrySet().removeIf(entry ->
+                !liveBootId.equals(entry.getValue().getHarnessBootId()));
+        mcpManagementAttachments.entrySet().removeIf(entry ->
                 !liveBootId.equals(entry.getValue().getHarnessBootId()));
         pendingRecovery.retainAll(attachments.keySet());
         if (dropped) {

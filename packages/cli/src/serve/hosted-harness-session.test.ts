@@ -41,7 +41,10 @@ import {
   ManagedSessionStoreHttpError,
   ManagedSessionStoreTransportError,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
-import { openManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import {
+  openManagedSession,
+  type ManagedSession,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { WorkflowStartCancelledError } from '@qwen-code/qwen-code-core/agents/runtime/workflow-runner.js';
@@ -23001,6 +23004,92 @@ describe('Hosted Harness tool approvals', () => {
     await finished();
     expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
   });
+  it('keeps a rewound MCP owner accounted for until ordered release', async () => {
+    let mcp: HostedMcpSession | undefined;
+    let managed: ManagedSession | undefined;
+    const open = HostedMcpManager.prototype.open;
+    vi.spyOn(HostedMcpManager.prototype, 'open').mockImplementation(
+      async function (this: HostedMcpManager) {
+        await open.call(this);
+        mcp = Reflect.get(this, 'mcp') as HostedMcpSession | undefined;
+        managed = Reflect.get(this, 'session') as ManagedSession;
+      },
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'mcpDefinitions',
+    ).mockResolvedValue([]);
+    const { server, authorize } = await mcpApp(
+      false,
+      ['demo'],
+      'hosted-workspace-shell/1',
+    );
+    await authorize(
+      supertest(server).get(`/session/${SESSION_ID}/mcp/management`),
+    ).expect(200);
+    if (!mcp || !managed) throw new Error('The MCP fixture did not initialize');
+    const history = {
+      ownerSessionId: SESSION_ID,
+      snapshots: [
+        {
+          promptId: PROMPT_ID,
+          timestamp: new Date().toISOString(),
+          trackedFileBackups: {},
+        },
+      ],
+      files: {},
+    };
+    await managed.sink.write({
+      uuid: randomUUID(),
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: new Date().toISOString(),
+      type: 'user',
+      cwd: state.root,
+      version: 'test',
+      message: { role: 'user', parts: [{ text: 'backup fixture' }] },
+    });
+    await commitHostedFileHistory(managed, {
+      schemaVersion: 1,
+      state: history,
+      pendingTurn: null,
+      pendingUndo: null,
+      undoReceipts: [],
+    });
+    vi.mocked(HostedWorkspaceBroker.prototype.fileHistory).mockImplementation(
+      async (operation) =>
+        operation.action === 'rewind'
+          ? {
+              state: history,
+              filesChanged: [],
+              filesFailed: [],
+              conflict: false,
+            }
+          : history,
+    );
+    const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    acquire.mockClear();
+    release.mockClear();
+    expect(mcp.mountHeld).toBe(false);
+    expect(
+      managed.authority.extensionRecordsInDomain('mcp_configuration'),
+    ).toHaveLength(0);
+    await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/files/rewind`),
+    )
+      .send({ requestId: randomUUID(), promptId: PROMPT_ID })
+      .expect(200);
+    expect(acquire).toHaveBeenCalledOnce();
+    expect(acquire.mock.contexts).toEqual([mcp.broker]);
+    expect(mcp.mountHeld).toBe(true);
+    expect(release).not.toHaveBeenCalled();
+    await mcp.closeResources();
+    expect(release).toHaveBeenCalledOnce();
+    expect(mcp.mountHeld).toBe(false);
+  });
+
   it.each([
     'success',
     'conflict',
