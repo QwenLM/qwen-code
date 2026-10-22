@@ -762,6 +762,15 @@ jobs:
       - name: 'Check that every non-Hosted integration test class ran'
         run: 'node scripts/check-failsafe-reports.js non-hosted packages/managed-agent-server'
 
+      - name: 'Upload Maven test reports on failure'
+        if: 'failure()'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'sdk-java-test-reports-mysql-integration-java-21'
+          path: 'packages/managed-agent-server/target/surefire-reports/*.txt'
+          if-no-files-found: 'ignore'
+          retention-days: 7
+
       # The host's docker cleanup service fires once a day and reaps qwen-code-*
       # containers only past a strict 24h age gate, so a cancelled job can strand
       # a running mysqld on the shared pool for up to ~48h.

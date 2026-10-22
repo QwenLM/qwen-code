@@ -241,26 +241,44 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it('uploads Maven text reports when the SDK Java test job fails', () => {
-    const steps = parse(workflow).jobs.test.steps;
-    const upload = steps.find(
-      (s) => s.name === 'Upload Maven test reports on failure',
-    );
-    expect(upload.if).toBe('failure()');
-    expect(upload.uses).toBe(
-      'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
-    );
-    expect(upload.with.path).toContain(
-      'packages/managed-agent-server/target/surefire-reports/*.txt',
-    );
-    expect(upload.with.path).toContain(
-      'packages/sdk-java/qwencode/target/surefire-reports/*.txt',
-    );
-    expect(upload.with['if-no-files-found']).toBe('ignore');
-    expect(steps.indexOf(upload)).toBeGreaterThan(
-      steps.findIndex((s) => s.name === 'Run Runtime Broker state tests'),
-    );
-  });
+  it.each([
+    {
+      name: 'test',
+      artifact:
+        'sdk-java-test-reports-${{ matrix.os }}-java-${{ matrix.java }}',
+      paths: [
+        'packages/sdk-java/qwencode/target/surefire-reports/*.txt',
+        'packages/managed-agent-server/target/surefire-reports/*.txt',
+      ],
+      testStep: 'Run Runtime Broker state tests',
+    },
+    {
+      name: 'mysql-integration',
+      artifact: 'sdk-java-test-reports-mysql-integration-java-21',
+      paths: ['packages/managed-agent-server/target/surefire-reports/*.txt'],
+      testStep:
+        'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration',
+    },
+  ])(
+    'preserves Surefire text reports on $name test failure',
+    ({ name, artifact, paths, testStep }) => {
+      const steps = parse(workflow).jobs[name].steps;
+      const upload = steps.find(
+        (s) => s.name === 'Upload Maven test reports on failure',
+      );
+      expect(upload.if).toBe('failure()');
+      expect(upload.uses).toBe(
+        'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+      );
+      expect(upload.with.name).toBe(artifact);
+      expect(upload.with.path.trim().split('\n')).toEqual(paths);
+      expect(upload.with['if-no-files-found']).toBe('ignore');
+      expect(upload.with['retention-days']).toBe(7);
+      const testIndex = steps.findIndex((s) => s.name === testStep);
+      expect(testIndex).toBeGreaterThan(-1);
+      expect(steps.indexOf(upload)).toBeGreaterThan(testIndex);
+    },
+  );
 
   it('builds the JavaScript the full module suite loads before the fast tier runs it', () => {
     const steps = parse(workflow).jobs.test.steps;
