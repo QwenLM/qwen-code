@@ -17951,15 +17951,28 @@ describe('Session', () => {
         id: 'cron-1',
         cron: '*/2 * * * *',
       });
+      vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+        id: 'cron-1',
+        cron: '*/2 * * * *',
+        gate: './probe.sh --gate',
+      });
       const create = vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator)
         .mock.calls[0]?.[0];
       expect(create).toBeTypeOf('function');
 
-      await create?.({
+      // The daemon's echo of the stored gate reaches cron_create; an older
+      // daemon's answer has none, which cron_create reads as a dropped gate.
+      await expect(
+        create?.({
+          cron: '*/2 * * * *',
+          prompt: 'handle the events below',
+          recurring: true,
+          promptId: 'prompt-1',
+          gate: './probe.sh --gate',
+        }),
+      ).resolves.toEqual({
+        id: 'cron-1',
         cron: '*/2 * * * *',
-        prompt: 'handle the events below',
-        recurring: true,
-        promptId: 'prompt-1',
         gate: './probe.sh --gate',
       });
       expect(mockClient.extMethod).toHaveBeenLastCalledWith(

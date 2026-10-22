@@ -799,6 +799,9 @@ export interface CurrentSessionScheduledTaskCreateInfo {
 export interface CurrentSessionScheduledTaskCreateResult {
   id: string;
   cron: string;
+  /** The gate stored with the task, or null for none: echoed so the child can
+   * tell a daemon that dropped a requested gate. */
+  gate?: string | null;
 }
 
 export type CurrentSessionScheduledTaskCreateHandler = (

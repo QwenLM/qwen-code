@@ -505,6 +505,9 @@ describe('CronScheduler gate', () => {
         );
       scheduler.approveGate('confirmed', './probe.sh');
       scheduler.approveGate('swapped', './probe.sh');
+      // A turn cancelled before the reload stops and re-enables the
+      // scheduler: the confirmations must survive that.
+      scheduler.stop();
       await writeCronTasks(tmpDir, [
         task('confirmed', './probe.sh'),
         task('swapped', './other.sh'),

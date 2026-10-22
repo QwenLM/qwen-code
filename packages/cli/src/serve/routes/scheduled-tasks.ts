@@ -1679,7 +1679,15 @@ function registerScheduledTaskCrudRoutes(
                   delete next.gateStatus;
                 }
               }
-              if (next.gate !== undefined && !next.recurring) {
+              // Refused only when this edit makes the combination (sets a
+              // gate, or turns the task one-shot): a task already in it, from
+              // an older daemon or a hand edit, keeps its other edits and can
+              // still clear the gate.
+              if (
+                next.gate !== undefined &&
+                !next.recurring &&
+                (patch.gate !== undefined || patch.recurring === false)
+              ) {
                 blockedGateOneShot = true;
                 return tasks;
               }

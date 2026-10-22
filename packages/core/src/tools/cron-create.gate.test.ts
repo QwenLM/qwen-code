@@ -318,7 +318,11 @@ describe('CronCreateTool gate', () => {
       mode: ApprovalMode.YOLO,
       creator: async (request) => {
         requests.push(request);
-        return { id: 'cron-current', cron: request.cron };
+        return {
+          id: 'cron-current',
+          cron: request.cron,
+          gate: request.gate ?? null,
+        };
       },
     });
     tool = new CronCreateTool(config);
@@ -364,7 +368,11 @@ describe('CronCreateTool gate', () => {
             request.gate,
           ),
         ]);
-        return { id: 'cron-current', cron: request.cron };
+        return {
+          id: 'cron-current',
+          cron: request.cron,
+          gate: request.gate ?? null,
+        };
       },
     });
     tool = new CronCreateTool(config);
@@ -384,6 +392,37 @@ describe('CronCreateTool gate', () => {
     const job = config._scheduler.list().find((j) => j.id === 'cron-current');
     expect(job?.gate).toBe('./probe.sh');
     expect(job?.gateApproved).toBe(true);
+  });
+
+  it('removes the task and refuses when the daemon drops a requested gate', async () => {
+    // A daemon that predates gated tasks stores the task without its gate and
+    // echoes none back: left alone, the task would run at every slot.
+    config._scheduler.destroy();
+    config = makeConfig({
+      mode: ApprovalMode.YOLO,
+      creator: async (request) => {
+        await updateCronTasks(tmpDir, (tasks) => [
+          ...tasks,
+          {
+            id: 'cron-old',
+            cron: request.cron,
+            prompt: request.prompt,
+            recurring: request.recurring,
+            createdAt: Date.now(),
+            lastFiredAt: null,
+          },
+        ]);
+        return { id: 'cron-old', cron: request.cron };
+      },
+    });
+    tool = new CronCreateTool(config);
+    const result = await promptIdContext.run('prompt-1', () =>
+      tool
+        .build({ ...params, durable: true, sessionMode: 'current' })
+        .execute(signal()),
+    );
+    expect(result.error?.message).toContain('current_session_gate_unsupported');
+    expect(await readCronTasks(tmpDir)).toEqual([]);
   });
 
   it('rejects a gate on a one-shot task, which a quiet gate would consume', async () => {

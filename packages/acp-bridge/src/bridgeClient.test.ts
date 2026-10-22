@@ -73,6 +73,7 @@ import {
 import type {
   ClientMcpMessageSender,
   CurrentSessionScheduledTaskCreateInfo,
+  CurrentSessionScheduledTaskCreateResult,
 } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import {
@@ -1957,7 +1958,9 @@ describe('BridgeClient — current-session scheduled-task dispatch', () => {
       ...overrides,
     };
     const handler = vi.fn(
-      async (_info: CurrentSessionScheduledTaskCreateInfo) => ({
+      async (
+        _info: CurrentSessionScheduledTaskCreateInfo,
+      ): Promise<CurrentSessionScheduledTaskCreateResult> => ({
         id: 'cron-1',
         cron: request.cron,
       }),
@@ -1989,12 +1992,23 @@ describe('BridgeClient — current-session scheduled-task dispatch', () => {
   it('forwards a gate command to the handler and rejects a malformed one', async () => {
     const { client, handler } = makeCurrentSessionClient();
 
+    // The stored gate is echoed so the child can tell a daemon that dropped
+    // a requested gate.
+    handler.mockResolvedValueOnce({
+      id: 'cron-1',
+      cron: request.cron,
+      gate: './probe.sh --gate',
+    });
     await expect(
       client.extMethod(
         SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
         { ...request, gate: './probe.sh --gate' },
       ),
-    ).resolves.toEqual({ id: 'cron-1', cron: request.cron });
+    ).resolves.toEqual({
+      id: 'cron-1',
+      cron: request.cron,
+      gate: './probe.sh --gate',
+    });
     expect(handler).toHaveBeenCalledWith({
       ...request,
       gate: './probe.sh --gate',

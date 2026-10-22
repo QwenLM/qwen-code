@@ -4106,7 +4106,14 @@ export class Session implements SessionContext {
           'cron_create: bridge returned an invalid scheduled-task result',
         );
       }
-      return { id: resp['id'], cron: resp['cron'] };
+      // A daemon that predates gated tasks echoes no `gate`; cron_create
+      // reads the absence as a dropped gate.
+      const gate = resp['gate'];
+      return {
+        id: resp['id'],
+        cron: resp['cron'],
+        ...(typeof gate === 'string' || gate === null ? { gate } : {}),
+      };
     });
   }
 

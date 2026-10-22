@@ -602,9 +602,11 @@ nothing on stdout skips it, and a non-zero exit is reported once per streak.
 `gateStatus.lastOutcome` is `quiet`, `delivered`, `failed` or `blocked`.
 
 - A gate needs a recurring task: `POST` with `recurring: false`, or a `PATCH`
-  that sets one on a one-shot, answers 400 `gate_requires_recurring`. A
-  malformed gate (empty, only a comment, over 2048 characters, or any part
-  backgrounded with `&`) answers 400 `invalid_gate`.
+  that sets a gate on a one-shot or turns a gated task one-shot, answers 400
+  `gate_requires_recurring`; a task already in that state keeps its other
+  edits. A malformed gate (empty on `POST`, only a comment, over 2048
+  characters, or any part backgrounded with `&`) answers 400 `invalid_gate`.
+  On `PATCH`, `gate: null` or `gate: ""` clears the gate and its `condition`.
 - A legacy task guarded by a `condition` refuses any `gate` key in a `PATCH`
   with 409 `task_legacy_unsupported`, so a client sends `gate` only when it
   changes it.

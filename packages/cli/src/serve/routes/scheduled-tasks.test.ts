@@ -598,6 +598,40 @@ describe('scheduled-tasks routes', () => {
     expect(invalid.body.code).toBe('invalid_gate');
   });
 
+  it('keeps an existing one-shot gated task editable and refuses only a new one-shot gate', async () => {
+    // Such a task comes from an older daemon or a hand edit: other edits and
+    // clearing the gate must still go through.
+    await seedTask({
+      id: 'oneshot-gated',
+      cron: '30 14 28 2 *',
+      prompt: 'p',
+      recurring: false,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      enabled: true,
+      sessionId: 'sess-oneshot-gated',
+      gate: './probe.sh',
+      condition: './probe.sh',
+    });
+    const disable = await request(h.app)
+      .patch('/scheduled-tasks/oneshot-gated')
+      .send({ enabled: false });
+    expect(disable.status).toBe(200);
+    const regate = await request(h.app)
+      .patch('/scheduled-tasks/oneshot-gated')
+      .send({ gate: './other.sh' });
+    expect(regate.status).toBe(400);
+    expect(regate.body.code).toBe('gate_requires_recurring');
+    const cleared = await request(h.app)
+      .patch('/scheduled-tasks/oneshot-gated')
+      .send({ gate: null });
+    expect(cleared.status).toBe(200);
+    const [stored] = await readCronTasks(h.workspace);
+    expect(stored).not.toHaveProperty('gate');
+    expect(stored).not.toHaveProperty('condition');
+    expect(stored).toMatchObject({ enabled: false });
+  });
+
   it('refuses a gate edit on a legacy guarded task so its condition is never stripped', async () => {
     await seedTask({
       id: 'legacy-guard',

@@ -1412,6 +1412,13 @@ export class CronScheduler {
    * created itself. Applies at once when the job is loaded, otherwise on the
    * reload that installs it, and only while the task's gate is that command.
    */
+  /** Removes a durable task from disk whether or not this scheduler has
+   * loaded it yet, as for a task another component just wrote. */
+  async removeDurable(id: string): Promise<void> {
+    await this.delete(id);
+    if (this.projectRoot) await removeCronTasks(this.projectRoot, [id]);
+  }
+
   approveGate(id: string, gate: string): void {
     const job = this.jobs.get(id);
     if (!job) {
@@ -1813,7 +1820,9 @@ export class CronScheduler {
       controller.abort();
     }
     this.gatesInFlight.clear();
-    this.pendingGateApprovals.clear();
+    // Pending confirmations survive: a turn cancelled between cron_create
+    // and the reload that installs its task stops and re-enables the
+    // scheduler, and the user's confirmation must still reach that task.
 
     if (this.durableEnabled) {
       // Invalidate in-flight durable continuations (see durableGeneration).

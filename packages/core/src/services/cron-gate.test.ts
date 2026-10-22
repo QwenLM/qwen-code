@@ -409,6 +409,18 @@ describe('gateCommandError', () => {
     // An `&` inside a quoted argument backgrounds nothing.
     ['a quoted &', "gh api 'repos/o/r/pulls?state=open&per_page=5'"],
     ['&&', 'a && b'],
+    // An `&` inside a comment backgrounds nothing.
+    [
+      'an & in a comment line',
+      '# check open & draft PRs\ngh pr list --json number',
+    ],
+    ['an & in a trailing comment', 'gh pr list --json number # open & draft'],
+    // A wrapper named only in a comment is not walked into.
+    ['a wrapper in a comment', "gh pr list # rerun with bash -c 'x &'"],
+    [
+      'an & in a wrapper script comment',
+      "bash -c '# check & report\ngh pr list'",
+    ],
     // The command after a wrapper runs: the wrapper's comment scope ends
     // with its script.
     [
@@ -431,6 +443,23 @@ describe('gateCommandError', () => {
     [
       'a wrapper script ending in &',
       "bash -c './probe.sh &'",
+      'must not background',
+    ],
+    // An escape counts in a wrapper script too.
+    [
+      'a backslash before & in a wrapper script',
+      "bash -c 'echo done \\\\&'",
+      'must not background',
+    ],
+    // A quote in a comment opens no string that could hide a later `&`.
+    [
+      'an & after a comment with a quote',
+      "# don't block\n./probe.sh &\ntrue",
+      'must not background',
+    ],
+    [
+      'an & after a quoted comment in a wrapper',
+      'bash -c "# don\'t\n./probe.sh &\ntrue"',
       'must not background',
     ],
     // A shell runs a comment as nothing: every fire would be quiet.

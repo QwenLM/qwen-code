@@ -1651,16 +1651,20 @@ export function runsOnlyComments(command: string): boolean {
  * also a wrapper behind a prefix `normalizeMonitorCommand` does not unwrap
  * (`nohup bash -c './probe.sh &'`, `sudo -u ci bash -c …`, `env FOO=1 bash
  * -c …`). Nested scripts are checked the same way. An `&` inside a quoted
- * argument that is not a shell script (`gh api 'pulls?a=1&b=2'`) does not
- * count.
+ * argument that is not a shell script (`gh api 'pulls?a=1&b=2'`), inside a
+ * comment, or escaped (`\&`) does not count. The check is lexical: an `&` in
+ * a heredoc body or an arithmetic expression is still read as backgrounding.
  */
 export function backgroundsAnyPart(command: string): boolean {
+  const text = stripShellComments(command);
   const { wrapperTokens, innerCommand, innerArgsSuffix } =
-    parseMonitorShellWrapper(command);
+    parseMonitorShellWrapper(text);
   for (const part of [innerCommand, innerArgsSuffix ?? '']) {
+    // A wrapper's script is shell too: its comments go before the scan.
+    const code = stripShellComments(part);
     if (
-      hasNonFinalTopLevelBackgroundOperator(part) ||
-      stripTrailingBackgroundAmp(part) !== part
+      hasNonFinalTopLevelBackgroundOperator(code) ||
+      endsWithBackgroundAmp(code)
     ) {
       return true;
     }
@@ -1668,7 +1672,7 @@ export function backgroundsAnyPart(command: string): boolean {
   if (wrapperTokens) return backgroundsAnyPart(innerCommand);
   // Not a wrapper at the head: look for one further along. Each recursion
   // only enters a wrapper's script, which is shorter than the command.
-  let rest = takeLeadingToken(command)?.rest ?? '';
+  let rest = takeLeadingToken(text)?.rest ?? '';
   for (
     let token = takeLeadingToken(rest);
     token;
@@ -1683,6 +1687,62 @@ export function backgroundsAnyPart(command: string): boolean {
     rest = token.rest;
   }
   return false;
+}
+
+/**
+ * Whether `command` ends with an `&` that backgrounds it: not the second half
+ * of `&&`, and not escaped by an odd run of backslashes (`\&` is a literal
+ * ampersand; `\\&` is a literal backslash, then a backgrounding `&`).
+ */
+function endsWithBackgroundAmp(command: string): boolean {
+  const text = command.trimEnd();
+  if (!text.endsWith('&') || text.endsWith('&&')) return false;
+  let backslashes = 0;
+  for (let at = text.length - 2; at >= 0 && text[at] === '\\'; at--) {
+    backslashes++;
+  }
+  return backslashes % 2 === 0;
+}
+
+/**
+ * `command` without its comments: a `#` that starts a word outside quotes
+ * runs to the end of its line. Quotes and backslash escapes are tracked, so
+ * `'#'`, `"a # b"`, `a\#b`, `$#` and `${#v}` stay.
+ */
+function stripShellComments(command: string): string {
+  let out = '';
+  let quote: "'" | '"' | '' = '';
+  for (let at = 0; at < command.length; at++) {
+    const char = command[at]!;
+    if (quote === "'") {
+      out += char;
+      if (char === "'") quote = '';
+      continue;
+    }
+    if (char === '\\') {
+      out += char + (command[at + 1] ?? '');
+      at++;
+      continue;
+    }
+    if (quote === '"') {
+      out += char;
+      if (char === '"') quote = '';
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      out += char;
+      continue;
+    }
+    if (char === '#' && (at === 0 || /[\s;&|()<>]/.test(command[at - 1]!))) {
+      const end = command.indexOf('\n', at);
+      if (end < 0) break;
+      at = end - 1;
+      continue;
+    }
+    out += char;
+  }
+  return out;
 }
 
 /**

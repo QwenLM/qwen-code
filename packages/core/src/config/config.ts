@@ -2438,6 +2438,9 @@ export interface CurrentSessionScheduledTaskCreateRequest {
 export interface CurrentSessionScheduledTaskCreateResult {
   id: string;
   cron: string;
+  /** The gate the daemon stored, or null for none; absent from a daemon that
+   * predates gated tasks and would have dropped a requested gate. */
+  gate?: string | null;
 }
 
 /** Daemon-only capability used by `cron_create` to bind a durable task to the

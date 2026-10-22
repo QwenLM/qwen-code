@@ -294,7 +294,9 @@ the command is proposed and checked again where it runs.
   the `&` that ends a wrapper's script (`bash -c './probe.sh &'`), also behind
   a prefix (`nohup`, `sudo`, `env`), is refused before the dialog: it would
   return at once with nothing on stdout. An escaped `\&` is a literal and
-  stays accepted. A gate of only comments is refused for the same reason: a
+  stays accepted, and an `&` in a comment counts for nothing; the check is
+  lexical, so an `&` in a heredoc body or an arithmetic expression is still
+  refused (put such a command in a script). A gate of only comments is refused for the same reason: a
   shell runs it as nothing; `true` and `:` stay accepted as explicit no-ops.
   "Always allow" therefore saves a `Monitor(...)` rule, not a `cron_create`
   rule. The classifier input for auto mode includes the gate. A bare
@@ -344,10 +346,13 @@ to remove it.
 Downgrade fuse: an older binary ignores `gate` and would fire the task
 unconditionally — the silent degradation #6676 guarded against. The writer
 therefore mirrors the gate into the legacy `condition` field, which every
-older reader treats as fail-closed, and `taskHasLegacyCondition` returns
+reader since v0.19.9 (#6676) treats as fail-closed, and `taskHasLegacyCondition` returns
 `false` when `gate` is present. Removing the gate clears both. An older
 version shows such a task as "legacy precondition, will not fire — recreate
-it", which is the safe outcome.
+it", which is the safe outcome. Binaries up to v0.19.8 read `condition` only
+for the isolated run mode, which no longer exists, so they would fire a gated
+task unconditionally; a task file holding gated tasks must not be shared with
+them.
 
 ### 5.6 Daemon
 
@@ -423,7 +428,8 @@ Rejected:
   in the turn. The wrapper marks it as data; step 2's probes label third-party
   fields explicitly; the fire cannot approve a pending permission.
 - An older binary reading a gated task file: fail-closed through the fuse,
-  with a confusing but safe message.
+  with a confusing but safe message, from v0.19.9 on; v0.19.8 and older fire
+  it unconditionally (see the downgrade fuse above).
 
 ## 9. Validation
 

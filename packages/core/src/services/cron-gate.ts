@@ -133,25 +133,10 @@ export function gateCommandError(gate: unknown): string | null {
   if (runsOnlyComments(gate)) {
     return 'must run a command, not only a comment';
   }
-  if (backgroundsAnyPart(gate) || endsWithBackgroundAmp(gate)) {
+  if (backgroundsAnyPart(gate)) {
     return 'must not background any part of the command with "&"';
   }
   return null;
-}
-
-/**
- * Whether `command` ends with an `&` that backgrounds it: not the second half
- * of `&&`, and not escaped by an odd run of backslashes (`\&` is a literal
- * ampersand; `\\&` is a literal backslash, then a backgrounding `&`).
- */
-function endsWithBackgroundAmp(command: string): boolean {
-  const text = command.trimEnd();
-  if (!text.endsWith('&') || text.endsWith('&&')) return false;
-  let backslashes = 0;
-  for (let at = text.length - 2; at >= 0 && text[at] === '\\'; at--) {
-    backslashes++;
-  }
-  return backslashes % 2 === 0;
 }
 
 /**

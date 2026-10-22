@@ -2440,7 +2440,11 @@ export class BridgeClient implements Client {
         'Scheduled-task host returned an invalid result',
       );
     }
-    return { id: result.id, cron: result.cron };
+    return {
+      id: result.id,
+      cron: result.cron,
+      ...(result.gate !== undefined ? { gate: result.gate } : {}),
+    };
   }
 
   private async handleLiveScreenContextCapture(
