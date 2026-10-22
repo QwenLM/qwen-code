@@ -240,19 +240,22 @@ final class HostedProviderMediaProbe implements AutoCloseable {
             }
         }
         String storageId = "storage-" + sessions.indexOf(session);
-        var owner = jdbc.queryForMap("SELECT o.holder_key FROM ma_storage_owner o"
-                + " JOIN ma_storage s ON s.physical_key = o.storage_key"
-                + " WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+        String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage"
+                + " WHERE alias_key = ? AND tenant_id = ? AND storage_id = ?", String.class,
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storageId),
                 tenant, storageId);
+        assertThat(physical).isNotBlank();
+        var member = jdbc.queryForMap("SELECT binding_id, runtime_generation, session_state,"
+                + " execution_storage_key, execution_exclusive FROM ma_runtime_session"
+                + " WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ?",
+                tenant, harness, runtimeId);
         boolean released = phase.equals("released") || phase.equals("restarted");
-        if (released) {
-            assertThat(owner.get("holder_key")).isNull();
-        } else {
-            assertThat(owner.get("holder_key")).isNotNull();
-        }
-        assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session WHERE harness_session_id = ?"
-                + " AND runtime_session_id = ?", String.class, harness, runtimeId)).isEqualTo(released ? "RELEASED" : "READY");
+        assertThat(member.get("binding_id")).as("original runtime binding").isEqualTo(row.get("binding_id"));
+        assertThat(member.get("runtime_generation")).as("original runtime generation").isEqualTo(row.get("runtime_generation"));
+        assertThat(member.get("execution_storage_key")).as("physical execution membership")
+                .isEqualTo(released ? null : physical);
+        assertThat(member.get("execution_exclusive")).as("shared execution membership").isEqualTo(false);
+        assertThat(member.get("session_state")).isEqualTo(released ? "RELEASED" : "READY");
         if (phase.equals("restarted")) {
             assertThat(restarted).isNotNull();
             assertThat(Files.readString(Path.of(session.get("directory").toString())

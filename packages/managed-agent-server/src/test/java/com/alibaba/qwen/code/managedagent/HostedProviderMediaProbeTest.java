@@ -28,6 +28,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
@@ -113,7 +114,7 @@ class HostedProviderMediaProbeTest {
     }
 
     @Test
-    void mediaEvidenceUsesTheCanonicalSchemaAndPhysicalStorageOwner() throws Exception {
+    void mediaEvidenceUsesTheCanonicalSchemaAndPhysicalExecutionMembership() throws Exception {
         JdbcDataSource source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:media-" + java.util.UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
@@ -136,15 +137,15 @@ class HostedProviderMediaProbeTest {
                 "b".repeat(64), "c".repeat(64), "d".repeat(64), reference.toString());
         jdbc.update("INSERT INTO ma_runtime_session (scope_key, runtime_session_id, tenant_id, workspace_id,"
                 + " workspace_generation, canonical_cwd, capability_digest, isolation_class, harness_session_id,"
-                + " turn_kind, binding_id, runtime_generation, session_state, record_version, last_active_at)"
+                + " turn_kind, binding_id, runtime_generation, session_state, record_version, last_active_at,"
+                + " execution_storage_key)"
                 + " VALUES (?, 'runtime', ?, 'workspace', '1', '/', 'capability', 'process', 'harness',"
-                + " 'tool', 'binding', 1, 'READY', 1, ?)", "e".repeat(64), tenant, System.currentTimeMillis());
+                + " 'tool', 'binding', 1, 'READY', 1, ?, ?)", "e".repeat(64), tenant, System.currentTimeMillis(), physical);
         jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key)"
                 + " VALUES (?, ?, ?, ?, 'storage-0', ?)",
                 JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage-0"),
                 "f".repeat(64), "0".repeat(64), tenant, physical);
-        jdbc.update("INSERT INTO ma_storage_owner (storage_key, holder_key, runtime_session_id)"
-                + " VALUES (?, ?, 'runtime')", physical, "1".repeat(64));
+        jdbc.update("INSERT INTO ma_storage_owner (storage_key) VALUES (?)", physical);
         var probe = mock(HostedProviderMediaProbe.class, CALLS_REAL_METHODS);
         ReflectionTestUtils.setField(probe, "jdbc", jdbc);
         ReflectionTestUtils.setField(probe, "tenant", tenant);
@@ -159,14 +160,30 @@ class HostedProviderMediaProbeTest {
         fields.set("reference", reference);
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(probe, "check", session, "prepared", fields))
                 .containsEntry("checked", "prepared");
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key=?", "9".repeat(64));
+        assertThatThrownBy(() -> ReflectionTestUtils.invokeMethod(probe, "check", session, "prepared", fields))
+                .isInstanceOf(AssertionError.class).hasMessageContaining("physical execution membership");
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key=?", physical);
+        jdbc.update("UPDATE ma_runtime_session SET binding_id='other'");
+        assertThatThrownBy(() -> ReflectionTestUtils.invokeMethod(probe, "check", session, "prepared", fields))
+                .isInstanceOf(AssertionError.class).hasMessageContaining("original runtime binding");
+        jdbc.update("UPDATE ma_runtime_session SET binding_id='binding', runtime_generation=2");
+        assertThatThrownBy(() -> ReflectionTestUtils.invokeMethod(probe, "check", session, "prepared", fields))
+                .isInstanceOf(AssertionError.class).hasMessageContaining("original runtime generation");
+        jdbc.update("UPDATE ma_runtime_session SET runtime_generation=1, execution_exclusive=TRUE");
+        assertThatThrownBy(() -> ReflectionTestUtils.invokeMethod(probe, "check", session, "prepared", fields))
+                .isInstanceOf(AssertionError.class).hasMessageContaining("shared execution membership");
+        jdbc.update("UPDATE ma_runtime_session SET execution_exclusive=FALSE");
         jdbc.update("UPDATE ma_tool_execution SET execution_state='SETTLED', execution_status='success',"
                 + " dispatch_generation=1, result_json='{}'");
         ReflectionTestUtils.setField(probe, "dispatches", Map.of("runtime", 1));
         ReflectionTestUtils.setField(probe, "executed", Map.of("runtime", reference));
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(probe, "check", session, "settled", fields))
                 .containsEntry("checked", "settled");
-        jdbc.update("UPDATE ma_storage_owner SET holder_key=NULL");
         jdbc.update("UPDATE ma_runtime_session SET session_state='RELEASED'");
+        assertThatThrownBy(() -> ReflectionTestUtils.invokeMethod(probe, "check", session, "released", fields))
+                .isInstanceOf(AssertionError.class).hasMessageContaining("physical execution membership");
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key=NULL");
         Files.writeString(directory.resolve(".provider-media-reads.json"), "{}");
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(probe, "check", session, "released", fields))
                 .containsEntry("checked", "released");
