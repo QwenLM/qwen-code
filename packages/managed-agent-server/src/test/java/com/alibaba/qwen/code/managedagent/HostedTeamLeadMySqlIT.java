@@ -777,15 +777,25 @@ class HostedTeamLeadMySqlIT {
         model.setExecutor(modelThreads);
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
-        // freePort() lets the port go before the Spring server and the embedded
-        // broker bind to it, and a contended CI runner can hand the port out
-        // again in that gap: boot with fresh ports when the bind loses the race.
+        // freePort() lets the port go before the Spring server, the embedded
+        // broker and the Node harness bind to it, and a contended CI runner
+        // can hand a port out again in that gap. The harness moves to the
+        // next port instead of failing, so startHarness reports that move and
+        // the whole attempt is retried with fresh ports.
         for (int attempt = 0; ; attempt++) {
             port = freePort();
             try {
                 startSpring(cli, node, decoy, workspace, harnessPort, brokerPort);
+                jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
+                        + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-0', 1,"
+                        + " 'storage-0', 'H4e-b1', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
+                        WorkspaceExecutionProfile.POLICY_REF);
+                jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                        + " VALUES (?, 'workspace-0', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
+                startHarness(cli, node, decoy, harnessPort, brokerPort);
                 break;
             } catch (RuntimeException error) {
+                abortBoot();
                 if (attempt >= 2 || !bindConflict(error)) {
                     throw error;
                 }
@@ -793,13 +803,6 @@ class HostedTeamLeadMySqlIT {
                 brokerPort = freePort();
             }
         }
-        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
-                + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-0', 1,"
-                + " 'storage-0', 'H4e-b1', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
-                WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                + " VALUES (?, 'workspace-0', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
-        startHarness(cli, node, decoy, harnessPort, brokerPort);
     }
 
     private void startSpring(Path cli, String node, Path decoy, Path workspace, int harnessPort, int brokerPort) {
@@ -853,8 +856,8 @@ class HostedTeamLeadMySqlIT {
     }
 
     private void startHarness(Path cli, String node, Path decoy, int harnessPort, int brokerPort) throws Exception {
-        Path home = Files.createDirectory(temporary.resolve("home"));
-        Path config = Files.createDirectory(home.resolve(".qwen"));
+        Path home = Files.createDirectories(temporary.resolve("home"));
+        Path config = Files.createDirectories(home.resolve(".qwen"));
         String modelUrl = "http://127.0.0.1:" + model.getAddress().getPort() + "/v1";
         Files.writeString(config.resolve("settings.json"), json.writeValueAsString(Map.of(
                 "security", Map.of("auth", Map.of("selectedType", "openai")), "model", Map.of("name", "h4eb1-fixture"),
@@ -883,9 +886,14 @@ class HostedTeamLeadMySqlIT {
             environment.put(name, temporary.resolve(name + ".json").toString());
         }
         harness = builder.start();
+        Pattern moved = Pattern.compile("qwen serve: port " + harnessPort + " is in use, trying");
         waiting().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
             if (!harness.isAlive()) {
                 throw new IllegalStateException("Hosted Harness exited: " + Files.readString(log));
+            }
+            if (Files.exists(log)
+                    && moved.matcher(Files.readString(log)).find()) {
+                throw new HarnessPortConflict("Hosted Harness lost the port race on " + harnessPort);
             }
             int status;
             try {
@@ -942,11 +950,50 @@ class HostedTeamLeadMySqlIT {
     private static boolean bindConflict(Throwable error) {
         for (Throwable cause = error; cause != null; cause = cause.getCause()) {
             if (cause instanceof BindException
+                    || cause instanceof HarnessPortConflict
                     || String.valueOf(cause.getMessage()).contains("Address already in use")) {
                 return true;
             }
         }
         return false;
+    }
+
+    private static final class HarnessPortConflict extends RuntimeException {
+        HarnessPortConflict(String message) {
+            super(message);
+        }
+    }
+
+    /** Stops a failed boot attempt before retrying with fresh ports. */
+    private void abortBoot() {
+        try {
+            if (harness != null) {
+                harness.descendants().forEach(ProcessHandle::destroyForcibly);
+                harness.destroyForcibly();
+                harness.waitFor(10, TimeUnit.SECONDS);
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } finally {
+            harness = null;
+            try {
+                if (jdbc != null) {
+                    jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?", tenant);
+                    jdbc.update("DELETE FROM ma_workspace WHERE tenant_id = ?", tenant);
+                }
+            } catch (RuntimeException ignored) {
+                // The next attempt re-creates the rows; keep the boot error.
+            }
+            try {
+                if (spring != null) {
+                    spring.close();
+                }
+            } catch (RuntimeException ignored) {
+                // The retry uses a fresh context; keep the boot error.
+            }
+            spring = null;
+            jdbc = null;
+        }
     }
 
     @AfterEach
