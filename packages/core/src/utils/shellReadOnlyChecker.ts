@@ -212,7 +212,14 @@ function evaluateGitRemoteArgs(args: string[]): boolean {
   // argument can be any URL. `get-url` never connects.
   const end = args.indexOf('--');
   const options = args.slice(0, end < 0 ? args.length : end);
-  if (action === 'show' && !options.includes('-n')) return false;
+  // shell-quote leaves bracket globs as plain text, and bash expands one such
+  // as `[--][--]` to a real `--` when the cwd holds a file with that name,
+  // hiding the terminator from the slice above.
+  if (
+    action === 'show' &&
+    (!options.includes('-n') || args.some((arg) => arg.includes('[')))
+  )
+    return false;
   return true;
 }
 

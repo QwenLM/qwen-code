@@ -1052,6 +1052,13 @@ describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyA
     ['git remote add origin url', false],
     ['git remote show origin \\-- -n', false, 'escaped terminator'],
     ["git remote show origin ''-- -n", false, 'quoted terminator'],
+    ["git remote show origin $'--' -n", false, 'ANSI-C quoted terminator'],
+    ['git remote show origin ""-- -n', false, 'empty-quote prefix'],
+    ['git remote show origin --"" -n', false, 'empty-quote suffix'],
+    ["git remote show origin '-'- -n", false, 'split quoted terminator'],
+    ['git remote show origin \\-\\- -n', false, 'per-char escaped terminator'],
+    ['git remote show origin [--][--] -n', false, 'bracket-glob terminator'],
+    ['git remote show origin [-]- -n', false, 'bracket-glob terminator'],
     ['git --version', true],
 
     // --- find ---

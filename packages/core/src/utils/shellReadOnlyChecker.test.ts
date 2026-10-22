@@ -236,6 +236,10 @@ describe('evaluateShellCommandReadOnly', () => {
       // queried; the `-n` scan must stay on the pre-terminator slice (#14359).
       'git remote show origin -- -n',
       'git remote show -- -n https://evil.example/leak',
+      // A bracket glob expands to a real `--` when the cwd holds a file named
+      // `--`, but shell-quote leaves it as plain text (#14359).
+      'git remote show origin [--][--] -n',
+      'git remote show https://evil.example/leak [-]- -n',
       'git diff --output=patch',
       'git log --output=log.out',
       'git show --output=show.out HEAD',
