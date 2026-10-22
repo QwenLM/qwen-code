@@ -23,6 +23,7 @@ import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -35,6 +36,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLTimeoutException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -672,10 +674,7 @@ public final class ManagedAgentPreflight {
         try (Connection connection = databaseConnection(environment)) {
             return capacityCheck(connection);
         } catch (SQLException error) {
-            return new Check("capacity", Status.WARN,
-                    "durable capacity facts unavailable: "
-                            + rootMessage(error),
-                    "check the datasource and managed schema");
+            return capacityUnavailable(error);
         }
     }
 
@@ -694,11 +693,40 @@ public final class ManagedAgentPreflight {
                     + "; memory=unknown; idle-reclamation=not measured";
             return new Check("capacity", Status.PASS, detail, null);
         } catch (SQLException error) {
-            return new Check("capacity", Status.WARN,
-                    "durable capacity facts unavailable: "
-                            + rootMessage(error),
-                    "check the managed schema");
+            return capacityUnavailable(error);
         }
+    }
+
+    private static Check capacityUnavailable(SQLException error) {
+        if (isTimeout(error)) {
+            return new Check("capacity", Status.WARN,
+                    "durable capacity facts unavailable: observation timed "
+                            + "out before all state counts were read",
+                    "retry when the database is less busy; this observation "
+                            + "reads the full state tables");
+        }
+        return new Check("capacity", Status.WARN,
+                "durable capacity facts unavailable: " + rootMessage(error),
+                "check the datasource grants and managed schema");
+    }
+
+    private static boolean isTimeout(Throwable error) {
+        for (Throwable current = error; current != null;
+                current = current.getCause()) {
+            if (current instanceof SQLTimeoutException
+                    || current instanceof SocketTimeoutException) {
+                return true;
+            }
+            String message = current.getMessage();
+            if (message != null) {
+                String lower = message.toLowerCase(Locale.ROOT);
+                if (lower.contains("timeout")
+                        || lower.contains("timed out")) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static Map<String, Long> stateCounts(Connection connection,

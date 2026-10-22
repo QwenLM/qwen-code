@@ -32,7 +32,13 @@ The existing database check remains the gate. If it fails, the capacity line is
 `SKIP` so a missing database is not presented as an empty deployment. If the
 database is reachable but one of the observation tables is unavailable, the
 capacity line is `WARN` and the preflight continues to preserve the existing
-read-only behavior. The query uses fixed table and column names from the shared
+read-only behavior. A timeout from the fixed five-second observation connection
+is also `WARN`, but its detail says that the observation timed out before all
+state counts were read and its fix points to database load, not a broken schema.
+The state grouping intentionally keeps exact all-state counts and does not add
+an index or restrict the query to non-terminal rows in this slice. A later
+status view can provide a separately designed bounded operational view if that
+becomes necessary. The query uses fixed table and column names from the shared
 schema and does not change that schema.
 
 ## Acceptance and follow-up
