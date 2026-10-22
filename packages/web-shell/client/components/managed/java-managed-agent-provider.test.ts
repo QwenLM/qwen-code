@@ -1091,6 +1091,43 @@ describe('createJavaManagedAgentProvider', () => {
     ).toThrow('productScope');
   });
 
+  it('sends a catalog model with the built-in Agent on both creation paths', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () =>
+        jsonResponse({ sessionId: 's', turnId: 't' }),
+      );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      enableWorkspaceBinding: true,
+      fetch: fetchImpl,
+    });
+    const request = {
+      agentId: 'qwen-code',
+      modelId: 'model-b',
+      workspaceId: 'ws',
+      cwdRelative: '.',
+      approvalMode: 'yolo' as const,
+    };
+    const command = { clientId: 'client', idempotencyKey: 'frozen-key' };
+    await provider.workspaceBinding!.createEmpty(request, command);
+    await provider.workspaceBinding!.createSession!(
+      { ...request, text: 'First' },
+      command,
+    );
+    for (const [, init] of fetchImpl.mock.calls) {
+      expect(JSON.parse(String(init?.body))).toEqual(
+        expect.objectContaining({
+          agentId: 'qwen-code',
+          modelId: 'model-b',
+          approvalMode: 'yolo',
+          idempotencyKey: 'frozen-key',
+        }),
+      );
+    }
+  });
+
   it('discovers policy selection, reads options and sends explicit policies for both bound creation paths', async () => {
     const options = {
       approvalMode: 'default',

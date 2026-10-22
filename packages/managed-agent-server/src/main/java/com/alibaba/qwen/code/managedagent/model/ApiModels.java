@@ -421,7 +421,7 @@ public final class ApiModels {
             String environmentId, String title,
             @Size(max = 100) List<@Valid InputBlock> input,
             Map<String, Object> metadata,
-            JsonNode workspace, String approvalMode, Boolean planMode,
+            JsonNode workspace, String approvalMode, Boolean planMode, String modelId,
             @Size(max = 256) List<@NotNull Map<String, Object>> skills) {
     }
 
@@ -429,7 +429,12 @@ public final class ApiModels {
     }
 
     public record WebShellSessionOptions(String approvalMode, List<String> availableApprovalModes,
-            boolean planModeSupported, boolean inputAttachments, boolean skillsSupported) {
+            boolean planModeSupported, boolean inputAttachments, boolean skillsSupported,
+            boolean modelSelectionSupported) {
+        public WebShellSessionOptions(String approvalMode, List<String> availableApprovalModes,
+                boolean planModeSupported, boolean inputAttachments, boolean skillsSupported) {
+            this(approvalMode, availableApprovalModes, planModeSupported, inputAttachments, skillsSupported, false);
+        }
         public WebShellSessionOptions(String approvalMode, List<String> availableApprovalModes,
                 boolean planModeSupported, boolean inputAttachments) {
             this(approvalMode, availableApprovalModes, planModeSupported, inputAttachments, false);
