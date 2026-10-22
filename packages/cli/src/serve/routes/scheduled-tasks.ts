@@ -51,6 +51,7 @@ import {
   isValidCronTaskRoutingId,
   MAX_JOBS,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
+  type CronGateStatus,
   type CronRunSessionOutcome,
   type CronTaskDelivery,
   type DurableCronTask,
@@ -629,6 +630,7 @@ async function dispatchTaskToFreshSession(
               prompt: task.prompt,
               triggeredAt,
               trigger: 'manual',
+              ...(task.gate ? { gate: task.gate } : {}),
             }),
           },
         ],
@@ -777,6 +779,10 @@ interface ScheduledTaskView {
   groupId: string | null;
   runs: CronTaskRun[];
   delivery?: CronTaskDelivery;
+  /** The gate command, or null for an ungated task. */
+  gate: string | null;
+  /** Summary of the gate's recent runs; null until the gate first ran. */
+  gateStatus: CronGateStatus | null;
 }
 
 /** Next scheduled fire (epoch ms) for an enabled task, or null when the task
@@ -823,6 +829,9 @@ function toView(task: DurableCronTask): ScheduledTaskView {
     // never special-cases undefined.
     runs: Array.isArray(task.runs) ? task.runs : [],
     ...(task.delivery !== undefined ? { delivery: task.delivery } : {}),
+    gate:
+      typeof task.gate === 'string' && task.gate.length > 0 ? task.gate : null,
+    gateStatus: task.gateStatus ?? null,
   };
 }
 

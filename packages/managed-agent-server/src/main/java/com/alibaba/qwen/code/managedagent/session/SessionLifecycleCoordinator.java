@@ -757,9 +757,14 @@ public class SessionLifecycleCoordinator {
                 try {
                     harness.prepareLifecycleResources(operation);
                     if (com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.SHELL.equals(profile)) {
-                        runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(),
-                                com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.authority(operation))
-                                .toCompletableFuture().join();
+                        var authority = com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.authority(operation);
+                        if (store.hasMcpServers(session)) {
+                            runtimeWarmer.prepareWorkspaceResources(operation.tenantId(), operation.sessionId(), authority)
+                                    .toCompletableFuture().join();
+                        } else {
+                            runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(), authority)
+                                    .toCompletableFuture().join();
+                        }
                     }
                     harness.settleLifecycleResources(operation);
                     runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(),
