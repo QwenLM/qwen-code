@@ -4,11 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getCompressionPrompt } from '@qwen-code/qwen-code-core';
 import { expect, describe, it, beforeEach, afterEach } from 'vitest';
 import {
   startFakeOpenAIServer,
   type FakeOpenAIServer,
+  type FakeOpenAIHandler,
 } from '../fake-openai-server.js';
+import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import {
   TestRig,
   type,
@@ -16,12 +19,8 @@ import {
   fakeServerHostOptions,
 } from '../test-helper.js';
 
-// The managed-memory extractor fires an extra model call per completing turn;
-// it competes with the compression this suite times (#11088).
 const SUITE_SETTINGS = {
-  memory: {
-    enableManagedAutoMemory: false,
-  },
+  memory: E2E_MEMORY_SETTINGS_DEFAULTS,
   security: {
     auth: {
       selectedType: 'openai',
@@ -36,7 +35,7 @@ const COMPRESSED_HISTORY =
 // after a transient connection error (or any other request that reaches the
 // fake server first) must still get the seed response, and only the
 // compression side-query asks for a <state_snapshot>.
-function fakeModelResponse({ body }: { body: Record<string, unknown> }) {
+const fakeModelResponse: FakeOpenAIHandler = ({ body }) => {
   const isCompressionRequest =
     JSON.stringify(body).includes('<state_snapshot>');
   return {
@@ -44,7 +43,7 @@ function fakeModelResponse({ body }: { body: Record<string, unknown> }) {
       ? COMPRESSED_HISTORY
       : `${'history '.repeat(100)} Einstein`,
   };
-}
+};
 
 describe('Interactive Mode', () => {
   let rig: TestRig;
@@ -86,20 +85,19 @@ describe('Interactive Mode', () => {
   it('answers seed and compression requests by shape, not request order', () => {
     const seed = fakeModelResponse({
       body: { messages: [{ role: 'user', content: 'seed prompt' }] },
+      requestIndex: 3,
     });
     expect(seed.content).toContain('history history');
 
     const compression = fakeModelResponse({
       body: {
-        messages: [
-          {
-            role: 'system',
-            content: 'produce a <state_snapshot> summary of the conversation',
-          },
-        ],
+        messages: [{ role: 'system', content: getCompressionPrompt() }],
       },
+      requestIndex: 0,
     });
-    expect(compression.content).toBe(COMPRESSED_HISTORY);
+    expect(compression.content).toBe(
+      '<state_snapshot>Compressed history focused on Einstein.</state_snapshot>',
+    );
   });
 
   function expectSuccessfulCompression() {
