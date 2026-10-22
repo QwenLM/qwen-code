@@ -5256,6 +5256,44 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
+    public boolean markTurnFailureRecovery(String tenantId, String sessionId,
+            String turnId, String owner, String message) {
+        requireLegacySessionForUpdate(tenantId, sessionId);
+        TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
+        long now = clock.millis();
+        String diagnostic = AgentStateStore.RUNTIME_RECOVERY_BLOCKED.equals(turn.errorCode())
+                && turn.errorMessage() != null ? turn.errorMessage() : message;
+        return jdbc.update("UPDATE ma_turn SET error_code = ?, error_message = ?,"
+                        + " gmt_modified = ?, version = version + 1 WHERE tenant_id = ?"
+                        + " AND session_id = ? AND turn_id = ? AND dispatch_owner = ?"
+                        + " AND dispatch_lease_until >= ? AND submission_attempted = TRUE"
+                        + " AND status IN ('ACCEPTED', 'RUNNING')",
+                AgentStateStore.RUNTIME_RECOVERY_BLOCKED, diagnostic, now,
+                tenantId, sessionId, turnId, owner, now) == 1;
+    }
+
+    @Override
+    @Transactional
+    public boolean requestRecoveryRecheck(String tenantId, String sessionId,
+            String turnId) {
+        requireLegacySessionForUpdate(tenantId, sessionId);
+        long now = clock.millis();
+        return jdbc.update("UPDATE ma_turn SET retry_after = ?, gmt_modified = ?,"
+                        + " version = version + 1 WHERE tenant_id = ? AND session_id = ?"
+                        + " AND turn_id = ? AND (retry_after IS NULL OR retry_after > ?)"
+                        + " AND (status = 'CANCELLING' OR status IN ('ACCEPTED', 'RUNNING')"
+                        + " AND error_code = ?)",
+                now, now, tenantId, sessionId, turnId, now,
+                AgentStateStore.RUNTIME_RECOVERY_BLOCKED) == 1
+                || jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ?"
+                        + " AND session_id = ? AND turn_id = ? AND (status = 'CANCELLING'"
+                        + " OR status IN ('ACCEPTED', 'RUNNING') AND error_code = ?)",
+                        Long.class, tenantId, sessionId, turnId,
+                        AgentStateStore.RUNTIME_RECOVERY_BLOCKED) == 1;
+    }
+
+    @Override
+    @Transactional
     public boolean parkTurnForRuntimeRecovery(String tenantId,
             String sessionId, String turnId, String owner, String message,
             long retryAfter) {
