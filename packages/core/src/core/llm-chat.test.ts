@@ -5422,9 +5422,9 @@ describe('LlmChat', async () => {
     );
 
     it.each([false, true])(
-      'invalidates resume usage with unknown catalog visibility, reused=%s',
-      async (reused) => {
-        const catalog = 'restored catalog';
+      'keeps resume usage while retained catalogs stay visible, reused=%s',
+      (reused) => {
+        let catalog = 'restored catalog';
         mockConfig.getAutoMemoryContext = () => catalog;
         const target = newChat({
           history: [
@@ -5437,18 +5437,13 @@ describe('LlmChat', async () => {
           expect(target.getLastPromptTokenCount()).toBe(6000);
         }
         target.seedResumeTokenCounts(5000, 50);
+        expect(target.getLastPromptTokenCount()).toBe(5000);
+        expect(target.getLastOutputTokenCount()).toBe(50);
+        catalog = '';
+        expect(target.getLastPromptTokenCount()).toBe(5000);
+        catalog = 'restored catalog';
         expect(target.getLastPromptTokenCount()).toBe(0);
         expect(target.getLastOutputTokenCount()).toBe(0);
-        expect(target.getHistory()).toHaveLength(2);
-        const compressSpy = mockCompress(noop());
-        mockStream(textStream('resumed answer'));
-        await sendDrain('resume', 'resume-memory-visibility', target);
-        expect(compressSpy.mock.calls[0][1].precomputedEffectiveTokens).toBe(
-          estimateContentTokens(requestAt(0).contents as Content[]),
-        );
-        target.setLastPromptTokenCount(7000);
-        target.setHistory(target.getHistoryShallow());
-        expect(target.getLastPromptTokenCount()).toBe(7000);
       },
     );
 

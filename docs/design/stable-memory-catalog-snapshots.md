@@ -70,9 +70,11 @@ against the latest retained snapshot again.
 When retained snapshots become visible after suppression, prior usage may exclude
 them (for example, `/cd` from structured memory to a legacy workspace). Before
 adopting counts for any route, discard current and retained route usage and use
-the existing full-history estimate for this transition. Resume counts have unknown
-catalog visibility, so an enabled catalog plus retained snapshots uses the same
-invalidation on first adoption, including when seeding a reused chat. Explicit
+the existing full-history estimate for this transition. Resume counts adopt the
+current catalog visibility: a session saved with legacy memory enabled already
+counted its visible snapshots, so the resumed authoritative count stays usable.
+The rarer save-while-suppressed resume relies on the overhead pad and reactive
+overflow recovery instead of discarding every resumed count. Explicit
 current-projection count seeds remain usable; ordinary history writeback does not
 invalidate counts. This bounded fallback loses the prior authoritative prefix
 anchor; the existing estimate overhead pad and reactive overflow recovery still

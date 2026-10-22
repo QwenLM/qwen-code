@@ -2647,8 +2647,8 @@ export class LlmChat {
         ),
       )
     ) {
-      // A suppressed request or unknown resume checkpoint cannot account for
-      // catalogs that are visible again. Invalidate every route before adoption.
+      // A suppressed request cannot account for catalogs that are visible
+      // again. Invalidate every route before adoption.
       this.lastPromptTokenCount = 0;
       this.lastPromptTokenCountIsEstimated = false;
       this.lastOutputTokenCount = 0;
@@ -2901,8 +2901,9 @@ export class LlmChat {
     isEstimated = false,
   ): void {
     this.unaccountedMemorySnapshots = new WeakSet<Part>();
-    // Persisted usage does not record whether retained catalogs were suppressed.
-    this.memorySnapshotsVisible = undefined;
+    // Usage saved with legacy memory on already counts visible snapshots. The
+    // rare suppressed-at-save resume relies on the pad and reactive recovery.
+    this.memorySnapshotsVisible = Boolean(this.config.getAutoMemoryContext?.());
     this.lastPromptTokenCount = Number.isFinite(promptTokenCount)
       ? Math.max(0, promptTokenCount)
       : 0;
