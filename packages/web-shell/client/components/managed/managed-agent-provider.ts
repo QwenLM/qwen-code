@@ -289,6 +289,8 @@ export interface ManagedAgentProvider {
   readonly storageKey: string;
   readonly canCancel: boolean;
   readonly acceptsWorkspaceCwd: boolean;
+  /** Present when the provider can filter the complete Session history by title. */
+  readonly titleSearch?: boolean;
   readonly recovery?: {
     query(
       sessionId: string,
@@ -495,6 +497,7 @@ export interface ManagedAgentProvider {
     options: ManagedAgentRequestOptions & {
       workspaceCwd?: string;
       archiveState?: 'unarchived' | 'archived' | 'all';
+      titleQuery?: string;
       limit?: number;
       cursor?: string;
     },
