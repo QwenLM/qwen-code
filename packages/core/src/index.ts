@@ -368,6 +368,7 @@ export type {
 } from './services/cronTasksFile.js';
 export {
   readCronTasks,
+  withTaskGate,
   cronTaskSessionDeletionId,
   updateCronTasks,
   removeCronTasks,
@@ -376,18 +377,13 @@ export {
   appendCronRun,
   annotateCronRunSession,
   taskHasLegacyCondition,
-  withTaskGate,
   MAX_TASK_RUNS,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
   isValidCronTaskRoutingId,
   MAX_CHANNEL_DELIVERY_NAME_LENGTH,
   MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH,
 } from './services/cronTasksFile.js';
-export {
-  CRON_GATE_TIMEOUT_MS,
-  MAX_CRON_GATE_CHARS,
-  gateCommandError,
-} from './services/cron-gate.js';
+export { MAX_CRON_GATE_CHARS, gateCommandError } from './services/cron-gate.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';

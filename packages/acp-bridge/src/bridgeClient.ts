@@ -23,6 +23,7 @@ import { RequestError } from '@agentclientprotocol/sdk';
 import {
   APPROVAL_MODES,
   isValidCronTaskRoutingId,
+  MAX_CRON_GATE_CHARS,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
   SESSION_PR_URL_MAX_LENGTH,
 } from '@qwen-code/qwen-code-core';
@@ -116,8 +117,6 @@ import {
 
 const MAX_SCHEDULED_TASK_CRON_CHARS = 200;
 const MAX_SCHEDULED_TASK_PROMPT_CHARS = 100_000;
-// Mirrors core's MAX_CRON_GATE_CHARS; the route applies the full rule.
-const MAX_SCHEDULED_TASK_GATE_CHARS = 2048;
 /**
  * A per-run scheduled task prompt is the task's own prompt (already capped at
  * the same ceiling by the scheduled-task REST route) plus a short execution
@@ -2378,11 +2377,11 @@ export class BridgeClient implements Client {
       gate !== undefined &&
       (typeof gate !== 'string' ||
         gate.trim().length === 0 ||
-        gate.length > MAX_SCHEDULED_TASK_GATE_CHARS)
+        gate.length > MAX_CRON_GATE_CHARS)
     ) {
       throw RequestError.invalidParams(
         undefined,
-        `\`gate\` must be a non-empty string within the ${MAX_SCHEDULED_TASK_GATE_CHARS}-character limit`,
+        `\`gate\` must be a non-empty string within the ${MAX_CRON_GATE_CHARS}-character limit`,
       );
     }
 
