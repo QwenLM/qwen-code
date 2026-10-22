@@ -2318,6 +2318,22 @@ describe('loadCliConfig', () => {
     expect(config.getAgentsSettings().maxParallelAgents).toBe(2);
   });
 
+  it.each([undefined, true, false])(
+    'passes agents.defaultBackground=%s from settings to core config',
+    async (defaultBackground) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { agents: { defaultBackground } },
+        argv,
+      );
+
+      expect(config.getAgentsSettings().defaultBackground).toBe(
+        defaultBackground,
+      );
+    },
+  );
+
   it('keeps cross-session messaging on when no suppression is in force', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

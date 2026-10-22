@@ -41,7 +41,7 @@ Codex runs unattended. Without an agent override, default, plan, and auto sessio
 
 ## Fork Subagent
 
-In addition to named subagents, Qwen Code supports **forking** — selected explicitly with `subagent_type: "fork"`. A fork inherits the parent's full conversation context and normally runs detached in the background. Forks work in both interactive and headless sessions; headless forks always use the background path. Omitting `subagent_type` does **not** fork; it launches the general-purpose subagent. Top-level named subagents run in the background by default and deliver their results through completion notifications. Set `run_in_background: false` when the current turn must wait for a regular subagent's result inline.
+In addition to named subagents, Qwen Code supports **forking** — selected explicitly with `subagent_type: "fork"`. A fork inherits the parent's full conversation context and normally runs detached in the background. Forks work in both interactive and headless sessions; headless forks always use the background path. Omitting `subagent_type` does **not** fork; it launches the general-purpose subagent. Top-level regular subagents run in the background by default and deliver their results through completion notifications. Set `agents.defaultBackground: false` in settings to prefer foreground execution globally (requires restart), or `run_in_background: false` for an individual call. The explicit argument takes precedence over the definition's `background` field, which takes precedence over the setting.
 
 ## Fork Context with `fork_turns`
 
@@ -148,7 +148,7 @@ Fork children cannot spawn any further sub-agent. This is enforced at runtime �
 
 ## Background Agent Continuation
 
-Top-level regular subagents run in the background by default. After a background agent finishes, Qwen Code keeps enough state to continue related work without launching a duplicate agent:
+Top-level regular subagents run in the background by default unless their definition or the `agents.defaultBackground` setting selects foreground execution; an explicit `run_in_background` argument overrides both. After a background agent finishes, Qwen Code keeps enough state to continue related work without launching a duplicate agent:
 
 - `list_agents` returns the addressable background agents in the current session, including compatible agents restored with a resumed session. Each entry includes a `task_id`, status, and whether it can receive a message.
 - `send_message` with that `task_id` queues a message for a running agent, resumes a paused agent, or continues a completed agent. Completed agents reuse their resident runtime when available and otherwise revive from their retained transcript.

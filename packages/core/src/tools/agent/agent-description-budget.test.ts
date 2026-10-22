@@ -436,7 +436,7 @@ describe('AgentTool per-turn size budgets', () => {
     // it from the constant left every suite green and this 341 delta
     // unchanged, because both arms shrink together.
     for (const clause of [
-      'Defaults to true for top-level regular subagents',
+      'explicit value > definition background > agents.defaultBackground (true by default)',
       'headless forks always run in the background',
       'Nested agents run in the foreground',
       'Unnamed caller-owned working_dir launches run in the foreground',
