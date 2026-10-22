@@ -5400,7 +5400,9 @@ export class Session implements SessionContext {
         .filter((snapshot) => snapshot.promptId === promptId).length > 1
     )
       return -1;
-    const history = this.captureHistorySnapshot();
+    // Read-only resolve. The snapshot listing calls this once per row, and
+    // capturing here would overwrite the boundary `restoreHistory` compares.
+    const history = this.config.getLlmClient()!.getChat().getHistoryShallow();
     return findApiHistoryPromptIndex(
       history,
       promptId,
@@ -5434,9 +5436,12 @@ export class Session implements SessionContext {
       delete copy.rewindId;
       markApiHistoryPrompt(copy, getApiHistoryPromptId(content) ?? rewindId);
     });
+    // Hash `restored`, not `history`: the wire echo carries a string
+    // `rewindId` the captured boundary never had, and `restored` is the
+    // transport-stripped form that gets installed.
     if (
       this.historySnapshotBoundary?.hash ===
-      createHash('sha256').update(JSON.stringify(history)).digest('hex')
+      createHash('sha256').update(JSON.stringify(restored)).digest('hex')
     ) {
       markCompressedHistory(
         restored,
