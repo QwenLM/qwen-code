@@ -393,16 +393,12 @@ public class ManagedAgentService {
         }
         Admission admission;
         try {
-            admission = approvalMode == null && planMode == null && additions.isEmpty()
-                    ? store.insertWorkspaceSessionCommand(tenantId,
-                            actorId, idempotencyKey, requestDigest, agentId,
-                            agentRevision, effectiveTitle, input, payloadDigest, selection)
-                    : store.insertWorkspaceSessionCommand(tenantId,
-                            actorId, idempotencyKey, requestDigest, agentId,
-                            agentRevision, effectiveTitle, input, payloadDigest,
-                            selection, approvalMode, harness.supportsApprovalSelection()
-                                    && ("qwen-code".equals(agentId) || harness.supportsAgentDefinitionApprovalSelection()),
-                            planMode, harness.supportsPlanMode(), additions);
+            admission = store.insertWorkspaceSessionCommand(tenantId,
+                    actorId, idempotencyKey, requestDigest, agentId, agentRevision,
+                    effectiveTitle, input, payloadDigest, selection, approvalMode,
+                    harness.supportsApprovalSelection() && ("qwen-code".equals(agentId)
+                            || harness.supportsAgentDefinitionApprovalSelection()),
+                    planMode, harness.supportsPlanMode(), additions, harness.supportsPublicChildAgents());
         } catch (DuplicateKeyException error) {
             admission = store.replayWorkspaceSessionCommand(tenantId,
                     actorId, idempotencyKey, requestDigest);
@@ -450,6 +446,14 @@ public class ManagedAgentService {
                 title, input, isolated);
     }
 
+    public CommandAdmission createPublicChildSession(String tenantId, String parentSessionId,
+            String childRunId, String description, String prompt, com.fasterxml.jackson.databind.JsonNode snapshot) {
+        List<Map<String, Object>> input = input(List.of(new InputBlock("input_text",
+                description.isBlank() ? prompt : "[" + description + "]\n\n" + prompt)), false);
+        return insertChildSession(tenantId, parentSessionId, childRunId,
+                description.isBlank() ? "child agent" : StringUtils.truncate(description, 256), input, false, snapshot);
+    }
+
     /**
      * The workflow arm of the same creation (#13803 K1): the child's first
      * turn carries one `workflow_launch` block — the workflow the parent
@@ -485,6 +489,12 @@ public class ManagedAgentService {
     private CommandAdmission insertChildSession(String tenantId,
             String parentSessionId, String childRunId, String title,
             List<Map<String, Object>> input, boolean isolated) {
+        return insertChildSession(tenantId, parentSessionId, childRunId, title, input, isolated, null);
+    }
+
+    private CommandAdmission insertChildSession(String tenantId, String parentSessionId,
+            String childRunId, String title, List<Map<String, Object>> input, boolean isolated,
+            com.fasterxml.jackson.databind.JsonNode snapshot) {
         List<Map<String, Object>> normalizedInput = normalizeInput(input);
         SessionRecord parent = store.requireSession(tenantId, parentSessionId);
         if (parent.workspace() == null || !"ACTIVE".equals(parent.status())
@@ -519,6 +529,9 @@ public class ManagedAgentService {
         }
         Map<String, Object> semantic = new LinkedHashMap<>();
         semantic.put("child", childRunId);
+        if (snapshot != null) {
+            semantic.put("publicLaunch", snapshot);
+        }
         semantic.put("title", title);
         semantic.put("input", normalizedInput);
         if (childCwd != null) {
@@ -527,7 +540,11 @@ public class ManagedAgentService {
         String requestDigest = digests.digest(semantic);
         StoreModels.Admission admission;
         try {
-            admission = childCwd == null
+            admission = snapshot != null
+                    ? store.insertPublicChildSessionCommand(tenantId, parentSessionId, creationKey,
+                            requestDigest, title, normalizedInput,
+                            SubmitHarnessTurn.computePayloadDigest(normalizedInput), lineage, snapshot)
+                    : childCwd == null
                     ? store.insertChildSessionCommand(tenantId,
                             parentSessionId, creationKey, requestDigest, title,
                             normalizedInput,
@@ -1183,7 +1200,8 @@ public class ManagedAgentService {
                         foregroundShell(session),
                         javaDurableAdmission == null ? null : visible,
                         visible && "ACTIVE".equals(session.status()) && session.workspace() != null
-                                && store.workspaceFilesEnabled() && compression.available() && harness.supportsContextCompression()),
+                                && store.workspaceFilesEnabled() && compression.available() && harness.supportsContextCompression(),
+                        childAgentsCapability(session)),
                 publicWorkspace(session), compression.available() ? compression.compactionRevision() : null, compression.operationId());
     }
 
@@ -1293,6 +1311,10 @@ public class ManagedAgentService {
             boolean compressionSupported, AgentStateStore.ContextCompressionState compression,
             WebShellApprovalSelection approvalSelection, boolean approvalSupported) {
         boolean visible = session.deletedAt() == null;
+        boolean publicChild = session.publicChildAgentsVersion() == 1
+                && store.findChildLineage(session.tenantId(), session.sessionId()) != null;
+        maySubmit = maySubmit && !publicChild;
+        mayChangeCwd = mayChangeCwd && !publicChild;
         boolean close = visible && supportsClose(session);
         boolean keep = visible && retention;
         boolean approvalExecutable = approvalSelection == null || approvalSelection.revision() == 0
@@ -1325,7 +1347,8 @@ public class ManagedAgentService {
                         visible && maySubmit && harness.supportsInputAttachments(),
                         visible && "ACTIVE".equals(session.status()) && renameSupported
                                 && (session.workspace() == null || maySubmit),
-                        visible && approvalExecutable && compressionSupported && compression.available()),
+                        visible && approvalExecutable && compressionSupported && compression.available(),
+                        childAgentsCapability(session)),
                 session.workspace() != null || session.agentDefinitionDigest() != null
                         ? approvalSelection == null ? session.approvalMode() : approvalSelection.mode() : null,
                 modelContext, modelSelection, approvalSelection == null ? null : approvalSelection.revision(),
@@ -1342,6 +1365,14 @@ public class ManagedAgentService {
         return retention || session.workspace() != null
                 && RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
                 && harness.supportsLifecycle(session.toolProfile());
+    }
+
+    private Boolean childAgentsCapability(SessionRecord session) {
+        if (session.publicChildAgentsVersion() != 1) {
+            return null;
+        }
+        return session.deletedAt() == null && harness.supportsPublicChildAgents()
+                && store.findChildLineage(session.tenantId(), session.sessionId()) == null;
     }
 
     private Boolean foregroundShell(SessionRecord session) {
@@ -1527,6 +1558,9 @@ public class ManagedAgentService {
 
     private void requireSubmitterFacts(SessionRecord session,
             String actorId) {
+        if (session.publicChildAgentsVersion() == 1 && store.findChildLineage(session.tenantId(), session.sessionId()) != null) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "Public child Sessions accept only their delegated input");
+        }
         if (session.workspace() != null
                 && !maySubmitWorkspaceTurn(session, actorId)) {
             requireLegacyWorkspace(session, actorId);

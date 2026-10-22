@@ -159,6 +159,7 @@ public class ManagedAgentStore implements AgentStateStore {
             "^[1-9][0-9]{0,17}$");
     private final boolean workspaceFilesEnabled;
     private final boolean workspaceShellEnabled;
+    private final boolean workspaceChildAgentsEnabled;
     private final List<ManagedAgentProperties.RuntimeBroker.WorkspaceMount> workspaceMounts;
     private final ResidentWorkspaces residentWorkspaces;
     private final WorkspaceCreationRoots createdRoots;
@@ -206,7 +207,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 readBinding(result),
                 result.getString("approval_mode"),
                 result.getString("tool_profile"),
-                result.getString("agent_definition_digest"));
+                result.getString("agent_definition_digest"), result.getInt("public_child_agents_version"));
     }
 
     private final RowMapper<TurnSummary> turnSummaryMapper =
@@ -342,6 +343,7 @@ public class ManagedAgentStore implements AgentStateStore {
         this.journalEventTransportEnabled = properties.getEventTransport().isEnabled();
         this.workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
         this.workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
+        this.workspaceChildAgentsEnabled = properties.admitsPublicChildAgents();
         this.workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
         this.residentWorkspaces = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
         this.createdRoots = new WorkspaceCreationRoots(jdbc, properties);
@@ -423,6 +425,18 @@ public class ManagedAgentStore implements AgentStateStore {
             String payloadDigest, WorkspaceSelection selection, String requestedApprovalMode,
             boolean approvalSelectionSupported, Boolean requestedPlanMode, boolean planModeSupported,
             List<Map<String, Object>> skills) {
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, requestedApprovalMode,
+                approvalSelectionSupported, requestedPlanMode, planModeSupported, skills, false);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
+            String requestedApprovalMode, boolean approvalSelectionSupported, Boolean requestedPlanMode,
+            boolean planModeSupported, List<Map<String, Object>> skills, boolean publicChildrenSupported) {
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
@@ -479,6 +493,12 @@ public class ManagedAgentStore implements AgentStateStore {
         Admission admission = insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
                 workspace, actorId, pin, null, planMode);
+        if (workspaceChildAgentsEnabled && publicChildrenSupported && !resident && !sshWorkspace
+                && "qwen-code".equals(agentId) && pin.digest() == null
+                && WorkspaceToolProfiles.SHELL.equals(pin.toolProfile())) {
+            jdbc.update("UPDATE ma_session SET public_child_agents_version=1 WHERE tenant_id=? AND session_id=?",
+                    tenantId, admission.sessionId());
+        }
         if (!skills.isEmpty()) {
             creationSkills.save(tenantId, admission.sessionId(), effectiveSkills);
         }
@@ -636,7 +656,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String requestDigest, String title, List<Map<String, Object>> input,
             String payloadDigest, StoreModels.SessionLineage lineage) {
         return insertChildSession(tenantId, parentSessionId, idempotencyKey,
-                requestDigest, title, input, payloadDigest, lineage, null);
+                requestDigest, title, input, payloadDigest, lineage, null, null);
     }
 
     @Override
@@ -651,7 +671,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         return insertChildSession(tenantId, parentSessionId, idempotencyKey,
                 requestDigest, title, input, payloadDigest, lineage,
-                childCwdRelative);
+                childCwdRelative, null);
     }
 
     @Override
@@ -665,11 +685,20 @@ public class ManagedAgentStore implements AgentStateStore {
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
+    @Override
+    @Transactional
+    public Admission insertPublicChildSessionCommand(String tenantId, String parentSessionId,
+            String idempotencyKey, String requestDigest, String title, List<Map<String, Object>> input,
+            String payloadDigest, StoreModels.SessionLineage lineage, com.fasterxml.jackson.databind.JsonNode snapshot) {
+        return insertChildSession(tenantId, parentSessionId, idempotencyKey, requestDigest,
+                title, input, payloadDigest, lineage, null, snapshot);
+    }
+
     private Admission insertChildSession(String tenantId,
             String parentSessionId, String idempotencyKey,
             String requestDigest, String title, List<Map<String, Object>> input,
             String payloadDigest, StoreModels.SessionLineage lineage,
-            String childCwdRelative) {
+            String childCwdRelative, com.fasterxml.jackson.databind.JsonNode snapshot) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
                 childActorOf(parentSessionId), idempotencyKey);
@@ -683,6 +712,43 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ManagedAgentException(HttpStatus.CONFLICT,
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
+        }
+        if (parent.publicChildAgentsVersion() == 1) {
+            if (snapshot == null || !snapshot.path("version").isIntegralNumber() || snapshot.path("version").asInt() != 1 || lineage.depth() != 1
+                    || childCwdRelative != null || snapshot.size() != 8
+                    || !snapshot.path("sourcePromptId").isTextual() || snapshot.path("sourcePromptId").asText().isBlank()
+                    || snapshot.path("sourcePromptId").asText().length() > 144
+                    || !WorkspaceToolProfiles.supportsApprovalMode(snapshot.path("approvalMode").asText())
+                    || !snapshot.path("approvalRevision").isIntegralNumber() || snapshot.path("approvalRevision").asLong(-1) < 0
+                    || !snapshot.path("approvalRevision").canConvertToLong() || snapshot.path("approvalRevision").asLong() > 9_007_199_254_740_991L
+                    || !snapshot.path("modelId").isTextual() || snapshot.path("modelId").asText().isBlank()
+                    || snapshot.path("modelId").asText().getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 512
+                    || !snapshot.path("modelRevision").isIntegralNumber() || snapshot.path("modelRevision").asLong(-1) < 0
+                    || !snapshot.path("modelRevision").canConvertToLong() || snapshot.path("modelRevision").asLong() > 9_007_199_254_740_991L
+                    || !snapshot.has("skillsRef") || snapshot.path("modelRoute").size() != (snapshot.path("modelRoute").has("origin") ? 4 : 3)
+                    || !snapshot.path("modelRoute").path("authType").isTextual()
+                    || !snapshot.path("modelRoute").path("authType").asText().matches("[a-z][a-z0-9_-]{0,63}")
+                    || !snapshot.path("modelRoute").path("endpointDigest").isTextual()
+                    || !snapshot.path("modelRoute").path("endpointDigest").asText().matches("[a-f0-9]{64}")
+                    || !snapshot.path("modelRoute").path("providerPin").isTextual()
+                    || !snapshot.path("modelRoute").path("providerPin").asText().matches("[a-f0-9]{64}")) {
+                throw new ManagedAgentException(HttpStatus.CONFLICT, "child_launch_snapshot_invalid", "The public child launch snapshot is invalid");
+            }
+            if (snapshot.path("modelRoute").has("origin")) {
+                var origin = snapshot.path("modelRoute").get("origin");
+                if (origin.size() != 4 || !origin.path("modelId").isTextual() || origin.path("modelId").asText().isBlank()
+                        || origin.path("modelId").asText().getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 512
+                        || !origin.path("authType").isTextual()
+                        || !origin.path("authType").asText().matches("[a-z][a-z0-9_-]{0,63}")
+                        || !origin.path("endpointDigest").isTextual()
+                        || !origin.path("endpointDigest").asText().matches("[a-f0-9]{64}")
+                        || !origin.path("providerPin").isTextual()
+                        || !origin.path("providerPin").asText().matches("[a-f0-9]{64}")) {
+                    throw new ManagedAgentException(HttpStatus.CONFLICT, "child_launch_snapshot_invalid", "The public child model origin is invalid");
+                }
+            }
+        } else if (snapshot != null) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "child_launch_snapshot_invalid", "The parent has no public child admission");
         }
         requireLegacyMutation(tenantId, parentSessionId);
         if (!input.isEmpty() && !workspaceFilesEnabled) {
@@ -771,6 +837,11 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " covered_sequence, gmt_modified) VALUES"
                         + " (?, ?, 'SESSION', '', 0, ?)",
                 tenantId, sessionId, now);
+        if (snapshot != null) {
+            byte[] owner = jdbc.queryForObject("SELECT COALESCE(owner_actor_key, creator_actor_key) FROM ma_session WHERE tenant_id=? AND session_id=?", byte[].class, tenantId, parentSessionId);
+            jdbc.update("UPDATE ma_session SET public_child_agents_version=1, owner_actor_key=?, approval_mode=?, selected_approval_mode=NULL, approval_revision=0, model_id=?, model_revision=1 WHERE tenant_id=? AND session_id=?",
+                    owner, snapshot.path("approvalMode").asText(), snapshot.path("modelId").asText(), tenantId, sessionId);
+        }
         if (turnId != null) {
             insertTurn(tenantId, sessionId, turnId, promptId, input,
                     payloadDigest, now);
@@ -778,7 +849,8 @@ public class ManagedAgentStore implements AgentStateStore {
         ManagedReceipts.insertCreation(jdbc, tenantId,
                 ManagedWorkspaceRegistry.actorKey(tenantId, childActorOf(parentSessionId)),
                 idempotencyKey, requestDigest, sessionId, turnId, now);
-        var inheritedSkills = creationSkills.snapshot(tenantId, parentSessionId);
+        var inheritedSkills = snapshot == null ? creationSkills.snapshot(tenantId, parentSessionId)
+                : creationSkills.fromLaunchReference(tenantId, parentSessionId, snapshot.path("skillsRef"));
         if (inheritedSkills != null) {
             creationSkills.save(tenantId, sessionId, inheritedSkills);
         }
@@ -1214,6 +1286,7 @@ public class ManagedAgentStore implements AgentStateStore {
         ManagedSessionStore.lockBounded(() -> WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId,
                 ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        requirePublicChildImmutable(session);
         // A bound Session's later Turn needs the same deployment opt-in as
         // its initial one; the service admits any caller holding OPERATOR
         // on the bound Workspace while the Session's creator-keyed
@@ -2339,7 +2412,8 @@ public class ManagedAgentStore implements AgentStateStore {
                     "The child Session lineage was not found.");
         }
         return beginLifecycle(tenantId, childSessionId, OperationKind.CLOSE, actorDigest, key, digest,
-                null, supported, 0, true, true);
+                null, supported, requireSession(tenantId, childSessionId).publicChildAgentsVersion() == 1
+                        ? WorkspaceToolProfiles.lifecycleProtocol(requireSession(tenantId, childSessionId).toolProfile()) : 0, true, true);
     }
 
     private OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind,
@@ -4713,7 +4787,14 @@ public class ManagedAgentStore implements AgentStateStore {
         return new WebShellApprovalChangeResult(sessionId, mode, revision, false, planMode);
     }
 
+    private void requirePublicChildImmutable(SessionRecord session) {
+        if (session.publicChildAgentsVersion() == 1 && findChildLineage(session.tenantId(), session.sessionId()) != null) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "Public child Sessions cannot change their delegated execution");
+        }
+    }
+
     private void requirePolicyChange(SessionRecord session, boolean live) {
+        requirePublicChildImmutable(session);
         String tenantId = session.tenantId();
         String sessionId = session.sessionId();
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());

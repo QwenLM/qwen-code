@@ -43,6 +43,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class QwenHostedHarnessConnector implements HarnessConnector {
+    private final ManagedAgentProperties settings;
     private final ManagedAgentProperties.Harness properties;
     private final ManagedAgentProperties.SessionStore sessionStore;
     private final ManagedAgentProperties.ToolPublication toolPublication;
@@ -55,6 +56,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     @org.springframework.beans.factory.annotation.Autowired
     private ManagedSessionSkills sessionSkills;
     private final ManagedSessionStore resources;
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore extensions;
     private final WriterCredentialPolicy credentials;
     private final SshWorkspaceStore ssh;
     /** #13753 I2: this control plane serves child Workspaces (startup checks the shape). */
@@ -103,6 +106,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             ManagedSessionStore resources, SshWorkspaceStore ssh) {
         this.definitions = definitions;
         this.resources = resources;
+        this.settings = properties;
         this.properties = properties.getHarness();
         this.sessionStore = properties.getSessionStore();
         this.toolPublication = properties.getToolPublication();
@@ -236,13 +240,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (ref == null) {
             ref = client().loadSession(new LoadHarnessSession(session.sessionId(), managedSessionStore(session),
                     false, toolProfile(session), false, false,
-                    WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
+                    WorkspaceToolProfiles.isPublicShell(toolProfile(session)) && !publicChildLaunchAvailable(session))
                     .withAgentDefinition(agentDefinition(session, false))
                     .withSessionSkillsRef(sessionSkillsRef(session, false))
                     .withMcpServers(mcpServers(session))
                     .withHookCatalog(hookCatalog(session))
+                    .withPublicChildAgentsVersion(session.publicChildAgentsVersion())
+                    .withPublicChildModelRoute(publicChildModelRoute(session))
                     .withForegroundOnly(foregroundOnly(session))
-                    .withChildWorkspaces(childWorkspaces && !foregroundOnly(session), childSnapshots && !foregroundOnly(session))
+                    .withChildWorkspaces(childWorkspaces && session.publicChildAgentsVersion() == 0 && !foregroundOnly(session), childSnapshots && session.publicChildAgentsVersion() == 0 && !foregroundOnly(session))
                     .forLifecycle(operation.operationId(), operation.claimGeneration(), operation.lifecycleProtocolVersion() == 2 ? 2 : 1));
             attachments.put(key, ref);
         }
@@ -345,6 +351,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             boolean actionResponse) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         requireShellApproval(session);
+        if (session.publicChildAgentsVersion() == 1 && !supportsPublicChildAgents()) {
+            throw new IllegalStateException("Hosted Harness public child recovery is unsupported");
+        }
         if (session.workspace() != null) {
             if (!isWorkspaceFilesAvailable()) {
                 throw new IllegalStateException("Hosted Workspace files are disabled");
@@ -458,6 +467,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
+        }
+    }
+
+    @Override
+    public boolean supportsPublicChildAgents() {
+        try {
+            return client().capabilities().getFeatures().contains("public-child-agents/1")
+                    && supportsApprovalSelection() && supportsLifecycle(WorkspaceToolProfiles.SHELL);
+        } catch (RuntimeException unavailable) {
+            return false;
         }
     }
 
@@ -944,13 +963,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         managedSessionStore(session),
                         session.harnessBootId() != null, toolProfile(session),
                         false, false,
-                        WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
+                        WorkspaceToolProfiles.isPublicShell(toolProfile(session)) && !publicChildLaunchAvailable(session))
                         .withAgentDefinition(agentDefinition(session, false))
                         .withSessionSkillsRef(sessionSkillsRef(session, false))
                         .withMcpServers(mcpServers(session))
                         .withHookCatalog(hookCatalog(session))
+                        .withPublicChildAgentsVersion(session.publicChildAgentsVersion())
+                        .withPublicChildModelRoute(publicChildModelRoute(session))
                         .withForegroundOnly(foregroundOnly(session))
-                        .withChildWorkspaces(childWorkspaces && !foregroundOnly(session), childSnapshots && !foregroundOnly(session));
+                        .withChildWorkspaces(childWorkspaces && session.publicChildAgentsVersion() == 0 && !foregroundOnly(session), childSnapshots && session.publicChildAgentsVersion() == 0 && !foregroundOnly(session));
         HarnessSessionRef attached = client().loadSession(
                 stopMessages ? load.withStoppedMessages() : load);
         if (session.workspace() != null && !actions.approvalMode(tenantId,
@@ -1204,9 +1225,10 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                             .approvalTimeoutMs(properties.getApprovalTimeout().toMillis())
                             .toolProfile(profile)
                             .foregroundOnly(foregroundOnly(session))
-                            .childWorkspaces(childWorkspaces && !foregroundOnly(session))
-                            .childSnapshots(childSnapshots && !foregroundOnly(session));
-            if (WorkspaceToolProfiles.isPublicShell(profile)) {
+                            .childWorkspaces(childWorkspaces && session.publicChildAgentsVersion() == 0 && !foregroundOnly(session))
+                            .childSnapshots(childSnapshots && session.publicChildAgentsVersion() == 0 && !foregroundOnly(session));
+            builder.publicChildAgentsVersion(session.publicChildAgentsVersion()).publicChildModelRoute(publicChildModelRoute(session));
+            if (WorkspaceToolProfiles.isPublicShell(profile) && !publicChildLaunchAvailable(session)) {
                 builder.suppressChildAgents();
             }
             if (toolPublication.isEnabled()
@@ -1282,13 +1304,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         LoadHarnessSession request = new LoadHarnessSession(session.sessionId(), store,
                 passiveManagedRuntimeRecovery, profile,
                 driveRuntimeRecovery, cancellationTakeover,
-                WorkspaceToolProfiles.isPublicShell(profile))
+                WorkspaceToolProfiles.isPublicShell(profile) && !publicChildLaunchAvailable(session))
                 .withAgentDefinition(agentDefinition(session, false))
                 .withSessionSkillsRef(sessionSkillsRef(session, false))
                 .withMcpServers(mcpServers(session))
                 .withHookCatalog(hookCatalog(session))
+                .withPublicChildAgentsVersion(session.publicChildAgentsVersion())
+                .withPublicChildModelRoute(publicChildModelRoute(session))
                 .withForegroundOnly(foregroundOnly(session))
-                .withChildWorkspaces(childWorkspaces && !foregroundOnly(session), childSnapshots && !foregroundOnly(session));
+                .withChildWorkspaces(childWorkspaces && session.publicChildAgentsVersion() == 0 && !foregroundOnly(session), childSnapshots && session.publicChildAgentsVersion() == 0 && !foregroundOnly(session));
         if (promptId != null) {
             request.withCancellationPromptId(promptId);
         }
@@ -1439,11 +1463,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
             workspaceExecution.authorizePassiveAttachment(session);
             var loaded = current.loadSession(new LoadHarnessSession(sessionId, managedSessionStore(session), false,
-                    toolProfile(session), false, false, WorkspaceToolProfiles.isPublicShell(session.toolProfile()))
+                    toolProfile(session), false, false, WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !publicChildLaunchAvailable(session))
                     .withAgentDefinition(agentDefinition(session, false))
                     .withSessionSkillsRef(sessionSkillsRef(session, false))
+                    .withPublicChildAgentsVersion(session.publicChildAgentsVersion())
+                    .withPublicChildModelRoute(publicChildModelRoute(session))
                     .withForegroundOnly(foregroundOnly(session))
-                    .withChildWorkspaces(childWorkspaces && !foregroundOnly(session), childSnapshots && !foregroundOnly(session))
+                    .withChildWorkspaces(childWorkspaces && session.publicChildAgentsVersion() == 0 && !foregroundOnly(session), childSnapshots && session.publicChildAgentsVersion() == 0 && !foregroundOnly(session))
                     .forRecoveryCleanup(promptId));
             attachments.compute(key, (ignored, held) -> {
                 if (held != null) {
@@ -1640,6 +1666,38 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 }
             }
         }
+    }
+
+    private Map<String, Object> publicChildModelRoute(SessionRecord session) {
+        if (session.publicChildAgentsVersion() != 1) {
+            return null;
+        }
+        if (!supportsPublicChildAgents()) {
+            throw new IllegalStateException("Hosted Harness public child recovery is unsupported");
+        }
+        var lineage = sessions.findChildLineage(session.tenantId(), session.sessionId());
+        if (lineage == null) {
+            return null;
+        }
+        var run = extensions.findRecord(session.tenantId(), lineage.parentSessionId(), "child_run", lineage.parentChildRunId()).orElseThrow();
+        var launch = extensions.readRecordResource(session.tenantId(), lineage.parentSessionId(), run.required("inputRef"));
+        var route = launch.required("publicLaunch").required("modelRoute");
+        Map<String, Object> result = new java.util.LinkedHashMap<>(Map.of("authType", route.required("authType").textValue(),
+                "endpointDigest", route.required("endpointDigest").textValue(),
+                "providerPin", route.required("providerPin").textValue()));
+        if (route.has("origin")) {
+            var origin = route.get("origin");
+            result.put("origin", Map.of("modelId", origin.required("modelId").textValue(),
+                    "authType", origin.required("authType").textValue(), "endpointDigest", origin.required("endpointDigest").textValue(),
+                    "providerPin", origin.required("providerPin").textValue()));
+        }
+        return result;
+    }
+
+    private boolean publicChildLaunchAvailable(SessionRecord session) {
+        return session.publicChildAgentsVersion() == 1 && settings.admitsPublicChildAgents()
+                && supportsPublicChildAgents()
+                && sessions.findChildLineage(session.tenantId(), session.sessionId()) == null;
     }
 
     private boolean foregroundOnly(SessionRecord session) {

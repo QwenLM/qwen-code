@@ -115,6 +115,7 @@ export interface ManagedAgentSessionSummary {
     canCancel: boolean;
     canRename?: boolean;
     actions?: boolean;
+    childAgents?: boolean;
     tasks?: boolean;
     artifacts?: boolean;
     /** The caller may submit later Turns to this Workspace-bound Session. */
@@ -278,7 +279,7 @@ export interface ManagedAgentProvider {
   readonly actions?: {
     listPending(
       sessionId: string,
-      options: ManagedAgentRequestOptions,
+      options: ManagedAgentRequestOptions & { includeChildren?: boolean },
     ): Promise<ManagedAgentPendingAction[]>;
     respond(
       action: ManagedAgentPendingAction,

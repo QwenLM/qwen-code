@@ -385,7 +385,7 @@ class SessionRowLockOrderTest {
         assertThat(audit.lockers()).containsExactlyInAnyOrder(
                 "insertTurnCommand", "insertCancelCommand", "changeSessionModel", "changeSessionApproval",
                 "insertSessionCommand", "insertWorkspaceSessionCommand",
-                "insertChildSessionCommand",
+                "insertChildSessionCommand", "insertPublicChildSessionCommand",
                 "insertInternalTeamLeadSessionCommand",
                 "beginSessionMutation",
                 "beginTaskCancelOperation", "completeSessionMutation",
@@ -463,7 +463,7 @@ class SessionRowLockOrderTest {
                         "findRuntimeRecoveryParked",
                         "parkTurnForRuntimeRecovery",
                         "insertCancelCommand", "insertChildSession",
-                        "insertChildSessionCommand", "insertCsiSessionCommand",
+                        "insertChildSessionCommand", "insertPublicChildSessionCommand", "insertCsiSessionCommand",
                         "insertInternalTeamLeadSessionCommand",
                         "insertSession", "insertSessionCommand", "insertTurn",
                         "insertTurnCommand", "insertWorkspaceSessionCommand",
