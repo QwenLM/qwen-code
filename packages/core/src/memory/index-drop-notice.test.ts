@@ -334,6 +334,41 @@ describe('review follow-up diagnostics', () => {
     ).toBe(index);
   });
 
+  it.each([false, true])(
+    'keeps count advice when a dropped overlong candidate is not the cause (extra entry=%s)',
+    (extraEntry) => {
+      const ordinary = Array.from({ length: 199 }, (_, i) => doc(i));
+      const hidden = {
+        ...doc(199),
+        title: 'Hidden',
+        relativePath: `reference/${' '.repeat(49)}xx.md`,
+      };
+      const docs = [...ordinary, hidden, ...(extraEntry ? [doc(200)] : [])];
+      const index = buildManagedAutoMemoryIndex(docs);
+      const kept = entries(index);
+      expect(kept).toHaveLength(165);
+      expect(kept.every((line) => line.length === 150)).toBe(true);
+      expect(kept.some((line) => line.includes('[Hidden]'))).toBe(false);
+      expect(index).toContain('too many index entries');
+      expect(index).not.toContain('index entries are too long');
+      expect(index).not.toContain(
+        'Overlong entries already omit descriptions.',
+      );
+      expect(index).toContain(
+        'Merge topic files or remove obsolete ones to reduce the index.',
+      );
+      expect(
+        entries(
+          buildManagedAutoMemoryIndex([
+            ...ordinary,
+            { ...hidden, relativePath: 'reference/hidden.md' },
+            ...(extraEntry ? [doc(200)] : []),
+          ]),
+        ),
+      ).toEqual(kept);
+    },
+  );
+
   it.each([1, 2])(
     'does not count %i extra notice-separator blank lines as entries',
     (extra) => {

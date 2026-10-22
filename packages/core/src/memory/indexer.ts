@@ -241,13 +241,15 @@ function assembleIndex(
   }
   const candidates = lines.slice(0, MAX_INDEX_LINES);
   const charCount = candidates.join('\n').length;
-  const hasOverlongEntry = candidates.some(
-    (line) => line.length > MAX_INDEX_LINE_CHARS,
-  );
+  const ordinaryCharCount = candidates
+    .map((line) => line.slice(0, MAX_INDEX_LINE_CHARS))
+    .join('\n').length;
+  const overlongEntriesCauseOverflow =
+    charCount > MAX_INDEX_CHARS && ordinaryCharCount <= MAX_INDEX_CHARS;
   if (charCount > MAX_INDEX_CHARS) {
     reasons.push(
       `${charCount} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — ${
-        hasOverlongEntry
+        overlongEntriesCauseOverflow
           ? 'index entries are too long'
           : 'too many index entries'
       }`,
@@ -257,7 +259,7 @@ function assembleIndex(
   const budgetLever =
     reasons.length === 0
       ? ''
-      : charCount > MAX_INDEX_CHARS && hasOverlongEntry
+      : overlongEntriesCauseOverflow
         ? ' Overlong entries already omit descriptions. Shorten their topic-file paths or frontmatter names, or merge topic files/remove obsolete ones. Editing only the generated index will not survive a rebuild.'
         : ' Merge topic files or remove obsolete ones to reduce the index. Editing only the generated index will not survive a rebuild.';
   const scanLever =
