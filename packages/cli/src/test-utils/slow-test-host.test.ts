@@ -7,7 +7,7 @@
 import * as os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { isSlowTestHost } from './slow-test-host.js';
+import { isSlowTestHost, slowHostBudgetMs } from './slow-test-host.js';
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>();
@@ -18,22 +18,22 @@ vi.mock('node:os', async (importOriginal) => {
   };
 });
 
+const initialRunnerName = process.env['RUNNER_NAME'];
+
+beforeEach(() => {
+  vi.mocked(os.loadavg).mockReturnValue([0, 0, 0]);
+  vi.mocked(os.availableParallelism).mockReturnValue(64);
+});
+
+afterEach(() => {
+  if (initialRunnerName === undefined) {
+    delete process.env['RUNNER_NAME'];
+  } else {
+    process.env['RUNNER_NAME'] = initialRunnerName;
+  }
+});
+
 describe('isSlowTestHost', () => {
-  const initialRunnerName = process.env['RUNNER_NAME'];
-
-  beforeEach(() => {
-    vi.mocked(os.loadavg).mockReturnValue([0, 0, 0]);
-    vi.mocked(os.availableParallelism).mockReturnValue(64);
-  });
-
-  afterEach(() => {
-    if (initialRunnerName === undefined) {
-      delete process.env['RUNNER_NAME'];
-    } else {
-      process.env['RUNNER_NAME'] = initialRunnerName;
-    }
-  });
-
   it('treats the ecs-qwen pool as slow regardless of load', () => {
     process.env['RUNNER_NAME'] = 'ecs-qwen-runner-64c-01';
     expect(isSlowTestHost()).toBe(true);
@@ -49,5 +49,24 @@ describe('isSlowTestHost', () => {
     delete process.env['RUNNER_NAME'];
     vi.mocked(os.loadavg).mockReturnValue([2, 0, 0]);
     expect(isSlowTestHost()).toBe(false);
+  });
+});
+
+describe('slowHostBudgetMs', () => {
+  it('keeps the fast budget on an unsaturated host', () => {
+    delete process.env['RUNNER_NAME'];
+    vi.mocked(os.loadavg).mockReturnValue([2, 0, 0]);
+    expect(slowHostBudgetMs(10_000, 45_000)).toBe(10_000);
+  });
+
+  it('uses the slow budget on the ecs-qwen pool', () => {
+    process.env['RUNNER_NAME'] = 'ecs-qwen-runner-64c-01';
+    expect(slowHostBudgetMs(10_000, 45_000)).toBe(45_000);
+  });
+
+  it('uses the slow budget on a saturated host without RUNNER_NAME', () => {
+    delete process.env['RUNNER_NAME'];
+    vi.mocked(os.loadavg).mockReturnValue([96, 0, 0]);
+    expect(slowHostBudgetMs(10_000, 45_000)).toBe(45_000);
   });
 });
