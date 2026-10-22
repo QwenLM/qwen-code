@@ -64,6 +64,8 @@ import {
 import { memberMessageId } from './hosted-member-chain.js';
 import { HostedTeamSession } from './hosted-team-session.js';
 
+// Must not sit below the pool testTimeout in packages/cli/vitest.config.ts:
+// an explicit per-test deadline overrides the config in both directions (#15216).
 const budgetTimeoutMs = isSlowTestHost() ? 60_000 : 30_000;
 
 // H4e-b3: `session_command` is enabled for real, so this suite drives the
