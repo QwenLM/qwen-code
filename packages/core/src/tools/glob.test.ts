@@ -19,6 +19,7 @@ import { tildeifyPath } from '../utils/paths.js';
 import { ToolErrorType } from './tool-error.js';
 import * as glob from 'glob';
 import type { Path as GlobResultPath } from 'glob';
+import { PermissionManager } from '../permissions/permission-manager.js';
 
 vi.mock('glob', { spy: true });
 
@@ -959,6 +960,66 @@ describe('GlobTool', () => {
         .build({ pattern: '*', path: '~/outside-workspace' })
         .getDefaultPermission();
       expect(permission).toBe('ask');
+    });
+  });
+
+  describe('Read deny rules over search results', () => {
+    /** An initialized PermissionManager denying `rules` within the temp root. */
+    const denyPm = (rules: string[]) => {
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => [],
+        getPermissionsAsk: () => [],
+        getPermissionsDeny: () => rules,
+        getProjectRoot: () => tempRootDir,
+        getCwd: () => tempRootDir,
+      });
+      pm.initialize();
+      return pm;
+    };
+
+    it('omits a file denied by a path-scoped Read rule', async () => {
+      const result = await run(
+        { pattern: '*.sortme' },
+        toolWith({
+          getPermissionManager: () => denyPm([`Read(./older.sortme)`]),
+        }),
+      );
+
+      expect(result.llmContent).toContain('Found 1 file(s)');
+      expect(result.llmContent).toContain('newer.sortme');
+      expect(result.llmContent).not.toContain('older.sortme');
+      expect(result.llmContent).toContain('1 file omitted by permission rules');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'newer.sortme'),
+      ]);
+      expect(result.collectedFilePaths).toEqual([
+        path.join(tempRootDir, 'newer.sortme'),
+      ]);
+    });
+
+    it('omits every file under a denied directory rule', async () => {
+      const result = await run(
+        { pattern: 'sub/**' },
+        toolWith({
+          getPermissionManager: () => denyPm(['Read(./sub/**)']),
+        }),
+      );
+
+      expect(result.llmContent).toContain('No files found');
+      expect(result.llmContent).not.toContain('fileC');
+      expect(result.llmContent).not.toContain('fileD');
+      expect(result.llmContent).toContain(
+        '3 files omitted by permission rules',
+      );
+    });
+
+    it('keeps results unchanged without a permission manager', async () => {
+      const result = await run({ pattern: '*.sortme' });
+
+      expect(result.llmContent).toContain('Found 2 file(s)');
+      expect(result.llmContent).toContain('older.sortme');
+      expect(result.llmContent).toContain('newer.sortme');
+      expect(result.llmContent).not.toContain('omitted by permission rules');
     });
   });
 });

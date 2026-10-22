@@ -107,6 +107,41 @@ export function buildPermissionCheckContext(
 // PM evaluation
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Resolve which of `filePaths` a `deny` rule claims, evaluated per file under
+ * `toolName`.
+ *
+ * The input-side check for search tools (grep, glob) evaluates rules against
+ * the search root, so a path-scoped `Read(...)` deny rule that targets an
+ * individual result file can never match it. Search tools call this with the
+ * files they are about to return so the per-file deny decision is the same
+ * one `read_file` would get for that file.
+ *
+ * Returns the denied subset; empty when `pm` is absent.
+ */
+export async function selectPathsDeniedByPermissionRules(
+  pm: PermissionManager | null | undefined,
+  toolName: string,
+  targetDir: string,
+  filePaths: readonly string[],
+): Promise<Set<string>> {
+  const denied = new Set<string>();
+  if (!pm || filePaths.length === 0) {
+    return denied;
+  }
+  for (const filePath of filePaths) {
+    const ctx = buildPermissionCheckContext(
+      toolName,
+      { file_path: filePath },
+      targetDir,
+    );
+    if ((await pm.evaluate(ctx)) === 'deny') {
+      denied.add(filePath);
+    }
+  }
+  return denied;
+}
+
 /** Result of {@link evaluatePermissionRules}. */
 export interface PermissionEvalResult {
   /** The final permission after PM override. */
