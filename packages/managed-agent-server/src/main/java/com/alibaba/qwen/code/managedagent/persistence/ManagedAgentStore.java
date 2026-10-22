@@ -4360,6 +4360,11 @@ public class ManagedAgentStore implements AgentStateStore {
 
     public SessionPage listSessions(String tenantId, String actorId,
             Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState) {
+        return listSessions(tenantId, actorId, beforeCreatedAt, beforeSessionId, limit, archiveState, "");
+    }
+
+    public SessionPage listSessions(String tenantId, String actorId,
+            Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState, String titleQuery) {
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
         arguments.add(actorId == null ? null
@@ -4369,6 +4374,11 @@ public class ManagedAgentStore implements AgentStateStore {
             case "unarchived" -> " AND ma_session.status <> 'ARCHIVED'";
             default -> "";
         };
+        String titleClause = "";
+        if (!StringUtils.isEmpty(titleQuery)) {
+            titleClause = " AND LOCATE(LOWER(?), LOWER(COALESCE(ma_session.title, ''))) > 0";
+            arguments.add(titleQuery);
+        }
         // Keyset on the immutable gmt_create: gmt_modified moves on every
         // event append, so a row can slide backwards into already-visited
         // pages and silently vanish from a paged listing.
@@ -4394,7 +4404,7 @@ public class ManagedAgentStore implements AgentStateStore {
                             + " ma_session.tenant_id AND wa.workspace_id = ma_session.workspace_id"
                             + " AND wa.actor_id = ? AND wa.role IN ('READER', 'OPERATOR',"
                             + " 'OWNER')))"
-                                + archiveClause + cursorClause
+                                + archiveClause + titleClause + cursorClause
                                 + " ORDER BY ma_session.gmt_create DESC, ma_session.session_id DESC"
                                 + " LIMIT ?",
                         sessionListMapper,

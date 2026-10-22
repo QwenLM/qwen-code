@@ -380,6 +380,9 @@
         </profile>
         <profile>
             <id>mysql-integration</id>
+            <properties>
+                <mysql.integration.forks>1</mysql.integration.forks>
+            </properties>
             <build>
                 <plugins>
                     <plugin>
@@ -390,6 +393,18 @@
                             <excludes>
                                 <exclude>**/Hosted*IT.java</exclude>
                             </excludes>
+                            <forkCount>${mysql.integration.forks}</forkCount>
+                            <reuseForks>true</reuseForks>
+                            <systemPropertyVariables>
+                                <qwen.mysql.forkCount>${mysql.integration.forks}</qwen.mysql.forkCount>
+                                <!-- A literal prefix preserves the late fork placeholder through Maven interpolation. -->
+                                <qwen.mysql.forkNumber>0${surefire.forkNumber}</qwen.mysql.forkNumber>
+                            </systemPropertyVariables>
+                            <properties>
+                                <configurationParameters>
+                                    junit.jupiter.execution.parallel.enabled = false
+                                </configurationParameters>
+                            </properties>
                         </configuration>
                         <executions>
                             <execution>

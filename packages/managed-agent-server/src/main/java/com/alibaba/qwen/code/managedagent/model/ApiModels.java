@@ -346,7 +346,11 @@ public final class ApiModels {
                     long snapshotThroughSequence) {
     }
 
-    public record WebShellListRequest(String cursor, Integer limit, String archiveState) {
+    public record WebShellListRequest(String cursor, Integer limit, String archiveState,
+            String titleQuery) {
+        public WebShellListRequest(String cursor, Integer limit, String archiveState) {
+            this(cursor, limit, archiveState, null);
+        }
     }
 
     public record WebShellSessionRequest(@NotBlank String sessionId) {

@@ -100,13 +100,37 @@ describe('SDK Java self-hosted workflow guards', () => {
       (s) => s.name === 'Install Node.js dependencies',
     );
     expect(install.env?.QWEN_SKIP_PREPARE).toBe('1');
+    expect(steps.map((s) => s.name).indexOf('Build Qwen Code')).toBeGreaterThan(
+      steps.map((s) => s.name).indexOf('Install Node.js dependencies'),
+    );
+  });
+
+  it.each([
+    ['.github/workflows/sdk-java.yml', 'daemon-e2e'],
+    ['.github/workflows/release-sdk-java.yml', 'release'],
+  ])('%s %s pins the explicit Build/Bundle/Run steps', (file, jobName) => {
+    const steps = parse(readFileSync(file, 'utf8')).jobs[jobName].steps;
     const names = steps.map((s) => s.name);
-    expect(names.indexOf('Build Qwen Code')).toBeGreaterThan(
-      names.indexOf('Install Node.js dependencies'),
-    );
-    expect(names.indexOf('Bundle Qwen Code')).toBeGreaterThan(
-      names.indexOf('Build Qwen Code'),
-    );
+    let previous = -1;
+    for (const [name, run] of [
+      ['Build Qwen Code', 'npm run build'],
+      ['Bundle Qwen Code', 'npm run bundle'],
+      ['Run Java daemon E2E', 'npx tsx scripts/run-java-daemon-sdk-e2e.ts'],
+    ]) {
+      const index = names.indexOf(name);
+      expect(index, `${jobName}: ${name}`).toBeGreaterThan(previous);
+      previous = index;
+      expect(steps[index].run, name).toBe(run);
+      expect(steps[index]['continue-on-error'], name).toBeUndefined();
+      expect(steps[index].if, name).toBeUndefined();
+    }
+  });
+
+  it('keeps the pinned build steps pointed at files that exist', () => {
+    const scripts = JSON.parse(readFileSync('package.json', 'utf8')).scripts;
+    expect(existsSync('scripts/run-java-daemon-sdk-e2e.ts')).toBe(true);
+    expect(scripts.build).toBeTruthy();
+    expect(scripts.bundle).toBeTruthy();
   });
 
   it('serializes latency-sensitive tests on each physical ECS host', () => {
@@ -802,6 +826,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // here would invite dropping that flag and dying on first connect.
     expect(start.run).not.toContain('MYSQL_DATABASE');
     expect(start.run).toContain("--env MYSQL_ROOT_PASSWORD='runtime-broker'");
+    expect(start.run).toContain('for fork in 1 2');
     expect(start.run).toContain('for attempt in {1..60}');
     expect(start.run).toContain('sleep 2');
     // MariaDB ships healthcheck.sh; MySQL does not. Each leg must wait on
@@ -816,25 +841,34 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
       'mysqladmin ping --host=127.0.0.1 --user=root --password=runtime-broker --silent',
     );
     expect(start.run).toContain(
-      'echo "MYSQL_PORT=${MYSQL_PORT}" >> "${GITHUB_ENV}"',
+      'echo "MYSQL_PORT_${fork}=${port}" >> "${GITHUB_ENV}"',
     );
     expect(configure.env?.MYSQL_CONTAINER).toBeUndefined();
-    expect(configure.run).toContain('docker exec "${MYSQL_CONTAINER}" sh -c');
+    expect(configure.run).toContain('for fork in 1 2');
+    expect(configure.run).toContain(
+      'docker exec "${MYSQL_CONTAINER}-${fork}" sh -c',
+    );
     expect(configure.run).toContain(
       'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" \'"${DATABASE_CLIENT}"\'',
     );
     expect(configure.run).toContain('SET GLOBAL max_allowed_packet=134217728');
     expect(verify.env.MYSQL_PORT).toBeUndefined();
     expect(verify.run).toContain(
-      '-Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false"',
+      '-Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false"',
     );
+    expect(verify.run).toContain('-Dmysql.integration.forks=2');
+    for (const fork of [1, 2]) {
+      expect(verify.run).toContain(
+        `-Dmysql.url.${fork}="jdbc:mysql://127.0.0.1:\${MYSQL_PORT_${fork}}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false"`,
+      );
+    }
     expect(mysql.steps.indexOf(start)).toBeLessThan(
       mysql.steps.indexOf(configure),
     );
     expect(mysql.steps.indexOf(configure)).toBeLessThan(
       mysql.steps.indexOf(verify),
     );
-    expect(cleanup.name).toBe('Remove the database container');
+    expect(cleanup.name).toBe('Remove the database containers');
     // The shell probe below cannot establish Actions cancellation scheduling.
     expect(cleanup.if).toBe('${{ always() }}');
     expect(cleanup.shell).toBe('bash');
@@ -861,7 +895,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     .skipIf(process.platform === 'win32')
     .each(
       databaseLegs.flatMap((leg) =>
-        ['ready', 'dead', 'timeout'].map((mode) => ({ ...leg, mode })),
+        ['ready', 'dead', 'timeout', 'dead-second', 'timeout-second'].map(
+          (mode) => ({ ...leg, mode }),
+        ),
       ),
     )(
     'executes $database startup and consumers with a $mode container',
@@ -899,11 +935,11 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
             printf 'DOCKER<%s>\\n' "$*" >> "$TRACE"
             printf 'ARGC<%s>\\n' "$#" >> "$TRACE"
             case "$1" in
-              run) return 0 ;;
+              run) attempts=0; return 0 ;;
               exec)
                 if [[ "$3" == "$READINESS" ]]; then
                   attempts=$((attempts + 1))
-                  if [[ "$MODE" == ready && "$attempts" -eq 3 ]]; then
+                  if [[ ( "$MODE" == ready || ( "$MODE" == *-second && "$2" == *-1 ) ) && "$attempts" -eq 3 ]]; then
                     return 0
                   fi
                   echo 'PROBE_SAYS_NO' >&2
@@ -912,9 +948,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
                 [[ "$3" == sh && "$5" == *'SET GLOBAL max_allowed_packet=134217728'* ]] ;;
               inspect)
                 if [[ "$3" == *State.Running* ]]; then
-                  [[ "$MODE" == dead ]] && echo false || echo true
+                  [[ "$MODE" == dead || ( "$MODE" == dead-second && "$4" == *-2 ) ]] && echo false || echo true
                 else
-                  echo 43219
+                  [[ "$4" == *-1 ]] && echo 43219 || echo 43220
                 fi ;;
               logs) echo MYSQL_FAILURE_LOG ;;
               *) return 92 ;;
@@ -950,7 +986,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
         expect(result.error).toBeUndefined();
         const trace = readFileSync(join(dir, 'trace'), 'utf8');
         expect(trace).toContain(
-          `run --detach --name ${container} --publish 127.0.0.1::3306 --mount type=tmpfs,destination=/var/lib/mysql --env MYSQL_ROOT_PASSWORD=runtime-broker ${image} ${engineArgs}`,
+          `run --detach --name ${container}-1 --publish 127.0.0.1::3306 --mount type=tmpfs,destination=/var/lib/mysql --env MYSQL_ROOT_PASSWORD=runtime-broker ${image} ${engineArgs}`,
         );
         // `"$*"` joins argv, so the trace above cannot tell N correctly split
         // engine args from one argument containing spaces. The arg count can:
@@ -958,16 +994,29 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
         // reaches that many. A joined element would report one fewer.
         expect(trace).toContain(`ARGC<${11 + engineArgs.split(' ').length}>`);
         // Each leg must wait on the readiness signal its own image ships.
-        expect(trace).toContain(`exec ${container} ${readiness}`);
+        expect(trace).toContain(`exec ${container}-1 ${readiness}`);
+        if (mode === 'ready' || mode.endsWith('-second')) {
+          expect(trace).toContain(
+            `run --detach --name ${container}-2 --publish 127.0.0.1::3306 --mount type=tmpfs,destination=/var/lib/mysql --env MYSQL_ROOT_PASSWORD=runtime-broker ${image} ${engineArgs}`,
+          );
+          expect(trace).toContain(`exec ${container}-2 ${readiness}`);
+        }
         if (mode === 'ready') {
           expect(result.status, result.stderr).toBe(0);
           expect(readFileSync(join(dir, 'env'), 'utf8')).toBe(
-            'MYSQL_PORT=43219\n',
+            'MYSQL_PORT_1=43219\nMYSQL_PORT_2=43220\n',
           );
-          expect(trace.match(/SLEEP<2>/g)).toHaveLength(2);
+          expect(trace.match(/SLEEP<2>/g)).toHaveLength(4);
           expect(result.stdout).toContain(
             'MAVEN<-Dmysql.url=jdbc:mysql://127.0.0.1:43219/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false>',
           );
+          expect(result.stdout).toContain('MAVEN<-Dmysql.integration.forks=2>');
+          for (const fork of [1, 2]) {
+            expect(result.stdout).toContain(
+              `MAVEN<-Dmysql.url.${fork}=jdbc:mysql://127.0.0.1:${43218 + fork}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false>`,
+            );
+            expect(trace).toContain(`exec ${container}-${fork} sh -c`);
+          }
           expect(result.stdout).not.toContain('MYSQL_FAILURE_LOG');
           expect(result.stdout).not.toContain('PROBE_SAYS_NO');
         } else {
@@ -976,12 +1025,19 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
           // The probe's own output must reach the log: a broken probe is
           // otherwise indistinguishable from a server still starting.
           expect(result.stdout).toContain('PROBE_SAYS_NO');
-          expect(existsSync(join(dir, 'env'))).toBe(false);
+          const second = mode.endsWith('-second');
+          if (second) {
+            expect(readFileSync(join(dir, 'env'), 'utf8')).toBe(
+              'MYSQL_PORT_1=43219\n',
+            );
+          } else {
+            expect(existsSync(join(dir, 'env'))).toBe(false);
+          }
           expect(
             trace.match(new RegExp(`exec \\S+ ${readiness}`, 'g')),
-          ).toHaveLength(mode === 'dead' ? 1 : 60);
+          ).toHaveLength((second ? 3 : 0) + (mode.startsWith('dead') ? 1 : 60));
           expect(trace.match(/SLEEP<2>/g) ?? []).toHaveLength(
-            mode === 'dead' ? 0 : 59,
+            (second ? 2 : 0) + (mode.startsWith('dead') ? 0 : 59),
           );
           expect(result.stdout).not.toContain('MAVEN<');
         }
@@ -993,49 +1049,57 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
 
   it
     .skipIf(process.platform === 'win32')
-    .each(['exists', 'missing', 'removal-fails'])(
-    'executes owned MySQL cleanup when the container %s',
-    (mode) => {
-      const cleanup = parse(workflow).jobs['mysql-integration'].steps.at(-1);
-      const result = spawnSync(
-        'bash',
-        [
-          '-e',
-          '-c',
-          `
+    .each([
+      'exists',
+      'missing',
+      'removal-fails',
+      'first-missing',
+      'first-removal-fails',
+    ])('executes owned MySQL cleanup when the container %s', (mode) => {
+    const cleanup = parse(workflow).jobs['mysql-integration'].steps.at(-1);
+    const result = spawnSync(
+      'bash',
+      [
+        '-e',
+        '-c',
+        `
         docker() {
           printf 'DOCKER<%s>\\n' "$*"
-          if [[ "$1" == inspect ]]; then [[ "$MODE" != missing ]];
-          elif [[ "$1" == rm ]]; then [[ "$MODE" != removal-fails ]];
+          if [[ "$1" == inspect ]]; then [[ "$MODE" != missing && ! ( "$MODE" == first-missing && "$2" == *-1 ) ]];
+          elif [[ "$1" == rm ]]; then [[ "$MODE" != removal-fails && ! ( "$MODE" == first-removal-fails && "$3" == *-1 ) ]];
           else return 92; fi
         }
         ${cleanup.run}
       `,
-        ],
-        {
-          encoding: 'utf8',
-          timeout: 5000,
-          env: {
-            ...process.env,
-            MODE: mode,
-            MYSQL_CONTAINER: 'qwen-code-sdk-java-mysql-123-2',
-          },
+      ],
+      {
+        encoding: 'utf8',
+        timeout: 5000,
+        env: {
+          ...process.env,
+          MODE: mode,
+          MYSQL_CONTAINER: 'qwen-code-sdk-java-mysql-123-2',
         },
+      },
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    for (const fork of [1, 2]) {
+      expect(
+        result.stdout.includes(
+          `DOCKER<rm --force qwen-code-sdk-java-mysql-123-2-${fork}>`,
+        ),
+      ).toBe(mode !== 'missing' && !(mode === 'first-missing' && fork === 1));
+      expect(
+        result.stdout.includes(
+          `::warning::could not remove qwen-code-sdk-java-mysql-123-2-${fork}; the host cleanup service reaps it within ~48h`,
+        ),
+      ).toBe(
+        mode === 'removal-fails' ||
+          (mode === 'first-removal-fails' && fork === 1),
       );
-      expect(result.error).toBeUndefined();
-      expect(result.status, result.stderr).toBe(0);
-      expect(
-        result.stdout.includes(
-          'DOCKER<rm --force qwen-code-sdk-java-mysql-123-2>',
-        ),
-      ).toBe(mode !== 'missing');
-      expect(
-        result.stdout.includes(
-          '::warning::could not remove qwen-code-sdk-java-mysql-123-2; the host cleanup service reaps it within ~48h',
-        ),
-      ).toBe(mode === 'removal-fails');
-    },
-  );
+    }
+  });
 
   it('holds the per-host sdk-java lock once around both Maven runs', () => {
     // Derived from the parsed steps, not a string count: the install and
@@ -1445,15 +1509,30 @@ describe('setup-java Maven cache stays on hosted runners', () => {
 // and qwen-autofix.yml already absorb (#11726); the heap class is capped in
 // pnpm-workspace.yaml, and a retry only offers it a quieter host. Pin the
 // recipe on every install so a new bare step fails here instead of on main.
-// Each attempt re-runs prepare's build (~4m32s observed), not just backoff.
+// For the five installs that do not set QWEN_SKIP_PREPARE, each attempt
+// re-runs prepare's build (~4m32s observed), not just backoff; daemon-e2e
+// skips the build and only runs `npm run generate` on each attempt.
+// Scope is sdk-java.yml: release-sdk-java.yml's install is a bare one-liner
+// with no retry loop or prepare skip, so these assertions do not describe it;
+// its explicit Build/Bundle/Run steps are pinned separately above.
 describe('SDK Java install-transient retry', () => {
-  const installs = Object.entries(parse(workflow).jobs).flatMap(
+  // Mirrors scripts/prepare.js, which skips on '1' or 'true' case-insensitively;
+  // Actions merges workflow/job env into the step environment.
+  const installSkipsPrepare = (step, inheritedEnv = {}) =>
+    ['1', 'true'].includes(
+      String(
+        { ...inheritedEnv, ...step.env }.QWEN_SKIP_PREPARE ?? '',
+      ).toLowerCase(),
+    );
+
+  const parsedWorkflow = parse(workflow);
+  const installs = Object.entries(parsedWorkflow.jobs).flatMap(
     ([jobName, job]) =>
       (job.steps ?? [])
         .filter(
           (s) => typeof s.run === 'string' && s.run.includes('pnpm install'),
         )
-        .map((s) => [jobName, s]),
+        .map((s) => [jobName, s, { ...parsedWorkflow.env, ...job.env }]),
   );
 
   it('finds every install step', () => {
@@ -1465,6 +1544,35 @@ describe('SDK Java install-transient retry', () => {
       'mysql-integration',
       'test',
     ]);
+  });
+
+  it.each(installs)(
+    "%s install warning matches the step's prepare behaviour",
+    (jobName, step, inheritedEnv) => {
+      const skips = installSkipsPrepare(step, inheritedEnv);
+      expect(step.run, jobName).toMatch(
+        new RegExp(
+          '::warning::[^\\n]*' +
+            (skips
+              ? "this step skips prepare's build"
+              : "this step also runs prepare's build"),
+        ),
+      );
+    },
+  );
+
+  it('classifies prepare-skip spellings the way scripts/prepare.js does', () => {
+    for (const value of ['1', 'true', 'TRUE', 1]) {
+      expect(installSkipsPrepare({ env: { QWEN_SKIP_PREPARE: value } })).toBe(
+        true,
+      );
+      expect(installSkipsPrepare({}, { QWEN_SKIP_PREPARE: value })).toBe(true);
+    }
+    for (const value of [undefined, '', '0', 'false']) {
+      expect(installSkipsPrepare({ env: { QWEN_SKIP_PREPARE: value } })).toBe(
+        false,
+      );
+    }
   });
 
   it.each(installs)('%s retries a transient install', (jobName, step) => {

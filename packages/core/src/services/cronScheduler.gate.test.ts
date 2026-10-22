@@ -1,0 +1,490 @@
+/**
+ * @license
+ * Copyright 2026 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * The scheduler's gate path: a job with a gate runs it before onFire, and
+ * the gate's result decides whether, and with what text, the fire is
+ * delivered. See docs/design/2026-10-21-scheduled-task-gate.md.
+ */
+
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Storage } from '../config/storage.js';
+import type {
+  CronGateResult,
+  CronGateRunOptions,
+  CronGateRunner,
+} from './cron-gate.js';
+import { CronScheduler, type CronJob } from './cronScheduler.js';
+import {
+  readCronTasks,
+  taskHasLegacyCondition,
+  updateCronTasks,
+  withTaskGate,
+  writeCronTasks,
+  type DurableCronTask,
+} from './cronTasksFile.js';
+
+const at = (h: number, m: number, sec = 0) => new Date(2025, 0, 15, h, m, sec);
+
+/** Hands each gate run the next scripted result; unscripted runs stay
+ * pending until `release` settles them. */
+function scriptedRunner(results: CronGateResult[] = []) {
+  const calls: Array<{ gate: string; options: CronGateRunOptions }> = [];
+  const pending: Array<(result: CronGateResult) => void> = [];
+  const runner: CronGateRunner = (gate, options) => {
+    calls.push({ gate, options });
+    const next = results.shift();
+    if (next) return Promise.resolve(next);
+    return new Promise((resolve) => pending.push(resolve));
+  };
+  const release = async (result: CronGateResult) => {
+    pending.shift()!(result);
+    await settled();
+  };
+  return { runner, calls, release };
+}
+
+/** Drains the microtask hops between a resolved gate run and its settle. */
+async function settled(): Promise<void> {
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+}
+
+const output = (stdout: string): CronGateResult => ({
+  kind: 'output',
+  stdout,
+  truncated: false,
+  durationMs: 50,
+});
+const quiet: CronGateResult = { kind: 'quiet', durationMs: 20 };
+const failed: CronGateResult = {
+  kind: 'failed',
+  detail: 'exited with code 1',
+  stderr: 'boom',
+  durationMs: 30,
+};
+
+describe('CronScheduler gate', () => {
+  let scheduler: CronScheduler;
+  let fired: CronJob[];
+  const script = scriptedRunner();
+
+  beforeEach(() => {
+    // Only Date is faked: the gate settles on real microtasks, and the
+    // creation minute must sit before the slots the tests tick.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(at(10, 29));
+    script.calls.length = 0;
+    scheduler = new CronScheduler(null, undefined, { runGate: script.runner });
+    fired = [];
+    scheduler.start((job) => fired.push(job));
+  });
+
+  afterEach(() => {
+    scheduler.destroy();
+    vi.useRealTimers();
+  });
+
+  const createGated = (gate = './probe.sh') =>
+    scheduler.create('* * * * *', 'Handle the events below.', true, gate);
+
+  it('skips the fire and records a quiet run when the gate prints nothing', async () => {
+    const job = createGated();
+    script.calls.length = 0;
+    scheduler.tick(at(10, 30, 59));
+    expect(script.calls).toHaveLength(1);
+    await script.release(quiet);
+    expect(fired).toHaveLength(0);
+    expect(job.gateStatus).toMatchObject({
+      lastOutcome: 'quiet',
+      quietSinceDelivery: 1,
+      consecutiveFailures: 0,
+    });
+    expect(job.gateStatus?.lastAt).toBe(at(10, 30).getTime());
+  });
+
+  it('delivers the prompt with the output attached when the gate prints', async () => {
+    const job = createGated();
+    scheduler.tick(at(10, 30, 59));
+    await script.release(output('event: comment\n'));
+    expect(fired).toHaveLength(1);
+    const text = fired[0]!.prompt;
+    expect(text.startsWith('Handle the events below.\n\n')).toBe(true);
+    expect(text).toContain('(`./probe.sh`, exit 0, 0.1 s)');
+    expect(text.endsWith('<gate-output>\nevent: comment\n</gate-output>')).toBe(
+      true,
+    );
+    expect(fired[0]!.id).toBe(job.id);
+    // The stored job keeps its own prompt; only the delivered copy carries
+    // the output.
+    expect(job.prompt).toBe('Handle the events below.');
+    expect(job.gateStatus).toMatchObject({
+      lastOutcome: 'delivered',
+      quietSinceDelivery: 0,
+      lastDeliveredAt: at(10, 30).getTime(),
+    });
+  });
+
+  it('passes the in-process approval to the runner', async () => {
+    const job = createGated();
+    scheduler.tick(at(10, 30, 59));
+    expect(script.calls[0]!.options.approvedInProcess).toBe(false);
+    await script.release(quiet);
+    job.gateApproved = true;
+    scheduler.tick(at(10, 31, 59));
+    expect(script.calls[1]!.options.approvedInProcess).toBe(true);
+    await script.release(quiet);
+  });
+
+  it('reports a failure once per streak and counts the rest', async () => {
+    const job = createGated();
+    scheduler.tick(at(10, 30, 59));
+    await script.release(failed);
+    expect(fired).toHaveLength(1);
+    expect(fired[0]!.prompt).toContain(
+      'its gate command failed, so the task prompt did not run',
+    );
+    expect(fired[0]!.prompt).toContain('`./probe.sh` exited with code 1');
+    expect(fired[0]!.prompt).toContain('<gate-stderr>\nboom\n</gate-stderr>');
+
+    scheduler.tick(at(10, 31, 59));
+    await script.release(failed);
+    expect(fired).toHaveLength(1);
+    expect(job.gateStatus).toMatchObject({
+      lastOutcome: 'failed',
+      consecutiveFailures: 2,
+      lastError: 'exited with code 1',
+    });
+
+    // A success ends the streak; the next failure is reported again.
+    scheduler.tick(at(10, 32, 59));
+    await script.release(quiet);
+    expect(job.gateStatus?.consecutiveFailures).toBe(0);
+    expect(job.gateStatus?.lastError).toBeUndefined();
+    scheduler.tick(at(10, 33, 59));
+    await script.release(failed);
+    expect(fired).toHaveLength(2);
+  });
+
+  it('reports a blocked gate with the rule to add', async () => {
+    createGated();
+    scheduler.tick(at(10, 30, 59));
+    await script.release({
+      kind: 'blocked',
+      reason: 'it has not been approved to run unattended in this session',
+      rule: 'Monitor(./probe.sh)',
+    });
+    expect(fired).toHaveLength(1);
+    expect(fired[0]!.prompt).toContain('was not run because it has not been');
+    expect(fired[0]!.prompt).toContain('`Monitor(./probe.sh)`');
+  });
+
+  it('blocks every gated fire when the scheduler has no runner', async () => {
+    const bare = new CronScheduler();
+    const bareFired: CronJob[] = [];
+    bare.start((job) => bareFired.push(job));
+    try {
+      const job = bare.create('* * * * *', 'watch', true, './probe.sh');
+      bare.tick(at(10, 30, 59));
+      await settled();
+      expect(bareFired).toHaveLength(1);
+      expect(bareFired[0]!.prompt).toContain(
+        'this session cannot run shell commands',
+      );
+      expect(job.gateStatus?.lastOutcome).toBe('blocked');
+    } finally {
+      bare.destroy();
+    }
+  });
+
+  it('runs one gate at a time per job and consumes the slots in between', async () => {
+    createGated();
+    scheduler.tick(at(10, 30, 59));
+    expect(script.calls).toHaveLength(1);
+    scheduler.tick(at(10, 31, 59));
+    expect(script.calls).toHaveLength(1);
+    await script.release(output('late\n'));
+    expect(fired).toHaveLength(1);
+    // The consumed slot does not fire once the gate returns; the next one does.
+    scheduler.tick(at(10, 31, 59));
+    expect(script.calls).toHaveLength(1);
+    scheduler.tick(at(10, 32, 59));
+    expect(script.calls).toHaveLength(2);
+    await script.release(quiet);
+  });
+
+  it('delivers nothing when the job is deleted while its gate runs', async () => {
+    // The cancelled settlement still reaches the listener: the deleted job's
+    // gate may have been the last work a headless run was waiting on.
+    const skipped = vi.fn();
+    scheduler.setGateSkippedListener(skipped);
+    const job = createGated();
+    scheduler.tick(at(10, 30, 59));
+    expect(script.calls[0]!.options.signal.aborted).toBe(false);
+    await scheduler.delete(job.id);
+    expect(script.calls[0]!.options.signal.aborted).toBe(true);
+    expect(scheduler.hasGatesInFlight()).toBe(false);
+    await script.release(output('too late\n'));
+    expect(fired).toHaveLength(0);
+    expect(skipped).toHaveBeenCalledTimes(1);
+  });
+
+  it('delivers nothing when the scheduler stops while a gate runs', async () => {
+    const skipped = vi.fn();
+    scheduler.setGateSkippedListener(skipped);
+    createGated();
+    scheduler.tick(at(10, 30, 59));
+    scheduler.stop();
+    expect(script.calls[0]!.options.signal.aborted).toBe(true);
+    await script.release(output('too late\n'));
+    expect(fired).toHaveLength(0);
+    // stop() is the end of the run, not a settlement to re-check after.
+    expect(skipped).not.toHaveBeenCalled();
+  });
+
+  it('delivers to the consumer a later start() installed while the gate ran', async () => {
+    // ACP installs a fresh callback through start() after every turn while
+    // the timer keeps running; a gate mid-run must not lose its output to it.
+    createGated();
+    scheduler.tick(at(10, 30, 59));
+    const later: CronJob[] = [];
+    scheduler.start((job) => later.push(job));
+    await script.release(output('event: push\n'));
+    expect(fired).toHaveLength(0);
+    expect(later).toHaveLength(1);
+    expect(later[0]!.prompt).toContain(
+      '<gate-output>\nevent: push\n</gate-output>',
+    );
+  });
+
+  it('counts a final fire whose gate still runs and reports a quiet settlement', async () => {
+    // An expiring recurring job (like a one-shot) leaves the map before its
+    // gate runs. Until the gate settles it is still this session's work, and
+    // a quiet settlement reaches no consumer, so the listener is what lets a
+    // headless run notice it is done.
+    scheduler.destroy();
+    scheduler = new CronScheduler(null, 60_000, { runGate: script.runner });
+    scheduler.start((job) => fired.push(job));
+    const skipped = vi.fn();
+    scheduler.setGateSkippedListener(skipped);
+    createGated();
+    expect(scheduler.sessionSize).toBe(1);
+    scheduler.tick(at(10, 30, 59)); // past expiresAt (10:29 + 60 s): final fire
+    expect(scheduler.list()).toHaveLength(0);
+    expect(scheduler.sessionSize).toBe(1);
+    expect(skipped).not.toHaveBeenCalled();
+    await script.release(quiet);
+    expect(fired).toHaveLength(0);
+    expect(skipped).toHaveBeenCalledTimes(1);
+    expect(scheduler.sessionSize).toBe(0);
+  });
+
+  it('tells the listener about a counted failure but not a delivered fire', async () => {
+    const skipped = vi.fn();
+    scheduler.setGateSkippedListener(skipped);
+    createGated();
+    scheduler.tick(at(10, 30, 59));
+    await script.release(failed); // first of the streak: a notice is delivered
+    expect(fired).toHaveLength(1);
+    expect(skipped).not.toHaveBeenCalled();
+    scheduler.tick(at(10, 31, 59));
+    await script.release(failed); // counted only
+    expect(fired).toHaveLength(1);
+    expect(skipped).toHaveBeenCalledTimes(1);
+    scheduler.tick(at(10, 32, 59));
+    await script.release(output('back\n'));
+    expect(fired).toHaveLength(2);
+    expect(skipped).toHaveBeenCalledTimes(1);
+  });
+
+  it('gates a forced fire too', async () => {
+    const job = createGated();
+    expect(scheduler.forceFireJob(job.id)).toBe(true);
+    expect(script.calls).toHaveLength(1);
+    await script.release(output('forced\n'));
+    expect(fired).toHaveLength(1);
+    expect(fired[0]!.prompt).toContain('<gate-output>\nforced\n</gate-output>');
+  });
+
+  it('leaves jobs without a gate alone', () => {
+    scheduler.create('* * * * *', 'plain', true);
+    scheduler.tick(at(10, 30, 59));
+    expect(script.calls).toHaveLength(0);
+    expect(fired).toHaveLength(1);
+    expect(fired[0]!.prompt).toBe('plain');
+  });
+
+  describe('durable tasks', () => {
+    let tmpDir: string;
+
+    beforeEach(async () => {
+      tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cron-gate-test-'));
+      Storage.setRuntimeBaseDir(tmpDir);
+      scheduler.destroy();
+      scheduler = new CronScheduler(tmpDir, undefined, {
+        runGate: script.runner,
+      });
+      fired = [];
+    });
+
+    afterEach(async () => {
+      scheduler.destroy();
+      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+      Storage.setRuntimeBaseDir(null);
+      await fs.rm(tmpDir, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 20,
+      });
+    });
+
+    const reload = () =>
+      (
+        scheduler as unknown as {
+          loadFileTasks(handleMissed: boolean): Promise<void>;
+        }
+      ).loadFileTasks(false);
+
+    it.each<[string, (tasks: DurableCronTask[]) => DurableCronTask[]]>([
+      ['disabled', (tasks) => tasks.map((t) => ({ ...t, enabled: false }))],
+      ['removed', () => []],
+      [
+        'given another gate',
+        (tasks) => tasks.map((t) => withTaskGate(t, './other.sh')),
+      ],
+    ])(
+      'aborts a running gate when the task is %s on disk',
+      async (_what, edit) => {
+        // The paths another session or the daemon's task controls take:
+        // cancelling through the file must stop the command like delete()
+        // does, not let it finish and drop the result.
+        await scheduler.createDurable('* * * * *', 'p', true, './probe.sh');
+        await scheduler.enableDurable('session-1');
+        scheduler.start((j) => fired.push(j));
+        const skipped = vi.fn();
+        scheduler.setGateSkippedListener(skipped);
+        scheduler.tick(at(10, 30, 59));
+        const { signal } = script.calls[0]!.options;
+        expect(signal.aborted).toBe(false);
+        await updateCronTasks(tmpDir, edit);
+        await reload();
+        expect(signal.aborted).toBe(true);
+        expect(scheduler.hasGatesInFlight()).toBe(false);
+        await script.release(output('too late\n'));
+        expect(fired).toHaveLength(0);
+        // Nothing reaches a consumer, so a headless run waiting on this gate
+        // re-checks from the listener.
+        expect(skipped).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each([
+      ['quiet', quiet, 0],
+      ['delivering', output('event: comment\n'), 1],
+    ] as const)(
+      'stamps a gated catch-up at once and books its run only at settlement (%s)',
+      async (_what, result, runs) => {
+        const createdAt = at(7, 0).getTime();
+        await writeCronTasks(tmpDir, [
+          withTaskGate(
+            {
+              id: 'cu1',
+              cron: '0 * * * *',
+              prompt: 'overdue',
+              recurring: true,
+              createdAt,
+              lastFiredAt: createdAt,
+            },
+            './probe.sh',
+          ),
+        ]);
+        await scheduler.enableDurable('session-1');
+        scheduler.start((j) => fired.push(j));
+        expect(script.calls).toHaveLength(1);
+        // The stamp lands before the gate decides, so a restart cannot
+        // replay the catch-up; the run does not.
+        let task: DurableCronTask | undefined;
+        await vi.waitFor(async () => {
+          [task] = await readCronTasks(tmpDir);
+          expect(task?.lastFiredAt).toBe(at(10, 29).getTime());
+        });
+        expect(task?.runs ?? []).toHaveLength(0);
+        await script.release(result);
+        expect(fired).toHaveLength(runs);
+        await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+          .pendingPersist;
+        [task] = await readCronTasks(tmpDir);
+        expect(task?.runs ?? []).toHaveLength(runs);
+        if (runs > 0) {
+          expect(task?.runs?.[0]).toMatchObject({
+            at: at(10, 29).getTime(),
+            kind: 'catch-up',
+            gate: 'delivered',
+            sessionId: 'session-1',
+          });
+        }
+      },
+    );
+
+    it('persists the gate with its downgrade fuse, the status and delivered runs', async () => {
+      const job = await scheduler.createDurable(
+        '* * * * *',
+        'Handle the events below.',
+        true,
+        './probe.sh',
+      );
+      job.gateApproved = true;
+      await scheduler.enableDurable('session-1');
+      scheduler.start((j) => fired.push(j));
+
+      let [task] = await readCronTasks(tmpDir);
+      expect(task).toMatchObject({
+        gate: './probe.sh',
+        condition: './probe.sh',
+      });
+      expect(taskHasLegacyCondition(task!)).toBe(false);
+
+      // A quiet fire books no run; its status rides along with the next slot.
+      scheduler.tick(at(10, 30, 59));
+      await script.release(quiet);
+      scheduler.tick(at(10, 31, 59));
+      await vi.waitFor(async () => {
+        [task] = await readCronTasks(tmpDir);
+        expect(task?.lastFiredAt).toBe(at(10, 31).getTime());
+      });
+      expect(task?.runs ?? []).toHaveLength(0);
+      expect(task?.gateStatus).toMatchObject({
+        lastOutcome: 'quiet',
+        quietSinceDelivery: 1,
+      });
+
+      await script.release(output('event: comment\n'));
+      expect(fired).toHaveLength(1);
+      await vi.waitFor(async () => {
+        [task] = await readCronTasks(tmpDir);
+        expect(task?.runs).toHaveLength(1);
+      });
+      expect(task?.runs?.[0]).toMatchObject({
+        at: at(10, 31).getTime(),
+        kind: 'scheduled',
+        gate: 'delivered',
+        sessionId: 'session-1',
+      });
+      expect(task?.gateStatus).toMatchObject({
+        lastOutcome: 'delivered',
+        quietSinceDelivery: 0,
+      });
+      // The reload keeps the in-process approval for an unchanged gate.
+      expect(scheduler.list().find((j) => j.id === job.id)?.gateApproved).toBe(
+        true,
+      );
+    });
+  });
+});

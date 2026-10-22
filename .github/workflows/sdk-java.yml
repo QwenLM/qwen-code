@@ -637,7 +637,8 @@ jobs:
       # instead, with native AIO disabled and its datadir on tmpfs. The MySQL
       # leg also binary-logs by default into that uncapped tmpfs, and this
       # disposable container has no replica and nothing reads the log.
-      # The only schema is the one the JDBC URL creates on first connect.
+      # Each fork needs its own instance: lock tests assert server-wide
+      # InnoDB deadlock counters, which separate schemas cannot isolate.
       - name: 'Start the database without native AIO'
         shell: 'bash'
         run: |-
@@ -646,46 +647,51 @@ jobs:
           if [[ -n "${DATABASE_ENGINE_ARGS}" ]]; then
             read -r -a engine_args <<< "${DATABASE_ENGINE_ARGS}"
           fi
-          docker run --detach --name "${MYSQL_CONTAINER}" \
-            --publish '127.0.0.1::3306' \
-            --mount type=tmpfs,destination=/var/lib/mysql \
-            --env MYSQL_ROOT_PASSWORD='runtime-broker' \
-            "${DATABASE_IMAGE}" "${engine_args[@]}"
-          # MariaDB ships healthcheck.sh; the MySQL image does not, so each
-          # leg waits on the readiness signal its own image provides.
-          if [[ "${DATABASE_CLIENT}" == 'mariadb' ]]; then
-            health=(docker exec "${MYSQL_CONTAINER}" healthcheck.sh --connect --innodb_initialized)
-          else
-            health=(docker exec "${MYSQL_CONTAINER}" mysqladmin ping --host=127.0.0.1 --user=root --password=runtime-broker --silent)
-          fi
-          # A probe that is itself broken (image bump, renamed healthcheck.sh)
-          # is otherwise indistinguishable from a server still starting.
-          probe_out="${RUNNER_TEMP:-/tmp}/readiness-probe.out"
-          for attempt in {1..60}; do
-            if "${health[@]}" >"${probe_out}" 2>&1; then
-              break
+          for fork in 1 2; do
+            container="${MYSQL_CONTAINER}-${fork}"
+            docker run --detach --name "${container}" \
+              --publish '127.0.0.1::3306' \
+              --mount type=tmpfs,destination=/var/lib/mysql \
+              --env MYSQL_ROOT_PASSWORD='runtime-broker' \
+              "${DATABASE_IMAGE}" "${engine_args[@]}"
+            # MariaDB ships healthcheck.sh; the MySQL image does not, so each
+            # leg waits on the readiness signal its own image provides.
+            if [[ "${DATABASE_CLIENT}" == 'mariadb' ]]; then
+              health=(docker exec "${container}" healthcheck.sh --connect --innodb_initialized)
+            else
+              health=(docker exec "${container}" mysqladmin ping --host=127.0.0.1 --user=root --password=runtime-broker --silent)
             fi
-            if ! docker inspect --format '{{.State.Running}}' "${MYSQL_CONTAINER}" | grep -qx true; then
-              docker logs "${MYSQL_CONTAINER}" || true
-              echo "::error::${DATABASE_IMAGE} container stopped during startup; last ${DATABASE_CLIENT} readiness probe said: $(cat "${probe_out}")"
-              exit 1
-            fi
-            if [[ "${attempt}" == '60' ]]; then
-              docker logs "${MYSQL_CONTAINER}" || true
-              echo "::error::${DATABASE_IMAGE} not ready after 60 probes; last ${DATABASE_CLIENT} readiness probe said: $(cat "${probe_out}")"
-              exit 1
-            fi
-            sleep 2
+            # A probe that is itself broken (image bump, renamed healthcheck.sh)
+            # is otherwise indistinguishable from a server still starting.
+            probe_out="${RUNNER_TEMP:-/tmp}/readiness-probe-${fork}.out"
+            for attempt in {1..60}; do
+              if "${health[@]}" >"${probe_out}" 2>&1; then
+                break
+              fi
+              if ! docker inspect --format '{{.State.Running}}' "${container}" | grep -qx true; then
+                docker logs "${container}" || true
+                echo "::error::${DATABASE_IMAGE} container stopped during startup; last ${DATABASE_CLIENT} readiness probe said: $(cat "${probe_out}")"
+                exit 1
+              fi
+              if [[ "${attempt}" == '60' ]]; then
+                docker logs "${container}" || true
+                echo "::error::${DATABASE_IMAGE} not ready after 60 probes; last ${DATABASE_CLIENT} readiness probe said: $(cat "${probe_out}")"
+                exit 1
+              fi
+              sleep 2
+            done
+            port="$(docker inspect --format '{{(index (index .NetworkSettings.Ports "3306/tcp") 0).HostPort}}' "${container}")"
+            echo "MYSQL_PORT_${fork}=${port}" >> "${GITHUB_ENV}"
           done
-          MYSQL_PORT="$(docker inspect --format '{{(index (index .NetworkSettings.Ports "3306/tcp") 0).HostPort}}' "${MYSQL_CONTAINER}")"
-          echo "MYSQL_PORT=${MYSQL_PORT}" >> "${GITHUB_ENV}"
       - name: 'Configure the database packet budget for large-object tests'
         run: |-
           # Connector/J hex-encodes the 32 MiB LONGBLOB fixture into a ~67 MiB
           # query, so the budget must sit above it: the inventory's byte-limit
           # gate, not the server packet limit, is what the test exercises.
-          # Set this job's disposable container before its first JDBC connection.
-          docker exec "${MYSQL_CONTAINER}" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" '"${DATABASE_CLIENT}"' --user=root --execute="SET GLOBAL max_allowed_packet=134217728; SELECT @@GLOBAL.max_allowed_packet"'
+          # Set both disposable containers before their first JDBC connections.
+          for fork in 1 2; do
+            docker exec "${MYSQL_CONTAINER}-${fork}" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" '"${DATABASE_CLIENT}"' --user=root --execute="SET GLOBAL max_allowed_packet=134217728; SELECT @@GLOBAL.max_allowed_packet"'
+          done
       - name: 'Set up Node.js 22 (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -754,8 +760,12 @@ jobs:
           # The shell owns the lock; Maven children must not extend its lifetime.
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install 9>&-
           cd packages/managed-agent-server
+          # Keep mysql.url for release runs that check out an older tag.
           mvn --batch-mode --no-transfer-progress -Pmysql-integration \
-            -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
+            -Dmysql.integration.forks=2 \
+            -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
+            -Dmysql.url.1="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
+            -Dmysql.url.2="jdbc:mysql://127.0.0.1:${MYSQL_PORT_2}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
             -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check 9>&-
           # Close the cache loop inside the same lock: the one-way seed
           # above alone does not recapture the Server dependency tree after
@@ -792,15 +802,18 @@ jobs:
       # The host's docker cleanup service fires once a day and reaps qwen-code-*
       # containers only past a strict 24h age gate, so a cancelled job can strand
       # a running database server on the shared pool for up to ~48h.
-      - name: 'Remove the database container'
+      - name: 'Remove the database containers'
         if: '${{ always() }}'
         shell: 'bash'
         run: |-
           set -uo pipefail
-          if docker inspect "${MYSQL_CONTAINER}" >/dev/null 2>&1; then
-            docker rm --force "${MYSQL_CONTAINER}" ||
-              echo "::warning::could not remove ${MYSQL_CONTAINER}; the host cleanup service reaps it within ~48h"
-          fi
+          for fork in 1 2; do
+            container="${MYSQL_CONTAINER}-${fork}"
+            if docker inspect "${container}" >/dev/null 2>&1; then
+              docker rm --force "${container}" ||
+                echo "::warning::could not remove ${container}; the host cleanup service reaps it within ~48h"
+            fi
+          done
 
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
@@ -1956,7 +1969,7 @@ jobs:
           for attempt in 1 2 3; do
             if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
               if [[ "${attempt}" != "1" ]]; then
-                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step also runs prepare's build, so check the failure class before counting it toward #11726."
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step skips prepare's build, so check the failure class before counting it toward #11726."
               fi
               break
             fi
