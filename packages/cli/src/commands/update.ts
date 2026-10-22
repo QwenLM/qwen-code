@@ -5,12 +5,14 @@
  */
 
 import type { CommandModule } from 'yargs';
-import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
 import { initializeI18n, resolveLanguageSetting, t } from '../i18n/index.js';
 
 interface UpdateArgs {
   targetVersion?: string;
 }
+
+/** Longest rejected-target or download error echoed to stderr. */
+const UPDATE_ERROR_ECHO_LIMIT = 500;
 
 export const updateCommand: CommandModule<object, UpdateArgs> = {
   command: 'update',
@@ -43,7 +45,8 @@ export const updateCommand: CommandModule<object, UpdateArgs> = {
     const { formatUpdateInstructions, getInstallationInfo } =
       installationInfoModule;
     const { performStandaloneUpdate, normalizeVersion } = standaloneUpdate;
-    const { writeStdoutLine, writeStderrLine } = stdioHelpers;
+    const { sanitizeForStderr, writeStdoutLine, writeStderrLine } =
+      stdioHelpers;
 
     const cwd = process.cwd();
     const settings = loadSettings(cwd, false);
@@ -56,14 +59,11 @@ export const updateCommand: CommandModule<object, UpdateArgs> = {
       try {
         targetVersion = normalizeVersion(argv.targetVersion).slice(1);
       } catch (err) {
-        // The flag value is raw argv: collapse whitespace and strip terminal
-        // escapes, control and bidi-format characters before echoing it.
-        const reason = stripAnsiAndControl(
-          (err instanceof Error ? err.message : String(err)).replace(
-            /\s+/g,
-            ' ',
-          ),
-        ).replace(/\p{Cf}/gu, '');
+        // The flag value is raw argv, so the echoed rejection is untrusted.
+        const reason = sanitizeForStderr(
+          err instanceof Error ? err.message : String(err),
+          UPDATE_ERROR_ECHO_LIMIT,
+        );
         writeStderrLine(t('Update failed: {{error}}', { error: reason }));
         process.exitCode = 1;
         return;
@@ -134,7 +134,10 @@ export const updateCommand: CommandModule<object, UpdateArgs> = {
       } catch (err) {
         writeStderrLine(
           t('Update failed: {{error}}', {
-            error: err instanceof Error ? err.message : String(err),
+            error: sanitizeForStderr(
+              err instanceof Error ? err.message : String(err),
+              UPDATE_ERROR_ECHO_LIMIT,
+            ),
           }),
         );
         process.exitCode = 1;

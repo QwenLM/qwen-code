@@ -1463,7 +1463,9 @@ async function applyStandaloneUpdate(
       !hasStandaloneRuntimeLayout(newInstallDir, target) ||
       !fs.existsSync(path.join(newInstallDir, 'lib', 'cli-entry.js'))
     ) {
-      throw new Error('Archive manifest does not match the requested release');
+      throw new Error(
+        'Downloaded archive is missing the standalone executable layout (launcher, bundled runtime, lib/cli-entry.js)',
+      );
     }
     debugLogger.info('Running smoke test...');
     await smokeTest(newInstallDir, target, runtime, newVersion);

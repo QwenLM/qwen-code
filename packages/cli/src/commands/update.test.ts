@@ -58,7 +58,8 @@ vi.mock('../ui/standalone-update.js', async (importOriginal) => ({
   performStandaloneUpdate,
 }));
 vi.mock('../utils/package.js', () => ({ getPackageJson }));
-vi.mock('../utils/stdioHelpers.js', () => ({
+vi.mock('../utils/stdioHelpers.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/stdioHelpers.js')>()),
   writeStdoutLine,
   writeStderrLine,
 }));
@@ -143,7 +144,7 @@ describe('update command', () => {
     // terminal escapes to stderr.
     '1.2.3\u001b]52;c;aGk=\u0007',
   ])(
-    'rejects invalid target %s before discovery or installation',
+    'rejects invalid target %j before discovery or installation',
     async (targetVersion) => {
       await updateCommand.handler({ ...updateArgs, targetVersion });
       expect(process.exitCode).toBe(1);
@@ -155,6 +156,54 @@ describe('update command', () => {
       expect(performStandaloneUpdate).not.toHaveBeenCalled();
     },
   );
+
+  it('strips bidi-format characters from an echoed rejection', async () => {
+    await updateCommand.handler({
+      ...updateArgs,
+      targetVersion: '1.2.3\u202e',
+    });
+    expect(process.exitCode).toBe(1);
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.not.stringContaining('\u202e'),
+    );
+  });
+
+  it('collapses an interior whitespace run in an echoed rejection', async () => {
+    await updateCommand.handler({
+      ...updateArgs,
+      targetVersion: '1.2.3   x',
+    });
+    expect(process.exitCode).toBe(1);
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'Update failed: Invalid version format: 1.2.3 x',
+    );
+  });
+
+  it('bounds an over-long rejected target echoed to stderr', async () => {
+    await updateCommand.handler({
+      ...updateArgs,
+      targetVersion: '1.2.3-' + 'a'.repeat(5000),
+    });
+    expect(process.exitCode).toBe(1);
+    const message = String(writeStderrLine.mock.calls.at(-1)?.[0]);
+    expect(message.length).toBeLessThanOrEqual(540);
+    expect(message).toContain('…');
+  });
+
+  it('sanitizes a download failure that carries terminal controls', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/test/qwen',
+    });
+    performStandaloneUpdate.mockRejectedValue(
+      new Error('mirror said \u001b]52;c;aGk=\u0007nope'),
+    );
+    await updateCommand.handler({ ...updateArgs, targetVersion: '1.2.3' });
+    expect(process.exitCode).toBe(1);
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'Update failed: mirror said nope',
+    );
+  });
 
   it('rejects an unmanaged exact target without suggesting an unpinned upgrade', async () => {
     await updateCommand.handler({ ...updateArgs, targetVersion: 'v1.2.3' });

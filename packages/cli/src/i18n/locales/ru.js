@@ -2194,8 +2194,6 @@ export default {
   // Update command
   'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
     'Обновление до указанной версии требует автономной установки. Установите версию {{version}} вручную, используя текущий способ установки.',
-  'Install an exact version without querying npm':
-    'Установить указанную версию без запроса к npm',
   'Check for Qwen Code updates and install if available':
     'Проверить обновления Qwen Code и установить при наличии',
   'Qwen Code update available! {{current}} → {{latest}}':

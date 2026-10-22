@@ -1564,20 +1564,21 @@ describe('standalone-update', () => {
       await expect(
         performStandaloneUpdate(standaloneDir, '1.2.3'),
       ).rejects.toThrow(
-        'Archive manifest does not match the requested release',
+        'Downloaded archive is missing the standalone executable layout (launcher, bundled runtime, lib/cli-entry.js)',
       );
       expectInstallationPreserved();
     });
 
     it('preserves the installation when the archive omits the launcher entry point', async () => {
       vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
-      // The launcher execs lib/cli-entry.js while the smoke test probes
-      // lib/cli.js, so only this gate clause ever looks for it.
+      // The fixture interpreter ignores its arguments, so the smoke test's
+      // own lib/cli-entry.js probe exits 0 here; only this gate clause
+      // rejects the entryless tree. In production smokeTest also execs it.
       await serveArchive({ runnable: true, entryless: true });
       await expect(
         performStandaloneUpdate(standaloneDir, '1.2.3'),
       ).rejects.toThrow(
-        'Archive manifest does not match the requested release',
+        'Downloaded archive is missing the standalone executable layout (launcher, bundled runtime, lib/cli-entry.js)',
       );
       expectInstallationPreserved();
     });
@@ -1782,7 +1783,7 @@ describe('standalone-update', () => {
         const failed = await prepareStandaloneUpdate(standaloneDir, '1.2.3');
         pending = failed;
         await expect(failed.activate()).rejects.toThrow(
-          'Archive manifest does not match the requested release',
+          'Downloaded archive is missing the standalone executable layout (launcher, bundled runtime, lib/cli-entry.js)',
         );
         expect(cachedArchives()).toHaveLength(0);
         expectInstallationPreserved();
@@ -1810,7 +1811,7 @@ describe('standalone-update', () => {
         await expect(
           performStandaloneUpdate(standaloneDir, '1.2.3'),
         ).rejects.toThrow(
-          'Archive manifest does not match the requested release',
+          'Downloaded archive is missing the standalone executable layout (launcher, bundled runtime, lib/cli-entry.js)',
         );
 
         expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
@@ -1837,7 +1838,7 @@ describe('standalone-update', () => {
       await expect(
         performStandaloneUpdate(standaloneDir, 'v1.2.3'),
       ).rejects.toThrow(
-        'Archive manifest does not match the requested release',
+        'Downloaded archive is missing the standalone executable layout (launcher, bundled runtime, lib/cli-entry.js)',
       );
       expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
         `${baseUrl}/v1.2.3/${filename}`,

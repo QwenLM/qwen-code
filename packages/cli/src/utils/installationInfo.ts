@@ -454,15 +454,15 @@ function isStandaloneInstallDir(installDir: string): boolean {
 }
 
 /**
- * Resolves the executable layout every standalone archive must ship for the
- * given target: the launcher and the bundled runtime. Keyed on the target
- * rather than the host platform so update verification can validate an
- * archive before activation regardless of where the check runs. The layout
- * itself is owned by scripts/create-standalone-package.js (writeShims and
- * the runtime installer); the updater's smokeTest consumes the same paths
- * through this helper so the gate and the smoke test cannot drift apart.
+ * Resolves the launcher and bundled-runtime paths a standalone archive must
+ * ship for the given target. Keyed on the archive target rather than the
+ * host platform: `applyStandaloneUpdate` validates an extracted archive whose
+ * target comes from its manifest. The layout is produced by
+ * scripts/create-standalone-package.js (writeShims and the runtime
+ * installer); keep this in sync when that layout changes. `smokeTest`
+ * resolves the flavor's own interpreter separately.
  */
-export function standaloneRuntimePaths(
+function standaloneRuntimePaths(
   installDir: string,
   target: string,
 ): { launcher: string; node: string } {

@@ -14,11 +14,10 @@ import {
   FatalBudgetExceededError,
   ToolErrorType,
   createDebugLogger,
-  stripAnsiAndControl,
 } from '@qwen-code/qwen-code-core';
 import type { BudgetExceeded } from './runBudget.js';
 import { runExitCleanup } from './cleanup.js';
-import { writeStderrLine } from './stdioHelpers.js';
+import { sanitizeForStderr, writeStderrLine } from './stdioHelpers.js';
 
 const debugLogger = createDebugLogger('CLI_ERRORS');
 
@@ -193,19 +192,6 @@ const TOOL_NAME_ECHO_LIMIT = 64;
 
 /** Longest denial reason echoed to stderr in a denied-tool warning. */
 const DENIAL_REASON_ECHO_LIMIT = 500;
-
-/**
- * A denial reason can be a hook's stderr or JSON `reason`, and a tool name
- * comes from the model, so neither is trusted terminal output. Collapse
- * whitespace to one line, drop terminal escapes, control and Unicode format
- * characters (bidi overrides, zero-width), and bound the length.
- */
-function sanitizeForStderr(text: string, limit: number): string {
-  const clean = stripAnsiAndControl(text.replace(/\s+/g, ' '))
-    .replace(/\p{Cf}/gu, '')
-    .trim();
-  return clean.length > limit ? `${clean.slice(0, limit)}…` : clean;
-}
 
 /**
  * Handles tool execution errors specifically.
