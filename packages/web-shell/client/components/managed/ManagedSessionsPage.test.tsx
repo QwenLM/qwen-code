@@ -1606,6 +1606,210 @@ describe('ManagedSessionsPage', () => {
     }
   });
 
+  it.each(['completed', 'failed', 'cancelled'] as const)(
+    'retains selected status after switching and clears a background %s task without losing paged rows',
+    async (phase) => {
+      vi.useFakeTimers();
+      const bound = { workspaceId: 'ws-a', cwdRelative: '.' };
+      let first = summary('s1', { phase: 'tool_running', workspace: bound });
+      const second = summary('s2', { workspace: bound });
+      const paged = summary('s3', { workspace: bound });
+      mocks.client.getSession.mockImplementation(async (id: string) =>
+        id === 's1' ? first : second,
+      );
+      mocks.client.listSessions
+        .mockResolvedValueOnce({
+          sessions: [{ ...first, phase: 'admitted', updatedAt: 19 }, second],
+          nextCursor: 'next',
+        })
+        .mockResolvedValue({ sessions: [paged] });
+      provider.workspaceBinding = {
+        agentId: 'agent',
+        list: vi.fn().mockResolvedValue({
+          data: [
+            {
+              workspaceId: 'ws-a',
+              displayName: 'Project',
+              state: 'active',
+              canCreateSession: true,
+            },
+          ],
+          supported: true,
+        }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      };
+      const slot = document.createElement('aside');
+      document.body.appendChild(slot);
+      const row = (id: string) =>
+        slot.querySelector(`[data-managed-session-id="${id}"]`)!;
+      try {
+        await render('s1', 'en', provider, slot);
+        expect(row('s1').getAttribute('title')).toBe('Executing tool');
+        await render('s2', 'en', provider, slot);
+        expect(row('s1').getAttribute('title')).toBe('Executing tool');
+        expect(
+          row('s1').querySelector('[data-web-shell-session-running]'),
+        ).not.toBeNull();
+        await act(async () =>
+          slot
+            .querySelector<HTMLButtonElement>(
+              '[aria-label="Load more Managed sessions"]',
+            )!
+            .click(),
+        );
+        first = { ...first, phase, updatedAt: 30 };
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(3000);
+          await flush();
+        });
+        expect(
+          row('s1').querySelector('[data-web-shell-session-running]'),
+        ).toBeNull();
+        expect(row('s3')).not.toBeNull();
+        expect(mocks.client.listSessions).toHaveBeenCalledTimes(2);
+        const firstReads = mocks.client.getSession.mock.calls.filter(
+          ([id]) => id === 's1',
+        ).length;
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(6000);
+          await flush();
+        });
+        expect(
+          mocks.client.getSession.mock.calls.filter(([id]) => id === 's1'),
+        ).toHaveLength(firstReads);
+        expect(
+          mocks.client.getSession.mock.calls.some(([id]) => id === 's3'),
+        ).toBe(false);
+      } finally {
+        slot.remove();
+      }
+    },
+  );
+
+  it('discards an old background read when that session becomes selected', async () => {
+    vi.useFakeTimers();
+    const active = summary('s1', { phase: 'agent_running' });
+    const complete = { ...active, phase: 'completed' as const, updatedAt: 30 };
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [active, summary('s2')],
+    });
+    let resolve!: (value: ManagedAgentSessionSummary) => void;
+    let oldSignal: AbortSignal | undefined;
+    mocks.client.getSession.mockImplementation(
+      (id: string, options: { signal: AbortSignal }) => {
+        if (id === 's1') {
+          oldSignal = options.signal;
+          return new Promise((done) => {
+            resolve = done;
+          });
+        }
+        return Promise.resolve(summary(id));
+      },
+    );
+    await render('s2');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+      await flush();
+    });
+    expect(oldSignal?.aborted).toBe(false);
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      id === 's1' ? complete : summary(id),
+    );
+    await render('s1');
+    expect(oldSignal?.aborted).toBe(true);
+    await act(async () => {
+      resolve(active);
+      await flush();
+    });
+    const nav = container.querySelector('nav')!;
+    expect(nav.textContent).toContain('Task s1Completed');
+    expect(nav.textContent).not.toContain('Thinking / responding');
+  });
+
+  it.each([19, 20])(
+    'keeps a confirmed background phase when a late catalog has timestamp %s',
+    async (updatedAt) => {
+      vi.useFakeTimers();
+      const bound = { workspaceId: 'ws-a', cwdRelative: '.' };
+      let first = summary('s1', { phase: 'agent_running', workspace: bound });
+      const second = summary('s2', { workspace: bound });
+      let resolveList!: (value: {
+        sessions: ManagedAgentSessionSummary[];
+        nextCursor?: string;
+      }) => void;
+      mocks.client.listSessions
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveList = resolve;
+            }),
+        )
+        .mockResolvedValue({
+          sessions: [{ ...first, phase: 'created', updatedAt }],
+        });
+      mocks.client.getSession.mockImplementation(async (id: string) =>
+        id === 's1' ? first : second,
+      );
+      provider.workspaceBinding = {
+        agentId: 'agent',
+        list: vi.fn().mockResolvedValue({
+          data: [
+            {
+              workspaceId: 'ws-a',
+              displayName: 'Project',
+              state: 'active',
+              canCreateSession: true,
+            },
+          ],
+          supported: true,
+        }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      };
+      const slot = document.createElement('aside');
+      document.body.appendChild(slot);
+      const row = () => slot.querySelector('[data-managed-session-id="s1"]')!;
+      try {
+        await render('s1', 'en', provider, slot);
+        expect(
+          row().querySelector('[data-web-shell-session-running]'),
+        ).not.toBeNull();
+        await render('s2', 'en', provider, slot);
+        await act(async () => {
+          resolveList({
+            sessions: [{ ...first, phase: 'created', updatedAt }, second],
+            nextCursor: 'older',
+          });
+          await flush();
+        });
+        expect(
+          row().querySelector('[data-web-shell-session-running]'),
+        ).not.toBeNull();
+        await act(async () =>
+          slot
+            .querySelector<HTMLButtonElement>(
+              '[aria-label="Load more Managed sessions"]',
+            )!
+            .click(),
+        );
+        expect(
+          row().querySelector('[data-web-shell-session-running]'),
+        ).not.toBeNull();
+        first = { ...first, phase: 'completed', updatedAt: 30 };
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(3000);
+          await flush();
+        });
+        expect(
+          row().querySelector('[data-web-shell-session-running]'),
+        ).toBeNull();
+      } finally {
+        slot.remove();
+      }
+    },
+  );
+
   it.each([false, true])(
     'keeps hidden flat navigation separate from results with a dedicated open callback (%s)',
     async (dedicatedOpen) => {

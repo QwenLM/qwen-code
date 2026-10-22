@@ -167,6 +167,56 @@ describe('Managed workspace navigation', () => {
     );
   });
 
+  it.each([
+    ['created', false],
+    ['admitted', true],
+    ['runtime_starting', true],
+    ['agent_running', true],
+    ['waiting_runtime', true],
+    ['tool_running', true],
+    ['cancelling', true],
+    ['completed', false],
+    ['failed', false],
+    ['cancelled', false],
+  ] as const)(
+    'uses daemon running indicators for %s',
+    async (phase, running) => {
+      await render({
+        sessions: [{ ...session('one', 'a'), phase }],
+        active: false,
+      });
+      const row = container.querySelector('[data-managed-session-id="one"]')!;
+      expect(
+        Boolean(row.querySelector('[data-web-shell-session-running]')),
+      ).toBe(running);
+      expect(
+        Boolean(row.querySelector('[role="status"][aria-label="Running"]')),
+      ).toBe(running);
+      expect(row.getAttribute('aria-current')).toBeNull();
+      await act(async () => (row as HTMLButtonElement).click());
+      expect(selectSession).toHaveBeenCalledWith('one', 'a');
+    },
+  );
+
+  it('removes both running indicators when a task settles without changing selection', async () => {
+    await render({
+      sessions: [{ ...session('one', 'a'), phase: 'agent_running' }],
+    });
+    expect(
+      group('a').querySelector('[data-web-shell-session-running]'),
+    ).not.toBeNull();
+    await render({ sessions: [session('one', 'a')] });
+    expect(
+      group('a').querySelector('[data-web-shell-session-running]'),
+    ).toBeNull();
+    expect(
+      group('a').querySelector('[role="status"][aria-label="Running"]'),
+    ).toBeNull();
+    expect(container.querySelector('[aria-current="page"]')?.textContent).toBe(
+      'Task one',
+    );
+  });
+
   it('filters by common workspace or session search without reloading the catalog', async () => {
     list.mockResolvedValue({
       data: [

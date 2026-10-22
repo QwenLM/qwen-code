@@ -69,6 +69,7 @@ import { ManagedSessionProgress } from './ManagedSessionProgress';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
 import type { ManagedCreationSkillsSource } from './managed-creation-skills';
 import { ManagedWorkspaceNavigation } from './ManagedWorkspaceNavigation';
+import { isManagedSessionRunning } from './managed-agent-provider';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
 import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
@@ -97,6 +98,25 @@ interface PendingPrompt {
   sessionId?: string;
   cwd?: string;
   input?: ManagedInputBlock[];
+}
+
+function mergeManagedSessionCatalog(
+  current: ManagedAgentSessionSummary[],
+  page: ManagedAgentSessionSummary[],
+): ManagedAgentSessionSummary[] {
+  const known = new Map(current.map((session) => [session.sessionId, session]));
+  const merged = new Map<string, ManagedAgentSessionSummary>();
+  for (const session of page) {
+    const previous = known.get(session.sessionId);
+    merged.set(
+      session.sessionId,
+      previous && previous.updatedAt >= session.updatedAt ? previous : session,
+    );
+  }
+  for (const session of current) {
+    if (!merged.has(session.sessionId)) merged.set(session.sessionId, session);
+  }
+  return [...merged.values()];
 }
 
 function readPending(
@@ -752,7 +772,9 @@ function ManagedSessionsContent({
       })
       .then((page) => {
         if (abort.signal.aborted) return;
-        setSessions(page.sessions);
+        setSessions((current) =>
+          mergeManagedSessionCatalog(current, page.sessions),
+        );
         setNextCursor(page.nextCursor);
       })
       .catch((failure: unknown) => {
@@ -766,6 +788,65 @@ function ManagedSessionsContent({
       });
     return () => abort.abort();
   }, [provider, clientId, listCwd, listRevision, archiveState]);
+
+  useEffect(() => {
+    const current = detail.summary;
+    if (!current || current.sessionId !== sessionId) return;
+    setSessions((rows) => {
+      const previous = rows.find((row) => row.sessionId === current.sessionId);
+      if (previous === current) return rows;
+      return previous
+        ? rows.map((row) =>
+            row.sessionId === current.sessionId ? current : row,
+          )
+        : [...rows, current];
+    });
+  }, [detail.summary, sessionId, sessions]);
+
+  const backgroundSessionIds = JSON.stringify(
+    sessions
+      .filter(
+        (row) =>
+          row.sessionId !== sessionId && isManagedSessionRunning(row.phase),
+      )
+      .map((row) => row.sessionId)
+      .sort(),
+  );
+  useEffect(() => {
+    const ids = JSON.parse(backgroundSessionIds) as string[];
+    if (!ids.length) return;
+    const abort = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      const results = await Promise.allSettled(
+        ids.map((id) =>
+          provider.getSession(id, { clientId, signal: abort.signal }),
+        ),
+      );
+      if (abort.signal.aborted) return;
+      const updates = new Map<string, ManagedAgentSessionSummary>();
+      results.forEach((result, index) => {
+        if (
+          result.status === 'fulfilled' &&
+          result.value.sessionId === ids[index]
+        ) {
+          updates.set(result.value.sessionId, result.value);
+        }
+      });
+      setSessions((rows) =>
+        rows.map((row) => {
+          const update = updates.get(row.sessionId);
+          return update && update.updatedAt >= row.updatedAt ? update : row;
+        }),
+      );
+      timer = setTimeout(() => void poll(), 3000);
+    };
+    timer = setTimeout(() => void poll(), 3000);
+    return () => {
+      abort.abort();
+      clearTimeout(timer);
+    };
+  }, [provider, clientId, backgroundSessionIds]);
 
   const reloadSession = detail.reload;
   const refresh = useCallback(() => {
@@ -793,7 +874,10 @@ function ManagedSessionsContent({
       if (abort.signal.aborted) return;
       setSessions((current) => [
         ...new Map(
-          [...current, ...page.sessions].map((item) => [item.sessionId, item]),
+          [
+            ...current,
+            ...mergeManagedSessionCatalog(current, page.sessions),
+          ].map((item) => [item.sessionId, item]),
         ).values(),
       ]);
       setNextCursor(page.nextCursor);
