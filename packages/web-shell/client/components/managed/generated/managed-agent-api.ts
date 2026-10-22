@@ -942,6 +942,8 @@ export interface components {
             requestId?: string | null;
             idempotencyKey: string;
             agentId: string;
+            /** @description Optional host-catalog model for a bound built-in qwen-code Session. Requires modelSelectionSupported. Persisted atomically before the first Turn and included in creation idempotency; omission preserves the default model and old digest. */
+            modelId?: string;
             /** @description Planned; phase one rejects non-blank values. */
             environmentId?: string | null;
             /** @description The server enforces the bound in UTF-16 code units (Java String.length()), so an astral character counts as two: a title this schema's code-point maxLength accepts can still exceed the server's 256-unit bound and answer 400 invalid_title. */
@@ -1703,6 +1705,8 @@ export interface components {
             planModeSupported?: boolean;
             /** @description Optional deployment capability; missing means false. */
             inputAttachments?: boolean;
+            /** @description Optional capability for modelId on Workspace creation. Missing means false. */
+            modelSelectionSupported?: boolean;
             /** @description Optional deployment capability; missing means false. Requires a compatible Harness and durable Session Store. */
             skillsSupported?: boolean;
         };

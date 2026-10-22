@@ -13,11 +13,18 @@ deployments, marker repair, and filesystem sandboxing are outside this change.
 ## Authority
 
 Add `runtime-broker.local-directory-import-enabled`, default `false`. Startup
-requires a loopback public listener, OPEN authentication with a configured
-trusted actor header, Workspace files, durable local-process execution, and
-verified recovery. This is an explicit single-user host capability. Publish
+requires a loopback public listener, either SIGNED authentication or OPEN
+authentication with a configured trusted actor header, Workspace files, durable
+local-process execution, and verified recovery. This is an explicit single-user host capability. Publish
 `localDirectoryImport` independently from existing directory selection and empty
 Workspace creation. Every request still requires an authenticated tenant actor.
+
+The single-user `serve --managed` launcher enables this capability in its
+controlled Java environment. It retains browser bearer authentication, fixed
+local tenant/actor identity, signed proxy requests and the private loopback Java
+listener. Signed mode authenticates the actor through the existing signature
+filter and does not accept a trusted-header substitute. Non-loopback import
+listeners remain forbidden even with the insecure-bind override.
 
 ## Import lifecycle
 
@@ -102,3 +109,8 @@ Targeted Java/MySQL and TypeScript/browser checks are recorded separately from
 the interrupted full Java suite in `.qwen/e2e-tests/`. No unresolved product
 decisions remain. Ordinary creation receipts omit the unused import field so
 they remain readable by previous Java versions.
+
+The local-launcher follow-up also verifies loopback SIGNED startup, retained
+bearer/signature refusals, absolute-path browser import, an actual Read tool
+turn and restart retention on native macOS. Detailed command results and test
+artifact limitations remain in `.qwen/e2e-tests/managed-local-import.md`.

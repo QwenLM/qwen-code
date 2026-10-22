@@ -134,6 +134,7 @@ class SessionRowLockOrderTest {
     // new sibling turn-row access — fails here instead of passing
     // unaudited.
     private static final Set<String> SIBLING_SESSION_LOCKERS = Set.of(
+            "HarnessPlacementStore.java",
             "ManagedActionStore.java", "ManagedExtensionRecordStore.java",
             "ManagedLegacySessionGuard.java",
             "ManagedProjectionResourceCollector.java",
