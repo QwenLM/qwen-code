@@ -13,6 +13,12 @@ export type ManagedAgentSessionPhase =
   | 'failed'
   | 'cancelled';
 
+export function isManagedSessionRunning(
+  phase: ManagedAgentSessionPhase,
+): boolean {
+  return !['created', 'completed', 'failed', 'cancelled'].includes(phase);
+}
+
 export type ManagedAgentRuntimeState =
   | 'unknown'
   | 'starting'
