@@ -807,9 +807,14 @@ interface UseTextBufferProps {
   isValidPath: (path: string) => boolean;
   shellModeActive?: boolean; // Whether the text buffer is in shell mode
   preferredEditor?: EditorType;
+  pasteHistory?: {
+    capture: () => ReadonlyMap<string, string>;
+    restore: (snapshot: ReadonlyMap<string, string>) => void;
+  };
 }
 
 interface UndoHistoryEntry {
+  pasteHistory?: ReadonlyMap<string, string>;
   lines: string[];
   cursorRow: number;
   cursorCol: number;
@@ -1140,6 +1145,7 @@ export type TextBufferGeometry = Pick<
 >;
 
 export interface TextBufferState {
+  pasteHistory?: ReadonlyMap<string, string>;
   lines: string[];
   cursorRow: number;
   cursorCol: number;
@@ -1160,6 +1166,9 @@ export const pushUndo = (currentState: TextBufferState): TextBufferState => {
     lines: [...currentState.lines],
     cursorRow: currentState.cursorRow,
     cursorCol: currentState.cursorCol,
+    ...(currentState.pasteHistory
+      ? { pasteHistory: currentState.pasteHistory }
+      : {}),
   };
   const newStack = [...currentState.undoStack, snapshot];
   if (newStack.length > historyLimit) {
@@ -1855,6 +1864,7 @@ function textBufferReducerLogic(
         lines: [...state.lines],
         cursorRow: state.cursorRow,
         cursorCol: state.cursorCol,
+        ...(state.pasteHistory ? { pasteHistory: state.pasteHistory } : {}),
       };
       return {
         ...state,
@@ -1872,6 +1882,7 @@ function textBufferReducerLogic(
         lines: [...state.lines],
         cursorRow: state.cursorRow,
         cursorCol: state.cursorCol,
+        ...(state.pasteHistory ? { pasteHistory: state.pasteHistory } : {}),
       };
       return {
         ...state,
@@ -2232,6 +2243,7 @@ export function useTextBuffer({
   isValidPath,
   shellModeActive = false,
   preferredEditor,
+  pasteHistory,
 }: UseTextBufferProps): TextBuffer {
   const initialState = useMemo((): TextBufferState => {
     const lines = initialText.split('\n');
@@ -2261,8 +2273,21 @@ export function useTextBuffer({
   const stateRef = useRef(initialState);
   const [state, setState] = useState(initialState);
 
+  const pasteHistoryRef = useRef(pasteHistory);
+  pasteHistoryRef.current = pasteHistory;
   const dispatch = useCallback((action: TextBufferAction) => {
-    stateRef.current = textBufferReducer(stateRef.current, action);
+    const history = pasteHistoryRef.current;
+    let before = stateRef.current;
+    if (history) {
+      before = { ...before, pasteHistory: new Map(history.capture()) };
+    }
+    const restoring =
+      (action.type === 'undo' && before.undoStack.length > 0) ||
+      (action.type === 'redo' && before.redoStack.length > 0);
+    stateRef.current = textBufferReducer(before, action);
+    if (restoring && history && stateRef.current.pasteHistory) {
+      history.restore(new Map(stateRef.current.pasteHistory));
+    }
     setState(stateRef.current);
   }, []);
 

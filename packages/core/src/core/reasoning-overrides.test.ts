@@ -271,7 +271,7 @@ describe('reasoning declarations', () => {
     );
     expect(resolved).toMatchObject({
       profile: 'dashscope-effort',
-      efforts: ['low', 'medium', 'xhigh'],
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
       defaultEffort: 'medium',
     });
     expect(getEffectiveReasoning(route, resolved)).toEqual({
@@ -280,7 +280,7 @@ describe('reasoning declarations', () => {
     expect(route.reasoning).toBeUndefined();
     expect(
       getEffectiveReasoning({ reasoning: { effort: 'high' } }, resolved),
-    ).toEqual({ effort: 'xhigh' });
+    ).toEqual({ effort: 'high' });
     expect(getEffectiveReasoning({ reasoning: false }, resolved)).toBe(false);
   });
 
@@ -379,7 +379,7 @@ describe('reasoning declarations', () => {
       'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
     ],
     [
-      'deepseek-v3.2',
+      'glm-5.2',
       'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
     ],
   ])('inherits %s toggle capabilities from its provider', (model, baseUrl) => {
@@ -399,8 +399,10 @@ describe('reasoning declarations', () => {
   });
 
   it('inherits the selected provider policy for the same model', () => {
-    const target = { ...route, model: 'qwen3.8-max-preview' };
-    const input = { defaultEffort: 'medium' };
+    // kimi-k2.5 is a Token Plan preset model only; on the Standard endpoint
+    // the same override has no provider declaration to extend.
+    const target = { ...route, model: 'kimi-k2.5' };
+    const input = { canDisable: false };
     expect(
       resolveReasoningCapabilities(
         {
@@ -410,7 +412,7 @@ describe('reasoning declarations', () => {
         },
         input,
       ),
-    ).toMatchObject({ defaultEffort: 'medium', canDisable: false });
+    ).toMatchObject({ toggleOnly: true, canDisable: false });
     expect(
       resolveReasoningCapabilities(
         {
@@ -418,7 +420,7 @@ describe('reasoning declarations', () => {
           baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
         },
         input,
-      )?.canDisable,
+      ),
     ).toBeUndefined();
   });
 
