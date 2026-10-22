@@ -91,6 +91,7 @@ const mocks = vi.hoisted(() => {
     bannerProps: null as Record<string, unknown> | null,
     footerProps: null as Record<string, unknown> | null,
     statusLineState: null as StatusLineState | null,
+    statusVimMode: undefined as string | undefined,
     worktree: null as null | {
       slug: string;
       worktreePath: string;
@@ -305,8 +306,15 @@ vi.mock('../hooks/useGitBranchName.js', () => ({
   useGitBranchName: () => 'current-branch',
 }));
 vi.mock('../hooks/useStatusLine.js', () => ({
-  useStatusLineState: ({ state }: { state: StatusLineState }) => {
+  useStatusLineState: ({
+    state,
+    vimMode,
+  }: {
+    state: StatusLineState;
+    vimMode?: string;
+  }) => {
     mocks.state.statusLineState = state;
+    mocks.state.statusVimMode = vimMode;
     return {
       lines: [],
       useThemeColors: true,
@@ -327,8 +335,9 @@ const CONFIG = {
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
 const getSessionStats = () => ({}) as unknown as SessionStatsState;
 
-function renderApp(overrides: Partial<Parameters<typeof OpenTuiApp>[0]> = {}) {
-  const props: Parameters<typeof OpenTuiApp>[0] = {
+type AppProps = Parameters<typeof OpenTuiApp>[0];
+function renderApp(overrides: Partial<AppProps> = {}) {
+  const props: AppProps = {
     config: CONFIG,
     settings: SETTINGS,
     logger: null,
@@ -458,6 +467,16 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.footerProps?.['streaming']).toBe(true);
     expect(mocks.state.loadingProps?.['streaming']).toBe(true);
   });
+
+  it.each(['NORMAL', 'INSERT', undefined] as const)(
+    'passes current Vim mode %s to the status command and footer',
+    async (vimMode) => {
+      renderApp({ vimMode });
+      await settle();
+      expect(mocks.state.statusVimMode).toBe(vimMode);
+      expect(mocks.state.footerProps?.['vimMode']).toBe(vimMode);
+    },
+  );
 
   it('uses the current render statistics for status output and dialog preview', async () => {
     const stale = {
@@ -1198,6 +1217,59 @@ describe('OpenTuiApp shell wiring', () => {
     });
     const userMessages = mocks.state.inputProps?.['userMessages'] as string[];
     expect(userMessages).toContain('earlier question');
+  });
+
+  it('merges newest real prompts and refreshes persisted history only when history changes', async () => {
+    let past = ['X', 'A', 'Y'];
+    const getPreviousUserMessages = vi.fn(async () => past);
+    renderApp({
+      userMessages: ['B', 'A', 'B'],
+      logger: { getPreviousUserMessages } as unknown as AppProps['logger'],
+    });
+    await settle();
+    expect(mocks.state.inputProps?.['userMessages']).toEqual([
+      'Y',
+      'X',
+      'A',
+      'B',
+    ]);
+    const host = mocks.state.host as OpenTuiAppHost;
+    await act(async () => host.setStreaming(true));
+    expect(getPreviousUserMessages).toHaveBeenCalledTimes(1);
+    past = ['X'];
+    await act(async () => {
+      host.addItem({ type: 'info', text: 'History changed' }, 1);
+    });
+    expect(getPreviousUserMessages).toHaveBeenCalledTimes(2);
+    expect(mocks.state.inputProps?.['userMessages']).toEqual(['X', 'A', 'B']);
+  });
+
+  it('ignores a late persisted-history result after session replacement', async () => {
+    let finishOld!: (texts: string[]) => void;
+    let sessionId = 'old';
+    const getPreviousUserMessages = vi
+      .fn()
+      .mockReturnValueOnce(
+        new Promise<string[]>((resolve) => {
+          finishOld = resolve;
+        }),
+      )
+      .mockResolvedValue(['fresh']);
+    const props: AppProps = {
+      config: { ...CONFIG, getSessionId: () => sessionId } as Config,
+      settings: SETTINGS,
+      logger: { getPreviousUserMessages } as unknown as AppProps['logger'],
+      commands: [],
+      getSessionStats,
+      userMessages: [],
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    sessionId = 'new';
+    await act(async () => view.rerender(<OpenTuiApp {...props} />));
+    expect(mocks.state.inputProps?.['userMessages']).toEqual(['fresh']);
+    await act(async () => finishOld(['stale']));
+    expect(mocks.state.inputProps?.['userMessages']).toEqual(['fresh']);
   });
 
   it('uses the live display projection for recall and clears it on a new session', async () => {

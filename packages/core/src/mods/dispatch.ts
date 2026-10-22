@@ -123,12 +123,21 @@ export class ModBudget {
   get expired(): boolean {
     return this.remainingMs <= 0;
   }
-  async lend<T>(run: () => Promise<T>): Promise<T> {
+  get lending(): boolean {
+    return this.pauses > 0;
+  }
+  pause(): void {
     if (!this.pauses++) this.left -= performance.now() - this.since;
+  }
+  resume(): void {
+    if (!--this.pauses) this.since = performance.now();
+  }
+  async lend<T>(run: () => Promise<T>): Promise<T> {
+    this.pause();
     try {
       return await run();
     } finally {
-      if (!--this.pauses) this.since = performance.now();
+      this.resume();
     }
   }
 }

@@ -146,7 +146,15 @@ public final class ApiModels {
             @JsonProperty("session_delete") boolean sessionDelete,
             @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("foreground_shell") Boolean foregroundShell,
             @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("durable_operations") Boolean durableOperations,
-            @JsonProperty("context_compression") boolean contextCompression) {
+            @JsonProperty("context_compression") boolean contextCompression,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("child_agents") Boolean childAgents) {
+        public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
+                boolean sessionLifecycle, boolean tasks, boolean actions, boolean sessionClose,
+                boolean sessionArchive, boolean sessionUnarchive, boolean sessionDelete,
+                Boolean foregroundShell, Boolean durableOperations, boolean contextCompression) {
+            this(items, snapshots, artifacts, resync, sessionLifecycle, tasks, actions, sessionClose,
+                    sessionArchive, sessionUnarchive, sessionDelete, foregroundShell, durableOperations, contextCompression, null);
+        }
         public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
                 boolean sessionLifecycle, boolean tasks, boolean actions, boolean sessionClose,
                 boolean sessionArchive, boolean sessionUnarchive, boolean sessionDelete,
@@ -164,7 +172,17 @@ public final class ApiModels {
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean approvalModeChange,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean durableOperations,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments,
-            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename, boolean contextCompression) {
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename, boolean contextCompression,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents) {
+        public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
+                boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
+                boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange, Boolean foregroundShell,
+                Boolean modelChange, Boolean approvalModeChange, Boolean durableOperations,
+                Boolean inputAttachments, Boolean rename, boolean contextCompression) {
+            this(tasks, artifacts, actions, workspaceTurns, sessionClose, sessionArchive, sessionUnarchive,
+                    sessionDelete, cwdChange, foregroundShell, modelChange, approvalModeChange,
+                    durableOperations, inputAttachments, rename, contextCompression, null);
+        }
         public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
                 boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
                 boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange, Boolean foregroundShell,
@@ -346,11 +364,36 @@ public final class ApiModels {
                     long snapshotThroughSequence) {
     }
 
-    public record WebShellListRequest(String cursor, Integer limit) {
+    public record WebShellListRequest(String cursor, Integer limit, String archiveState,
+            String titleQuery) {
+        public WebShellListRequest(String cursor, Integer limit, String archiveState) {
+            this(cursor, limit, archiveState, null);
+        }
     }
 
     public record WebShellSessionRequest(@NotBlank String sessionId) {
     }
+
+    public record ManagedMcpServerPin(@NotBlank @Pattern(regexp = "[A-Za-z0-9._:-]{1,128}") String serverId,
+            @Min(1) @Max(9_007_199_254_740_991L) long serverRevision,
+            @NotBlank @Pattern(regexp = "[a-f0-9]{64}") String definitionDigest) { }
+
+    public record ManagedMcpManagementCommand(@NotBlank String action,
+            @NotBlank @Pattern(regexp = "[A-Za-z0-9._:-]{1,128}") String serverId,
+            @NotNull @Min(0) @Max(9_007_199_254_740_990L) Long expectedRevision,
+            @Valid ManagedMcpServerPin server) { }
+
+    public record WebShellMcpManagementQuery(@NotBlank @Size(max = 128) String sessionId,
+            @Size(max = 128) String requestId) { }
+
+    public record WebShellMcpManagementSubmit(@NotBlank @Size(max = 128) String sessionId,
+            @Size(max = 128) String requestId, @NotNull String idempotencyKey,
+            @NotBlank String action, @NotBlank @Pattern(regexp = "[A-Za-z0-9._:-]{1,128}") String serverId,
+            @NotNull @Min(0) @Max(9_007_199_254_740_990L) Long expectedRevision,
+            @Valid ManagedMcpServerPin server) { }
+
+    public record WebShellMcpManagementOperationQuery(@NotBlank @Size(max = 128) String sessionId,
+            @NotBlank String operationId, @Size(max = 128) String requestId) { }
 
     public record WebShellRenameRequest(@Size(max = 128) String requestId,
             @NotBlank @Size(max = 128) String sessionId,
@@ -460,7 +503,8 @@ public final class ApiModels {
     }
 
     public record WebShellLifecycleRequest(@NotBlank String sessionId,
-            @NotBlank @Size(max = 128) String idempotencyKey) {
+            @NotBlank @Size(max = 128) String idempotencyKey,
+            @Size(max = 128) String requestId) {
     }
 
     public record CompressSessionRequest(
@@ -597,7 +641,8 @@ public final class ApiModels {
             WebShellSessionCapabilities capabilities, String approvalMode,
             WebShellModelContext modelContext, WebShellModelSelection modelSelection,
             Long approvalRevision, String initialApprovalMode, boolean planMode, boolean planModeSupported,
-            Long compactionRevision, String contextCompressionOperationId, SessionRecovery recovery) {
+            Long compactionRevision, String contextCompressionOperationId,
+            WebShellLifecycleOperation lifecycleOperation, SessionRecovery recovery) {
         public WebShellSession(String sessionId, String title, String agentId, String status,
                 long createdAt, long updatedAt, WebShellTurn activeTurn, Object environment,
                 long lastSequence, WebShellWorkspace workspace, WebShellSessionCapabilities capabilities,
@@ -605,7 +650,7 @@ public final class ApiModels {
                 Long approvalRevision, String initialApprovalMode, boolean planMode, boolean planModeSupported) {
             this(sessionId, title, agentId, status, createdAt, updatedAt, activeTurn, environment, lastSequence,
                     workspace, capabilities, approvalMode, modelContext, modelSelection, approvalRevision,
-                    initialApprovalMode, planMode, planModeSupported, 0L, null, null);
+                    initialApprovalMode, planMode, planModeSupported, 0L, null, null, null);
         }
 
         public WebShellSession(String sessionId, String title, String agentId,
@@ -620,7 +665,23 @@ public final class ApiModels {
                     activeTurn, environment, lastSequence, workspace, capabilities,
                     approvalMode, modelContext, modelSelection, approvalRevision,
                     initialApprovalMode, planMode, planModeSupported, compactionRevision,
-                    contextCompressionOperationId, null);
+                    contextCompressionOperationId, null, null);
+        }
+
+        public WebShellSession(String sessionId, String title, String agentId,
+                String status, long createdAt, long updatedAt,
+                WebShellTurn activeTurn, Object environment, long lastSequence,
+                WebShellWorkspace workspace, WebShellSessionCapabilities capabilities,
+                String approvalMode, WebShellModelContext modelContext,
+                WebShellModelSelection modelSelection, Long approvalRevision,
+                String initialApprovalMode, boolean planMode, boolean planModeSupported,
+                Long compactionRevision, String contextCompressionOperationId,
+                WebShellLifecycleOperation lifecycleOperation) {
+            this(sessionId, title, agentId, status, createdAt, updatedAt,
+                    activeTurn, environment, lastSequence, workspace, capabilities,
+                    approvalMode, modelContext, modelSelection, approvalRevision,
+                    initialApprovalMode, planMode, planModeSupported, compactionRevision,
+                    contextCompressionOperationId, lifecycleOperation, null);
         }
 
         public WebShellSession withRecovery(SessionRecovery value) {
@@ -628,7 +689,8 @@ public final class ApiModels {
                     createdAt, updatedAt, activeTurn, environment, lastSequence,
                     workspace, capabilities, approvalMode, modelContext,
                     modelSelection, approvalRevision, initialApprovalMode,
-                    planMode, planModeSupported, compactionRevision, contextCompressionOperationId, value);
+                    planMode, planModeSupported, compactionRevision, contextCompressionOperationId,
+                    lifecycleOperation, value);
         }
     }
 
@@ -718,7 +780,16 @@ public final class ApiModels {
             @JsonProperty("artifact_refs") List<String> artifactRefs,
             @JsonProperty("action_capabilities")
                     List<String> actionCapabilities,
-            @JsonProperty("child_session_id") String childSessionId) {
+            @JsonProperty("child_session_id") String childSessionId,
+            @JsonProperty("stop_requested") Boolean stopRequested,
+            @JsonProperty("approval_mode") String approvalMode) {
+        public PublicTask(String id, String object, String sessionId, String kind,
+                String state, Long definitionRevision, String runtimeState, long createdAt,
+                Long startedAt, Long settledAt, String outputCursor, List<String> artifactRefs,
+                List<String> actionCapabilities, String childSessionId) {
+            this(id, object, sessionId, kind, state, definitionRevision, runtimeState, createdAt,
+                    startedAt, settledAt, outputCursor, artifactRefs, actionCapabilities, childSessionId, null, null);
+        }
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -727,7 +798,14 @@ public final class ApiModels {
             long createdAt, Long startedAt, Long settledAt,
             String outputCursor,
             List<String> artifactRefs, List<String> actionCapabilities,
-            String childSessionId) {
+            String childSessionId, Boolean stopRequested, String approvalMode) {
+        public WebShellTask(String taskId, String sessionId, String kind, String state,
+                Long definitionRevision, String runtimeState, long createdAt, Long startedAt,
+                Long settledAt, String outputCursor, List<String> artifactRefs,
+                List<String> actionCapabilities, String childSessionId) {
+            this(taskId, sessionId, kind, state, definitionRevision, runtimeState, createdAt,
+                    startedAt, settledAt, outputCursor, artifactRefs, actionCapabilities, childSessionId, null, null);
+        }
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -779,7 +857,10 @@ public final class ApiModels {
     }
 
     public record WebShellActionQueryRequest(
-            @NotBlank String sessionId, @Size(max = 512) String cursor, Integer limit) {
+            @NotBlank String sessionId, @Size(max = 512) String cursor, Integer limit, Boolean includeChildren) {
+        public WebShellActionQueryRequest(String sessionId, String cursor, Integer limit) {
+            this(sessionId, cursor, limit, null);
+        }
         @JsonAnySetter
         public void rejectUnknown(String name, JsonNode value) {
             throw new IllegalArgumentException("Unknown Action request field: " + name);
@@ -857,8 +938,11 @@ public final class ApiModels {
         }
     }
 
-    public record WebShellPage<T>(List<T> data, String nextCursor,
-            boolean hasMore) {
+    public record WebShellPage<T>(List<T> data, String nextCursor, boolean hasMore) {
+    }
+
+    public record WebShellTaskPage(List<WebShellTask> data, String nextCursor,
+            boolean hasMore, @JsonInclude(JsonInclude.Include.NON_NULL) Long activeChildCount) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -883,6 +967,19 @@ public final class ApiModels {
             List<WebShellContentPart> content,
             Map<String, Object> attributes, long firstSequence,
             long lastSequence, long createdAt, long updatedAt) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record WebShellLifecycleOperation(String operationId, String type,
+            String status, String failureCode) {
+    }
+
+    public record WebShellExportRequest(@NotBlank String sessionId,
+            @Size(max = 4096) String cursor, @Min(1) @Max(100) Integer limit) {
+    }
+
+    public record WebShellExportPage(List<WebShellItem> items, String nextCursor,
+            boolean hasMore, long snapshotThroughSequence) {
     }
 
     public record WebShellTranscript(List<WebShellItem> items,
