@@ -18,8 +18,9 @@
  * a genuinely broken boot failing fast. Any budget here must stay under the
  * suite's testTimeout (TB_TIMEOUT_MINUTES, default 5min).
  *
- * Only InteractiveSession.start was observed to stall; the TestRig readiness
- * waits keep their own budgets and are tracked separately.
+ * InteractiveSession.start and the skill-hooks invocation-parity suite's
+ * TestRig readiness wait use this budget; other TestRig readiness waits keep
+ * their own budgets and are tracked separately.
  *
  * Pure and read at call time so the decision is pinned state-by-state with a
  * plain object instead of real time (scripts/tests/ready-prompt-budget.test.ts).
