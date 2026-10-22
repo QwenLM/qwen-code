@@ -31,6 +31,7 @@ import {
 import { ToolApproval } from '../messages/ToolApproval';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
+import { Input } from '../ui/input';
 import { createManagedMessageProjector } from './managed-session-messages';
 import {
   getManagedClientId,
@@ -445,6 +446,7 @@ function ManagedSessionsContent({
   const [archiveState, setArchiveState] = useState<'unarchived' | 'archived'>(
     'unarchived',
   );
+  const [titleQuery, setTitleQuery] = useState('');
   const [confirmation, setConfirmation] = useState<{
     session: ManagedAgentSessionSummary;
     action: ManagedLifecycleAction;
@@ -783,6 +785,8 @@ function ManagedSessionsContent({
   // Depend on the value the request actually sends: a provider that drops
   // workspaceCwd must not refetch (and lose paged rows) on folder change.
   const listCwd = provider.acceptsWorkspaceCwd ? workspaceCwd : undefined;
+  const listTitleQuery = provider.titleSearch ? titleQuery : '';
+  const navigationSessions = listTitleQuery ? sessions : lifecycleSummaries;
   useEffect(() => {
     const abort = new AbortController();
     listLifetime.current = abort;
@@ -795,6 +799,7 @@ function ManagedSessionsContent({
         clientId,
         workspaceCwd: listCwd,
         ...(provider.lifecycle ? { archiveState } : {}),
+        ...(listTitleQuery ? { titleQuery: listTitleQuery } : {}),
         limit: 50,
         signal: abort.signal,
       })
@@ -815,7 +820,7 @@ function ManagedSessionsContent({
         if (!abort.signal.aborted) setListLoading(false);
       });
     return () => abort.abort();
-  }, [provider, clientId, listCwd, listRevision, archiveState]);
+  }, [provider, clientId, listCwd, listRevision, archiveState, listTitleQuery]);
 
   useEffect(() => {
     const current = detail.summary;
@@ -902,6 +907,7 @@ function ManagedSessionsContent({
         clientId,
         workspaceCwd: listCwd,
         ...(provider.lifecycle ? { archiveState } : {}),
+        ...(listTitleQuery ? { titleQuery: listTitleQuery } : {}),
         cursor: nextCursor,
         limit: 50,
         signal: abort.signal,
@@ -1318,11 +1324,24 @@ function ManagedSessionsContent({
           ))}
         </div>
       )}
+      {provider.titleSearch && (
+        <label className="px-2 py-1">
+          <span className="sr-only">{t('managed.titleSearch')}</span>
+          <Input
+            type="search"
+            value={titleQuery}
+            maxLength={512}
+            placeholder={t('managed.titleSearchPlaceholder')}
+            aria-label={t('managed.titleSearch')}
+            onChange={(event) => setTitleQuery(event.target.value)}
+          />
+        </label>
+      )}
       {home && provider.workspaceBinding ? (
         <ManagedWorkspaceNavigation
           provider={provider}
           clientId={clientId}
-          sessions={lifecycleSummaries.filter(
+          sessions={navigationSessions.filter(
             (session) =>
               !provider.lifecycle ||
               (archiveState === 'archived'

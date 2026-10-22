@@ -199,6 +199,7 @@ export function createJavaManagedAgentProvider(
     },
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    titleSearch: true,
     recovery: {
       query: (sessionId, request) =>
         client.getRecovery(sessionId, request.signal),
@@ -685,6 +686,7 @@ export function createJavaManagedAgentProvider(
           cursor: request.cursor,
           limit: request.limit,
           archiveState: request.archiveState,
+          titleQuery: request.titleQuery,
         },
         request.signal,
       );
