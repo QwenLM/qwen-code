@@ -23,7 +23,7 @@ install -d -m 0750 -o root -g qwen-managed-agent /etc/qwen-managed-agent
    these commands from this `systemd/` directory:
 
 ```bash
-install -m 0640 -o root -g qwen-managed-agent \
+install -m 0600 -o qwen-managed-agent -g qwen-managed-agent \
   harness.env.example /etc/qwen-managed-agent/harness.env
 install -m 0640 -o root -g qwen-managed-agent \
   server.env.example /etc/qwen-managed-agent/server.env
@@ -31,14 +31,25 @@ install -m 0600 -o qwen-managed-agent -g qwen-managed-agent \
   ../config/application.example.yml /etc/qwen-managed-agent/application.yml
 ```
 
-The control plane reads `application.yml` as `qwen-managed-agent`, so that file
-is owned by the service account at `0600`. The preflight rejects a secret file
-that is group- or world-readable, and a `root`-owned `0600` file would be
-unreadable to the service. `systemd` reads the two environment files as root,
-so `0640 root:qwen-managed-agent` is enough for them.
+The control plane reads `application.yml` and `harness.env` as
+`qwen-managed-agent`, so those files are owned by the service account at
+`0600`. The preflight warns, in its `config` and `credentials` rows, when a
+secret file is group- or world-readable; a WARN does not fail `--check`, so
+apply the `chmod 600` it prints. A `root`-owned `0600` `harness.env` would be
+unreadable to the service, which the `credentials` row reports as FAIL. `systemd`
+reads environment files as root, so `0640 root:qwen-managed-agent` is enough
+for `server.env`.
 
-The Harness token and capability digest must match in `harness.env` and
-`server.env`. If the Harness reports a port other than 4170 because the
+The Harness token and capability digest live only in `harness.env`:
+`server.env` points `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE` at it, and
+the control plane refuses to start when that file is set together with
+`QWEN_MANAGED_AGENT_HARNESS_TOKEN` or `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST`.
+Keep each credential in `harness.env` as `KEY=value` on one line, with LF line
+endings, no whitespace around the `=`, and only letters, digits and `._:/+=-`
+in the value. The control plane refuses anything else, such as a continuation
+or text after a closing quote, since systemd or a shell would read it
+differently.
+If the Harness reports a port other than 4170 because the
 requested one was in use, update `QWEN_MANAGED_AGENT_HARNESS_BASE_URL` in
 `server.env` before starting the control plane.
 The Session Store needs no setting of its own: the control plane derives its
