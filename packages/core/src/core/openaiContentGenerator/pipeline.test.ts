@@ -1708,7 +1708,7 @@ describe('ContentGenerationPipeline', () => {
       ['moonshot', 'kimi-k2.7-code-highspeed', undefined, undefined, true],
       ['moonshot', 'kimi-k2.6', undefined, 'thinking', false],
       ['deepseek', 'deepseek-v4-pro', 'low', 'thinking', false],
-      ['deepseek', 'deepseek-v4-flash', 'low', 'thinking', false],
+      ['deepseek', 'deepseek-flash', 'low', 'thinking', false],
       [std, 'qwen3.8-max', 'low', 'reasoning_effort', false],
       [std, 'qwen3.8-max-0902', 'medium', 'reasoning_effort', false],
       [std, 'qwen3.8-flash', 'xhigh', 'reasoning_effort', false],
