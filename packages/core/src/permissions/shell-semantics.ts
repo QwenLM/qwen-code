@@ -2083,10 +2083,13 @@ function isHomeAssignmentToken(word: string): boolean {
  * Only forms that leave the shell's value changed count. A bare assignment
  * statement (`HOME=/x` with no command word after the leading run) persists, as
  * does an assignment after `export` / `declare` / `local` / `typeset` /
- * `readonly`, and `unset` clears every listed name. A command-scoped prefix
- * (`HOME=/x npm test`, `HOME=/x cd`, `env HOME=/x node`) and a quoted string the
- * tokenizer unquotes do not persist in bash, so they must not latch — treating
- * them as reassignments mis-attributes a later bare `cd` and can downgrade a
+ * `readonly`, and `unset` clears every listed name — but only when that builtin
+ * is the segment's command. The same words in argument position (`echo unset
+ * HOME`) are arguments to a different command and change nothing. A
+ * command-scoped prefix (`HOME=/x npm test`, `HOME=/x cd`, `env HOME=/x node`)
+ * and a quoted string the tokenizer unquotes do not persist in bash, so they
+ * must not latch — treating them as reassignments mis-attributes a later bare
+ * `cd` and can downgrade a
  * user's hard `deny` to a confirmation prompt.
  */
 function segmentReassignsHome(command: string): boolean {
@@ -2095,15 +2098,36 @@ function segmentReassignsHome(command: string): boolean {
   const firstCommandWord = words.findIndex(
     (word) => !ANY_ASSIGNMENT_TOKEN.test(word),
   );
-  const leadingAssignments =
-    firstCommandWord === -1 ? words.length : firstCommandWord;
-  if (leadingAssignments > 0 && leadingAssignments === words.length) {
+  if (firstCommandWord === -1) {
+    // A bare assignment statement persists; there is no command to scope it.
     return words.some(isHomeAssignmentToken);
   }
 
-  for (const [index, word] of words.entries()) {
-    if (!HOME_EXPORTING_BUILTINS.has(word)) continue;
-    let next = index + 1;
+  // Only the command position can reassign the shell's `HOME`. Scanning every
+  // word would read `echo unset HOME` / `echo export HOME=/x` as a
+  // reassignment even though bash runs `echo` and the parent keeps its value;
+  // latching there makes a later bare `cd` dynamic, which turns a user's hard
+  // `deny` on `$HOME/settings.json` into a confirmation prompt. `command` and
+  // `builtin` are transparent here: they run the builtin in this shell.
+  let commandIndex = firstCommandWord;
+  while (
+    words[commandIndex] === 'command' ||
+    words[commandIndex] === 'builtin'
+  ) {
+    commandIndex++;
+    while (
+      words[commandIndex] !== undefined &&
+      words[commandIndex]!.startsWith('-')
+    ) {
+      commandIndex++;
+    }
+  }
+
+  const builtin = words[commandIndex];
+  if (builtin === undefined) return false;
+
+  if (HOME_EXPORTING_BUILTINS.has(builtin)) {
+    let next = commandIndex + 1;
     while (words[next] !== undefined && words[next]!.startsWith('-')) next++;
     for (
       ;
@@ -2112,12 +2136,12 @@ function segmentReassignsHome(command: string): boolean {
     ) {
       if (isHomeAssignmentToken(words[next]!)) return true;
     }
+    return false;
   }
 
   // `unset A HOME` clears every listed name; flags such as `-v` are skipped.
-  for (const [index, word] of words.entries()) {
-    if (word !== 'unset') continue;
-    for (let next = index + 1; next < words.length; next++) {
+  if (builtin === 'unset') {
+    for (let next = commandIndex + 1; next < words.length; next++) {
       const candidate = words[next]!;
       if (candidate.startsWith('-')) continue;
       if (candidate === 'HOME') return true;
@@ -2382,6 +2406,9 @@ function walkCompoundCommand(
   let effectiveCwd = cwd;
   let cwdUnknown = initialCwdUnknown;
   let homeReassigned = initialHomeReassigned;
+  // Terminator of the previous segment: a `|` there makes this segment a
+  // pipeline element even though its own terminator is empty.
+  let previousTerminator = '';
 
   for (const { command: sub, terminator } of subCommands) {
     // `cd x & …` runs the `cd` in a background subshell, so it does not move
@@ -2393,11 +2420,25 @@ function walkCompoundCommand(
     // `( export HOME=/x )` is a subshell too: bash applies the assignment in a
     // child shell, so the parent's HOME is unchanged.
     const inSubshell = /^\s*\(/.test(sub);
+    // Every element of a pipeline runs in its own subshell, so `export
+    // HOME=/x | cat` leaves the parent's HOME alone — latching it would make a
+    // later bare `cd` dynamic and downgrade a hard `deny` to a prompt.
+    const inPipeline =
+      terminator === '|' ||
+      terminator === '|&' ||
+      previousTerminator === '|' ||
+      previousTerminator === '|&';
+    previousTerminator = terminator;
 
     // `HOME=/x & …` runs the assignment in a background subshell and
     // `HOME=/x cmd` scopes it to one command; neither leaves the parent
     // shell's HOME changed, so only a foreground persistent form latches.
-    if (!backgrounded && !inSubshell && segmentReassignsHome(sub)) {
+    if (
+      !backgrounded &&
+      !inSubshell &&
+      !inPipeline &&
+      segmentReassignsHome(sub)
+    ) {
       homeReassigned = true;
     }
 

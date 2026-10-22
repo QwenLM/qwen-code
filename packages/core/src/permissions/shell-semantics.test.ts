@@ -698,6 +698,18 @@ describe('extractShellOperationsAcrossCommand', () => {
       expect(
         across('(export HOME=/tmp/attacker) ; cd ; echo {} > settings.json'),
       ).toEqual([write('/home/tester/settings.json')]);
+      // A builtin name in argument position is not the command: bash runs
+      // `echo` here, so the parent's HOME keeps its value.
+      expect(
+        across('echo unset HOME && cd && echo {} > settings.json'),
+      ).toEqual([write('/home/tester/settings.json')]);
+      // Every element of a pipeline is a subshell, so an `export` there never
+      // reaches the shell that runs the following `cd`.
+      expect(
+        across(
+          'export HOME=/tmp/attacker | cat ; cd && echo {} > settings.json',
+        ),
+      ).toEqual([write('/home/tester/settings.json')]);
     } finally {
       if (previous === undefined) delete process.env['HOME'];
       else process.env['HOME'] = previous;
