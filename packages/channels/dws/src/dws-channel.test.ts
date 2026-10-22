@@ -9447,6 +9447,53 @@ describe('DwsChannel', () => {
     }
   });
 
+  it('keeps a collected direct reply private when its cached target is evicted', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ dispatchMode: 'collect' }),
+      'evicted-collected-direct-dws',
+    );
+    let releaseFirst!: (value: string) => void;
+    const firstPrompt = new Promise<string>((resolve) => {
+      releaseFirst = resolve;
+    });
+    vi.mocked(bridge.prompt)
+      .mockImplementationOnce(() => firstPrompt)
+      .mockImplementationOnce(async () => {
+        channel.forgetImTarget('cid-1');
+        return 'collected response';
+      });
+
+    const firstDelivery = client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'collect-first', 'first'),
+    );
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+    const secondDelivery = client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'collect-second', 'second'),
+    );
+    try {
+      await vi.waitFor(() =>
+        expect(channel.pendingMessageIds()).toContain('collect-second'),
+      );
+      await secondDelivery;
+    } finally {
+      releaseFirst('first response');
+      await Promise.allSettled([firstDelivery, secondDelivery]);
+    }
+
+    await vi.waitFor(() =>
+      expect(client.sendImMessage).toHaveBeenCalledWith(
+        { kind: 'direct', openDingTalkId: 'open-alice' },
+        'collected response',
+        expect.any(String),
+      ),
+    );
+    expect(client.replyToImMessage).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])(
     'drops a queued group reply after its group allowlist entry is removed (quoteGroupReply=%s)',
     async (quoteGroupReply) => {

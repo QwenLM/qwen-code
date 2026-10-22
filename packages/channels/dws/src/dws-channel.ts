@@ -1268,8 +1268,11 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       `${this.name}\0${chatId}\0${messageId}\0${text}`,
     );
     const target = this.findImTarget(chatId);
+    // Collected turns outlive their source message's kind entry; the active
+    // prompt still carries the originating conversation kind.
     const isGroup =
       this.imResponseKinds.get(`${chatId}\0${messageId}`) ??
+      this.getResponseIsGroup(sessionId) ??
       target?.kind !== 'direct';
     const delivery: PersistedImDelivery = {
       conversationId: chatId,
