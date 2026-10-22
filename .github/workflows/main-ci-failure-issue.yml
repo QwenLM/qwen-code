@@ -167,14 +167,28 @@ jobs:
           # JSON document per page, and the comment helper reads this file
           # with a single JSON.parse, so the pages merge into one document
           # here — a run wider than 100 jobs would otherwise render a comment
-          # naming no job. `gh api` writes a non-2xx body to stdout before
-          # exiting non-zero, and that body carries no `.jobs`, so a parked
-          # error normalizes to an empty list: the same degradation the
-          # per-commit body already handles.
+          # naming no job.
+          # The merged document is staged and promoted only once it accounts
+          # for every job the pages report: page 1 can arrive and page 2 still
+          # fail, and jq happily merges what it got. That partial list reads
+          # exactly like a complete one to every consumer of this file —
+          # including the infra classifier, which counts only the jobs present
+          # and would turn a regression parked on the missing page into a
+          # rerun instead of an issue. `total_count` is the receipt, so the
+          # guard holds even where the shell runs without pipefail; a run that
+          # yields no receipt at all falls back to the empty list the
+          # per-commit body already tolerates, and says so.
           jobs_json="${RUNNER_TEMP}/run-jobs.json"
-          if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
-            --paginate | jq -s '{jobs: [ .[].jobs[]? ]}' > "${jobs_json}"; then
-            echo "::warning::Could not list the jobs of run ${WORKFLOW_RUN_ID}"
+          jobs_tmp="${jobs_json}.tmp"
+          if gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
+            --paginate \
+            | jq -s '{jobs: [ .[].jobs[]? ]} as $doc | ([.[].total_count] | max) as $total | if $total == null or ($doc.jobs | length) == $total then $doc else error("listed \($doc.jobs | length) of \($total) jobs") end' \
+              > "${jobs_tmp}"; then
+            mv "${jobs_tmp}" "${jobs_json}"
+          else
+            rm -f "${jobs_tmp}"
+            printf '{"jobs":[]}\n' > "${jobs_json}"
+            echo "::warning::Could not read the whole job list of run ${WORKFLOW_RUN_ID}; reporting without it"
           fi
 
           mapfile -t job_ids < <(

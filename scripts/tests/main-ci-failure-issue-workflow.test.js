@@ -481,16 +481,26 @@ printf '%s\\n' '${liveAttempt}'
     const summary = oneLine(steps.find((step) => step.id === 'summary').run);
 
     // `gh api` writes a non-2xx body to stdout before exiting non-zero, so the
-    // fetch has to stay non-fatal AND say so — with the warning inside the
-    // `then` block, since outside it a successful fetch raises an annotation
-    // claiming the opposite. `--paginate` rides the same span because this one
-    // fetch feeds both projections, so dropping it caps a wide run at page 1.
-    // The slurp merge rides it too: `--paginate` prints one document per page
-    // while the comment helper reads the file with a single JSON.parse, so a
-    // run wider than one page would silently render a comment naming no job
-    // without it.
+    // fetch has to stay non-fatal AND say so. `--paginate` rides the same span
+    // because this one fetch feeds both projections, so dropping it caps a
+    // wide run at page 1. The slurp merge rides it too: `--paginate` prints
+    // one document per page while the comment helper reads the file with a
+    // single JSON.parse, so a run wider than one page would silently render a
+    // comment naming no job without it.
+    // The merge alone is not enough: it merges whichever pages arrived, and
+    // that partial list is what every consumer — the infra classifier included
+    // — reads as the whole run. The receipt therefore gates the promotion:
+    // `total_count` has to match the jobs merged before the staged file
+    // replaces `run-jobs.json`.
     expect(download).toContain(
-      'if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" --paginate | jq -s \'{jobs: [ .[].jobs[]? ]}\' > "${jobs_json}"; then echo "::warning::Could not list the jobs of run ${WORKFLOW_RUN_ID}" fi',
+      '| jq -s \'{jobs: [ .[].jobs[]? ]} as $doc | ([.[].total_count] | max) as $total | if $total == null or ($doc.jobs | length) == $total then $doc else error("listed \\($doc.jobs | length) of \\($total) jobs") end\' > "${jobs_tmp}"; then mv "${jobs_tmp}" "${jobs_json}"',
+    );
+    // A run whose pages cannot be read at all degrades the way the per-commit
+    // body already tolerates: no stale staging file, an empty list, and a
+    // warning — the pipeline's status cannot carry it alone, because jq is the
+    // side that decides whether the merge was complete.
+    expect(download).toContain(
+      'else rm -f "${jobs_tmp}" printf \'{"jobs":[]}\\n\' > "${jobs_json}" echo "::warning::Could not read the whole job list of run ${WORKFLOW_RUN_ID}; reporting without it" fi',
     );
     expect(downloadStep.env.RUN_ATTEMPT).toBe(
       '${{ github.event.workflow_run.run_attempt }}',
@@ -568,6 +578,85 @@ printf '%s\\n' '{"jobs":[]}'
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+
+  it('refuses a page list that stops short of total_count', () => {
+    // Page 1 arrives and page 2 fails, so `gh api` exits non-zero — but jq has
+    // already merged the page it got, and that truncated list reads exactly
+    // like a whole run to the projections below and to the infra classifier
+    // built on the same file. Spawned without pipefail on purpose: the
+    // receipt, not the pipeline status, is what has to reject it.
+    const step = jobs.analyze.steps.find(
+      (candidate) => candidate.name === 'Download failed job logs',
+    );
+    const page = (ids) => ({
+      total_count: 2,
+      jobs: ids.map((id) => ({
+        id,
+        name: `java-${id}`,
+        conclusion: 'failure',
+        steps: [],
+      })),
+    });
+    const runPages = (pages) => {
+      const tmp = mkdtempSync(join(tmpdir(), 'java-ci-pages-'));
+      try {
+        writeFileSync(
+          join(tmp, 'gh'),
+          `${[
+            '#!/usr/bin/env bash',
+            // The log downloads that follow this fetch are a separate call;
+            // only the jobs listing is under test here.
+            '[[ "$*" == *"/logs"* ]] && exit 0',
+            ...pages.flatMap((entry) => [
+              `printf '%s\\n' '${JSON.stringify(entry.body)}'`,
+              ...(entry.fail
+                ? [`printf '%s\\n' '{"message":"rate limited"}'`, 'exit 1']
+                : []),
+            ]),
+          ].join('\n')}\n`,
+        );
+        chmodSync(join(tmp, 'gh'), 0o755);
+        const result = spawnSync('bash', ['-e', '-c', step.run], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${tmp}:${process.env.PATH}`,
+            RUNNER_TEMP: tmp,
+            REPO: 'QwenLM/qwen-code',
+            WORKFLOW_RUN_ID: '39045740099',
+            RUN_ATTEMPT: '1',
+            GH_TOKEN: 'fake',
+          },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        return {
+          stdout: result.stdout,
+          jobs: JSON.parse(readFileSync(join(tmp, 'run-jobs.json'), 'utf8'))
+            .jobs,
+          staged: existsSync(join(tmp, 'run-jobs.json.tmp')),
+        };
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    };
+
+    const truncated = runPages([
+      { body: page([9001]) },
+      { body: page([]), fail: true },
+    ]);
+    expect(truncated.jobs).toEqual([]);
+    expect(truncated.staged).toBe(false);
+    expect(truncated.stdout).toContain(
+      '::warning::Could not read the whole job list of run',
+    );
+
+    // Positive control: every page arrives, and the merged list — including
+    // the failure that only page 2 carries — is promoted as a whole.
+    const complete = runPages([{ body: page([9001]) }, { body: page([9101]) }]);
+    expect(complete.jobs.map((job) => job.id)).toEqual([9001, 9101]);
+    expect(complete.staged).toBe(false);
+    expect(complete.stdout).not.toContain('::warning::');
   });
 
   it('passes --allow-escape-sequences so gh does not refuse the colourised logs', () => {
