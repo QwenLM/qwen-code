@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { FatalError } from '@qwen-code/qwen-code-core';
 import { AlreadyReportedError } from './utils/errors.js';
+import { CHECKED_NODE_VERSION_ENV } from './utils/env-provenance.js';
 import { TOP_LEVEL_HELP_OPTIONS } from './config/top-level-options.js';
 import {
   MCP_COMMANDS,
@@ -1896,6 +1897,11 @@ describe('bootstrap import boundaries', () => {
 });
 
 describe('bootstrap error handling', () => {
+  const nodeVersion = Object.getOwnPropertyDescriptor(
+    process.versions,
+    'node',
+  )!;
+  const bunVersion = Object.getOwnPropertyDescriptor(process.versions, 'bun');
   const savedEnv = {
     NO_COLOR: process.env['NO_COLOR'],
   };
@@ -1903,6 +1909,10 @@ describe('bootstrap error handling', () => {
   let stderr: string[];
 
   beforeEach(() => {
+    Object.defineProperty(process.versions, 'node', { value: '26.12.1' });
+    delete process.versions['bun'];
+    vi.stubEnv(CHECKED_NODE_VERSION_ENV, undefined);
+    vi.stubEnv('QWEN_CODE_NO_RELAUNCH', undefined);
     stderr = [];
     vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
       stderr.push(String(chunk));
@@ -1914,6 +1924,13 @@ describe('bootstrap error handling', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
+    Object.defineProperty(process.versions, 'node', nodeVersion);
+    if (bunVersion) {
+      Object.defineProperty(process.versions, 'bun', bunVersion);
+    } else {
+      delete process.versions['bun'];
+    }
     if (savedEnv.NO_COLOR === undefined) {
       delete process.env['NO_COLOR'];
     } else {
@@ -1921,6 +1938,101 @@ describe('bootstrap error handling', () => {
     }
     vi.restoreAllMocks();
   });
+
+  it.each(['24.13.1', '24.16.0', '24.22.1'])(
+    'warns on Node %s before continuing startup without changing stdout',
+    async (node) => {
+      Object.defineProperty(process.versions, 'node', { value: node });
+      vi.spyOn(process, 'on').mockReturnValue(process);
+      const stdout = vi.spyOn(process.stdout, 'write');
+      const handleError = vi.fn();
+      const run = vi.fn(async () => {
+        expect(stderr).toHaveLength(1);
+        expect(stderr[0]).toContain(`Node.js ${node}`);
+        expect(stderr[0]).toContain('Upgrade to Node.js 26.12.1');
+        expect(stderr[0]).toContain('will continue normally');
+        expect(stderr[0]).toContain('issues/15165');
+      });
+
+      await runCliEntryPoint(run, handleError);
+
+      expect(run).toHaveBeenCalledOnce();
+      expect(handleError).not.toHaveBeenCalled();
+      expect(process.exit).not.toHaveBeenCalled();
+      expect(stdout).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    '22.23.4',
+    '24.13.0',
+    '24.13.2',
+    '24.15.0',
+    '24.16.1',
+    '24.22.0',
+    '24.22.2',
+    '24.13.1-nightly',
+    '26.0.0',
+    '26.12.1',
+  ])('does not warn on unlisted Node %s', async (node) => {
+    Object.defineProperty(process.versions, 'node', { value: node });
+    vi.spyOn(process, 'on').mockReturnValue(process);
+    const run = vi.fn(async () => {});
+
+    await runCliEntryPoint(run);
+
+    expect(run).toHaveBeenCalledOnce();
+    expect(stderr).toEqual([]);
+    expect(process.exit).not.toHaveBeenCalled();
+  });
+
+  it('does not apply the V8 warning to Bun with a matching Node version', async () => {
+    Object.defineProperty(process.versions, 'node', { value: '24.13.1' });
+    Object.defineProperty(process.versions, 'bun', {
+      value: '1.3.0',
+      configurable: true,
+    });
+    vi.spyOn(process, 'on').mockReturnValue(process);
+    const run = vi.fn(async () => {});
+
+    await runCliEntryPoint(run);
+
+    expect(run).toHaveBeenCalledOnce();
+    expect(stderr).toEqual([]);
+  });
+
+  it('consumes the relaunch marker without repeating the warning', async () => {
+    Object.defineProperty(process.versions, 'node', { value: '24.13.1' });
+    vi.stubEnv(CHECKED_NODE_VERSION_ENV, '24.13.1');
+    vi.spyOn(process, 'on').mockReturnValue(process);
+    const run = vi.fn(async () => {
+      expect(process.env[CHECKED_NODE_VERSION_ENV]).toBeUndefined();
+    });
+
+    await runCliEntryPoint(run);
+
+    expect(run).toHaveBeenCalledOnce();
+    expect(stderr).toEqual([]);
+  });
+
+  it.each([undefined, '24.22.1'])(
+    'warns when relaunch is disabled and the checked version is %s',
+    async (checkedVersion) => {
+      Object.defineProperty(process.versions, 'node', { value: '24.13.1' });
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', 'true');
+      vi.stubEnv(CHECKED_NODE_VERSION_ENV, checkedVersion);
+      vi.spyOn(process, 'on').mockReturnValue(process);
+      const run = vi.fn(async () => {});
+
+      await runCliEntryPoint(run);
+
+      expect(run).toHaveBeenCalledOnce();
+      expect(stderr).toHaveLength(1);
+      expect(stderr[0]).toContain('Upgrade to Node.js 26.12.1');
+      expect(process.env[CHECKED_NODE_VERSION_ENV]).toBeUndefined();
+      expect(process.exit).not.toHaveBeenCalled();
+    },
+  );
 
   it('prints FatalError messages and exits with their code', async () => {
     process.env['NO_COLOR'] = '1';
