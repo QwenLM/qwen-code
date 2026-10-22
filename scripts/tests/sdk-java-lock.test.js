@@ -11,7 +11,10 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
+  realpathSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -30,28 +33,20 @@ const script = '.github/scripts/sdk-java-lock.sh';
 const queueDir = (home) =>
   join(home, '.cache/qwen-code-ci/sdk-java-tests.lock.queue');
 
+// Tests decide the promotion window themselves. A value exported by the
+// invoking shell would silently re-order cases that never asked to vary it
+// (with 0 the waiting normal ticket of the fast-ordering case promotes and is
+// served first), so the base env is captured without it; a case that wants a
+// window passes it through `env`, which stays the last spread in the child.
+const baseEnv = { ...process.env };
+delete baseEnv.SDK_JAVA_LOCK_PROMOTE_AFTER;
+
 const flockStub = (behavior) => {
   const stubDir = mkdtempSync(join(tmpdir(), 'flock-stub-'));
   writeFileSync(join(stubDir, 'flock'), behavior, { mode: 0o755 });
   return stubDir;
 };
 const freeFlock = '#!/bin/sh\nexit 0';
-// fd 8 is the counter lock and must always succeed; fd 9 is the host lock
-// under test. A stub that failed both would abort at the counter, which an
-// errexit-suspending harness could not see.
-const heldFlock = (held, order) => `#!/bin/sh
-case "$*" in
-  *" 9")
-    if [ -f "${held}" ]; then
-      sleep 0.2
-      exit 1
-    fi
-    echo "$LOCK_LABEL" >> "${order}"
-    exit 0
-    ;;
-  *) exit 0 ;;
-esac
-`;
 
 // A held lock behaves like a real sibling hold: the non-blocking probe fails
 // at once, the blocking wait stays parked until the test kills the child.
@@ -63,14 +58,93 @@ case "$*" in
 esac
 `;
 
+// A held lock parks the blocking wait the way the kernel does: it returns
+// only when the test releases the lock or the wait runs out, so a head that
+// entered `flock --wait` never loops again before it is served. Release is
+// not exclusive, so only the order of tickets still waiting is meaningful.
+const parkedFlock = (held, order, parks = '') => `#!/bin/sh
+case "$*" in
+  *"--wait "*" 9")
+    [ -n "${parks}" ] && echo "$LOCK_LABEL park" >> "${parks}"
+    n=$(($2 * 10))
+    while [ -f "${held}" ]; do
+      [ "$n" -le 0 ] && exit 1
+      n=$((n - 1))
+      sleep 0.1
+    done
+    ;;
+  *" 9") [ -f "${held}" ] && exit 1 ;;
+  *) exit 0 ;;
+esac
+echo "$LOCK_LABEL" >> "${order}"
+`;
+
+const waitFor = async (what, check) => {
+  const deadline = Date.now() + 10000;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(what);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+};
+const hasTicket = (home, pattern) =>
+  existsSync(queueDir(home)) &&
+  readdirSync(queueDir(home)).some((f) => pattern.test(f));
+const headTicket = (home) =>
+  join(
+    queueDir(home),
+    readdirSync(queueDir(home))
+      .filter((f) => f !== '.seq')
+      .sort()[0],
+  );
+
+// Linux only: whether a process has an open fd on `path`, and the processes
+// under `root` outside any `flock` subtree (the stub's own children inherit
+// the lock fd legitimately).
+const holdsFd = (pid, path) => {
+  try {
+    return readdirSync(`/proc/${pid}/fd`).some((fd) => {
+      try {
+        return readlinkSync(`/proc/${pid}/fd/${fd}`) === path;
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return false;
+  }
+};
+const descendantsOutsideFlock = (root) => {
+  const children = new Map();
+  for (const entry of readdirSync('/proc')) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const stat = readFileSync(`/proc/${entry}/stat`, 'utf8');
+      const comm = readFileSync(`/proc/${entry}/comm`, 'utf8').trim();
+      const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
+      if (comm === 'flock') continue;
+      children.set(ppid, [...(children.get(ppid) ?? []), Number(entry)]);
+    } catch {
+      // The process exited while the table was read.
+    }
+  }
+  const found = [];
+  const walk = (pid) =>
+    (children.get(pid) ?? []).forEach((child) => {
+      found.push(child);
+      walk(child);
+    });
+  walk(root);
+  return found;
+};
+
 const startAcquire = (
   home,
   wait,
   stubDir,
   extra = '',
-  priority = '',
   label = '',
   env = {},
+  priority = '',
 ) => {
   const child = spawn(
     'bash',
@@ -89,7 +163,7 @@ const startAcquire = (
     ],
     {
       env: {
-        ...process.env,
+        ...baseEnv,
         HOME: home,
         PATH: `${stubDir}:${process.env.PATH}`,
         LOCK_LABEL: label,
@@ -108,11 +182,6 @@ const startAcquire = (
 
 const acquire = (...args) => startAcquire(...args).done;
 
-const order = (home) => {
-  const file = join(home, 'order');
-  return existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n') : [];
-};
-
 // Field 22 of /proc/<pid>/stat is the process start time; the tail fields
 // begin at field 3, so it is index 19. This mirrors the helper's sed/awk.
 const procStart = (pid) =>
@@ -121,20 +190,6 @@ const procStart = (pid) =>
     .trim()
     .split(/\s+/)[19];
 
-const ticketName = /^\d-\d{10}-\d+$/;
-const waitForTicket = async (home, pattern) => {
-  const deadline = Date.now() + 10000;
-  while (
-    !(
-      existsSync(queueDir(home)) &&
-      readdirSync(queueDir(home)).some((f) => pattern.test(f))
-    )
-  ) {
-    if (Date.now() > deadline) throw new Error('no ticket published');
-    await new Promise((r) => setTimeout(r, 20));
-  }
-};
-
 describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
   it(
     'grants the lock to the head of the queue before a later ticket',
@@ -142,14 +197,16 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
     async () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-fifo-'));
       const held = join(home, 'held');
-      const orderFile = join(home, 'order');
+      const order = join(home, 'order');
       writeFileSync(held, '');
-      const stub = flockStub(heldFlock(held, orderFile));
-      const a = acquire(home, 30, stub, 'sleep 1', '', 'A');
+      const stub = flockStub(parkedFlock(held, order));
+      const a = acquire(home, 30, stub, 'sleep 1', 'A');
       // Wait for A's published ticket instead of a fixed sleep: on a loaded
       // runner 800 ms can run out and B then takes sequence 1.
-      await waitForTicket(home, ticketName);
-      const b = acquire(home, 30, stub, '', '', 'B');
+      await waitFor('A took no ticket', () =>
+        hasTicket(home, /^\d-\d{10}-\d+$/),
+      );
+      const b = acquire(home, 30, stub, '', 'B');
       await new Promise((r) => setTimeout(r, 2500));
       rmSync(held);
       const [first, second] = await Promise.all([a, b]);
@@ -162,7 +219,10 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       expect(second.out).toContain('queue ticket 2');
       // The observable ordering, not just the ticket number: the stub
       // records who actually reached the lock first.
-      expect(order(home)).toEqual(['A', 'B']);
+      expect(readFileSync(order, 'utf8').trim().split('\n')).toEqual([
+        'A',
+        'B',
+      ]);
     },
   );
 
@@ -180,63 +240,284 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       const announced = state.out.includes(
         'Waiting for the sdk-java host lock as queue ticket 1',
       );
+      const ticket = headTicket(home);
+      const before = statSync(ticket).mtimeMs;
       child.kill('SIGKILL');
       await done;
+      // The keepalive's owner-death guard must stop it within one 2 s cycle;
+      // without it the orphan keeps refreshing a dead owner's ticket.
+      await new Promise((r) => setTimeout(r, 4500));
+      expect(statSync(ticket).mtimeMs - before).toBeLessThan(1000);
       expect(announced).toBe(true);
     },
   );
 
   it(
-    'ranks an arriving fast ticket ahead of an older normal ticket',
+    'names the ticket that displaced a parked head when it times out',
     { timeout: 30000 },
     async () => {
-      const home = mkdtempSync(join(tmpdir(), 'lock-fast-'));
+      const home = mkdtempSync(join(tmpdir(), 'lock-stale-head-'));
       const held = join(home, 'held');
-      const orderFile = join(home, 'order');
+      const order = join(home, 'order');
       writeFileSync(held, '');
-      const stub = flockStub(heldFlock(held, orderFile));
-      const normal = acquire(home, 30, stub, '', 'full', 'normal');
-      await waitForTicket(home, /^1-/);
-      const fast = acquire(home, 30, stub, '', 'fast', 'fast');
-      // Let the normal head complete a loop that sees the fast ticket first,
-      // so releasing the lock cannot hand it the acquisition in between.
-      await waitForTicket(home, /^0-0000000002-/);
-      await new Promise((r) => setTimeout(r, 2500));
+      const stub = flockStub(parkedFlock(held, order));
+      const head = startAcquire(home, 5, stub, '', 'head', {}, 'full');
+      await waitFor('head did not park', () =>
+        head.state.out.includes('queue ticket 1'),
+      );
+      const fast = startAcquire(home, 30, stub, '', 'fast', {}, 'fast');
+      await waitFor('fast took no ticket', () =>
+        hasTicket(home, /^0-0000000002-/),
+      );
+      // The head parked on its own name; the fast ticket is the lexical
+      // minimum at timeout. The error must name the queue as it is then.
+      const result = await head.done;
+      expect(result.code).toBe(1);
+      expect(result.out).toContain('as queue ticket 1 (normal)');
+      expect(result.out).toContain('head of queue is 0-0000000002-');
+      expect(result.out).not.toContain('head of queue is 1-0000000001-');
       rmSync(held);
-      const [normalResult, fastResult] = await Promise.all([normal, fast]);
-      expect(normalResult.code).toBe(0);
+      const fastResult = await fast.done;
       expect(fastResult.code).toBe(0);
-      expect(order(home)).toEqual(['fast', 'normal']);
+      // The fast ticket became head by name while the full-tier head was
+      // parked in front of it: routine queue order, not a starved head, and
+      // the warning has to say so.
+      expect(fastResult.out).toContain(
+        '::warning::head of the queue as ticket 2 (fast) but the lock is held, and any ticket already parked in flock still goes first',
+      );
     },
   );
 
   it(
-    'promotes a normal ticket into the fast class so full-tier work cannot starve',
+    'reaps the keepalive at acquisition while the owner shell lives',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-teardown-'));
+      const held = join(home, 'held');
+      const order = join(home, 'order');
+      writeFileSync(held, '');
+      const stub = flockStub(parkedFlock(held, order));
+      // Keep the owner alive after acquisition the way the Maven step is:
+      // otherwise the keepalive's own owner check masks a missing teardown.
+      const head = startAcquire(home, 30, stub, 'sleep 5', 'head', {}, 'fast');
+      await waitFor('head did not park', () =>
+        head.state.out.includes('queue ticket 1'),
+      );
+      const ticket = headTicket(home);
+      rmSync(held);
+      await waitFor('head did not acquire', () => !existsSync(ticket));
+      // Recreate the removed ticket: a leaked keepalive's `touch -c` would
+      // refresh this path, a reaped one cannot.
+      const sentinel = new Date(Date.now() - 60 * 1000);
+      writeFileSync(ticket, '');
+      utimesSync(ticket, sentinel, sentinel);
+      await new Promise((r) => setTimeout(r, 2500));
+      expect(statSync(ticket).mtimeMs).toBeLessThan(Date.now() - 30000);
+      const result = await head.done;
+      expect(result.code).toBe(0);
+      rmSync(ticket, { force: true });
+    },
+  );
+
+  it(
+    'serves a fast ticket ahead of a normal ticket still waiting its turn',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-fast-'));
+      const held = join(home, 'held');
+      const order = join(home, 'order');
+      const parks = join(home, 'parks');
+      writeFileSync(held, '');
+      const stub = flockStub(parkedFlock(held, order, parks));
+      // The production shape: the oldest normal ticket is already parked in
+      // `flock --wait` as head, a second normal ticket sleeps behind it, and
+      // only then does the fast ticket arrive.
+      const head = startAcquire(home, 30, stub, '', 'head', {}, 'full');
+      await waitFor('head did not park', () =>
+        head.state.out.includes('queue ticket 1'),
+      );
+      const normal = acquire(home, 30, stub, '', 'normal', {}, 'full');
+      await waitFor('normal took no ticket', () =>
+        hasTicket(home, /^\d-0000000002-/),
+      );
+      const fast = acquire(home, 30, stub, '', 'fast', {}, 'fast');
+      await waitFor('fast took no ticket', () =>
+        hasTicket(home, /^\d-0000000003-/),
+      );
+      // Let both waiters complete a loop with the fast ticket queued, and
+      // leave room for a second blocking entry, so the release cannot hand
+      // the turn to the normal ticket by timing.
+      await new Promise((r) => setTimeout(r, 4500));
+      rmSync(held);
+      const results = await Promise.all([head.done, normal, fast]);
+      expect(results.map((r) => r.code)).toEqual([0, 0, 0]);
+      // The stub records who actually reached the lock. The parked head is
+      // not overtaken, so only the fast-before-normal order is the claim.
+      const served = readFileSync(order, 'utf8').trim().split('\n');
+      expect(served.indexOf('fast')).toBeLessThan(served.indexOf('normal'));
+      // A full-tier caller is the normal class, and the log names the class
+      // the ticket actually has, not the raw workflow tier.
+      expect(results[1].out).toContain('(normal,');
+      // Each ticket enters the blocking wait once while the hold lasts: the
+      // parked head keeps its kernel position and the fast ticket behind it
+      // parks once as the new minimum. Re-entering every few seconds would
+      // lose that position.
+      const parkLog = readFileSync(parks, 'utf8').trim().split('\n');
+      expect(parkLog.filter((line) => line === 'head park')).toHaveLength(1);
+      expect(parkLog.filter((line) => line === 'fast park')).toHaveLength(1);
+      expect(parkLog).not.toContain('normal park');
+    },
+  );
+
+  it(
+    'promotes a waiting normal ticket ahead of a later fast ticket',
     { timeout: 30000 },
     async () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-promote-'));
       const held = join(home, 'held');
-      const orderFile = join(home, 'order');
+      const order = join(home, 'order');
       writeFileSync(held, '');
-      const stub = flockStub(heldFlock(held, orderFile));
-      const normal = acquire(home, 30, stub, '', 'full', 'normal', {
-        SDK_JAVA_LOCK_PROMOTE_AFTER: '1',
-      });
-      await waitForTicket(home, /^1-/);
-      await new Promise((r) => setTimeout(r, 2500));
-      const fast = acquire(home, 30, stub, '', 'fast', 'fast');
-      await waitForTicket(home, /^0-0000000002-/);
+      const stub = flockStub(parkedFlock(held, order));
+      // Promotion is for a ticket that is not head yet: the head is parked
+      // in `flock --wait` and is next whatever its class.
+      const head = startAcquire(home, 30, stub, '', 'head', {}, 'full');
+      await waitFor('head did not park', () =>
+        head.state.out.includes('queue ticket 1'),
+      );
+      const normal = acquire(
+        home,
+        30,
+        stub,
+        '',
+        'normal',
+        { SDK_JAVA_LOCK_PROMOTE_AFTER: '1' },
+        'full',
+      );
+      await waitFor('normal was not promoted', () =>
+        hasTicket(home, /^0-0000000002-/),
+      );
+      const fast = acquire(home, 30, stub, '', 'fast', {}, 'fast');
+      await waitFor('fast took no ticket', () =>
+        hasTicket(home, /^\d-0000000003-/),
+      );
       await new Promise((r) => setTimeout(r, 2500));
       rmSync(held);
-      const [normalResult, fastResult] = await Promise.all([normal, fast]);
-      expect(normalResult.code).toBe(0);
-      expect(fastResult.code).toBe(0);
-      expect(normalResult.out).toContain(
-        'Promoted sdk-java host lock queue ticket 1 to the fast class',
+      const results = await Promise.all([head.done, normal, fast]);
+      expect(results.map((r) => r.code)).toEqual([0, 0, 0]);
+      expect(results[1].out).toContain(
+        'Promoted sdk-java host lock queue ticket 2 to the fast class',
       );
       // The promoted ticket keeps its older sequence, so it still precedes
       // the fast ticket that arrived after it.
-      expect(order(home)).toEqual(['normal', 'fast']);
+      const served = readFileSync(order, 'utf8').trim().split('\n');
+      expect(served.indexOf('normal')).toBeLessThan(served.indexOf('fast'));
+    },
+  );
+
+  it(
+    'reports the fast class for a promoted ticket that times out',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-promoted-timeout-'));
+      const held = join(home, 'held');
+      writeFileSync(held, '');
+      const stub = flockStub(parkedFlock(held, join(home, 'order')));
+      const head = startAcquire(home, 30, stub, '', 'head', {}, 'full');
+      await waitFor('head did not park', () =>
+        head.state.out.includes('queue ticket 1'),
+      );
+      const result = await acquire(
+        home,
+        4,
+        stub,
+        '',
+        'normal',
+        { SDK_JAVA_LOCK_PROMOTE_AFTER: '1' },
+        'full',
+      );
+      expect(result.code).toBe(1);
+      expect(result.out).toContain(
+        'Promoted sdk-java host lock queue ticket 2 to the fast class',
+      );
+      // Whether promotion fired is the first question a timeout raises, so
+      // the annotation names the class the ticket had when it gave up.
+      expect(result.out).toContain(
+        'as queue ticket 2 (fast); head of queue is 1-0000000001-',
+      );
+      rmSync(held);
+      expect((await head.done).code).toBe(0);
+    },
+  );
+
+  it(
+    'keeps a parked head ticket fresh so a later waiter cannot reap it',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-keepalive-'));
+      const held = join(home, 'held');
+      const order = join(home, 'order');
+      writeFileSync(held, '');
+      const stub = flockStub(parkedFlock(held, order));
+      const head = startAcquire(home, 30, stub, '', 'head', {}, 'fast');
+      await waitFor('head did not park', () =>
+        head.state.out.includes('queue ticket 1'),
+      );
+      const ticket = headTicket(home);
+      // Age the parked head past the 1800s arm, as a hold longer than that
+      // would: the mtime arm reaps any ticket nobody refreshes.
+      const past = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      utimesSync(ticket, past, past);
+      await waitFor(
+        'parked head ticket was not refreshed',
+        () => statSync(ticket).mtimeMs > Date.now() - 60000,
+      );
+      const waiter = acquire(home, 30, stub, '', 'waiter', {}, 'fast');
+      await waitFor('waiter took no ticket', () =>
+        hasTicket(home, /^\d-0000000002-/),
+      );
+      // Two of the waiter's loops, each running the reaper over the head.
+      await new Promise((r) => setTimeout(r, 4500));
+      expect(existsSync(ticket)).toBe(true);
+      rmSync(held);
+      const results = await Promise.all([head.done, waiter]);
+      expect(results.map((r) => r.code)).toEqual([0, 0]);
+      expect(readFileSync(order, 'utf8').trim().split('\n')[0]).toBe('head');
+      // The keepalive stops with the wait and `touch -c` cannot recreate a
+      // removed ticket, so nothing is left for the next job on the host.
+      await new Promise((r) => setTimeout(r, 2500));
+      expect(readdirSync(queueDir(home))).toEqual(['.seq']);
+    },
+  );
+
+  it.skipIf(!existsSync('/proc/self/fd'))(
+    'keeps the lock fd out of a parked head keepalive',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-keepalive-fd-'));
+      const held = join(home, 'held');
+      const parks = join(home, 'parks');
+      writeFileSync(held, '');
+      const stub = flockStub(parkedFlock(held, join(home, 'order'), parks));
+      const head = startAcquire(home, 30, stub, '', 'head', {}, 'fast');
+      await waitFor('head did not park', () => existsSync(parks));
+      const lock = realpathSync(
+        join(home, '.cache/qwen-code-ci/sdk-java-tests.lock'),
+      );
+      // The owner shell holds the lock fd, which proves the probe sees it.
+      expect(holdsFd(head.child.pid, lock)).toBe(true);
+      await waitFor(
+        'no keepalive started',
+        () => descendantsOutsideFlock(head.child.pid).length > 0,
+      );
+      // flock(2) locks belong to the open file description, so a keepalive
+      // still holding fd 9 would keep the lock held after the owner dies.
+      await waitFor('the keepalive holds the lock fd', () =>
+        descendantsOutsideFlock(head.child.pid).every(
+          (pid) => !holdsFd(pid, lock),
+        ),
+      );
+      rmSync(held);
+      expect((await head.done).code).toBe(0);
     },
   );
 
@@ -247,7 +528,8 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-reap-'));
       const queue = queueDir(home);
       mkdirSync(queue, { recursive: true });
-      const stale = join(queue, '0000000001-99999999');
+      writeFileSync(join(queue, '.seq'), '1\n');
+      const stale = join(queue, '1-0000000001-99999999');
       writeFileSync(stale, '');
       // Predate the reaping age-out; 99999999 outlives no PID namespace.
       const past = new Date(Date.now() - 30000);
@@ -267,10 +549,11 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-livepid-'));
       const queue = queueDir(home);
       mkdirSync(queue, { recursive: true });
+      writeFileSync(join(queue, '.seq'), '1\n');
       // A SIGKILLed owner leaves its ticket behind and its PID gets recycled,
       // so `kill -0` still answers; only the mtime arm can clear it. Without
       // that arm the orphan stays head and an idle lock is unreachable.
-      const orphan = join(queue, `0000000001-${process.pid}`);
+      const orphan = join(queue, `1-0000000001-${process.pid}`);
       writeFileSync(orphan, '');
       const past = new Date(Date.now() - 2 * 60 * 60 * 1000);
       utimesSync(orphan, past, past);
@@ -289,6 +572,7 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-recycled-'));
       const queue = queueDir(home);
       mkdirSync(queue, { recursive: true });
+      writeFileSync(join(queue, '.seq'), '1\n');
       // The PID is alive (it is this test process) but its start time cannot
       // match ticket 1, so the owner died and the PID was reused.
       const orphan = join(queue, `0-0000000001-${process.pid}`);
@@ -309,8 +593,10 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
     async () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-starttime-'));
       const { child, done } = startAcquire(home, 60, flockStub(blockingFlock));
+      await waitFor('no ticket published', () =>
+        hasTicket(home, /^1-0000000001-/),
+      );
       const ticket = join(queueDir(home), `1-0000000001-${child.pid}`);
-      await waitForTicket(home, ticketName);
       // The file appears before its body is written, so poll briefly instead
       // of failing on an empty first read.
       let body = '';
@@ -373,7 +659,7 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-timeout-'));
       const held = join(home, 'held');
       writeFileSync(held, '');
-      const stub = flockStub(heldFlock(held, join(home, 'order')));
+      const stub = flockStub(parkedFlock(held, join(home, 'order')));
       const result = await acquire(home, 5, stub);
       expect(result.code).toBe(1);
       // The `::error::` prefix is what the infra classifier matches: a bare
@@ -381,6 +667,10 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       expect(result.out).toContain(
         '::error::sdk-java host lock not acquired within',
       );
+      // A lone waiter's own ticket is gone by then; the empty glob must not
+      // leak into the annotation as `*`.
+      expect(result.out).toContain('head of queue is (no other ticket queued)');
+      expect(result.out).not.toContain('head of queue is *');
       expect(readdirSync(queueDir(home)).filter((f) => f !== '.seq')).toEqual(
         [],
       );
@@ -394,9 +684,10 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-blocked-'));
       const queue = queueDir(home);
       mkdirSync(queue, { recursive: true });
+      writeFileSync(join(queue, '.seq'), '1\n');
       // A live owner with a fresh mtime is not reapable, so the lock stays out
       // of reach and the timeout has to name what blocked it.
-      const name = `0000000001-${process.pid}`;
+      const name = `1-0000000001-${process.pid}`;
       writeFileSync(join(queue, name), '');
       const stub = flockStub(freeFlock);
       const result = await acquire(home, 3, stub);
