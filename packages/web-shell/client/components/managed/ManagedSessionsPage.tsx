@@ -2073,7 +2073,9 @@ function ManagedSessionsContent({
                   approvalChange.busy
                 }
                 dialogOpen={!interactive}
-                isRunning={home && Boolean(active)}
+                isRunning={
+                  home && Boolean(active || summary?.capabilities.canCancel)
+                }
                 onCancel={
                   home &&
                   cancellationEnabled &&

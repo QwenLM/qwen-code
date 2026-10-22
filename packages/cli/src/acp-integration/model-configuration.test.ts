@@ -456,12 +456,16 @@ describe('model configuration manifest', () => {
       'high',
     ],
     ['alibabaStandard', 'kimi-k3', ['low', 'high', 'max'], 'max'],
-    ['token-plan', 'qwen3.8-max', ['low', 'medium', 'xhigh'], 'xhigh'],
-    ['token-plan', 'qwen3.8-max-preview', ['low', 'medium', 'xhigh'], 'xhigh'],
+    [
+      'token-plan',
+      'qwen3.8-max',
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      'xhigh',
+    ],
     [
       'token-plan',
       'qwen3.8-flash',
-      ['none', 'low', 'medium', 'xhigh'],
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       'xhigh',
     ],
     [
