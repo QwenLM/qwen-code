@@ -90,12 +90,50 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  const eventsDone = (async () => {
+    try {
+      for await (const event of session.events()) {
+        for (const item of normalizeDaemonEvent(event, {
+          clientId: session.clientId,
+          suppressOwnUserEcho: true,
+        })) {
+          if (
+            item.type === 'assistant.text.delta' ||
+            item.type === 'thought.text.delta'
+          ) {
+            process.stdout.write(item.text);
+          } else if (item.type === 'assistant.done') {
+            process.stdout.write('\n');
+          } else if (item.type === 'permission.request') {
+            const options = item.options
+              .map((option) => option.label)
+              .join(' / ');
+            writeStderrLine(
+              `qwen attach: approval required: ${item.title}. Approve in Web Shell.${options ? ` Options: ${options}` : ''}`,
+            );
+          } else if (item.type === 'error') {
+            writeStderrLine(`qwen attach: ${item.text}`);
+          }
+        }
+      }
+    } catch (error) {
+      writeStderrLine(
+        `qwen attach: stream ended: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      process.exitCode = 1;
+    }
+  })();
+
   const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
     terminal: true,
   });
+  let terminalClosed = false;
   const onSigint = () => {
+    terminalClosed = true;
     rl.close();
     process.exit(0);
   };
@@ -106,7 +144,6 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
       rl.prompt();
       return;
     }
-    process.stdout.write(`\n> ${text}\n`);
     void session
       .prompt({ prompt: [{ type: 'text', text }] })
       .catch((error: unknown) => {
@@ -115,43 +152,17 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
             error instanceof Error ? error.message : String(error)
           }`,
         );
+      })
+      .finally(() => {
+        if (!terminalClosed) rl.prompt();
       });
   });
   rl.prompt();
 
   try {
-    for await (const event of session.events()) {
-      for (const item of normalizeDaemonEvent(event, {
-        clientId: session.clientId,
-        suppressOwnUserEcho: true,
-      })) {
-        if (
-          item.type === 'assistant.text.delta' ||
-          item.type === 'thought.text.delta'
-        ) {
-          process.stdout.write(item.text);
-        } else if (item.type === 'assistant.done') {
-          process.stdout.write('\n');
-        } else if (item.type === 'permission.request') {
-          const options = item.options
-            .map((option) => option.label)
-            .join(' / ');
-          writeStderrLine(
-            `qwen attach: approval required: ${item.title}. Approve in Web Shell.${options ? ` Options: ${options}` : ''}`,
-          );
-        } else if (item.type === 'error') {
-          writeStderrLine(`qwen attach: ${item.text}`);
-        }
-      }
-    }
-  } catch (error) {
-    writeStderrLine(
-      `qwen attach: stream ended: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    process.exitCode = 1;
+    await eventsDone;
   } finally {
+    terminalClosed = true;
     process.removeListener('SIGINT', onSigint);
     rl.close();
   }
