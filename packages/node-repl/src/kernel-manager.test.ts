@@ -1746,10 +1746,29 @@ describe('NodeReplKernelManager', () => {
   );
 
   it.skipIf(process.platform === 'win32')(
-    'kills a session process that ignores SIGTERM when the kernel exits on SIGTERM',
+    'lets a session process handle SIGTERM before it is killed on reset',
     async () => {
-      // Cleanup outlasts the 2500 ms grace period, so the kernel gets the
-      // SIGTERM and exits during the 500 ms that follow.
+      const marker = path.join(workDir, 'sigterm-marker');
+      const child = await startSessionProcess(
+        `process.on('SIGTERM', () => { require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'flushed'); process.exit(0); });`,
+      );
+      try {
+        await manager.reset();
+        await expect(child.exitedWithin(10_000)).resolves.toBe(true);
+        expect(fs.readFileSync(marker, 'utf8')).toBe('flushed');
+      } finally {
+        child.stop();
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'kills a session process that ignores SIGTERM when the kernel exits on its own after the grace period',
+    async () => {
+      // Cleanup outlasts the 2500 ms grace period, so the group gets SIGTERM
+      // while the kernel is still running. The kernel ignores it once shutdown
+      // has started and exits when cleanup ends, during the 500 ms that follow.
       createEsmPackage(
         path.join(workDir, 'node_modules'),
         'cua-slow-cleanup-fixture',
@@ -1766,7 +1785,28 @@ describe('NodeReplKernelManager', () => {
           `globalThis.cua = (await import('cua-slow-cleanup-fixture')).cua;`,
         );
         expect(install.status).toBe('ok');
-        await manager.reset();
+        const kernelPid = manager.getKernelPid()!;
+        const realKill = process.kill.bind(process);
+        const signalledRunningKernel: Array<[number, unknown]> = [];
+        const kill = vi
+          .spyOn(process, 'kill')
+          .mockImplementation((pid, signal) => {
+            try {
+              realKill(kernelPid, 0);
+              signalledRunningKernel.push([pid, signal]);
+            } catch {
+              // The kernel had already exited.
+            }
+            return realKill(pid, signal);
+          });
+        try {
+          await manager.reset();
+        } finally {
+          kill.mockRestore();
+        }
+        // Without this the kernel could exit before any signal and the case
+        // would pass without reaching the path it is named for.
+        expect(signalledRunningKernel).toContainEqual([-kernelPid, 'SIGTERM']);
         await expect(child.exitedWithin(10_000)).resolves.toBe(true);
       } finally {
         child.stop();
