@@ -154,31 +154,37 @@ export function parseManagedAutomationGateResult(
     return null;
   }
   const result = parsed as Record<string, unknown>;
+  // A whole, non-negative count, as the records store it: a worker whose
+  // wall clock stepped back mid-probe must not leave a claim whose output
+  // can never be read back.
+  const durationMs =
+    typeof result['durationMs'] === 'number' &&
+    Number.isFinite(result['durationMs'])
+      ? Math.max(0, Math.round(result['durationMs']))
+      : undefined;
   switch (result['kind']) {
     case 'quiet':
-      return typeof result['durationMs'] === 'number'
-        ? { kind: 'quiet', durationMs: result['durationMs'] }
-        : null;
+      return durationMs !== undefined ? { kind: 'quiet', durationMs } : null;
     case 'output':
       return typeof result['stdout'] === 'string' &&
         typeof result['truncated'] === 'boolean' &&
-        typeof result['durationMs'] === 'number'
+        durationMs !== undefined
         ? {
             kind: 'output',
             stdout: result['stdout'],
             truncated: result['truncated'],
-            durationMs: result['durationMs'],
+            durationMs,
           }
         : null;
     case 'failed':
       return typeof result['detail'] === 'string' &&
         typeof result['stderr'] === 'string' &&
-        typeof result['durationMs'] === 'number'
+        durationMs !== undefined
         ? {
             kind: 'failed',
             detail: result['detail'],
             stderr: result['stderr'],
-            durationMs: result['durationMs'],
+            durationMs,
           }
         : null;
     case 'blocked':

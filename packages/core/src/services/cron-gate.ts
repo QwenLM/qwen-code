@@ -186,7 +186,9 @@ export function createCronGateRunner(
       };
     }
 
-    const startedAt = Date.now();
+    // Durations run on the monotonic clock: a wall clock stepped back
+    // mid-probe would report a negative one, which records refuse.
+    const startedAt = performance.now();
     const timeout = AbortSignal.timeout(timeoutMs);
     const binary = new AbortController();
     const untracked = new AbortController();
@@ -235,7 +237,7 @@ export function createCronGateRunner(
       kind: 'failed',
       detail,
       stderr,
-      durationMs: Date.now() - startedAt,
+      durationMs: Math.round(performance.now() - startedAt),
     });
 
     let result: ShellExecutionResult;
@@ -281,10 +283,16 @@ export function createCronGateRunner(
           : `exited with code ${result.exitCode}`,
       );
     }
-    const durationMs = Date.now() - startedAt;
+    const durationMs = Math.round(performance.now() - startedAt);
     if (stdout.trim().length === 0) return { kind: 'quiet', durationMs };
     return { kind: 'output', stdout, truncated, durationMs };
   };
+}
+
+/** Gate output as the model may see it; storing it this way also bounds
+ * its JSON encoding (no control character survives to escape to 6 bytes). */
+export function sanitizeGateOutput(text: string): string {
+  return sanitizeGateText(text);
 }
 
 /**
@@ -292,12 +300,6 @@ export function createCronGateRunner(
  * line, like a `Monitor` line, so a probe's output cannot close the
  * `<gate-output>` block it is wrapped in or spoof a notification boundary.
  */
-/** Gate output as the model may see it; storing it this way also bounds
- * its JSON encoding (no control character survives to escape to 6 bytes). */
-export function sanitizeGateOutput(text: string): string {
-  return sanitizeGateText(text);
-}
-
 function sanitizeGateText(text: string): string {
   return stripAnsi(text)
     .split('\n')

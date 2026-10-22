@@ -90,6 +90,25 @@ describe('parseManagedAutomationGateResult', () => {
         { text: '{"kind":"blocked","reason":"r","rule":"Monitor(x)"}' },
       ]),
     ).toEqual({ kind: 'blocked', reason: 'r', rule: 'Monitor(x)' });
+    // A worker clock stepped back mid-probe: the records only take a whole,
+    // non-negative count.
+    expect(
+      parseManagedAutomationGateResult([
+        {
+          text: JSON.stringify({
+            kind: 'output',
+            stdout: 'x',
+            truncated: false,
+            durationMs: -3,
+          }),
+        },
+      ]),
+    ).toEqual({ kind: 'output', stdout: 'x', truncated: false, durationMs: 0 });
+    expect(
+      parseManagedAutomationGateResult([
+        { text: JSON.stringify({ kind: 'quiet', durationMs: 4.6 }) },
+      ]),
+    ).toEqual({ kind: 'quiet', durationMs: 5 });
     for (const parts of [
       [],
       [{ text: 'not json' }],

@@ -1651,10 +1651,6 @@ function unsettledPromptId(session: HostedSession): string | undefined {
   return unsettled.size === 1 ? [...unsettled][0] : undefined;
 }
 
-// A pruned-to-empty carry must persist as a delete, not as no write at
-// all: an upsert-only write leaves the previous pass's stale set behind,
-// and the next pass would journal a positively witnessed stop as
-// unobservable.
 /** A Session's gate runner and the release for probes it no longer asks. */
 function gateOptions(options: HostedAutomationGateRunnerOptions): {
   gate: ReturnType<typeof createHostedAutomationGateRunner>;
@@ -1666,6 +1662,10 @@ function gateOptions(options: HostedAutomationGateRunnerOptions): {
   };
 }
 
+// A pruned-to-empty carry must persist as a delete, not as no write at
+// all: an upsert-only write leaves the previous pass's stale set behind,
+// and the next pass would journal a positively witnessed stop as
+// unobservable.
 function persistRecoveryUnobserved(
   session: HostedSession,
   turnId: string,
@@ -5655,6 +5655,7 @@ export function registerHostedHarnessSessionRoutes(
             : {}),
           shellAvailable: () =>
             isHostedWorkspaceShellProfile(session.toolProfile),
+          hooksConfigured: () => session.hooks !== undefined,
         },
       );
       // H5b: every hosted Session owns its channel funnel — a channel input

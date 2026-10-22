@@ -184,15 +184,21 @@ export interface AutomationFireResult {
   readonly gate?: AutomationGateSummary;
 }
 
-/** The definition names a gate, but the Session's tool profile has no Shell. */
+/** The definition names a gate this Session cannot run as its deployment
+ * requires. */
 export class AutomationGateUnsupportedError extends Error {
-  constructor(scheduleId: string) {
-    super(
-      `Automation ${scheduleId} names a gate, but the Session's tool profile declares no Shell to run it.`,
-    );
+  constructor(
+    scheduleId: string,
+    reason = "the Session's tool profile declares no Shell to run it",
+  ) {
+    super(`Automation ${scheduleId} names a gate, but ${reason}.`);
     this.name = 'AutomationGateUnsupportedError';
   }
 }
+
+/** Why a Session whose deployment configures Hooks runs no gate. */
+const GATE_HOOKS_REASON =
+  "the deployment's Hooks would not see the gate command: a probe does not run through PreToolUse or PermissionRequest yet";
 
 export interface HostedAutomationSessionOptions {
   /** Runs a definition's gate; absent, every gated fire is `blocked`. */
@@ -207,6 +213,11 @@ export interface HostedAutomationSessionOptions {
   ) => Promise<void>;
   /** Whether this Session's tool profile declares Shell, at define time. */
   readonly shellAvailable?: () => boolean;
+  /**
+   * Whether the deployment configures Hooks for this Session. A gate would
+   * run around them, so a Session with Hooks refuses and blocks gates.
+   */
+  readonly hooksConfigured?: () => boolean;
 }
 
 /** The definition moved since the caller read it; re-read and decide again. */
@@ -302,6 +313,11 @@ function summarizeGate(
 
 export class HostedAutomationSession {
   private writes: Promise<void> = Promise.resolve();
+  /**
+   * Probes this process ran whose attempt ended without the Session's
+   * release (`<runId>|<revision>`): the next fire of that occurrence owes it.
+   */
+  private readonly owedGateReleases = new Set<string>();
 
   constructor(
     private readonly store: HostedAutomationStore,
@@ -453,6 +469,12 @@ export class HostedAutomationSession {
         !this.options.shellAvailable()
       ) {
         throw new AutomationGateUnsupportedError(params.scheduleId);
+      }
+      if (definition.gate !== null && this.options.hooksConfigured?.()) {
+        throw new AutomationGateUnsupportedError(
+          params.scheduleId,
+          GATE_HOOKS_REASON,
+        );
       }
       const definitionDigest = automationDefinitionDigest(definition);
       if (
@@ -646,8 +668,8 @@ export class HostedAutomationSession {
       if (ending !== undefined || stale) {
         // This occurrence is not probed under its pinned revision again,
         // so an earlier attempt's probe Session, which that attempt could
-        // not release, is released here; the scanner retries the fire
-        // until it is.
+        // not release, is released here; while this process knows it owes
+        // that release, the scanner retries the fire until it is done.
         await this.releaseGateSession(runId, params.definitionRevision);
       }
       if (ending !== undefined) throw ending;
@@ -702,17 +724,22 @@ export class HostedAutomationSession {
   }
 
   /**
-   * Releases the probe Session of `automationRunId` under `revision`, if any;
-   * a failure asks the scanner to retry the fire.
+   * Releases the probe Session of `automationRunId` under `revision`, if any.
+   * A probe this process left unreleased makes a failure retry the fire;
+   * otherwise the release is a courtesy — most such fires never probed (an
+   * ungated definition, a first attempt) and must not wait on the Broker.
    */
   private async releaseGateSession(
     automationRunId: string,
     revision: number,
   ): Promise<void> {
     if (this.options.releaseGate === undefined) return;
+    const owed = `${automationRunId}|${revision}`;
     try {
       await this.options.releaseGate(automationRunId, revision);
+      this.owedGateReleases.delete(owed);
     } catch (cause) {
+      if (!this.owedGateReleases.has(owed)) return;
       throw new HostedAutomationGateHeld(
         cause instanceof Error ? cause.message : String(cause),
       );
@@ -731,12 +758,28 @@ export class HostedAutomationSession {
         reason: 'this Session cannot run gate commands',
       });
     }
-    return this.options.gate({
-      automationRunId,
-      definitionRevision,
-      gate,
-      signal: new AbortController().signal,
-    });
+    if (this.options.hooksConfigured?.()) {
+      return Promise.resolve({ kind: 'blocked', reason: GATE_HOOKS_REASON });
+    }
+    const owed = `${automationRunId}|${definitionRevision}`;
+    return this.options
+      .gate({
+        automationRunId,
+        definitionRevision,
+        gate,
+        signal: new AbortController().signal,
+      })
+      .then(
+        (result) => {
+          // An answer means the runner released the Session.
+          this.owedGateReleases.delete(owed);
+          return result;
+        },
+        (cause: unknown) => {
+          this.owedGateReleases.add(owed);
+          throw cause;
+        },
+      );
   }
 
   /** Revision 2: the input and its wake, in one transaction with the run. */

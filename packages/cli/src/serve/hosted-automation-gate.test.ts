@@ -376,58 +376,102 @@ describe('createHostedAutomationGateRunner', () => {
     },
   );
 
-  it('cancels what it started when it stops watching, before releasing', async () => {
-    // A start whose execution this attempt cannot follow to an answer: a
-    // reservation that never started would otherwise run later, or keep
-    // the Session busy past the release.
-    let prepares = 0;
-    const { calls, probe } = await rig((path) => {
-      switch (path) {
-        case '/executions:prepare':
-          prepares++;
-          return prepares === 1
-            ? rejection(404, 'runtime_session_not_found')
-            : {
-                body: {
-                  ...identity,
-                  executionCallId: 'gate-execution',
-                  status: { state: 'prepared' },
-                },
-              };
-        case '/tool-sessions:acquire':
-          return { body: acquired };
-        case '/executions/gate-execution:start':
-          return {
-            body: {
-              ...identity,
-              executionCallId: 'gate-execution',
-              status: { state: 'lapsed' },
-            },
-          };
-        case '/executions/gate-execution:cancel':
-          return {
-            body: {
-              ...identity,
-              executionCallId: 'gate-execution',
-              status: { state: 'cancel_requested' },
-            },
-          };
-        case RELEASE:
-          return { body: { ...identity, released: true } };
-        default:
-          throw new Error(`unexpected ${path}`);
+  it.each([
+    [
+      'still executing: a later attempt reads the real receipt',
+      {
+        body: {
+          ...identity,
+          executionCallId: 'gate-execution',
+          status: { state: 'executing' },
+        },
+      },
+      'held',
+    ],
+    [
+      'settled meanwhile: its receipt is the answer',
+      {
+        body: settled(
+          '{"kind":"output","stdout":"new mail\\n","truncated":false,"durationMs":5}',
+        ),
+      },
+      'output',
+    ],
+    [
+      'still only prepared: the start never arrived',
+      {
+        body: {
+          ...identity,
+          executionCallId: 'gate-execution',
+          status: { state: 'prepared' },
+        },
+      },
+      'cancelled',
+    ],
+  ] as const)(
+    'reads the reservation again when it loses sight of a started probe: %s',
+    async (_what, now, expected) => {
+      // A poll that fails once must not cost the occurrence a probe that is
+      // running fine; only a reservation that never started is cancelled.
+      let prepares = 0;
+      const { calls, probe } = await rig((path) => {
+        switch (path) {
+          case '/executions:prepare':
+            prepares++;
+            return prepares === 1
+              ? rejection(404, 'runtime_session_not_found')
+              : prepares === 2
+                ? {
+                    body: {
+                      ...identity,
+                      executionCallId: 'gate-execution',
+                      status: { state: 'prepared' },
+                    },
+                  }
+                : now;
+          case '/tool-sessions:acquire':
+            return { body: acquired };
+          case '/executions/gate-execution:start':
+            return rejection(503, 'runtime_store_unavailable');
+          case '/executions/gate-execution':
+            return rejection(503, 'runtime_store_unavailable');
+          case '/executions/gate-execution:cancel':
+            return {
+              body: {
+                ...identity,
+                executionCallId: 'gate-execution',
+                status: { state: 'cancel_requested' },
+              },
+            };
+          case RELEASE:
+            return { body: { ...identity, released: true } };
+          default:
+            throw new Error(`unexpected ${path}`);
+        }
+      });
+      const paths = () => calls.map((call) => call.path);
+      if (expected === 'held') {
+        await expect(probe()).rejects.toBeInstanceOf(HostedAutomationGateHeld);
+        expect(paths()).not.toContain('/executions/gate-execution:cancel');
+        expect(paths()).not.toContain(RELEASE);
+        return;
       }
-    });
-    await expect(probe()).resolves.toMatchObject({ kind: 'unknown' });
-    expect(calls.map((call) => call.path)).toEqual([
-      '/executions:prepare',
-      '/tool-sessions:acquire',
-      '/executions:prepare',
-      '/executions/gate-execution:start',
-      '/executions/gate-execution:cancel',
-      RELEASE,
-    ]);
-  });
+      if (expected === 'output') {
+        await expect(probe()).resolves.toMatchObject({
+          kind: 'output',
+          stdout: 'new mail\n',
+        });
+        expect(paths()).not.toContain('/executions/gate-execution:cancel');
+      } else {
+        await expect(probe()).resolves.toMatchObject({
+          kind: 'failed',
+          detail: 'could not start: the Runtime never started the probe',
+        });
+        expect(paths()).toContain('/executions/gate-execution:cancel');
+      }
+      expect(paths().at(-1)).toBe(RELEASE);
+    },
+  );
 
   it.each([
     ['released', { body: { ...identity, released: true } }, true],

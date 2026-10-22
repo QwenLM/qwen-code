@@ -133,7 +133,6 @@ export function createHostedAutomationGateRunner(
     let unconfirmed = false;
     let replayed = false;
     let started = false;
-    let executionCallId: string | undefined;
     let result: HostedAutomationGateResult;
     try {
       // The occurrence's receipt is asked for before anything is acquired:
@@ -193,22 +192,36 @@ export function createHostedAutomationGateRunner(
         if (prepared === 'unknown' || prepared === 'superseded') {
           result = unreadable(prepared);
         } else {
-          executionCallId = prepared.executionCallId;
-          result = await settle(broker, prepared, payloadJson, signal, () => {
-            started = true;
-          });
+          const reservation = prepared;
+          try {
+            result = await settle(
+              broker,
+              reservation,
+              payloadJson,
+              signal,
+              () => {
+                started = true;
+              },
+            );
+          } catch (cause) {
+            if (
+              !started ||
+              cause instanceof HostedWorkspaceBrokerExecutionUnresolved
+            ) {
+              throw cause;
+            }
+            result = await afterLostWatch(
+              broker,
+              callId,
+              digest,
+              reservation.executionCallId,
+              cause,
+            );
+          }
         }
       }
     } catch (cause) {
       if (cause instanceof HostedAutomationGateHeld) throw cause;
-      if (started && executionCallId !== undefined) {
-        // This attempt stops watching what it started: cancel it, so a
-        // start that is still on its way, or a reservation it never
-        // reached, cannot run after the answer and does not keep the
-        // Session busy past the release. A refused cancel leaves both to
-        // the retried fire.
-        await broker.cancel(executionCallId).catch(() => undefined);
-      }
       const message = cause instanceof Error ? cause.message : String(cause);
       // Once the start left, the command may have run: only a settled
       // answer could say; everything else is unknown, never a second start.
@@ -311,6 +324,53 @@ async function releaseDerivedSession(
 type Reservation = Awaited<
   ReturnType<HostedWorkspaceBroker['prepareReplayable']>
 >;
+
+/**
+ * What an attempt answers once it lost sight of an execution it started (a
+ * poll that failed, an observation window that ran out): the reservation as
+ * the Broker now holds it. A settled receipt is the probe's answer; an
+ * execution still running or a Broker that cannot say is retried, so a
+ * later attempt reads the real receipt; a reservation still only prepared
+ * means the start never arrived, so it is cancelled — it cannot run after
+ * this answer — and the probe did not run.
+ */
+async function afterLostWatch(
+  broker: HostedWorkspaceBroker,
+  callId: string,
+  digest: string,
+  executionCallId: string,
+  cause: unknown,
+): Promise<HostedAutomationGateResult> {
+  const now = await reservationAnswer(broker, callId, digest).catch(
+    () => 'held' as const,
+  );
+  if (now === 'held') {
+    throw new HostedAutomationGateHeld(
+      `the occurrence's probe has not settled: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    );
+  }
+  if (now === 'unknown' || now === 'superseded') return unreadable(now);
+  if (now === undefined || now.executionCallId !== executionCallId) {
+    return {
+      kind: 'unknown',
+      reason: "the Broker no longer holds the occurrence's probe",
+    };
+  }
+  if (now.settled !== undefined) {
+    return settle(broker, now, '', new AbortController().signal, () => {
+      throw new Error('a settled receipt never starts');
+    });
+  }
+  await broker.cancel(executionCallId).catch(() => undefined);
+  return {
+    kind: 'failed',
+    detail: 'could not start: the Runtime never started the probe',
+    stderr: '',
+    durationMs: 0,
+  };
+}
 
 function heldByAnotherAttempt(): HostedAutomationGateHeld {
   // The Session exists but is not ready: an attempt still running, or an

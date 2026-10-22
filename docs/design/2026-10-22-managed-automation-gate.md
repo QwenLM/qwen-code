@@ -76,7 +76,7 @@ The facts below are from `main` at `13a4fea516` plus PR #15069.
   which the scanner defers and re-drives.
 - **Public API.** `AutomationDefinitionRequest`, `PublicAutomation` and
   `PublicAutomationRun` are `additionalProperties: false` schemas in the
-  v1.80.0 contract; `ManagedAgentApiContractTest` fails on any drift between
+  public contract (1.88.0 before this change); `ManagedAgentApiContractTest` fails on any drift between
   the `ApiModels` records, the mounted routes and the document.
 - **Ledger.** `ma_schedule` mirrors the definition for the scanner;
   `ma_schedule_occurrence` keeps one row per decision with `outcome`,
@@ -121,13 +121,17 @@ control characters and no part backgrounded with `&`. A revision may set,
 change or clear it (`null`); the definition digest includes it, so a changed
 gate is a new definition revision. `PublicAutomation` carries `gate` (absent
 for an ungated definition) and `gate_status` (absent until the gate first
-runs): `last_outcome`, `last_at`,
-`quiet_since_delivery`, `consecutive_failures` and `last_error`, or null
-until the gate first ran.
+runs): `last_outcome`, `last_at`, `quiet_since_delivery`,
+`consecutive_failures` and `last_error`.
 
-A gate needs a Session whose tool profile declares Shell. A definition that
-names one on another Session is refused with `409 automation_gate_unsupported`
-before anything commits.
+A gate needs a Session whose tool profile declares Shell and whose
+deployment configures no Hooks: a probe does not run through the
+deployment's PreToolUse and PermissionRequest Hooks yet, so a gate there
+would run a command those Hooks never saw. A definition that names one on
+another Session is refused with `409 automation_gate_unsupported` before
+anything commits. A gate the Harness's shell checks refuse (empty, or any
+part backgrounded with `&`) is refused with `400 automation_gate_invalid`,
+without spending the caller's `Idempotency-Key`.
 
 ### 4.2 Occurrences
 
@@ -137,7 +141,7 @@ before anything commits.
 | exit 0, output                                     | `fired`                                                | the run's turn text is the prompt plus the output, as data |
 | non-zero exit, timeout, could not start            | `skipped`, reason `gate_failed`; `last_error` names it | nothing reaches the Session; the streak grows              |
 | the Runtime cannot say (worker replaced mid-probe) | `skipped`, reason `gate_unknown`                       | nothing reaches the Session; the next slot probes again    |
-| the Session's profile has no Shell                 | `skipped`, reason `gate_failed`; `last_error` says so  | a definition revised onto such a Session                   |
+| blocked: no Broker, or Hooks configured            | `skipped`, reason `gate_failed`; `last_error` says so  | a Harness without a Broker; refused at definition anyway   |
 
 A manual run (`POST .../runs`) takes the same path: a quiet gate answers
 `409 automation_run_skipped` with reason `gate_quiet`, as an overlap refusal
@@ -194,8 +198,9 @@ and the Session's identity to run under. The funnel takes an injected runner
 (`HostedAutomationSession` option `gate`), so its tests script outcomes and
 the route wires the real one:
 
-1. The Harness refuses the probe outright when the Session's tool profile
-   declares no Shell (`blocked`, the reason naming the profile).
+1. The Harness refuses the probe outright (`blocked`, with the reason) when
+   the Session's tool profile declares no Shell, when the deployment
+   configures Hooks for the Session, or when it has no Broker to run it.
 2. Otherwise it opens a `HostedWorkspaceBroker` for the derived Runtime
    Session `hostedRuntimeSessionId("<automationRunId>:gate:<revision>")`,
    where `<revision>` is the definition revision the occurrence is pinned
@@ -218,9 +223,12 @@ the route wires the real one:
    still hold the key's execution. An execution the Runtime lost answers
    `unknown`, and a reservation under the same key for another request is a
    conflict, never a second run: it answers `unknown` too. An attempt that
-   started the execution and stops watching it before it settles cancels it
-   first, so a start still on its way, or a reservation it never reached,
-   cannot run after the answer or keep the Session busy. Whenever the
+   started the execution and loses sight of it before it settles (a poll
+   that failed, the observation window running out) reads the reservation
+   again: a settled receipt is the answer, an execution still running is
+   retried so a later attempt reads its real receipt, and a reservation
+   still only prepared — its start never arrived — is cancelled, so it
+   cannot run after the answer, and the probe did not run. Whenever the
    attempt may hold the derived Session (it acquired it, its acquisition was
    not confirmed, or the Broker reports it live), it releases the Session
    before answering, and a release that fails fails the fire for a
@@ -247,7 +255,11 @@ A re-drive that no longer probes under the occurrence's pinned revision —
 the revision went stale, the definition retired or is gone — first releases
 that revision's derived Session, because the attempt that could not release
 it left the release to the next one through the runner, which now never
-comes; a release that fails keeps the fire unsettled the same way. A
+comes. While the Harness process knows it owes that release (one of its
+attempts under the revision ended without it), a release that fails keeps
+the fire unsettled the same way; otherwise the release is a courtesy whose
+failure is ignored, because most such fires never probed (an ungated
+definition, a first attempt) and must not wait on the Broker. A
 revision that changed the gate therefore probes the occurrence again with
 the new command under its own identities: the occurrence's answer is the
 current command's. When the first answer was lost and the definition moved
@@ -286,7 +298,12 @@ decided slot.
   acting through the public API, the same authority that may run a Turn in
   it. The gate is admitted there, under the definition's own validation, and
   revised the same way; the Harness additionally refuses a gate on a Session
-  whose profile has no Shell. There is no classifier and no Action: the
+  whose profile has no Shell or whose deployment configures Hooks. A
+  model's Shell call passes the deployment's PreToolUse and PermissionRequest
+  Hooks, which the deployer owns and the Session's creator cannot change; a
+  probe does not, so on such a Session a gate would be a way around them.
+  Running the probe through them is a follow-up. There is no classifier and
+  no Action: the
   worker executes admitted tools under `yolo`, and the Harness's per-call
   approval exists for a model's proposal, which a gate is not.
 - **Fire time.** The probe runs in the Workspace Runtime with the identity,
@@ -376,7 +393,7 @@ file on every execution:
   reads the stored output; failed, blocked and unknown answer their outcome;
   an ungated definition never calls the runner; a stale, retired or missing
   definition releases the pinned revision's probe Session first, and a
-  failed release retries the fire.
+  failed release retries the fire only when this process owes it.
 - `hosted-workspace-broker.test.ts`: `prepareReplayable` answers a fresh
   reservation and a terminal replay, and refuses a conflicting one.
 - `hosted-automation-gate.test.ts`: against a scripted Broker, the runner
@@ -385,7 +402,8 @@ file on every execution:
   for a retry while a Session is held or an execution has not settled,
   answers `unknown` and releases for a lost execution or a conflicting
   reservation, reads a reservation it finds only after acquiring the same
-  way, cancels an execution it stops watching before releasing, `failed`
+  way, reads the reservation again when it loses sight of a started probe
+  (retrying one still running, cancelling one never started), `failed`
   for a Session it cannot acquire, and `blocked` for a profile without Shell
   before asking; release failures and unconfirmed acquisitions keep the fire
   unsettled.
@@ -447,6 +465,11 @@ One PR, stacked on #15069 (it reuses `cron-gate.ts`):
   Broker names no execution in its conflict answers, and the Harness keeps
   no earlier revision's gate to ask for it by its request; a Broker-side
   expiry of a reservation that never started would close it.
+- Two releases can still miss a Session. An acquisition whose answer was
+  lost and that the Broker admits only after a revision's stale fire found
+  nothing to release (about 30 s of Broker stall) leaves that Session held.
+  So does a Harness restart that forgets an owed release while the Broker
+  is failing. Either stays held until the Harness Session drains.
 
 - Should a failure streak past a bound park the definition (`blocked_reason`)
   the way an unresolvable timezone does? Today it only counts.

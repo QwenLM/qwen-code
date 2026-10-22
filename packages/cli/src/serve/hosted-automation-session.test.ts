@@ -153,6 +153,9 @@ async function withSession<T>(
         ...(options.shellAvailable
           ? { shellAvailable: options.shellAvailable }
           : {}),
+        ...(options.hooksConfigured
+          ? { hooksConfigured: options.hooksConfigured }
+          : {}),
       },
     );
     return await run(automations, authority);
@@ -1357,7 +1360,7 @@ describe('hosted automation gates', () => {
     );
   });
 
-  it('retries a fire whose stale revision’s probe Session could not be released', async () => {
+  it('retries a fire whose stale revision’s probe Session this process owes, and only that one', async () => {
     const harness = await createHarness();
     let failing = true;
     await withSession(
@@ -1368,6 +1371,10 @@ describe('hosted automation gates', () => {
           operationId: nextOperationId(),
           definition: gated,
         });
+        // The probe's attempt could not release its Session.
+        await expect(automations.fire(fireParams(1))).rejects.toThrow(
+          /was not released/,
+        );
         await automations.define({
           scheduleId: SCHEDULE_ID,
           operationId: nextOperationId(),
@@ -1383,8 +1390,23 @@ describe('hosted automation gates', () => {
         // Only then does the ungated revision claim, unprobed.
         const fired = await automations.fire(fireParams(2));
         expect(fired.run?.run.execution).toBe('dispatch_started');
+        // A stale fire that owes nothing does not wait on the Broker.
+        failing = true;
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: { prompt: 'Run the build again.' },
+        });
+        await expect(
+          automations.fire(fireParams(2, 'schedule:2026-03-09T07:00:00Z')),
+        ).rejects.toThrow(AutomationRevisionStaleError);
       },
       {
+        gate: async () => {
+          throw new Error(
+            "The gate's Runtime Session was not released, so the fire is retried to release it: Broker unavailable",
+          );
+        },
         releaseGate: async () => {
           if (failing) throw new Error('Broker unavailable');
         },
@@ -1644,6 +1666,48 @@ describe('hosted automation gates', () => {
         expect(gate.calls).toHaveLength(0);
       },
       { gate: gate.runner },
+    );
+  });
+
+  it('refuses and blocks a gate on a Session whose deployment configures Hooks', async () => {
+    // A probe does not run through the deployment's PreToolUse and
+    // PermissionRequest Hooks, so a gate there would run around them.
+    const harness = await createHarness();
+    const gate = scriptedGate([]);
+    await withSession(
+      harness,
+      async (automations) => {
+        await expect(
+          automations.define({
+            scheduleId: SCHEDULE_ID,
+            operationId: nextOperationId(),
+            definition: gated,
+          }),
+        ).rejects.toThrow(/deployment's Hooks would not see the gate command/);
+        expect(automations.schedules()).toHaveLength(0);
+      },
+      { gate: gate.runner, hooksConfigured: () => true },
+    );
+    // A definition committed before the Session had Hooks never probes.
+    await withSession(harness, async (automations) => {
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
+        definition: gated,
+      });
+    });
+    await withSession(
+      harness,
+      async (automations) => {
+        const fired = await automations.fire(fireParams());
+        expect(fired.run).toBeUndefined();
+        expect(fired.gate).toMatchObject({
+          outcome: 'blocked',
+          detail: expect.stringContaining('PreToolUse or PermissionRequest'),
+        });
+        expect(gate.calls).toHaveLength(0);
+      },
+      { gate: gate.runner, hooksConfigured: () => true, create: false },
     );
   });
 
