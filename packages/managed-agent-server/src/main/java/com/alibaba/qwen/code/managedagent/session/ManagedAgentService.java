@@ -1276,6 +1276,7 @@ public class ManagedAgentService {
                         compressions.getOrDefault(session.sessionId(),
                                 new AgentStateStore.ContextCompressionState(0, null)),
                         approvalSelections.get(session.sessionId()), approvalSupported
+                                && WorkspaceToolProfiles.supportsApprovalSelection(session)
                                 && (session.agentDefinitionDigest() == null || definitionApprovalSupported)
                                 && lifecycleOwners.contains(session.sessionId())))
                 .toList();

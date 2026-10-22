@@ -265,7 +265,15 @@ export function useManagedSessionLifecycle(
 
   useEffect(() => {
     scope.alive = true;
-    for (const intent of Object.values(scope.intents)) void run(intent);
+    for (const intent of Object.values(scope.intents)) {
+      if (intent.failed && !intent.operationId)
+        update(intent.sessionId, {
+          action: intent.action,
+          status: 'failed',
+          busy: false,
+        });
+      else void run(intent);
+    }
     return () => {
       scope.alive = false;
       for (const abort of scope.runs.values()) abort.abort();

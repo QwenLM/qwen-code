@@ -35,7 +35,15 @@ function blocks(items: readonly ManagedExportItem[]): ExportBlock[] {
     const result = object(attributes['result']);
     const preview = object(result['preview']);
     const images: ExportBlock['images'] = [];
-    const content = item.content.map((part) => part.text).filter(Boolean);
+    const parts = item.content.filter((part) => part.text);
+    const hasReasoning = parts.some((part) => part.type === 'reasoning');
+    const reasoningOnly =
+      hasReasoning && parts.every((part) => part.type === 'reasoning');
+    const content = parts.map((part) =>
+      hasReasoning && !reasoningOnly
+        ? `### ${part.type === 'reasoning' ? 'Public reasoning' : 'Assistant answer'}\n\n${part.text}`
+        : part.text!,
+    );
     const attachments: unknown[] = Array.isArray(attributes['inputAttachments'])
       ? attributes['inputAttachments']
       : [];
@@ -66,14 +74,13 @@ function blocks(items: readonly ManagedExportItem[]): ExportBlock[] {
     }
     if (item.type === 'tool_call') {
       content.push(
-        text(attributes['title']) ||
-          text(attributes['toolName']) ||
-          text(attributes['name']) ||
-          'Tool',
+        text(attributes['title']) || text(attributes['name']) || 'Tool',
       );
-      if (attributes['input'] !== undefined)
-        content.push(`Input:\n${JSON.stringify(attributes['input'], null, 2)}`);
-      content.push(text(preview['text']) || text(attributes['output']));
+      content.push('[Arguments not included in this public snapshot.]');
+      content.push(
+        text(preview['text']) ||
+          '[Result preview not included in this public snapshot.]',
+      );
       if (
         preview['truncated'] === true ||
         result['truncated'] === true ||
@@ -87,7 +94,7 @@ function blocks(items: readonly ManagedExportItem[]): ExportBlock[] {
       role:
         item.type === 'tool_call'
           ? `tool · ${item.status}`
-          : item.type === 'reasoning'
+          : reasoningOnly
             ? 'reasoning'
             : item.role || item.type,
       createdAt: new Date(item.createdAt).toISOString(),
@@ -286,6 +293,9 @@ export async function downloadManagedSession(
   const link = document.createElement('a');
   link.href = url;
   link.download = `${data.session.title.replace(/[^\p{L}\p{N} _-]/gu, '_').slice(0, 80) || 'session'}-${sessionId.slice(0, 8)}.${format}`;
+  link.addEventListener('click', (event) => event.stopPropagation(), {
+    once: true,
+  });
   document.body.append(link);
   try {
     link.click();

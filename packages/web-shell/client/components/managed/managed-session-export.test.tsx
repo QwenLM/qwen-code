@@ -165,8 +165,13 @@ describe('Managed reading exports', () => {
     tool.type = 'tool_call';
     tool.content = [];
     tool.attributes = {
-      toolName: 'Shell',
-      input: { command: 'echo public argument' },
+      kind: 'tool_call',
+      toolCallId: 'call',
+      callId: 'call',
+      title: 'Public shell title',
+      name: 'run_shell_command',
+      status: 'completed',
+      sourceSequence: 2,
       result: {
         preview: { text: 'preview', truncated: true },
         storageRef: 'PRIVATE',
@@ -184,14 +189,77 @@ describe('Managed reading exports', () => {
     const html = renderManagedReadingExport(data, 'html');
     expect(html).toContain('data:image/png;base64,YQ==');
     expect(html).toContain('attached text');
-    expect(html).toContain('echo public argument');
+    expect(html).toContain('Public shell title');
+    expect(html).toContain('Arguments not included in this public snapshot');
     expect(html).toContain('1970-01-01T00:00:00.001Z');
     expect(html).toContain('Truncated preview');
-    expect(renderManagedReadingExport(data, 'md')).toContain(
-      'echo public argument',
-    );
+    expect(renderManagedReadingExport(data, 'md')).toContain('preview');
     expect(html).not.toContain('SECRET');
     expect(html).not.toContain('PRIVATE');
+  });
+  it('marks unavailable tool details instead of implying a complete transcript', async () => {
+    const tool = item('1');
+    tool.type = 'tool_call';
+    tool.content = [];
+    tool.attributes = {
+      name: 'read_file',
+      title: 'Read README',
+      status: 'completed',
+      callId: 'read-call',
+      sourceSequence: 2,
+      input: { secret: 'PRIVATE' },
+      output: 'SECRET',
+    };
+    const data = await collectManagedReadingExport(
+      provider([{ items: [tool], hasMore: false, snapshotThroughSequence: 2 }]),
+      'c',
+      's',
+      new AbortController().signal,
+    );
+    for (const format of ['html', 'md'] as const) {
+      const output = renderManagedReadingExport(data, format);
+      expect(output).toContain('Read README');
+      expect(output).toContain(
+        'Arguments not included in this public snapshot',
+      );
+      expect(output).toContain(
+        'Result preview not included in this public snapshot',
+      );
+      expect(output).not.toContain('PRIVATE');
+      expect(output).not.toContain('SECRET');
+    }
+  });
+  it('distinguishes public reasoning parts from the final assistant answer', async () => {
+    const mixed = item('mixed', 'FINAL_ANSWER');
+    mixed.content.unshift({
+      partId: 'thought',
+      type: 'reasoning',
+      text: 'PUBLIC_THOUGHT',
+      firstSequence: 1,
+      lastSequence: 2,
+    });
+    const thought = item('thought-only', 'ONLY_THOUGHT');
+    thought.content[0]!.type = 'reasoning';
+    const data = await collectManagedReadingExport(
+      provider([
+        { items: [mixed, thought], hasMore: false, snapshotThroughSequence: 2 },
+      ]),
+      'c',
+      's',
+      new AbortController().signal,
+    );
+    expect(data.blocks[1]!.role).toBe('reasoning');
+    for (const format of ['html', 'md'] as const) {
+      const output = renderManagedReadingExport(data, format);
+      expect(output).toContain('Public reasoning');
+      expect(output).toContain('Assistant answer');
+      expect(output).toContain('PUBLIC_THOUGHT');
+      expect(output).toContain('FINAL_ANSWER');
+      expect(output).toContain('ONLY_THOUGHT');
+      expect(output.indexOf('PUBLIC_THOUGHT')).toBeLessThan(
+        output.indexOf('FINAL_ANSWER'),
+      );
+    }
   });
   it('propagates cursor expiry without downloading a partial transcript', async () => {
     const api = provider([]);

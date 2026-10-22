@@ -18,13 +18,13 @@ WebShell 列表请求增加 `archiveState`（`unarchived`、`archived`、`all`�
 
 WebShell 生命周期 capability 纳入当前 actor 权限。批量查询的可选 `lifecycleOperation` 投影提供当前未结算操作的身份、种类、状态和失败码；已结算会话省略此投影。每页因此增加一次有界批量查询：仅凭会话状态无法区分 failed 与 recovery-blocked，也无法在另一浏览器恢复操作身份。生命周期请求增加仅用于追踪的 `requestId`。同时更新 canonical OpenAPI、生成浏览器类型、路由注册和契约测试。不需要数据库结构迁移。
 
-浏览器在提交前按 provider 身份 scope 持久保存每个会话的冻结意图。HTTP 202 表示准入，不表示完成。响应丢失时重放原 key。pending/running 继续查询；recovery-blocked 等待对账。仅明确 failed 后用户主动重试才创建新 key。关闭并归档保存两个 key 和当前阶段，刷新后继续。如果关闭成功而归档失败，明确显示已关闭及归档未完成。切换选择不丢操作；身份变化中止旧请求。
+浏览器在提交前按 provider 身份 scope 持久保存每个会话的冻结意图。HTTP 202 表示准入，不表示完成。响应丢失时重放原 key。pending/running 继续查询；recovery-blocked 等待对账。仅明确 failed 后用户主动重试才创建新 key。关闭并归档保存两个 key 和当前阶段，刷新后继续。如果关闭成功而归档失败，明确显示已关闭及归档未完成。归档被明确拒绝且尚无已受理操作时，刷新仅恢复失败状态并等待主动重试，不能自动重新提交。切换选择不丢操作；身份变化中止旧请求。
 
 ## 阅读导出
 
 新增读取授权的 `POST /api/agent/web-shell/v1/sessions/export/query`，将已有不可变快照分页适配为 WebShell items。捕获会话水位，最多等待 30 秒直到已发布快照覆盖水位，再仅使用该快照的 cursor。cursor 过期、水位变化或读取失败时中止导出。不能拼接不同快照或静默遗漏尾部。
 
-HTML 与 Markdown 使用同一份公开数据：标题与时间、用户/助手/思考文本、公开工具调用参数与结果预览，以及公开附件。保留截断提示；完整 Artifact 单独下载。采用 32 MiB 预算。HTML 为静态文档，内联 CSS、转义内容并嵌入安全的光栅图片；不执行会话脚本，不请求远程资源。嵌入库与 React 一起从宿主解析 `react-dom/server`，保持 React 18/19 渲染器兼容。释放下载 object URL。不导出私有 journal、凭证、恢复引用或内部存储地址。
+HTML 与 Markdown 使用同一份公开快照数据：标题与时间、用户/助手文本、独立标注的公开思考内容片段、工具标签及已发布的结果预览，以及公开附件。当前工具投影不发布调用参数，应明确标注参数未包含在快照中；结果预览缺失时同样标注，不能暗示包含完整工具输出。不能通过读取可变工具详情或私有 journal 填补这些缺口。保留截断提示；完整 Artifact 单独下载。采用 32 MiB 预算。HTML 为静态文档，内联 CSS、转义内容并嵌入安全的光栅图片；不执行会话脚本，不请求远程资源。Markdown 为阅读者的渲染器保留会话 Markdown 源文本。嵌入库与 React 一起从宿主解析 `react-dom/server`，保持 React 18/19 渲染器兼容。合成下载点击不能进入嵌入宿主的委托链接处理器，并在完成后释放 object URL。不导出凭证、恢复引用或内部存储地址。
 
 ## 验证与边界
 

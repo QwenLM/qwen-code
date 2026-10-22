@@ -293,6 +293,49 @@ it('keeps an unfinished archive recoverable after close succeeds', async () => {
   expect(api.submit.mock.calls[2]![0]).toBe('archive');
   expect(api.submit.mock.calls[2]![2].idempotencyKey).toBe(key);
 });
+it('restores a refused archive without resubmitting until an explicit retry', async () => {
+  const { api, provider, changed } = fixture();
+  api.submit.mockImplementation(async (kind: string) => {
+    if (kind === 'archive')
+      throw new JavaManagedAgentHttpError(
+        409,
+        'workspace_lifecycle_refused',
+        'refused',
+      );
+    return operation('completed');
+  });
+  const first = await renderHook(() =>
+    useManagedSessionLifecycle(provider, 'c', [], changed),
+  );
+  await act(async () => first.result.current.start(summary, 'close_archive'));
+  await waitFor(() =>
+    expect(first.result.current.states.s?.status).toBe('failed'),
+  );
+  const key = api.submit.mock.calls[1]![2].idempotencyKey;
+  expect(api.submit).toHaveBeenCalledTimes(2);
+  first.unmount();
+
+  api.submit.mockResolvedValue(operation('completed', 'archive', 'archive'));
+  const second = await renderHook(() =>
+    useManagedSessionLifecycle(provider, 'c', [], changed),
+  );
+  expect(api.submit).toHaveBeenCalledTimes(2);
+  expect(second.result.current.states.s).toMatchObject({
+    action: 'close_archive',
+    status: 'failed',
+    busy: false,
+    canConfirm: true,
+    kind: 'archive',
+  });
+  expect(second.result.current.blocked('s')).toBe(true);
+  await act(async () => second.result.current.confirm('s'));
+  await waitFor(() =>
+    expect(changed).toHaveBeenCalledWith('s', 'close_archive', 'ws'),
+  );
+  expect(api.submit).toHaveBeenCalledTimes(3);
+  expect(api.submit.mock.calls[2]![0]).toBe('archive');
+  expect(api.submit.mock.calls[2]![2].idempotencyKey).not.toBe(key);
+});
 it('releases definite turn_active admission refusals and leaves task cancellation explicit', async () => {
   const { api, provider, changed } = fixture();
   api.submit.mockRejectedValue(
