@@ -16,6 +16,12 @@ export interface HostedToolInputCheck {
   error?: string;
 }
 
+/**
+ * Checks a `todo_write` call. Every item's shape is checked here; the
+ * list-level rules — duplicate ids, duplicate `blockedBy` references and a
+ * dependency cycle — stay with the tool, which reports them with its own
+ * message.
+ */
 export function checkHostedTodoWriteInput(
   args: Record<string, unknown>,
 ): HostedToolInputCheck {

@@ -2399,7 +2399,9 @@ it('keeps Hosted Todo state and web_fetch out of the Worker', async () => {
   }
 });
 
-// Route fixtures cannot express a root of / or a repeated root component.
+// The route-level fixtures cannot express these geometries (a Session root is
+// always a deep unique tmpdir path), so the anchoring invariants are pinned
+// against the function directly.
 describe('relativizeGlobText', () => {
   it('strips the root at token starts but keeps a tail that repeats it', () => {
     // The hit carries the root string twice: once as the path prefix and once
