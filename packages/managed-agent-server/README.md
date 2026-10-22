@@ -16,6 +16,78 @@ authentication and writer credentials" below.
 设计说明：[English](../../docs/design/2026-09-19-managed-agent-spring-server.md) |
 [简体中文](../../docs/design/2026-09-19-managed-agent-spring-server.zh-CN.md)
 
+## Local embedded profile
+
+The installed CLI starts local Managed mode with `qwen serve --managed --open`.
+It checks local Java 21, downloads a matching server JAR on first use, and reuses
+the verified versioned cache on subsequent starts. An explicitly preinstalled
+runtime can instead bundle Java 21 for offline use. It needs no MySQL, Docker,
+Maven or systemd. The ordinary server profile keeps its
+existing MySQL defaults. Design:
+[English](../../docs/design/2026-10-20-managed-local-serve.md) |
+[简体中文](../../docs/design/2026-10-20-managed-local-serve.zh-CN.md).
+
+The `central-release` Maven profile attaches sources, Javadoc and GPG signatures
+for the main executable server JAR, without attaching the auxiliary operator
+JARs. Ordinary builds keep the existing attachments and do not activate Central
+publishing. The protected `Release Managed server runtime` workflow sets the
+artifact version from an existing CLI release tag and publishes identical JAR
+bytes to Central, GitHub Release assets and the official OSS mirror. The CLI's
+first-use download uses OSS/GitHub and requires no Maven installation. See the
+[release procedure](../../docs/users/managed-local-serve.md#publish-the-first-use-jar)
+and its [Chinese version](../../docs/users/managed-local-serve.zh-CN.md#发布首次使用的-jar).
+
+The launcher selects the `managed-local` Spring profile and supplies an
+existing canonical, owner-only `QWEN_MANAGED_AGENT_LOCAL_DATA_DIRECTORY`.
+The directory and its private subdirectories must be owned by the current
+user with mode `0700`; symlinks, noncanonical paths and data-directory paths
+containing `;` are refused. The profile creates these directories:
+
+| Path                     | Persistent contents                                                           |
+| ------------------------ | ----------------------------------------------------------------------------- |
+| `database/managed.mv.db` | Embedded H2 database with the canonical Managed schema                        |
+| `runtime/`               | Durable local Runtime worker state                                            |
+| `workspaces/`            | Application-owned Workspace storage roots and their original identity markers |
+| `legacy/`                | Private fallback cwd for unbound Sessions                                     |
+
+H2 uses MySQL compatibility mode, lowercase catalog metadata,
+`DB_CLOSE_ON_EXIT=FALSE` and `WRITE_DELAY=0`. Its embedded file lock and the
+launcher's data-directory lock admit one local control plane. The connection
+pool retains an idle connection to keep that file lock held. No H2 TCP server,
+`AUTO_SERVER`, or Web console is enabled. Database URL overrides are refused;
+the profile keeps the existing Flyway admission and structure validation and
+never repairs foreign, partial, history-only or unsupported catalogs.
+
+The launcher supplies the existing Harness URL/token/digest, Session Store
+base URL and binding key, Broker token and credential encryption key, Node
+executable and worker entry. `QWEN_MANAGED_AGENT_WORKSPACE_ID` is the first
+16 hexadecimal characters of the SHA-256 of the canonical `legacy/` path;
+it identifies the fallback Runtime and Session Store, independently of
+the bound Workspace IDs created through the API. Public API requests use signed authentication;
+the front door retains the signing key and fixed tenant/actor identity.
+Java, Harness and Broker listeners must stay on loopback. Readiness is
+`GET /actuator/health/readiness`, which includes the database and Spring's
+readiness state. The public front door opens after readiness and the
+authenticated Harness capability probe succeed.
+
+The profile enables verified, durable local-process workers, file tools and
+Shell with `default` approval mode. The launcher creates the first Workspace
+through the existing signed WebShell creation API using a persistent
+idempotency key. It creates a new application-owned Workspace; the shell's
+current Git checkout is not copied, symlinked or imported. The existing
+Workspace ownership and grant checks still apply. Tool publication remains
+disabled unless separately configured; ordinary persisted tool receipts do
+not require an object store.
+
+Keep the database, Runtime state, Workspace roots, credentials and worker
+`QWEN_HOME/file-history` together across restarts. Credentials never rotate
+merely because the application restarts. The local profile defaults trusted
+whole-host reboot recovery to `false`; macOS supports same-boot worker
+adoption only. Linux operators may explicitly enable
+`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY` under its existing
+trusted-host contract. Missing or conflicting physical identity markers
+remain closed to execution; startup does not re-register or repair them.
+
 ## Java package layout
 
 Business components live in `managedagent.session`, `workspace`, `artifact`,
@@ -755,7 +827,9 @@ An uncertain response must be retried with the same key and name. The page prese
 
 For a trusted single-user deployment bound to loopback, enable
 `QWEN_MANAGED_AGENT_LOCAL_DIRECTORY_IMPORT_ENABLED=true` alongside Workspace files,
-durable local-process execution, verified recovery, and the trusted actor header.
+durable local-process execution and verified recovery. Authenticate with signed
+requests or OPEN mode plus a trusted actor header. The single-user
+`qwen serve --managed` launcher enables this capability with signed authentication.
 Then **Workspace → Choose existing directory** browses this computer directly,
 without a pre-registered parent or grant. Import keeps the project in place,
 automatically registers its projects parent outside Git worktrees, grants the
@@ -763,7 +837,10 @@ current actor OWNER access, and sets the project as the initial working director
 The parent shares file access and its physical-owner lease across projects; this
 is not a filesystem sandbox. Existing owned roots are reused while sessions run.
 Private Runtime state and creation roots must stay outside imported parents.
-Remote listeners and signed/shared deployments cannot enable this local feature.
+Remote listeners cannot enable this local feature, including with the insecure
+bind override. Signed mode retains signature validation and does not accept a
+trusted actor header in its place. This capability is for a trusted single-user
+host deployment.
 
 The actor-authenticated directory query accepts `localPath` (empty starts at the
 host home directory), and create accepts an absolute `localPath` with the name
@@ -970,8 +1047,20 @@ Local-process workers run model-directed tools, so the Broker starts them
 without any environment variable whose name begins, in any letter case, with
 `QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `SPRING_` or `OSS_`. Every other
 variable of the server process still reaches the worker and its tools. Keep
-unrelated secrets out of the service environment. This does not isolate files:
-a worker runs as the service account and can read whatever that account can.
+unrelated secrets out of the service environment. A worker that uses the
+artifact tool's `oss` publisher therefore needs its credentials under the
+`ALIBABA_CLOUD_ACCESS_KEY_ID`, `ALIBABA_CLOUD_ACCESS_KEY_SECRET` and
+`ALIBABA_CLOUD_SECURITY_TOKEN` names, which that publisher also accepts. Those
+names are not filtered: they reach every worker the Broker starts and every
+model-directed tool it runs. The Broker copies its environment into a worker
+once, at launch, and never refreshes it; a Broker restart does not refresh a
+durable worker that it adopts by pid. Give those names a long-lived RAM
+identity that can only write the artifact bucket and prefix, never the account
+key that the `OSS_` filter withholds. A short-lived STS token needs a rotation
+path that re-execs the Broker before it expires, and even then an adopted
+durable worker keeps its launch-time credentials. One credential set serves
+every tenant and workspace on the host. This does not isolate files: a worker
+runs as the service account and can read whatever that account can.
 
 After a credential-key rotation, keep each prior key in
 `previous-credential-keys` until no persisted Runtime binding references its
