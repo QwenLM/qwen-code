@@ -1,10 +1,10 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.service.EventTransportNodeMain;
-import com.alibaba.qwen.code.managedagent.store.IsolatedManagedSchemaMySqlTestDatabase;
-import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelope;
-import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.event.EventTransportNodeMain;
+import com.alibaba.qwen.code.managedagent.event.ManagedEventEnvelope;
+import com.alibaba.qwen.code.managedagent.event.ManagedEventEnvelopes;
+import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -501,12 +501,18 @@ class EventTransportMultiNodeGate {
     @Timeout(360)
     void aLongBrokerOutageLeavesTheFlagAsTheWayBack() throws Exception {
         Node a = node("a").start(true);
-        Node b = node("b").start(true);
         String session = createSession(a);
         turn(a, session, "MQ3_BEFORE_LONG_OUTAGE");
+        assertThat(writerId(session)).isEqualTo(a.bootId);
+        // Establish a's writer before b joins: either dispatcher can claim
+        // a fresh Turn, but a live writer keeps its journal ownership.
+        Node b = node("b").start(true);
+        // The surviving node must still own the journal whose failed sends we await.
+        assertThat(writerId(session)).isEqualTo(a.bootId);
 
         try (Frozen proxy = freezeProxy()) {
             turn(a, session, "MQ3_DURING_LONG_OUTAGE");
+            assertThat(writerId(session)).isEqualTo(a.bootId);
             b.crashSpring();
             String refused = b.startSpringExpectingFailure(true, Duration.ofMinutes(4));
             // Pins MQ3 finding 3 (startup needs the broker): a fix that lets a

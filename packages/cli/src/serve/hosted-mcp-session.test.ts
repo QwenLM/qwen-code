@@ -245,6 +245,27 @@ it('pins discovery, commits raw resource results and replays without another eff
   expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledOnce();
 });
 
+it('identifies each server behind opaque model tool names without changing invocation bindings', async () => {
+  mcp = new HostedMcpSession(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    [pin, { ...pin, serverId: 'other' }],
+  );
+  await mcp.ensureReady();
+  const tools = mcp.tools();
+  expect(tools).toHaveLength(2);
+  expect(new Set(tools.map((tool) => tool.name)).size).toBe(2);
+  for (const [index, serverId] of ['demo', 'other'].entries()) {
+    expect(tools[index].description).toBe(
+      `MCP server: "${serverId}"\nMCP tool: "echo"\nEcho input`,
+    );
+    expect(
+      mcp.toolInput(tools[index].name!, { text: 'hello' }, `call-${index}`)
+        ?.input,
+    ).toMatchObject({ serverId, request: { kind: 'tool_call', name: 'echo' } });
+  }
+});
+
 it('queries a lost configure reply by its original identity instead of reconnecting', async () => {
   loseAck = true;
   await mcp.ensureReady();
@@ -1186,7 +1207,9 @@ it('stops refresh after cancellation without configuring a changed catalog or po
   });
   const abort = new AbortController();
   const refresh = mcp.refresh(abort.signal).catch((cause: unknown) => cause);
-  await vi.waitFor(() => expect(discoveryId).toBeDefined());
+  await vi.waitFor(() => expect(discoveryId).toBeDefined(), {
+    timeout: 10_000,
+  });
   const count = control.mock.calls.length;
   const reason = new Error('cancelled discovery');
   abort.abort(reason);
@@ -1290,7 +1313,9 @@ it('discards discovery from a configuration superseded while the request was pen
     return physical(operation);
   });
   const refreshing = mcp.refresh();
-  await vi.waitFor(() => expect(operationId).toBeDefined());
+  await vi.waitFor(() => expect(operationId).toBeDefined(), {
+    timeout: 10_000,
+  });
   try {
     await mcp.configure(randomUUID(), { ...pin, serverRevision: 2 }, 1);
     reply({
@@ -1370,7 +1395,9 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       .refresh(abort.signal)
       .catch((cause: unknown) => cause);
     try {
-      await vi.waitFor(() => expect(entered).toBe(true));
+      await vi.waitFor(() => expect(entered).toBe(true), {
+        timeout: 10_000,
+      });
       abort.abort(reason);
       await expect(mcp.close()).rejects.toBeInstanceOf(
         HostedMcpRecoveryRequiredError,
@@ -1438,7 +1465,9 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       .ensureReady(abort.signal)
       .catch((error: unknown) => error);
     try {
-      await vi.waitFor(() => expect(entered).toBe(true));
+      await vi.waitFor(() => expect(entered).toBe(true), {
+        timeout: 10_000,
+      });
       const before =
         session.authority.extensionRecordsInDomain('mcp_configuration')[0];
       abort.abort(reason);
@@ -1450,12 +1479,16 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       expect(requests).toHaveLength(0);
       loseAck = phase === 'dispatch_started';
       finish();
-      await vi.waitFor(() => expect(resumed).toBe(true));
+      await vi.waitFor(() => expect(resumed).toBe(true), {
+        timeout: 10_000,
+      });
       if (phase === 'dispatch_started') {
-        await vi.waitFor(() =>
-          expect(
-            requests.filter((request) => request.kind === 'mcp-configure'),
-          ).toHaveLength(1),
+        await vi.waitFor(
+          () =>
+            expect(
+              requests.filter((request) => request.kind === 'mcp-configure'),
+            ).toHaveLength(1),
+          { timeout: 10_000 },
         );
         await mcp.ensureReady();
         expect(

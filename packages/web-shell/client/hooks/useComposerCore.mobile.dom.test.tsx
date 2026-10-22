@@ -52,6 +52,7 @@ function Harness({
   atWorkspaceCwd,
   expanded = false,
   shellModeEnabled,
+  persistFileReferences,
 }: {
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
@@ -61,6 +62,7 @@ function Harness({
   atWorkspaceCwd?: string;
   expanded?: boolean;
   shellModeEnabled?: boolean;
+  persistFileReferences?: boolean;
 }) {
   const composer = useComposerCore({
     onSubmit,
@@ -72,6 +74,7 @@ function Harness({
     sessionId,
     atWorkspaceCwd,
     shellModeEnabled,
+    persistFileReferences,
   });
   latest = composer;
 
@@ -116,6 +119,7 @@ async function mount({
   atWorkspaceCwd,
   expanded = false,
   shellModeEnabled,
+  persistFileReferences,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
@@ -124,6 +128,7 @@ async function mount({
   atWorkspaceCwd?: string;
   expanded?: boolean;
   shellModeEnabled?: boolean;
+  persistFileReferences?: boolean;
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
@@ -147,6 +152,7 @@ async function mount({
             atWorkspaceCwd={currentWorkspaceCwd}
             expanded={expanded}
             shellModeEnabled={shellModeEnabled}
+            persistFileReferences={persistFileReferences}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -224,6 +230,90 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(latest!.mobileComposer).not.toBeNull();
     expect(container!.querySelector('textarea')).not.toBeNull();
     expect(document.querySelector('.cm-editor')).toBeNull();
+  });
+
+  it('keeps selected-file metadata through a mobile draft remount', async () => {
+    mockTouchDevice();
+    const tag = {
+      id: 'file:a',
+      kind: 'file' as const,
+      value: 'a.ts',
+      serialized: '@a.ts',
+      metadata: {
+        managedFile: { text: '\uFEFForiginal\r\nbytes', source: 'session-a' },
+      },
+    };
+    await mount({ sessionId: 'session-a', persistFileReferences: true });
+    typeText('explain');
+    act(() => latest!.addTags([tag], { placement: 'inline' }));
+    act(() => window.dispatchEvent(new Event('pagehide')));
+    act(() => root!.unmount());
+    root = null;
+    container?.remove();
+    container = null;
+    const { onSubmit } = await mount({
+      sessionId: 'session-a',
+      persistFileReferences: true,
+    });
+    expect(latest!.composerTags).toEqual([tag]);
+    act(() => latest!.submitText());
+    expect(onSubmit.mock.calls[0]?.[4]).toMatchObject({
+      inputAnnotations: [
+        expect.objectContaining({
+          reference: expect.objectContaining({ metadata: tag.metadata }),
+        }),
+      ],
+    });
+  });
+
+  it('keeps restored inline snapshots when mobile adds another top file', async () => {
+    mockTouchDevice();
+    const inline = {
+      id: 'file:inline',
+      kind: 'file',
+      serialized: '@inline.ts',
+      metadata: { managedFile: { text: 'inline selected bytes' } },
+    };
+    localStorage.setItem(
+      getSessionDraftKey('session-a'),
+      '\0qwen-file-draft:1:' +
+        JSON.stringify({
+          text: '@inline.ts explain',
+          inlineTags: [{ start: 0, end: 10, tag: inline }],
+          tags: [],
+        }),
+    );
+    const { onSubmit } = await mount({
+      sessionId: 'session-a',
+      persistFileReferences: true,
+    });
+    act(() =>
+      latest!.addTags(
+        [
+          {
+            id: 'file:top',
+            kind: 'file',
+            serialized: '@top.ts',
+            metadata: { managedFile: { text: 'top selected bytes' } },
+          },
+        ],
+        { placement: 'top' },
+      ),
+    );
+    act(() => latest!.submitText());
+    expect(onSubmit.mock.calls[0]?.[4]).toMatchObject({
+      inputAnnotations: expect.arrayContaining([
+        expect.objectContaining({
+          reference: expect.objectContaining({
+            id: 'file:inline',
+            metadata: inline.metadata,
+          }),
+        }),
+        expect.objectContaining({
+          reference: expect.objectContaining({ id: 'file:top' }),
+        }),
+      ]),
+    });
   });
 
   it('stays off on non-touch devices: CodeMirror mounts, mobileComposer is null', async () => {

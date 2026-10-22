@@ -278,10 +278,40 @@ export type CompactTrigger = 'manual' | 'auto';
  */
 export const PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP = 4000;
 
+export interface ChatCompressionCandidate {
+  readonly newHistory: Content[];
+  readonly info: ChatCompressionInfo;
+  readonly summary: string;
+}
+
+export async function firePostCompact(
+  config: Config,
+  candidate: ChatCompressionCandidate,
+  signal?: AbortSignal,
+  trigger: CompactTrigger = 'manual',
+): Promise<void> {
+  try {
+    await config
+      .getHookSystem()
+      ?.firePostCompactEvent(
+        trigger === 'manual'
+          ? PostCompactTrigger.Manual
+          : PostCompactTrigger.Auto,
+        candidate.summary,
+        signal,
+      );
+  } catch (error) {
+    if (config.getHookSystem()?.isManaged()) throw error;
+    config.getDebugLogger().warn(`PostCompact hook failed: ${error}`);
+  }
+}
+
 export interface CompressOptions {
   promptId: string;
   force: boolean;
   config: Config;
+  onPreparedCompaction?: (candidate: ChatCompressionCandidate) => Promise<void>;
+  restoreRecentFiles?: boolean;
   /**
    * Number of consecutive auto-compaction failures for this chat. When it reaches
    * MAX_CONSECUTIVE_FAILURES, the cheap-gate stops trying until a successful
@@ -1248,7 +1278,10 @@ export class ChatCompressionService {
             // retry request straight back over the same limit and defeating
             // the recovery. Suppress restoration attachments on this path;
             // the summary that just fit dominates the retried request.
-            maxFiles: opts.requestPayloadTooLarge ? 0 : tuning.maxRecentFiles,
+            maxFiles:
+              opts.requestPayloadTooLarge || opts.restoreRecentFiles === false
+                ? 0
+                : tuning.maxRecentFiles,
             maxImages: opts.requestPayloadTooLarge ? 0 : tuning.maxRecentImages,
             // Restore plan-mode reminder + running-subagent snapshot so the
             // post-compact agent does not lose either piece of mid-session
@@ -1442,28 +1475,24 @@ export class ChatCompressionService {
         },
       };
     } else {
-      // Fire PostCompact event after successful compression
-      try {
-        const postCompactTrigger =
-          compactTrigger === 'manual'
-            ? PostCompactTrigger.Manual
-            : PostCompactTrigger.Auto;
-        // Pass the stripped summary (Finding 8a) so hook consumers see
-        // the same text that lands in history — not the raw side-query
-        // output with the <analysis> scratchpad still attached. The
-        // resume trailer is NOT included; it is wrapper decoration for
-        // the next agent turn, not state for downstream consumers.
-        await config
-          .getHookSystem()
-          ?.firePostCompactEvent(
-            postCompactTrigger,
-            stripAnalysisBlock(summary),
-            signal,
-          );
-      } catch (err) {
-        if (config.getHookSystem()?.isManaged()) throw err;
-        config.getDebugLogger().warn(`PostCompact hook failed: ${err}`);
-      }
+      const candidate: ChatCompressionCandidate = {
+        newHistory: extraHistory,
+        // Hook consumers see the same summary that lands in history, without
+        // the side-query's analysis scratchpad or the resume trailer.
+        summary: stripAnalysisBlock(summary),
+        info: {
+          originalTokenCount,
+          newTokenCount,
+          newTokenCountIsEstimated: true,
+          compressionStatus: CompressionStatus.COMPRESSED,
+          triggerReason,
+          ...(compactionWarning && { warning: compactionWarning }),
+        },
+      };
+      // A hosted caller saves this before any PostCompact side effect, so a
+      // takeover resumes that exact summary instead of generating another one.
+      await opts.onPreparedCompaction?.(candidate);
+      await firePostCompact(config, candidate, signal, compactTrigger);
 
       // #13004: this shrink lands below whatever a parked cadence snapshot
       // holds, and a turn that ends without reaching scheduleExtract (e.g.
@@ -1474,17 +1503,7 @@ export class ChatCompressionService {
         .getMemoryManager?.()
         ?.invalidatePendingExtract(config.getSessionId());
 
-      return {
-        newHistory: extraHistory,
-        info: {
-          originalTokenCount,
-          newTokenCount,
-          newTokenCountIsEstimated: true,
-          compressionStatus: CompressionStatus.COMPRESSED,
-          triggerReason,
-          ...(compactionWarning && { warning: compactionWarning }),
-        },
-      };
+      return { newHistory: candidate.newHistory, info: candidate.info };
     }
   }
 }

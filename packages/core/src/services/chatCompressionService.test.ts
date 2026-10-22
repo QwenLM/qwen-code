@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ChatCompressionService,
+  firePostCompact,
   COMPACT_MAX_OUTPUT_TOKENS,
   COMPACTION_BUDGET_SAFETY_MARGIN,
   computeCompactionOutputBudget,
@@ -1033,6 +1034,70 @@ describe('ChatCompressionService', () => {
 
   describe('PreCompact hook', () => {
     beforeEach(installHookSystem);
+
+    it('awaits a durable candidate before PostCompact and resumes the saved candidate without generating again', async () => {
+      arrangeForced();
+      let saved:
+        | import('./chatCompressionService.js').ChatCompressionCandidate
+        | undefined;
+      let release: () => void = () => {};
+      let prepared: () => void = () => {};
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const ready = new Promise<void>((resolve) => {
+        prepared = resolve;
+      });
+      const pending = run({
+        force: true,
+        onPreparedCompaction: async (candidate) => {
+          saved = structuredClone(candidate);
+          prepared();
+          await blocked;
+        },
+      });
+      await ready;
+      expect(saved?.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(saved?.newHistory.length).toBeGreaterThanOrEqual(2);
+      expect(mockFirePostCompactEvent).not.toHaveBeenCalled();
+      release();
+      expectCompressed(await pending);
+      expect(mockFirePostCompactEvent).toHaveBeenCalledWith(
+        PostCompactTrigger.Manual,
+        saved!.summary,
+        undefined,
+      );
+      const calls = vi.mocked(mockConfig.getBaseLlmClient().generateText).mock
+        .calls.length;
+      await firePostCompact(mockConfig, saved!);
+      expect(
+        vi.mocked(mockConfig.getBaseLlmClient().generateText).mock.calls,
+      ).toHaveLength(calls);
+    });
+
+    it('does not run PostCompact after candidate persistence fails', async () => {
+      arrangeForced();
+      await expect(
+        run({
+          force: true,
+          onPreparedCompaction: async () => {
+            throw new Error('writer fenced');
+          },
+        }),
+      ).rejects.toThrow('writer fenced');
+      expect(mockFirePostCompactEvent).not.toHaveBeenCalled();
+    });
+
+    it('disables local file restoration for a Hosted compression', async () => {
+      arrangeForced();
+      const compose = vi.spyOn(postCompactModule, 'composePostCompactHistory');
+      expectCompressed(await run({ force: true, restoreRecentFiles: false }));
+      expect(compose).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ maxFiles: 0 }),
+      );
+    });
 
     it('should fire PreCompact hook with Manual trigger when force=true', async () => {
       arrangeForced();
@@ -2698,6 +2763,60 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
       screenshot(data),
     ]),
   ];
+
+  it.each([false, true])(
+    'counts restored images once with positive usage (pending call: %s)',
+    async (pendingCall) => {
+      const history = screenshotSession('Analyze screenshots.', [
+        's1',
+        's2',
+        's3',
+      ]);
+      if (pendingCall) {
+        history.push(content('model', fnCall('read_file', {}, 'pending')));
+      }
+      spySideQuery('S'.repeat(2000), usage(170_000, 500));
+      const result = await compressWith(fakeChat(history), fakeConfig(), {
+        trigger: 'auto',
+      });
+      expectCompressed(result);
+      expect(result.info.newTokenCount).toBeGreaterThanOrEqual(
+        11_500 + 3 * 1600,
+      );
+      expect(result.info.newTokenCount).toBeLessThan(16_600);
+      expect(result.newHistory).toHaveLength(pendingCall ? 4 : 3);
+    },
+  );
+
+  it('rejects inflation when a restored file grows beyond the original context', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-restore-cost-'));
+    const file = join(dir, 'context.txt');
+    writeFileSync(file, 'x'.repeat(17_600));
+    try {
+      const history = [
+        userText('Read the file.'),
+        content('model', fnCall('read_file', { file_path: file }, 'read')),
+        content(
+          'user',
+          fnResponse('read_file', { output: 'Earlier content.' }, 'read'),
+        ),
+        modelText('Done.'),
+      ];
+      spySideQuery('Summary.', usage(3000, 100));
+      const result = await compressWith(
+        fakeChat(history),
+        fakeConfig({ extra: { getTargetDir: () => dir } }),
+        { originalTokenCount: 2000 },
+      );
+      expectNoNewHistory(
+        result,
+        CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+      );
+      expect(result.info.newTokenCount).toBeGreaterThan(4400);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('preserves the user prompt verbatim in summary and restores 3 most recent screenshots', async () => {
     // Reproduces the "single-turn long task" scenario the rewrite targets:

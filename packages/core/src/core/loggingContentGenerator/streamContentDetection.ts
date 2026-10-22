@@ -5,6 +5,7 @@
  */
 
 import type { GenerateContentResponse } from '@google/genai';
+import { getToolCallPreparations } from '../tool-call-preparation.js';
 
 /**
  * Detects whether a streaming chunk contains user-visible model output.
@@ -12,13 +13,18 @@ import type { GenerateContentResponse } from '@google/genai';
  * Used by the LoggingContentGenerator stream wrapper to identify the first
  * chunk that should trigger TTFT (time-to-first-token) measurement.
  *
- * A chunk is "user-visible" if any normalized Part in candidates[0].content.parts
- * is one of:
+ * A chunk is "user-visible" if it carries a tool-call preparation, or if any
+ * normalized Part in candidates[0].content.parts is one of:
  *   - text with a non-empty string
  *   - functionCall (tool use — even tool-call-only responses count)
  *   - inlineData (image, binary blob)
  *   - executableCode (sandbox / code-execution responses)
  *   - thought / reasoning content (provider-dependent; o1, qwen thinking, Anthropic <thinking>)
+ *
+ * The OpenAI and Anthropic generators emit the functionCall part only once the
+ * call's arguments are complete, but announce the call earlier as a
+ * preparation, which ACP already shows as a preparing tool call. Counting the
+ * preparation keeps TTFT from spanning the whole tool-call-only response.
  *
  * Chunks containing only role metadata, only usageMetadata (final summary
  * chunk), or empty parts are NOT user-visible — TTFT should not fire on these.
@@ -30,6 +36,7 @@ import type { GenerateContentResponse } from '@google/genai';
  * sees it (see loggingContentGenerator.ts generateContentStream).
  */
 export function hasUserVisibleContent(chunk: GenerateContentResponse): boolean {
+  if (getToolCallPreparations(chunk).length > 0) return true;
   const parts = chunk.candidates?.[0]?.content?.parts;
   if (!parts || parts.length === 0) return false;
   return parts.some(isUserVisiblePart);

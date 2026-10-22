@@ -109,6 +109,7 @@ export interface ExportCompletionResult {
 export function useExportCompletion(
   buffer: TextBuffer,
   slashCommands: readonly SlashCommand[],
+  onBufferReplace?: () => void,
 ): ExportCompletionResult {
   const navigatedRef = useRef(false);
   const navigatedTextRef = useRef('');
@@ -190,12 +191,13 @@ export function useExportCompletion(
     (index: number): boolean => {
       const format = exportCycleFormats[index];
       if (!format) return false;
+      onBufferReplace?.();
       buffer.setText(`${EXPORT_COMMAND_INPUT} ${format}`);
       cyclingActiveRef.current = true;
       navigatedRef.current = false;
       return true;
     },
-    [buffer, exportCycleFormats],
+    [buffer, exportCycleFormats, onBufferReplace],
   );
 
   const handleExportInput = useCallback(

@@ -127,6 +127,26 @@ export class JavaManagedAgentClient {
     return this.post<JavaAgentSession>('/sessions/get', { sessionId }, signal);
   }
 
+  async renameSession(
+    request: Schemas['WebShellRenameRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellRenameResult']> {
+    const response = await this.request(
+      '/sessions/rename',
+      request,
+      signal,
+      false,
+    );
+    if (response.status !== 200) {
+      throw new JavaManagedAgentHttpError(
+        response.status,
+        'session_rename_unconfirmed',
+        'Managed Agent rename was not confirmed',
+      );
+    }
+    return (await response.json()) as Schemas['WebShellRenameResult'];
+  }
+
   listWorkspaces(
     request: Schemas['WebShellWorkspaceQueryRequest'],
     signal?: AbortSignal,
@@ -185,6 +205,20 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ): Promise<JavaAgentWorkspace> {
     return this.post('/workspaces/create', request, signal);
+  }
+
+  queryWorkspaceFiles(
+    request: Schemas['WebShellWorkspaceFileQueryRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceFilePage']> {
+    return this.post('/workspaces/files/query', request, signal);
+  }
+
+  readWorkspaceFile(
+    request: Schemas['WebShellWorkspaceFileReadRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceFileSnapshot']> {
+    return this.post('/workspaces/files/read', request, signal);
   }
 
   workspaceDirectories(
@@ -309,9 +343,32 @@ export class JavaManagedAgentClient {
     return this.post('/sessions/cwd/change', request, signal);
   }
 
+  compressContext(
+    request: Schemas['WebShellContextCompressionRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellContextCompressionOperation']> {
+    return this.post('/sessions/compress', request, signal);
+  }
+
   getSessionModels(sessionId: string, signal?: AbortSignal) {
     return this.post<Schemas['WebShellSessionModels']>(
       '/session-models/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  getSessionSkills(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellSessionSkills']>(
+      '/session-skills/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  getSessionMcp(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['PublicMcpCatalog']>(
+      '/session-mcp/query',
       { sessionId },
       signal,
     );
@@ -324,6 +381,14 @@ export class JavaManagedAgentClient {
     return this.post<Schemas['WebShellModelChangeResult']>(
       '/session-models/change',
       request,
+      signal,
+    );
+  }
+
+  getToolDetails(sessionId: string, itemId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellToolDetails']>(
+      '/tool-details/get',
+      { sessionId, itemId },
       signal,
     );
   }

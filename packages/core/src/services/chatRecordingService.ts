@@ -25,7 +25,7 @@ import {
   type SessionExecutionEngine,
   type SessionExecutionEnginePayload,
 } from './session-execution-engine.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
   PartListUnion,
@@ -67,10 +67,23 @@ import {
   SessionWriterLostError,
   SessionWriterUnavailableError,
   type SessionWriterCommitProof,
-  type SessionWriterLease,
+  SessionWriterLease,
 } from './session-writer-lease.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
-import { getApiHistoryPromptId } from './session-api-history.js';
+import { getApiHistoryPromptId } from '../utils/api-history-metadata.js';
+import { getStartupContextLength } from '../core/environmentContext.js';
+import { computeInitialTurnFromHistory } from './session-turn-state.js';
+import {
+  deleteTranscriptMessageGroups,
+  getTranscriptMessageGroups,
+  messageGroupsSnapshot,
+  MessageGroupDeletionError,
+  parseMessageGroupTranscript,
+  telemetryRecordIdentity,
+  type DeleteMessageGroupsRequest,
+  type DeleteMessageGroupsResult,
+  type MessageGroupsSnapshot,
+} from '../utils/message-group-deletion.js';
 import type {
   AgentMentionRecordPayload,
   AgentMessageRecordPayload,
@@ -471,6 +484,8 @@ export interface ChatRecord {
   usageMetadata?: GenerateContentResponseUsageMetadata;
   /** Model used for this response */
   model?: string;
+  /** Hosted assistant batch synthesized from explicit user Skill invocations. */
+  clientInitiatedSkills?: true;
   /** Effective session settings when user input reaches the recorder. */
   executionContext?: {
     modelId: string;
@@ -655,6 +670,9 @@ export interface ChatCompressionRecordPayload {
    * resume reconstruction.
    */
   compressedHistory: Content[];
+  contextPrefixLength?: number;
+  /** Generated summary and restore entries preceding any retained raw input. */
+  summaryPrefixLength?: number;
   /** Prompt identities parallel to compressedHistory. */
   promptIds?: Array<string | null>;
   completedToolCallIds?: string[];
@@ -1187,6 +1205,8 @@ export class ChatRecordingService {
   private handoffRequested = false;
   /** Prevents asynchronous metadata writers from becoming checkpoint siblings. */
   private topologyFence: TranscriptTopologyFence | undefined;
+  private readonly deletedTelemetryPromptIds = new Set<string>();
+  private readonly deletedTelemetryCallIds = new Set<string>();
   /** First async JSONL write failure; permanently degrades this recorder. */
   private writeFailure: Error | undefined;
   private integrityFailure: Error | undefined;
@@ -1787,6 +1807,10 @@ export class ChatRecordingService {
     if (this.topologyFence !== fence) return;
     this.topologyFence = undefined;
     for (const intent of fence.buffered) {
+      if (this.isDeletedTelemetry(intent.record)) {
+        intent.resolve?.();
+        continue;
+      }
       // Side artifacts keep updateActiveTail=false, but still move behind the
       // reserved checkpoint so they cannot become siblings of the completed
       // turn and invalidate the active transcript topology.
@@ -2036,6 +2060,129 @@ export class ChatRecordingService {
     if (this.writeFailure) throw this.writeFailure;
   }
 
+  supportsMessageGroupDeletion(): boolean {
+    return (
+      this.state === 'active' &&
+      (this.binding !== undefined || !this.writerLeaseRequired) &&
+      this.managedSink === undefined &&
+      this.writeFailure === undefined
+    );
+  }
+
+  private async ensureMessageGroupDeletionLease(): Promise<SessionWriterLease> {
+    if (this.binding) return this.binding.lease;
+    if (!this.supportsMessageGroupDeletion())
+      throw new MessageGroupDeletionError(
+        'unsupported',
+        'This session storage does not support message deletion',
+      );
+    const sessionId = this.getSessionId();
+    const lease = await SessionWriterLease.acquire({
+      runtimeBaseDir: this.config.storage.getRuntimeBaseDir(),
+      processKind: 'acp',
+      sessionId,
+      transcriptPath: this.ensureConversationFile(),
+      qwenVersion: this.config.getCliVersion(),
+    });
+    this.binding = { sessionId, lease };
+    await lease.assertOwnedAndUnchanged();
+    return lease;
+  }
+
+  async getMessageGroups(): Promise<MessageGroupsSnapshot> {
+    if (!this.supportsMessageGroupDeletion()) {
+      throw new MessageGroupDeletionError(
+        'unsupported',
+        'This session storage does not support message deletion',
+      );
+    }
+    return this.runWithWriteBarrier(async () => {
+      const text = this.binding
+        ? await this.binding.lease.readTranscript()
+        : await fs.promises
+            .readFile(this.ensureConversationFile(), 'utf8')
+            .catch((error: NodeJS.ErrnoException) => {
+              if (error.code === 'ENOENT') return '';
+              throw error;
+            });
+      const records = parseMessageGroupTranscript(text);
+      return {
+        snapshot: messageGroupsSnapshot(records),
+        groups: getTranscriptMessageGroups(records),
+      };
+    });
+  }
+
+  async deleteMessageGroups(
+    request: DeleteMessageGroupsRequest,
+  ): Promise<DeleteMessageGroupsResult> {
+    if (!this.supportsMessageGroupDeletion()) {
+      throw new MessageGroupDeletionError(
+        'unsupported',
+        'This session storage does not support message deletion',
+      );
+    }
+    if (this.topologyFence)
+      throw new Error('Transcript topology transaction already active');
+    const fence: TranscriptTopologyFence = { buffered: [] };
+    this.topologyFence = fence;
+    try {
+      return await this.runWithWriteBarrier(async () => {
+        const lease = await this.ensureMessageGroupDeletionLease();
+        const text = await lease.readTranscript();
+        const original = parseMessageGroupTranscript(text);
+        if (messageGroupsSnapshot(original) !== request.snapshot) {
+          throw new MessageGroupDeletionError(
+            'conflict',
+            'The session history changed; refresh before deleting',
+          );
+        }
+        const { records, result } = deleteTranscriptMessageGroups(
+          original,
+          request.groupIds,
+          {
+            ...this.createBaseRecord('system'),
+            promptId: `${this.getSessionId()}########${computeInitialTurnFromHistory(original, this.getSessionId())}`,
+          },
+        );
+        const updated = `${records.map((record) => JSON.stringify(record)).join('\n')}\n`;
+        await lease.replaceTranscript(
+          updated,
+          createHash('sha256').update(text).digest('hex'),
+        );
+        for (const id of [
+          ...result.removedApiPromptIds,
+          ...result.deletedPromptIds,
+        ]) {
+          this.deletedTelemetryPromptIds.add(id);
+        }
+        const retained = new Set(records.map((record) => record.uuid));
+        for (const record of original) {
+          if (retained.has(record.uuid)) continue;
+          for (const part of record.message?.parts ?? []) {
+            if (part.functionCall?.id)
+              this.deletedTelemetryCallIds.add(part.functionCall.id);
+          }
+        }
+        const active = prepareTranscriptRecords(records)
+          .records as ChatRecord[];
+        this.rebuildTurnBoundaries(active);
+        this.userDisplayTextsForTitle.length = 0;
+        for (const record of active) {
+          if (record.type === 'user' && record.subtype === undefined) {
+            this.trackUserDisplayTextForTitle(
+              (record.systemPayload as UserPromptRecordPayload | undefined)
+                ?.displayText,
+            );
+          }
+        }
+        return result;
+      });
+    } finally {
+      this.releaseTopologyFence(fence);
+    }
+  }
+
   async readActiveTranscriptChain(): Promise<readonly ChatRecord[]> {
     await this.flush();
     if (this.managedSink) {
@@ -2076,9 +2223,10 @@ export class ChatRecordingService {
         return result;
       } catch (error) {
         if (
-          error instanceof SessionWriterLostError ||
-          error instanceof SessionTranscriptChangedError ||
-          error instanceof SessionWriterUnavailableError
+          (this.binding !== undefined || this.writerLeaseRequired) &&
+          (error instanceof SessionWriterLostError ||
+            error instanceof SessionTranscriptChangedError ||
+            error instanceof SessionWriterUnavailableError)
         ) {
           throw this.enterWriteFailure(
             error,
@@ -3098,6 +3246,19 @@ export class ChatRecordingService {
       // Freeze the array so later live-history mutations cannot desynchronize
       // entries from the parallel promptIds array.
       const compressedHistory = [...payload.compressedHistory];
+      const previous = this.activeBranchRecords.findLast(
+        (record) => record.subtype === 'chat_compression',
+      )?.systemPayload as ChatCompressionRecordPayload | undefined;
+      const previousPrefix = previous?.summaryPrefixLength ?? 0;
+      const summaryPrefixLength =
+        payload.summaryPrefixLength ??
+        (previous &&
+        isDeepStrictEqual(
+          compressedHistory.slice(0, previousPrefix),
+          previous.compressedHistory.slice(0, previousPrefix),
+        )
+          ? previousPrefix
+          : 0);
       const promptIds = compressedHistory.map(
         (content) => getApiHistoryPromptId(content) ?? null,
       );
@@ -3108,6 +3269,10 @@ export class ChatRecordingService {
         systemPayload: {
           ...payload,
           compressedHistory,
+          contextPrefixLength: getStartupContextLength(compressedHistory, {
+            includeCompressed: true,
+          }),
+          summaryPrefixLength,
           ...(promptIds.some(Boolean) ? { promptIds } : {}),
         },
       };
@@ -3131,11 +3296,20 @@ export class ChatRecordingService {
         subtype: 'ui_telemetry',
         systemPayload: { uiEvent },
       };
-
+      if (this.isDeletedTelemetry(record)) return;
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving ui telemetry record:', error);
     }
+  }
+
+  private isDeletedTelemetry(record: ChatRecord): boolean {
+    const { promptId, callId } = telemetryRecordIdentity(record);
+    return (
+      (promptId !== undefined &&
+        this.deletedTelemetryPromptIds.has(promptId)) ||
+      (callId !== undefined && this.deletedTelemetryCallIds.has(callId))
+    );
   }
 
   /**
