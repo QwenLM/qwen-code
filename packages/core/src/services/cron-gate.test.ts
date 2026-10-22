@@ -630,6 +630,8 @@ describe('gateCommandError', () => {
       'must be at most 2048 characters',
     ],
     ['whitespace', '   ', 'must be a non-empty shell command'],
+    // A process argument cannot carry a NUL: such a gate never starts.
+    ['a NUL', 'echo a\u0000b', 'must not contain a NUL character'],
   ])('refuses %s', (_what, gate, error) => {
     expect(gateCommandError(gate)).toContain(error);
   });

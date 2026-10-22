@@ -128,6 +128,10 @@ export function gateCommandError(gate: unknown): string | null {
   if (gate.length > MAX_CRON_GATE_CHARS) {
     return `must be at most ${MAX_CRON_GATE_CHARS} characters`;
   }
+  // A process argument cannot carry one: such a gate could never start.
+  if (gate.includes('\0')) {
+    return 'must not contain a NUL character';
+  }
   // A shell runs a comment as nothing: exit 0, no stdout. Explicit no-ops
   // such as `true` and `:` stay accepted.
   if (runsOnlyComments(gate)) {
