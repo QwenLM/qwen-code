@@ -255,7 +255,10 @@ describe('SDK Java self-hosted workflow guards', () => {
     {
       name: 'mysql-integration',
       artifact: 'sdk-java-test-reports-mysql-integration-java-21',
-      paths: ['packages/managed-agent-server/target/surefire-reports/*.txt'],
+      paths: [
+        'packages/managed-agent-server/target/surefire-reports/*.txt',
+        'packages/managed-agent-server/target/failsafe-reports/*.txt',
+      ],
       testStep:
         'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration',
     },
