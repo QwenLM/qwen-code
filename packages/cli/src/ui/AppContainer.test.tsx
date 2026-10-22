@@ -186,6 +186,7 @@ vi.mock('ink', async (importOriginal) => {
 let capturedUIState: UIState;
 let capturedUIActions: UIActions;
 let capturedRenderMode: RenderMode;
+const RENDER_MODE_ARG_INDEX = 25;
 let capturedThoughtExpanded: ThoughtExpandedValue;
 function TestContextConsumer() {
   capturedUIState = useContext(UIStateContext)!;
@@ -6477,6 +6478,9 @@ describe('AppContainer State Management', () => {
       );
 
       expect(capturedRenderMode).toBe('raw');
+      expect(
+        mockedUseLlmStream.mock.calls.at(-1)?.[RENDER_MODE_ARG_INDEX],
+      ).toBe('raw');
     });
 
     it('falls back to rendered Markdown mode for missing or invalid ui.renderMode', () => {
@@ -6549,7 +6553,15 @@ describe('AppContainer State Management', () => {
             handler.toString().includes('handleRenderModeToggleKey'),
         ) as ((key: Key) => void) | undefined;
       expect(handleKeypress).toBeDefined();
-      expect(() => handleKeypress!(optionMKey)).not.toThrow();
+      expect(
+        mockedUseLlmStream.mock.calls.at(-1)?.[RENDER_MODE_ARG_INDEX],
+      ).toBe('render');
+      await act(async () => handleKeypress!(optionMKey));
+      await vi.waitFor(() => expect(capturedRenderMode).toBe('raw'));
+      expect(
+        mockedUseLlmStream.mock.calls.at(-1)?.[RENDER_MODE_ARG_INDEX],
+        `renderMode was not captured at arg index ${RENDER_MODE_ARG_INDEX} — useLlmStream signature may have changed`,
+      ).toBe(capturedRenderMode);
     });
   });
 

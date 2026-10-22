@@ -9,6 +9,7 @@ import type { Config } from '../config/config.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import type { ModToolCall, ModToolCheck } from '../mods/tool-events.js';
 import { executeModTool, modToolRequest } from '../mods/tool-execution.js';
+import { ToolNames } from '../tools/tool-names.js';
 import {
   CoreToolScheduler,
   type AllToolCallsCompleteHandler,
@@ -69,6 +70,10 @@ export async function executeToolCall(
         ?.recordToolResult(response.responseParts, {
           ...response,
           status: completed?.status ?? (response.error ? 'error' : 'success'),
+          renderOutputAsMarkdown:
+            completed?.invocation !== undefined &&
+            (!response.error || completed.request.name === ToolNames.ADVISOR) &&
+            (completed.tool?.isOutputMarkdown ?? false),
         });
     return response;
   }

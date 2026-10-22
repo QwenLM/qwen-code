@@ -855,6 +855,7 @@ describe('<TableRenderer />', () => {
           rows={rows}
           contentWidth={contentWidth}
           maxHeight={maxHeight}
+          isStreaming
         />,
       );
       return lastFrame() ?? '';
@@ -882,6 +883,19 @@ describe('<TableRenderer />', () => {
       expect(stripAnsi(output)).toContain('more rows streaming');
     });
 
+    it('does not leave a bare border when a completed table has only two rows', () => {
+      const { lastFrame } = renderWithProviders(
+        <TableRenderer
+          headers={['A', 'B']}
+          rows={manyRows}
+          contentWidth={80}
+          maxHeight={2}
+        />,
+      );
+      expect(lastFrame()).toContain('more rows not shown');
+      expect(lastFrame()).not.toContain('┌');
+    });
+
     it('is a passthrough when maxHeight is undefined (full table)', () => {
       const output = renderWithMaxHeight(['A', 'B'], manyRows, undefined);
       expect(stripAnsi(output)).not.toContain('more rows streaming');
@@ -893,7 +907,28 @@ describe('<TableRenderer />', () => {
       // still be clipped to maxHeight with the cue.
       const output = renderWithMaxHeight(['A', 'B'], manyRows, 8, 20);
       expect(getVisibleLines(output).length).toBeLessThanOrEqual(8);
-      expect(stripAnsi(output)).toContain('more rows streaming');
+      expect(stripAnsi(output)).toContain('more rows');
+      for (const line of getVisibleLines(output)) {
+        expect(stringWidth(line)).toBeLessThanOrEqual(20);
+      }
+    });
+
+    it('wraps long vertical cells before applying the height clamp', () => {
+      const output = renderWithMaxHeight(
+        ['A', 'B'],
+        [
+          ['x'.repeat(200), 'y'],
+          ['short', 'value'],
+          ['tail', 'value'],
+        ],
+        8,
+        40,
+      );
+      expect(getVisibleLines(output).length).toBeLessThanOrEqual(8);
+      expect(stripAnsi(output)).toContain('more rows');
+      for (const line of getVisibleLines(output)) {
+        expect(stringWidth(line)).toBeLessThanOrEqual(40);
+      }
     });
   });
 

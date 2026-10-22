@@ -492,6 +492,40 @@ describe('ToolConfirmationMessage', () => {
     expect(lastFrame()).toContain('Step one');
   });
 
+  it.each([false, true])(
+    'bounds literal math to the actual plan width with compactMode=%s',
+    (compactMode) => {
+      const { lastFrame } = renderWithProviders(
+        <Box width={80} flexDirection="column">
+          <ToolConfirmationMessage
+            confirmationDetails={{
+              type: 'plan',
+              title: 'Approve plan?',
+              plan:
+                '$$\n' +
+                Array(5).fill('x'.repeat(79)).join('\n') +
+                '\n$$\nStep 2',
+              onConfirm: vi.fn(),
+            }}
+            config={mockConfig}
+            contentWidth={80}
+            availableTerminalHeight={18}
+            compactMode={compactMode}
+          />
+        </Box>,
+      );
+      expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(
+        compactMode ? 8 : 18,
+      );
+      expect(lastFrame()).toContain('more lines not shown');
+      expect(lastFrame()).toContain('o open full plan in editor');
+      expect(lastFrame()).toContain(
+        compactMode ? '3. No' : 'No, keep planning',
+      );
+      expect(lastFrame()).not.toContain('Step 2');
+    },
+  );
+
   describe('full-plan viewer (#7001)', () => {
     const plan = [
       '# Big Plan',

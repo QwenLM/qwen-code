@@ -170,6 +170,80 @@ describe('executeToolCall', () => {
     expect(recordToolResult).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['direct', false, false],
+    ['direct', true, true],
+    ['mod', false, false],
+    ['mod', true, true],
+    ['synthetic', true, false],
+    ['error', true, false],
+    ['withheld', true, false],
+    ['mod-error', true, false],
+  ] as const)(
+    'records the display mode for %s output with Markdown=%s',
+    async (mode, isOutputMarkdown, expected) => {
+      const recordToolResult = vi.fn();
+      mockConfig.getChatRecordingService = () =>
+        ({ recordToolResult }) as unknown as ReturnType<
+          Config['getChatRecordingService']
+        >;
+      mockTool = new MockTool({
+        name: 'testTool',
+        isOutputMarkdown,
+        execute: executeFn,
+      });
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+      executeFn.mockResolvedValue({
+        llmContent: '# result',
+        returnDisplay: '# result',
+      });
+      if (mode === 'error') executeFn.mockRejectedValue(new Error('# failure'));
+
+      await executeToolCall(
+        mockConfig,
+        {
+          callId: 'display-mode',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt',
+        },
+        abortController.signal,
+        {
+          modToolCall:
+            mode === 'mod' ||
+            mode === 'synthetic' ||
+            mode === 'withheld' ||
+            mode === 'mod-error'
+              ? async (event, next, signal) => {
+                  if (mode === 'synthetic')
+                    return { result: { output: '# result' } };
+                  const result = await next(
+                    event,
+                    signal,
+                    async (_event, verdict) => verdict,
+                  );
+                  if (mode === 'withheld') return { deny: '# withheld result' };
+                  if (mode === 'mod-error')
+                    return {
+                      result: { error: '# replaced failure' },
+                      isError: true,
+                    };
+                  return result;
+                }
+              : undefined,
+        },
+      );
+
+      expect(recordToolResult).toHaveBeenCalledTimes(1);
+      expect(recordToolResult).toHaveBeenCalledWith(
+        expect.any(Array),
+        expect.objectContaining({ renderOutputAsMarkdown: expected }),
+      );
+      expect(executeFn).toHaveBeenCalledTimes(mode === 'synthetic' ? 0 : 1);
+    },
+  );
+
   it('runs the tool with the requested runtime content generator', async () => {
     const request: ToolCallRequestInfo = {
       callId: 'runtime-call',

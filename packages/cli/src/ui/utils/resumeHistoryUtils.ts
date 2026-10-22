@@ -5,6 +5,7 @@
  */
 
 import * as path from 'node:path';
+import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import type { Part, FunctionCall } from '@google/genai';
 import type {
   ResumedSessionData,
@@ -206,6 +207,7 @@ function convertToHistoryItems(
     description: string;
     args?: Record<string, unknown>;
     resultDisplay: ToolResultDisplay | undefined;
+    renderOutputAsMarkdown: boolean;
     visionBridgeNotice?: string;
     detailedDisplay?: string;
     images?: InlineImageData[];
@@ -574,6 +576,7 @@ function convertToHistoryItems(
             // resumed session shows the same args row as a live one.
             args: fc.args,
             resultDisplay: undefined,
+            renderOutputAsMarkdown: tool?.isOutputMarkdown ?? false,
             status: ToolCallStatus.Success, // Will be updated by tool_result
             confirmationDetails: undefined,
           });
@@ -601,6 +604,16 @@ function convertToHistoryItems(
             const rawStatus = (
               record.toolCallResult as Record<string, unknown>
             )['status'] as string | undefined;
+            const recordedMarkdown =
+              record.toolCallResult.renderOutputAsMarkdown;
+            if (typeof recordedMarkdown === 'boolean') {
+              toolCall.renderOutputAsMarkdown = recordedMarkdown;
+            } else if (
+              (rawStatus === 'error' || rawStatus === 'cancelled') &&
+              pendingToolCalls.get(toolCall.callId)?.name !== ToolNames.ADVISOR
+            ) {
+              toolCall.renderOutputAsMarkdown = false;
+            }
             toolCall.status =
               rawStatus === 'error'
                 ? ToolCallStatus.Error

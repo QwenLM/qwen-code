@@ -5379,119 +5379,140 @@ describe('runNonInteractive', () => {
     expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
   });
 
-  it('should execute only the first duplicate provider tool-call id in the same batch', async () => {
-    setupMetricsMock();
-    const recordToolResult = vi.fn();
-    (
-      mockConfig as Config & {
-        getChatRecordingService: () => {
-          recordToolResult: typeof recordToolResult;
-          finalize: ReturnType<typeof vi.fn>;
-          flush: ReturnType<typeof vi.fn>;
-        };
-      }
-    ).getChatRecordingService = () => ({
-      recordToolResult,
-      finalize: vi.fn(),
-      flush: vi.fn().mockResolvedValue(undefined),
-    });
-    vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
-    const firstToolCall: ServerLlmStreamEvent = {
-      type: LlmEventType.ToolCallRequest,
-      value: {
-        callId: 'tool-1',
-        providerCallId: 'tool-1',
-        name: 'testTool',
-        args: { arg1: 'value1' },
-        isClientInitiated: false,
-        prompt_id: 'prompt-id-same-batch-dup',
-      },
-    };
-    const duplicateToolCall: ServerLlmStreamEvent = {
-      type: LlmEventType.ToolCallRequest,
-      value: {
-        callId: 'tool-1',
-        providerCallId: 'tool-1',
-        name: 'testTool',
-        args: { arg1: 'value1' },
-        isClientInitiated: false,
-        prompt_id: 'prompt-id-same-batch-dup',
-      },
-    };
-    mockCoreExecuteToolCall.mockImplementation(
-      async (
-        _config: unknown,
-        request: ToolCallRequestInfo,
-        _signal: AbortSignal,
-        options: {
-          onAllToolCallsComplete?: (
-            calls: Array<{
-              request: ToolCallRequestInfo;
-              response: ToolCallResponseInfo;
-              status: 'success';
-            }>,
-          ) => Promise<void>;
+  it.each([
+    { markdown: false, responseError: false },
+    { markdown: true, responseError: false },
+    { markdown: true, responseError: true },
+  ])(
+    'deduplicates ids with Markdown=$markdown and responseError=$responseError',
+    async ({ markdown, responseError }) => {
+      setupMetricsMock();
+      const recordToolResult = vi.fn();
+      (
+        mockConfig as Config & {
+          getChatRecordingService: () => {
+            recordToolResult: typeof recordToolResult;
+            finalize: ReturnType<typeof vi.fn>;
+            flush: ReturnType<typeof vi.fn>;
+          };
+        }
+      ).getChatRecordingService = () => ({
+        recordToolResult,
+        finalize: vi.fn(),
+        flush: vi.fn().mockResolvedValue(undefined),
+      });
+      vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
+      const firstToolCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-1',
+          providerCallId: 'tool-1',
+          name: 'testTool',
+          args: { arg1: 'value1' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-same-batch-dup',
         },
-      ) => {
-        const response: ToolCallResponseInfo = {
-          callId: request.callId,
-          responseParts: [{ text: 'Tool response' }],
-          resultDisplay: 'Tool response',
-          error: undefined,
-          errorType: undefined,
-          executionStatus: 'success',
-        };
-        await options.onAllToolCallsComplete?.([
-          { request, response, status: 'success' },
-        ]);
-        return response;
-      },
-    );
-
-    mockLlmClient.sendMessageStream
-      .mockReturnValueOnce(
-        createStreamFromEvents([firstToolCall, duplicateToolCall]),
-      )
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: LlmEventType.Content, value: 'Final answer' },
-          {
-            type: LlmEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 10 },
-            },
+      };
+      const duplicateToolCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-1',
+          providerCallId: 'tool-1',
+          name: 'testTool',
+          args: { arg1: 'value1' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-same-batch-dup',
+        },
+      };
+      mockCoreExecuteToolCall.mockImplementation(
+        async (
+          _config: unknown,
+          request: ToolCallRequestInfo,
+          _signal: AbortSignal,
+          options: {
+            onAllToolCallsComplete?: (
+              calls: Array<{
+                request: ToolCallRequestInfo;
+                response: ToolCallResponseInfo;
+                status: 'success';
+                tool: { isOutputMarkdown: boolean };
+                invocation: object;
+              }>,
+            ) => Promise<void>;
           },
-        ]),
+        ) => {
+          const response: ToolCallResponseInfo = {
+            callId: request.callId,
+            responseParts: [{ text: 'Tool response' }],
+            resultDisplay: 'Tool response',
+            error: responseError
+              ? new Error('Mod withheld the result')
+              : undefined,
+            errorType: undefined,
+            executionStatus: 'success',
+          };
+          await options.onAllToolCallsComplete?.([
+            {
+              request,
+              response,
+              status: 'success',
+              tool: { isOutputMarkdown: markdown },
+              invocation: {},
+            },
+          ]);
+          return response;
+        },
       );
 
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Use a tool',
-      'prompt-id-same-batch-dup',
-    );
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([firstToolCall, duplicateToolCall]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Final answer' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 10 },
+              },
+            },
+          ]),
+        );
 
-    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
-    expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
-    expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Use a tool',
+        'prompt-id-same-batch-dup',
+      );
 
-    const toolResultParts = mockLlmClient.sendMessageStream.mock.calls[1][0];
-    expect(toolResultParts).toHaveLength(2);
-    expect(toolResultParts[0]).toEqual({ text: 'Tool response' });
-    expect(toolResultParts[1].functionResponse?.response?.['error']).toContain(
-      'Duplicate provider tool call id "tool-1"',
-    );
-    expect(recordToolResult).toHaveBeenCalledTimes(2);
-    expect(recordToolResult.mock.calls.map((call) => call[1].status)).toEqual([
-      'success',
-      'error',
-    ]);
-    expect(
-      recordToolResult.mock.calls.map((call) => call[1].executionStatus),
-    ).toEqual(['success', 'not_started']);
-    expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
-  });
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+      expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+
+      const toolResultParts = mockLlmClient.sendMessageStream.mock.calls[1][0];
+      expect(toolResultParts).toHaveLength(2);
+      expect(toolResultParts[0]).toEqual({ text: 'Tool response' });
+      expect(
+        toolResultParts[1].functionResponse?.response?.['error'],
+      ).toContain('Duplicate provider tool call id "tool-1"');
+      expect(recordToolResult).toHaveBeenCalledTimes(2);
+      expect(
+        recordToolResult.mock.calls.map(
+          (call) => call[1].renderOutputAsMarkdown,
+        ),
+      ).toEqual([markdown && !responseError, false]);
+      expect(recordToolResult.mock.calls.map((call) => call[1].status)).toEqual(
+        ['success', 'error'],
+      );
+      expect(
+        recordToolResult.mock.calls.map((call) => call[1].executionStatus),
+      ).toEqual(['success', 'not_started']);
+      expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
+    },
+  );
 
   it('should handle error during tool execution and should send error back to the model', async () => {
     setupMetricsMock();

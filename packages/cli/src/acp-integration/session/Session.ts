@@ -861,6 +861,7 @@ type PendingToolResultRecord = {
   metadata: Omit<Partial<ToolCallResponseInfo>, 'executionStatus'> & {
     status: 'success' | 'error' | 'cancelled';
     executionStatus: ToolExecutionStatus;
+    renderOutputAsMarkdown?: boolean;
   };
 };
 
@@ -13908,6 +13909,7 @@ export class Session implements SessionContext {
         this.config.getChatRecordingService()?.recordToolResult(
           finalized[index].responseParts,
           {
+            renderOutputAsMarkdown: false,
             ...record.metadata,
             persistedOutputFiles: finalized[index].persistedOutputFiles,
             artifacts: finalized[index].artifacts,
@@ -17661,6 +17663,9 @@ export class Session implements SessionContext {
               status,
               executionStatus,
               resultDisplay: toolResult.returnDisplay,
+              renderOutputAsMarkdown:
+                tool.isOutputMarkdown &&
+                (status !== 'error' || tool.name === ToolNames.ADVISOR),
               ...(visionBridgeNotice !== undefined
                 ? { visionBridgeNotice }
                 : {}),

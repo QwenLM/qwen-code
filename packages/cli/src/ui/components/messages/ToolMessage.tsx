@@ -47,6 +47,12 @@ import { localizeToolDisplayName } from '../../../i18n/index.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
+import { useRenderMode } from '../../contexts/RenderModeContext.js';
+import {
+  fitPendingSlice,
+  MIN_PENDING_CONTENT_LINES,
+  PENDING_MARKDOWN_HEADROOM_ROWS,
+} from '../../utils/pending-rendered-height.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 
 import {
@@ -623,13 +629,17 @@ const StringResultRenderer: React.FC<{
   availableHeight?: number;
   childWidth: number;
   registerOverflow?: boolean;
+  isPending?: boolean;
 }> = ({
   data,
   renderAsMarkdown,
   availableHeight,
   childWidth,
   registerOverflow,
+  isPending = false,
 }) => {
+  const { renderMode } = useRenderMode();
+  const settings = useSettings();
   let displayData = data;
 
   // Truncate if too long
@@ -637,12 +647,38 @@ const StringResultRenderer: React.FC<{
     displayData = '...' + displayData.slice(-MAXIMUM_RESULT_DISPLAY_CHARACTERS);
   }
 
-  if (renderAsMarkdown) {
+  // Live tool output is replaced, not committed to scrollback: overflow needs its tail.
+  const markdownBudget =
+    availableHeight === undefined
+      ? undefined
+      : isPending
+        ? Math.max(
+            MIN_PENDING_CONTENT_LINES,
+            availableHeight - PENDING_MARKDOWN_HEADROOM_ROWS,
+          )
+        : availableHeight;
+  const useMarkdown =
+    renderAsMarkdown &&
+    (markdownBudget === undefined ||
+      !fitPendingSlice(
+        (isPending ? displayData.trimEnd() : displayData).split(/\r?\n/),
+        childWidth,
+        markdownBudget,
+        Number.MAX_SAFE_INTEGER,
+        isPending,
+        {
+          renderVisualBlocks: renderMode === 'render',
+          showLineNumbers: settings.merged.ui?.showLineNumbers ?? true,
+          rejectVisualBlocks: true,
+          keepFirstTable: false,
+        },
+      ).clipped);
+  if (useMarkdown) {
     return (
       <Box flexDirection="column">
         <MarkdownDisplay
           text={displayData}
-          isPending={false}
+          isPending={isPending}
           availableTerminalHeight={availableHeight}
           contentWidth={childWidth}
         />
@@ -746,9 +782,8 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   /**
    * True while the tool message is rendered inside `pendingHistoryItems`
    * (live area), false (or omitted — undefined is treated as false)
-   * once committed to `<Static>`. Forwarded for parity with sibling
-   * renderers and possible future gating; currently inert inside this
-   * component. The live-phase filter for panel-owned subagent entries
+   * once committed to `<Static>`. Forwarded to Markdown and sibling renderers.
+   * The live-phase filter for panel-owned subagent entries
    * lives in `ToolGroupMessage` (the only call site), and the terminal
    * `SubagentScrollbackSummary` fires regardless of `isPending` so the
    * inline path can bridge the gap between `unregisterForeground`'s
@@ -770,7 +805,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   availableTerminalHeight,
   contentWidth,
   emphasis = 'medium',
-  renderOutputAsMarkdown = true,
+  renderOutputAsMarkdown,
   activeShellPtyId,
   embeddedShellFocused,
   ptyId,
@@ -886,16 +921,8 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     isCappingShell && shellCapHeight === shellOutputMaxLines;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
 
-  // Long tool call response in MarkdownDisplay doesn't respect availableTerminalHeight properly,
-  // we're forcing it to not render as markdown when the response is too long, it will fallback
-  // to render as plain text, which is contained within the terminal using MaxSizedBox.
-  // `isCappingShell` keeps the cap honest when ctrl+s has been pressed
-  // (#10640): constrainHeight=false drops the height budget (availableHeight
-  // above is undefined) but the ui.shellOutputMaxLines cap still binds.
-  // Resumed sessions rebuild tool displays without renderOutputAsMarkdown
-  // (default true), so without this the capped shell output would escape
-  // through the markdown branch, which MaxSizedBox does not contain.
-  if (availableHeight || isCappingShell) {
+  renderOutputAsMarkdown ??= false;
+  if (isCappingShell) {
     renderOutputAsMarkdown = false;
   }
 
@@ -941,9 +968,8 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
 
   // detailedDisplay is RAW tool output (file content, grep hits, directory
   // listings). Render it as plain text — Markdown formatting would turn the
-  // file's own `#`/`*`/`-`/`>` characters into headings/bold/lists. The usual
-  // markdown-suppression guard above doesn't catch this because fullDetail
-  // lifts the height cap (availableTerminalHeight is undefined in transcript).
+  // file's own `#`/`*`/`-`/`>` characters into headings/bold/lists, even when
+  // the tool declares its summary as Markdown.
   if (usingDetailedDisplay) {
     renderOutputAsMarkdown = false;
   }
@@ -1101,6 +1127,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 availableHeight={shellStringCapHeight}
                 childWidth={innerWidth}
                 registerOverflow={!shellCapIgnoresShowMore}
+                isPending={isPending && status === ToolCallStatus.Executing}
               />
             )}
           </Box>

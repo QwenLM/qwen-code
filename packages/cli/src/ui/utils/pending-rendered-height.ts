@@ -4,8 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import wrapAnsi from 'wrap-ansi';
 import { getCachedStringWidth } from './textUtils.js';
 import { readInlineMathSpanAt } from './inline-math.js';
+import { parseCodeFenceInfo } from './markdown-utilities.js';
+import { renderTableText, TABLE_MARGIN_ROWS } from './TableRenderer.js';
+
+export const LIST_ITEM_PREFIX_PADDING = 1;
+export const BLOCKQUOTE_PREFIX_PADDING = 1;
+export const BLOCKQUOTE_PREFIX = '│ ';
+export const PENDING_MERMAID_HEADER = 'Mermaid diagram is being written...';
+export const MIN_PENDING_CONTENT_LINES = 1;
+export const PENDING_MARKDOWN_HEADROOM_ROWS = 2;
 
 /**
  * Shared rendered-height accounting for bounding the live (pending) markdown
@@ -18,18 +28,6 @@ import { readInlineMathSpanAt } from './inline-math.js';
  * divergent estimate would let the safety net engage out of step with the
  * commit and flicker.
  */
-
-/** The fixed chrome a horizontal table adds around its rows: the top,
- *  header-separator and bottom borders (3) plus a `marginY` of 1 (2 rows) = 5.
- *  fitPendingSlice adds this to the summed wrapped row heights (`contentRows`)
- *  and the N-1 inter-row separators — it is no longer a flat `2 * dataRows + 5`. */
-export const TABLE_CHROME_ROWS = 5;
-
-/** The wrap-height threshold: when any cell wraps past this many lines,
- *  TableRenderer falls back to the (much taller) vertical layout. This is the
- *  single source of truth — TableRenderer imports it as MAX_ROW_LINES — so the
- *  renderer and this estimator can never disagree on the format decision. */
-export const TABLE_MAX_ROW_LINES = 4;
 
 /** A markdown table row: `| ... |`. Group 1 captures the inner cells. */
 export const TABLE_ROW_RE = /^\s*\|(.+)\|\s*$/;
@@ -103,10 +101,24 @@ export function splitMarkdownTableRow(row: string): string[] {
   return cells;
 }
 
-/** Estimated terminal rows a non-table line occupies once wrapped to `width`. */
-export function estimateWrappedRows(line: string, width: number): number {
-  if (width <= 0) return 1;
-  return Math.max(1, Math.ceil(getCachedStringWidth(line) / width));
+/** Exact wrapped rows unless a lower bound already exceeds `maxRows`. */
+export function estimateWrappedRows(
+  line: string,
+  width: number,
+  maxRows = Number.MAX_SAFE_INTEGER,
+): number {
+  if (
+    width <= 0 ||
+    (!line.includes('\n') &&
+      !line.includes('\t') &&
+      getCachedStringWidth(line) <= width)
+  )
+    return 1;
+  // A double-width grapheme can occupy a row even when width is only one.
+  const rowWidth = Math.max(2, width);
+  const measured = getCachedStringWidth(line);
+  if (measured > rowWidth * maxRows) return Math.ceil(measured / rowWidth);
+  return wrapAnsi(line, width, { trim: false, hard: true }).split('\n').length;
 }
 
 /**
@@ -138,20 +150,21 @@ export interface PendingSliceResult {
   keptLines: number;
   /** True when some trailing source lines were dropped to fit the budget. */
   clipped: boolean;
+  /** End of a closed table that can be committed whole, even without a blank. */
+  completedTableBoundary?: number;
 }
 
 /**
  * How many leading source lines of `allLines` fit within `budget` RENDERED
  * terminal rows. Block-aware:
  *  - a non-table line costs {@link estimateWrappedRows};
- *  - a *completed* table costs the height of whichever layout TableRenderer will
- *    pick — horizontal (wrapped rows + chrome) or, when the terminal is too
- *    narrow OR a cell wraps past {@link TABLE_MAX_ROW_LINES}, the taller vertical
- *    `label: value` layout — capped at `tableClampRows` (TableRenderer clamps a
- *    streaming table's height to that);
+ *  - a table costs its actual rendered text height plus margins, capped at
+ *    `tableClampRows`, using the same layout function as TableRenderer;
  *  - a table that would overflow the remaining budget is cut *before* (kept for
- *    a later chunk / commit) unless it is the first block, in which case it is
- *    kept and the clamp bounds it, then the walk stops;
+ *    a later chunk / commit) unless it is the first pending block and its
+ *    margins can fit, in which case it is kept for the renderer to clamp;
+ *  - visual Mermaid/math blocks can be rejected: source height does not bound
+ *    diagrams or their copy-command headers;
  *  - lines inside a fenced code block are charged individually (never treated as
  *    a table) so the estimate matches the renderer, which renders them as code.
  *
@@ -163,13 +176,76 @@ export function fitPendingSlice(
   contentWidth: number,
   budget: number,
   tableClampRows: number,
+  isPending = true,
+  {
+    renderVisualBlocks = true,
+    showLineNumbers = true,
+    rejectVisualBlocks = !isPending,
+    keepFirstTable = true,
+  }: {
+    renderVisualBlocks?: boolean;
+    showLineNumbers?: boolean;
+    rejectVisualBlocks?: boolean;
+    keepFirstTable?: boolean;
+  } = {},
 ): PendingSliceResult {
   let rendered = 0;
   let kept = allLines.length;
   let codeFence = ''; // non-empty while inside a fenced code block
+  let inMathBlock = false;
+  let codeContentWidth = contentWidth;
+  let pendingMermaid = false;
+  let lastLineEmpty = true;
+  let afterTable = false;
+  let tableHeaders: string[] = [];
+  let tableRows: string[][] = [];
+  let tableCost = 0;
+  let completedTableBoundary: number | undefined;
+  const layoutRows = (isStreaming: boolean) => {
+    if (tableRows.length >= tableClampRows) {
+      return (tableClampRows <= 2 ? 1 : tableClampRows) + TABLE_MARGIN_ROWS;
+    }
+    const renderedRows = renderTableText({
+      headers: tableHeaders,
+      rows: tableRows,
+      contentWidth,
+      enableInlineMath: true,
+      isStreaming,
+    })
+      .split('\n')
+      .reduce(
+        (count, line) =>
+          count + estimateWrappedRows(line, Math.max(1, contentWidth)),
+        0,
+      );
+    // TableText collapses tiny clamps to one cue only when actually clipped.
+    const keptRows =
+      renderedRows > tableClampRows
+        ? tableClampRows <= 2
+          ? 1
+          : tableClampRows
+        : renderedRows;
+    return keptRows + TABLE_MARGIN_ROWS;
+  };
   for (let i = 0; i < allLines.length; ) {
     const line = allLines[i]!;
     const fenceMatch = CODE_FENCE_RE.exec(line);
+    if (inMathBlock) {
+      if (/^ *\$\$ *$/.test(line)) {
+        inMathBlock = false;
+        if (!isPending) {
+          i++;
+          continue;
+        }
+      }
+      rendered += estimateWrappedRows(line, contentWidth, budget - rendered);
+      if (rendered > budget) {
+        kept = i;
+        break;
+      }
+      i++;
+      continue;
+    }
     if (codeFence) {
       // Inside a code block: charge the line as code (one row, wrapped), and
       // close on a matching fence. Never treat contents as a table.
@@ -180,7 +256,16 @@ export function fitPendingSlice(
       ) {
         codeFence = '';
       }
-      rendered += estimateWrappedRows(line, contentWidth);
+      // Pending diagrams truncate each source line and omit the closing fence.
+      rendered += pendingMermaid
+        ? codeFence
+          ? 1
+          : 0
+        : estimateWrappedRows(
+            line.replace(/\t/g, '    '),
+            codeContentWidth,
+            budget - rendered,
+          );
       if (rendered > budget) {
         kept = i;
         break;
@@ -188,9 +273,55 @@ export function fitPendingSlice(
       i++;
       continue;
     }
+    const isBlank = line.trim().length === 0;
+    // MarkdownDisplay drops leading blanks and renders one spacer per blank run.
+    if (isBlank && lastLineEmpty) {
+      i++;
+      continue;
+    }
+    lastLineEmpty = isBlank;
     if (fenceMatch) {
       codeFence = fenceMatch[1]!;
-      rendered += estimateWrappedRows(line, contentWidth);
+      // CodeColorizer adds padding and a numbered gutter, and expands tabs.
+      const { lang, startLine } = parseCodeFenceInfo(fenceMatch[2]);
+      pendingMermaid =
+        isPending && renderVisualBlocks && lang?.toLowerCase() === 'mermaid';
+      // A diagram's height cannot be inferred from its source lines.
+      if (
+        rejectVisualBlocks &&
+        renderVisualBlocks &&
+        lang?.toLowerCase() === 'mermaid'
+      ) {
+        kept = i;
+        break;
+      }
+      let end = i + 1;
+      while (end < allLines.length) {
+        const closing = CODE_FENCE_RE.exec(allLines[end]!);
+        if (
+          closing &&
+          closing[1]!.startsWith(codeFence[0]!) &&
+          closing[1]!.length >= codeFence.length
+        )
+          break;
+        end++;
+      }
+      const contentLines = end - i - 1;
+      const blockLineCount = Math.max(
+        1,
+        contentLines - (allLines[end - 1] === '' ? 1 : 0),
+      );
+      const gutterWidth = showLineNumbers
+        ? String(startLine + blockLineCount - 1).length + 1
+        : 0;
+      codeContentWidth = Math.max(1, contentWidth - 1 - gutterWidth);
+      rendered += pendingMermaid
+        ? estimateWrappedRows(
+            PENDING_MERMAID_HEADER,
+            Math.max(1, contentWidth - 1),
+            budget - rendered,
+          )
+        : estimateWrappedRows(line, contentWidth, budget - rendered);
       if (rendered > budget) {
         kept = i;
         break;
@@ -198,124 +329,139 @@ export function fitPendingSlice(
       i++;
       continue;
     }
-    if (isTableStart(allLines, i)) {
-      let j = i + 2;
-      while (j < allLines.length && TABLE_ROW_RE.test(allLines[j]!)) j++;
-      const dataRows = j - (i + 2);
-      // TableRenderer renders EITHER the horizontal format (each row as tall as
-      // its tallest wrapped cell, + chrome) OR the vertical key-value format
-      // (colCount label:value lines per row + a separator between rows +
-      // marginY), which is much taller for multi-column tables. It picks vertical
-      // when the terminal is too narrow OR any cell wraps past MAX_ROW_LINES.
-      // Charge the height it will ACTUALLY render by mirroring BOTH triggers —
-      // charging vertical unconditionally over-estimates and clips a small table
-      // early on a wide terminal, while modelling only the width trigger
-      // under-charges a wide terminal whose long-text cells wrap tall (the
-      // renderer goes vertical, the live frame overflows and locks to the top).
-      // splitMarkdownTableRow already trims each cell, so headerCells and the
-      // per-row cells below need no further trimming.
-      const headerCells = splitMarkdownTableRow(
-        TABLE_ROW_RE.exec(allLines[i]!)![1]!,
-      );
-      const colCount = headerCells.length;
-      // TableRenderer: borderOverhead = 1 + 3*colCount;
-      // minHorizontalTableWidth = max(24, colCount*3 + borderOverhead + 4).
-      const minHorizontalWidth = Math.max(24, 6 * colCount + 5);
-      // Per-row WRAPPED line counts, mirroring TableRenderer's per-cell wrap.
-      // TableRenderer shrinks columns PROPORTIONALLY to their content; we
-      // approximate that with an equal share of the content area. That is exact
-      // for uniform columns but can under-count a heterogeneous table — a narrow
-      // column the renderer shrinks below the equal share wraps taller than
-      // estimated here — in which case the MainContent maxHeight backstop is the
-      // hard cap that still prevents the overflow/lock. MIN_COLUMN_WIDTH mirrors
-      // its floor of 3.
-      const perColWidth = Math.max(
-        3,
-        Math.floor((contentWidth - (1 + 3 * colCount) - 4) / colCount),
-      );
-      // One pass over the header + data rows collects both layouts' heights:
-      //  - horizontal `contentRows`: each row is as tall as its tallest wrapped
-      //    cell (columns share `perColWidth`);
-      //  - the tallest single cell `maxRowLines` (the vertical trigger);
-      //  - vertical `verticalRows`: each DATA cell becomes its own `label: value`
-      //    line (TableRenderer's renderVerticalFormat prefixes the header label)
-      //    that wraps at ~`contentWidth`. Charging just the value, or one flat
-      //    line per cell, would under-count a long `label: value` that wraps.
-      let contentRows = 0;
-      let verticalRows = 0;
-      // The header row's own wrapped height (reusing headerCells, not re-parsed).
-      let maxRowLines = 1;
-      for (const label of headerCells) {
-        maxRowLines = Math.max(
-          maxRowLines,
-          estimateWrappedRows(label, perColWidth),
-        );
-      }
-      contentRows += maxRowLines;
-      // Data rows: sum every row's wrapped height, but anchor the vertical
-      // trigger to the header + FIRST data row only (r === i + 2) so appending
-      // rows never flips the format mid-stream.
-      for (let r = i + 2; r < j; r++) {
-        const cells = splitMarkdownTableRow(
-          TABLE_ROW_RE.exec(allLines[r]!)![1]!,
-        );
-        let rowMax = 1;
-        for (let colIdx = 0; colIdx < cells.length; colIdx++) {
-          const value = cells[colIdx]!;
-          rowMax = Math.max(rowMax, estimateWrappedRows(value, perColWidth));
-          const label = headerCells[colIdx] ?? '';
-          verticalRows += estimateWrappedRows(
-            label ? `${label}: ${value}` : value,
-            contentWidth,
-          );
-        }
-        contentRows += rowMax;
-        if (r === i + 2) {
-          maxRowLines = Math.max(maxRowLines, rowMax);
-        }
-      }
-      // `maxRowLines` (header + first row) drives the format choice, mirroring
-      // TableRenderer. It is close to but NOT a guaranteed upper bound on the
-      // renderer's real first-row wrap count — three renderer behaviours can make
-      // a cell wrap taller than modelled here: (a) proportional (not equal-share)
-      // column widths shrink a narrow column below `perColWidth`; (b) word-aware
-      // wrapping (wrapAnsi) can break a line one row earlier than character-level
-      // `estimateWrappedRows`; (c) a post-layout width-safety check can force
-      // vertical. Each can only make the renderer go vertical/taller while the
-      // estimate stays horizontal/shorter — an under-charge — for which the
-      // `MainContent` maxHeight backstop is the hard cap that still prevents the
-      // overflow/lock. Deliberately NOT over-correcting here (e.g. shrinking every
-      // width or bumping the trigger), which would over-charge and clip common
-      // uniform tables early.
-      // With no data rows yet (a header+separator still streaming), TableRenderer
-      // keeps the horizontal header box — renderVerticalFormat iterates the data
-      // rows and would draw nothing — so only model vertical once a row exists.
-      // Otherwise a narrow terminal would charge the 2-row vertical stub instead
-      // of the taller horizontal header, under-charging the transient state.
-      const usesVertical =
-        dataRows > 0 &&
-        (contentWidth < minHorizontalWidth ||
-          maxRowLines > TABLE_MAX_ROW_LINES);
-      const rows = usesVertical
-        ? verticalRows + Math.max(0, dataRows - 1) + 2
-        : contentRows + Math.max(0, dataRows - 1) + TABLE_CHROME_ROWS;
-      // TableRenderer clamps only the inner <Text> to `tableClampRows`, but
-      // wraps it in <Box marginY={1}>, so a clamped table actually renders
-      // tableClampRows + 2 rows. Charge that so the two margin lines are never
-      // dropped when the clamp engages.
-      const cost = Math.min(rows, tableClampRows + 2);
-      if (rendered + cost > budget && i > 0) {
+    if (renderVisualBlocks && /^ *\$\$ *$/.test(line)) {
+      if (rejectVisualBlocks) {
         kept = i;
         break;
       }
+      inMathBlock = true;
+      if (!isPending) {
+        i++;
+        continue;
+      }
+    }
+    const resumesTable =
+      afterTable &&
+      !inMathBlock &&
+      (TABLE_ROW_RE.test(line) || TABLE_SEPARATOR_RE.test(line));
+    if (renderVisualBlocks && (resumesTable || isTableStart(allLines, i))) {
+      let j = resumesTable ? i : i + 2;
+      if (!resumesTable) {
+        tableHeaders = splitMarkdownTableRow(TABLE_ROW_RE.exec(line)![1]!);
+        tableRows = [];
+        tableCost = 0;
+      }
+      while (j < allLines.length) {
+        const row = allLines[j]!;
+        if (TABLE_SEPARATOR_RE.test(row)) {
+          j++;
+        } else {
+          const match = TABLE_ROW_RE.exec(row);
+          if (!match) break;
+          tableRows.push(splitMarkdownTableRow(match[1]!));
+          j++;
+        }
+      }
+      // The renderer holds the same table open across code/math blocks.
+      rendered -= tableCost;
+      if (
+        j < allLines.length &&
+        !CODE_FENCE_RE.test(allLines[j]!) &&
+        !/^ *\$\$ *$/.test(allLines[j]!) &&
+        !(isPending && j === allLines.length - 1 && /^\s*\|/.test(allLines[j]!))
+      ) {
+        completedTableBoundary = j;
+      }
+      if (tableRows.length === 0) {
+        // MarkdownDisplay holds a table until its first data row arrives.
+        afterTable = true;
+        i = j;
+        continue;
+      }
+      // Each data row needs at least one row, even in vertical layout.
+      const minimumCost =
+        Math.min(tableRows.length, tableClampRows <= 2 ? 1 : tableClampRows) +
+        TABLE_MARGIN_ROWS;
+      let cost =
+        rendered + minimumCost > budget ? minimumCost : layoutRows(isPending);
+      if (rendered + cost > budget) {
+        kept =
+          i > 0 || !isPending || !keepFirstTable || budget <= TABLE_MARGIN_ROWS
+            ? i
+            : j;
+        break;
+      }
+      if (isPending && completedTableBoundary === j) {
+        const completedCost = layoutRows(false);
+        // Keep a fitting frontier rather than drop it for unseen following text.
+        if (rendered + completedCost > budget) {
+          kept = j;
+          break;
+        }
+        cost = Math.max(cost, completedCost);
+      }
       rendered += cost;
+      tableCost = cost;
+      afterTable = true;
       i = j;
       if (rendered >= budget) {
         kept = j;
         break;
       }
     } else {
-      rendered += estimateWrappedRows(line, contentWidth);
+      const listItem = /^([ \t]*)(?:([-*+])|(\d+)\.) +(.*)/.exec(line);
+      if (afterTable && !inMathBlock) {
+        if (!(isPending && i === allLines.length - 1 && /^\s*\|/.test(line))) {
+          if (
+            isPending &&
+            tableRows.length > 0 &&
+            completedTableBoundary !== i
+          ) {
+            rendered += Math.max(0, layoutRows(false) - tableCost);
+          }
+          completedTableBoundary = i;
+        }
+        // The renderer consumes a table's closing text line as inline text.
+        rendered += isBlank
+          ? 0
+          : estimateWrappedRows(line, contentWidth, budget - rendered);
+        afterTable = false;
+        lastLineEmpty = false;
+      } else if (isBlank) {
+        rendered++;
+      } else if (listItem) {
+        const taskItem = renderVisualBlocks
+          ? /^\[([ xX])\]\s+(.*)$/.exec(listItem[4]!)
+          : null;
+        const markerWidth =
+          taskItem || listItem[2] ? 2 : listItem[3]!.length + 2;
+        const itemWidth = Math.max(
+          1,
+          contentWidth -
+            listItem[1]!.length -
+            LIST_ITEM_PREFIX_PADDING -
+            markerWidth,
+        );
+        rendered += estimateWrappedRows(
+          taskItem ? taskItem[2]! : listItem[4]!,
+          itemWidth,
+          budget - rendered,
+        );
+      } else {
+        const quote = renderVisualBlocks ? /^ *> ?(.*)$/.exec(line) : null;
+        rendered += estimateWrappedRows(
+          quote ? quote[1]! : line,
+          quote
+            ? Math.max(
+                1,
+                contentWidth -
+                  BLOCKQUOTE_PREFIX_PADDING -
+                  getCachedStringWidth(BLOCKQUOTE_PREFIX),
+              )
+            : contentWidth,
+          budget - rendered,
+        );
+      }
       if (rendered > budget) {
         kept = i;
         break;
@@ -323,5 +469,24 @@ export function fitPendingSlice(
       i++;
     }
   }
-  return { keptLines: kept, clipped: kept < allLines.length };
+  // A final delimiter prefix can still grow into a fence or table separator.
+  if (
+    completedTableBoundary === allLines.length - 1 &&
+    /^ *(?:`{1,2}|~{1,2}|\$)\s*$|^\s*[:|-][\s:|-]*$/.test(
+      allLines[completedTableBoundary]!,
+    )
+  ) {
+    completedTableBoundary = undefined;
+  }
+  const clipped = kept < allLines.length;
+  return {
+    keptLines: kept,
+    clipped,
+    ...(isPending &&
+    clipped &&
+    completedTableBoundary !== undefined &&
+    completedTableBoundary <= kept
+      ? { completedTableBoundary }
+      : {}),
+  };
 }

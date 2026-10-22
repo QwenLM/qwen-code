@@ -242,8 +242,8 @@ export const ToolConfirmationMessage: React.FC<
     return Math.max(availableTerminalHeight - surroundingElementsHeight, 1);
   }
 
-  // The warning box uses marginLeft={1} and paddingX={1}. Regular mode also
-  // renders inside the outer box's padding={1}.
+  // Warning and plan boxes use marginLeft={1} and paddingX={1}. Regular mode
+  // also renders inside the outer box's padding={1}.
   const warningContentWidth = Math.max(
     contentWidth - 3 - (compactMode ? 0 : 2),
     1,
@@ -549,7 +549,7 @@ export const ToolConfirmationMessage: React.FC<
           text={planProps.plan}
           isPending={false}
           availableTerminalHeight={planHeight}
-          contentWidth={contentWidth}
+          contentWidth={warningContentWidth}
           // Live pending items render inside MainContent's maxHeight +
           // overflow="hidden" wrapper, and Ink clips the BOTTOM. Without a
           // height-aware pre-slice, a long plan silently loses its tail

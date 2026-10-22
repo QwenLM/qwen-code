@@ -7758,6 +7758,49 @@ describe('Session', () => {
       );
     });
 
+    it.each([false, true])(
+      'records the executed ACP tool Markdown declaration %s',
+      async (isOutputMarkdown) => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: '# result',
+          returnDisplay: '# result',
+        });
+        const tool = mockConfirmingTool('test_tool', execute);
+        tool.isOutputMarkdown = isOutputMarkdown;
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    { id: 'display-mode', name: 'test_tool', args: {} },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'run test tool' }],
+        });
+
+        expect(execute).toHaveBeenCalledOnce();
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          expect.any(Array),
+          expect.objectContaining({
+            callId: 'display-mode',
+            renderOutputAsMarkdown: isOutputMarkdown,
+          }),
+        );
+      },
+    );
+
     it('persists the decline for a deliberate cancel of a restored question', async () => {
       mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());
       const execute = vi.fn();

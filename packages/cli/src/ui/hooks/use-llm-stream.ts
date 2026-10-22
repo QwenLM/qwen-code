@@ -119,6 +119,7 @@ import {
   getEnclosingFenceInfo,
 } from '../utils/markdown-utilities.js';
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
+import type { RenderMode } from '../contexts/RenderModeContext.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
@@ -619,11 +620,15 @@ export const useLlmStream = (
     submissionInFlightRef?: React.RefObject<boolean>;
     onSubmissionSettled?: () => void;
   } | null>,
+  renderMode: RenderMode = settings.merged.ui?.renderMode ?? 'render',
 ) => {
   const [workflowKeywordActive, setWorkflowKeywordActive] = useState(false);
   const workflowConfigRef = useRef(config);
   workflowConfigRef.current = config;
   const [initError, setInitError] = useState<string | null>(null);
+  // An active stream retains its starting callbacks across render-mode toggles.
+  const renderModeRef = useRef(renderMode);
+  renderModeRef.current = renderMode;
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeInteractionPromptIdRef = useRef<string | undefined>(undefined);
   const activeInteractionOwnerRef = useRef<
@@ -2022,11 +2027,10 @@ export const useLlmStream = (
       //
       //  - `while`, not `if`: a single throttled update can append many lines, so
       //    keep committing until the remainder fits.
-      //  - Commit ONLY at a blank-line block boundary so a table / list / code
-      //    block is never cut into a headerless continuation (which would render
-      //    as raw "| ... |" text). A table that is still streaming (no trailing
-      //    blank line yet) stays pending — bounded in view by MarkdownDisplay's
-      //    clamp — until it is complete, then commits whole.
+      //  - Commit at a blank-line boundary or the end of a closed table, never
+      //    into a headerless continuation (which would render as raw "| ... |"
+      //    text). An open table stays pending, bounded by MarkdownDisplay's clamp,
+      //    until it is complete, then commits whole.
       //  - `findLastSafeSplitPoint`: also never cut inside a fenced code block.
       //  - Conservative fallback when the content-area height is not yet known
       //    (ref is 0 before the first render populates it): derive from
@@ -2048,11 +2052,16 @@ export const useLlmStream = (
       const tableClampRows = Math.max(2, viewportRows - 3);
       while (true) {
         const bufferLines = newLlmMessageBuffer.split('\n');
-        const { keptLines, clipped } = fitPendingSlice(
+        const { keptLines, clipped, completedTableBoundary } = fitPendingSlice(
           bufferLines,
           commitWidth,
           commitRowBudget,
           tableClampRows,
+          true,
+          {
+            renderVisualBlocks: renderModeRef.current === 'render',
+            showLineNumbers: settings.merged.ui?.showLineNumbers ?? true,
+          },
         );
         if (!clipped) break;
         // Back up to the last blank line at or before the kept prefix — the only
@@ -2074,7 +2083,12 @@ export const useLlmStream = (
           }
         }
         let target: number;
-        if (boundaryLine < 0) {
+        if (boundaryLine < 0 && completedTableBoundary !== undefined) {
+          target = charIndexAfterLine(
+            newLlmMessageBuffer,
+            completedTableBoundary,
+          );
+        } else if (boundaryLine < 0) {
           // No blank-line boundary at/before the kept prefix. A fenced code
           // block taller than the viewport never provides one mid-block, so the
           // whole block would stay pending — frozen on its head — and only land
@@ -2145,6 +2159,7 @@ export const useLlmStream = (
       terminalHeight,
       availableTerminalHeightRef,
       terminalWidthRef,
+      settings,
     ],
   );
 
@@ -4342,6 +4357,7 @@ export const useLlmStream = (
                     callId: request.callId,
                     status: response.error ? 'error' : 'success',
                     resultDisplay: response.resultDisplay,
+                    renderOutputAsMarkdown: false,
                     persistedOutputFiles: finalized[index].persistedOutputFiles,
                     artifacts: finalized[index].artifacts,
                     error: response.error,
@@ -5575,6 +5591,7 @@ export const useLlmStream = (
         request: ToolCallRequestInfo;
         response: ToolCallResponseInfo;
         status: 'success' | 'error' | 'cancelled';
+        renderOutputAsMarkdown: boolean;
       };
       const executableQueues = new Map<string, ReadyToolResponse[]>();
       for (const toolCall of llmTools) {
@@ -5583,6 +5600,11 @@ export const useLlmStream = (
           request: toolCall.request,
           response: toolCall.response,
           status: toolCall.status,
+          renderOutputAsMarkdown:
+            toolCall.invocation !== undefined &&
+            (toolCall.status !== 'error' ||
+              toolCall.request.name === ToolNames.ADVISOR) &&
+            (toolCall.tool?.isOutputMarkdown ?? false),
         });
         executableQueues.set(toolCall.request.callId, queue);
       }
@@ -5592,6 +5614,7 @@ export const useLlmStream = (
         queue.push({
           ...duplicate,
           status: duplicate.response.error ? 'error' : 'success',
+          renderOutputAsMarkdown: false,
         });
         duplicateQueues.set(duplicate.request.callId, queue);
       }
@@ -5634,26 +5657,29 @@ export const useLlmStream = (
       const responsesToSend = finalizedResponses.flatMap(
         (entry) => entry.responseParts,
       );
-      orderedResponses.forEach(({ request, response, status }, index) => {
-        config.getChatRecordingService?.()?.recordToolResult?.(
-          finalizedResponses[index].responseParts,
-          {
-            callId: request.callId,
-            status,
-            resultDisplay: response.resultDisplay,
-            persistedOutputFiles:
-              finalizedResponses[index].persistedOutputFiles,
-            artifacts: finalizedResponses[index].artifacts,
-            error: response.error,
-            errorType: response.errorType,
-            executionStatus: response.executionStatus,
-          },
-          goalToolResultProvenance(
-            request,
+      orderedResponses.forEach(
+        ({ request, response, status, renderOutputAsMarkdown }, index) => {
+          config.getChatRecordingService?.()?.recordToolResult?.(
             finalizedResponses[index].responseParts,
-          ),
-        );
-      });
+            {
+              callId: request.callId,
+              status,
+              resultDisplay: response.resultDisplay,
+              renderOutputAsMarkdown,
+              persistedOutputFiles:
+                finalizedResponses[index].persistedOutputFiles,
+              artifacts: finalizedResponses[index].artifacts,
+              error: response.error,
+              errorType: response.errorType,
+              executionStatus: response.executionStatus,
+            },
+            goalToolResultProvenance(
+              request,
+              finalizedResponses[index].responseParts,
+            ),
+          );
+        },
+      );
 
       if (continuationWasCancelled()) {
         // This is the branch a cancelled Goal tool batch actually takes: the

@@ -608,6 +608,7 @@ describe('resumeHistoryUtils', () => {
             description: 'Mocked description',
             args: { old: 'a', new: 'b' },
             resultDisplay: 'All set',
+            renderOutputAsMarkdown: false,
             status: ToolCallStatus.Success,
             confirmationDetails: undefined,
           },
@@ -615,6 +616,79 @@ describe('resumeHistoryUtils', () => {
       },
     ]);
   });
+
+  it.each([
+    [false, true, false, 'success', false],
+    [true, false, false, 'success', true],
+    [false, undefined, false, 'success', false],
+    [true, undefined, false, 'success', true],
+    [undefined, false, false, 'success', false],
+    [undefined, true, false, 'success', true],
+    [undefined, undefined, false, 'success', false],
+    [false, undefined, true, 'success', false],
+    [true, undefined, true, 'success', true],
+    [undefined, undefined, true, 'success', false],
+    [undefined, true, false, 'error', false],
+    [undefined, true, false, 'cancelled', false],
+    [undefined, true, true, 'cancelled', false],
+    [true, false, false, 'cancelled', true],
+    [false, true, false, 'cancelled', false],
+  ] as const)(
+    'restores Markdown=%s with registered=%s, preview=%s, status=%s as %s',
+    (recorded, registered, preview, status, expected) => {
+      const conversation = {
+        messages: [
+          {
+            type: 'assistant',
+            message: {
+              parts: [
+                { functionCall: { id: 'call-1', name: 'test_tool', args: {} } },
+              ],
+            },
+          },
+          {
+            type: 'tool_result',
+            toolCallResult: {
+              callId: 'call-1',
+              resultDisplay: '# result\n- item',
+              status,
+              ...(recorded !== undefined
+                ? { renderOutputAsMarkdown: recorded }
+                : {}),
+            },
+          },
+        ],
+      } as ConversationRecord;
+      const config = preview
+        ? null
+        : makeConfig(
+            registered === undefined
+              ? {}
+              : {
+                  test_tool: Object.assign(mockTool, {
+                    isOutputMarkdown: registered,
+                  }),
+                },
+          );
+
+      expect(
+        buildResumedHistoryItems(
+          { conversation } as ResumedSessionData,
+          config,
+        ),
+      ).toMatchObject([
+        {
+          type: 'tool_group',
+          tools: [
+            {
+              renderOutputAsMarkdown: expected,
+              resultDisplay: '# result\n- item',
+            },
+          ],
+        },
+      ]);
+    },
+  );
 
   it('restores mid-turn user messages from display text', () => {
     const conversation = {
@@ -982,6 +1056,7 @@ describe('resumeHistoryUtils', () => {
             description: '',
             args: { foo: 'bar' },
             resultDisplay: { summary: 'failure' },
+            renderOutputAsMarkdown: false,
             status: ToolCallStatus.Error,
             confirmationDetails: undefined,
           },
@@ -1074,6 +1149,7 @@ describe('resumeHistoryUtils', () => {
           description: 'Mocked description',
           args: { target: 'a' },
           resultDisplay: undefined,
+          renderOutputAsMarkdown: false,
           status: ToolCallStatus.Success,
           confirmationDetails: undefined,
         },

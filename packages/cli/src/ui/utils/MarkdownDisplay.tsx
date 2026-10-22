@@ -10,9 +10,13 @@ import stringWidth from 'string-width';
 import { theme } from '../semantic-colors.js';
 import { ICON } from '../constants.js';
 import { colorizeCode } from './CodeColorizer.js';
-import { TableRenderer, type ColumnAlign } from './TableRenderer.js';
+import {
+  TableRenderer,
+  TABLE_MARGIN_ROWS,
+  type ColumnAlign,
+} from './TableRenderer.js';
 import { RenderInline } from './InlineMarkdownRenderer.js';
-import { useSettings } from '../contexts/SettingsContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
@@ -23,18 +27,13 @@ import {
   TABLE_ROW_RE,
   TABLE_SEPARATOR_RE,
   CODE_FENCE_RE,
+  LIST_ITEM_PREFIX_PADDING,
+  BLOCKQUOTE_PREFIX_PADDING,
+  BLOCKQUOTE_PREFIX,
+  PENDING_MERMAID_HEADER,
+  MIN_PENDING_CONTENT_LINES,
+  PENDING_MARKDOWN_HEADROOM_ROWS,
 } from './pending-rendered-height.js';
-// Minimum content lines to keep in a clipped live preview (own constant — not
-// coupled to MaxSizedBox's floor).
-const MIN_PENDING_CONTENT_LINES = 1;
-
-// Rows reserved from the viewport when clamping a streaming table's height:
-// marginY 2 + one row of wrapped-cell safety headroom. Tables under-estimate
-// their rendered height the most (a wrapped cell), so they keep one more
-// reserved row than the other blocks. Shared by the render-side clamp
-// (RenderTable's `maxHeight`) and the slice-side estimate (`tableClampRows`)
-// so the two never diverge and let a table overflow the render cap.
-const TABLE_PENDING_RESERVED_ROWS = 3;
 
 interface MarkdownDisplayProps {
   text: string;
@@ -125,9 +124,7 @@ export function countMarkdownSourceBlocks(
 
 const EMPTY_LINE_HEIGHT = 1;
 const CODE_BLOCK_PREFIX_PADDING = 1;
-const LIST_ITEM_PREFIX_PADDING = 1;
 const LIST_ITEM_TEXT_FLEX_GROW = 1;
-const BLOCKQUOTE_PREFIX_PADDING = 1;
 const MATH_BLOCK_PREFIX_PADDING = 1;
 
 const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
@@ -140,7 +137,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   enforceHeightBudget = false,
 }) => {
   const { renderMode } = useRenderMode();
-  if (!text) return <></>;
+  const settings = React.useContext(SettingsContext);
 
   const renderVisualBlocks = renderMode === 'render';
   // Some models stream long runs of trailing newlines after useful content.
@@ -175,8 +172,14 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // content is pre-sliced the same way, avoiding silent bottom-clipping.
   const pendingRenderedBudget =
     (isPending || enforceHeightBudget) && availableTerminalHeight !== undefined
-      ? Math.max(MIN_PENDING_CONTENT_LINES, availableTerminalHeight - 2)
+      ? Math.max(
+          MIN_PENDING_CONTENT_LINES,
+          availableTerminalHeight - PENDING_MARKDOWN_HEADROOM_ROWS,
+        )
       : undefined;
+  // Bounded complete plans keep diagram source; source height cannot bound visuals.
+  const renderDiagrams =
+    renderVisualBlocks && (isPending || pendingRenderedBudget === undefined);
   const headerRegex = /^ *(#{1,4}) +(.*)/;
   const codeFenceRegex = CODE_FENCE_RE;
   const ulItemRegex = /^([ \t]*)([-*+]) +(.*)/;
@@ -205,16 +208,23 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // tail means the user is asked to approve a plan whose remainder never
   // appears — a model could hide steps past the budget. See #6867.
   let droppedSourceLines = 0;
+  const tableMaxHeight =
+    pendingRenderedBudget !== undefined
+      ? Math.max(1, pendingRenderedBudget - TABLE_MARGIN_ROWS)
+      : undefined;
   if (pendingRenderedBudget !== undefined) {
-    const tableClampRows =
-      availableTerminalHeight !== undefined
-        ? Math.max(2, availableTerminalHeight - TABLE_PENDING_RESERVED_ROWS)
-        : Number.MAX_SAFE_INTEGER;
+    const tableClampRows = tableMaxHeight ?? Number.MAX_SAFE_INTEGER;
     const { keptLines } = fitPendingSlice(
       allLines,
       contentWidth,
       pendingRenderedBudget,
       tableClampRows,
+      isPending,
+      {
+        renderVisualBlocks,
+        rejectVisualBlocks: false,
+        showLineNumbers: settings?.merged.ui?.showLineNumbers ?? true,
+      },
     );
     if (keptLines < allLines.length) {
       lines = allLines.slice(0, keptLines);
@@ -223,6 +233,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   }
   const showTruncationCue =
     enforceHeightBudget && !isPending && droppedSourceLines > 0;
+  if (!text) return <></>;
 
   // Hold back a still-forming table at the streaming frontier. A table is only
   // recognized once its separator line (matching the header's column count) has
@@ -426,6 +437,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             lang={codeBlockLang}
             codeBlockIndex={currentCodeBlockIndex}
             codeBlockLangIndex={currentCodeBlockLangIndex}
+            renderDiagrams={renderDiagrams}
             isPending={isPending}
             availableTerminalHeight={availableTerminalHeight}
             contentWidth={contentWidth}
@@ -452,6 +464,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             content={mathBlockContent}
             sourceCopyCommand={`/copy latex ${currentMathBlockIndex}`}
             contentWidth={contentWidth}
+            renderDiagrams={renderDiagrams}
             isPending={isPending}
             availableTerminalHeight={availableTerminalHeight}
           />,
@@ -559,10 +572,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       }
       tableRows.push(cells);
     } else if (inTable && !tableRowMatch) {
-      // End of table — a following line closes it, so this table is COMPLETE
-      // and renders in full (the rendered-aware slice guarantees a completed
-      // table that would overflow was cut before it; `maxHeight` clamps the
-      // residual wrapped-cell case).
+      // A following line closes the table. Its layout uses all rows, but a
+      // pending or enforceHeightBudget caller can still clamp its height.
       if (tableHeaders.length > 0 && tableRows.length > 0) {
         addContentBlock(
           <RenderTable
@@ -578,7 +589,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             // its format from all rows (not just the first) so it does not flip
             // horizontal→vertical when the message finally commits.
             isFrontier={false}
-            availableTerminalHeight={availableTerminalHeight}
+            maxHeight={tableMaxHeight}
           />,
         );
       }
@@ -740,6 +751,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         lang={codeBlockLang}
         codeBlockIndex={currentCodeBlockIndex}
         codeBlockLangIndex={currentCodeBlockLangIndex}
+        renderDiagrams={renderDiagrams}
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}
@@ -755,17 +767,16 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         content={mathBlockContent}
         sourceCopyCommand={`/copy latex ${currentMathBlockIndex}`}
         contentWidth={contentWidth}
+        renderDiagrams={renderDiagrams}
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
       />,
     );
   }
 
-  // Handle table at end of content — the table still being written. Draw it live
-  // (growing each tick); the `maxHeight` clamp caps it at the viewport and the
-  // slice above keeps preceding content within budget, so it can never overflow
-  // and lock the terminal. Renders in full once the message commits to <Static>
-  // (isPending=false → no clamp).
+  // A frontier table grows while pending. The clamp also applies to completed
+  // content that opts into enforceHeightBudget; other completed tables render
+  // in full.
   //
   // While PENDING, defer a table that has no COMPLETE data row yet. A zero-row
   // table can only render horizontally (the vertical fallback needs rows to lay
@@ -793,7 +804,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         // End of content: this table is at the streaming frontier and may still
         // gain rows, so anchor its format to the first row while pending.
         isFrontier={true}
-        availableTerminalHeight={availableTerminalHeight}
+        maxHeight={tableMaxHeight}
       />,
     );
   }
@@ -831,6 +842,7 @@ interface RenderCodeBlockProps {
   lang: string | null;
   codeBlockIndex: number;
   codeBlockLangIndex: number;
+  renderDiagrams: boolean;
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
@@ -844,13 +856,13 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
   lang,
   codeBlockIndex,
   codeBlockLangIndex,
+  renderDiagrams,
   isPending,
   availableTerminalHeight,
   contentWidth,
   startLineNumber = 1,
 }) => {
-  const settings = useSettings();
-  const { renderMode } = useRenderMode();
+  const settings = React.useContext(SettingsContext);
   // Below this many usable rows there is no room for a meaningful code
   // preview, so we fall back to the "... code is being written ..." notice.
   const MIN_PREVIEW_LINES = 1;
@@ -859,7 +871,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
   // so the reclaimed row now shows an extra code line at the same total height.
   const RESERVED_LINES = 1;
 
-  if (lang?.toLowerCase() === 'mermaid' && renderMode === 'render') {
+  if (lang?.toLowerCase() === 'mermaid' && renderDiagrams) {
     if (isPending) {
       return (
         <RenderPendingMermaidBlock
@@ -962,7 +974,7 @@ const RenderPendingMermaidBlockInternal: React.FC<
       width={contentWidth}
       flexShrink={0}
     >
-      <Text color={theme.text.accent}>Mermaid diagram is being written...</Text>
+      <Text color={theme.text.accent}>{PENDING_MERMAID_HEADER}</Text>
       {previewLines.map((line, index) => (
         <Text key={index} color={theme.text.secondary} wrap="truncate-end">
           {line || ' '}
@@ -978,6 +990,7 @@ interface RenderMathBlockProps {
   content: string[];
   sourceCopyCommand: string;
   contentWidth: number;
+  renderDiagrams: boolean;
   isPending: boolean;
   availableTerminalHeight?: number;
 }
@@ -986,9 +999,13 @@ const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
   content,
   sourceCopyCommand,
   contentWidth,
+  renderDiagrams,
   isPending,
   availableTerminalHeight,
 }) => {
+  if (!renderDiagrams) {
+    return <Text wrap="wrap">{content.join('\n')}</Text>;
+  }
   // One row for the "LaTeX block · source:" header plus one row of headroom.
   // The third row used to hold a "... generating more ..." cue (removed with PR
   // #6170); reclaiming it shows an extra preview line at the same total height.
@@ -1052,7 +1069,7 @@ const RenderBlockquoteInternal: React.FC<RenderBlockquoteProps> = ({
   enableInlineMath = true,
 }) => (
   <Box paddingLeft={BLOCKQUOTE_PREFIX_PADDING} flexDirection="row">
-    <Text color={theme.text.secondary}>│ </Text>
+    <Text color={theme.text.secondary}>{BLOCKQUOTE_PREFIX}</Text>
     <Box flexGrow={LIST_ITEM_TEXT_FLEX_GROW}>
       <Text wrap="wrap" color={textColor} italic>
         <RenderInline
@@ -1125,7 +1142,7 @@ interface RenderTableProps {
   contentWidth: number;
   aligns?: ColumnAlign[];
   enableInlineMath?: boolean;
-  /** True while the whole message is still streaming — drives the height clamp. */
+  /** True while the whole message is still streaming. */
   isPending?: boolean;
   /**
    * True only for the table at the streaming frontier (end of content, may still
@@ -1134,7 +1151,7 @@ interface RenderTableProps {
    * true so a bare RenderTable behaves like the frontier.
    */
   isFrontier?: boolean;
-  availableTerminalHeight?: number;
+  maxHeight?: number;
 }
 
 const RenderTableInternal: React.FC<RenderTableProps> = ({
@@ -1145,30 +1162,18 @@ const RenderTableInternal: React.FC<RenderTableProps> = ({
   enableInlineMath = false,
   isPending = false,
   isFrontier = true,
-  availableTerminalHeight,
-}) => {
-  // The height clamp tracks whether the MESSAGE is streaming (overflow can grow
-  // on any tick). The format anchor tracks whether THIS TABLE is still streaming
-  // — only the frontier table anchors its format to the first row; a completed
-  // mid-content table measures all rows. Keeping the clamp on isPending (not
-  // isFrontier) means a mid-content table is still bounded, so the estimator's
-  // clamped cost still matches the render and cannot under-estimate.
-  const maxHeight =
-    isPending && availableTerminalHeight !== undefined
-      ? Math.max(2, availableTerminalHeight - TABLE_PENDING_RESERVED_ROWS)
-      : undefined;
-  return (
-    <TableRenderer
-      headers={headers}
-      rows={rows}
-      contentWidth={contentWidth}
-      aligns={aligns}
-      enableInlineMath={enableInlineMath}
-      isStreaming={isPending && isFrontier}
-      maxHeight={maxHeight}
-    />
-  );
-};
+  maxHeight,
+}) => (
+  <TableRenderer
+    headers={headers}
+    rows={rows}
+    contentWidth={contentWidth}
+    aligns={aligns}
+    enableInlineMath={enableInlineMath}
+    isStreaming={isPending && isFrontier}
+    maxHeight={maxHeight}
+  />
+);
 
 const RenderTable = React.memo(RenderTableInternal);
 

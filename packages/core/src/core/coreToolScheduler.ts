@@ -8080,6 +8080,11 @@ export class CoreToolScheduler {
         status: call.status,
         executionStatus: call.response.executionStatus,
         resultDisplay: call.response.resultDisplay,
+        renderOutputAsMarkdown:
+          (call.status !== 'error' ||
+            call.request.name === ToolNames.ADVISOR) &&
+          call.invocation !== undefined &&
+          (call.tool?.isOutputMarkdown ?? false),
         persistedOutputFiles: call.response.persistedOutputFiles,
         artifacts: call.response.artifacts,
         ...(call.response.visionBridgeNotice !== undefined
