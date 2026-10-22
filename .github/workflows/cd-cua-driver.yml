@@ -9,10 +9,8 @@ name: 'CD: Qwen CUA Driver'
 #                   (APPLE_NOTARY_API_KEY_P8_BASE64 / _KEY_ID / _ISSUER_ID)
 #     The Developer ID Application identity is auto-discovered from the
 #     imported cert (no DEVELOPER_NAME secret needed).
-# Windows UIAccess workers require a trusted Authenticode signature. Releases
-# use WINDOWS_CERTIFICATE (base64 PFX) + WINDOWS_CERTIFICATE_PASSWORD, or the
-# legacy WIN_CSC_LINK + WIN_CSC_KEY_PASSWORD pair. Only dry runs may use a
-# runner-local test certificate; those artifacts must never be published.
+# Windows UIAccess workers are submitted to SignPath before packaging. Dry runs
+# use the test certificate; releases require the production policy's approval.
 #
 # Artifact convention used by the @qwen-code/cua-sdk native installer:
 #   macOS  : cua-driver-rs-<v>-darwin-{arm64,x86_64,universal}.tar.gz
@@ -47,6 +45,7 @@ on:
         type: 'boolean'
         default: true
 permissions:
+  actions: 'read'
   contents: 'write'
 jobs:
   validate-version:
@@ -269,6 +268,14 @@ jobs:
     name: 'windows-${{ matrix.arch }}'
     needs: ['validate-version']
     runs-on: 'windows-latest'
+    permissions:
+      actions: 'read'
+      contents: 'read'
+    env:
+      SIGNPATH_SIGNING_POLICY:
+        "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true
+        && !startsWith(github.ref, 'refs/tags/') && 'test-signing' ||
+        'release-signing' }}"
     strategy:
       fail-fast: false
       matrix:
@@ -322,25 +329,46 @@ jobs:
           node scripts/build-node-runtime.mjs \
             --target "${{ matrix.target }}" \
             --output "rust/target/${{ matrix.target }}/release/cua_driver_node_runtime.node"
-      - name: 'Sign UIAccess worker with test certificate'
-        if: "github.event_name == 'workflow_dispatch' && inputs.dry_run == true && !startsWith(github.ref, 'refs/tags/')"
+      - name: 'Stage unsigned UIAccess worker'
+        shell: 'pwsh'
+        run: |
+          $worker = "packages/cua-driver/rust/target/${{ matrix.target }}/release/cua-driver-uia.exe"
+          if (-not (Test-Path -LiteralPath $worker -PathType Leaf)) {
+            throw 'Windows build did not produce cua-driver-uia.exe'
+          }
+          if ((Get-AuthenticodeSignature -LiteralPath $worker).Status -ne 'NotSigned') {
+            throw 'The UIAccess worker must be unsigned before SignPath submission'
+          }
+          Copy-Item $worker "${{ runner.temp }}/cua-driver-uia-${{ matrix.arch }}.exe"
+      - name: 'Upload unsigned UIAccess worker'
+        id: 'upload-unsigned-uia'
+        uses: 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9' # v7.0.2
+        with:
+          name: 'unsigned-cua-driver-uia-${{ matrix.arch }}'
+          path: '${{ runner.temp }}/cua-driver-uia-${{ matrix.arch }}.exe'
+          archive: false
+          if-no-files-found: 'error'
+      - name: 'Submit UIAccess worker to SignPath'
+        uses: 'signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092' # v3.0.0
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: 'e2bc00ea-6f24-4cde-9cfc-f0b19b2b6ece'
+          project-slug: 'qwen-code'
+          signing-policy-slug: '${{ env.SIGNPATH_SIGNING_POLICY }}'
+          artifact-configuration-slug: 'initial'
+          github-artifact-id: '${{ steps.upload-unsigned-uia.outputs.artifact-id }}'
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: '${{ runner.temp }}/signpath-${{ matrix.arch }}'
+          skip-decompress: true
+      - name: 'Install signed UIAccess worker'
         shell: 'pwsh'
         env:
-          SIGNING_TEST_ONLY: 'true'
+          SIGNPATH_TEST_SIGNING: "${{ env.SIGNPATH_SIGNING_POLICY == 'test-signing' }}"
         run: >-
-          ./.github/scripts/sign-cua-windows-worker.ps1
+          ./.github/scripts/install-signpath-cua-windows-worker.ps1
           -Worker "packages/cua-driver/rust/target/${{ matrix.target }}/release/cua-driver-uia.exe"
-      - name: 'Sign UIAccess worker'
-        if: "github.event_name != 'workflow_dispatch' || inputs.dry_run != true || startsWith(github.ref, 'refs/tags/')"
-        shell: 'pwsh'
-        env:
-          WINDOWS_CERTIFICATE: '${{ secrets.WINDOWS_CERTIFICATE }}'
-          WINDOWS_CERTIFICATE_PASSWORD: '${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}'
-          LEGACY_WIN_CSC_LINK: '${{ secrets.WIN_CSC_LINK }}'
-          LEGACY_WIN_CSC_KEY_PASSWORD: '${{ secrets.WIN_CSC_KEY_PASSWORD }}'
-        run: >-
-          ./.github/scripts/sign-cua-windows-worker.ps1
-          -Worker "packages/cua-driver/rust/target/${{ matrix.target }}/release/cua-driver-uia.exe"
+          -SignedWorker "${{ runner.temp }}/signpath-${{ matrix.arch }}/cua-driver-uia-${{ matrix.arch }}.exe"
       - name: 'Package'
         working-directory: 'packages/cua-driver/rust'
         shell: 'pwsh'
@@ -361,6 +389,8 @@ jobs:
           Get-ChildItem "release/$stage*.zip"
       - name: 'Clean-install Windows SDK from packaged payload'
         shell: 'pwsh'
+        env:
+          CUA_DRIVER_USE_UIACCESS: '1'
         run: |
           $sdk = Join-Path $env:GITHUB_WORKSPACE 'packages/cua-driver/typescript'
           $stage = "cua-driver-rs-${{ steps.version.outputs.version }}-windows-${{ matrix.arch }}"
