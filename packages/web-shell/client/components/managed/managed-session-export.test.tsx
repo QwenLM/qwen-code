@@ -44,7 +44,7 @@ function provider(pages: ManagedExportPage[], watermark = 2) {
 }
 afterEach(() => vi.useRealTimers());
 describe('Managed reading exports', () => {
-  it('collects all immutable pages and renders offline HTML with inert content', async () => {
+  it('collects immutable pages for inert HTML and original Markdown source', async () => {
     const api = provider([
       {
         items: [
@@ -77,7 +77,10 @@ describe('Managed reading exports', () => {
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
     expect(html).not.toContain('src="https:');
     expect(html).not.toContain('example.com/a.png');
-    expect(renderManagedReadingExport(data, 'md')).toContain('你好 **world**');
+    const markdown = renderManagedReadingExport(data, 'md');
+    expect(markdown).toContain('你好 **world**');
+    expect(markdown).toContain('<script>alert(1)</script>');
+    expect(markdown).toContain('![remote](https://example.com/a.png)');
   });
   it('waits for the captured watermark instead of exporting a stale tail', async () => {
     vi.useFakeTimers();

@@ -5,6 +5,10 @@ export const MANAGED_LIFECYCLE_MESSAGES_EN = {
   'managed.history.archived': 'Archived',
   'managed.exportHtml': 'Export HTML',
   'managed.exportMarkdown': 'Export Markdown',
+  'managed.exportHtmlDescription':
+    'Offline reading; scripts and remote images are blocked.',
+  'managed.exportMarkdownDescription':
+    'Original source may contain HTML and remote image links. Use a viewer that blocks scripts and remote requests.',
   'managed.exportFailed':
     'Could not export this conversation. Check access and connection, then retry.',
   'managed.exporting': 'Preparing export…',
@@ -52,6 +56,9 @@ export const MANAGED_LIFECYCLE_MESSAGES_ZH = {
   'managed.history.archived': '已归档',
   'managed.exportHtml': '导出 HTML',
   'managed.exportMarkdown': '导出 Markdown',
+  'managed.exportHtmlDescription': '离线阅读；不执行脚本，不加载远程图片。',
+  'managed.exportMarkdownDescription':
+    '原始文本保留 HTML 和远程图片链接，请使用禁用脚本和远程请求的阅读器。',
   'managed.exportFailed': '无法导出此会话，请检查访问权限和网络后重试。',
   'managed.exporting': '正在准备导出…',
   'managed.exportNotReady': '会话历史仍在同步，请稍后重试。',

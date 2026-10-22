@@ -78,7 +78,10 @@ export function ManagedSessionActions({
           <MoreHorizontalIcon aria-hidden="true" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
+      <DropdownMenuContent
+        align="end"
+        className={onExport ? 'w-72 max-w-[calc(100vw-1rem)]' : undefined}
+      >
         {exporting && (
           <DropdownMenuItem disabled>{t('managed.exporting')}</DropdownMenuItem>
         )}
@@ -110,16 +113,24 @@ export function ManagedSessionActions({
         {onExport && (
           <>
             <DropdownMenuItem
+              className="flex-col items-start gap-0.5 whitespace-normal"
               disabled={exporting}
               onSelect={() => onExport(session.sessionId, 'html')}
             >
-              {t('managed.exportHtml')}
+              <span>{t('managed.exportHtml')}</span>
+              <span className="text-xs leading-snug text-muted-foreground">
+                {t('managed.exportHtmlDescription')}
+              </span>
             </DropdownMenuItem>
             <DropdownMenuItem
+              className="flex-col items-start gap-0.5 whitespace-normal"
               disabled={exporting}
               onSelect={() => onExport(session.sessionId, 'md')}
             >
-              {t('managed.exportMarkdown')}
+              <span>{t('managed.exportMarkdown')}</span>
+              <span className="text-xs leading-snug text-muted-foreground">
+                {t('managed.exportMarkdownDescription')}
+              </span>
             </DropdownMenuItem>
           </>
         )}
