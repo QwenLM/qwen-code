@@ -145,6 +145,10 @@ describe('build artifact — package boundary', () => {
     expect(bundle).not.toContain('fileName:');
   });
 
+  it('uses the host React DOM server renderer for conversation exports', () => {
+    expect(readPackageJavascript()).toContain('from "react-dom/server"');
+  });
+
   it('externalizes @qwen-code/sdk subpaths', () => {
     const bundle = readPackageJavascript();
     // Should not contain raw SDK implementation

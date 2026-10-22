@@ -1593,7 +1593,7 @@ class SurfaceAdmissionAcceptanceTest {
             case SESSION_RECOVERY_RECHECK -> publicSurface
                     ? "{\"turnId\":\"turn_0000000000000000\"}"
                     : "{\"sessionId\":\"" + session + "\",\"turnId\":\"turn_0000000000000000\"}";
-            case TRANSCRIPT_QUERY -> "{\"sessionId\":\"" + session + "\"}";
+            case TRANSCRIPT_QUERY, ITEM_LIST -> "{\"sessionId\":\"" + session + "\"}";
             case TAIL_EVENTS -> "{\"sessionId\":\"" + session
                     + "\",\"afterSequence\":0}";
             case TASK_LIST -> "{\"sessionId\":\"" + session + "\"}";

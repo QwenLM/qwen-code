@@ -4197,8 +4197,9 @@ export function registerHostedHarnessSessionRoutes(
         return error(res, 409, 'hosted_tool_profile_conflict');
       if (resident.lifecycle || resident.mcpClosing)
         return error(res, 409, 'hosted_session_closing');
-      await resident.stores!.assertWritable().then(
-        () => sendAttachment(res, sessionId, resident),
+      const attachedSession = resident;
+      await attachedSession.stores!.assertWritable().then(
+        () => sendAttachment(res, sessionId, attachedSession),
         () => error(res, 503, 'managed_session_open_failed'),
       );
       return;

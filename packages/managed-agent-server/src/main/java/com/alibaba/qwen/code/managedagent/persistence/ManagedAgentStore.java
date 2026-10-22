@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelContext;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelOption;
@@ -4430,10 +4431,20 @@ public class ManagedAgentStore implements AgentStateStore {
 
     public SessionPage listSessions(String tenantId, String actorId,
             Long beforeCreatedAt, String beforeSessionId, int limit) {
+        return listSessions(tenantId, actorId, beforeCreatedAt, beforeSessionId, limit, "all");
+    }
+
+    public SessionPage listSessions(String tenantId, String actorId,
+            Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState) {
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
         arguments.add(actorId == null ? null
                 : ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+        String archiveClause = switch (archiveState) {
+            case "archived" -> " AND ma_session.status = 'ARCHIVED'";
+            case "unarchived" -> " AND ma_session.status <> 'ARCHIVED'";
+            default -> "";
+        };
         // Keyset on the immutable gmt_create: gmt_modified moves on every
         // event append, so a row can slide backwards into already-visited
         // pages and silently vanish from a paged listing.
@@ -4459,7 +4470,7 @@ public class ManagedAgentStore implements AgentStateStore {
                             + " ma_session.tenant_id AND wa.workspace_id = ma_session.workspace_id"
                             + " AND wa.actor_id = ? AND wa.role IN ('READER', 'OPERATOR',"
                             + " 'OWNER')))"
-                                + cursorClause
+                                + archiveClause + cursorClause
                                 + " ORDER BY ma_session.gmt_create DESC, ma_session.session_id DESC"
                                 + " LIMIT ?",
                         sessionListMapper,
@@ -4469,6 +4480,32 @@ public class ManagedAgentStore implements AgentStateStore {
             rows = new ArrayList<>(rows.subList(0, limit));
         }
         return new SessionPage(List.copyOf(rows), hasMore);
+    }
+
+    public Map<String, WebShellLifecycleOperation>
+            findLatestLifecycleOperations(String tenantId, List<String> sessionIds) {
+        if (sessionIds.isEmpty()) {
+            return Map.of();
+        }
+        List<Object> arguments = new ArrayList<>();
+        arguments.add(tenantId);
+        arguments.addAll(sessionIds);
+        Map<String, WebShellLifecycleOperation> result = new HashMap<>();
+        jdbc.query("SELECT * FROM (SELECT o.session_id, o.operation_id, o.operation_kind, o.state, o.failure_code,"
+                        + " ROW_NUMBER() OVER (PARTITION BY o.session_id ORDER BY CASE WHEN o.state IN"
+                        + " ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED') THEN 0 ELSE 1 END,"
+                        + " o.gmt_modified DESC, o.gmt_create DESC, o.operation_id DESC) AS lifecycle_rank FROM ma_operation o"
+                        + " JOIN ma_session s ON s.tenant_id = o.tenant_id AND s.session_id = o.session_id"
+                        + " WHERE o.tenant_id = ? AND o.session_id IN (" + placeholders(sessionIds.size()) + ")"
+                        + " AND ((s.status = 'CLOSING' AND o.operation_kind = 'CLOSE')"
+                        + " OR (s.status = 'DELETING' AND o.operation_kind = 'DELETE')"
+                        + " OR (s.status = 'ARCHIVING' AND o.operation_kind = 'ARCHIVE'))) lifecycle WHERE lifecycle_rank = 1",
+                (RowCallbackHandler) row -> result.put(row.getString("session_id"),
+                        new WebShellLifecycleOperation(
+                                row.getString("operation_id"), row.getString("operation_kind").toLowerCase(Locale.ROOT),
+                                row.getString("state").toLowerCase(Locale.ROOT), row.getString("failure_code"))),
+                arguments.toArray());
+        return result;
     }
 
     public Optional<TurnRecord> findTurn(String tenantId, String sessionId,
