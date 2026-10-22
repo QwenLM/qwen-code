@@ -35,7 +35,7 @@ const packages = {
     'ExFgWrzyldNAMi45U9PLIOu+g/RatP+f0c/dZxaooifME6yLW32BoHveH26/TtoAjZyJrc2iL0u48pgnR1fzmg==',
 };
 
-function processes(ids) {
+function processes(ids, timeout = 5000) {
   assert.ok(
     ids.length > 0 && ids.every((id) => Number.isInteger(id) && id > 0),
   );
@@ -46,7 +46,7 @@ function processes(ids) {
   const output = execFileSync(
     'powershell.exe',
     ['-NoProfile', '-NonInteractive', '-Command', command],
-    { encoding: 'utf8', timeout: 5000 },
+    { encoding: 'utf8', timeout },
   );
   return output.trim() ? [].concat(JSON.parse(output.trim())) : [];
 }
@@ -208,9 +208,16 @@ async function controller(runtime) {
       }).trim(),
     };
     facts.phase = 'process-sampler-warmup';
-    facts.processSamplerWarmup = processes([process.pid]).find(
-      (row) => row.pid === process.pid,
-    );
+    facts.processSamplerWarmupBudgetMs = 15_000;
+    const warmupStartedAt = performance.now();
+    try {
+      facts.processSamplerWarmup = processes(
+        [process.pid],
+        facts.processSamplerWarmupBudgetMs,
+      ).find((row) => row.pid === process.pid);
+    } finally {
+      facts.processSamplerWarmupElapsedMs = performance.now() - warmupStartedAt;
+    }
     assert.ok(
       facts.processSamplerWarmup,
       'controller PID/start warmup required',

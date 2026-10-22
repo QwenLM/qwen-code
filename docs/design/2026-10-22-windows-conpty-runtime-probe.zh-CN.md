@@ -41,9 +41,9 @@ Bun 压缩包为官方 release 资产 `bun-windows-x64.zip`，通过 `gh release
 
 ## 预算、归属与证据
 
-下载和解压分别限 30 秒，身份查询限五秒，worker 执行限 45 秒，每个协议阶段限八秒。workflow 外层限十分钟，不自动重试。输出目录必须全新，不能覆盖已有尝试。
+下载和解压分别限 30 秒。worker 启动前唯一一次控制器自身初始化查询显式限 15 秒，其余身份查询仍限五秒，worker 执行限 45 秒，每个协议阶段限八秒。workflow 外层限十分钟，不自动重试。输出目录必须全新，不能覆盖已有尝试。
 
-控制器用 PID 加 CreationDate 采样 Windows 进程身份。每次 CIM 查询仅过滤实际 worker/已捕获 PID 及 ParentProcessId 直接匹配的子进程，新观察到的子进程在同一次采样内递归查询。scratch 路径匹配仅在这些返回行内进行，不再全量扫描宿主进程。仅作为 CIM 过滤条件的 PID 不授予清理归属；种子身份必须精确匹配已捕获的 PID/start，或命令包含独占 scratch 路径。worker 启动前显式查询控制器自身 PID，预热相同 CIM 路径；worker 的初始收据仅查询自身 PID。每次查询仍限五秒，失败原样抛出。崩溃后可通过 worker-before 收据恢复 worker 身份。清理前立即重新核对 CreationDate，再停止归属明确的 PID，不按镜像名批量终止，也不终止无关 runner 进程。身份或清理无法确认时保留失败，判为不确定。进程采样不能证明原生硬崩溃后不存在未观察到且已重新托管的 helper；失败案例重试前须独立检查进程。
+控制器用 PID 加 CreationDate 采样 Windows 进程身份。每次 CIM 查询仅过滤实际 worker/已捕获 PID 及 ParentProcessId 直接匹配的子进程，新观察到的子进程在同一次采样内递归查询。scratch 路径匹配仅在这些返回行内进行，不再全量扫描宿主进程。仅作为 CIM 过滤条件的 PID 不授予清理归属；种子身份必须精确匹配已捕获的 PID/start，或命令包含独占 scratch 路径。worker 启动前显式查询控制器自身 PID，预热相同 CIM 路径；worker 的初始收据仅查询自身 PID。只有这一次初始化查询限 15 秒，并记录预算和实际耗时（包括失败），不吞异常、不重试。worker 身份查询及所有后续采样仍限五秒，失败原样抛出。崩溃后可通过 worker-before 收据恢复 worker 身份。清理前立即重新核对 CreationDate，再停止归属明确的 PID，不按镜像名批量终止，也不终止无关 runner 进程。身份或清理无法确认时保留失败，判为不确定。进程采样不能证明原生硬崩溃后不存在未观察到且已重新托管的 helper；失败案例重试前须独立检查进程。
 
 始终上传 `.qwen/e2e-tests/windows-pty-probe/<runtime>`，包含准备阶段失败收据、原始 worker stdout/stderr、可获得的原生身份收据、成功或普通断言失败时的终端输出及最终结果。硬崩溃可能使 worker 来不及落盘终端输出，应保留缺失事实，不能伪造记录。删除临时目录后仍保留下载可执行文件哈希。原始失败与后续尝试分别保存。
 
@@ -61,6 +61,12 @@ Bun 压缩包为官方 release 资产 `bun-windows-x64.zip`，通过 `gh release
 
 运行 [39782916977](https://github.com/QwenLM/qwen-code/actions/runs/39782916977) 的源码为 `91edf79e1e7c8ef561e391e1368555a0cef524aa`，只选择三个显式诊断案例。三份原始 FAIL 及原始工件均保留。Node22 在五秒冷启动 PowerShell/CIM 进程观察器中超时，尚未建立原生正控制。Bun1.3.14 实际加载固定 ConPTY 模块，并返回正确 nonce/PID/三个 TTY/80x24 ready 帧，随后等待输入确认超时。Bun1.4.3 加载相同模块且完成输入确认，但 resize 后紧接着的第一份 size 帧仍为 80x24。两个 Bun 都未到达自然退出。这些混合诊断失败不能证明 Bun 独有产品缺陷，也不足以批准生产升级。独立证据审计 SHA 为 `69f1a0d1ff943899c81bac350bdd16935ad2de3ffdfd5c13b8f645d43c979c14`。
 
-新候选按上文收窄并显式预热 CIM 采样，不增加查询、worker 或协议预算。将立即断言首份 size 帧改为原八秒 resize 阶段内的有限观察：每 100ms 最多请求一次 SIZE，直到相同 nonce/PID/三个 TTY 的元组报告精确 97x31。保留收到的全部 size 帧及第一帧，包括最初的 80x24；不能把这个原始观察重标为首帧匹配。错误 nonce/PID/TTY 仍立即失败。固定原生生产者、初始窗口、输入合同、主动退出及清理断言均不变。
+首个观察器修正按上文收窄并显式预热 CIM 采样，当时不增加查询、worker 或协议预算。将立即断言首份 size 帧改为原八秒 resize 阶段内的有限观察：每 100ms 最多请求一次 SIZE，直到相同 nonce/PID/三个 TTY 的元组报告精确 97x31。保留收到的全部 size 帧及第一帧，包括最初的 80x24；不能把这个原始观察重标为首帧匹配。错误 nonce/PID/TTY 仍立即失败。固定原生生产者、初始窗口、输入合同、主动退出及清理断言均不变。
 
 递归 PID 采样只能跟踪已知祖先关系仍可见时实际观察到的进程。采样前已退出、或首次观察前已重新托管的 helper 可能不在覆盖范围内，PID 过滤查询不能证明它们不存在。因此原 Node 空 capture 列表不能证明完整归属关闭；后续运行即使通过，也保留此限制。修正后的 Node 正控制和两个 Bun 案例仍须一次新的已审 dispatch，此处不声称修正已通过。
+
+## 第二轮后的仅初始化预算修正
+
+运行 [39787064396](https://github.com/QwenLM/qwen-code/actions/runs/39787064396) 的源码为 `35300c37fe00adfe22c7236013b515ce14da28b8`，另三份原始 FAIL 完整保留。Node22 的控制器自身过滤 CIM 预热仍超出五秒，尚未启动 worker。Bun1.3.14 到达 ready，但没有输入确认。Bun1.4.3 确认输入后，在未变的八秒阶段内产生 79 份 nonce/PID/三个 TTY 正确的 size 帧，全部仍为 80x24，原首帧继续记录。两个 Bun 都未到达主动退出。独立审计 SHA 为 `6ea713e9a73cacfa544385b9b50c3b5f65d327d58290bf97454f0dd4fdf4d071`。这些观察不足以延长产品时限或升级 Bun。
+
+新的作者候选仅将 worker 前控制器自身 CIM 初始化改为独立有界 15 秒，并记录配置预算与成功或失败时的实际耗时。默认及其他查询仍五秒，worker 仍 45 秒，input/resize 仍八秒，SIZE 间隔仍 100ms，重试仍为零。失败继续抛出。前两份五秒失败保持原始证据；修正候选仍为 NOT_RUN，等待审查和一次新的 dispatch。
