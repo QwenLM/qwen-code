@@ -153,6 +153,17 @@ public class ManagedExtensionRecordStore {
             String state, long revision, JsonNode body) {
     }
 
+    public Optional<JsonNode> findRecord(String tenantId, String sessionId, String domain, String recordId) {
+        Body body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
+        require(body != null, "Unknown extension record domain.");
+        JsonNode record = recordBody(ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionId,
+                domain, recordId, id -> readResource(tenantId, sessionId, id));
+        if (record != null) {
+            body.require().accept(record);
+        }
+        return Optional.ofNullable(record);
+    }
+
     public List<JsonNode> listRecords(String tenantId, String sessionId,
             String domain) {
         Body body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
@@ -208,7 +219,10 @@ public class ManagedExtensionRecordStore {
                         + " u.state = 'REFERENCED' AND u.kind = ? AND"
                         + " u.schema_version = 1 AND u.storage_kind = 'MYSQL_INLINE' AND"
                         + " u.object_key IS NULL AND u.object_version_id IS NULL AND"
-                        + " u.encryption_key_id IS NULL AND u.byte_length BETWEEN 0 AND 65536"
+                        + " u.encryption_key_id IS NULL AND NOT EXISTS (SELECT 1 FROM ma_session_record c"
+                        + " WHERE c.session_scope_key = r.session_scope_key AND c.record_kind = 'DOMAIN'"
+                        + " AND c.domain = 'hosted_context_compaction' AND c.revision > r.revision)"
+                        + " AND u.byte_length BETWEEN 0 AND 65536"
                         + " AND OCTET_LENGTH(u.inline_bytes) <= 65536",
                 row -> {
                     byte[] bytes = row.getBytes("inline_bytes");
@@ -475,6 +489,23 @@ public class ManagedExtensionRecordStore {
             if ("tool.receipt".equals(kind)) {
                 receipts.add(event);
             }
+            if ("context.compacted".equals(kind)) {
+                projectContextCompaction(tenantId, workspaceId, sessionId, event, resources, occurredAt);
+            }
+            if ("history_maintenance".equals(domain)) {
+                JsonNode maintenance = readBody(resources.apply(payload.path("recordRef").path("resourceId").asText()));
+                ManagedHistoryMaintenanceRecords.requireRecord(maintenance);
+                if ("compressed".equals(maintenance.path("outcome").asText())) {
+                    long compaction = maintenance.path("compactionRevision").longValue();
+                    boolean sameTransaction = java.util.Arrays.stream(lines).map(ManagedExtensionRecordStore::parse)
+                            .filter(Objects::nonNull).map(line -> line.path("managedSession"))
+                            .anyMatch(candidate -> "context.compacted".equals(candidate.path("kind").asText())
+                                    && candidate.path("sequence").longValue() == compaction
+                                    && maintenance.path("operationId").asText().equals(
+                                            candidate.path("payload").path("compactionId").asText()));
+                    require(sameTransaction, "A compressed outcome commits atomically with its context snapshot.");
+                }
+            }
             if ("model.attempt".equals(kind)) {
                 projectModelContext(tenantId, workspaceId, sessionId, event,
                         resources, occurredAt);
@@ -503,11 +534,79 @@ public class ManagedExtensionRecordStore {
         return new ApplyResult(List.copyOf(receipts), lastActivation, List.copyOf(records));
     }
 
+    private void projectContextCompaction(String tenantId, String workspaceId, String sessionId,
+            JsonNode event, Function<String, StoredResource> resources, long occurredAt) {
+        if (sessions != null) {
+            sessions.requireContextCompressionCommit(tenantId, sessionId,
+                    event.path("payload").path("compactionId").asText());
+        }
+        JsonNode ref = event.path("payload").path("summaryRef");
+        ManagedExtensionRecords.durableRef(ref, "compaction.summaryRef");
+        StoredResource resource = resources.apply(ref.get("resourceId").textValue());
+        requireReference(resource, ref);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String key = ManagedExtensionProjection.recordKey(sessionId, "hosted_context_compaction", "latest");
+        long sequence = event.get("sequence").longValue();
+        int inserted = jdbc.update("INSERT IGNORE INTO ma_session_record (record_kind, session_scope_key, record_key, tenant_id,"
+                + " workspace_id, session_id, domain, record_id, revision, record_resource_id, gmt_create,"
+                + " settled_at, first_sequence) VALUES ('DOMAIN', ?, ?, ?, ?, ?, 'hosted_context_compaction',"
+                + " ?, ?, ?, ?, ?, ?)", scope, key, tenantId, workspaceId, sessionId, "latest", sequence,
+                resource.resourceId(), occurredAt, occurredAt, sequence);
+        if (inserted == 0 && jdbc.update("UPDATE ma_session_record SET revision = ?, record_resource_id = ?, settled_at = ?"
+                + " WHERE session_scope_key = ? AND record_key = ? AND revision < ?", sequence,
+                resource.resourceId(), occurredAt, scope, key, sequence) == 0) {
+            return;
+        }
+        jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'SESSION_RECORD'"
+                + " AND owner_key = ?", scope, key);
+        for (StoredResource referenced : historyResources(ref, resources)) {
+            referenceProjectionResource(scope, key, sequence, tenantId, workspaceId, sessionId, referenced.resourceId());
+        }
+        String usage = ManagedExtensionProjection.recordKey(sessionId, MODEL_CONTEXT_DOMAIN, MODEL_CONTEXT_ID);
+        jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'SESSION_RECORD'"
+                + " AND owner_key = ?", scope, usage);
+        jdbc.update("DELETE FROM ma_session_record WHERE session_scope_key = ? AND record_key = ?", scope, usage);
+    }
+
+    private static List<StoredResource> historyResources(JsonNode ref, Function<String, StoredResource> resources) {
+        ManagedExtensionRecords.durableRef(ref, "history resource");
+        StoredResource resource = resources.apply(ref.get("resourceId").textValue());
+        requireReference(resource, ref);
+        List<StoredResource> closure = new ArrayList<>();
+        closure.add(resource);
+        if ("managed-message-chunks".equals(resource.kind())) {
+            JsonNode parts = readBody(resource).path("parts");
+            require(parts.isArray() && !parts.isEmpty(), "A history chunk manifest must contain parts.");
+            for (JsonNode part : parts) {
+                ManagedExtensionRecords.durableRef(part, "history chunk part");
+                require("managed-message-part".equals(part.path("kind").asText()),
+                        "A history manifest must reference message parts.");
+                StoredResource chunk = resources.apply(part.get("resourceId").textValue());
+                requireReference(chunk, part);
+                closure.add(chunk);
+            }
+        }
+        return closure;
+    }
+
+    private void referenceProjectionResource(String scope, String key, long revision,
+            String tenantId, String workspaceId, String sessionId, String resourceId) {
+        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision,"
+                + " resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES"
+                + " (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")", scope,
+                key, revision, ManagedSchemaKeys.key(scope, resourceId), tenantId, workspaceId, sessionId, resourceId);
+    }
+
     private void projectModelContext(String tenantId, String workspaceId,
             String sessionId, JsonNode event,
             Function<String, StoredResource> resources, long occurredAt) {
         JsonNode payload = event.path("payload");
         JsonNode ref = payload.path("usageRef");
+        if (!jdbc.queryForList("SELECT 1 FROM ma_session_record WHERE session_scope_key = ?"
+                + " AND record_kind = 'DOMAIN' AND domain = 'history_maintenance' AND settled_at IS NULL LIMIT 1",
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId)).isEmpty()) {
+            return;
+        }
         if (!"output_committed".equals(payload.path("state").textValue())
                 || !MODEL_USAGE_KIND.equals(ref.path("kind").textValue())
                 || !ref.path("schemaVersion").isIntegralNumber()
@@ -957,6 +1056,14 @@ public class ManagedExtensionRecordStore {
                 JsonNode ref = record.get(field);
                 if (ref != null && !ref.isNull()) {
                     requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+        }
+        if (domain.equals("history_maintenance")) {
+            for (String field : List.of("requestRef", "candidateRef")) {
+                JsonNode ref = record.get(field);
+                if (ref != null && !ref.isNull()) {
+                    historyResources(ref, resources);
                 }
             }
         }
@@ -1424,6 +1531,20 @@ public class ManagedExtensionRecordStore {
         jdbc.update(
                 "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                 scopeKey, recordKey, revision, ManagedSchemaKeys.key(scopeKey, resourceId), tenantId, workspaceId, sessionId, resourceId);
+        if ("history_maintenance".equals(domain)) {
+            Set<String> retained = new HashSet<>(Set.of(resourceId));
+            for (String field : List.of("requestRef", "candidateRef")) {
+                JsonNode ref = record.get(field);
+                if (!ref.isNull()) {
+                    for (StoredResource referenced : historyResources(ref, resources)) {
+                        if (retained.add(referenced.resourceId())) {
+                            referenceProjectionResource(scopeKey, recordKey, revision, tenantId,
+                                    workspaceId, sessionId, referenced.resourceId());
+                        }
+                    }
+                }
+            }
+        }
         if (taskKind != null && (previous == null
                 || !Objects.equals(previous.projection(), projection))) {
             String taskId = ManagedExtensionProjection.taskId(recordKey);
