@@ -191,7 +191,7 @@ jobs:
             printf '{"jobs":[]}\n' > "${jobs_json}"
             echo "::warning::Could not read the whole job list of run ${WORKFLOW_RUN_ID}; reporting without it"
           fi
-          # Both reports read this list; the flag lets them say when it is short.
+          # The comment and the issue read this list; the flag lets them say when it is short.
           echo "jobs_complete=${jobs_complete}" >> "${GITHUB_OUTPUT}"
 
           mapfile -t job_ids < <(

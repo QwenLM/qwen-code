@@ -584,7 +584,7 @@ printf '%s\\n' '{"jobs":[]}'
     }
   });
 
-  it('refuses a page list that stops short of total_count', () => {
+  it('refuses a job list it cannot certify complete', () => {
     // Page 1 arrives and page 2 fails, so `gh api` exits non-zero — but jq has
     // already merged the page it got, and that truncated list reads exactly
     // like a whole run to the projections below and to the infra classifier
