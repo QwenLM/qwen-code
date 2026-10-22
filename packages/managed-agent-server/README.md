@@ -211,7 +211,13 @@ publishes an immutable prerelease. See
 [Managed Agent reference deployment](../../docs/users/managed-agent-reference-deployment.md)
 and the [distribution design](../../docs/design/2026-10-14-managed-agent-reference-distribution.md).
 The bundled launcher also supports `--check`, a read-only preflight for
-configuration, Harness reachability, ports and database grants.
+configuration, Harness reachability, ports and database grants. When the
+database check succeeds, the output includes a `capacity` line with grouped
+counts from `ma_runtime_binding`, `ma_runtime_session` and `ma_operation`.
+These are durable logical records for capacity triage; they are not a count of
+physical worker processes or memory usage. The line explicitly reports
+physical processes and memory as unknown, and does not infer idle work or
+reclaim anything. If the database check fails, capacity remains skipped.
 
 ## Prerequisites
 
@@ -244,6 +250,16 @@ export QWEN_MANAGED_AGENT_WORKSPACE_ID='local-dev-workspace'
 
 mvn spring-boot:run
 ```
+
+Instead of the token and digest, `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`
+can name the Harness's own environment file. The server then reads
+`QWEN_SERVER_TOKEN` and `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` from it into its
+configuration, never into its process environment, and refuses to start when
+either direct value is also set. Write each credential as `KEY=value` on one
+line, with no whitespace around the `=` and only letters, digits and `._:/+=-`
+in the value. The server refuses, by file and line, any line it might read
+differently from systemd or a shell, such as a continuation, a carriage return
+from CRLF line endings, an unterminated quote or text after a closing quote.
 
 Create a Session:
 
@@ -698,6 +714,16 @@ no dispatched Shell is automatically replayed. Keep the opt-in off until the
 deployment passes #12904, #13010 and public FG6f physical failure gates. See
 [the complete design](../../docs/design/public-hosted-shell-admission.md).
 
+### Public child agents
+
+`QWEN_MANAGED_AGENT_WORKSPACE_CHILD_AGENTS_ENABLED` defaults to true and enables public `agent` delegation for qualified new built-in `qwen-code` Workspace Sessions. Set it to false to disable new delegation. Admission requires public Shell, a durable LOCAL process Broker, Session isolation, and a Harness advertising `public-child-agents/1`, approval selection and Shell lifecycle v2. Other deployment profiles continue to start without public child admission. Existing Sessions remain opted out. SSH, resident/CSI, custom definitions, Team, Workflow, messaging, nesting and isolated child Workspaces are excluded from this first release.
+
+Children share the parent's directory, definition and owner, start without its conversation, and keep the effective approval mode, actual model route and Skills captured at launch. Later parent policy changes apply only to new children. Default execution is background; explicit foreground waits retain the existing mount restrictions. Each root admits at most four active children and 64 launches over its lifetime.
+
+The optional `child_agents` / WebShell `childAgents` capability identifies orchestration support. Turning the deployment switch off blocks new launches while admitted tasks can still recover, receive approvals, stop and deliver results. Query pending approvals with `include_children=true` or WebShell `includeChildren: true`; answer each Action on its actual owner Session. Aggregation grants no new response permission.
+
+Stopping a parent Turn durably stops new launches and requests cancellation for active children from that prompt only. A stop request is distinct from physical termination. Late results remain available through the task's `childSessionId` transcript without automatically waking cancelled work. Public children reject independent new Turns and policy/model changes. See the [bilingual design](../../docs/design/2026-10-22-managed-public-child-agents.md) for recovery and rollout acceptance.
+
 ### Initial Workspace Turn (G0)
 
 `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true` opts in to an initial
@@ -818,9 +844,7 @@ Public Shell close, archive, unarchive and delete stay unavailable, including
 protocol-0. Archive, delete and unarchive of non-Shell Sessions follow their
 separate retention capabilities after reliable Workspace close. Controlled cwd
 changes ship below (W2); broad Workspace capability advertisement remains
-gated. Public foreground Shell does not publish the child agent tool, and it
-has no Session message funnel because that funnel shares the child
-orchestrator's write chain.
+gated. Qualified new public Shell Sessions expose `agent` under the public-child admission above; public Session messaging remains unavailable.
 Background Shell, Monitor and complete in-flight recovery remain separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.
@@ -946,8 +970,20 @@ Local-process workers run model-directed tools, so the Broker starts them
 without any environment variable whose name begins, in any letter case, with
 `QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `SPRING_` or `OSS_`. Every other
 variable of the server process still reaches the worker and its tools. Keep
-unrelated secrets out of the service environment. This does not isolate files:
-a worker runs as the service account and can read whatever that account can.
+unrelated secrets out of the service environment. A worker that uses the
+artifact tool's `oss` publisher therefore needs its credentials under the
+`ALIBABA_CLOUD_ACCESS_KEY_ID`, `ALIBABA_CLOUD_ACCESS_KEY_SECRET` and
+`ALIBABA_CLOUD_SECURITY_TOKEN` names, which that publisher also accepts. Those
+names are not filtered: they reach every worker the Broker starts and every
+model-directed tool it runs. The Broker copies its environment into a worker
+once, at launch, and never refreshes it; a Broker restart does not refresh a
+durable worker that it adopts by pid. Give those names a long-lived RAM
+identity that can only write the artifact bucket and prefix, never the account
+key that the `OSS_` filter withholds. A short-lived STS token needs a rotation
+path that re-execs the Broker before it expires, and even then an adopted
+durable worker keeps its launch-time credentials. One credential set serves
+every tenant and workspace on the host. This does not isolate files: a worker
+runs as the service account and can read whatever that account can.
 
 After a credential-key rotation, keep each prior key in
 `previous-credential-keys` until no persisted Runtime binding references its
@@ -1190,7 +1226,7 @@ local workloads. The W0e recovery above handles trusted host reboot; it
 does not provide physical isolation or recovery after worker-only death.
 Public bound Turn admission is limited to the initial Workspace Turn described
 in G0 above (file tools, or mandatory-approval foreground Shell under the Shell
-opt-in; the public Shell tool list does not include the child agent tool) and
+opt-in; the public-child admission above controls `agent`) and
 later Turns submitted by any caller holding OPERATOR on the Workspace under the
 same opt-in while the Session's creator-keyed execution facts hold (the WebShell
 adapter's per-caller `workspaceTurns` capability flag mirrors that same rule;
@@ -1404,7 +1440,7 @@ QWEN_MANAGED_HOOK_CGROUP_ROOT=/sys/fs/cgroup/your-delegated-root \
   -Dmysql.user=root -Dmysql.password= verify
 ```
 
-Missing Linux/MySQL/cgroup prerequisites are not acceptance. This selector verifies only the extension class; it does not establish that the complete Hosted profile passed. Evidence is saved before forced fixture teardown under `target/failsafe-reports/hosted-extension-evidence/` and is included in the existing CI report upload. The interrupted MCP case leaves its public Turn `RUNNING`, its ordinary execution `UNKNOWN`, and rejects new input and close with `409 turn_active`; successful cleanup is established by the separate healthy-close case. This gate uses a controlled loopback model and local stdio transport, so it does not establish upstream-model, remote transport, reboot, cross-machine, SSH MCP/Hook, or production acceptance. See the complete [English design](../../docs/design/2026-10-16-managed-extension-acceptance.md) and [Chinese design](../../docs/design/2026-10-16-managed-extension-acceptance.zh-CN.md).
+Missing Linux/MySQL/cgroup prerequisites are not acceptance. This selector verifies only the extension class; it does not establish that the complete Hosted profile passed. Evidence is saved before forced fixture teardown under `target/failsafe-reports/hosted-extension-evidence/` and is included in the existing CI report upload. The interrupted MCP case leaves its public Turn `RUNNING` with durable `ma_turn.error_code = hosted_runtime_recovery_blocked` and ordinary execution `UNKNOWN`, rejects new input and close with `409 turn_active`, and does not replay the physical effect; successful cleanup is established by the separate healthy-close case. This gate uses a controlled loopback model and local stdio transport, so it does not establish upstream-model, remote transport, reboot, cross-machine, SSH MCP/Hook, or production acceptance. See the complete [English design](../../docs/design/2026-10-16-managed-extension-acceptance.md) and [Chinese design](../../docs/design/2026-10-16-managed-extension-acceptance.zh-CN.md).
 
 ## Real-model end-to-end check
 
@@ -1672,6 +1708,20 @@ Set `QWEN_MANAGED_AGENT_DEFINITION_MODELS` to comma-separated IDs configured in 
 
 Public and WebShell Workspace Session creation also accept an optional `skills` array in the same static format. The Session catalog permits 256 entries, 512 KiB per body and 2 MiB compact JSON; AgentDefinition admission retains the smaller limits above. Both origins use the same `managed-agent-skills` resource kind, whose shared resource validators apply the 2-MiB bound; the smaller definition limits are enforced at admission. The array adds to the pinned AgentDefinition Skills (including for the built-in `qwen-code` agent); duplicate names or combined limits are rejected. The effective catalog is saved immutably with the creation receipt, and changing Skill content under the same idempotency key conflicts. Empty or omitted arrays preserve existing behavior. The WebShell uses the enabled Skills from its existing Skills management page; creation imports an immutable instruction snapshot from the explicitly selected trusted daemon Workspace. Upload and enable/disable remain on that page. Manual-only and user-hidden invocation flags are preserved; source asset directories, permission grants, model overrides and Hooks are not imported. This requires a durable Session Store and a Harness advertising `session-skills/2`; deploy compatible Java, SDK, Harness, and WebShell artifacts together. The existing Skills page owns discovery and installation; the Managed execution Runtime does not discover source directories implicitly.
 
-`mcp_servers` accepts up to 16 unique `{ "server_id": "docs", "server_revision": 1, "definition_digest": "<64 lowercase hex characters>" }` pins. Select `tools: [{ "type": "hosted_profile", "profile": "hosted-workspace-mcp/1" }]` and explicitly add that profile to `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES`; an MCP profile without pins or pins with another profile are refused. The Runtime deployment owns the matching server manifest, endpoints, transport and credentials. `hook_catalog` similarly accepts `{ "catalog_id": "review", "catalog_revision": 1, "definition_digest": "<64 lowercase hex characters>" }` for any Workspace-bound tool profile, selecting a Runtime-provisioned Hook catalog. Revisions are positive JavaScript-safe integers. Neither field accepts executable recipes or credentials. Create/update continues to store future configuration shapes without interpreting them; the limits and supported shapes above are enforced at Session admission. An old definition containing an unsupported shape remains rejected there.
+`mcp_servers` accepts up to 16 unique `{ "server_id": "docs", "server_revision": 1, "definition_digest": "<64 lowercase hex characters>" }` pins. Select an explicitly allowlisted `hosted-workspace-mcp/1` or `hosted-workspace-shell/1` tool profile in `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES`. The legacy MCP profile requires pins and retains its no-Shell/no-backup contract. Ordinary `shell/1` accepts optional pins and keeps Read/Write/Edit, foreground/background Shell, file backups and rewind on the same Session Runtime owner. Other profiles, foreground-only SSH and dedicated CSI resident Workspaces reject nonempty pins. Plan creation/change is explicitly unavailable for Agents with MCP pins; Session options do not advertise it. Static pins do not import daemon settings or enable configuration editing. The Runtime deployment owns the matching server manifest, endpoints, transport and credentials. `hook_catalog` similarly accepts `{ "catalog_id": "review", "catalog_revision": 1, "definition_digest": "<64 lowercase hex characters>" }` for any Workspace-bound tool profile, selecting a Runtime-provisioned Hook catalog. Revisions are positive JavaScript-safe integers. Neither field accepts executable recipes or credentials. Create/update continues to store future configuration shapes without interpreting them; the limits and supported shapes above are enforced at Session admission. An old definition containing an unsupported shape remains rejected there.
 
-Roll out the compatible Runtime manifest, Broker and Hosted Harness before admitting configured Sessions. Set the Harness `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` to include `hosted-workspace-mcp/1` before relying on MCP public close/delete, and preserve reliable Runtime stop support; configuration admission does not bypass these existing lifecycle gates. MCP/Hook load requests carry pins from the original admitted AgentDefinition revision, and Skills use the saved resource reference. Updating a definition affects new Sessions only. Unknown execution outcomes continue to require reconciliation of the original Runtime operation. Missing, corrupt or conflicting resources fail loading explicitly. Existing Sessions without extension fields keep their prior behavior for non-MCP profiles. The MCP profile requires nonempty server pins during create and attach/load validation. Older storage admission could retain an empty-pin MCP profile even though Hosted attachment already rejected it; audit stored definitions and Sessions before rollout rather than assuming none exist. Retain historical access separately and settle or close affected Sessions on the previous deployment before replacement. Publish a corrected definition revision for new Sessions; existing Session pins are not rewritten.
+Roll out the compatible Runtime manifest, Broker and Hosted Harness before admitting configured Sessions. The Harness must advertise `workspace-shell-mcp/1` for ordinary Shell with MCP. Set `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` to include `hosted-workspace-shell/1` for that combination, or `hosted-workspace-mcp/1` for the legacy profile, before public close/delete. Ordinary Shell with MCP requires the lifecycle v2 close path rather than direct Hosted DELETE. Preserve reliable Runtime stop support; configuration admission does not bypass these existing lifecycle gates. MCP/Hook load requests carry pins from the original admitted AgentDefinition revision, and Skills use the saved resource reference. Updating a definition affects new Sessions only. Unknown execution outcomes continue to require reconciliation of the original Runtime operation. Missing, corrupt or conflicting resources fail loading explicitly. Existing Sessions without extension fields keep their prior behavior for non-MCP profiles. The MCP profile requires nonempty server pins during create and attach/load validation. Older storage admission could retain an empty-pin MCP profile even though Hosted attachment already rejected it; audit stored definitions and Sessions before rollout rather than assuming none exist. Retain historical access separately and settle or close affected Sessions on the previous deployment before replacement. Publish a corrected definition revision for new Sessions; existing Session pins are not rewritten.
+
+### Session MCP management
+
+Deploy matching Java, Java SDK, Broker, Runtime and WebShell artifacts. The Harness must advertise `session-mcp-management/1`, and `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` must enable the Session's exact `hosted-workspace-shell/1` or `hosted-workspace-mcp/1` profile. The initial implementation uses ordinary local-process Workspace workers; foreground-only SSH, dedicated CSI resident profiles, read-only children and other tool profiles do not gain management. An ordinary Shell Session may add its first MCP server without being recreated.
+
+Use the Session's **Manage MCP** entry or the MCP management page. Add or edit selects an exact server revision published in that tenant and Workspace's Runtime-private `QWEN_MANAGED_MCP_CONFIG` manifest. Remove, enable, disable, reload and restart apply to the current Session. The manifest remains deployment administration: this interface neither accepts arbitrary executable recipes nor imports daemon settings, credentials or OAuth state. Inventory exposes only the published identifier, revision, digest and transport. Keep historical manifest revisions available for existing Sessions.
+
+Management reattaches only to a Session resident in the current Harness and never triggers cleanup, recovery or wake dispatch. After a Harness restart, continue or recover the Session through its normal execution flow first; management otherwise returns `hosted_mcp_session_load_required`. A new empty Session may initialize through management without sending a Turn. Command status never creates a Session, and uncertain creation never loads a cold journal implicitly. Cleanup-only recovery attachments also refuse management until a normal execution load upgrades them.
+
+The original AgentDefinition and Skills stay pinned. Explicit management commands append independent Session MCP settings revisions; they do not change other Sessions or future defaults. Each snapshot retains at most 32 server identities including removed tombstones, with at most 16 enabled selections; the existing shared Runtime connection quota still applies. Removed and disabled selections survive Session reload. Direct detach remains governed by the existing lifecycle protocol. The Session retains its original owner and MCP history until ordered close, so Plan remains unavailable after MCP management even when every server is removed. File/Shell tools, approvals, backups and rewind retain their ordinary behavior. Restart drains the selected connection before reconnecting, without restarting a shared worker.
+
+Public routes are `GET /v1/agents/sessions/{sessionId}/mcp-management`, `POST /v1/agents/sessions/{sessionId}/mcp-management/commands` with `Idempotency-Key`, and `GET /v1/agents/sessions/{sessionId}/mcp-management/commands/{operationId}`. WebShell has corresponding POST query, submit and operation-query routes under `/api/agent/web-shell/v1/session-mcp/management/`. Commands include `action`, `serverId` and `expectedRevision`; add/edit also include the exact selected `server` pin. Management requires Workspace execution permission and a public active Session. The settings commit rechecks idle/Plan/lifecycle admission atomically; a static settings revision or catalog is not proof of a healthy connection.
+
+An unconfirmed operation keeps its original identity. Status queries are read-only; explicit retry first queries that original operation, then resumes the saved original command only while it remains unsettled. The UI can retain unconfirmed public command metadata across a tab reload when the provider has an explicit tenant-and-actor `productScope`; otherwise it retains it only in memory. Neither mode stores executable recipes or credentials. Unknown physical outcomes block replacement rather than replaying on another Runtime. See the complete [English design](../../docs/design/2026-10-22-managed-session-mcp-management.md) and [Chinese design](../../docs/design/2026-10-22-managed-session-mcp-management.zh-CN.md) for ownership, authorization and qualification boundaries.

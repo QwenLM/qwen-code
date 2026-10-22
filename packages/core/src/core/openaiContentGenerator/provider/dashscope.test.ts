@@ -2056,6 +2056,37 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(hello(model, extra)['max_tokens']).toBe(expected);
     });
 
+    // DashScope serves MiniMax-M2.5 with a 32K cap, below the 64K default the
+    // shared table derives from the MiniMax API; anything above is a 400.
+    it.each([
+      ['the default', {}, 32768],
+      ['an over-cap request value', { max_tokens: 64000 }, 32768],
+      ['an in-cap request value', { max_tokens: 1000 }, 1000],
+    ])(
+      'caps MiniMax-M2.5 output at the DashScope limit for %s',
+      (_t, extra, expected) => {
+        expect(hello('MiniMax-M2.5', extra)['max_tokens']).toBe(expected);
+      },
+    );
+
+    it('caps an explicit samplingParams max_tokens for MiniMax-M2.5', () => {
+      const result = hello(
+        'MiniMax-M2.5',
+        { max_tokens: 64000 },
+        gen({ samplingParams: { max_tokens: 64000 } }),
+      );
+      expect(result['max_tokens']).toBe(32768);
+    });
+
+    it('caps an extra_body max_tokens for MiniMax-M2.5', () => {
+      const result = hello(
+        'MiniMax-M2.5',
+        {},
+        gen({ extra_body: { max_tokens: 64000 } }),
+      );
+      expect(result['max_tokens']).toBe(32768);
+    });
+
     it('should preserve other request parameters when limiting max_tokens', () => {
       const result = hello('qwen3-max', { max_tokens: 100000, ...sampling() });
       expect(result['max_tokens']).toBe(32768);

@@ -97,4 +97,6 @@ export interface OpenTuiComposerHandle {
   getText(): string;
   setText(text: string): void;
   cancelTurn?(): void;
+  submitDraft?(text: string): Promise<void>;
+  invalidateImportedInput?(): void;
 }

@@ -462,12 +462,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Allow unencrypted Agent Host HTTP connections outside loopback (trusted demo networks only).',
       })
       .check((argv) => {
-        // A wildcard or LAN primary bind already owns the port Local Control
-        // needs on its selected address. Token and Origin settings remain
-        // independent because the second listener owns those.
         if (argv['local-control'] === true && argv['web'] === false) {
           throw new Error('Local Control requires the Web Shell.');
         }
+        // Preserve the documented deployment boundary: Local Control adds its
+        // pairing-scoped LAN listener only to a loopback primary daemon.
         if (
           argv['local-control'] === true &&
           argv.hostname !== DEFAULT_SERVE_HOSTNAME

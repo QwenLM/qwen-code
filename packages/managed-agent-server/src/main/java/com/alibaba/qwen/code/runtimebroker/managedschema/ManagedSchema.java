@@ -43,7 +43,8 @@ public final class ManagedSchema {
             new Migration(9, RUNTIME_SESSION_HARNESS), new Migration(10, PLAN_MODE),
             new Migration(11, WAKE_RECOVERY), new Migration(12, CSI_APPLICATION_RETIREMENT),
             new Migration(13, HOSTED_CLEANUP), new Migration(14, RESIDENT_RETIREMENT),
-            new Migration(15, WORKSPACE_EXECUTION_MEMBERS), new Migration(16, CONTEXT_COMPRESSION));
+            new Migration(15, WORKSPACE_EXECUTION_MEMBERS), new Migration(16, CONTEXT_COMPRESSION),
+            new Migration(17, "/db/managed-schema/V17__public_child_agents.sql"));
     private static final int CURRENT = EXTENSIONS.getLast().version();
 
     private record Migration(int version, String resource) {

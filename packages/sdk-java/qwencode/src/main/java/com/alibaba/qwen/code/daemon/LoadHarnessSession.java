@@ -20,8 +20,40 @@ public final class LoadHarnessSession {
     private Map<String, Object> sessionSkillsRef;
     private List<Map<String, Object>> mcpServers;
     private Map<String, Object> hookCatalog;
+    private int publicChildAgentsVersion;
+    private Map<String, Object> publicChildModelRoute;
     private boolean stopMessages;
     private boolean foregroundOnly;
+    private String recoveryCleanupPromptId;
+    private String cancellationPromptId;
+
+    /** Opens only the original terminal input's cleanup, without starting a Harness turn. */
+    public LoadHarnessSession forRecoveryCleanup(String promptId) {
+        if (passiveManagedRuntimeRecovery || driveRuntimeRecovery || cancellationTakeover || lifecycleAuthority != null
+                || cancellationPromptId != null) {
+            throw new IllegalArgumentException("Cleanup load cannot drive Runtime or lifecycle recovery");
+        }
+        recoveryCleanupPromptId = HostedHarnessClient.requireUuid(promptId, "promptId");
+        return this;
+    }
+
+    /** Restricts a cancellation takeover to the original input. */
+    public LoadHarnessSession withCancellationPromptId(String promptId) {
+        if (!passiveManagedRuntimeRecovery || !cancellationTakeover || driveRuntimeRecovery
+                || lifecycleAuthority != null || recoveryCleanupPromptId != null) {
+            throw new IllegalArgumentException("Targeted cancellation requires a passive cancellation takeover");
+        }
+        cancellationPromptId = HostedHarnessClient.requireUuid(promptId, "promptId");
+        return this;
+    }
+
+    String getCancellationPromptId() {
+        return cancellationPromptId;
+    }
+
+    String getRecoveryCleanupPromptId() {
+        return recoveryCleanupPromptId;
+    }
 
     /**
      * #13753 I2: a copy that tells the Hosted side this control plane
@@ -30,6 +62,19 @@ public final class LoadHarnessSession {
     private boolean childWorkspaces;
     /** #13753 I3: with child Workspaces, the control plane serves snapshots too. */
     private boolean childSnapshots;
+
+    public LoadHarnessSession withPublicChildModelRoute(Map<String, Object> value) {
+        this.publicChildModelRoute = value == null ? null : Map.copyOf(value);
+        return this;
+    }
+
+    public LoadHarnessSession withPublicChildAgentsVersion(int value) {
+        if (value != 0 && value != 1) {
+            throw new IllegalArgumentException("Invalid public child agents version");
+        }
+        this.publicChildAgentsVersion = value;
+        return this;
+    }
 
     public LoadHarnessSession withAgentDefinition(Map<String, Object> value) {
         this.agentDefinition = value == null ? null : Map.copyOf(value);
@@ -78,6 +123,10 @@ public final class LoadHarnessSession {
         copy.childSnapshots = value && snapshots;
         copy.stopMessages = stopMessages;
         copy.foregroundOnly = foregroundOnly;
+        copy.recoveryCleanupPromptId = recoveryCleanupPromptId;
+        copy.cancellationPromptId = cancellationPromptId;
+        copy.publicChildAgentsVersion = publicChildAgentsVersion;
+        copy.publicChildModelRoute = publicChildModelRoute;
         return copy;
     }
 
@@ -96,6 +145,10 @@ public final class LoadHarnessSession {
         copy.childSnapshots = childSnapshots;
         copy.stopMessages = stopMessages;
         copy.foregroundOnly = value;
+        copy.recoveryCleanupPromptId = recoveryCleanupPromptId;
+        copy.cancellationPromptId = cancellationPromptId;
+        copy.publicChildAgentsVersion = publicChildAgentsVersion;
+        copy.publicChildModelRoute = publicChildModelRoute;
         return copy;
     }
 
@@ -104,6 +157,9 @@ public final class LoadHarnessSession {
     }
 
     public LoadHarnessSession forLifecycle(String operationId, long claimGeneration, int protocolVersion) {
+        if (recoveryCleanupPromptId != null || cancellationPromptId != null) {
+            throw new IllegalArgumentException("Cleanup or cancellation load cannot drive lifecycle recovery");
+        }
         if (protocolVersion != 1 && protocolVersion != 2) {
             throw new IllegalArgumentException("Invalid lifecycle protocol");
         }
@@ -123,6 +179,10 @@ public final class LoadHarnessSession {
         copy.childSnapshots = childSnapshots;
         copy.stopMessages = stopMessages;
         copy.foregroundOnly = foregroundOnly;
+        copy.recoveryCleanupPromptId = recoveryCleanupPromptId;
+        copy.cancellationPromptId = cancellationPromptId;
+        copy.publicChildAgentsVersion = publicChildAgentsVersion;
+        copy.publicChildModelRoute = publicChildModelRoute;
         return copy;
     }
 
@@ -142,6 +202,10 @@ public final class LoadHarnessSession {
         copy.childSnapshots = childSnapshots;
         copy.stopMessages = true;
         copy.foregroundOnly = foregroundOnly;
+        copy.recoveryCleanupPromptId = recoveryCleanupPromptId;
+        copy.cancellationPromptId = cancellationPromptId;
+        copy.publicChildAgentsVersion = publicChildAgentsVersion;
+        copy.publicChildModelRoute = publicChildModelRoute;
         return copy;
     }
 
@@ -214,6 +278,12 @@ public final class LoadHarnessSession {
 
     Map<String, Object> toJson() {
         Map<String, Object> result = new LinkedHashMap<>();
+        if (recoveryCleanupPromptId != null) {
+            result.put("recoveryCleanupPromptId", recoveryCleanupPromptId);
+        }
+        if (cancellationPromptId != null) {
+            result.put("cancellationPromptId", cancellationPromptId);
+        }
         if (managedSessionStore != null) {
             result.put("managedSessionStore", managedSessionStore.toJson());
         }
@@ -222,6 +292,12 @@ public final class LoadHarnessSession {
         }
         if (toolProfile != null) {
             result.put("toolProfile", toolProfile);
+        }
+        if (publicChildModelRoute != null) {
+            result.put("publicChildModelRoute", publicChildModelRoute);
+        }
+        if (publicChildAgentsVersion != 0) {
+            result.put("publicChildAgentsVersion", publicChildAgentsVersion);
         }
         if (suppressChildAgents) {
             result.put("suppressChildAgents", true);

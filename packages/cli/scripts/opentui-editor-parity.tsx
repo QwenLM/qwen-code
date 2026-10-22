@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 // @ts-expect-error Bun-only native runner; no Bun globals in the Node build.
 import { mock } from 'bun:test';
 import { act } from 'react';
+import type { OpenTuiComposerHandle } from '../src/ui/opentui/input-submission.js';
+import type { VimBuffer } from '../src/ui/hooks/vim.js';
 import { TextareaRenderable, type Renderable } from '@opentui/core';
 import { testRender } from '@opentui/react/test-utils';
 
@@ -23,6 +25,16 @@ const nodes = (node: Renderable): Renderable[] => [
 ];
 let ui: Awaited<ReturnType<typeof testRender>> | undefined;
 const submissions: string[] = [];
+const composer = { current: null as OpenTuiComposerHandle | null };
+const buffer = { current: null as VimBuffer | null };
+const moveTo = (row: number, col: number) => {
+  const owner = buffer.current!;
+  owner.vimMoveToLine(row + 1);
+  owner.vimMoveToLineStart();
+  if (col >= [...owner.lines[row]].length) owner.vimAppendAtLineEnd();
+  else if (col > 0) owner.vimMoveRight(col);
+};
+const longHistory = 'LONG_' + 'abcdef'.repeat(24) + '_TAIL_SENTINEL';
 let editorOutput = 'external 甲🙂';
 try {
   for (const key of keys) {
@@ -47,7 +59,9 @@ try {
   await act(async () => {
     ui = await testRender(
       <OpenTuiInputPrompt
-        userMessages={[]}
+        composerHandle={composer}
+        vim={{ buffer, handleInput: () => false, enabled: false }}
+        userMessages={[longHistory, 'HISTORY_OLD', 'HISTORY_NEW']}
         onSubmit={(text) => {
           submissions.push(text);
           return true;
@@ -81,8 +95,7 @@ try {
   assert(editor);
   const reset = (text: string) =>
     input(() => {
-      editor.setText(text);
-      editor.gotoBufferEnd();
+      composer.current!.setText(text);
     });
 
   for (const home of ['HOME', 'a']) {
@@ -106,7 +119,7 @@ try {
     await reset(mixed);
     if (fromStart)
       await input(() => {
-        editor.gotoBufferHome();
+        moveTo(0, 0);
       });
     await type(sequence);
     await type('WORD_MARK');
@@ -121,7 +134,7 @@ try {
   for (const direction of ['k', 'u']) {
     await reset('first\nsecond');
     await input(() =>
-      editor.setCursor(direction === 'k' ? 0 : 1, direction === 'k' ? 5 : 0),
+      moveTo(direction === 'k' ? 0 : 1, direction === 'k' ? 5 : 0),
     );
     await key(direction, true);
     assert.equal(editor.plainText, 'firstsecond');
@@ -140,10 +153,117 @@ try {
   await key('z', true, true);
   assert.equal(editor.plainText, 'bae');
 
+  // A visual row inside one logical line must move before recalling history.
+  const wrapped = '甲🙂e\u0301'.repeat(30) + '尾';
+  await reset(wrapped);
+  assert(editor.editorView.getTotalVirtualLineCount() > 1);
+  const offset = editor.cursorOffset;
+  await key('p', true);
+  assert.equal(editor.plainText, wrapped);
+  assert(editor.cursorOffset < offset);
+  await input(() => {
+    moveTo(0, 0);
+  });
+  await key('p', true);
+  assert.equal(editor.plainText, 'HISTORY_NEW');
+  await input(() => {
+    buffer.current!.vimMoveToLastLine();
+    buffer.current!.vimAppendAtLineEnd();
+  });
+  await key('n', true);
+  assert.equal(editor.plainText, wrapped);
+  for (const [width, height] of [
+    [24, 10],
+    [80, 20],
+  ]) {
+    await input(() => setup.resize(width, height));
+    assert.equal(editor.plainText, wrapped);
+    await key('HOME');
+    const row: number = editor.scrollY + editor.visualCursor.visualRow;
+    await key('HOME');
+    assert.equal(editor.scrollY + editor.visualCursor.visualRow, row);
+  }
+
+  await reset('NEW');
+  await key('r', true);
+  await act(async () =>
+    setup.waitForFrame(
+      (frame) =>
+        frame.includes('HISTORY_NEW') && !frame.includes('HISTORY_OLD'),
+    ),
+  );
+  await key('TAB', false, true);
+  assert.equal(editor.plainText, 'HISTORY_NEW');
+  assert.equal(submissions.length, 0);
+  await type('_tail');
+  await key('RETURN');
+  assert.deepEqual(submissions, ['HISTORY_NEW_tail']);
+  await reset('甲🙂tail');
+  await input(() => moveTo(0, 2));
+  await key('r', true);
+  await type('no-match');
+  await key('ESCAPE');
+  await act(async () => setup.waitForFrame((frame) => !frame.includes('(r:)')));
+  await type('X');
+  assert.equal(editor.plainText, '甲🙂Xtail');
+
+  await input(() => setup.resize(100, 30));
+  await reset('LONG_');
+  await key('r', true);
+  const candidate = () => {
+    const rows = setup.captureCharFrame().split('(r:)').at(-1)!.split('\n');
+    const start = rows.findIndex((line) => line.trimStart().startsWith('> '));
+    assert(start >= 0, 'active search row must be visible');
+    return rows.slice(start).join('\n');
+  };
+  await act(async () =>
+    setup.waitForFrame((frame) => {
+      const body = frame.split('(r:)').at(-1)!;
+      return body.includes('→') && !body.includes('HISTORY_NEW');
+    }),
+  );
+  const collapsed = longHistory.slice(0, 147) + '...';
+  const visibleLabel = () =>
+    candidate()
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .join('')
+      .replace(/^> /, '')
+      .replace(/ [←→]/, '');
+  assert.equal(visibleLabel(), collapsed);
+  assert(!candidate().includes('TAIL_SENTINEL'));
+  for (const modifier of [5, 3]) {
+    await type(`\x1b[1;${modifier}C`);
+    assert(candidate().includes('←'));
+    assert.equal(visibleLabel(), longHistory);
+    await type(`\x1b[1;${modifier}D`);
+    assert(candidate().includes('→'));
+    assert.equal(visibleLabel(), collapsed);
+    assert.equal(editor.plainText, 'LONG_');
+    assert.deepEqual(submissions, ['HISTORY_NEW_tail']);
+  }
+  await input(() => setup.resize(40, 12));
+  assert(candidate().includes('→'));
+  assert.equal(visibleLabel(), collapsed);
+  await key('ESCAPE');
+  await act(async () => setup.waitForFrame((frame) => !frame.includes('(r:)')));
+  await reset('TAIL_SENTINEL');
+  await key('r', true);
+  await act(async () =>
+    setup.waitForFrame((frame) => {
+      const body = frame.split('(r:)').at(-1)!;
+      return body.includes('→') && !body.includes('LONG_');
+    }),
+  );
+  assert.equal(visibleLabel(), '...' + longHistory.slice(-147));
+  await key('ESCAPE');
+  await act(async () => setup.waitForFrame((frame) => !frame.includes('(r:)')));
+
   await reset('original');
   await key('x', true);
   assert.equal(editor.plainText, editorOutput);
-  await input(() => setup.resize(80, 20));
+  await input(() => setup.resize(40, 12));
   await type('X');
   assert.equal(editor.plainText, `${editorOutput}X`);
   await key('z', true);
@@ -170,7 +290,6 @@ try {
   );
   await type('_after');
   assert.equal(editor.plainText, 'original_after');
-  assert.deepEqual(submissions, []);
 } catch (error) {
   if (ui) console.error(ui.captureCharFrame());
   throw error;
@@ -187,4 +306,6 @@ try {
     }
   }
 }
-console.log('PASS: native editing, word movement and external-edit undo');
+console.log(
+  'PASS: native editing, visual history, search and external-edit undo',
+);
