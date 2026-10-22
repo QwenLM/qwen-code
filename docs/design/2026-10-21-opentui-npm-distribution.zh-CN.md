@@ -4,25 +4,11 @@
 
 ## 状态与问题
 
-整合候选 `e8192c18b1643e20ea9c9a8fa2a2d023eb004c46` 纳入 R1
-`65c20e3fcd4360222655b6e7af0e2dbbe67e86cb` 与下述解释器工作，其 macOS arm64
-构建、typecheck 和定向门禁已通过。独立验收通过五种真实 npm 安装布局及 41 个不同的
-实际产品场景，包含生命周期、运行模式、资源、managed 与手动更新。另有三个合成协议
-场景通过；其 CLI/update producer 是合成的，不能计入实际产品覆盖。此前三次实际场景
-失败与首次合成准备失败仍保留，未改写为通过。更新夹具使用自有 0.0.0 克隆与未修改的
-候选 0.25.3 tarball，不代表两个正式发布版本之间的升级。
+源码检查点 `0d353777bb054b9d5c9925f134dd63db7c316614` 通过普通 merge 纳入 main `19d3289f4818617efdf31ca46d4db0522da36f95`，包含已接受的输入/输出批次 #15067 和 Bun PTY #14046。49 项分发改动与现有依赖输入完整保留。该检查点的 macOS arm64 fresh build 和 typecheck 已通过。受影响 consumer、native、bundle 与安装版产品门禁分别记录在 [#14959](https://github.com/QwenLM/qwen-code/pull/14959)；源码构建成功不能代替安装产物验收。
 
-此前 `b734a90e` 的 frozen install、完整 build/bundle 与 typecheck 已通过，产物验收
-仍待执行。当前正常 merge 纳入 main `8545558a25db342683cb84a6814e591c6fcf6c67`，保留
-R1、Generated UI 资产和发布执行权限保护。main 已通过 squash merge `97567d5d`
-纳入 #14046 已审阅的 `2972234e`。本批另纳入四文件 guard 修复
-`92d4b193266c5b5fc15927570c8e2fe4fabcadf6`：原生主进程退出后不再按数值进程组发送
-信号，仍清理身份核验匹配的后代。新组合树的全部动态验证均为 NOT_RUN；e819 与 b734
-结果仅作历史证据。新产物须重新实测 160 MiB 解包体积门禁。
+历史证据继续绑定原源码和产物。候选 `e8192c18` 通过五种安装布局与 41 个不同实际产品场景，另有三个合成协议场景通过。更新夹具使用自有 0.0.0 克隆和候选 tarball，不代表两个正式发布版本之间的升级。后续 `7368b97` 的 22 个安装用例记录为 20 个功能通过与两个 Ink deny 已知差异；`61f4e5be` 的源码/运行时门禁早于本次 main 整合，均不能证明最终组合产物。原始失败、平台跳过及修正后的 harness 运行分别保留；最终 tarball 须重新实测 160 MiB 解包体积门禁。
 
-已观察到的 serve 关闭失败与 strict 交互 `--json-file` 输出缺口仍未关闭。
-Linux 原生 cgroup/bwrap/landlock、其他平台及正式发布版本升级仍未验证。
-这是显式选择 OpenTUI 的兼容交付，不能视为所有 TUI 会话迁移到 Bun 已完成。
+原 strict 交互 `--json-file` 缺陷已有已接受的输出改动覆盖，但最终安装组合仍须独立执行输出回归。历史 serve 关闭失败需要在当前候选上重新刻画。Linux 原生 cgroup/bwrap/landlock、其他支持平台及正式发布版本升级仍是独立未结门禁。Windows ConPTY 诊断不代表安装版 Qwen 通过，也不改变固定 Bun 版本。这仍是显式选择 OpenTUI 的 POSIX npm 交付；整体 TUI 迁移完成及默认 renderer 切换须满足整体迁移门禁。
 
 当前 npm 发布清单排除了 `opentui-assets`，也没有私有 Bun 运行时。Node 低于
 26.4 时，显式 OpenTUI 请求回退到 Ink；较新 Node 的 bundle 安装仍缺少启动
