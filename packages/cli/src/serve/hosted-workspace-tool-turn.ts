@@ -7902,6 +7902,7 @@ export class HostedWorkspaceToolTurn {
     let permissionRan = false;
     for (const [index, request] of requests.entries()) {
       if (
+        unicode[index] !== undefined ||
         refusals[index] !== undefined ||
         !this.approval ||
         request.skill ||
@@ -7922,12 +7923,14 @@ export class HostedWorkspaceToolTurn {
         undefined,
         HOSTED_TOOL_INPUT_ORDER,
       );
-      const unicodeError = hostedShellHookInputError(request.call.name, output);
+      const decision = permissionRequestDecision(output);
+      const unicodeError =
+        hostedShellInputError(request.call.name, decision.input) ??
+        hostedShellHookInputError(request.call.name, output);
       if (unicodeError !== undefined) {
         unicode[index] = unicodeError;
         continue;
       }
-      const decision = permissionRequestDecision(output);
       refusals[index] = decision.refusal;
       if (decision.allowed) this.hookAllowed.add(request.call.callId);
       if (decision.input)

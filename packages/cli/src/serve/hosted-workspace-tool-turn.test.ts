@@ -5411,7 +5411,7 @@ it.each<{
     denySibling: HookEventName.PreToolUse,
   },
   { event: HookEventName.PreToolUse, deny: false, failResult: true },
-  { event: HookEventName.PreToolUse, deny: false, bothEvents: true },
+  { event: HookEventName.PermissionRequest, deny: false, bothEvents: true },
 ])(
   'refuses a durable malformed $event rewrite for the entire batch (deny: $deny, sibling: $denySibling, fault: $failResult, concurrent marker reads: $bothEvents, unstarted sibling: $unstartedSibling, cancelled size plan: $cancelledSizePlan, bounded: $bounded) across reconstruction',
   async ({
@@ -5442,7 +5442,12 @@ it.each<{
                   ...new Set([
                     event,
                     ...(denySibling ? [denySibling] : []),
-                    ...(bothEvents ? [HookEventName.PermissionRequest] : []),
+                    ...(bothEvents
+                      ? [
+                          HookEventName.PreToolUse,
+                          HookEventName.PermissionRequest,
+                        ]
+                      : []),
                     HookEventName.PostToolBatch,
                   ]),
                 ].flatMap((eventName) => {
@@ -5511,7 +5516,10 @@ it.each<{
                                         ? 'deny'
                                         : 'allow',
                                     ...(event ===
-                                    HookEventName.PermissionRequest
+                                      HookEventName.PermissionRequest &&
+                                    'tool_name' in operation.input &&
+                                    operation.input.tool_name ===
+                                      'run_shell_command'
                                       ? { updatedInput: malformed }
                                       : {}),
                                   },
@@ -5522,17 +5530,21 @@ it.each<{
                                   'tool_use_id' in operation.input &&
                                   operation.input.tool_use_id ===
                                     'denied-sibling'
-                                    ? {
-                                        permissionDecision: 'deny',
-                                        permissionDecisionReason:
-                                          'recorded policy denial',
-                                      }
-                                    : {
-                                        updatedInput: malformed,
-                                        ...(deny
-                                          ? { permissionDecision: 'deny' }
-                                          : {}),
-                                      }),
+                                    ? denySibling === HookEventName.PreToolUse
+                                      ? {
+                                          permissionDecision: 'deny',
+                                          permissionDecisionReason:
+                                            'recorded policy denial',
+                                        }
+                                      : {}
+                                    : event === HookEventName.PreToolUse
+                                      ? {
+                                          updatedInput: malformed,
+                                          ...(deny
+                                            ? { permissionDecision: 'deny' }
+                                            : {}),
+                                        }
+                                      : {}),
                                 },
                         },
               },
@@ -5622,6 +5634,9 @@ it.each<{
               prompt_id: 'prompt',
             },
             new AbortController().signal,
+            undefined,
+            undefined,
+            HOSTED_TOOL_INPUT_ORDER,
           ),
         ).rejects.toThrow('crash after plan');
       } finally {
@@ -5695,7 +5710,11 @@ it.each<{
       );
     else
       expect(responses[1].functionResponse?.response?.['error']).toContain(
-        'not executed',
+        cancelledSizePlan
+          ? 'Hook data exceeds the 60 KiB'
+          : unstartedSibling
+            ? 'PermissionRequest Hook denied the call.'
+            : 'not executed',
       );
     if (bounded) {
       for (const [kind, bytes] of publish!.mock.calls)
@@ -5737,17 +5756,18 @@ it.each<{
     ).toEqual(
       denySibling === HookEventName.PermissionRequest
         ? [
+            HookEventName.PreToolUse,
+            HookEventName.PreToolUse,
             HookEventName.PermissionRequest,
-            HookEventName.PermissionRequest,
-            event,
           ]
         : denySibling
           ? [event, event]
           : bothEvents
             ? [
+                HookEventName.PreToolUse,
+                HookEventName.PreToolUse,
                 HookEventName.PermissionRequest,
                 HookEventName.PermissionRequest,
-                event,
               ]
             : bounded && event === HookEventName.PermissionRequest
               ? [`${event}:metadata`, event]
@@ -6474,12 +6494,12 @@ it.each<{
       'model',
       new AbortController().signal,
     );
-    if (decision === 'ask' || ordered)
+    if (decision === 'ask')
       await resolveHostedAction(
         session,
         waiters,
         await requested(),
-        answer(ordered ? 'allow' : 'deny'),
+        answer('deny'),
       );
     const responses = await running;
     if (ordered) {
@@ -6490,8 +6510,15 @@ it.each<{
             operation.hookId === HookEventName.PreToolUse,
         )?.[0],
       ).toMatchObject({
-        input: { tool_input: { file_path: 'permission.txt' } },
+        input: { tool_input: { file_path: 'original.txt' } },
       });
+      expect(
+        hookControl.mock.calls.find(
+          ([operation]) =>
+            operation.kind === 'hook-execute' &&
+            operation.hookId === HookEventName.PermissionRequest,
+        )?.[0],
+      ).toMatchObject({ input: { tool_input: { file_path: 'pre.txt' } } });
       expect(
         hookControl.mock.calls
           .filter(([operation]) => operation.kind === 'hook-execute')
@@ -6500,12 +6527,12 @@ it.each<{
               operation.kind === 'hook-execute' && operation.hookId,
           ),
       ).toEqual([
-        HookEventName.PermissionRequest,
         HookEventName.PreToolUse,
+        HookEventName.PermissionRequest,
         HookEventName.PostToolUse,
       ]);
       expect(JSON.parse(broker.execute.mock.calls[0][1])).toMatchObject({
-        input: { file_path: 'pre.txt' },
+        input: { file_path: 'permission.txt' },
       });
       expect(
         hookControl.mock.calls.find(
@@ -6513,7 +6540,9 @@ it.each<{
             operation.kind === 'hook-execute' &&
             operation.hookId === HookEventName.PostToolUse,
         )?.[0],
-      ).toMatchObject({ input: { tool_input: { file_path: 'pre.txt' } } });
+      ).toMatchObject({
+        input: { tool_input: { file_path: 'permission.txt' } },
+      });
     }
     const contexts = responses.filter((part) => typeof part.text === 'string');
     expect(contexts).toEqual(
@@ -9009,6 +9038,7 @@ function backgroundTurnRig(
     closeResults?: ReadonlyArray<'NOT_STARTED' | 'MISSING'>;
     executionCallIds?: readonly string[];
     hooks?: HostedHookSession;
+    approval?: 'default';
   } = {},
 ) {
   enablement.childRun = true;
@@ -9154,8 +9184,8 @@ function backgroundTurnRig(
     (type: string) => options.fitsInline?.(type) ?? true,
     { owner, captureBytes: 1024 * 1024 },
     undefined,
-    options.hooks
-      ? { settings: { mode: 'default', timeoutMs: 100 }, waiters }
+    options.approval
+      ? { settings: { mode: options.approval, timeoutMs: 100 }, waiters }
       : undefined,
     {
       hooks: options.hooks,
@@ -11689,7 +11719,7 @@ it('refuses a malformed permission rewrite on an admitted background Shell', asy
     );
   const rig = backgroundTurnRig(
     { executionStatus: 'success', responseParts: [], capture: null },
-    { hooks: hookSession(fire) },
+    { hooks: hookSession(fire), approval: 'default' },
   );
   turn = rig.turn;
   const { call, parts: input } = backgroundCall();
@@ -11705,5 +11735,5 @@ it('refuses a malformed permission rewrite on an admitted background Shell', asy
   expect(rig.orchestrator.calls).toHaveLength(0);
   expect(broker.prepareV3).not.toHaveBeenCalled();
   expect(broker.executeV3).not.toHaveBeenCalled();
-  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.acquire).toHaveBeenCalledOnce();
 });
