@@ -199,7 +199,7 @@ async function installRecovery(page: Page, running = false) {
     });
   });
   await page.goto('/e2e/fixtures/managed-usability.html');
-  await page.getByRole('button', { name: /Recover original task/ }).click();
+  await page.getByRole('button', { name: /^Recover original task\b/ }).click();
   if (!running)
     await expect(
       page.getByRole('region', { name: 'Session recovery' }),
@@ -243,7 +243,7 @@ test('refresh tracks the original cancel operation until cancellation is confirm
   expect(scenario.writes).toHaveLength(1);
   const reads = scenario.operationReads.length;
   await page.reload();
-  await page.getByRole('button', { name: /Recover original task/ }).click();
+  await page.getByRole('button', { name: /^Recover original task\b/ }).click();
   await expect
     .poll(() => scenario.operationReads.length)
     .toBeGreaterThan(reads);

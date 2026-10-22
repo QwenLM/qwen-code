@@ -1871,6 +1871,68 @@ class HostedAutomationFaultGatesIT {
         request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-second-retire", 202);
     }
 
+    // FG11d: a cancel stops the run it names and leaves the Session usable. Once
+    // the target settles `cancelled`, the next manual fire is admitted and runs
+    // to completion — the cancelled turn does not leave the Session wedged, and
+    // the definition stays `live`. A scheduled future slot is outside this arm:
+    // the definition's cron never comes due inside it.
+    @Test
+    @Timeout(600)
+    void fg11dSiblingRunSurvivesACancelOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("cancel-isolation");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11A_HOLD", "0 0 1 1 *"), "fg11d-iso-base", 202).path("id").asText();
+        String first = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-iso-first", 202)
+                .path("id").asText();
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("manual:fg11d-iso-first")));
+        JsonNode task = request("GET", "/v1/agents/sessions/" + session + "/tasks", null, null, 200)
+                .path("data").path(0);
+        assertThat(task.path("kind").asText()).as("the newest task is the run's").isEqualTo("automation_run");
+        request("POST", "/v1/agents/sessions/" + session + "/tasks/" + task.path("id").asText() + "/cancel", null,
+                "fg11d-iso-cancel", 202);
+        waiting().atMost(Duration.ofSeconds(120)).untilAsserted(() -> assertThat(runState(first))
+                .as("the target run is cancelled").isEqualTo("cancelled"));
+        // The cancelled turn's model call is still in flight; releasing it must
+        // not revive the run, and the Session has to admit what comes next.
+        heldModel.countDown();
+        String sibling = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-iso-sibling", 202)
+                .path("id").asText();
+        waiting().atMost(Duration.ofSeconds(120)).untilAsserted(() -> assertThat(runState(sibling))
+                .as("the sibling run completes").isEqualTo("completed"));
+        assertThat(runState(first)).as("the cancel still stands").isEqualTo("cancelled");
+        assertThat(request("GET", "/v1/agent-automations/" + id, null, null, 200).path("state").asText())
+                .as("the schedule survives both").isEqualTo("live");
+        // Every sibling cancel cell pins the occurrence ledger. The row count only
+        // catches a spurious third key: a re-drive of a named key is an UPDATE on
+        // the (tenant, schedule, occurrence_key) primary key — `deferOccurrence`
+        // bumps `attempts` — so it leaves the count alone and is caught by the
+        // attempts assertion instead.
+        Map<String, Object> cancelled = jdbc.queryForMap("SELECT outcome, attempts FROM"
+                + " ma_schedule_occurrence WHERE tenant_id = ? AND schedule_id = ? AND occurrence_key = ?",
+                tenant, id, "manual:fg11d-iso-first");
+        assertThat(cancelled).as("the cancelled key keeps its one fired occurrence")
+                .containsEntry("outcome", "fired");
+        assertThat(((Number) cancelled.get("attempts")).intValue())
+                .as("the cancelled key is never re-driven").isZero();
+        Map<String, Object> siblingOccurrence = jdbc.queryForMap("SELECT outcome, attempts FROM"
+                + " ma_schedule_occurrence WHERE tenant_id = ? AND schedule_id = ? AND occurrence_key = ?",
+                tenant, id, "manual:fg11d-iso-sibling");
+        assertThat(siblingOccurrence).as("the sibling key fires its own occurrence")
+                .containsEntry("outcome", "fired");
+        assertThat(((Number) siblingOccurrence.get("attempts")).intValue())
+                .as("the sibling key is never re-driven").isZero();
+        assertThat(jdbc.queryForList("SELECT occurrence_key FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                + " AND schedule_id = ?", String.class, tenant, id))
+                .as("no third occurrence key exists").hasSize(2);
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("manual:fg11d-iso-first"))
+                .as("the cancelled run keeps its one Turn").hasSize(1);
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("manual:fg11d-iso-sibling"))
+                .as("the sibling runs its own Turn").hasSize(1);
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-iso-retire", 202);
+    }
+
     private void boot(String letter) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("FG11 requires real MySQL").startsWith("jdbc:mysql:");
         this.letter = letter;
