@@ -568,6 +568,13 @@ export function createProductionDispatch(
    * tree or host.
    */
   refuseSubagentTools?: boolean,
+  /**
+   * The Workflow tool call that started this run. Suffixed onto each
+   * subagent id the way the Agent tool suffixes its own call id, so readers
+   * that resolve a subagent's spawning call from its id (the trajectory)
+   * can nest workflow agents under this call.
+   */
+  parentToolCallId?: string,
 ): WorkflowAgentDispatch {
   return async (prompt, opts, dispatchId) => {
     // An empty or non-string prompt seeds no `user` record, so the
@@ -606,7 +613,9 @@ export function createProductionDispatch(
     // Minted per `agent()` call rather than per attempt, so a stall-retried
     // dispatch appends to ONE transcript instead of presenting as two agents
     // to every reader of the subagent transcript dir.
-    const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
+    const workflowAgentId =
+      `workflow-agent-${randomBytes(8).toString('hex')}` +
+      (parentToolCallId ? `-${parentToolCallId}` : '');
     // Resolved once and handed to both the runtime and the transcript so
     // the on-disk records name the same agent that ran. The resolved
     // agentType definition rides along so the override path reuses it

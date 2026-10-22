@@ -23,6 +23,7 @@ import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -35,6 +36,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLTimeoutException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -44,6 +46,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.regex.Pattern;
 
 /**
@@ -85,6 +88,7 @@ public final class ManagedAgentPreflight {
         checks.add(keyRingCheck(properties));
         checks.add(authCheck(environment, properties));
         checks.add(harnessCheck(properties));
+        checks.add(sessionStoreCheck(properties));
         checks.add(toolPathCheck(properties));
         checks.addAll(brokerChecks(properties));
         checks.add(workspaceCheck(properties));
@@ -97,7 +101,13 @@ public final class ManagedAgentPreflight {
                     properties.getRuntimeBroker().getHost(),
                     properties.getRuntimeBroker().getPort()));
         }
-        checks.add(databaseCheck(environment));
+        Check database = databaseCheck(environment);
+        checks.add(database);
+        checks.add(database.status() == Status.PASS
+                ? capacityCheck(environment)
+                : new Check("capacity", Status.SKIP,
+                        "database check did not pass; capacity not measured",
+                        null));
         print(checks);
         return checks.stream().anyMatch(check ->
                 check.status() == Status.FAIL) ? 1 : 0;
@@ -184,13 +194,15 @@ public final class ManagedAgentPreflight {
         }
     }
 
-    private static ManagedAgentProperties bind(
+    static ManagedAgentProperties bind(
             ConfigurableEnvironment environment, List<Check> checks) {
         try {
-            return Binder.get(environment)
+            ManagedAgentProperties properties = Binder.get(environment)
                     .bind("qwen.managed-agent",
                             Bindable.of(ManagedAgentProperties.class))
                     .orElseGet(ManagedAgentProperties::new);
+            properties.setEnvironment(environment);
+            return properties;
         } catch (RuntimeException error) {
             checks.add(new Check("config", Status.FAIL,
                     "binding failed: " + rootMessage(error),
@@ -309,6 +321,31 @@ public final class ManagedAgentPreflight {
         return new Check("auth", Status.PASS,
                 "address=" + address + " mode="
                         + String.valueOf(properties.getAuth().getMode()),
+                null);
+    }
+
+    // Reads the values after the startup validation applied its defaults.
+    static Check sessionStoreCheck(ManagedAgentProperties properties) {
+        ManagedAgentProperties.SessionStore store =
+                properties.getSessionStore();
+        if (!properties.getHarness().isEnabled() || !store.isEnabled()) {
+            return new Check("session-store", Status.SKIP, "disabled", null);
+        }
+        if (StringUtils.isBlank(store.getBaseUrl())) {
+            return new Check("session-store", Status.FAIL,
+                    "base URL is empty",
+                    "set QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL to the"
+                            + " listener the Harness reaches");
+        }
+        if (StringUtils.isBlank(store.getWorkspaceId())) {
+            return new Check("session-store", Status.FAIL,
+                    "workspace ID is empty",
+                    "set QWEN_MANAGED_AGENT_WORKSPACE_CWD or"
+                            + " QWEN_MANAGED_AGENT_WORKSPACE_ID");
+        }
+        return new Check("session-store", Status.PASS,
+                store.getBaseUrl() + ", workspace "
+                        + store.getWorkspaceId(),
                 null);
     }
 
@@ -589,22 +626,11 @@ public final class ManagedAgentPreflight {
 
     static Check databaseCheck(ConfigurableEnvironment environment) {
         String url = environment.getProperty("spring.datasource.url");
-        String user = environment.getProperty("spring.datasource.username", "");
-        String password =
-                environment.getProperty("spring.datasource.password", "");
         if (StringUtils.isBlank(url)) {
             return new Check("database", Status.FAIL,
                     "no datasource URL", "set SPRING_DATASOURCE_URL");
         }
-        Properties credentials = new Properties();
-        credentials.setProperty("user", user);
-        credentials.setProperty("password", password);
-        credentials.setProperty("connectTimeout",
-                String.valueOf(TIMEOUT_MILLIS));
-        credentials.setProperty("socketTimeout",
-                String.valueOf(TIMEOUT_MILLIS));
-        try (Connection connection =
-                DriverManager.getConnection(url, credentials)) {
+        try (Connection connection = databaseConnection(environment)) {
             try (Statement statement = connection.createStatement()) {
                 statement.execute("SELECT 1");
             }
@@ -637,6 +663,101 @@ public final class ManagedAgentPreflight {
                     "check the datasource settings, grants and that MySQL 8 "
                             + "is running");
         }
+    }
+
+    /**
+     * Reports durable counts that are useful for capacity triage. These are
+     * logical SQL records, not physical process or memory measurements. The
+     * report deliberately does not infer idle work or reclaim anything.
+     */
+    static Check capacityCheck(ConfigurableEnvironment environment) {
+        try (Connection connection = databaseConnection(environment)) {
+            return capacityCheck(connection);
+        } catch (SQLException error) {
+            return capacityUnavailable(error);
+        }
+    }
+
+    static Check capacityCheck(Connection connection) {
+        try {
+            Map<String, Long> bindings = stateCounts(connection,
+                    "ma_runtime_binding", "binding_state");
+            Map<String, Long> sessions = stateCounts(connection,
+                    "ma_runtime_session", "session_state");
+            Map<String, Long> operations = stateCounts(connection,
+                    "ma_operation", "state");
+            String detail = "runtime-bindings=" + bindings
+                    + "; runtime-sessions=" + sessions
+                    + "; operations=" + operations
+                    + "; physical-processes=unknown"
+                    + "; memory=unknown; idle-reclamation=not measured";
+            return new Check("capacity", Status.PASS, detail, null);
+        } catch (SQLException error) {
+            return capacityUnavailable(error);
+        }
+    }
+
+    private static Check capacityUnavailable(SQLException error) {
+        if (isTimeout(error)) {
+            return new Check("capacity", Status.WARN,
+                    "durable capacity facts unavailable: observation timed "
+                            + "out before all state counts were read",
+                    "retry when the database is less busy; this observation "
+                            + "reads the full state tables");
+        }
+        return new Check("capacity", Status.WARN,
+                "durable capacity facts unavailable: " + rootMessage(error),
+                "check the datasource grants and managed schema");
+    }
+
+    private static boolean isTimeout(Throwable error) {
+        for (Throwable current = error; current != null;
+                current = current.getCause()) {
+            if (current instanceof SQLTimeoutException
+                    || current instanceof SocketTimeoutException) {
+                return true;
+            }
+            String message = current.getMessage();
+            if (message != null) {
+                String lower = message.toLowerCase(Locale.ROOT);
+                if (lower.contains("timeout")
+                        || lower.contains("timed out")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static Map<String, Long> stateCounts(Connection connection,
+            String table, String stateColumn) throws SQLException {
+        Map<String, Long> counts = new TreeMap<>();
+        String sql = "SELECT " + stateColumn + ", COUNT(*) FROM " + table
+                + " GROUP BY " + stateColumn;
+        try (Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery(sql)) {
+            while (result.next()) {
+                counts.put(result.getString(1), result.getLong(2));
+            }
+        }
+        return counts;
+    }
+
+    private static Connection databaseConnection(
+            ConfigurableEnvironment environment) throws SQLException {
+        String user = environment.getProperty("spring.datasource.username", "");
+        String password =
+                environment.getProperty("spring.datasource.password", "");
+        Properties credentials = new Properties();
+        credentials.setProperty("user", user);
+        credentials.setProperty("password", password);
+        credentials.setProperty("connectTimeout",
+                String.valueOf(TIMEOUT_MILLIS));
+        credentials.setProperty("socketTimeout",
+                String.valueOf(TIMEOUT_MILLIS));
+        return DriverManager.getConnection(
+                environment.getRequiredProperty("spring.datasource.url"),
+                credentials);
     }
 
     private static void requirePerformanceSchemaGrant(Connection connection)

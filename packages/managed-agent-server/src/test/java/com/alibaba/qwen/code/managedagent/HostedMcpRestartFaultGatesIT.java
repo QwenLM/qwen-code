@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
@@ -1066,16 +1065,19 @@ class HostedMcpRestartFaultGatesIT {
     }
 
     private int storageHolders(SessionRef session) {
-        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner o"
-                + " JOIN ma_runtime_binding b ON o.binding_id = b.binding_id"
-                + " WHERE b.tenant_id = ? AND b.isolation_key = ? AND"
-                + " o.holder_key IS NOT NULL", Integer.class, tenant,
-                session.id());
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session s"
+                + " JOIN ma_runtime_binding b ON s.binding_id = b.binding_id"
+                + " AND s.runtime_generation = b.runtime_generation"
+                + " WHERE s.tenant_id = ? AND b.tenant_id = ? AND"
+                + " s.harness_session_id = ? AND"
+                + " s.execution_storage_key IS NOT NULL", Integer.class,
+                tenant, tenant, session.id());
     }
 
     private List<Map<String, Object>> runtimeState(SessionRef session) {
-        return jdbc.queryForList("SELECT b.binding_state, b.runtime_generation"
-                + " AS binding_generation, s.session_state,"
+        return jdbc.queryForList("SELECT b.binding_id, b.binding_state,"
+                + " b.runtime_generation AS binding_generation,"
+                + " s.runtime_session_id, s.session_state,"
                 + " s.runtime_generation FROM ma_runtime_session s JOIN"
                 + " ma_runtime_binding b ON s.binding_id = b.binding_id WHERE"
                 + " s.tenant_id = ? AND s.harness_session_id = ?", tenant,
@@ -1245,17 +1247,14 @@ class HostedMcpRestartFaultGatesIT {
     }
 
     private OperationRecord admitClose(SessionRef session) {
+        var transactions = new org.springframework.transaction.support.TransactionTemplate(
+                spring.getBean(org.springframework.transaction.PlatformTransactionManager.class));
         String key = "close-" + uuid();
         RuntimeException last = null;
         for (int attempt = 0; attempt < 60; attempt++) {
             try {
-                var admission = store.beginWorkspaceLifecycle(tenant,
-                        session.id(), OperationKind.CLOSE, "actor",
-                        DigestUtils.sha256Hex("actor"), key,
-                        "sha256:" + DigestUtils.sha256Hex(key), true, 2);
-                return store.claimOperation(tenant, session.id(),
-                        admission.operation().operationId(), "fg12d-close",
-                        Duration.ofMinutes(10)).orElseThrow();
+                return HostedGateTestSupport.admitAndClaimClose(transactions,
+                        store, tenant, session.id(), key, "fg12d-close");
             } catch (RuntimeException failure) {
                 last = failure;
                 String message = String.valueOf(failure.getMessage());

@@ -183,7 +183,8 @@ final class WorkspaceCsiApplicationInventory {
                     "scope_key:CHAR,runtime_session_id:VARBINARY,tenant_id:VARBINARY,workspace_id:VARBINARY,"
                     + "workspace_generation:VARBINARY,canonical_cwd:VARCHAR,capability_digest:VARBINARY,"
                     + "isolation_class:VARCHAR,harness_session_id:VARBINARY,turn_kind:VARCHAR,binding_id:VARBINARY,"
-                    + "runtime_generation:BIGINT,session_state:VARCHAR,record_version:BIGINT,last_active_at:BIGINT"),
+                    + "runtime_generation:BIGINT,session_state:VARCHAR,record_version:BIGINT,last_active_at:BIGINT,"
+                    + "execution_storage_key:CHAR,execution_exclusive:BOOLEAN"),
             declaration("ma_runtime_slot", "request_key",
                     "request_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,workspace_generation:VARBINARY,"
                     + "canonical_cwd:VARCHAR,capability_digest:VARBINARY,isolation_class:VARCHAR,isolation_key:VARBINARY,"
@@ -1480,7 +1481,7 @@ final class WorkspaceCsiApplicationInventory {
             } else if ("managed-input".equals(kind)) {
                 value = CsiNativeActivationProof.inputBlocks(raw);
             } else if (Set.of("managed-activation-boundary", "managed-activation-install", "managed-admission",
-                    "managed-checkpoint", "managed-definition", "managed-file_history", "managed-hosted-model-route",
+                    "managed-checkpoint", "managed-checkpoint-history", "managed-definition", "managed-file_history", "managed-hosted-model-route",
                     "managed-hosted-model-usage", "managed-root",
                     "managed-tool-definition", "managed-tool-input", "managed-turn-result").contains(kind)) {
                 value = CsiNativeActivationProof.readObject(raw);
@@ -3078,6 +3079,7 @@ final class WorkspaceCsiApplicationInventory {
                         && Objects.equals(intent.resourceHandleVersion().longValue(), row.number("resource_handle_version"))
                         && Objects.equals(intent.attestationGeneration(), row.number("attestation_generation")));
                 case "ma_runtime_session" -> expect(table, row, scope(row)
+                        && row.cell("execution_storage_key").isNull() && Boolean.FALSE.equals(row.bool("execution_exclusive"))
                         && original.bindingId().equals(row.text("binding_id")) && session.equals(row.text("runtime_session_id"))
                         && session.equals(row.text("harness_session_id")) && "bootstrap".equals(row.text("turn_kind"))
                         && Objects.equals(original.generation(), row.number("runtime_generation"))

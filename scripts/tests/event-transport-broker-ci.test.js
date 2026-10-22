@@ -104,7 +104,7 @@ describe('EventTransport broker gates CI', () => {
     );
   });
 
-  it('routes like the MariaDB lane, with the JDK 17 the broker needs', () => {
+  it('routes like the non-Hosted MySQL lane, with the JDK 17 the broker needs', () => {
     // The evaluated routing matrix lives in ci-runner-routing.test.mjs.
     expect(job['runs-on']).toBe(workflow.jobs['mysql-integration']['runs-on']);
     const java = step('Set up Java').with['java-version'];

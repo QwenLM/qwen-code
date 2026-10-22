@@ -10,6 +10,166 @@ function jsonResponse(value: unknown): Response {
 }
 
 describe('createJavaManagedAgentProvider', () => {
+  it('submits and reads a compression operation through the product routes', async () => {
+    const operation = {
+      operationId: 'compression-1',
+      sessionId: 's1',
+      type: 'context_compression',
+      status: 'running',
+      expectedCompactionRevision: 0,
+      replayed: false,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse(operation));
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: fetchImpl,
+    });
+    const signal = new AbortController().signal;
+    await expect(
+      provider.contextCompression!.submit(
+        's1',
+        { expectedCompactionRevision: 0 },
+        {
+          clientId: 'c',
+          idempotencyKey: 'original',
+          signal,
+        },
+      ),
+    ).resolves.toEqual(operation);
+    const [url, request] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      'https://product.example/api/agent/web-shell/v1/sessions/compress',
+    );
+    expect(JSON.parse(String(request?.body))).toEqual({
+      sessionId: 's1',
+      expectedCompactionRevision: 0,
+      idempotencyKey: 'original',
+      requestId: expect.any(String),
+    });
+    await expect(
+      provider.contextCompression!.query('s1', 'compression-1', {
+        clientId: 'c',
+        signal,
+      }),
+    ).resolves.toEqual(operation);
+    expect(fetchImpl.mock.calls[1][0]).toBe(
+      'https://product.example/api/agent/web-shell/v1/operations/query',
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      sessionId: 's1',
+      operationId: 'compression-1',
+    });
+    fetchImpl.mockResolvedValueOnce(
+      jsonResponse({ ...operation, operationId: 'other' }),
+    );
+    await expect(
+      provider.contextCompression!.query('s1', 'compression-1', {
+        clientId: 'c',
+      }),
+    ).rejects.toThrow('identity mismatch');
+    fetchImpl.mockResolvedValueOnce(
+      jsonResponse({ ...operation, sessionId: 'other' }),
+    );
+    await expect(
+      provider.contextCompression!.submit(
+        's1',
+        { expectedCompactionRevision: 0 },
+        {
+          clientId: 'c',
+          idempotencyKey: 'original',
+        },
+      ),
+    ).rejects.toThrow('identity mismatch');
+  });
+
+  it('projects compression revision and remote operation without allowing a Turn to race it', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        sessionId: 's1',
+        status: 'active',
+        title: 'Session',
+        createdAt: 1,
+        updatedAt: 2,
+        workspace: { workspaceId: 'ws', cwdRelative: '.', contextRevision: 1 },
+        compactionRevision: 15,
+        contextCompressionOperationId: 'op',
+        capabilities: { workspaceTurns: true, contextCompression: true },
+      }),
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: fetchImpl,
+    });
+    const session = await provider.getSession('s1', { clientId: 'c' });
+    expect(session.compactionRevision).toBe(15);
+    expect(session.contextCompressionOperationId).toBe('op');
+    expect(session.capabilities.contextCompression).toBe(true);
+    expect(session.capabilities.canSend).toBe(false);
+    fetchImpl.mockResolvedValue(
+      jsonResponse({
+        sessionId: 's1',
+        status: 'active',
+        createdAt: 1,
+        updatedAt: 2,
+      }),
+    );
+    expect(
+      (await provider.getSession('s1', { clientId: 'c' })).compactionRevision,
+    ).toBe(0);
+    expect(
+      createJavaManagedAgentProvider({ baseUrl: 'https://product.example' })
+        .contextCompression,
+    ).toBeUndefined();
+  });
+
+  it.each([undefined, true, false])(
+    'keeps a recovery-blocked Turn parked with server cancel permission %s',
+    async (cancel) => {
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: vi.fn<typeof fetch>().mockResolvedValue(
+          jsonResponse({
+            sessionId: 's1',
+            title: 'Blocked',
+            status: 'active',
+            createdAt: 1,
+            updatedAt: 2,
+            ...(cancel === undefined
+              ? {}
+              : {
+                  recovery: {
+                    state: 'awaiting_evidence',
+                    reasonCode: 'recovery_evidence_unavailable',
+                    turnId: 't1',
+                    nextTurnAllowed: false,
+                    actions: {
+                      recheck: false,
+                      cancel,
+                      continueInNewSession: true,
+                    },
+                  },
+                }),
+            activeTurn: {
+              turnId: 't1',
+              status: 'recovery_blocked',
+              submittedAt: 1,
+              errorCode: 'hosted_harness_recovery_blocked',
+            },
+          }),
+        ),
+      });
+      const summary = await provider.getSession('s1', { clientId: 'client' });
+      expect(summary.phase).toBe('failed');
+      expect(summary.capabilities.canSend).toBe(false);
+      expect(summary.capabilities.canCancel).toBe(cancel !== false);
+      expect(summary.failure?.code).toBe('hosted_harness_recovery_blocked');
+    },
+  );
+
   it.each([true, false, undefined])(
     'uses the advertised rename capability %s independently of a running Turn',
     async (rename) => {
