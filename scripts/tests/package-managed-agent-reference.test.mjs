@@ -575,6 +575,8 @@ test('ships the Harness credential keys the control plane reads', async () => {
     template,
     /^QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=sha256:[A-Za-z0-9._:/+=-]+$/m,
   );
+  // It refuses a `;` comment, which a shell stops reading the file at.
+  assert.doesNotMatch(template, /^\s*;/m);
 });
 
 test('rejects a stable distribution version', async () => {

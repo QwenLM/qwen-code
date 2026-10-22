@@ -257,9 +257,10 @@ can name the Harness's own environment file. The server then reads
 configuration, never into its process environment, and refuses to start when
 either direct value is also set. Write each credential as `KEY=value` on one
 line, with no whitespace around the `=` and only letters, digits and `._:/+=-`
-in the value. The server refuses, by file and line, any line it might read
-differently from systemd or a shell, such as a continuation, a carriage return
-from CRLF line endings, an unterminated quote or text after a closing quote.
+in the value, and start comments with `#`. The server refuses, by file and
+line, any line it might read differently from systemd or a shell, such as a
+continuation, a carriage return from CRLF line endings, a `;` comment, an
+unterminated quote or text after a closing quote.
 
 Create a Session:
 

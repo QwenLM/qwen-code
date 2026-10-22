@@ -227,8 +227,13 @@ public class ManagedAgentProperties implements EnvironmentAware {
             if (line.endsWith("\\")) {
                 throw unsupportedCredentialLine(file, index, "a line continuation");
             }
+            // systemd skips a `;` comment, but a shell refuses it and stops
+            // reading the file there, wherever it falls.
+            if (line.startsWith(";")) {
+                throw unsupportedCredentialLine(file, index, "a comment starting with `;` instead of `#`");
+            }
             int separator = line.indexOf('=');
-            if (line.startsWith("#") || line.startsWith(";") || separator < 0) {
+            if (line.startsWith("#") || separator < 0) {
                 continue;
             }
             String key = line.substring(0, separator).strip();
