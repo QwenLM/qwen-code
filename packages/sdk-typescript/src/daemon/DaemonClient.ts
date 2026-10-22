@@ -4306,8 +4306,12 @@ export class DaemonClient {
    * it as the same "no deadline", so the spawn would arm no timer and attach no
    * AbortSignal, leaving a stalled daemon free to retain the create or worktree
    * reset for the process lifetime. Clamp that overflow to `MAX_TIMER_DELAY_MS`
-   * — the largest delay a timer can express — so a derived deadline is always
-   * bounded.
+   * — the largest delay a timer can express — so a derived deadline is bounded
+   * on these two routes. Restore is deliberately exempt: `resolveRestoreTimeoutMs`
+   * forwards the same derived `0` into `fetchWithTimeout`, so `loadSession` and
+   * `resumeSession` stay unbounded under an over-ceiling
+   * `--session-restore-timeout-ms`, which #14622 requires ("Restore must keep
+   * its `0` pass-through"). The bound below covers the spawn routes only.
    */
   private resolveSessionSpawnTimeoutMs(): number {
     const timeoutMs = this.resolveSessionOperationTimeoutMs();

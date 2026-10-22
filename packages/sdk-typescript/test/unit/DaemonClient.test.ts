@@ -4421,26 +4421,28 @@ describe('DaemonClient', () => {
       vi.useFakeTimers();
       try {
         let signal: AbortSignal | undefined;
-        const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-          const url = String(input);
-          if (url.endsWith('/capabilities')) {
-            return Promise.resolve(
-              jsonResponse(200, {
-                v: 1,
-                mode: 'http-bridge',
-                features: [],
-                modelServices: [],
-                limits: { sessionRestoreTimeoutMs: 2_147_483_647 },
-              }),
-            );
-          }
-          return new Promise<Response>(() => {
-            signal = init?.signal ?? undefined;
-          });
-        }) as unknown as typeof globalThis.fetch;
+        const fetchMock = vi.fn(
+          (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input);
+            if (url.endsWith('/capabilities')) {
+              return Promise.resolve(
+                jsonResponse(200, {
+                  v: 1,
+                  mode: 'http-bridge',
+                  features: [],
+                  modelServices: [],
+                  limits: { sessionRestoreTimeoutMs: 2_147_483_647 },
+                }),
+              );
+            }
+            return new Promise<Response>(() => {
+              signal = init?.signal ?? undefined;
+            });
+          },
+        );
         const client = new DaemonClient({
           baseUrl: 'http://daemon',
-          fetch,
+          fetch: fetchMock as unknown as typeof globalThis.fetch,
           fetchTimeoutMs: 0,
         });
         await client.capabilities();
@@ -4448,8 +4450,25 @@ describe('DaemonClient', () => {
         void client
           .createOrAttachSession({ workspaceCwd: '/work/a' })
           .catch(() => {});
+        // `signal` is assigned only once the spawn request reaches the wire, so
+        // asserting it is undefined proves the deadline is absent *and* nothing
+        // else: a later change that drops the request before the wire (a
+        // validation throw, an added capability preflight, a transport that
+        // stops forwarding `init`) leaves `signal` undefined too and keeps this
+        // case green, silently turning an explicit `0` into the 24.8-day
+        // deadline R3-2 warns about. Pin the request first, then the deadline.
+        // `advanceTimersByTimeAsync` also drains the microtask chain inside the
+        // fire-and-forget create, so this waits for the request to reach the
+        // wire rather than racing it.
+        await vi.advanceTimersByTimeAsync(100);
+        const spawnCalls = fetchMock.mock.calls.filter(
+          ([input]) => !String(input).endsWith('/capabilities'),
+        );
+        expect(spawnCalls.length).toBeGreaterThan(0);
+        expect(spawnCalls[0]?.[1]?.signal).toBeUndefined();
         expect(signal).toBeUndefined();
         await vi.advanceTimersByTimeAsync(2_147_483_647);
+        expect(spawnCalls.length).toBeGreaterThan(0);
         expect(signal).toBeUndefined();
       } finally {
         vi.useRealTimers();
