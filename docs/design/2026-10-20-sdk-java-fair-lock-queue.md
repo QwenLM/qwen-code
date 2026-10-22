@@ -101,6 +101,19 @@ drop fd 9 so a survivor
 cannot retain the lock. A hold now measures the copy instead of the suite, and
 the fast tier's 90-minute budget is again far above one hold.
 
+The test job had the same shape and the same failure: the Java 21 leg held
+the lock across the sdk-java suite and the managed-agent H2 suite (925 s), and
+the Java 11/17 legs across the sdk-java suite. On 2026-10-22 run
+39794057849's fast job stayed head of the queue for the full 5400 s as ticket
+257, and failed before Maven on both attempts, on two different hosts. That job now seeds a job-local repository,
+runs all three Maven commands unlocked, and takes the lock only for its
+write-back, so no hold spans a suite anywhere in this workflow.
+
+The write-back acquisition is also best-effort at both sites: a lock that
+cannot be acquired within its budget warns and skips the copy instead of
+failing a step whose suite already passed. The `lock not acquired within`
+substring, the 5400 s budget, and the fd 9 closures are unchanged.
+
 ### Fast-tier priority
 
 The FIFO queue bounds a waiter by its position, but it still puts a fast-tier
@@ -156,8 +169,10 @@ its last 52 minutes as head behind one hold and timed out, and full-tier
 MariaDB holds of 7426 s and 8685 s have been measured on this lock; a hold
 like that exhausts a fast head's 5400 s budget whatever the ticket order.
 Naming the holder (a long ticketed hold, or a process that never took a
-ticket) is the diagnostic in qwen-code#15031, and bounding hold length stays
-with #14566.
+ticket) is the diagnostic in qwen-code#15031. The hold-scope change above
+bounds every hold this workflow takes to one write-back copy; a hold that
+still outlasts the budget now comes from a stale or non-ticketed process,
+and the best-effort acquisition keeps it from reddening the suite.
 
 The head keepalive matters more with two classes. Without it, a head blocked
 past 1800 s loses its ticket to another waiter's reaper, and the next ticket
@@ -209,9 +224,10 @@ order this section exists to prevent.
   head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper and the
-  `sdk_java_lock_acquire 5400` budget at each acquisition site, the MariaDB
-  lane's Maven runs above its acquisition and its write-back children's fd 9
-  close, and the `.size-baseline` records the workflow's new size.
+  `sdk_java_lock_acquire 5400` budget at each acquisition site, every Maven
+  run above its acquisition, both write-backs' fd 9 closes, and the
+  best-effort guard that keeps a missed acquisition from failing the step.
+  The `.size-baseline` records the workflow's new size.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
@@ -219,6 +235,8 @@ order this section exists to prevent.
 
 - Both lock sites in `sdk-java.yml` acquire through the helper at 5400 s;
   the test job passes its tier and the MariaDB site defaults to normal.
+- Every Maven run resolves from a job-local repository above its acquisition,
+  and a failed acquisition skips the write-back without failing the step.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.

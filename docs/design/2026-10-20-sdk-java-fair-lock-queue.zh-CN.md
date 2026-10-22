@@ -87,6 +87,17 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 只量一次复制，而不是一整套测试，fast 通道的 90 分钟预算又远大于一次
 持锁时长。
 
+测试 job 也是同样的形状、同样的失败：Java 21 leg 把锁持在 sdk-java 套件
+和 managed-agent H2 套件（925 s）之上，Java 11/17 leg 持在 sdk-java 套件
+之上。2026-10-22 的 run 39794057849 中，fast job 以票据 257 一直停在队首
+整整 5400 s，两次尝试、两台不同主机都在 Maven 启动前失败。现在该 job 先播种 job 本地
+仓库，三次 Maven 运行都不持锁，只在写回时取锁，因此这个工作流里已经
+没有任何持锁会跨过一整套测试。
+
+两处写回取锁现在都是尽力而为：预算内拿不到锁就发出警告并跳过复制，
+而不是让一个套件已经通过的 step 失败。`lock not acquired within` 子串、
+5400 s 预算与 fd 9 关闭逻辑都保持不变。
+
 ### fast 档优先
 
 FIFO 队列把 waiter 的等待限制在它的排位内，但 fast 档 job 仍然排在所有
@@ -132,7 +143,9 @@ FIFO 队列把 waiter 的等待限制在它的排位内，但 fast 档 job 仍�
 一次持锁之后等了最后 52 分钟并超时，而这把锁上已实测到 7426 秒和 8685
 秒的 full 档 MariaDB 持锁；这样一次持锁无论票序如何都会耗尽 fast 队首
 的 5400 秒预算。点名持锁者（一次很长的持票持锁，还是一个从未取票的进程）
-是 qwen-code#15031 的诊断，限制持锁时长仍归 #14566。
+是 qwen-code#15031 的诊断。上文的持锁范围改动已经把本工作流的每次持锁
+限制在一次写回复制之内；仍能超过预算的持锁只可能来自过期或未取票的
+进程，而尽力而为的取锁不会再让它把已经通过的套件染红。
 
 有了两个档位之后，队首 keepalive 更加重要。没有它时，阻塞超过 1800
 秒的队首会被其他 waiter 的回收逻辑删掉票据，队列里的下一张票 —— 不论
@@ -177,8 +190,8 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
   也不会被超过。
 - 工作流的 pin 随机制迁移：`scripts/tests/sdk-java-workflow.test.js`
   pin 的是 source 该辅助脚本和两处 `sdk_java_lock_acquire 5400` 预算、
-  MariaDB 通道的 Maven 运行在取锁之前、写回子进程关闭 fd 9，以及
-  `.size-baseline` 记录的工作流新尺寸。
+  每次 Maven 运行都在取锁之前、两处写回都关闭 fd 9，以及拿不到锁时
+  不会让 step 失败的保护逻辑。`.size-baseline` 记录工作流的新尺寸。
 - 真实宿主机上的浸泡验证就是 CI 本身：合并后第一批池上运行要么
   按票序拿到锁，要么带着可归因的票据号超时。
 
@@ -186,6 +199,8 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
 
 - `sdk-java.yml` 的两处取锁点都以 5400 秒通过该辅助脚本获取；
   test job 传入自己的 tier，MariaDB 站点默认 normal。
+- 每次 Maven 运行都从 job 本地仓库解析、位于取锁之前；拿不到锁时跳过
+  写回，但不让 step 失败。
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   通过。
