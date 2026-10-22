@@ -29,6 +29,7 @@ export const QWENCLOUD_MAAS_HOSTS: readonly string[] = SITE_CHANNELS.map(
  */
 export function buildDashScopeSourceConfig(
   baseUrl: string | undefined,
+  runtimeChannel?: string,
 ): string | undefined {
   if (!baseUrl) return undefined;
   let hostname: string;
@@ -37,12 +38,14 @@ export function buildDashScopeSourceConfig(
   } catch {
     return undefined;
   }
+  const t1 =
+    runtimeChannel === 'desktop' ? 'qwen-code-desktop' : 'qwen-code-cli';
   for (const [host, channel] of SITE_CHANNELS) {
     const tags =
       hostname === host
-        ? { t1: 'qwen-code', t2: 'payg' }
+        ? { t1, t2: 'payg' }
         : hostname === `token-plan.${host}`
-          ? { t1: 'qwen-code' }
+          ? { t1 }
           : undefined;
     if (tags) return JSON.stringify({ channel, source: 'model', tags });
   }
@@ -58,8 +61,9 @@ export function buildDashScopeSourceConfig(
 export function withDashScopeSourceConfig<T extends string | undefined>(
   headers: Record<string, T>,
   baseUrl: string | undefined,
+  runtimeChannel?: string,
 ): Record<string, T | string> {
-  const value = buildDashScopeSourceConfig(baseUrl);
+  const value = buildDashScopeSourceConfig(baseUrl, runtimeChannel);
   if (!value) return headers;
   const name = DASHSCOPE_SOURCE_CONFIG_HEADER.toLowerCase();
   const result: Record<string, T | string> = Object.fromEntries(

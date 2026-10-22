@@ -656,7 +656,11 @@ export class ResponsesPipeline {
 
     const fetchOpts: RequestInit & { dispatcher?: unknown } = {
       method: 'POST',
-      headers: withDashScopeSourceConfig(headers, this.config.baseUrl),
+      headers: withDashScopeSourceConfig(
+        headers,
+        this.config.baseUrl,
+        this.cliConfig.getChannel?.(),
+      ),
       body,
       signal: connectController.signal,
     };

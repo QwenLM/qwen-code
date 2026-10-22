@@ -1266,10 +1266,14 @@ describe('WebSearchTool execute', () => {
     expect(opts.defaultHeaders).not.toHaveProperty('X-DashScope-Source-Config');
   });
 
-  it('attributes searches sent to a QwenCloud endpoint', async () => {
+  it.each([
+    [undefined, 'qwen-code-cli'],
+    ['CLI', 'qwen-code-cli'],
+    ['desktop', 'qwen-code-desktop'],
+  ])('attributes searches from channel %s', async (channel, t1) => {
     respond([SEARCH_ITEM, MESSAGE_ITEM]);
-    await runSearch(
-      makeConfig({
+    await runSearch({
+      ...makeConfig({
         models: [
           dsModel({
             baseUrl: 'https://maas.qianwenaiapi.com/compatible-mode/v1',
@@ -1279,12 +1283,17 @@ describe('WebSearchTool execute', () => {
           }),
         ],
       }),
-    );
+      getChannel: () => channel,
+    } as Config);
     const opts = mockCtorOpts.current as {
       defaultHeaders: Record<string, string>;
     };
     expect(opts.defaultHeaders['X-DashScope-Source-Config']).toBe(
-      '{"channel":"qianwenai-inner-agents","source":"model","tags":{"t1":"qwen-code","t2":"payg"}}',
+      JSON.stringify({
+        channel: 'qianwenai-inner-agents',
+        source: 'model',
+        tags: { t1, t2: 'payg' },
+      }),
     );
     expect(opts.defaultHeaders).not.toHaveProperty('x-dashscope-source-config');
   });

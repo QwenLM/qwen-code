@@ -257,6 +257,7 @@ export class DashScopeWebSearchBackend implements WebSearchBackend {
           ...(backend.customHeaders ?? {}),
         },
         backend.baseUrl,
+        this.config.getChannel?.(),
       ),
       ...(runtimeOptions || {}),
       fetch: buildSessionAwareFetch(

@@ -325,6 +325,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     return withDashScopeSourceConfig(
       customHeaders ? { ...defaultHeaders, ...customHeaders } : defaultHeaders,
       this.contentGeneratorConfig.baseUrl,
+      this.cliConfig.getChannel?.(),
     );
   }
 

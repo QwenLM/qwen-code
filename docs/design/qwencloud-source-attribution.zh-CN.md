@@ -4,7 +4,7 @@
 
 ## 状态
 
-已实现，已用真实的千问 AI 平台 Token Plan 端点验证。
+已实现。原始请求头已用真实的千问 AI 平台 Token Plan 端点验证。CLI/Desktop 身份细化由本地回归测试覆盖。
 
 ## 问题
 
@@ -18,7 +18,7 @@
 }
 ```
 
-Qwen Code 目前不发送这个头，所以它在这两个平台上的调用量无法归到 Qwen Code 名下。
+原始实现将所有 Qwen Code 流量标识为 `qwen-code`。现在需要根据拥有请求的运行时入口，区分 CLI 和 Desktop 流量。
 
 ## 请求头取值
 
@@ -26,10 +26,10 @@ Qwen Code 目前不发送这个头，所以它在这两个平台上的调用量�
 | --------- | -------------------------------------------------------------------- |
 | `channel` | 国内站为 `qianwenai-inner-agents`，国际站为 `qwencloud-inner-agents` |
 | `source`  | `model`                                                              |
-| `tags.t1` | `qwen-code`，不随版本变化                                            |
+| `tags.t1` | Desktop 运行时为 `qwen-code-desktop`，其余为 `qwen-code-cli`         |
 | `tags.t2` | 按量付费端点为 `payg`；Token Plan 端点不填                           |
 
-站点根据请求的 host 判断。`inner-agents` 是暂定值：接入指南没有对 Qwen Code 归类，这里是根据 Qwen Code 由阿里运营的 QwenLM 组织发布推断的，与指南中 `inner` 示例里的 `qoder` 情况相同。该取值待与平台确认（见待确认问题）；若改为 `outer-agents`，只需修改两处 channel 字符串。
+站点根据请求的 host 判断。已批准的需求为两个站点选择 `inner-agents`，保留现有 channel。Qwen Code 的平台归类仍待平台确认；本次细化不改变这些 channel 取值。
 
 ## 范围
 
@@ -53,9 +53,10 @@ Qwen Code 目前不发送这个头，所以它在这两个平台上的调用量�
 ## 设计决策
 
 - **精确匹配 host。** 先解析 URL，再精确比较 hostname，所以仿冒域名（`maas.qwencloudapi.com.evil.example`）和把域名放在路径里的写法都不会命中。忽略大小写和端口。这里刻意比消费同一份列表的两个端点门禁更窄：`isDashScopeProvider` 和 WebSearch 的端点检查都按后缀匹配 `QWENCLOUD_MAAS_HOSTS`，所以不在上表里的 MaaS 子域会被当成 DashScope 服务、也能通过搜索门禁，但不带来源标识。准入只需要选对 API 方言；来源标识会把 `channel`/`t2` 写进平台面板，因此只覆盖上表列出的四个 host。
-- **Token Plan 不填 `t2`。** Token Plan 的个人版和团队版 key 都以 `sk-sp-` 开头，客户端分不出来。接入指南说明平台可以按 API Key 反查付费方式，不填可以避免错报。
+- **Token Plan 不填 `t2`（已接受的临时行为）。** Token Plan 的个人版和团队版 key 都以 `sk-sp-` 开头，客户端分不出来。接入指南说明平台可以按 API Key 反查付费方式，不填可以避免错报。
 - **第一方取值优先。** `customHeaders` 中同名的项（不区分大小写）会被移除，所以来源标识既不会被覆盖，也不会重复发送。移除时刻意不给提示：这是文档化的策略、没有开关，请求本身照常成功。
-- **不加配置项。** 取值完全由 host 推导，没有需要用户配置的内容。
+- **运行时身份。** 三条调用链都传入已有的 `Config.getChannel()` 值。仅 `desktop` 映射为 `qwen-code-desktop`；CLI、daemon、ACP、其他集成及未设置的 channel 均映射为 `qwen-code-cli`。Desktop 启动器已有 channel 传递，包括由 ACP channel fallback 解析的 Tauri 标记。派生 agent Config 会继承该值，嵌套 agent 和模型覆盖也一样。无需新增环境检测或身份状态。
+- **不加配置项。** 取值由端点和运行时 channel 推导，没有需要用户配置的内容。现有遥测和隐私开关行为保持不变。
 - **单一 leaf 模块。** `packages/core/src/core/dashscope-source-config.ts` 不依赖任何模块，并维护 `QWENCLOUD_MAAS_HOSTS`（由 DashScope provider 再导出），provider、Responses 链路和 WebSearch 都可以引用它，不会形成循环依赖。这个 leaf 不是两个 host 字符串的唯一副本：`telemetry/gen-ai-provider.ts` 仍按自己的字面量分类，`core/reasoning-overrides.ts` 用一段内联正则。本 PR 不做合并——两个文件都不在本次改动范围内——但 leaf 已经消掉了 `gen-ai-provider.ts` 注释里所说的循环依赖，合并因此成了一个普通的后续项。`providers/presets/` 下的四个 preset base URL 也内嵌同一批 host，并有测试把它们钉在 `SITE_CHANNELS` 上。
 - **按配置的 host 判断，而非运行时 host。** 判断依据是配置的 `baseUrl`。Qwen OAuth 会在运行时替换客户端的端点，但它配置的 `baseUrl` 是无法解析的占位符 `DYNAMIC_QWEN_OAUTH_BASE_URL`，因此永远不会带上来源标识；有测试固定这一点。
 
@@ -79,13 +80,13 @@ Qwen Code 目前不发送这个头，所以它在这两个平台上的调用量�
 ## 验证
 
 - 单元测试覆盖 host 矩阵（两个站点、两种付费方式、大小写和端口、仿冒域名和路径中的域名、百炼域名），以及对冲突 `customHeaders` 的优先级。
-- 三条链路各有一个测试，断言请求 QwenCloud 端点时带上了这个头；关闭注入后三个测试全部失败。
+- 三条链路都验证 CLI、Desktop 和未设置的运行时 channel，以及对自定义请求头的优先级。leaf 测试覆盖两种付费方式的运行时映射；派生 Config 测试验证嵌套 agent 的 channel 继承。任一调用方丢失 channel 参数，都会导致对应 Desktop 用例失败。
 - 向 `token-plan.maas.qianwenaiapi.com` 发出的真实请求，带头和不带头都返回 HTTP 200。
-- 在 HTTP 客户端层观察一次真实的 CLI 运行：发往 Token Plan host 的请求恰好带一个头；同一会话中发往百炼 workspace host 的请求不带。
+- 保留的 CLI 请求证据显示，Token Plan 请求恰好带一个来源标识头。独立的百炼对照进程没有发送来源标识头；这些观测来自不同会话。
 
 ## 待确认问题
 
 - Qwen Code 应归为阿里系内部 Agent（`inner-agents`）还是外部生态 Agent（`outer-agents`）。接入指南要求各 Agent 团队在接入前确认归属，且没有列出 Qwen Code；它引用的上游埋点方案可能定义了规则，但无法访问。
-- `qwen-code` 是否需要先在平台的渠道清单中登记，才会被计入统计。
+- `qwen-code-cli` 和 `qwen-code-desktop` 是否需要先在平台的渠道清单中登记，才会被计入统计。
 - Token Plan 端点不填 `t2` 是否为平台所接受。
 - Batch 提交请求上的头能否传递到该批次的模型调用。

@@ -19,15 +19,33 @@ import {
 } from '../providers/presets/qwencloud-token-plan.js';
 
 const CN_PAYG =
-  '{"channel":"qianwenai-inner-agents","source":"model","tags":{"t1":"qwen-code","t2":"payg"}}';
+  '{"channel":"qianwenai-inner-agents","source":"model","tags":{"t1":"qwen-code-cli","t2":"payg"}}';
 const INTL_PAYG =
-  '{"channel":"qwencloud-inner-agents","source":"model","tags":{"t1":"qwen-code","t2":"payg"}}';
+  '{"channel":"qwencloud-inner-agents","source":"model","tags":{"t1":"qwen-code-cli","t2":"payg"}}';
 const CN_TOKEN_PLAN =
-  '{"channel":"qianwenai-inner-agents","source":"model","tags":{"t1":"qwen-code"}}';
+  '{"channel":"qianwenai-inner-agents","source":"model","tags":{"t1":"qwen-code-cli"}}';
 const INTL_TOKEN_PLAN =
-  '{"channel":"qwencloud-inner-agents","source":"model","tags":{"t1":"qwen-code"}}';
+  '{"channel":"qwencloud-inner-agents","source":"model","tags":{"t1":"qwen-code-cli"}}';
 
 describe('buildDashScopeSourceConfig', () => {
+  it.each([
+    [undefined, 'qwen-code-cli'],
+    ['CLI', 'qwen-code-cli'],
+    ['ACP', 'qwen-code-cli'],
+    ['daemon', 'qwen-code-cli'],
+    ['vscode', 'qwen-code-cli'],
+    ['desktop', 'qwen-code-desktop'],
+  ])('attributes runtime channel %s on both plans', (runtimeChannel, t1) => {
+    for (const [baseUrl, tags] of [
+      [QWENCLOUD_GLOBAL_BASE_URL, { t1, t2: 'payg' }],
+      [QWENCLOUD_TOKEN_PLAN_GLOBAL_BASE_URL, { t1 }],
+    ] as const) {
+      expect(
+        JSON.parse(buildDashScopeSourceConfig(baseUrl, runtimeChannel)!),
+      ).toEqual({ channel: 'qwencloud-inner-agents', source: 'model', tags });
+    }
+  });
+
   it.each([
     ['https://maas.qianwenaiapi.com/compatible-mode/v1', CN_PAYG],
     ['https://maas.qwencloudapi.com/compatible-mode/v1', INTL_PAYG],

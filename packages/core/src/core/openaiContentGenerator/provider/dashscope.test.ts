@@ -518,19 +518,36 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       );
     });
 
-    it('should attribute QwenCloud requests over a conflicting custom header', () => {
-      const headers = gen({
-        authType: AuthType.USE_OPENAI,
-        baseUrl: 'https://maas.qwencloudapi.com/compatible-mode/v1',
-        customHeaders: { 'x-dashscope-source-config': 'user', 'X-Custom': '1' },
-      }).buildHeaders();
+    it.each([
+      [undefined, 'qwen-code-cli'],
+      ['CLI', 'qwen-code-cli'],
+      ['desktop', 'qwen-code-desktop'],
+    ])(
+      'attributes channel %s over a conflicting custom header',
+      (channel, t1) => {
+        const headers = gen(
+          {
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://maas.qwencloudapi.com/compatible-mode/v1',
+            customHeaders: {
+              'x-dashscope-source-config': 'user',
+              'X-Custom': '1',
+            },
+          },
+          { ...mockCliConfig, getChannel: () => channel } as Config,
+        ).buildHeaders();
 
-      expect(headers['X-DashScope-Source-Config']).toBe(
-        '{"channel":"qwencloud-inner-agents","source":"model","tags":{"t1":"qwen-code","t2":"payg"}}',
-      );
-      expect(headers).not.toHaveProperty('x-dashscope-source-config');
-      expect(headers['X-Custom']).toBe('1');
-    });
+        expect(headers['X-DashScope-Source-Config']).toBe(
+          JSON.stringify({
+            channel: 'qwencloud-inner-agents',
+            source: 'model',
+            tags: { t1, t2: 'payg' },
+          }),
+        );
+        expect(headers).not.toHaveProperty('x-dashscope-source-config');
+        expect(headers['X-Custom']).toBe('1');
+      },
+    );
 
     it.each([
       [

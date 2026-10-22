@@ -1213,16 +1213,27 @@ describe('ResponsesPipeline', () => {
       );
     });
 
-    it('sends one first-party source attribution to a QwenCloud Token Plan endpoint', async () => {
+    it.each([
+      [undefined, 'qwen-code-cli'],
+      ['CLI', 'qwen-code-cli'],
+      ['desktop', 'qwen-code-desktop'],
+    ])('attributes channel %s on the Token Plan wire', async (channel, t1) => {
       await executeDone(
-        pipe({
-          baseUrl: 'https://token-plan.maas.qianwenaiapi.com/compatible-mode',
-          customHeaders: { 'X-DashScope-Source-Config': 'user' },
-        }),
+        pipe(
+          {
+            baseUrl: 'https://token-plan.maas.qianwenaiapi.com/compatible-mode',
+            customHeaders: { 'X-DashScope-Source-Config': 'user' },
+          },
+          { ...makeCliConfig(), getChannel: () => channel } as Config,
+        ),
       );
 
       expect(sentHeaders().get('x-dashscope-source-config')).toBe(
-        '{"channel":"qianwenai-inner-agents","source":"model","tags":{"t1":"qwen-code"}}',
+        JSON.stringify({
+          channel: 'qianwenai-inner-agents',
+          source: 'model',
+          tags: { t1 },
+        }),
       );
     });
 

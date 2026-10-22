@@ -4,7 +4,7 @@
 
 ## Status
 
-Implemented. Verified against the live 千问AI平台 Token Plan endpoint.
+Implemented. The original header was verified against the live 千问AI平台 Token Plan endpoint. The CLI/Desktop identity refinement is covered by local regression tests.
 
 ## Problem
 
@@ -18,7 +18,7 @@ Implemented. Verified against the live 千问AI平台 Token Plan endpoint.
 }
 ```
 
-Qwen Code sends no such header, so its traffic on these platforms is not attributed to it.
+The original implementation attributed all Qwen Code traffic as `qwen-code`. CLI and Desktop traffic must now be distinguished by the runtime entry that owns the request.
 
 ## Header value
 
@@ -26,10 +26,10 @@ Qwen Code sends no such header, so its traffic on these platforms is not attribu
 | --------- | ------------------------------------------------------------------------------------------------ |
 | `channel` | `qianwenai-inner-agents` for the China site, `qwencloud-inner-agents` for the international site |
 | `source`  | `model`                                                                                          |
-| `tags.t1` | `qwen-code`, stable across versions                                                              |
+| `tags.t1` | `qwen-code-desktop` for the Desktop runtime; `qwen-code-cli` otherwise                           |
 | `tags.t2` | `payg` on pay-as-you-go endpoints; omitted on Token Plan endpoints                               |
 
-The site is derived from the request's host. `inner-agents` is provisional: the guide does not classify Qwen Code, and it is inferred from Qwen Code being published by the Alibaba-run QwenLM organization, like `qoder` in the guide's `inner` example. It awaits confirmation with the platform (see Open questions); switching to `outer-agents` changes only the two channel strings.
+The site is derived from the request's host. The approved requirement selects `inner-agents` for both sites, preserving the existing channels. Platform confirmation of Qwen Code's classification remains an open question; this refinement does not change those channel values.
 
 ## Scope
 
@@ -53,9 +53,10 @@ Three request paths can reach these hosts in a default setup, and all three send
 ## Design decisions
 
 - **Exact host match.** The URL is parsed and the hostname compared exactly, so lookalike hosts (`maas.qwencloudapi.com.evil.example`) and path-embedded hosts do not match. Case and port are ignored. This is deliberately narrower than the two endpoint gates that consume the same list: `isDashScopeProvider` and the WebSearch endpoint check suffix-match `QWENCLOUD_MAAS_HOSTS`, so a MaaS subdomain that is not in the table above is served as DashScope and passes the search gate, but is not attributed. Admission only has to pick the right API dialect; attribution writes a `channel`/`t2` pair onto the platform's dashboard, so it stays on the four hosts listed above.
-- **No `t2` on Token Plan.** Token Plan keys share the `sk-sp-` prefix across the Personal and Team editions, so the client cannot tell them apart. The guide states the platform can resolve the plan from the API key; omitting the field avoids misreporting.
+- **No `t2` on Token Plan (accepted temporary behavior).** Token Plan keys share the `sk-sp-` prefix across the Personal and Team editions, so the client cannot tell them apart. The guide states the platform can resolve the plan from the API key; omitting the field avoids misreporting.
 - **First-party value wins.** A `customHeaders` entry with the same name, in any casing, is removed, so the attribution can neither be overridden nor sent twice. There is deliberately no diagnostic for the removal: it is a documented policy with no switch, and the request still succeeds.
-- **No setting.** The value is fully derived; there is nothing to configure.
+- **Runtime identity.** All three callers pass the existing `Config.getChannel()` value. Only `desktop` maps to `qwen-code-desktop`; CLI, daemon, ACP, other integrations and an unset channel map to `qwen-code-cli`. Desktop launchers already establish the channel, including the Tauri marker resolved by the ACP channel fallback. Derived agent Configs inherit it, including nested agents and model overrides. No new environment detection or identity state is needed.
+- **No setting.** The value is derived from the endpoint and runtime channel; there is nothing to configure. Existing telemetry and privacy switches are unchanged.
 - **One leaf module.** `packages/core/src/core/dashscope-source-config.ts` has no imports and owns `QWENCLOUD_MAAS_HOSTS` (re-exported by the DashScope provider), so the provider, the Responses wire and WebSearch can all use it without an import cycle. The leaf is not the only copy of the two host strings: `telemetry/gen-ai-provider.ts` still classifies by its own literals and `core/reasoning-overrides.ts` by an inline regex. Neither is consolidated here — both files are outside this change — but the leaf removes the import cycle that `gen-ai-provider.ts` cites as the reason, so consolidation is now a plain follow-up. The four preset base URLs under `providers/presets/` embed the same hosts, and a test pins them to `SITE_CHANNELS`.
 - **Configured host, not runtime host.** The decision reads the configured `baseUrl`. Qwen OAuth swaps the client's endpoint at runtime, but its configured `baseUrl` is the unparseable placeholder `DYNAMIC_QWEN_OAUTH_BASE_URL`, so it is never attributed; a test pins this.
 
@@ -79,13 +80,13 @@ Any of these can call `withDashScopeSourceConfig` once they reach QwenCloud.
 ## Validation
 
 - Unit tests cover the host matrix (both sites, both plans, case and port, lookalike and path-embedded hosts, Bailian hosts) and the precedence over a conflicting `customHeaders` entry.
-- Each of the three paths has a test asserting the header on a QwenCloud endpoint; disabling the injection fails all three.
+- Each of the three paths checks CLI, Desktop and unset runtime channels, alongside custom-header precedence. The leaf tests cover the runtime mapping for both plans; derived Config tests verify channel inheritance through nested agents. Dropping a caller's channel argument breaks its Desktop case.
 - A live request to `token-plan.maas.qianwenaiapi.com` returned HTTP 200 both with and without the header.
-- A real CLI run observed at the HTTP client sent exactly one header to the Token Plan host and none to a Bailian workspace host in the same session.
+- The retained CLI wire evidence shows exactly one attribution header on the Token Plan request. A separate Bailian control process sent no attribution header; these were not observations from the same session.
 
 ## Open questions
 
 - Whether Qwen Code is classified as an Alibaba-affiliated internal Agent (`inner-agents`) or an external ecosystem Agent (`outer-agents`). The guide asks each Agent team to confirm ownership before integration and does not list Qwen Code; the upstream tracking plan it cites may define the rule but was not accessible.
-- Whether `qwen-code` must be registered in the platform's channel list before it is counted.
+- Whether `qwen-code-cli` and `qwen-code-desktop` must be registered in the platform's channel list before it is counted.
 - Whether omitting `t2` on Token Plan endpoints is acceptable to the platform.
 - Whether Batch submission headers propagate to the batch's model calls.
