@@ -164,10 +164,10 @@ interface PendingUpdate {
   /** Key for `/models`, set only for providers that support discovery. */
   discoveryApiKey?: string;
   /**
-   * Model ids served to the stored key, when discovery succeeded. Built-in
-   * models outside this set are not installed.
+   * Built-in model ids to install, when discovery narrowed the list. The
+   * prompt's diff is computed from the same list. Unset means every built-in.
    */
-  servedModelIds?: ReadonlySet<string>;
+  installModelIds?: string[];
 }
 
 function readInstalledOwnedIds(
@@ -190,26 +190,25 @@ function readInstalledOwnedIds(
     : allModels.map((m) => m.id);
 }
 
-function resolveDiscoveryApiKey(
+function resolveDiscoveryApiKey(provider: ProviderConfig): string | undefined {
+  // Owned models always carry the provider's envKey, so the stored key is
+  // read from that variable.
+  if (!provider.supportsModelDiscovery || typeof provider.envKey !== 'string') {
+    return undefined;
+  }
+  return process.env[provider.envKey]?.trim() || undefined;
+}
+
+function readInstalledOwnedModels(
   settings: LoadedSettings,
   provider: ProviderConfig,
-  baseUrl: string,
-): string | undefined {
-  if (!provider.supportsModelDiscovery) return undefined;
-  const mergedSettings = settings.merged as Record<string, unknown>;
-  const modelProviders = mergedSettings['modelProviders'] as
-    | Record<string, ProviderModelConfig[]>
-    | undefined;
-  const ownsFn = resolveOwnsModel(provider);
-  const installedEnvKey = (modelProviders?.[provider.protocol] ?? []).find(
-    (model) => model.envKey && (!ownsFn || ownsFn(model)),
-  )?.envKey;
-  const envKey =
-    installedEnvKey ??
-    (typeof provider.envKey === 'function'
-      ? provider.envKey(provider.protocol, resolveBaseUrl(provider, baseUrl))
-      : provider.envKey);
-  return process.env[envKey]?.trim() || undefined;
+): ProviderModelConfig[] {
+  const ownsModel = resolveOwnsModel(provider);
+  return getModelsForProviderProtocol(
+    settings.merged.modelProviders,
+    provider.protocol,
+    settings.merged.providerProtocol,
+  ).filter((model) => !ownsModel || ownsModel(model));
 }
 
 function getInstalledOwnedModelIds(
@@ -261,7 +260,7 @@ function findAllPendingUpdates(
     const existingModelIds = getInstalledOwnedModelIds(settings, provider);
     const newModelIds = provider.models!.map((s) => s.id);
     const diff = computeModelDiff(existingModelIds, newModelIds, currentModel);
-    const discoveryApiKey = resolveDiscoveryApiKey(settings, provider, baseUrl);
+    const discoveryApiKey = resolveDiscoveryApiKey(provider);
 
     results.push({
       provider,
@@ -297,16 +296,55 @@ async function narrowToServedModels(
     signal,
   });
   if (!discovered) return pending;
-  const servedModelIds = new Set(discovered.map((model) => model.id));
-  const newModelIds = builtInModels
-    .map((model) => model.id)
-    .filter((id) => servedModelIds.has(id));
-  if (newModelIds.length === 0) return pending;
+  const servedIds = new Set(discovered.map((model) => model.id));
+  const builtInIds = builtInModels.map((model) => model.id);
+  if (!builtInIds.some((id) => servedIds.has(id))) return pending;
+  // Discovery alone never removes the selected model, so one incomplete
+  // listing cannot drop the model in use. The preset can still remove it.
+  const keepsCurrentModel = pending.existingModelIds.includes(currentModel);
+  const installModelIds = builtInIds.filter(
+    (id) => servedIds.has(id) || (keepsCurrentModel && id === currentModel),
+  );
   return {
     ...pending,
-    servedModelIds,
-    diff: computeModelDiff(pending.existingModelIds, newModelIds, currentModel),
+    installModelIds,
+    diff: computeModelDiff(
+      pending.existingModelIds,
+      installModelIds,
+      currentModel,
+    ),
   };
+}
+
+/**
+ * Whether installing a narrowed update would change nothing: no model added
+ * or removed, and every installed model already matches its template. This
+ * happens when a new preset version only touches models the key is not
+ * served.
+ */
+function isNarrowedUpdateNoop(
+  settings: LoadedSettings,
+  pending: PendingUpdate,
+): boolean {
+  const { installModelIds, diff } = pending;
+  if (!installModelIds || diff.added.length || diff.removed.length) {
+    return false;
+  }
+  const installed = readInstalledOwnedModels(settings, pending.provider);
+  const ids = new Set(installModelIds);
+  return buildProviderTemplate(pending.provider, pending.baseUrl)
+    .filter((model) => ids.has(model.id))
+    .every((template) => {
+      const model = installed.find((m) => m.id === template.id);
+      if (!model) return false;
+      // Updates keep the installed envKey, so it is not compared.
+      return Object.entries(template).every(
+        ([key, value]) =>
+          key === 'envKey' ||
+          JSON.stringify(model[key as keyof ProviderModelConfig]) ===
+            JSON.stringify(value),
+      );
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +367,11 @@ export function useProviderUpdates(
     ProviderUpdateRequest | undefined
   >();
   const migrated = useRef(false);
+  // Prompts waiting for the one on screen to close. Providers with model
+  // discovery prompt after their `/models` request, which can resolve while
+  // another provider's prompt is still open.
+  const promptQueue = useRef<PendingUpdate[][]>([]);
+  const promptOpen = useRef(false);
 
   const executeUpdate = useCallback(
     async (pending: PendingUpdate) => {
@@ -336,16 +379,8 @@ export function useProviderUpdates(
         const providerCfg = pending.provider;
         const resolved = resolveBaseUrl(providerCfg, pending.baseUrl);
         const builtInIds = getDefaultModelIds(providerCfg);
-        const servedIds = pending.servedModelIds;
-        const defaultIds = servedIds
-          ? builtInIds.filter((id) => servedIds.has(id))
-          : builtInIds;
-        const ownsModel = resolveOwnsModel(providerCfg);
-        const existingModels = getModelsForProviderProtocol(
-          settings.merged.modelProviders,
-          providerCfg.protocol,
-          settings.merged.providerProtocol,
-        ).filter((model) => !ownsModel || ownsModel(model));
+        const defaultIds = pending.installModelIds ?? builtInIds;
+        const existingModels = readInstalledOwnedModels(settings, providerCfg);
         const prebuiltModels: ProviderModelConfig[] = defaultIds.flatMap(
           (id) => {
             const installed = existingModels.filter((model) => model.id === id);
@@ -452,17 +487,21 @@ export function useProviderUpdates(
     [settings, config, addItem],
   );
 
-  const showUpdatePrompt = useCallback(
-    (pendingList: PendingUpdate[]) => {
-      const entries: ProviderUpdateEntry[] = pendingList.map((p) => ({
-        providerLabel: t(p.provider.label),
-        diff: p.diff,
-      }));
+  const showNextPrompt = useCallback(() => {
+    const pendingList = promptQueue.current.shift();
+    promptOpen.current = pendingList !== undefined;
+    if (!pendingList) return;
 
-      setUpdateRequest({
-        entries,
-        onConfirm: async (choice: UpdateChoice) => {
-          setUpdateRequest(undefined);
+    const entries: ProviderUpdateEntry[] = pendingList.map((p) => ({
+      providerLabel: t(p.provider.label),
+      diff: p.diff,
+    }));
+
+    setUpdateRequest({
+      entries,
+      onConfirm: async (choice: UpdateChoice) => {
+        setUpdateRequest(undefined);
+        try {
           if (choice === 'update') {
             for (const p of pendingList) {
               await executeUpdate(p);
@@ -509,10 +548,20 @@ export function useProviderUpdates(
               );
             }
           }
-        },
-      });
+        } finally {
+          showNextPrompt();
+        }
+      },
+    });
+  }, [settings, executeUpdate, addItem]);
+
+  const queueUpdatePrompt = useCallback(
+    (pendingList: PendingUpdate[]) => {
+      if (pendingList.length === 0) return;
+      promptQueue.current.push(pendingList);
+      if (!promptOpen.current) showNextPrompt();
     },
-    [settings, executeUpdate, addItem],
+    [showNextPrompt],
   );
 
   const checkForUpdates = useCallback(
@@ -527,31 +576,52 @@ export function useProviderUpdates(
 
       if (pendingList.length === 0) return;
 
-      if (!pendingList.some((p) => p.discoveryApiKey)) {
-        showUpdatePrompt(pendingList);
-        return;
-      }
+      // Providers without discovery prompt right away. Providers with it
+      // compare against the models served to the stored key, so the prompt's
+      // diff matches what Update installs; they prompt once `/models` answers.
+      queueUpdatePrompt(pendingList.filter((p) => !p.discoveryApiKey));
+      const discoverable = pendingList.filter((p) => p.discoveryApiKey);
+      if (discoverable.length === 0) return;
 
-      // Providers with model discovery compare against the models served to
-      // the stored key, so the prompt's diff matches what Update installs.
       void Promise.all(
-        pendingList.map((p) => narrowToServedModels(p, currentModel, signal)),
+        discoverable.map((p) => narrowToServedModels(p, currentModel, signal)),
       ).then((narrowed) => {
-        if (!signal.aborted) showUpdatePrompt(narrowed);
+        if (signal.aborted) return;
+        const toPrompt: PendingUpdate[] = [];
+        const persistScope = getPersistScopeForModelSelection(settings);
+        for (const p of narrowed) {
+          if (!isNarrowedUpdateNoop(settings, p)) {
+            toPrompt.push(p);
+            continue;
+          }
+          // Nothing changes for this key: record the version without asking.
+          settings.setValue(
+            persistScope,
+            `${PROVIDER_METADATA_NS}.${p.metadataKey}.version`,
+            p.currentVersion,
+          );
+        }
+        queueUpdatePrompt(toPrompt);
       });
     },
-    [settings, config, showUpdatePrompt],
+    [settings, config, queueUpdatePrompt],
   );
 
   useEffect(() => {
     const controller = new AbortController();
     checkForUpdates(controller.signal);
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      // A re-run re-checks from scratch; drop prompts queued by this run.
+      promptQueue.current = [];
+      promptOpen.current = false;
+    };
   }, [checkForUpdates]);
 
   const dismissProviderUpdate = useCallback(() => {
     setUpdateRequest(undefined);
-  }, []);
+    showNextPrompt();
+  }, [showNextPrompt]);
 
   return {
     providerUpdateRequest: updateRequest,
