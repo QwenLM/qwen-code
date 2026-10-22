@@ -857,6 +857,36 @@ describe('ChatRecordingService - auto-title trigger', () => {
     expect(findCustomTitleRecord()).toBeUndefined();
   });
 
+  it('titles a projected session after the ring shifts its newest text out', async () => {
+    // R8-1: one marker-less hook-context payload flips the session into
+    // projection mode; 20 payload-less turns then evict every ring entry.
+    // The recorder must keep the newest projected text beside the flag, or
+    // the session reports empty_history over a full visible conversation.
+    tryGenerateSessionTitleMock.mockResolvedValue({
+      ok: true,
+      title: 'Retained Prompt',
+      modelUsed: 'qwen-turbo',
+    });
+    chatRecordingService.recordUserMessage(
+      [{ text: 'hidden model context' }],
+      undefined,
+      { displayText: 'visible prompt', hookContext: 'hidden context' },
+    );
+    for (let index = 0; index < 20; index++) {
+      chatRecordingService.recordUserMessage([{ text: `bare ${index}` }]);
+    }
+
+    expect(chatRecordingService.hasDisplayProjectionForTitle()).toBe(true);
+    await assistantTurn();
+
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
+      mockConfig,
+      expect.any(AbortSignal),
+      ['visible prompt'],
+      true,
+    );
+  });
+
   it('does not trigger in headless CLI mode (non-interactive, non-ACP)', async () => {
     vi.mocked(mockConfig.isInteractive).mockReturnValue(false);
     vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(false);

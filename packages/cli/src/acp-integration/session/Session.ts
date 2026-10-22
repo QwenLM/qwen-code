@@ -6787,8 +6787,13 @@ export class Session implements SessionContext {
               .join(' ');
             const promptDisplayTextValue =
               promptMetadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+            // Mirror #beginTurnRecording: an empty client projection is
+            // absent, not a visible empty text. Keeping '' here writes a
+            // `displayText: ''` marker that hides the turn from the
+            // navigation index and flips core into projection mode.
             const promptDisplayText =
-              typeof promptDisplayTextValue === 'string'
+              typeof promptDisplayTextValue === 'string' &&
+              promptDisplayTextValue !== ''
                 ? promptDisplayTextValue
                 : undefined;
             const inputAnnotations = readDaemonInputAnnotations(

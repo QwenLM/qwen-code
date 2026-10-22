@@ -1139,6 +1139,12 @@ export interface BranchCheckpointCursor {
 export interface ChatRecordingRestoreState {
   lastCompletedUuid: string;
   turnParentUuids: Array<string | null>;
+  /** Projection mode of the restored session; see `restoreProjectedState`. */
+  displayProjectionForTitle?: boolean;
+  /** Surviving title texts, oldest first (already 20-capped). */
+  userDisplayTextsForTitle?: Array<string | undefined>;
+  /** Newest non-empty projected text, retained past ring eviction. */
+  lastProjectionTextForTitle?: string;
   customTitle?: string;
   titleSource?: TitleSource;
   parentSessionId?: string;
@@ -1257,6 +1263,22 @@ export class ChatRecordingService {
     | SessionApprovalModeRecordPayload
     | undefined;
   private readonly userDisplayTextsForTitle: Array<string | undefined> = [];
+  /**
+   * Per-user-turn projection state, index-aligned with `turnParentUuids`.
+   * The ring above is 20-capped, so it cannot answer "does any surviving
+   * turn still project?" after eviction; this array can, and rewind slices
+   * it in lockstep with the turn boundaries.
+   */
+  private readonly turnTitleStates: Array<{
+    projection: boolean;
+    displayText: string | undefined;
+  }> = [];
+  /**
+   * Newest non-empty projected display text, kept beside the ring so a
+   * session whose 20-slot ring shifted every entry out still has one visible
+   * text to title from instead of reporting `empty_history`.
+   */
+  private lastProjectionTextForTitle: string | undefined;
   /**
    * Separate from the per-turn texts: one `string | undefined` slot cannot
    * answer both "is this session in client-projection mode?" and "what text
@@ -1458,7 +1480,9 @@ export class ChatRecordingService {
     this.activeBranchBaseUuid = null;
     this.pendingBranchToolCalls = [];
     this.userDisplayTextsForTitle.length = 0;
+    this.turnTitleStates.length = 0;
     this.displayProjectionForTitle = false;
+    this.lastProjectionTextForTitle = undefined;
     if (!sessionData) return;
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
     for (const record of sessionData.conversation.messages) {
@@ -1521,14 +1545,20 @@ export class ChatRecordingService {
   private trackUserDisplayTextForTitlePayload(
     payload: UserPromptRecordPayload | undefined,
   ): void {
-    if (payload !== undefined && payload.displayProjection !== false) {
-      this.displayProjectionForTitle = true;
-    }
-    this.trackUserDisplayTextForTitle(
+    const projection =
+      payload !== undefined && payload.displayProjection !== false;
+    const displayText =
       payload?.displayProjection === false && payload.displayText === ''
         ? undefined
-        : payload?.displayText,
-    );
+        : payload?.displayText;
+    this.turnTitleStates.push({ projection, displayText });
+    if (projection) {
+      this.displayProjectionForTitle = true;
+      if (displayText !== undefined && displayText !== '') {
+        this.lastProjectionTextForTitle = displayText;
+      }
+    }
+    this.trackUserDisplayTextForTitle(displayText);
   }
 
   private trackUserDisplayTextForTitle(displayText: string | undefined): void {
@@ -1544,6 +1574,22 @@ export class ChatRecordingService {
     this.resetExternalRecordIndex();
     this.activeBranchBaseUuid = state.lastCompletedUuid;
     this.turnParentUuids = [...state.turnParentUuids];
+    // A re-bound recorder must never inherit the previous session's marker.
+    this.userDisplayTextsForTitle.length = 0;
+    this.turnTitleStates.length = 0;
+    this.displayProjectionForTitle = false;
+    this.lastProjectionTextForTitle = undefined;
+    if (state.userDisplayTextsForTitle !== undefined) {
+      for (const text of state.userDisplayTextsForTitle.slice(
+        -MAX_TITLE_USER_DISPLAY_TEXTS,
+      )) {
+        this.trackUserDisplayTextForTitle(text);
+      }
+    }
+    if (state.displayProjectionForTitle === true) {
+      this.displayProjectionForTitle = true;
+      this.lastProjectionTextForTitle = state.lastProjectionTextForTitle;
+    }
     this.currentCustomTitle = state.customTitle;
     this.currentTitleSource = state.titleSource;
     this.currentParentSessionId = state.parentSessionId;
@@ -2212,11 +2258,13 @@ export class ChatRecordingService {
           .records as ChatRecord[];
         this.rebuildTurnBoundaries(active);
         this.userDisplayTextsForTitle.length = 0;
+        this.turnTitleStates.length = 0;
+        this.displayProjectionForTitle = false;
+        this.lastProjectionTextForTitle = undefined;
         for (const record of active) {
           if (record.type === 'user' && record.subtype === undefined) {
-            this.trackUserDisplayTextForTitle(
-              (record.systemPayload as UserPromptRecordPayload | undefined)
-                ?.displayText,
+            this.trackUserDisplayTextForTitlePayload(
+              record.systemPayload as UserPromptRecordPayload | undefined,
             );
           }
         }
@@ -2562,6 +2610,13 @@ export class ChatRecordingService {
   }
 
   getUserDisplayTextsForTitle(): ReadonlyArray<string | undefined> {
+    if (
+      this.displayProjectionForTitle &&
+      this.userDisplayTextsForTitle.every((text) => text === undefined) &&
+      this.lastProjectionTextForTitle !== undefined
+    ) {
+      return [this.lastProjectionTextForTitle];
+    }
     return this.userDisplayTextsForTitle;
   }
 
@@ -3087,7 +3142,9 @@ export class ChatRecordingService {
           // through: the ring can shift every recorded entry out of a session
           // that is still projected, so the consumer must not re-derive the
           // mode from the surviving texts.
-          this.displayProjectionForTitle ? this.userDisplayTextsForTitle : [],
+          this.displayProjectionForTitle
+            ? this.getUserDisplayTextsForTitle()
+            : [],
           this.displayProjectionForTitle,
         );
         if (!outcome.ok) return;
@@ -3404,6 +3461,26 @@ export class ChatRecordingService {
       this.userDisplayTextsForTitle.splice(
         Math.max(0, targetTurnIndex - projectionStart),
       );
+      // Prune the per-turn projection state with the same boundary and
+      // re-derive the flag: a rewind past the only projected turn must not
+      // leave the session in projection mode with an all-undefined ring.
+      this.turnTitleStates.length = Math.min(
+        this.turnTitleStates.length,
+        targetTurnIndex,
+      );
+      this.displayProjectionForTitle = this.turnTitleStates.some(
+        (turn) => turn.projection,
+      );
+      this.lastProjectionTextForTitle = undefined;
+      for (const turn of this.turnTitleStates) {
+        if (
+          turn.projection &&
+          turn.displayText !== undefined &&
+          turn.displayText !== ''
+        ) {
+          this.lastProjectionTextForTitle = turn.displayText;
+        }
+      }
       // Trim future boundaries — they no longer exist in the active branch.
       this.turnParentUuids = this.turnParentUuids.slice(0, targetTurnIndex);
       // The previous attribution snapshot now sits on the abandoned

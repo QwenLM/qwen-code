@@ -30,6 +30,7 @@ import {
   vi,
 } from 'vitest';
 import { SessionService, SessionStorageEntryError } from './sessionService.js';
+import { getMaxInlineMediaBytes } from '../core/inlineMediaLimit.js';
 import type { RemoveSessionOptions } from './sessionService.js';
 import { SessionTranscriptIdentityUnavailableError } from './session-writer-lease.js';
 import type { ChatRecord } from './chatRecordingService.js';
@@ -374,12 +375,43 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
     expect(svc.readLastRecordUuid(file)).toBe('u1');
   });
 
+  it('recovers a legitimate record larger than the old tail-window ceiling', () => {
+    // An inline image at the configured decoded limit is journaled as
+    // base64 (4/3 inflation) on one JSONL line. The ceiling must sit above
+    // that, or renameSession anchors custom_title.parentUuid at null on a
+    // perfectly valid last record.
+    const record = {
+      ...recordFor('oversized-inline', 'user', null),
+      message: {
+        role: 'user',
+        parts: [
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'A'.repeat(14 * 1024 * 1024),
+            },
+          },
+        ],
+      },
+    };
+    const line = JSON.stringify(record);
+    expect(Buffer.byteLength(line, 'utf8')).toBeGreaterThan(4 * 1024 * 1024);
+    const file = writeJsonl('oversized-inline.jsonl', `${line}\n`);
+
+    expect(svc.readLastRecordUuid(file)).toBe('oversized-inline');
+  });
+
   it('gives up at the tail-window ceiling instead of escalating to a whole-file read', () => {
     // A post-crash garbage flood with no uuid-bearing line: without the
     // ceiling the doubling loop re-reads and re-parses the whole file at
     // every step, stalling renameSession on the daemon route.
-    const MAX_TAIL_WINDOW_SIZE = 4 * 1024 * 1024;
-    const garbage = `${'y'.repeat(4096)}\n`.repeat(1100);
+    const MAX_TAIL_WINDOW_SIZE = Math.max(
+      4 * 1024 * 1024,
+      Math.ceil((getMaxInlineMediaBytes() * 4) / 3) + 1024 * 1024,
+    );
+    const garbage = `${'y'.repeat(4096)}\n`.repeat(
+      Math.ceil(MAX_TAIL_WINDOW_SIZE / 4097) + 100,
+    );
     const file = writeJsonl('huge-garbage-tail.jsonl', garbage);
     expect(fs.statSync(file).size).toBeGreaterThan(MAX_TAIL_WINDOW_SIZE);
 

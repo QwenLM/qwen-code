@@ -86,6 +86,7 @@ import {
   type SessionTranscriptCursorState,
   type SessionTranscriptReadPageOptions,
   type SessionTranscriptRecordPage,
+  navigationKindForRecord,
 } from './session-transcript-reader.js';
 import {
   content,
@@ -3104,6 +3105,32 @@ describe('SessionTranscriptReader', () => {
   });
 
   describe('turn navigation', () => {
+    it('keeps a resource-only prompt visible in navigation', () => {
+      const record: ChatRecord = {
+        uuid: 'u-resource-only',
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date(RECORD_BASE_MS).toISOString(),
+        type: 'user',
+        cwd: workspaceDir,
+        version: '1.0.0',
+        message: { role: 'user', parts: [] },
+        systemPayload: {
+          displayText: '',
+          displayProjection: false,
+          hookContext: '',
+          embeddedResources: [
+            {
+              type: 'resource',
+              resource: { uri: 'context://ide/selection', text: '' },
+            },
+          ],
+        },
+      };
+
+      expect(navigationKindForRecord(record)).toBe('prompt');
+    });
+
     const turnResult = (uuid: string, parentUuid: string, promptId: string) =>
       sys(uuid, parentUuid, 'turn_result', {
         promptId,

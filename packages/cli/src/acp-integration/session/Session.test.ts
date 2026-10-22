@@ -13852,6 +13852,43 @@ describe('Session', () => {
       },
     );
 
+    it('treats an empty client display projection as absent', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const image = {
+        type: 'image' as const,
+        data: 'AQID',
+        mimeType: 'image/png',
+      };
+      const reference = {
+        type: 'image' as const,
+        attachmentId: 'attachment-1',
+        mimeType: 'image/png',
+        size: 3,
+      };
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [image],
+        _meta: {
+          'qwen.daemon.promptDisplayText': '',
+          'qwen.daemon.attachmentReferences': [reference],
+        },
+      });
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        expect.any(String),
+        undefined,
+        expect.objectContaining({
+          displayText: '',
+          displayProjection: false,
+        }),
+        expect.any(String),
+        undefined,
+      );
+    });
+
     it.each(['image', 'text', 'binary'] as const)(
       'keeps %s attachment paths in model context without changing user display text',
       async (kind) => {

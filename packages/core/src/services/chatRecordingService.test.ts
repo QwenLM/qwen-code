@@ -2877,6 +2877,29 @@ describe('ChatRecordingService', () => {
     const failNextFileWrite = (code: string) =>
       vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(throwFsError(code));
 
+    it('restores projection mode and title texts from a projected restore state', () => {
+      const service = activateReduced({
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null],
+        displayProjectionForTitle: true,
+        userDisplayTextsForTitle: ['visible prompt'],
+        lastProjectionTextForTitle: 'visible prompt',
+      });
+
+      expect(service.hasDisplayProjectionForTitle()).toBe(true);
+      expect(service.getUserDisplayTextsForTitle()).toEqual(['visible prompt']);
+    });
+
+    it('does not inherit projection mode when the restore state carries none', () => {
+      const service = activateReduced({
+        lastCompletedUuid: 'plain-leaf',
+        turnParentUuids: [null],
+      });
+
+      expect(service.hasDisplayProjectionForTitle()).toBe(false);
+      expect(service.getUserDisplayTextsForTitle()).toEqual([]);
+    });
+
     it('reanchors session source after more than the tail window is appended', async () => {
       await expect(
         svc.recordSessionSource('channel', 'channel-main'),

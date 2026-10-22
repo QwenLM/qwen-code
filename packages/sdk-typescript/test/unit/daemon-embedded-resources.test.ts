@@ -470,14 +470,23 @@ describe('daemon embedded text resources', () => {
       ),
     );
     const snapshot = store.getSnapshot();
-    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    // The newest block is never evicted, and the summed estimate bound now
+    // covers a writer-admitted prompt (~2 MiB), so the block may charge up
+    // to that bound past a smaller store budget.
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(
+      maxRetainedBytes + 2 * 1024 * 1024 + 4096,
+    );
     expect(onTruncation).toHaveBeenCalled();
     const block = snapshot.blocks.find((b) => b.kind === 'user');
     if (!block || block.kind !== 'user') {
       throw new Error('expected one retained user block');
     }
-    expect(block.embeddedResources!.length).toBeLessThan(5);
-    expect(block.embeddedResources!.length).toBeGreaterThan(0);
+    // Admission degrades before dropping: the first two floods fit the
+    // summed estimate bound whole, and the rest keep their display identity
+    // as `_meta`-stripped skeletons.
+    expect(block.embeddedResources).toHaveLength(5);
+    expect(block.embeddedResources![0]).toHaveProperty('_meta');
+    expect(block.embeddedResources![4]).not.toHaveProperty('_meta');
   });
 
   it('skeletonizes rather than drops a resource whose oversized non-ASCII uri overflows the byte ceiling', () => {
@@ -516,7 +525,9 @@ describe('daemon embedded text resources', () => {
     const retained = block.embeddedResources![0]!;
     expect(retained.resource.uri.startsWith('context://example/')).toBe(true);
     expect(retained.resource.uri).toContain('[truncated]');
-    expect(retained.resource.text).toBe('');
+    // R14-4: the uri owns the overflow; a legitimate 5-char text is not the
+    // offender and must survive the uri-driven breach.
+    expect(retained.resource.text).toBe('small');
     const retainedJsonBytes = new TextEncoder().encode(
       JSON.stringify(retained),
     ).length;
@@ -649,6 +660,59 @@ describe('daemon embedded text resources', () => {
     expect(replayed).not.toContain('[truncated]');
   });
 
+  it('does not apply the aggregate estimate cap on a MAX_SAFE_INTEGER budget', () => {
+    // R14-2: both spellings of "unbounded" must skip every byte-driven cut.
+    // The aggregate gate recognized only !isFinite, so this empty-object
+    // flood passed the per-resource gate (trim-free) and was then degraded
+    // by the block sum.
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxBlocks: Number.MAX_SAFE_INTEGER,
+      maxRetainedBytes: Number.MAX_SAFE_INTEGER,
+      onTruncation,
+    });
+    const flood = {
+      type: 'resource',
+      resource: { uri: 'context://example/scalar-flood', text: '' },
+      _meta: { entries: Array.from({ length: 80_000 }, () => ({})) },
+    };
+    store.dispatch(normalizeDaemonEvent(frame(flood))[0]!);
+    const block = store.getSnapshot().blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(1);
+    expect(block.embeddedResources![0]).toHaveProperty('_meta');
+    expect(onTruncation).not.toHaveBeenCalled();
+  });
+
+  it('retains two writer-admitted scalar resources whose summed estimate exceeds the per-resource bound', () => {
+    // R14-3: each resource is inside both per-resource bounds and the two
+    // real-byte sums fit the writer's 256 KiB per-prompt budget, but their
+    // summed estimate units cross the per-resource constant. The aggregate
+    // must be sized as a sum, not reuse the single-resource bound.
+    const maxRetainedBytes = 1024 * 1024;
+    const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+    const scalar = (index: number) => ({
+      type: 'resource',
+      resource: { uri: `context://example/scalar/${index}`, text: '' },
+      _meta: { nums: Array.from({ length: 40_000 }, () => 1) },
+    });
+    store.dispatch([
+      normalizeDaemonEvent(frame(scalar(0)))[0]!,
+      normalizeDaemonEvent(frame(scalar(1)))[0]!,
+    ]);
+    const block = store.getSnapshot().blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(2);
+    expect(block.embeddedResources!.map((entry) => entry.resource.uri)).toEqual(
+      ['context://example/scalar/0', 'context://example/scalar/1'],
+    );
+  });
+
   it('does not skeletonize a writer-journaled scalar payload on replay', () => {
     // The estimator bills a flat 16 units per number/boolean regardless of
     // JSON width, so an estimate-sized ceiling skeletonizes a scalar-heavy
@@ -717,8 +781,19 @@ describe('daemon embedded text resources', () => {
     if (!block || block.kind !== 'user') {
       throw new Error('expected one retained user block');
     }
-    expect(block.embeddedResources!.length).toBeLessThan(256);
-    expect(block.embeddedResources!.length).toBeGreaterThan(0);
+    // Every writer-admitted entry keeps its identity: the first is whole,
+    // the rest fall back to `_meta`-stripped skeletons, so the block's real
+    // JSON sum stays inside the writer's per-prompt budget while no entry
+    // is lost whole.
+    expect(block.embeddedResources).toHaveLength(256);
+    expect(block.embeddedResources![0]).toHaveProperty('_meta');
+    expect(block.embeddedResources![255]).not.toHaveProperty('_meta');
+    const resourceJsonBytes = block.embeddedResources!.reduce(
+      (sum, entry) =>
+        sum + new TextEncoder().encode(JSON.stringify(entry)).length,
+      0,
+    );
+    expect(resourceJsonBytes).toBeLessThanOrEqual(256 * 1024 + 4096);
   });
 
   it('evicts the older block once retained resource charges cross the byte budget', () => {
@@ -842,7 +917,13 @@ describe('daemon embedded text resources', () => {
       throw new Error('expected one retained user block');
     }
     const retained = block.embeddedResources![0]!;
-    expect(retained.resource.text).toBe('');
+    // R14-4: the text owns the overflow, so the byte-budget cut keeps as
+    // much as fits instead of emptying all 100k characters.
+    expect(retained.resource.text).not.toBe('');
+    expect(retained.resource.text).toContain('[truncated]');
+    expect(
+      new TextEncoder().encode(JSON.stringify(retained)).length,
+    ).toBeLessThanOrEqual(256 * 1024);
     expect(retained.resource.uri).toBe('context://example/wide');
     expect(retained.resource.mimeType).toBe('text/plain');
     expect(onTruncation).toHaveBeenCalledWith({
