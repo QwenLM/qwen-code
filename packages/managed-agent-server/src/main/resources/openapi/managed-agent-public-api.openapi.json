@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.75.0",
-    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle. v1.19 serves the task list and detail on both surfaces as partial (Stage H0c): the Session store projects them from the Stage H records the Session authority commits, a task.updated Session event announces each change of a task's view, and Session capabilities advertise tasks. Task events and cancel stay planned until a slice's tasks produce output and accept a cancel. v1.20 implements the Turn read model (Stage D5): the public Turn list and detail read a Session's Turns without their input, newest first by creation time in milliseconds and then Turn ID, with an opaque cursor; a deleted Session's Turns are not readable, and the durable admission fields of a Turn stay planned until D7. v1.21 declares on the task list, detail and event routes of both surfaces the 403 actor_scope_mismatch that the tenant filter answers on every /v1/agents/ and WebShell route, as the Session and Turn reads already do, and the shared Forbidden response names it; a caller that cannot read a task still gets 404. v1.22 adds deployment-opted-in creation with an initial Workspace file-tool Turn (G0) on the public and WebShell surfaces; the fixed server-owned profile does not enable later Workspace operations. v1.23 settles the planned task event and cancel semantics: a durable retention floor, committed-prefix publication, stable cursors, Artifact visibility before expiry, bounded backlog under archival failure, ordered idempotent cancellation and command outcomes. Clients tolerate unknown optional event fields across minor versions. Task events and cancel remain planned. v1.24 serves the read-only Session MCP catalog as partial (Stage H1), projecting display metadata and schemas from committed records without Runtime identities, credentials or production profile enablement. v1.25 implements permission Actions (Stage D6b) on both surfaces: list, get and respond, projected from the Session's action.changed records; a WebShell permission Action carries inputRevision, policyRevision, functionCallId, toolName and expiresAt, its option ids allow and deny are stable, a Turn has at most one requested approval at a time, and a response is a durable command operation carrying requestId. v1.26 declares the tenant filter's 403 actor_scope_mismatch on every covered public and WebShell route, including planned routes, and pins the refusal code in contract traffic. v1.27 adds O3 durable tool-result projection, artifact metadata, immutable range/streaming content and WebShell result reads. Artifact capability requires a configured O3 reader and a Workspace-bound Session; execution admission remains independent. v1.28 admits later Turns of a Workspace-bound Session for the Session's creator under the deployment's Workspace files opt-in, including cancel and rename; WebShell Session capabilities advertise the per-caller workspaceTurns flag. v1.29 implements the AgentDefinition routes (Stage D8a): create, get and update store tenant-scoped, immutable revisions with a content digest, and an unchanged update adds no revision. Sessions still pin qwen-code and the configured revision, and no definition field changes execution yet. v1.30 adds the qwenSignature security scheme for gateway-free deployments: in signed authentication mode the broker authenticates the X-Qwen-Tenant-Id and X-Qwen-Actor-Id header pair itself with an HMAC signature over method, path, query, tenant, actor, timestamp, body digest and Idempotency-Key, carried in X-Qwen-Signature and X-Qwen-Signature-Timestamp, and answers 401 authentication_required or invalid_signature, 400 invalid_request on a repeated Idempotency-Key header, and 413 payload_too_large beyond the signed-body limit; a Session now records its creator so approval responses are owned without a Workspace creation record; a Session with no recorded creator and no recorded create command answers approvals to any caller in its tenant. v1.31 serves the task events routes as partial (Stage H3): a bounded per-task event journal in SQL commits each task view change with its record revision, the durable retention floor survives an empty retained set under the Artifact visibility barrier, output cursors lift with the routes, and the cancel routes stay planned. v1.32 implements the W2 controlled same-Workspace cwd change on both surfaces: the creator changes the bound Session's relative directory under an idle, opt-in deployment through a durable operation with revision CAS and busy barriers; completion emits the session.context.changed Session event and bumps context_revision, while WorkspaceContext.state stays ready and its other values remain reserved for the read-model follow-up, and bound later-turn submission answers 409 session_context_busy while a context-changing operation is open (the cross-slice busy-barrier handshake; permission-action responses and pending mutation commands are excluded from that barrier, so they can never wedge Turn admission). v1.33 shapes the planned Stage H5 channel resources: a channel connection lists its route bindings, a channel lists its outbound deliveries with per-segment states and a stable cursor, and a delivery detail query is named as planned; all mutations stay Idempotency-Key based with 202 plus operation id. v1.35 serves the three channel resources as partial (Stage H5b/H5c): connections and their route bindings, and the delivery list and detail, are read over the registered connections, the committed ingress rows and the delivery ledger; the email reference adapter routes inbound events into bound Sessions and sends replies through the receipted outbox, where unknown is a terminal outcome that is never resent automatically and an explicit resend opens a new delivery id. v1.36 conditions replay-floor expiry on the Snapshot backing the floor (replay_floor_sequence <= snapshot_through_sequence), serves a below-floor cursor from the retained events while a stream reconciliation rebuilds the Snapshot, and adds the opt-in scheduled replay-floor pass. v1.37 enforces the Workspace actor roles on the bound-Session surface: grants are a single role column ordered reader < operator < owner; Turn submit, rename and cwd change now admit any caller holding OPERATOR, but only while the Session's creator-keyed execution facts hold — the Workspace registry still backs the binding and stays ACTIVE, and the actor recorded by the Workspace create command keeps OPERATOR or above, because the admitted work executes under the creator's grants; Turn cancel admits on the OPERATOR role and the Session's executable shape alone, because its delivery reuses the admitted attachment and re-checks no grants; Action respond admits any caller holding OPERATOR or the Session's recorded owner under no shape gate, with every bound response certifying the same creator-keyed execution facts at admission, so a second operator can unblock a Turn waiting on an approval while the creator still backs execution; close, archive, unarchive and delete admit the Session's recorded owner (the owner_actor_key column, with the pre-V40 creator fallback); the submitter family's readable-but-below-OPERATOR refusal normalizes from 409 workspace_unavailable to 403 session_operation_forbidden; and the WebShell workspaceTurns capability advertises the caller's OPERATOR role under the same creator-keyed facts rather than creator identity; a cwd change's settlement persistently re-checks both the recorded create-command actor and the V56-persisted initiator, so demoting either actor after admission fails the operation with workspace_unavailable. v1.38 serves the automation resources as partial (Stage H6b/H6c): a definition is created, revised, read and retired under its target Session, a manual run and the scanner's occurrences share one derived run identity, definitions and occurrences page separately, and every mutation takes an Idempotency-Key and answers 202 with the committed resource; the per_run target and the delivery policy stay refused until their slices land. v1.40 serves task cancel as partial (Stage H4f): the public and WebShell cancel routes admit a durable task_cancel operation in the A6 order, carrying task_id/taskId; the operation completes once the task's committed record holds the stop request, fails with task_already_settled when the run ended first, and parks as recovery_blocked (not an open operation) when delivery stays unproven; only child_agent tasks whose run has not ended advertise cancel, and only in an active Session; a Workspace-bound Session under a storage migration fence refuses a new cancel with 409 workspace_unavailable; the child is then stopped by its result relay and settles cancelled unless a natural completion or failure won; the WebShell cancel request gains a trace-only requestId. v1.41 pins stored AgentDefinition revisions on Session creation (D8b) and compiles permission_policy and tools into the per-Session approval mode and tool profile (D8c-1): an omitted agent_revision resolves the latest revision at admission and pins it, an unknown agent or revision answers 404 agent_not_found, and definition content that cannot take effect yet answers 409 agent_definition_unsupported naming the refused field in error.field; PublicSession gains the optional agent_digest. D8c-2 applies the pinned model and instructions; a missing, ambiguous or unauthenticated configured model route fails the Turn before inference with turn.failed code model_unavailable. v1.42 implements the per-caller WebShell cwdChange capability, independently of workspaceTurns; admission still owns idle checks and public cwd_change remains planned. v1.43 adds deployment-opted-in public foreground Shell/1 creation for the built-in qwen-code agent with mandatory default/auto-edit approval. Fresh Shell Turns require the Shell opt-in, valid persisted approval and foregroundShell=true; workspaceTurns remains the OPERATOR submit/rename capability and does not by itself admit a Shell Turn. The public Shell tool list does not include the child agent tool. Public Shell close, archive, unarchive and delete stay unavailable, including protocol-0; an internal child Session close is not a public lifecycle request. Shell Action responses admit only the Session's recorded owner, not every Workspace operator, because the answer runs a command. Enable the Shell flag only after the Harness understands suppressChildAgents; an older Harness ignores that field and advertises the child agent tool. Stored AgentDefinition Sessions retain their compiled profile and approval mode independently of the built-in default selection; every Shell Session still requires deployment Shell admission for fresh execution.v1.44 names the input admission budget on each command's input array: every block adds to a 4,000,000-character aggregate per command under the per-block 1,000,000-character cap, and a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected; opens WebShellMetadata to arbitrary caller metadata that Phase 1 accepts and ignores, the Session title travelling in WebShellCreateRequest's own title field; and drops the WebShellTurn usage field the server never returns. v1.45 preserves durable event floors across projection rebuilds and keeps immutable snapshot pagination for 30 minutes. Item next_cursor positions bind tenant, Session, snapshot version and expiry; numeric after remains a first-page sequence filter, while an opaque after or cursor continues that fixed snapshot. v1.46 extends public task cancel to workflow tasks (the H4f follow-up of the workflow runtime): a workflow task in pending, running, waiting or degraded, in an active Session, advertises cancel; its cancel rides the same durable task_cancel operation as a child agent's, and the result relay stops the workflow child through its own Turn's abort. v1.47 unifies the Session title policy at 256 UTF-16 code units (the Harness client's own cap), counted as Java String.length() does — an astral character occupies two units — plus a control-character rejection, now enforced on create and metadata as well as rename (a row written before the unification may hold a longer title; echoing that stored title back through rename is a no-op that answers 200, while any other over-bound title still answers 400 invalid_title), and pagination orders Sessions by the immutable created_at key; replayed rename and unarchive answer the recorded outcome with Session status as last visible rather than 404 after a delete; a create replay after delete answers 404 on the public create route, which re-reads the Session before responding, and the recorded 202 admission carrying the tombstoned sessionId on the WebShell create route. A recorded Turn submit, cancel or rename outcome answers to the actor who recorded it (the actor recorded on the command receipt) as well as to the Session creator; any other authorized actor is still refused. A key recorded before v1.47 named no recorder and keeps its earlier replay for every actor the role gates admit. v1.48 connects explicit static AgentDefinition skills and Runtime MCP/Hook definition pins to Hosted execution. Skills require a Workspace profile, use immutable bounded content resources, and grant no permissions; MCP pins require hosted-workspace-mcp/1 in the deployment allowlist. Existing Session revisions and resources remain pinned across replacement. v1.49 pins the durable retry terminal failure codes: an action response whose delivery exhausted its retry budget fails action_response_delivery_failed, and an answered delivery whose Action expired before its decision projected fails action_response_decision_expired; a lifecycle operation that exhausted its retry budget carries the settle's failure (session_lifecycle_delivery_failed or the workspace close refusal) and certifies no cleanup — its Session keeps its pending status and no session completion event is appended — and one whose settle reached the Harness but stayed unsettled past the larger settled budget carries session_close_completion_unsettled; a Workspace close recovery_blocked also reports session_close_writer_live while a Harness still holds the journal writer or hosted_harness_generation_mismatch while this replica's view of the Harness boot is stale. v1.50 adds WebShell empty Workspace creation, supported approval selection at Session creation, safe model/context observations, and host-catalog next-Turn model selection within idle bound Sessions; model choices are immutable per admitted Turn and do not replace AgentDefinition identity or policy. v1.51 adds owner-authorized idle approval changes and explicit built-in Shell Full Access with immutable per-Turn approval snapshots. v1.52 adds opt-in SSH Runtime node discovery, remote directory checks, and durable existing-directory registration. v1.53 enumerates on failure_code the codes a lifecycle operation can end with once its retry budget runs out — including managed_capability_mismatch, hosted_harness_protocol_error and the Runtime Broker's own refusal codes, with runtime_broker_recovery_blocked reported as workspace_close_identity_unverified — and states that session_close_writer_live is also reported while the journal-writer check itself fails. v1.54 extends public task cancel to background_shell and monitor tasks (the H3 kinds, H4f-c): such a task in pending, running, waiting or degraded, in an active Session, advertises cancel; its cancel rides the same durable task_cancel operation, whose delivery stops the task's process through its Runtime and completes once the task's committed record shows the stop (the stop request on a background Shell, the stop_requested settlement on a Monitor, whose record carries no request); an end the process reached first keeps its outcome and fails the operation with task_already_settled. v1.55 links a child task to its child Session (Stage H4f, #13746 F2): a child_agent or workflow task carries child_session_id/childSessionId once its run's committed record names the child Session; the child is a Session in the parent's Workspace, readable by exactly the callers that can read the task, so a caller reads the child's output through the existing Session, Turn, item and event routes; every other kind, and a child task before its child is known, omits the field. v1.56 adds owner-authorized Linux directory discovery, existing-directory Workspace creation with pinned source identity, and persisted WebShell default working directories. v1.57 projects each channel delivery as a task of its route Session (#13746 F3): kind channel_delivery, pending while planned, running while an adapter sends it, waiting while its outcome is unknown, completed once delivered, failed when rejected and cancelled when cancelled before any send, with no runtime_state; deliveries planned before this version project no task. Its cancel rides the same durable task_cancel operation and is admitted only while the delivery is pending; the operation completes once the delivery's committed record holds its cancel request, so an adapter that claims the delivery first keeps sending it, and the task keeps that natural outcome. v1.58 records Turn input and cancellation as durable command operations (D7-1): each submit_input and cancel admission saves its operation, with the command's idempotency key and request digest, in the transaction that admits the Turn or the cancellation; a retry under the same key resolves to that original operation, and the operation query reads both kinds. Their outcome follows the Turn's own committed facts, so the Turn dispatcher stays their only deliverer: a submit_input completes harness_confirmed once a Harness admitted its Turn, and is cancelled or failed, java_durable and blocked, when the Turn ended before that; a cancel completes once its Turn is cancelled, harness_confirmed after a Harness admitted the Turn and java_durable when Java cancelled it first, and fails with turn_already_settled when the Turn ended otherwise. Admission responses still omit operation_id, admission_stage and delivery_state, which stay planned behind durable_operations. v1.59 settles every operation whose acceptance is unknown through one rule (D7-2): a recovery_blocked submit_input or task cancel is never claimed or delivered again, and settles only from its own durable evidence, the task's record for a task cancel and the Session journal's admission of its prompt for a submit_input; a close or delete keeps recovery_blocked as a published wait that its delivery re-drives under keyed effect receipts. A submit_input whose Turn failed after a submission no Harness answered is now recovery_blocked with submit_input_unconfirmed instead of failed: it completes harness_confirmed once the journal holds its prompt's admission, and fails with the Turn's error code once a complete journal that no writer can extend lacks it. v1.60 reconciles a parked SSH Workspace registration (D7-2): a registration refused before it reserved its directory now fails instead of parking recovery_blocked, and one that may have reached its node stays recovery_blocked, with the directory reserved, until a read-only probe of the node completes it (its marker landed) or fails it and releases the directory (no marker, or another directory at the root). v1.61 adds the opt-in java_durable admission profile (D7-3): on a deployment that enables it, Sessions advertise durable_operations, and a Turn input or cancel that asks for admission_profile java_durable is answered with operation_id, admission_stage and delivery_state, naming the submit_input or cancel operation its admission saved; a retry under the same key answers the same operation, so a lost response resolves through it. harness_confirmed (the pinned reference design's qwen_confirmed) stays the default for every other admission, and asking for java_durable where the profile is off answers 400 unsupported_feature. PublicTurn and WebShellTurn keep their operation fields planned. v1.62 extends existing-Session approval selection to owner-operated stored AgentDefinition Sessions bound to a Workspace on exactly hosted-workspace-files/1 or hosted-workspace-shell/1,/2, requiring both approval-selection/1 and agent-definition-approval-selection/1. Definition creation policy and pins remain immutable; selected policy is frozen per later user Turn. All Java/Broker catalog readers and writers must be upgraded before custom overrides are enabled; an old Java binary is not a compatible rollback. v1.64 adds independent owner-controlled Plan selection for public Workspace files/1 and Shell/1,/2 Sessions, exact human Plan approval before effects, immutable per-Turn Plan snapshots, and bounded inline UTF-8 file and PNG/JPEG/WebP image inputs with durable replay. Inputs containing attachments have a 48 KiB encoded budget, and the selected model must support images. Plan and attachment dispatch require their respective plan-mode/1 and input-attachments/1 Harness capabilities. Deploy compatible schema V10 Server/Broker readers and writers before enabling Plan. v1.65 extends public and WebShell task cancel to automation_run: only the targeted occurrence is cancelled, its schedule and unrelated Turns remain intact, and the operation completes only from the run's committed cancelled outcome. v1.66 exposes only names and descriptions from a readable Session's pinned static Skill catalog to WebShell; leading published Skill invocations load their immutable instructions through the Hosted executor before inference, including in Plan mode. v1.67 adds bounded, actor-authorized Workspace file query and selection-time UTF-8 snapshots for local and SSH Workspaces; unsupported storage never falls back to a local daemon. v1.68 raises the complete canonical attachment input budget from 48 KiB to 8 MiB for ordinary screenshots and small text files, with dedicated 8 MiB input and 32 MiB model-request resources, bounded message/checkpoint recovery, and IndexedDB persistence for byte-identical browser retries. Ordinary inline resources retain their 64 KiB limit; deploy compatible WebShell, Java and Harness readers and writers together. v1.69 keeps the daemon lifecycle recovery refusal recoverable across the retry budget. v1.70 adds on-demand WebShell ReadFile and Shell detail reads from retained committed history, available to trusted Session/Workspace readers without a feature switch; lifecycle events remain metadata-only and Artifact publication/download policies remain independent. v1.73 reconciles parked Turn cancellation operations from the original prompt's durable terminal event without delivering a cancellation again; request-only or missing history remains unknown. v1.74 separates a cancel over an unobserved execution from turn_already_settled: a cancel that already existed when its Turn failed with managed_runtime_recovery_blocked after a Harness admitted it or a submission was attempted parks recovery_blocked with cancel_unconfirmed, while a cancel submitted after the Turn ended still fails turn_already_settled. v1.75 keeps the daemon's busy lifecycle refusal (hosted_turn_active) recoverable across the retry budget like its recovery refusal."
+    "version": "1.80.0",
+    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle. v1.19 serves the task list and detail on both surfaces as partial (Stage H0c): the Session store projects them from the Stage H records the Session authority commits, a task.updated Session event announces each change of a task's view, and Session capabilities advertise tasks. Task events and cancel stay planned until a slice's tasks produce output and accept a cancel. v1.20 implements the Turn read model (Stage D5): the public Turn list and detail read a Session's Turns without their input, newest first by creation time in milliseconds and then Turn ID, with an opaque cursor; a deleted Session's Turns are not readable, and the durable admission fields of a Turn stay planned until D7. v1.21 declares on the task list, detail and event routes of both surfaces the 403 actor_scope_mismatch that the tenant filter answers on every /v1/agents/ and WebShell route, as the Session and Turn reads already do, and the shared Forbidden response names it; a caller that cannot read a task still gets 404. v1.22 adds deployment-opted-in creation with an initial Workspace file-tool Turn (G0) on the public and WebShell surfaces; the fixed server-owned profile does not enable later Workspace operations. v1.23 settles the planned task event and cancel semantics: a durable retention floor, committed-prefix publication, stable cursors, Artifact visibility before expiry, bounded backlog under archival failure, ordered idempotent cancellation and command outcomes. Clients tolerate unknown optional event fields across minor versions. Task events and cancel remain planned. v1.24 serves the read-only Session MCP catalog as partial (Stage H1), projecting display metadata and schemas from committed records without Runtime identities, credentials or production profile enablement. v1.25 implements permission Actions (Stage D6b) on both surfaces: list, get and respond, projected from the Session's action.changed records; a WebShell permission Action carries inputRevision, policyRevision, functionCallId, toolName and expiresAt, its option ids allow and deny are stable, a Turn has at most one requested approval at a time, and a response is a durable command operation carrying requestId. v1.26 declares the tenant filter's 403 actor_scope_mismatch on every covered public and WebShell route, including planned routes, and pins the refusal code in contract traffic. v1.27 adds O3 durable tool-result projection, artifact metadata, immutable range/streaming content and WebShell result reads. Artifact capability requires a configured O3 reader and a Workspace-bound Session; execution admission remains independent. v1.28 admits later Turns of a Workspace-bound Session for the Session's creator under the deployment's Workspace files opt-in, including cancel and rename; WebShell Session capabilities advertise the per-caller workspaceTurns flag. v1.29 implements the AgentDefinition routes (Stage D8a): create, get and update store tenant-scoped, immutable revisions with a content digest, and an unchanged update adds no revision. Sessions still pin qwen-code and the configured revision, and no definition field changes execution yet. v1.30 adds the qwenSignature security scheme for gateway-free deployments: in signed authentication mode the broker authenticates the X-Qwen-Tenant-Id and X-Qwen-Actor-Id header pair itself with an HMAC signature over method, path, query, tenant, actor, timestamp, body digest and Idempotency-Key, carried in X-Qwen-Signature and X-Qwen-Signature-Timestamp, and answers 401 authentication_required or invalid_signature, 400 invalid_request on a repeated Idempotency-Key header, and 413 payload_too_large beyond the signed-body limit; a Session now records its creator so approval responses are owned without a Workspace creation record; a Session with no recorded creator and no recorded create command answers approvals to any caller in its tenant. v1.31 serves the task events routes as partial (Stage H3): a bounded per-task event journal in SQL commits each task view change with its record revision, the durable retention floor survives an empty retained set under the Artifact visibility barrier, output cursors lift with the routes, and the cancel routes stay planned. v1.32 implements the W2 controlled same-Workspace cwd change on both surfaces: the creator changes the bound Session's relative directory under an idle, opt-in deployment through a durable operation with revision CAS and busy barriers; completion emits the session.context.changed Session event and bumps context_revision, while WorkspaceContext.state stays ready and its other values remain reserved for the read-model follow-up, and bound later-turn submission answers 409 session_context_busy while a context-changing operation is open (the cross-slice busy-barrier handshake; permission-action responses and pending mutation commands are excluded from that barrier, so they can never wedge Turn admission). v1.33 shapes the planned Stage H5 channel resources: a channel connection lists its route bindings, a channel lists its outbound deliveries with per-segment states and a stable cursor, and a delivery detail query is named as planned; all mutations stay Idempotency-Key based with 202 plus operation id. v1.35 serves the three channel resources as partial (Stage H5b/H5c): connections and their route bindings, and the delivery list and detail, are read over the registered connections, the committed ingress rows and the delivery ledger; the email reference adapter routes inbound events into bound Sessions and sends replies through the receipted outbox, where unknown is a terminal outcome that is never resent automatically and an explicit resend opens a new delivery id. v1.36 conditions replay-floor expiry on the Snapshot backing the floor (replay_floor_sequence <= snapshot_through_sequence), serves a below-floor cursor from the retained events while a stream reconciliation rebuilds the Snapshot, and adds the opt-in scheduled replay-floor pass. v1.37 enforces the Workspace actor roles on the bound-Session surface: grants are a single role column ordered reader < operator < owner; Turn submit, rename and cwd change now admit any caller holding OPERATOR, but only while the Session's creator-keyed execution facts hold — the Workspace registry still backs the binding and stays ACTIVE, and the actor recorded by the Workspace create command keeps OPERATOR or above, because the admitted work executes under the creator's grants; Turn cancel admits on the OPERATOR role and the Session's executable shape alone, because its delivery reuses the admitted attachment and re-checks no grants; Action respond admits any caller holding OPERATOR or the Session's recorded owner under no shape gate, with every bound response certifying the same creator-keyed execution facts at admission, so a second operator can unblock a Turn waiting on an approval while the creator still backs execution; close, archive, unarchive and delete admit the Session's recorded owner (the owner_actor_key column, with the pre-V40 creator fallback); the submitter family's readable-but-below-OPERATOR refusal normalizes from 409 workspace_unavailable to 403 session_operation_forbidden; and the WebShell workspaceTurns capability advertises the caller's OPERATOR role under the same creator-keyed facts rather than creator identity; a cwd change's settlement persistently re-checks both the recorded create-command actor and the V56-persisted initiator, so demoting either actor after admission fails the operation with workspace_unavailable. v1.38 serves the automation resources as partial (Stage H6b/H6c): a definition is created, revised, read and retired under its target Session, a manual run and the scanner's occurrences share one derived run identity, definitions and occurrences page separately, and every mutation takes an Idempotency-Key and answers 202 with the committed resource; the per_run target and the delivery policy stay refused until their slices land. v1.40 serves task cancel as partial (Stage H4f): the public and WebShell cancel routes admit a durable task_cancel operation in the A6 order, carrying task_id/taskId; the operation completes once the task's committed record holds the stop request, fails with task_already_settled when the run ended first, and parks as recovery_blocked (not an open operation) when delivery stays unproven; only child_agent tasks whose run has not ended advertise cancel, and only in an active Session; a Workspace-bound Session under a storage migration fence refuses a new cancel with 409 workspace_unavailable; the child is then stopped by its result relay and settles cancelled unless a natural completion or failure won; the WebShell cancel request gains a trace-only requestId. v1.41 pins stored AgentDefinition revisions on Session creation (D8b) and compiles permission_policy and tools into the per-Session approval mode and tool profile (D8c-1): an omitted agent_revision resolves the latest revision at admission and pins it, an unknown agent or revision answers 404 agent_not_found, and definition content that cannot take effect yet answers 409 agent_definition_unsupported naming the refused field in error.field; PublicSession gains the optional agent_digest. D8c-2 applies the pinned model and instructions; a missing, ambiguous or unauthenticated configured model route fails the Turn before inference with turn.failed code model_unavailable. v1.42 implements the per-caller WebShell cwdChange capability, independently of workspaceTurns; admission still owns idle checks and public cwd_change remains planned. v1.43 adds deployment-opted-in public foreground Shell/1 creation for the built-in qwen-code agent with mandatory default/auto-edit approval. Fresh Shell Turns require the Shell opt-in, valid persisted approval and foregroundShell=true; workspaceTurns remains the OPERATOR submit/rename capability and does not by itself admit a Shell Turn. The public Shell tool list does not include the child agent tool. Public Shell close, archive, unarchive and delete stay unavailable, including protocol-0; an internal child Session close is not a public lifecycle request. Shell Action responses admit only the Session's recorded owner, not every Workspace operator, because the answer runs a command. Enable the Shell flag only after the Harness understands suppressChildAgents; an older Harness ignores that field and advertises the child agent tool. Stored AgentDefinition Sessions retain their compiled profile and approval mode independently of the built-in default selection; every Shell Session still requires deployment Shell admission for fresh execution.v1.44 names the input admission budget on each command's input array: every block adds to a 4,000,000-character aggregate per command under the per-block 1,000,000-character cap, and a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected; opens WebShellMetadata to arbitrary caller metadata that Phase 1 accepts and ignores, the Session title travelling in WebShellCreateRequest's own title field; and drops the WebShellTurn usage field the server never returns. v1.45 preserves durable event floors across projection rebuilds and keeps immutable snapshot pagination for 30 minutes. Item next_cursor positions bind tenant, Session, snapshot version and expiry; numeric after remains a first-page sequence filter, while an opaque after or cursor continues that fixed snapshot. v1.46 extends public task cancel to workflow tasks (the H4f follow-up of the workflow runtime): a workflow task in pending, running, waiting or degraded, in an active Session, advertises cancel; its cancel rides the same durable task_cancel operation as a child agent's, and the result relay stops the workflow child through its own Turn's abort. v1.47 unifies the Session title policy at 256 UTF-16 code units (the Harness client's own cap), counted as Java String.length() does — an astral character occupies two units — plus a control-character rejection, now enforced on create and metadata as well as rename (a row written before the unification may hold a longer title; echoing that stored title back through rename is a no-op that answers 200, while any other over-bound title still answers 400 invalid_title), and pagination orders Sessions by the immutable created_at key; replayed rename and unarchive answer the recorded outcome with Session status as last visible rather than 404 after a delete; a create replay after delete answers 404 on the public create route, which re-reads the Session before responding, and the recorded 202 admission carrying the tombstoned sessionId on the WebShell create route. A recorded Turn submit, cancel or rename outcome answers to the actor who recorded it (the actor recorded on the command receipt) as well as to the Session creator; any other authorized actor is still refused. A key recorded before v1.47 named no recorder and keeps its earlier replay for every actor the role gates admit. v1.48 connects explicit static AgentDefinition skills and Runtime MCP/Hook definition pins to Hosted execution. Skills require a Workspace profile, use immutable bounded content resources, and grant no permissions; MCP pins require hosted-workspace-mcp/1 in the deployment allowlist. Existing Session revisions and resources remain pinned across replacement. v1.49 pins the durable retry terminal failure codes: an action response whose delivery exhausted its retry budget fails action_response_delivery_failed, and an answered delivery whose Action expired before its decision projected fails action_response_decision_expired; a lifecycle operation that exhausted its retry budget carries the settle's failure (session_lifecycle_delivery_failed or the workspace close refusal) and certifies no cleanup — its Session keeps its pending status and no session completion event is appended — and one whose settle reached the Harness but stayed unsettled past the larger settled budget carries session_close_completion_unsettled; a Workspace close recovery_blocked also reports session_close_writer_live while a Harness still holds the journal writer or hosted_harness_generation_mismatch while this replica's view of the Harness boot is stale. v1.50 adds WebShell empty Workspace creation, supported approval selection at Session creation, safe model/context observations, and host-catalog next-Turn model selection within idle bound Sessions; model choices are immutable per admitted Turn and do not replace AgentDefinition identity or policy. v1.51 adds owner-authorized idle approval changes and explicit built-in Shell Full Access with immutable per-Turn approval snapshots. v1.52 adds opt-in SSH Runtime node discovery, remote directory checks, and durable existing-directory registration. v1.53 enumerates on failure_code the codes a lifecycle operation can end with once its retry budget runs out — including managed_capability_mismatch, hosted_harness_protocol_error and the Runtime Broker's own refusal codes, with runtime_broker_recovery_blocked reported as workspace_close_identity_unverified — and states that session_close_writer_live is also reported while the journal-writer check itself fails. v1.54 extends public task cancel to background_shell and monitor tasks (the H3 kinds, H4f-c): such a task in pending, running, waiting or degraded, in an active Session, advertises cancel; its cancel rides the same durable task_cancel operation, whose delivery stops the task's process through its Runtime and completes once the task's committed record shows the stop (the stop request on a background Shell, the stop_requested settlement on a Monitor, whose record carries no request); an end the process reached first keeps its outcome and fails the operation with task_already_settled. v1.55 links a child task to its child Session (Stage H4f, #13746 F2): a child_agent or workflow task carries child_session_id/childSessionId once its run's committed record names the child Session; the child is a Session in the parent's Workspace, readable by exactly the callers that can read the task, so a caller reads the child's output through the existing Session, Turn, item and event routes; every other kind, and a child task before its child is known, omits the field. v1.56 adds owner-authorized Linux directory discovery, existing-directory Workspace creation with pinned source identity, and persisted WebShell default working directories. v1.57 projects each channel delivery as a task of its route Session (#13746 F3): kind channel_delivery, pending while planned, running while an adapter sends it, waiting while its outcome is unknown, completed once delivered, failed when rejected and cancelled when cancelled before any send, with no runtime_state; deliveries planned before this version project no task. Its cancel rides the same durable task_cancel operation and is admitted only while the delivery is pending; the operation completes once the delivery's committed record holds its cancel request, so an adapter that claims the delivery first keeps sending it, and the task keeps that natural outcome. v1.58 records Turn input and cancellation as durable command operations (D7-1): each submit_input and cancel admission saves its operation, with the command's idempotency key and request digest, in the transaction that admits the Turn or the cancellation; a retry under the same key resolves to that original operation, and the operation query reads both kinds. Their outcome follows the Turn's own committed facts, so the Turn dispatcher stays their only deliverer: a submit_input completes harness_confirmed once a Harness admitted its Turn, and is cancelled or failed, java_durable and blocked, when the Turn ended before that; a cancel completes once its Turn is cancelled, harness_confirmed after a Harness admitted the Turn and java_durable when Java cancelled it first, and fails with turn_already_settled when the Turn ended otherwise. Admission responses still omit operation_id, admission_stage and delivery_state, which stay planned behind durable_operations. v1.59 settles every operation whose acceptance is unknown through one rule (D7-2): a recovery_blocked submit_input or task cancel is never claimed or delivered again, and settles only from its own durable evidence, the task's record for a task cancel and the Session journal's admission of its prompt for a submit_input; a close or delete keeps recovery_blocked as a published wait that its delivery re-drives under keyed effect receipts. A submit_input whose Turn failed after a submission no Harness answered is now recovery_blocked with submit_input_unconfirmed instead of failed: it completes harness_confirmed once the journal holds its prompt's admission, and fails with the Turn's error code once a complete journal that no writer can extend lacks it. v1.60 reconciles a parked SSH Workspace registration (D7-2): a registration refused before it reserved its directory now fails instead of parking recovery_blocked, and one that may have reached its node stays recovery_blocked, with the directory reserved, until a read-only probe of the node completes it (its marker landed) or fails it and releases the directory (no marker, or another directory at the root). v1.61 adds the opt-in java_durable admission profile (D7-3): on a deployment that enables it, Sessions advertise durable_operations, and a Turn input or cancel that asks for admission_profile java_durable is answered with operation_id, admission_stage and delivery_state, naming the submit_input or cancel operation its admission saved; a retry under the same key answers the same operation, so a lost response resolves through it. harness_confirmed (the pinned reference design's qwen_confirmed) stays the default for every other admission, and asking for java_durable where the profile is off answers 400 unsupported_feature. PublicTurn and WebShellTurn keep their operation fields planned. v1.62 extends existing-Session approval selection to owner-operated stored AgentDefinition Sessions bound to a Workspace on exactly hosted-workspace-files/1 or hosted-workspace-shell/1,/2, requiring both approval-selection/1 and agent-definition-approval-selection/1. Definition creation policy and pins remain immutable; selected policy is frozen per later user Turn. All Java/Broker catalog readers and writers must be upgraded before custom overrides are enabled; an old Java binary is not a compatible rollback. v1.64 adds independent owner-controlled Plan selection for public Workspace files/1 and Shell/1,/2 Sessions, exact human Plan approval before effects, immutable per-Turn Plan snapshots, and bounded inline UTF-8 file and PNG/JPEG/WebP image inputs with durable replay. Inputs containing attachments have a 48 KiB encoded budget, and the selected model must support images. Plan and attachment dispatch require their respective plan-mode/1 and input-attachments/1 Harness capabilities. Deploy compatible schema V10 Server/Broker readers and writers before enabling Plan. v1.65 extends public and WebShell task cancel to automation_run: only the targeted occurrence is cancelled, its schedule and unrelated Turns remain intact, and the operation completes only from the run's committed cancelled outcome. v1.66 exposes only names and descriptions from a readable Session's pinned static Skill catalog to WebShell; leading published Skill invocations load their immutable instructions through the Hosted executor before inference, including in Plan mode. v1.67 adds bounded, actor-authorized Workspace file query and selection-time UTF-8 snapshots for local and SSH Workspaces; unsupported storage never falls back to a local daemon. v1.68 raises the complete canonical attachment input budget from 48 KiB to 8 MiB for ordinary screenshots and small text files, with dedicated 8 MiB input and 32 MiB model-request resources, bounded message/checkpoint recovery, and IndexedDB persistence for byte-identical browser retries. Ordinary inline resources retain their 64 KiB limit; deploy compatible WebShell, Java and Harness readers and writers together. v1.69 keeps the daemon lifecycle recovery refusal recoverable across the retry budget. v1.70 adds on-demand WebShell ReadFile and Shell detail reads from retained committed history, available to trusted Session/Workspace readers without a feature switch; lifecycle events remain metadata-only and Artifact publication/download policies remain independent. v1.73 reconciles parked Turn cancellation operations from the original prompt's durable terminal event without delivering a cancellation again; request-only or missing history remains unknown. v1.74 separates a cancel over an unobserved execution from turn_already_settled: a cancel that already existed when its Turn failed with managed_runtime_recovery_blocked after a Harness admitted it or a submission was attempted parks recovery_blocked with cancel_unconfirmed, while a cancel submitted after the Turn ended still fails turn_already_settled. v1.75 keeps the daemon's busy lifecycle refusal (hosted_turn_active) recoverable across the retry budget like its recovery refusal. v1.77 advertises optional liveSupported approval selection: a compatible Hosted Harness applies execution-policy changes to subsequent permission checks and eligible pending tool approvals in the current Turn; manual Plan toggles remain idle-only. v1.78 adds opt-in trusted single-user local directory import with automatic guarded storage registration, actor OWNER access, and durable imported-root resolution. v1.79 adds creation-time import of enabled Skills into an immutable per-Session catalog, including invocation policy and idempotent retries; catalogs allow up to 256 entries, 512 KiB per body and 2 MiB compact JSON, and require session-skills/2. v1.80 adds confirmed WebShell manual Session rename through the existing durable rename service, with an independent fresh-rename capability and original-key replay semantics."
   },
   "servers": [
     {
@@ -1133,6 +1133,65 @@
         }
       }
     },
+    "/api/agent/web-shell/v1/sessions/rename": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellRenameSession",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Synchronously rename a Session through the same durable, fenced title service as public PATCH. HTTP 200 confirms persistence; an unavailable or unknown Harness outcome remains an error and is never a pending success. Workspace-bound fresh renames require current OPERATOR access and the original binding's execution facts; unbound Sessions use the existing tenant-scoped rename authorization. An active Turn does not itself block rename. Reuse the same idempotency key only for the same Session and title; completed replay returns the Session's current persisted title without another Harness rename, including the existing last-visible result after deletion. Fresh-rename capability changes do not preclude authorized replay. The result title is authoritative and can differ from the requested title when a later rename already completed.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellRenameRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Confirmed persisted Session title, or an authorized completed replay.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Qwen-Idempotent-Replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellRenameResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
     "/api/agent/web-shell/v1/transcript/query": {
       "post": {
         "tags": ["WebShell"],
@@ -1232,7 +1291,7 @@
         "tags": ["WebShell"],
         "operationId": "webShellCreateSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission with public Session creation: the server-selected profile for the built-in qwen-code agent, and the profile selected by a stored definition's single allowlisted hosted_profile tools entry for a definition-pinned Session. Newly bound qwen-code Sessions, including empty creation, persist hosted-workspace-shell/1 with mandatory default/auto-edit approval when the Shell deployment opt-in is enabled; otherwise they persist hosted-workspace-files/1 with the configured file approval mode. The switch does not override a stored AgentDefinition's compiled profile or approval mode. Public callers cannot select the built-in profile. Any caller holding the OPERATOR role may submit later Turns and rename the Session under the same opt-in, while the Workspace registry row stays ACTIVE and still backs the binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is active and undeleted and is either a qwen-code Session on the frozen execution profile or pinned to a stored definition; Workspace close follows its separate close capability and lifecycle admission; the same caller may cancel a running Turn (its delivery re-checks no grant it needs survives the cancellation), and the Session's own liveness keeps OPERATOR access even when its Workspace's background-exit observation closes some other bound Session; cancel is always allowed for its own running Turn even outside the Workspace files opt-in. A definition-pinned Session keeps its pinned revision's tool profile, model and instructions for its whole life, and a replay of the create command reuses the original pin; a WebShell Session inherits its Workspace's default Workspace selection when the request omits one. Shell Sessions additionally require the Shell opt-in and valid persisted approval for fresh Turns; disabling only Shell admission preserves original-key replay and accepted approvals and cancellation while Workspace files remain enabled and persisted approval remains valid. The public Shell tool list does not include the child agent tool. Invalid approval or files-off can refuse attachment. Public Shell close, archive, unarchive and delete stay unavailable, including protocol-0. Fresh Shell sending also requires foregroundShell=true; workspaceTurns advertises submit/rename permission and is not sufficient Shell Turn admission.",
+        "description": "Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission with public Session creation: the server-selected profile for the built-in qwen-code agent, and the profile selected by a stored definition's single allowlisted hosted_profile tools entry for a definition-pinned Session. Newly bound qwen-code Sessions, including empty creation, persist hosted-workspace-shell/1 with mandatory default/auto-edit approval when the Shell deployment opt-in is enabled; otherwise they persist hosted-workspace-files/1 with the configured file approval mode. The switch does not override a stored AgentDefinition's compiled profile or approval mode. Public callers cannot select the built-in profile. Any caller holding the OPERATOR role may submit later Turns and rename the Session under the same opt-in, while the Workspace registry row stays ACTIVE and still backs the binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is active and undeleted and is either a qwen-code Session on the frozen execution profile or pinned to a stored definition; Workspace close follows its separate close capability and lifecycle admission; the same caller may cancel a running Turn (its delivery re-checks no grant it needs survives the cancellation), and the Session's own liveness keeps OPERATOR access even when its Workspace's background-exit observation closes some other bound Session; cancel is always allowed for its own running Turn even outside the Workspace files opt-in. A definition-pinned Session keeps its pinned revision's tool profile, model and instructions for its whole life, and a replay of the create command reuses the original pin; a WebShell Session inherits its Workspace's default Workspace selection when the request omits one. Shell Sessions additionally require the Shell opt-in and valid persisted approval for fresh Turns; disabling only Shell admission preserves original-key replay and accepted approvals and cancellation while Workspace files remain enabled and persisted approval remains valid. The public Shell tool list does not include the child agent tool. Invalid approval or files-off can refuse attachment. Public Shell close, archive, unarchive and delete stay unavailable, including protocol-0. Fresh Shell sending also requires foregroundShell=true; workspaceTurns alone is not sufficient Shell Turn admission. Manual rename uses the independent rename capability.",
         "requestBody": {
           "required": true,
           "content": {
@@ -3984,7 +4043,7 @@
         "tags": ["WebShell"],
         "operationId": "changeWebShellSessionApproval",
         "x-qwen-implementation-status": "implemented",
-        "description": "Change the next-user-Turn policy of an idle eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1 or hosted-workspace-shell/1,/2. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable.",
+        "description": "Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1 or hosted-workspace-shell/1,/2. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable.",
         "requestBody": {
           "required": true,
           "content": {
@@ -4298,6 +4357,51 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/session-mcp/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "queryWebShellSessionMcp",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Read the selected Session's sanitized, committed MCP catalog. Requires a trusted actor and Workspace read access. Discovery states describe the published snapshot, not live Runtime health. Does not configure servers, discover capabilities or execute tools, resources or prompts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session MCP catalog snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicMcpCatalog"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         }
       }
@@ -4993,6 +5097,14 @@
             "$ref": "#/components/schemas/WorkspaceSelection",
             "x-qwen-implementation-status": "partial",
             "description": "W0. Only omission allows default resolution; null or an empty object is invalid. Resolve and persist an explicit authorized tenant default on first admission; no default means workspace_required. The caller request digest retains an omission marker; replay resolves the original receipt before defaults. A changed default must never rebind a retry. Unavailable W0 support rejects rather than ignores this field."
+          },
+          "skills": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/SessionCreationSkill"
+            },
+            "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON. Requires session-skills/2; persisted immutably and included in creation idempotency."
           }
         }
       },
@@ -5968,6 +6080,14 @@
           "planMode": {
             "type": "boolean",
             "description": "Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state."
+          },
+          "skills": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/SessionCreationSkill"
+            },
+            "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON. Requires session-skills/2; persisted immutably and included in creation idempotency."
           }
         }
       },
@@ -6276,7 +6396,7 @@
           "workspaceTurns": {
             "type": "boolean",
             "default": false,
-            "description": "True when the caller may submit later Turns of this Workspace-bound Session or rename it: the deployment enables Workspace files, the caller holds the OPERATOR role on a Workspace registry row whose state is ACTIVE and still backs the Session's binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is active and undeleted and is either a qwen-code Session or a Session pinned to a stored definition (both on the Workspace's frozen execution profile). Cancelling only aborts work already running, so an OPERATOR caller may cancel a running Turn even when this is false; the capability does not gate cancellation. False for every other caller and for unbound Sessions, which do not use it. Shell Sessions also require foregroundShell=true for fresh sending; workspaceTurns may remain true with Shell admission disabled and is not sufficient Shell Turn admission."
+            "description": "True when the caller may submit later Turns of this Workspace-bound Session: the deployment enables Workspace files, the caller holds the OPERATOR role on a Workspace registry row whose state is ACTIVE and still backs the Session's binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is active and undeleted and is either a qwen-code Session or a Session pinned to a stored definition (both on the Workspace's frozen execution profile). Cancelling only aborts work already running, so an OPERATOR caller may cancel a running Turn even when this is false; the capability does not gate cancellation. False for every other caller and for unbound Sessions, which do not use it. Shell Sessions also require foregroundShell=true for fresh sending; workspaceTurns may remain true with Shell admission disabled and is not sufficient Shell Turn admission. Manual rename uses the independent rename capability."
           },
           "tasks": {
             "type": "boolean"
@@ -6323,6 +6443,12 @@
           "inputAttachments": {
             "type": "boolean",
             "description": "Optional deployment capability; missing means false."
+          },
+          "rename": {
+            "type": "boolean",
+            "default": false,
+            "x-qwen-implementation-status": "implemented",
+            "description": "True for a visible ACTIVE Session when the Harness supports fenced title persistence and is available. Workspace-bound Sessions additionally require Workspace files admission, current OPERATOR access and the original binding's frozen execution facts, independently of approval or fresh Turn sending support. Unbound Sessions use the existing tenant-scoped rename permission. An active Turn does not itself make this false. Missing means false. This advertises fresh rename only; authorized completed original-key replay remains available under the rename service's replay rules."
           }
         }
       },
@@ -7007,7 +7133,11 @@
               },
               "workspaceDirectorySelection": {
                 "type": "boolean",
-                "description": "Supports browsing and selecting existing directories on authorized Linux storage; absent means unsupported."
+                "description": "Supports browsing and selecting existing directories on authorized Linux or macOS storage; absent means unsupported."
+              },
+              "localDirectoryImport": {
+                "type": "boolean",
+                "description": "Trusted single-user local deployment can browse and import existing host directories without a pre-registered Workspace. Missing or false means unsupported."
               }
             },
             "x-qwen-implementation-status": "partial"
@@ -10875,9 +11005,30 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 2048
+          },
+          "localPath": {
+            "type": "string",
+            "description": "Absolute execution-host directory. Requires localDirectoryImport; exclusive with Workspace-relative fields. An empty path is allowed only for directory browsing and starts at the host home directory."
           }
         },
-        "x-qwen-implementation-status": "implemented"
+        "x-qwen-implementation-status": "implemented",
+        "not": {
+          "allOf": [
+            {
+              "required": ["localPath"]
+            },
+            {
+              "anyOf": [
+                {
+                  "required": ["sourceWorkspaceId"]
+                },
+                {
+                  "required": ["cwdRelative"]
+                }
+              ]
+            }
+          ]
+        }
       },
       "WebShellSessionOptionsRequest": {
         "type": "object",
@@ -10917,6 +11068,10 @@
           "inputAttachments": {
             "type": "boolean",
             "description": "Optional deployment capability; missing means false."
+          },
+          "skillsSupported": {
+            "type": "boolean",
+            "description": "Optional deployment capability; missing means false. Requires a compatible Harness and durable Session Store."
           }
         }
       },
@@ -11084,6 +11239,10 @@
           "supported"
         ],
         "properties": {
+          "liveSupported": {
+            "type": "boolean",
+            "description": "Execution approval can change during a Turn when true. Missing means idle-only; Plan changes remain idle-only."
+          },
           "approvalMode": {
             "type": "string",
             "enum": ["default", "auto-edit", "yolo"]
@@ -11422,21 +11581,36 @@
         }
       },
       "WebShellWorkspaceDirectoryQueryRequest": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["workspaceId", "cwdRelative"],
-        "properties": {
-          "workspaceId": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["workspaceId", "cwdRelative"],
+            "properties": {
+              "workspaceId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "cwdRelative": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              }
+            }
           },
-          "cwdRelative": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 2048
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["localPath"],
+            "properties": {
+              "localPath": {
+                "type": "string",
+                "description": "Absolute execution-host directory. Requires localDirectoryImport; exclusive with Workspace-relative fields. An empty path is allowed only for directory browsing and starts at the host home directory."
+              }
+            }
           }
-        }
+        ]
       },
       "InputTextBlock": {
         "type": "object",
@@ -11530,7 +11704,7 @@
         "properties": {
           "skills": {
             "type": "array",
-            "maxItems": 16,
+            "maxItems": 256,
             "items": {
               "$ref": "#/components/schemas/WebShellSkill"
             }
@@ -11776,6 +11950,85 @@
             "items": {
               "type": "string"
             }
+          }
+        }
+      },
+      "WebShellRenameRequest": {
+        "type": "object",
+        "required": ["sessionId", "title", "idempotencyKey"],
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[!-~]+$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "The server enforces the bound in UTF-16 code units (Java String.length()), so an astral character counts as two: a title this schema's code-point maxLength accepts can still exceed the server's 256-unit bound and answer 400 invalid_title."
+          }
+        }
+      },
+      "WebShellRenameResult": {
+        "type": "object",
+        "required": ["sessionId", "title", "replayed"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "title": {
+            "type": "string",
+            "description": "Current persisted title from the confirmed mutation or completed replay. Existing legacy titles can exceed the fresh-title input bound."
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SessionCreationSkill": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "description", "body"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Unique Skill name, at most 128 UTF-8 bytes."
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "description": "At most 4096 UTF-8 bytes."
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Static instructions, at most 524288 UTF-8 bytes."
+          },
+          "base_directory": {
+            "type": "string",
+            "description": "Canonical POSIX path relative to the Session working directory; defaults to dot."
+          },
+          "model_invocable": {
+            "type": "boolean",
+            "description": "Whether the model may invoke this Skill; defaults to true."
+          },
+          "user_invocable": {
+            "type": "boolean",
+            "description": "Whether the user may invoke this Skill; defaults to true."
           }
         }
       }

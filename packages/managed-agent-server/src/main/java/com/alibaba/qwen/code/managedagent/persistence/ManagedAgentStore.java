@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.event.CommittedEventPublisher;
 import com.alibaba.qwen.code.managedagent.event.JournalEventTransport;
@@ -11,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelContext;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelOption;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelSelection;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionOptions;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
@@ -147,6 +149,12 @@ public class ManagedAgentStore implements AgentStateStore {
     private final List<String> definitionModels;
     private final List<WebShellModelOption> modelCatalog;
     private ManagedAgentDefinitionStore definitions;
+    private ManagedSessionSkills creationSkills;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setManagedSessionSkills(ManagedSessionSkills skills) {
+        this.creationSkills = skills;
+    }
     private static final Pattern DEFINITION_REVISION = Pattern.compile(
             "^[1-9][0-9]{0,17}$");
     private final boolean workspaceFilesEnabled;
@@ -308,6 +316,8 @@ public class ManagedAgentStore implements AgentStateStore {
             ManagedAgentProperties properties) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
+        this.creationSkills = new ManagedSessionSkills(jdbc, objectMapper,
+                new RequestDigests(), null);
         this.clock = clock;
         this.snapshots = new ManagedSnapshotStore(jdbc, objectMapper, clock, this::snapshotItems);
         this.approvalMode =
@@ -400,6 +410,19 @@ public class ManagedAgentStore implements AgentStateStore {
             String requestedRevision, String title, List<Map<String, Object>> input,
             String payloadDigest, WorkspaceSelection selection, String requestedApprovalMode,
             boolean approvalSelectionSupported, Boolean requestedPlanMode, boolean planModeSupported) {
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, requestedApprovalMode,
+                approvalSelectionSupported, requestedPlanMode, planModeSupported, List.of());
+    }
+
+    @Override
+    @Transactional
+    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title, List<Map<String, Object>> input,
+            String payloadDigest, WorkspaceSelection selection, String requestedApprovalMode,
+            boolean approvalSelectionSupported, Boolean requestedPlanMode, boolean planModeSupported,
+            List<Map<String, Object>> skills) {
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
@@ -446,9 +469,20 @@ public class ManagedAgentStore implements AgentStateStore {
                         || !sshWorkspace && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
             throw workspaceExecutionUnavailable();
         }
-        return insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
+        List<Map<String, Object>> merged = new ArrayList<>();
+        if (!skills.isEmpty() && pin.digest() != null) {
+            merged.addAll(AgentDefinitionExtensions.skills(readMap(definitions.find(tenantId, agentId,
+                    Long.parseLong(pin.revision())).orElseThrow().definitionJson()).get("skills"), true));
+        }
+        merged.addAll(skills);
+        var effectiveSkills = AgentDefinitionExtensions.sessionSkills(merged);
+        Admission admission = insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
                 workspace, actorId, pin, null, planMode);
+        if (!skills.isEmpty()) {
+            creationSkills.save(tenantId, admission.sessionId(), effectiveSkills);
+        }
+        return admission;
     }
 
     private boolean configuredStorage(String tenant, String storage) {
@@ -744,6 +778,10 @@ public class ManagedAgentStore implements AgentStateStore {
         ManagedReceipts.insertCreation(jdbc, tenantId,
                 ManagedWorkspaceRegistry.actorKey(tenantId, childActorOf(parentSessionId)),
                 idempotencyKey, requestDigest, sessionId, turnId, now);
+        var inheritedSkills = creationSkills.snapshot(tenantId, parentSessionId);
+        if (inheritedSkills != null) {
+            creationSkills.save(tenantId, sessionId, inheritedSkills);
+        }
         appendEvent(tenantId, sessionId, null, "session.created",
                 Map.of("sessionId", sessionId), false, null, now);
         if (turnId != null) {
@@ -4130,7 +4168,7 @@ public class ManagedAgentStore implements AgentStateStore {
         if (modelCatalog.stream().noneMatch(option -> option.modelId().equals(modelId))) {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_model", "The model is not published by this host");
         }
-        requireIdlePolicyChange(session);
+        requirePolicyChange(session, false);
         long current = jdbc.queryForObject("SELECT model_revision FROM ma_session WHERE tenant_id = ?"
                 + " AND session_id = ?", Long.class, tenantId, sessionId);
         if (current != expectedRevision || current >= 9_007_199_254_740_991L) {
@@ -4234,6 +4272,16 @@ public class ManagedAgentStore implements AgentStateStore {
     public WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
             String sessionId, String key, String digest, String mode, long expectedRevision,
             boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported) {
+        return changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision,
+                supported, agentDefinitionSupported, requestedPlanMode, planModeSupported, false);
+    }
+
+    @Override
+    @Transactional
+    public WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
+            String sessionId, String key, String digest, String mode, long expectedRevision,
+            boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported,
+            boolean liveSupported) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
@@ -4282,7 +4330,7 @@ public class ManagedAgentStore implements AgentStateStore {
         if (planMode && (!planModeSupported || !supportsPlanMode(session))) {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "Plan mode is unavailable");
         }
-        requireIdlePolicyChange(session);
+        requirePolicyChange(session, liveSupported && requestedPlanMode == null);
         long current = jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id = ?"
                 + " AND session_id = ?", Long.class, tenantId, sessionId);
         if (current != expectedRevision || current >= 9_007_199_254_740_991L
@@ -4306,19 +4354,22 @@ public class ManagedAgentStore implements AgentStateStore {
         return new WebShellApprovalChangeResult(sessionId, mode, revision, false, planMode);
     }
 
-    private void requireIdlePolicyChange(SessionRecord session) {
+    private void requirePolicyChange(SessionRecord session, boolean live) {
         String tenantId = session.tenantId();
         String sessionId = session.sessionId();
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         requireSessionStatus(session.status(), "ACTIVE");
         requireCwdChangeRegistryFacts(session);
-        if (hasActiveTurn(tenantId, sessionId) || hasDecidableAction(session)) {
+        if (!live && (hasActiveTurn(tenantId, sessionId) || hasDecidableAction(session))) {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn or approval");
         }
-        if (hasOpenOperation(tenantId, sessionId) || hasPendingRenameDelivery(tenantId, sessionId)
-                || hasRetainedRuntimeSession(tenantId, sessionId)
+        if ((live ? hasOpenExecutionOperation(tenantId, sessionId) : hasOpenOperation(tenantId, sessionId))
+                || hasPendingRenameDelivery(tenantId, sessionId)
+                || !live && hasRetainedRuntimeSession(tenantId, sessionId)
                 || !jdbc.queryForList("SELECT 1 FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
-                        + " AND status = 'RECOVERY_BLOCKED' LIMIT 1", tenantId, sessionId).isEmpty()
+                        + " AND (status IN ('RECOVERY_BLOCKED', 'CANCELLING') OR status IN ('ACCEPTED', 'RUNNING')"
+                        + " AND error_code IN (?, ?)) LIMIT 1", tenantId, sessionId,
+                        AgentStateStore.RUNTIME_RECOVERY_BLOCKED, AgentStateStore.WORKFLOW_RECOVERY_BLOCKED).isEmpty()
                 || !jdbc.queryForList("SELECT 1 FROM ma_session_head WHERE tenant_id = ?"
                         + " AND session_id = ? AND head_kind = 'MANAGED_SESSION' AND"
                         + " (state <> 'ACTIVE' OR recovery_status <> 'READY')", tenantId, sessionId).isEmpty()) {

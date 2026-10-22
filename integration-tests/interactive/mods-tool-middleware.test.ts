@@ -454,34 +454,40 @@ describe.sequential(`Mods model tools (${renderer})`, () => {
         failure = error;
         throw error;
       } finally {
-        if (session) {
-          writeFileSync(
-            join(evidence, 'pty.ansi'),
-            (session as unknown as { rawOutput: string }).rawOutput,
-          );
-          writeFileSync(join(evidence, 'screen.txt'), await session.screen());
-          await session.close();
+        try {
+          if (session) {
+            writeFileSync(
+              join(evidence, 'pty.ansi'),
+              (session as unknown as { rawOutput: string }).rawOutput,
+            );
+            writeFileSync(join(evidence, 'screen.txt'), await session.screen());
+            await session.close();
+          }
+        } catch (error) {
+          failure ??= error;
+        } finally {
+          json(join(evidence, 'requests.json'), server.requests);
+          await server.close();
+          json(join(evidence, 'manifest.json'), {
+            mode,
+            nonce,
+            renderer,
+            strict: renderer === 'opentui',
+            scratch,
+            bundleHash: digest(readFileSync(bundle)),
+            fixtureHash: digest(source),
+            oracleHash: digest(oracle),
+            settingsHash: digest(JSON.stringify(settings)),
+            head: execFileSync('git', ['rev-parse', 'HEAD'], {
+              cwd: repo,
+              encoding: 'utf8',
+            }).trim(),
+            pass: !failure,
+            failure: failure ? String(failure) : undefined,
+          });
         }
-        json(join(evidence, 'requests.json'), server.requests);
-        await server.close();
-        json(join(evidence, 'manifest.json'), {
-          mode,
-          nonce,
-          renderer,
-          strict: renderer === 'opentui',
-          scratch,
-          bundleHash: digest(readFileSync(bundle)),
-          fixtureHash: digest(source),
-          oracleHash: digest(oracle),
-          settingsHash: digest(JSON.stringify(settings)),
-          head: execFileSync('git', ['rev-parse', 'HEAD'], {
-            cwd: repo,
-            encoding: 'utf8',
-          }).trim(),
-          pass: !failure,
-          failure: failure ? String(failure) : undefined,
-        });
       }
+      if (failure) throw failure;
     },
     150000,
   );

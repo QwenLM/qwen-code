@@ -603,7 +603,7 @@ export function createMcpResourcesProvider(
               server.resourceCount === undefined
                 ? undefined
                 : formatResourceCount(server.resourceCount);
-            if (server.resourceCount === 0) {
+            if (server.resourceCount === 0 || !getActions()?.loadMcpResources) {
               return {
                 id: `mcp-server-ref:${server.name}`,
                 label: safeDisplayText(server.name),

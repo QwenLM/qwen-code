@@ -73,6 +73,7 @@ const MAX_ATTACHMENT_INPUT_BYTES = 8 * 1024 * 1024;
 
 export function managedSessionInlineResourceBytes(kind: string): number {
   if (kind === 'managed-input') return MAX_ATTACHMENT_INPUT_BYTES;
+  if (kind === 'managed-agent-skills') return 2 * 1024 * 1024;
   if (kind === 'hosted-model-request') return HOSTED_MODEL_REQUEST_BYTES;
   return HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
 }
@@ -147,6 +148,12 @@ export interface HttpManagedSessionStores {
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void;
   authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void>;
   authorizeOrdinary(kind?: 'legacy-close'): Promise<void>;
+  approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
+}
+
+export interface ManagedSessionApprovalSelection {
+  readonly mode: 'default' | 'auto-edit' | 'yolo';
+  readonly revision: number;
 }
 
 export interface HttpToolPublicationOwner {
@@ -236,6 +243,7 @@ export function createHttpManagedSessionStores(
       client.setLifecycleAuthority(authority),
     authorizeLifecycle: (kind) => client.authorizeLifecycle(kind),
     authorizeOrdinary: (kind) => client.authorizeOrdinary(kind),
+    approvalSelection: () => client.approvalSelection(),
   };
 }
 
@@ -759,6 +767,32 @@ class ManagedSessionStoreHttpClient {
     });
   }
 
+  async approvalSelection(): Promise<
+    ManagedSessionApprovalSelection | undefined
+  > {
+    await this.assertWritable();
+    const value = await this.json('/approval:query', 'POST', {
+      workspaceId: this.sessionKey.workspaceId,
+      writerId: this.writerId,
+      writerGeneration: this.grant!.writerGeneration,
+    });
+    if (value === null) return undefined;
+    const selection = asRecord(value, 'approval selection');
+    if (
+      Object.keys(selection).length !== 2 ||
+      !['default', 'auto-edit', 'yolo'].includes(String(selection['mode'])) ||
+      typeof selection['mode'] !== 'string' ||
+      typeof selection['revision'] !== 'number' ||
+      !Number.isSafeInteger(selection['revision']) ||
+      selection['revision'] < 0
+    )
+      throw corrupt('approval selection is invalid.');
+    return {
+      mode: selection['mode'] as ManagedSessionApprovalSelection['mode'],
+      revision: selection['revision'],
+    };
+  }
+
   async authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void> {
     if (kind) await this.assertWritable();
     const grant = this.grant;
@@ -1007,6 +1041,11 @@ class ManagedSessionStoreHttpClient {
           error instanceof ManagedSessionStoreHttpError &&
           ((error.status === 409 &&
             (error.remoteCode === 'workspace_lifecycle_admission_closed' ||
+              // An ordinary write that reaches the store after a lifecycle
+              // claim was admitted is refused before anything is written.
+              // The same refusal is rollbackable under the claim below, so
+              // whether the claim was set yet must not decide the outcome.
+              error.remoteCode === 'workspace_lifecycle_claim_fenced' ||
               // The verdict/mint gate's refusal is a rollbackable
               // non-commit: the corrected retry must reach the backend
               // without the authority latching a write failure behind it.
@@ -1835,7 +1874,12 @@ class ManagedSessionStoreHttpClient {
           this.renewingAuthority?.claimGeneration
       )
         return this.renewPromise;
-      return this.renewPromise.then(() => this.renewWriter());
+      // That renewal answers for the authority it was sent under. An
+      // ordinary renewal that reaches the store after a lifecycle claim was
+      // admitted is fenced, and the fence says nothing about the claim now
+      // asking, so renew again under it either way.
+      const renewAgain = () => this.renewWriter();
+      return this.renewPromise.then(renewAgain, renewAgain);
     }
     const grant = this.requireGrant();
     this.renewingAuthority = this.lifecycleAuthority

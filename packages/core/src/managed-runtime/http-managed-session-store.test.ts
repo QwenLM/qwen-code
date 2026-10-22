@@ -86,6 +86,110 @@ const TOKEN_B = 'b'.repeat(32);
 describe('HTTP Managed Session store', () => {
   const temporaryDirectories: string[] = [];
 
+  it.each([
+    { mode: 'default', revision: 0 },
+    { mode: 'auto-edit', revision: 2 },
+    { mode: 'yolo', revision: 3 },
+    null,
+  ])(
+    'queries the current approval policy with the active writer credential: %j',
+    async (selection) => {
+      const server = new FakeManagedSessionStore();
+      const fetchFn = vi.fn<typeof fetch>(async (input, init) =>
+        requestUrl(input).endsWith('/approval:query')
+          ? jsonResponse(selection)
+          : server.fetch(input, init),
+      );
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn,
+      });
+      try {
+        await stores.journalStore.open({ sessionKey: SESSION_KEY });
+        await expect(stores.approvalSelection()).resolves.toEqual(
+          selection ?? undefined,
+        );
+        const [, init] = fetchFn.mock.calls.find(([input]) =>
+          requestUrl(input).endsWith('/approval:query'),
+        )!;
+        expect(init?.method).toBe('POST');
+        expect(JSON.parse(String(init?.body))).toEqual({
+          workspaceId: SESSION_KEY.workspaceId,
+          writerId: 'harness-a',
+          writerGeneration: 1,
+        });
+        const headers = new Headers(init?.headers);
+        expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
+        expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
+      } finally {
+        await stores.stopLocal();
+      }
+    },
+  );
+
+  it.each([
+    {},
+    { mode: 'auto', revision: 1 },
+    { mode: 'yolo', revision: -1 },
+    { mode: 'yolo', revision: '1' },
+    { mode: 'yolo', revision: Number.MAX_SAFE_INTEGER + 1 },
+    { mode: 'yolo', revision: 1, extra: true },
+  ])('fails closed on malformed approval policy %j', async (selection) => {
+    const server = new FakeManagedSessionStore();
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) =>
+        requestUrl(input).endsWith('/approval:query')
+          ? jsonResponse(selection)
+          : server.fetch(input, init),
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await expect(stores.approvalSelection()).rejects.toThrow(
+        'approval selection',
+      );
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
+  it('propagates an approval-query writer fencing refusal', async () => {
+    const server = new FakeManagedSessionStore();
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) =>
+        requestUrl(input).endsWith('/approval:query')
+          ? jsonResponse(
+              {
+                error: {
+                  code: 'managed_session_writer_conflict',
+                  message: 'writer fenced',
+                },
+              },
+              409,
+            )
+          : server.fetch(input, init),
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await expect(stores.approvalSelection()).rejects.toMatchObject({
+        status: 409,
+        remoteCode: 'managed_session_writer_conflict',
+      });
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
   async function createSessionOpener(server: FakeManagedSessionStore) {
     const runtimeBaseDir = await mkdtemp(
       path.join(tmpdir(), 'managed-http-store-'),
@@ -1228,6 +1332,69 @@ describe('HTTP Managed Session store', () => {
       }
     },
   );
+
+  it('renews under a newly set claim when the in-flight ordinary renewal is fenced', async () => {
+    const server = new FakeManagedSessionStore();
+    const claims: Array<string | null> = [];
+    const authorized: Array<string | null> = [];
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'https://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        if (requestUrl(input).endsWith('/writers:renew')) {
+          const headers = new Headers(init?.headers);
+          claims.push(headers.get('X-Qwen-Lifecycle-Claim-Generation'));
+          if (claims.length === 1) {
+            await barrier;
+            // The close was admitted while this ordinary renewal was in
+            // flight, so the store fences it on arrival.
+            return jsonResponse(
+              {
+                error: {
+                  code: 'workspace_lifecycle_claim_fenced',
+                  message: 'Workspace lifecycle recovery is blocked.',
+                },
+              },
+              409,
+            );
+          }
+        }
+        if (requestUrl(input).endsWith('/lifecycle:authorize')) {
+          const headers = new Headers(init?.headers);
+          authorized.push(headers.get('X-Qwen-Lifecycle-Claim-Generation'));
+          return jsonResponse({});
+        }
+        return server.fetch(input, init);
+      },
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      const ordinary = stores.assertWritable();
+      await vi.waitFor(() => expect(claims).toHaveLength(1));
+      stores.setLifecycleAuthority({
+        operationId: 'close',
+        claimGeneration: 1,
+      });
+      const lifecycle = stores.authorizeLifecycle('close');
+      release();
+      await expect(ordinary).rejects.toMatchObject({
+        status: 409,
+        remoteCode: 'workspace_lifecycle_claim_fenced',
+      });
+      await lifecycle;
+      expect(claims).toEqual([null, '1']);
+      expect(authorized).toEqual(['1']);
+    } finally {
+      release();
+      await stores.close();
+    }
+  });
 
   it('publishes bounded tool output immediately under the original writer grant', async () => {
     const server = new FakeManagedSessionStore();
@@ -3502,61 +3669,72 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
-  it('keeps writer renewal after a rollbackable append rejection', async () => {
-    vi.useFakeTimers({ now: 1_790_000_000_000 });
-    const server = new FakeManagedSessionStore();
-    const { stores, session } = await bootStoresAndSession(server);
-    const originalFetch = server.fetch.getMockImplementation()!;
-    let refused = false;
-    server.fetch.mockImplementation(async (input, init) => {
-      if (/\/transactions:commit(?:-v2)?$/.test(requestUrl(input))) {
-        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        if (body['operation'] === 'message.commit' && !refused) {
-          refused = true;
-          return jsonResponse(
-            {
-              error: {
-                code: 'workspace_lifecycle_admission_closed',
-                message: 'temporarily held by lifecycle',
+  // A claim fenced refusal reaches an ordinary write that was sent before
+  // the Harness set the lifecycle claim; it is a non-commit either way.
+  it.each([
+    'workspace_lifecycle_admission_closed',
+    'workspace_lifecycle_claim_fenced',
+  ])(
+    'keeps writer renewal after a rollbackable %s append rejection',
+    async (code) => {
+      vi.useFakeTimers({ now: 1_790_000_000_000 });
+      const server = new FakeManagedSessionStore();
+      const { stores, session } = await bootStoresAndSession(server);
+      const originalFetch = server.fetch.getMockImplementation()!;
+      let refused = false;
+      server.fetch.mockImplementation(async (input, init) => {
+        if (/\/transactions:commit(?:-v2)?$/.test(requestUrl(input))) {
+          const body = JSON.parse(String(init?.body)) as Record<
+            string,
+            unknown
+          >;
+          if (body['operation'] === 'message.commit' && !refused) {
+            refused = true;
+            return jsonResponse(
+              {
+                error: {
+                  code,
+                  message: 'temporarily held by lifecycle',
+                },
               },
-            },
-            409,
-          );
+              409,
+            );
+          }
         }
+        return originalFetch(input, init);
+      });
+      try {
+        const messageRef = await stores.resourceStore.publish(
+          'managed-message',
+          MESSAGE_BODY,
+        );
+        await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
+          ManagedSessionCommitRejectedError,
+        );
+        expect(session.authority.writesStopped).toBe(false);
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(server.renewCount).toBe(1);
+        await appendMessage(session, 2, messageRef);
+        expect(session.authority.writesStopped).toBe(false);
+        expect(
+          server.commits.filter(
+            (commit) => commit['operation'] === 'message.commit',
+          ),
+        ).toHaveLength(1);
+        expect(
+          server.fetch.mock.calls.filter(([input]) =>
+            requestUrl(input).endsWith('/writers:acquire'),
+          ),
+        ).toHaveLength(1);
+        expect(server.sealCount).toBe(0);
+      } finally {
+        await session.close().catch(() => undefined);
+        await stores.close().catch(() => undefined);
+        vi.clearAllTimers();
+        vi.useRealTimers();
       }
-      return originalFetch(input, init);
-    });
-    try {
-      const messageRef = await stores.resourceStore.publish(
-        'managed-message',
-        MESSAGE_BODY,
-      );
-      await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
-        ManagedSessionCommitRejectedError,
-      );
-      expect(session.authority.writesStopped).toBe(false);
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(server.renewCount).toBe(1);
-      await appendMessage(session, 2, messageRef);
-      expect(session.authority.writesStopped).toBe(false);
-      expect(
-        server.commits.filter(
-          (commit) => commit['operation'] === 'message.commit',
-        ),
-      ).toHaveLength(1);
-      expect(
-        server.fetch.mock.calls.filter(([input]) =>
-          requestUrl(input).endsWith('/writers:acquire'),
-        ),
-      ).toHaveLength(1);
-      expect(server.sealCount).toBe(0);
-    } finally {
-      await session.close().catch(() => undefined);
-      await stores.close().catch(() => undefined);
-      vi.clearAllTimers();
-      vi.useRealTimers();
-    }
-  });
+    },
+  );
 
   it('stops activation retries when its writer is explicitly sealed', async () => {
     vi.useFakeTimers({ now: 1_790_000_000_000 });

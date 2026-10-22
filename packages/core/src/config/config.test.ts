@@ -2769,7 +2769,17 @@ describe('Server Config (config.ts)', () => {
         .spyOn(sandboxPolicy, 'probeShellSandbox')
         .mockResolvedValue(resolvedPolicy);
       try {
-        const config = new Config(parameters());
+        const config = new Config({
+          ...parameters(),
+          bundledGeneratedUi: {
+            enabled: true,
+            server: {
+              command: process.execPath,
+              args: ['/bundle/generated-ui/main.js'],
+            },
+            skillsDir: '/bundle/generated-ui/skills',
+          },
+        });
         const admittedPolicy = config.getShellExecutionSandbox();
         const refreshExtensions = vi.spyOn(
           config.getExtensionManager(),
@@ -2778,6 +2788,12 @@ describe('Server Config (config.ts)', () => {
         await config.initialize();
         expect(probe).toHaveBeenCalledWith(admittedPolicy, undefined);
         expect(config.getShellExecutionSandbox()).toBe(resolvedPolicy);
+        expect(config.getBundledGeneratedUiStatus()).toEqual({
+          version: 1,
+          enabled: false,
+          reason: 'unsupported-runtime',
+        });
+        expect(config.getBundledGeneratedUiSkillsDir()).toBeUndefined();
         expect(HookSystem).not.toHaveBeenCalled();
         expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
         expect(refreshExtensions).not.toHaveBeenCalled();
@@ -3152,6 +3168,286 @@ describe('Server Config (config.ts)', () => {
     it('returns the same cache instance on repeated getter calls within one Config', () => {
       const config = makeConfig();
       expect(config.getFileReadCache()).toBe(config.getFileReadCache());
+    });
+  });
+
+  describe('bundled Generated UI', () => {
+    const server: MCPServerConfig = {
+      command: process.execPath,
+      args: ['/bundle/generated-ui/main.js'],
+      includeTools: ['generated_ui_show'],
+      trust: false,
+    };
+    const candidate = {
+      enabled: true,
+      server,
+      skillsDir: '/bundle/generated-ui/skills',
+    };
+    const create = (overrides: Partial<ConfigParameters> = {}) =>
+      makeConfig({
+        sandbox: undefined,
+        bundledGeneratedUi: candidate,
+        ...overrides,
+      });
+    const ready = async (overrides: Partial<ConfigParameters> = {}) => {
+      const config = create(overrides);
+      await config.initialize();
+      return config;
+    };
+    const expectUnavailable = (config: Config, reason: string) => {
+      expect(config.getBundledGeneratedUiStatus()).toEqual({
+        version: 1,
+        enabled: false,
+        reason,
+      });
+      expect(config.getBundledGeneratedUiSkillsDir()).toBeUndefined();
+      expect(
+        config.isSkillEnabled({ name: 'generated-ui', level: 'bundled' }),
+      ).toBe(false);
+    };
+
+    it('keeps default-off and pre-initialization sessions inactive', async () => {
+      const pending = create();
+      expect(pending.getBundledGeneratedUiStatus().enabled).toBe(false);
+      expect(pending.getMcpServers()).not.toHaveProperty('generated-ui');
+      const config = await ready({ bundledGeneratedUi: undefined });
+      expectUnavailable(config, 'setting-disabled');
+      config.setMcpServers({ ordinary: { command: 'ordinary' } });
+      expect(config.getBundledGeneratedUiStatus().enabled).toBe(false);
+      expect(
+        config.isSkillEnabled({ name: 'generated-ui', level: 'user' }),
+      ).toBe(true);
+    });
+
+    it('registers one independent binding after initialization and retains it across reloads', async () => {
+      const config = await ready();
+      expect(config.getBundledGeneratedUiStatus()).toEqual({
+        version: 1,
+        enabled: true,
+      });
+      expect(config.getMcpServers()?.['generated-ui']).toBe(server);
+      expect(config.getSettingsMcpServers()?.['generated-ui']).toBeUndefined();
+      expect(config.getBundledGeneratedUiSkillsDir()).toBe(candidate.skillsDir);
+      await config.reinitializeMcpServers({
+        ordinary: { command: 'ordinary' },
+      });
+      expect(config.getMcpServers()?.['generated-ui']).toBe(server);
+      expect(config.getBundledGeneratedUiStatus().enabled).toBe(true);
+      const snapshot = config.getBundledGeneratedUiStatus();
+      snapshot.enabled = false;
+      expect(config.getBundledGeneratedUiStatus().enabled).toBe(true);
+    });
+
+    it('freezes the switch until a new owning Config is created', async () => {
+      const settingsCandidate = { ...candidate, enabled: false };
+      const old = await ready({ bundledGeneratedUi: settingsCandidate });
+      settingsCandidate.enabled = true;
+      await old.reinitializeMcpServers({ ordinary: { command: 'ordinary' } });
+      expectUnavailable(old, 'setting-disabled');
+      const next = await ready({ bundledGeneratedUi: settingsCandidate });
+      expect(next.getBundledGeneratedUiStatus().enabled).toBe(true);
+      settingsCandidate.enabled = false;
+      await next.reinitializeMcpServers({});
+      expect(next.getBundledGeneratedUiStatus().enabled).toBe(true);
+      expectUnavailable(
+        await ready({ bundledGeneratedUi: settingsCandidate }),
+        'setting-disabled',
+      );
+    });
+
+    it.each([
+      ['settings', { mcpServers: { 'generated-ui': { command: 'manual' } } }],
+      [
+        'session',
+        {
+          topTierMcpServers: { 'generated-ui': { command: 'manual' } },
+          mcpServers: { 'generated-ui': { command: 'manual' } },
+        },
+      ],
+    ] as const)(
+      'preserves a manual %s provider and does not activate later',
+      async (_label, overrides) => {
+        const config = await ready(overrides);
+        expectUnavailable(config, 'provider-conflict');
+        expect(config.getMcpServers()?.['generated-ui']?.command).toBe(
+          'manual',
+        );
+        config.setMcpServers({});
+        expectUnavailable(config, 'provider-conflict');
+      },
+    );
+
+    it('checks runtime overlays injected after construction', async () => {
+      const config = create();
+      config.addRuntimeMcpServer('generated-ui', { command: 'runtime-manual' });
+      await config.initialize();
+      expectUnavailable(config, 'provider-conflict');
+      expect(config.getMcpServers()?.['generated-ui']?.command).toBe(
+        'runtime-manual',
+      );
+    });
+
+    it('checks active extensions discovered during initialization', async () => {
+      const config = create();
+      const extension = extensionFixture('manual-ui');
+      extension.config.mcpServers = {
+        'generated-ui': { command: 'extension-manual' },
+      };
+      vi.spyOn(config, 'getActiveExtensions').mockReturnValue([extension]);
+      await config.initialize();
+      expectUnavailable(config, 'provider-conflict');
+      expect(config.getMcpServers()?.['generated-ui']?.command).toBe(
+        'extension-manual',
+      );
+    });
+
+    it.each([
+      { bareMode: true },
+      { safeMode: true },
+      { sandbox: SANDBOX },
+      { provisionalWorkspace: true },
+    ])(
+      'withholds the provider and writer in unsupported modes: %j',
+      async (mode) => {
+        const config = await ready(mode);
+        expectUnavailable(config, 'unsupported-runtime');
+        expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      },
+    );
+
+    it('does not enable Generated UI for managed execution', async () => {
+      const config = create({ sessionExecutionEngine: 'managed' });
+      vi.spyOn(internals(config), 'activateChatRecording').mockResolvedValue(
+        undefined,
+      );
+      await config.initialize();
+      expectUnavailable(config, 'unsupported-runtime');
+      expect(config.getMcpServers()).toEqual({});
+    });
+
+    it('does not enable a local provider for an SSH execution environment', async () => {
+      const config = create({
+        executionEnvironment: new SshExecutionEnvironment(
+          { host: 'host', directory: '/srv/project' },
+          '/local/anchor',
+        ),
+      });
+      await config.initialize(SKIP_LLM_INIT);
+      expectUnavailable(config, 'unsupported-runtime');
+      expect(config.getMcpServers()).toEqual({});
+    });
+
+    it('keeps read-only Agent Host sessions unavailable', async () => {
+      const config = create();
+      config.setSessionSource('agent-host');
+      await config.initialize();
+      expectUnavailable(config, 'unsupported-runtime');
+    });
+
+    it.each([
+      { skipMcpDiscovery: true, disableBundledGeneratedUi: true },
+      { skipSkillManager: true, skipHooks: true },
+    ])(
+      'withholds the provider in bootstrap/read-only initialization: %j',
+      async (options) => {
+        const config = create();
+        await config.initialize(options);
+        expectUnavailable(config, 'unsupported-runtime');
+        expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      },
+    );
+
+    it('keeps normal deferred MCP discovery eligible', async () => {
+      const config = create();
+      await config.initialize({ skipMcpDiscovery: true });
+      expect(config.getBundledGeneratedUiStatus()).toEqual({
+        version: 1,
+        enabled: true,
+      });
+      expect(config.getMcpServers()?.['generated-ui']).toBe(server);
+    });
+
+    it('withholds untrusted workspaces and incomplete assets', async () => {
+      expectUnavailable(
+        await ready({ folderTrust: true, trustedFolder: false }),
+        'workspace-untrusted',
+      );
+      expectUnavailable(
+        await ready({
+          bundledGeneratedUi: {
+            enabled: true,
+            unavailableReason: 'assets-missing',
+          },
+        }),
+        'assets-missing',
+      );
+    });
+
+    it.each([
+      { allowedMcpServers: [] },
+      { excludedMcpServers: ['generated-*'] },
+      { pendingMcpServers: ['generated-ui'] },
+      { disabledTools: ['generated_ui_show'] },
+      { disabledTools: ['mcp__generated-ui__generated_ui_show'] },
+    ])('honors existing MCP/tool restrictions: %j', async (policy) => {
+      const config = await ready(policy);
+      expectUnavailable(config, 'policy-disabled');
+      expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+    });
+
+    it('applies live admission restrictions to the provider and cached writer', async () => {
+      const config = await ready();
+      config.setAllowedMcpServers([]);
+      expectUnavailable(config, 'policy-disabled');
+      expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      config.setAllowedMcpServers(undefined);
+      expect(config.getBundledGeneratedUiStatus().enabled).toBe(true);
+      config.setDisabledTools(
+        new Set(['mcp__generated-ui__generated_ui_show']),
+      );
+      expectUnavailable(config, 'policy-disabled');
+    });
+
+    it('does not let a newly enabled extension take over an active built-in binding', async () => {
+      const config = await ready();
+      const extension = extensionFixture('late-manual-ui');
+      extension.config.mcpServers = {
+        'generated-ui': { command: 'extension-manual' },
+      };
+      const active = vi
+        .spyOn(config, 'getActiveExtensions')
+        .mockReturnValue([extension]);
+      expectUnavailable(config, 'provider-conflict');
+      expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      expect(config.isBundledGeneratedUiServer('generated-ui')).toBe(true);
+      await config.reinitializeMcpServers({});
+      expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      active.mockReturnValue([]);
+      expect(config.getMcpServers()?.['generated-ui']).toBe(server);
+    });
+
+    it('rejects hot shadowing without changing the active binding', async () => {
+      const config = await ready();
+      expect(() =>
+        config.addRuntimeMcpServer('generated-ui', { command: 'manual' }),
+      ).toThrow('Restart the owning session');
+      expect(() =>
+        config.setMcpServers({ 'generated-ui': { command: 'manual' } }),
+      ).toThrow('Restart the owning session');
+      expect(config.getMcpServers()?.['generated-ui']).toBe(server);
+    });
+
+    it('cannot grant a disabled bundled writer through skills.enabled', async () => {
+      const config = await ready({
+        bundledGeneratedUi: { enabled: false },
+        enabledSkillNamesProvider: () => new Set(['generated-ui']),
+      });
+      expect(
+        config.isSkillEnabled({ name: 'generated-ui', level: 'bundled' }),
+      ).toBe(false);
+      expect(
+        config.isSkillEnabled({ name: 'generated-ui', level: 'project' }),
+      ).toBe(true);
     });
   });
 
@@ -6210,6 +6506,14 @@ describe('Server Config (config.ts)', () => {
       ).resolves.toEqual(
         unavailable('No terminal image renderer is configured.'),
       );
+    });
+
+    it('DW03: applies the constructor and live workflow keyword preference', () => {
+      const config = makeConfig({ workflowKeywordTriggerEnabled: false });
+      expect(config.getWorkflowKeywordTriggerEnabled()).toBe(false);
+      config.setWorkflowKeywordTriggerEnabled(true);
+      expect(config.getWorkflowKeywordTriggerEnabled()).toBe(true);
+      expect(makeConfig().getWorkflowKeywordTriggerEnabled()).toBe(true);
     });
 
     describe('bundled review workflow activation', () => {
@@ -10106,6 +10410,21 @@ describe('Server Config (config.ts)', () => {
       expect(makeConfig().getMaxToolCallsPerTurn()).toBe(
         DEFAULT_MAX_TOOL_CALLS_PER_TURN,
       );
+    });
+
+    it('defaults loopProtection to warn', () => {
+      expect(makeConfig().getLoopProtection()).toBe('warn');
+      expect(makeConfig({ loopProtection: 'stop' }).getLoopProtection()).toBe(
+        'stop',
+      );
+    });
+
+    it('falls back to warn for an unknown loopProtection mode', () => {
+      expect(
+        makeConfig({
+          loopProtection: 'Stop' as never,
+        }).getLoopProtection(),
+      ).toBe('warn');
     });
 
     it('should use a custom maxToolCallsPerTurn if provided', () => {

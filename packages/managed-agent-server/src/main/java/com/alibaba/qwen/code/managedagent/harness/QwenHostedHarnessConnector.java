@@ -21,6 +21,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionSkills;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.SshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
@@ -28,6 +29,7 @@ import com.alibaba.qwen.code.managedagent.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles;
 import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 
 import java.net.URI;
@@ -50,6 +52,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final DaemonApprovalMode approvalMode;
     private final ManagedActionStore actions;
     private final ManagedAgentDefinitionStore definitions;
+    @org.springframework.beans.factory.annotation.Autowired
+    private ManagedSessionSkills sessionSkills;
     private final ManagedSessionStore resources;
     private final WriterCredentialPolicy credentials;
     private final SshWorkspaceStore ssh;
@@ -148,7 +152,10 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         || sessionStore.getBaseUrl().isBlank()
                         || StringUtils.isBlank(workspaceId))) {
             throw new IllegalStateException("Enabled Managed Session Store"
-                    + " requires base URL and Runtime workspace ID");
+                    + " requires base URL and Runtime workspace ID; set"
+                    + " QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL and"
+                    + " QWEN_MANAGED_AGENT_WORKSPACE_CWD or"
+                    + " QWEN_MANAGED_AGENT_WORKSPACE_ID");
         }
         String runtimeWorkspaceId = properties.getRuntimeBroker()
                 .getWorkspaceId();
@@ -231,6 +238,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     false, toolProfile(session), false, false,
                     WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
                     .withAgentDefinition(agentDefinition(session, false))
+                    .withSessionSkillsRef(sessionSkillsRef(session, false))
                     .withMcpServers(mcpServers(session))
                     .withHookCatalog(hookCatalog(session))
                     .withForegroundOnly(foregroundOnly(session))
@@ -461,6 +469,17 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsLiveApprovalSelection() {
+        try {
+            var features = client().capabilities().getFeatures();
+            return features.contains("approval-selection/1")
+                    && features.contains("live-approval-selection/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
     public boolean supportsAgentDefinitionApprovalSelection() {
         try {
             var features = client().capabilities().getFeatures();
@@ -480,6 +499,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public boolean supportsPlanMode() {
         try {
             return client().capabilities().getFeatures().contains("plan-mode/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
+    public boolean supportsSessionSkills() {
+        try {
+            return sessionStore.isEnabled() && client().capabilities().getFeatures().contains("session-skills/2");
         } catch (RuntimeException unavailable) {
             return false;
         }
@@ -838,6 +866,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         false, false,
                         WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
                         .withAgentDefinition(agentDefinition(session, false))
+                        .withSessionSkillsRef(sessionSkillsRef(session, false))
                         .withMcpServers(mcpServers(session))
                         .withHookCatalog(hookCatalog(session))
                         .withForegroundOnly(foregroundOnly(session))
@@ -1100,6 +1129,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             if (definition != null) {
                 builder.agentDefinition(definition);
             }
+            builder.sessionSkillsRef(sessionSkillsRef(session, true));
             StoreModels.SessionLineage lineage = sessions.findChildLineage(
                     session.tenantId(), session.sessionId());
             if (lineage != null) {
@@ -1143,6 +1173,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 driveRuntimeRecovery, cancellationTakeover,
                 WorkspaceToolProfiles.isPublicShell(profile))
                 .withAgentDefinition(agentDefinition(session, false))
+                .withSessionSkillsRef(sessionSkillsRef(session, false))
                 .withMcpServers(mcpServers(session))
                 .withHookCatalog(hookCatalog(session))
                 .withForegroundOnly(foregroundOnly(session))
@@ -1370,6 +1401,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 if (policy == null) {
                     throw new IllegalStateException("The active Turn approval snapshot is missing");
                 }
+                if (policy.revision() < selected.revision() && !supportsLiveApprovalSelection()) {
+                    throw new IllegalStateException("Hosted live approval selection is unavailable");
+                }
                 if (policy.planMode() && !supportsPlanMode()) {
                     throw new IllegalStateException("Hosted Plan mode is unavailable");
                 }
@@ -1433,6 +1467,23 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     "byteLength", ref.byteLength(), "digest", ref.digest()));
         }
         return pin;
+    }
+
+    private Map<String, Object> sessionSkillsRef(SessionRecord session, boolean create) {
+        var skills = sessionSkills == null ? null : sessionSkills.snapshot(session.tenantId(), session.sessionId());
+        if (skills == null) {
+            return null;
+        }
+        if (!supportsSessionSkills()) {
+            throw new IllegalStateException("The Hosted Harness does not support Session Skills");
+        }
+        byte[] bytes = AgentDefinitionExtensions.skillsBytes(skills);
+        String digest = DigestUtils.sha256Hex(bytes);
+        if (create) {
+            resources.publishAgentSkills(session.tenantId(), session.workspace().getWorkspaceId(), session.sessionId(), skills);
+        }
+        return Map.of("resourceId", "agent-skills-" + digest, "kind", "managed-agent-skills", "schemaVersion", 1,
+                "byteLength", bytes.length, "digest", digest);
     }
 
     private List<Map<String, Object>> mcpServers(SessionRecord session) {

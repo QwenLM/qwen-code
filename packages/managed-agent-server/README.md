@@ -240,6 +240,7 @@ export QWEN_MANAGED_AGENT_HARNESS_ENABLED='true'
 export QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4170'
 export QWEN_MANAGED_AGENT_HARNESS_TOKEN='replace-me'
 export QWEN_MANAGED_AGENT_CAPABILITY_DIGEST='sha256:replace-with-64-hex-characters'
+export QWEN_MANAGED_AGENT_WORKSPACE_ID='local-dev-workspace'
 
 mvn spring-boot:run
 ```
@@ -424,8 +425,10 @@ Restore transaction pages are bounded to 8 MiB of unencoded record bytes even
 when the requested item limit is larger. Unknown head states, unsafe counters,
 or missing transaction revisions fail closed as storage corruption.
 
-The routes are disabled by default. Enable them only on a private service
-listener or trusted service network:
+The routes follow `qwen.managed-agent.harness.enabled` by default, because
+the Hosted Harness requires them; `QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED`
+overrides that default. Serve them only on a private service listener or
+trusted service network. The explicit settings are:
 
 ```bash
 export QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED='true'
@@ -435,16 +438,25 @@ export QWEN_MANAGED_AGENT_WORKSPACE_ID='workspace-demo'
 ```
 
 `QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL` must be reachable from the Hosted
-Harness. When both the Harness and Store are enabled, Java includes a scoped
+Harness. When it is blank and the store listener — the internal listener when
+`internal-server.port` is set, otherwise the public one — binds a blank,
+`127.0.0.1`, `0.0.0.0`, `::` or `::1` address on a fixed port, the server
+uses that listener's loopback `http://` URL. A public listener that serves TLS
+through `server.ssl`, or any other listener, needs an explicit URL.
+When both the Harness and Store are enabled, Java includes a scoped
 Store descriptor in each new private Hosted Session request. The ordinary
 daemon rejects that descriptor, while the Hosted Harness uses the TypeScript
 HTTP adapter with the descriptor's broker-issued writer credential (or a
 self-generated secret when no binding key is configured). Workspace-bound Sessions use
 their persisted Workspace ID for the Store scope; unbound Sessions use
 `QWEN_MANAGED_AGENT_WORKSPACE_ID`. The public Session, private journal and Runtime
-binding retain one `(tenantId, workspaceId, sessionId)` identity. The global ID
-must still be set explicitly when enabling the Session Store; if the Runtime
-Broker also has an explicit ID, startup rejects a mismatch.
+binding retain one `(tenantId, workspaceId, sessionId)` identity. When the
+global store ID is blank, the store uses the Runtime Broker's ID: its configured
+ID, otherwise the hash a local-process or Kubernetes Broker derives from
+`QWEN_MANAGED_AGENT_WORKSPACE_CWD`, even while the Broker is disabled. If the
+Runtime Broker also has an explicit ID, startup rejects a mismatch. Keep an
+existing deployment's ID unchanged, since unbound Sessions resolve their store
+scope from it.
 
 This activates the durable create and cold-load paths for newly created Hosted
 Sessions. The load path rebuilds the Harness state from the scoped Store and
@@ -597,23 +609,19 @@ QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST="$QWEN_MANAGED_AGENT_CAPABILITY_DIGEST" \
 qwen serve --profile hosted-harness --port 4171 --hostname 127.0.0.1 --no-web
 ```
 
-— and Spring must point at it with the matching base URL. Spring's HTTP
-Session Store stays off by default, and the Hosted Harness rejects every
-attach without a store descriptor, so Spring also needs the three values
-the one-shot launcher writes into `spring.env` — the connector refuses to
-start when the store is enabled with a blank base URL or workspace ID.
-Export all four together:
+— and Spring must point at it with the matching base URL. The Hosted
+Harness rejects every attach without a store descriptor; the HTTP Session
+Store follows the Harness, defaults to this server's loopback listener and is
+scoped by the workspace ID exported in Prerequisites, so only the Harness URL
+changes:
 
 ```bash
 export QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4171'
-export QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED='true'
-export QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL='http://127.0.0.1:8080'
-export QWEN_MANAGED_AGENT_WORKSPACE_ID='local-dev-workspace'
 ```
 
-All four are read once at JVM startup, so if `mvn spring-boot:run` is
-already up on the 4170 value exported in Prerequisites, restart it with the
-overrides in place.
+It is read once at JVM startup, so if `mvn spring-boot:run` is already up
+on the 4170 value exported in Prerequisites, restart it with the override in
+place.
 
 `--port` is a request, not a guarantee: `qwen serve` moves to the next free
 port on a collision, and 4171 is exactly where a daemon displaced from 4170
@@ -647,9 +655,9 @@ Harness or Runtime Broker credentials.
 
 ### Native macOS Workspace development
 
-The Java Broker can run the existing local Node.js tool worker on macOS with verified Workspace registration and durable same-boot worker adoption. Set `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`; whole-host reboot recovery remains Linux-only. Keep durable local mode and verified Workspace recovery enabled, register the storage offline using the maintenance command below, and configure the same mount in the Java service. A missing registration still refuses tool execution.
+The Java Broker can run the existing local Node.js tool worker on macOS with verified Workspace registration and durable same-boot worker adoption. Set `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`; whole-host reboot recovery remains Linux-only. Keep durable local mode and verified Workspace recovery enabled. Use the local directory import below for automatic registration, or register storage offline using the maintenance command and configure the same mount in the Java service. A missing registration still refuses tool execution.
 
-For the Vite entry, set `VITE_MANAGED_AGENT_WORKSPACE_BINDING=true` and `VITE_MANAGED_AGENT_ACTOR_ID` to your development actor. On the loopback Java service, set `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER=X-Qwen-Actor-Id` and grant that actor access to the registered Workspace. Configure `VITE_MANAGED_AGENT_MODEL_PRESETS` with published AgentDefinition IDs for new-task model choices; the server's `model-catalog` supplies model choices within bound Sessions. These settings supplement the Broker and Hosted Harness wiring below; enabling selectors alone does not enable tools.
+For the Vite entry, set `VITE_MANAGED_AGENT_WORKSPACE_BINDING=true` and `VITE_MANAGED_AGENT_ACTOR_ID` to your development actor. On the loopback Java service, set `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER=X-Qwen-Actor-Id`; local directory import grants the importing actor automatically, while offline registration requires a separate Workspace grant. Configure `VITE_MANAGED_AGENT_MODEL_PRESETS` with published AgentDefinition IDs for new-task model choices; the server's `model-catalog` supplies model choices within bound Sessions. These settings supplement the Broker and Hosted Harness wiring below; enabling selectors alone does not enable tools.
 
 macOS storage identity combines `IOPlatformUUID` with the original device, inode and nanosecond birth time from native `stat`, cross-checked against the JDK directory identity. Worker identity also checks `kern.bootsessionuuid` and the exact process start instant before re-attestation. Preserve the SQL database, private Runtime state directory and credential key across Broker restarts. macOS handles use explicit `macos` namespace labels; older Java readers refuse them. A different boot is refused even for operator stop attestation. Background Shell, Monitor, command Hooks and Linux CSI retain their existing platform restrictions. The published reference distribution's Linux qualification is unchanged.
 
@@ -719,6 +727,28 @@ An uncertain response must be retried with the same key and name. The page prese
 
 ### Select an existing local project directory
 
+For a trusted single-user deployment bound to loopback, enable
+`QWEN_MANAGED_AGENT_LOCAL_DIRECTORY_IMPORT_ENABLED=true` alongside Workspace files,
+durable local-process execution, verified recovery, and the trusted actor header.
+Then **Workspace → Choose existing directory** browses this computer directly,
+without a pre-registered parent or grant. Import keeps the project in place,
+automatically registers its projects parent outside Git worktrees, grants the
+current actor OWNER access, and sets the project as the initial working directory.
+The parent shares file access and its physical-owner lease across projects; this
+is not a filesystem sandbox. Existing owned roots are reused while sessions run.
+Private Runtime state and creation roots must stay outside imported parents.
+Remote listeners and signed/shared deployments cannot enable this local feature.
+
+The actor-authenticated directory query accepts `localPath` (empty starts at the
+host home directory), and create accepts an absolute `localPath` with the name
+and idempotency key. These fields are exclusive with Workspace-relative source
+fields. `localDirectoryImport` advertises the capability independently; pending
+receipts pin native root identity and completed receipts resolve imported roots
+after restart or disabling further imports. Neither retry nor restart repairs a
+missing/foreign marker or restores revoked access. See the
+[local import design](../../docs/design/2026-10-21-managed-local-directory-import.md).
+
+For other deployments, the existing authorized-root flow remains available.
 With verified LOCAL storage enabled, **New workspace → Choose existing directory** browses the Linux or macOS execution host through Java. Select an ACTIVE ROOT Workspace you own, then choose an existing project beneath its authorized root. Administrators can register and grant a projects parent directory once; the root must remain outside all Git worktrees. The selected project stays in place and becomes the new Workspace's persistent default working directory. Other Workspaces on that storage retain the same shared file-access scope and physical-owner lease; selecting a subdirectory does not create filesystem isolation.
 
 `POST /api/agent/web-shell/v1/workspaces/directories/query` accepts `workspaceId` and `cwdRelative`, rechecks OWNER access and native storage, and returns at most 100 real immediate child directories (scanning at most 1024 entries). Only this authorized route discloses its execution-host root path. The existing create route accepts `sourceWorkspaceId` and `cwdRelative` together to bind a new logical Workspace to the verified source storage, configuration, and policy. It does not create directories or re-register storage. The creation receipt pins source generation and directory; pending retries refuse source changes or revoked ownership. Completed replay checks the new Workspace's current access. WebShell summaries expose `defaultCwdRelative` and `canSelectDirectory`; missing values mean `.` and unsupported, respectively. The page advertises `workspaceDirectorySelection` separately from empty creation and preserves the selected directory across retries, refresh, and reselect. See the [bilingual design](../../docs/design/2026-10-16-managed-workspace-directory-selection.md).
@@ -739,11 +769,11 @@ For new Workspace-bound WebShell Sessions, the shared composer queries `POST /ap
 
 The WebShell create request may include `approvalMode` only with a Workspace binding. Omission preserves the existing default and request digest; explicit selection is persisted in the Session and joins its idempotency digest. Retrying the same key reads the original pin even if deployment defaults, the AgentDefinition, or a later Session selection changed. Workspace-bound and definition-pinned Session summaries expose the current `approvalMode`, immutable `initialApprovalMode`, and `approvalRevision`. Legacy unbound built-in Sessions omit this metadata because their execution policy is supplied by the deployment. The public REST create contract is unchanged.
 
-Eligible Workspace Sessions can change their next user-submitted Turn's approval policy. Built-in `qwen-code` Sessions require the Harness feature `approval-selection/1`. Stored AgentDefinition Sessions using exactly `hosted-workspace-files/1`, `hosted-workspace-shell/1`, or `hosted-workspace-shell/2` additionally require `agent-definition-approval-selection/1`; both features must remain available for execution after any override, including a return to the initial mode. `POST /api/agent/web-shell/v1/session-approval/query` returns the current mode, revision, available modes, and support. `POST /api/agent/web-shell/v1/session-approval/change` accepts `sessionId`, `approvalMode`, `expectedRevision`, `idempotencyKey`, and `requestId`. Only the recorded Session owner with current Workspace OPERATOR or OWNER access may change it or replay a receipt. The Session must be idle, with no pending approval, context/lifecycle operation, retained Runtime, or recovery work. Identical retries return the original result without another revision; different content under the same key and stale revisions conflict. The definition pin and initial creation policy remain immutable; later user Turns freeze the selected mode and revision. Creation options still expose only the compiled initial policy. Files/2, MCP, read-only child, team-lead, CSI, unknown profiles, and unbound text Sessions do not gain policy selection. There is no public REST mutation endpoint. See the [stored-definition approval design](../../docs/design/2026-10-17-managed-definition-approval-selection.md) ([简体中文](../../docs/design/2026-10-17-managed-definition-approval-selection.zh-CN.md)).
+Eligible Workspace Sessions can change their execution approval policy. With the Harness feature `live-approval-selection/1`, a selection affects subsequent permission checks in the current Turn, and ordinary pending tools are durably allowed when the selected mode permits them. Already dispatched tools and explicit Hook or Plan-exit approvals retain their existing decisions. Built-in `qwen-code` Sessions require the Harness feature `approval-selection/1`. Stored AgentDefinition Sessions using exactly `hosted-workspace-files/1`, `hosted-workspace-shell/1`, or `hosted-workspace-shell/2` additionally require `agent-definition-approval-selection/1`; both features must remain available for execution after any override, including a return to the initial mode. `POST /api/agent/web-shell/v1/session-approval/query` returns the current mode, revision, available modes, and support. `POST /api/agent/web-shell/v1/session-approval/change` accepts `sessionId`, `approvalMode`, `expectedRevision`, `idempotencyKey`, and `requestId`. Only the recorded Session owner with current Workspace OPERATOR or OWNER access may change it or replay a receipt. Without live support, the Session must be idle, with no pending approval or retained Runtime. Context/lifecycle and recovery barriers always apply; Plan changes remain idle-only. The options response advertises live behavior with `liveSupported`. Upgrade the control plane and Harness together in a maintenance window, fencing old Java writers before reopening execution; new Harness tool Turns refuse a missing live-policy endpoint. See the [live approval design](../../docs/design/2026-10-20-managed-live-approval.md) ([简体中文](../../docs/design/2026-10-20-managed-live-approval.zh-CN.md)). Identical retries return the original result without another revision; different content under the same key and stale revisions conflict. The definition pin and initial creation policy remain immutable; later user Turns freeze the selected mode and revision. Creation options still expose only the compiled initial policy. Files/2, MCP, read-only child, team-lead, CSI, unknown profiles, and unbound text Sessions do not gain policy selection. There is no public REST mutation endpoint. See the [stored-definition approval design](../../docs/design/2026-10-17-managed-definition-approval-selection.md) ([简体中文](../../docs/design/2026-10-17-managed-definition-approval-selection.zh-CN.md)).
 
-This extension needs no schema migration, but old Java readers and writers ignore custom overrides. Upgrade Harness first, then stop or fence every old Java/Broker process sharing the catalog and deploy the new control plane everywhere before permitting changes. After a custom override, rollback must use a compatible build or keep affected Sessions blocked while applying a forward fix. Do not mix old Java binaries, clear revisions, or rewrite definition/history to roll back. Custom initial-yolo definitions retain the existing ten-minute approval timeout fallback after an override; custom initial-default/auto-edit definitions retain their stored timeout.
+The stored-definition extension needs no schema migration, but old Java readers and writers ignore custom overrides. For live approval, use the coordinated control-plane/Harness upgrade described above and stop or fence every old Java/Broker process sharing the catalog before permitting changes. After a custom override, rollback must use a compatible build or keep affected Sessions blocked while applying a forward fix. Do not mix old Java binaries, clear revisions, or rewrite definition/history to roll back. Custom initial-yolo definitions retain the existing ten-minute approval timeout fallback after an override; custom initial-default/auto-edit definitions retain their stored timeout.
 
-Schema V6 preserves the original policy and adds a current override plus per-Turn approval snapshots. Turn admission and policy changes share the Session row lock, so retries and recovery execute the admitted snapshot. Revision zero and legacy Turns consistently omit the private `approvalSelection` field and execute the confirmed immutable definition, preserving prompt retry identity across Harness capability upgrades; positive revisions always send the saved Turn snapshot. `yolo` skips ordinary file and Shell approvals, while explicit Hook ask/deny decisions retain their existing behavior. The configured approval timeout persists for new selectable Full Access Sessions and survives a later switch back to asking. Legacy Full Access definitions without a timeout keep the existing 10-minute fallback. WebShell retains an uncertain change with its original request and key across refresh, blocks send/model/cwd changes until receipt readback, and ignores older policy revisions. A Session with an override cannot execute through an older Harness. Deploy the updated Harness first, upgrade schema and all Java/Broker readers and writers during a maintenance window, then release WebShell; rollback binaries must understand the saved override and snapshots. See the [approval selection design](../../docs/design/managed-approval-selection.md).
+Schema V6 preserves the original policy and adds a current override plus per-Turn approval snapshots. Turn admission and policy changes share the Session row lock. Immutable Turn snapshots preserve retry and recovery identity; live permission boundaries separately read the current durable Session selection. Revision zero and legacy Turns consistently omit the private `approvalSelection` field, preserving prompt retry identity across Harness capability upgrades; positive revisions always send the saved Turn snapshot. `yolo` skips ordinary file and Shell approvals, while explicit Hook ask/deny decisions retain their existing behavior. The configured approval timeout persists for new selectable Full Access Sessions and survives a later switch back to asking. Legacy Full Access definitions without a timeout keep the existing 10-minute fallback. WebShell retains an uncertain change with its original request and key across refresh, blocks send/model/cwd changes until receipt readback, and ignores older policy revisions. A Session with an override cannot execute through an older Harness. Follow the coordinated live rollout above; rollback binaries must understand the saved override and snapshots. See the [approval selection design](../../docs/design/managed-approval-selection.md).
 
 Workspace-bound WebShell Session summaries can include `modelContext` with the actual observed `modelId`, optional latest-request `inputTokens` and resolved `contextWindowSize`, and `observedAt`. The Hosted CLI records capacity beside successful provider usage; the Java Session Store projects only committed main-model attempts into one private latest-resource pointer. Lists read these observations in one batch without scanning journal history. Older or invalid usage advances the pointer but leaves missing values unknown; cumulative billing totals and inferred capacities never substitute for them. The shared usage popover does not offer manual compression. New tasks continue to select published AgentDefinition presets. This observation projection uses existing SQL tables and resource-reference cleanup without changing the recovery format.
 
@@ -909,6 +939,13 @@ export QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY='/absolute/private/state'
 export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/absolute/path/to/node'
 export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 ```
+
+Local-process workers run model-directed tools, so the Broker starts them
+without any environment variable whose name begins, in any letter case, with
+`QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `SPRING_` or `OSS_`. Every other
+variable of the server process still reaches the worker and its tools. Keep
+unrelated secrets out of the service environment. This does not isolate files:
+a worker runs as the service account and can read whatever that account can.
 
 After a credential-key rotation, keep each prior key in
 `previous-credential-keys` until no persisted Runtime binding references its
@@ -1199,7 +1236,7 @@ Marker v2 stores birth time as a canonical `Instant` string. Linux reads creatio
 
 Keep the storage root outside **every Git worktree**, with Session cwd in a child project directory. `.qwen-managed-storage.json` is an administrator maintenance file: do not read/write it through model tools or subject it to Git cleanup/stash. Tools are not confined by this layout. Missing or conflicting markers close admission; completed registrations never automatically republish them, including on a same-UUID retry. Marker repair needs a separate design.
 
-The retired V1–V68 migration chain and marker v1 are historical formats. This application initializes a new database with the shared V1 baseline and marker v2; it does not upgrade or migrate an existing database. Preserve old deployments and their data for historical access. Do not attach this binary to an old catalog or bypass refusal with Flyway `repair`, `outOfOrder` or manual history edits.
+The retired V1–V68 migration chain and marker v1 are historical formats. This application initializes a new database with the shared V1 baseline and marker v2; it refuses catalogs from that retired chain. Additive migrations within the current canonical chain follow their own rollout requirements, including the [V15 drained cutover](#hosted-recovery-scope). Preserve retired deployments and their data for historical access. Do not attach this binary to a retired catalog or bypass refusal with Flyway `repair`, `outOfOrder` or manual history edits.
 
 Stop all processes and external jobs that can write the storage, account for
 old Runtime holders and verify the original root before registration. Initialize
@@ -1339,6 +1376,16 @@ mvn -Pmysql-integration \
 
 Use a disposable database: the integration test creates and deletes fixture
 rows within the selected schema.
+
+The `hosted-harness-mysql` profile additionally clears every `ma_` base table
+before each top-level `Hosted*IT` class, while retaining the schema and Flyway
+history. Its JUnit extension is enabled only in that profile; one fork and
+disabled JUnit parallelism keep cleanup ahead of the next class's contexts.
+Use a database exclusively owned by this test invocation. Class teardown must
+still stop all contexts and child processes. State is preserved between methods,
+nested classes, and context restarts inside one class. See the
+[isolation design](../../docs/design/2026-10-20-hosted-it-database-isolation.md)
+([简体中文](../../docs/design/2026-10-20-hosted-it-database-isolation.zh-CN.md)).
 
 ## Linux extension process acceptance
 
@@ -1522,6 +1569,12 @@ each arm runs even when an earlier one failed.
 
 ### Hosted recovery scope
 
+Ordinary LOCAL and SSH_LOCAL Managed Workspace Sessions may execute concurrently in the same directory, with one active Turn per Session. An UNKNOWN tool result on a READY binding retains its original Runtime Session and cannot be replayed, but does not exclude another ordinary Session. Existing LOST, DRAINING, OPERATOR_RECOVERY and attested RECOVERY_BLOCKED placement barriers remain in force. Physical registration, fencing, migration and maintenance still require every execution membership and unproven writer to drain. Shared files have no transactional isolation. Past execution overlap does not disable file undo. Undo requires other current memberships to release, then briefly excludes new acquisitions; existing file-level history checks still apply. Resident/private CSI and existing Agent/Workflow child-admission restrictions are unchanged. See the [concurrency design](../../docs/design/2026-10-21-managed-workspace-concurrency.md) ([简体中文](../../docs/design/2026-10-21-managed-workspace-concurrency.zh-CN.md)).
+
+V15 stores ordinary execution memberships per Runtime Session. Use the matching Server/Broker build and schema. There is no singleton-holder conversion or fallback execution authority; CSI reservation and physical-maintenance ownership keep their existing roles.
+
+Fresh installations initialize an empty catalog. An existing canonical V1–V14 catalog requires a drained cutover, not a mixed-version rolling upgrade: disable new Turn admission, then use the old build to finish or recover and release every ordinary LOCAL/SSH_LOCAL holder. Stop the old Server, Broker, Harness, Runtime workers and other storage writers, then verify that no `ma_storage_owner` row with `storage_kind IN ('LOCAL', 'SSH_LOCAL')` and `maintenance_id IS NULL` has a non-null `holder_key`. Only then apply V15 and start the matching build. An UNKNOWN holder with unconfirmed writer cleanup must remain on the old deployment until recovery and release succeed. Do not manually clear its ownership or start the new build against that catalog.
+
 The [SQL wake scan](#wake-recovery-after-harness-loss) has separate local
 macOS/MySQL 8.4 evidence; it does not yet have Linux/Windows, real-MQ or deployed
 provider acceptance. The scope below does not extend those claims.
@@ -1614,6 +1667,8 @@ Set `QWEN_MANAGED_AGENT_DEFINITION_MODELS` to comma-separated IDs configured in 
 `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` defaults to `hosted-workspace-files/1`. Before opting into `hosted-workspace-files/2`, drain old workers and upgrade every provisioner according to #13166. Empty permission policies inherit the deployment approval mode (default `yolo`); use `default` for deployments that require approval.
 
 `skills` accepts up to 16 static `{ "name": "review", "description": "Review changes", "body": "Read the diff and report concrete defects.", "base_directory": ".qwen/skills/review" }` entries for a Workspace-bound tool profile. `base_directory` is optional and defaults to `.`; it is a canonical POSIX path relative to the Session's working directory, matching Runtime `read_file` and `glob`, never the Harness host. Absolute paths, traversal, empty or dot components, colons, backslashes and control characters are rejected. Names are unique and use letters, numbers, `_`, `:`, `.`, or `-` (at most 128 UTF-8 bytes); descriptions are nonblank and at most 4096 UTF-8 bytes, bodies are nonblank and at most 32768 bytes, directories are at most 4096 bytes, and the compact JSON catalog is at most 48 KiB. Invalid Unicode and extra Skill fields are rejected. Bodies grant no tool permissions and cannot register Hooks, override the model, or discover host-installed skills. The connector publishes the catalog as a digest-addressed `managed-agent-skills` resource; a replacement Harness validates and reads the original reference.
+
+Public and WebShell Workspace Session creation also accept an optional `skills` array in the same static format. The Session catalog permits 256 entries, 512 KiB per body and 2 MiB compact JSON; AgentDefinition admission retains the smaller limits above. Both origins use the same `managed-agent-skills` resource kind, whose shared resource validators apply the 2-MiB bound; the smaller definition limits are enforced at admission. The array adds to the pinned AgentDefinition Skills (including for the built-in `qwen-code` agent); duplicate names or combined limits are rejected. The effective catalog is saved immutably with the creation receipt, and changing Skill content under the same idempotency key conflicts. Empty or omitted arrays preserve existing behavior. The WebShell uses the enabled Skills from its existing Skills management page; creation imports an immutable instruction snapshot from the explicitly selected trusted daemon Workspace. Upload and enable/disable remain on that page. Manual-only and user-hidden invocation flags are preserved; source asset directories, permission grants, model overrides and Hooks are not imported. This requires a durable Session Store and a Harness advertising `session-skills/2`; deploy compatible Java, SDK, Harness, and WebShell artifacts together. The existing Skills page owns discovery and installation; the Managed execution Runtime does not discover source directories implicitly.
 
 `mcp_servers` accepts up to 16 unique `{ "server_id": "docs", "server_revision": 1, "definition_digest": "<64 lowercase hex characters>" }` pins. Select `tools: [{ "type": "hosted_profile", "profile": "hosted-workspace-mcp/1" }]` and explicitly add that profile to `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES`; an MCP profile without pins or pins with another profile are refused. The Runtime deployment owns the matching server manifest, endpoints, transport and credentials. `hook_catalog` similarly accepts `{ "catalog_id": "review", "catalog_revision": 1, "definition_digest": "<64 lowercase hex characters>" }` for any Workspace-bound tool profile, selecting a Runtime-provisioned Hook catalog. Revisions are positive JavaScript-safe integers. Neither field accepts executable recipes or credentials. Create/update continues to store future configuration shapes without interpreting them; the limits and supported shapes above are enforced at Session admission. An old definition containing an unsupported shape remains rejected there.
 

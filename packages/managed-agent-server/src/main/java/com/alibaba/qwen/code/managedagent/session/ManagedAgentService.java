@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
+import com.alibaba.qwen.code.managedagent.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
@@ -245,12 +246,12 @@ public class ManagedAgentService {
         var options = store.workspaceSessionOptions(tenantId, agentId);
         if ("qwen-code".equals(agentId) && store.workspaceShellEnabled() && harness.supportsApprovalSelection()) {
             return new WebShellSessionOptions(options.approvalMode(), List.of("default", "auto-edit", "yolo"),
-                    harness.supportsPlanMode(), harness.supportsInputAttachments());
+                    harness.supportsPlanMode(), harness.supportsInputAttachments(), harness.supportsSessionSkills());
         }
         return new WebShellSessionOptions(options.approvalMode(), options.availableApprovalModes(),
                 harness.supportsPlanMode() && harness.supportsAgentDefinitionApprovalSelection()
                         && options.planModeSupported(),
-                harness.supportsInputAttachments());
+                harness.supportsInputAttachments(), harness.supportsSessionSkills());
     }
 
     public WebShellSessionModels queryWebShellSessionModels(String tenantId, String actorId,
@@ -286,7 +287,7 @@ public class ManagedAgentService {
                 summary.approvalRevision() == null ? 0 : summary.approvalRevision(),
                 supported ? List.of("default", "auto-edit", "yolo")
                         : summary.approvalMode() == null ? List.of() : List.of(summary.approvalMode()), supported,
-                summary.planMode(), summary.planModeSupported());
+                summary.planMode(), summary.planModeSupported(), supported && harness.supportsLiveApprovalSelection());
     }
 
     public WebShellApprovalChangeResult changeWebShellSessionApproval(String tenantId, String actorId,
@@ -306,7 +307,7 @@ public class ManagedAgentService {
         String digest = digests.digest(semantic);
         return store.changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode,
                 expectedRevision, harness.supportsApprovalSelection(), harness.supportsAgentDefinitionApprovalSelection(),
-                planMode, harness.supportsPlanMode());
+                planMode, harness.supportsPlanMode(), harness.supportsLiveApprovalSelection());
     }
 
     private static void requireModelActor(String actorId) {
@@ -327,7 +328,17 @@ public class ManagedAgentService {
             String actorId, String idempotencyKey, String agentId,
             String agentRevision, String title, Map<String, Object> metadata,
             List<InputBlock> blocks, WorkspaceSelection selection, String approvalMode, Boolean planMode) {
+        return createWorkspaceSession(tenantId, actorId, idempotencyKey, agentId, agentRevision,
+                title, metadata, blocks, selection, approvalMode, planMode, null);
+    }
+
+    public CommandAdmission createWorkspaceSession(String tenantId,
+            String actorId, String idempotencyKey, String agentId,
+            String agentRevision, String title, Map<String, Object> metadata,
+            List<InputBlock> blocks, WorkspaceSelection selection, String approvalMode, Boolean planMode,
+            List<Map<String, Object>> skills) {
         validateIdempotencyKey(idempotencyKey);
+        var additions = AgentDefinitionExtensions.sessionSkills(skills);
         if (actorId == null || actorId.isEmpty()) {
             throw new ManagedAgentException(HttpStatus.UNAUTHORIZED,
                     "actor_required", "A trusted actor is required.");
@@ -351,6 +362,9 @@ public class ManagedAgentService {
         if (planMode != null) {
             semantic.put("planMode", planMode);
         }
+        if (!additions.isEmpty()) {
+            semantic.put("skills", additions);
+        }
         String requestDigest = digests.digest(semantic);
         String payloadDigest = input.isEmpty() ? null
                 : SubmitHarnessTurn.computePayloadDigest(input);
@@ -362,6 +376,10 @@ public class ManagedAgentService {
             dispatch(tenantId, recorded.get(), true);
             return response(recorded.get());
         }
+        if (!additions.isEmpty() && !harness.supportsSessionSkills()) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature",
+                    "The Hosted Harness does not support Session Skills.");
+        }
         if (!input.isEmpty() && !harness.isWorkspaceFilesAvailable()) {
             throw new ManagedAgentException(HttpStatus.CONFLICT,
                     "workspace_unavailable",
@@ -369,7 +387,7 @@ public class ManagedAgentService {
         }
         Admission admission;
         try {
-            admission = approvalMode == null && planMode == null
+            admission = approvalMode == null && planMode == null && additions.isEmpty()
                     ? store.insertWorkspaceSessionCommand(tenantId,
                             actorId, idempotencyKey, requestDigest, agentId,
                             agentRevision, effectiveTitle, input, payloadDigest, selection)
@@ -378,7 +396,7 @@ public class ManagedAgentService {
                             agentRevision, effectiveTitle, input, payloadDigest,
                             selection, approvalMode, harness.supportsApprovalSelection()
                                     && ("qwen-code".equals(agentId) || harness.supportsAgentDefinitionApprovalSelection()),
-                            planMode, harness.supportsPlanMode());
+                            planMode, harness.supportsPlanMode(), additions);
         } catch (DuplicateKeyException error) {
             admission = store.replayWorkspaceSessionCommand(tenantId,
                     actorId, idempotencyKey, requestDigest);
@@ -1180,6 +1198,7 @@ public class ManagedAgentService {
         Map<String, WebShellModelSelection> modelSelections = store.findModelSelections(tenantId, boundIds);
         Map<String, WebShellModelContext> modelContexts = store.findModelContexts(tenantId, boundIds);
         boolean modelSelectionSupported = !store.modelOptions().isEmpty() && harness.supportsModelSelection();
+        boolean renameSupported = harness.isAvailable() && harness.supportsFencedTitles();
         Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
         // Cwd admission has no Turn execution-profile restriction. One role
         // grant read covers the workspaces of both shapes; the executable
@@ -1221,7 +1240,7 @@ public class ManagedAgentService {
                         maySubmitWorkspaceTurn(session, grants, executable),
                         mayChangeCwd(session, grants, executable),
                         modelContexts.get(session.sessionId()),
-                        modelSelections.get(session.sessionId()), modelSelectionSupported,
+                        modelSelections.get(session.sessionId()), modelSelectionSupported, renameSupported,
                         approvalSelections.get(session.sessionId()), approvalSupported
                                 && (session.agentDefinitionDigest() == null || definitionApprovalSupported)
                                 && approvalOwners.contains(session.sessionId())))
@@ -1249,7 +1268,8 @@ public class ManagedAgentService {
             TurnSummary latestTurn, EventRecord environmentEvent,
             boolean retention, boolean maySubmit, boolean mayChangeCwd,
             WebShellModelContext modelContext, WebShellModelSelection modelSelection,
-            boolean modelSelectionSupported, WebShellApprovalSelection approvalSelection, boolean approvalSupported) {
+            boolean modelSelectionSupported, boolean renameSupported,
+            WebShellApprovalSelection approvalSelection, boolean approvalSupported) {
         boolean visible = session.deletedAt() == null;
         boolean close = visible && supportsClose(session);
         boolean keep = visible && retention;
@@ -1280,7 +1300,9 @@ public class ManagedAgentService {
                         visible && modelSelectionSupported && mayChangeCwd,
                         visible && approvalSupported && mayChangeCwd && !Boolean.FALSE.equals(foregroundShell(session)),
                         javaDurableAdmission == null ? null : visible,
-                        visible && maySubmit && harness.supportsInputAttachments()),
+                        visible && maySubmit && harness.supportsInputAttachments(),
+                        visible && "ACTIVE".equals(session.status()) && renameSupported
+                                && (session.workspace() == null || maySubmit)),
                 session.workspace() != null || session.agentDefinitionDigest() != null
                         ? approvalSelection == null ? session.approvalMode() : approvalSelection.mode() : null,
                 modelContext, modelSelection, approvalSelection == null ? null : approvalSelection.revision(),

@@ -405,12 +405,14 @@ vi.mock('../telemetry/uiTelemetry.js', () => ({
   uiTelemetryService: mockUiTelemetryService,
 }));
 vi.mock('../telemetry/loggers.js', () => ({
+  logWorkflowKeyword: vi.fn(),
   logHookCall: vi.fn(),
   logChatCompression: vi.fn(),
   logNextSpeakerCheck: vi.fn(),
   logApiRequest: vi.fn(),
   logLoopDetected: vi.fn(),
   logLoopDetectionDisabled: vi.fn(),
+  logLoopProtection: vi.fn(),
   logMemoryRecallConsumed: vi.fn(),
 }));
 
@@ -963,6 +965,7 @@ describe('Gemini Client (client.ts)', () => {
       getEffectiveInputModalities: vi.fn().mockReturnValue({}),
       getBaseLlmClient: vi.fn(),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
+      getLoopProtection: vi.fn().mockReturnValue('stop'),
       // Mimics the resolved Config getter: always a number (Infinity keeps
       // the cap out of the way of unrelated streaming tests).
       getMaxToolCallsPerTurn: vi.fn().mockReturnValue(Number.POSITIVE_INFINITY),
@@ -1369,6 +1372,132 @@ describe('Gemini Client (client.ts)', () => {
       expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledTimes(2);
       expectSessionStart(hookSystem, SessionStartSource.Startup, { nth: 1 });
       expectSessionStart(hookSystem, SessionStartSource.Resume, { nth: 2 });
+    });
+  });
+
+  describe('DW03: human workflow intent', () => {
+    beforeEach(() => {
+      Object.assign(mockConfig, {
+        isWorkflowsEnabled: () => true,
+        getWorkflowKeywordTriggerEnabled: () => true,
+        isWorkflowNameOnly: () => false,
+      });
+      registryMock().getAllToolNames.mockReturnValue(['workflow']);
+      registryMock().getTool.mockReturnValue({ authoringSurface: 'withheld' });
+      mockTurnRunFn.mockImplementation(() => textTurn('ok'));
+    });
+
+    const notices = () =>
+      getLastTurnRequestText().match(/The user's message includes the/g) ?? [];
+
+    it('injects an independent Part once and leaves the caller options intact', async () => {
+      const applied = vi.fn();
+      const options = Object.freeze({
+        type: SendMessageType.UserQuery,
+        submittedPrompt: 'original input',
+        humanInput: Object.freeze({ text: 'ultracode: inspect' }),
+        onWorkflowIntentApplied: applied,
+      });
+      await run([{ text: 'expanded request' }], 'dw03-human', options);
+      expect(notices()).toHaveLength(1);
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      expect(parts).toContain('expanded request');
+      expect(
+        parts.some(
+          (part) =>
+            typeof part !== 'string' &&
+            part.text?.includes('"ultracode" keyword'),
+        ),
+      ).toBe(true);
+      expect(applied).toHaveBeenCalledExactlyOnceWith('ultracode');
+      expect(options.humanInput.text).toBe('ultracode: inspect');
+      await run([{ text: 'ultracode unknown next turn' }], 'dw03-unknown', {
+        type: SendMessageType.UserQuery,
+        submittedPrompt: 'ultracode unknown next turn',
+      });
+      expect(notices()).toHaveLength(0);
+      expect(applied).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      SendMessageType.ToolResult,
+      SendMessageType.Steer,
+      SendMessageType.Retry,
+      SendMessageType.Hook,
+      SendMessageType.Cron,
+      SendMessageType.Notification,
+      SendMessageType.Teammate,
+    ])(
+      'does not activate for an internal %s even with a descriptor',
+      async (type) => {
+        await run([{ text: 'workflow ultracode' }], `dw03-${type}`, {
+          type,
+          humanInput: { text: 'ultracode' },
+        });
+        expect(notices()).toHaveLength(0);
+      },
+    );
+
+    it('does not upgrade an expanded attachment or hook body to human input', async () => {
+      await run(
+        [{ text: 'attachment body: workflow ultracode' }],
+        'dw03-attachment',
+        {
+          type: SendMessageType.UserQuery,
+          humanInput: { text: 'inspect @context.txt' },
+        },
+      );
+      expect(notices()).toHaveLength(0);
+    });
+
+    it('does not let a descriptor bypass automatic Goal admission', async () => {
+      const onWorkflowIntentApplied = vi.fn();
+      await expect(
+        run([{ text: 'ultracode' }], 'dw03-goal', {
+          type: SendMessageType.Goal,
+          humanInput: { text: 'ultracode' },
+          onWorkflowIntentApplied,
+        }),
+      ).rejects.toThrow('An automatic Goal turn requires an exact permit');
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+      expect(onWorkflowIntentApplied).not.toHaveBeenCalled();
+    });
+
+    it('excludes concurrent side queries', async () => {
+      await run([{ text: 'ultracode' }], 'dw03-side', {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+        humanInput: { text: 'ultracode' },
+      });
+      expect(notices()).toHaveLength(0);
+    });
+
+    it('does not inject or notify when the raw admission blocks', async () => {
+      const applied = vi.fn();
+      const bus = installMessageBus(
+        vi.fn().mockResolvedValue({
+          output: { decision: 'block', reason: 'blocked by fixture' },
+        }),
+        'UserPromptSubmit',
+      );
+      const admission = await client.admitUserPrompt(
+        'ultracode raw',
+        'dw03-block',
+      );
+      const events = await run([{ text: 'expanded input' }], 'dw03-block', {
+        type: SendMessageType.UserQuery,
+        promptAdmission: admission,
+        humanInput: { text: 'ultracode raw' },
+        onWorkflowIntentApplied: applied,
+      });
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: LlmEventType.UserPromptSubmitBlocked,
+        }),
+      );
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+      expect(applied).not.toHaveBeenCalled();
+      expect(bus.request.mock.calls[0][0].input.prompt).toBe('ultracode raw');
     });
   });
 
@@ -10989,6 +11118,74 @@ Other open files:
 
       expect(events.at(-1)).toEqual(consecutiveLoop);
       expect(events).toHaveLength(5);
+    });
+
+    it('lets identical tool calls through when loopProtection is off', async () => {
+      vi.mocked(mockConfig.getLoopProtection).mockReturnValue('off');
+      const events = await repeatedShellTurn(true, 'prompt-id-loop-off');
+
+      expect(events).not.toContainEqual(consecutiveLoop);
+    });
+
+    it('delivers the loop-protection reminder with the next tool results', async () => {
+      const promptId = 'prompt-id-loop-reminder';
+      const shellCall = (i: number) =>
+        toolCallRequest(`repeat-${i}`, 'run_shell_command', {
+          command: 'echo repeated',
+        });
+      installChat();
+      // The 3rd identical call queues the reminder.
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(shellCall(0), shellCall(1), shellCall(2), stopped()),
+      );
+      await run([{ text: 'repeat a tool' }], promptId);
+
+      mockTurnRunFn.mockReturnValueOnce(textTurn('done'));
+      await run(
+        [fnResponse('run_shell_command', { output: 'repeated' })],
+        promptId,
+        { type: SendMessageType.ToolResult },
+      );
+      const request = mockTurnRunFn.mock.lastCall?.[1] as Part[];
+      expect(request.at(-1)).toEqual({
+        text: expect.stringContaining(
+          '`run_shell_command` has been called 3 times in a row',
+        ),
+      });
+      expect(request[0]).toHaveProperty('functionResponse');
+    });
+
+    it('keeps the loop-protection reminder across a concurrent side query', async () => {
+      const promptId = 'prompt-id-loop-reminder-btw';
+      const shellCall = (i: number) =>
+        toolCallRequest(`repeat-${i}`, 'run_shell_command', {
+          command: 'echo repeated',
+        });
+      installChat();
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(shellCall(0), shellCall(1), shellCall(2), stopped()),
+      );
+      await run([{ text: 'repeat a tool' }], promptId);
+
+      // A /btw side query starts before the turn's tool results go out.
+      mockTurnRunFn.mockReturnValueOnce(textTurn('side answer'));
+      await run([{ text: '/btw unrelated question' }], `${promptId}-btw`, {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+      });
+
+      mockTurnRunFn.mockReturnValueOnce(textTurn('done'));
+      await run(
+        [fnResponse('run_shell_command', { output: 'repeated' })],
+        promptId,
+        { type: SendMessageType.ToolResult },
+      );
+      const request = mockTurnRunFn.mock.lastCall?.[1] as Part[];
+      expect(request.at(-1)).toEqual({
+        text: expect.stringContaining(
+          '`run_shell_command` has been called 3 times in a row',
+        ),
+      });
     });
 
     describe('retry sendMessageType', () => {
