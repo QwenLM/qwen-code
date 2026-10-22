@@ -971,8 +971,8 @@ async function ci() {
   // Persistent runners point this at a host-wide directory, so each archive
   // is downloaded once per host instead of on every run.
   const cacheDir = process.env.QWEN_STANDALONE_RUNTIME_CACHE;
-  const fetchArchive = (url, filename, verified) =>
-    fetchVerifiedArchive(url, filename, verified, { cacheDir });
+  const fetchArchive = (url, filename, pin) =>
+    fetchVerifiedArchive(url, filename, pin, { cacheDir });
   try {
     let node = process.env.PINNED_NODE;
     let bun = process.env.PINNED_BUN;
@@ -995,12 +995,10 @@ async function ci() {
         'runtime source must not contain credentials',
       );
       assert(base.endsWith('/'), 'runtime source must end with /');
-      const bytes = await fetchArchive(
-        base + filename,
-        filename,
-        (data) =>
-          createHash('sha256').update(data).digest('hex') === digests.node,
-      );
+      const bytes = await fetchArchive(base + filename, filename, {
+        digest: (data) => createHash('sha256').update(data).digest('hex'),
+        expected: digests.node,
+      });
       const archive = path.join(root, 'node.tgz');
       fs.writeFileSync(archive, bytes);
       run('tar', ['-xzf', archive, '-C', root]);
@@ -1012,9 +1010,11 @@ async function ci() {
       const bytes = await fetchArchive(
         `https://registry.npmjs.org/@oven/${name}/-/${filename}`,
         filename,
-        (data) =>
-          'sha512-' + createHash('sha512').update(data).digest('base64') ===
-          digests.bun,
+        {
+          digest: (data) =>
+            'sha512-' + createHash('sha512').update(data).digest('base64'),
+          expected: digests.bun,
+        },
       );
       const dir = path.join(root, 'bun');
       fs.mkdirSync(dir);

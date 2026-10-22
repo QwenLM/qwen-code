@@ -322,8 +322,8 @@ These probes do not exercise the launcher's ordinary-command child-spawn path.
 Unit fixtures own
 their home and generated wrapper directories. The CI mode provisions these pinned tools, verifies
 them against the published checksums/integrity pinned in the runner, reuses a
-verified copy from `QWEN_STANDALONE_RUNTIME_CACHE` when set, and runs before the
-existing script tests.
+verified copy from `QWEN_STANDALONE_RUNTIME_CACHE` when set (removing entries no
+run has used for a week), and runs before the existing script tests.
 
 Synthetic unsigned archives cover checksums, not production signature acceptance.
 The POSIX runner does not cover Windows, and successful local execution would not
