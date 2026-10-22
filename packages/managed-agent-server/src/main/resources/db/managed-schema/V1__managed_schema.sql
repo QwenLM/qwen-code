@@ -563,6 +563,7 @@ CREATE INDEX ix_ma_receipt_session ON ma_request_receipt (namespace, tenant_key,
 
 CREATE INDEX ix_ma_receipt_channel ON ma_request_receipt (namespace, channel_id, account_generation, semantic_revision);
 
+-- Turn input and cancellation commands are durable operations (D7-1).
 CREATE TABLE ma_operation (
     operation_key CHAR(64) NOT NULL,
     scope_key CHAR(64) NOT NULL,
@@ -1155,8 +1156,10 @@ CREATE INDEX ix_ma_capture_execution ON ma_output_capture (execution_key);
 CREATE INDEX ix_ma_work_execution ON ma_operation_work (work_kind, target_key, operation_key);
 
 CREATE INDEX ma_session_csi_guard_idx ON ma_session (tenant_id, session_id, csi_guard);
+-- Session lists page on the immutable gmt_create keyset: gmt_modified moves on every event append.
 CREATE INDEX ix_ma_session_list ON ma_session (tenant_id, gmt_create, session_id);
 CREATE INDEX ix_ma_storage_owner_host ON ma_storage_owner (mount_host_id, storage_kind);
+-- Session close releases one Harness Session's Runtime Sessions across shared bindings.
 CREATE INDEX ix_ma_runtime_session_harness ON ma_runtime_session (harness_session_id);
 CREATE INDEX ix_ma_head_wake ON ma_session_head (wake_scan_pending, wake_retry_at, tenant_key, harness_key);
 CREATE INDEX ix_ma_ref_binding ON ma_resource_ref (owner_kind, runtime_binding_key, owner_revision);
