@@ -221,6 +221,20 @@ public interface AgentStateStore {
                 approvalSelectionSupported, planMode, planModeSupported, skills);
     }
 
+    @org.springframework.transaction.annotation.Transactional
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
+            String approvalMode, boolean approvalSelectionSupported, Boolean planMode, boolean planModeSupported,
+            List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId) {
+        if (modelId != null) {
+            throw new UnsupportedOperationException("Initial model selection is unavailable");
+        }
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
+                approvalSelectionSupported, planMode, planModeSupported, skills, publicChildrenSupported);
+    }
+
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest);
 

@@ -27,6 +27,7 @@ import type {
   ManagedApprovalMode,
   ManagedModelContext,
   ManagedModelSelection,
+  ManagedModelPreset,
 } from './managed-agent-provider';
 
 export interface JavaManagedAgentProviderOptions
@@ -36,7 +37,7 @@ export interface JavaManagedAgentProviderOptions
   /** Include tenant and actor identity; replace this scope/provider when either changes. Token refresh alone can use getHeaders. */
   productScope?: string;
   enableWorkspaceBinding?: boolean;
-  modelPresets?: readonly { agentId: string; label: string }[];
+  modelPresets?: readonly ManagedModelPreset[];
   /** Acquire a streaming save target during the user gesture, then call openStream. */
   saveArtifact?: ManagedArtifactSave;
 }
@@ -105,6 +106,7 @@ export function createJavaManagedAgentProvider(
   async function createWorkspaceSession(
     request: {
       agentId: string;
+      modelId?: string;
       workspaceId: string;
       cwdRelative: string;
       text?: string;
@@ -120,6 +122,7 @@ export function createJavaManagedAgentProvider(
         requestId: managedRequestId(),
         idempotencyKey: command.idempotencyKey,
         agentId: request.agentId,
+        ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
         ...(request.skills?.length ? { skills: request.skills } : {}),
         // Without a title the Session list and header fall back to a UUID
         // prefix, unlike the standard shell's prompt-derived title.
@@ -706,6 +709,7 @@ export function createJavaManagedAgentProvider(
             createEmpty: (
               {
                 agentId,
+                modelId,
                 workspaceId,
                 cwdRelative,
                 approvalMode,
@@ -717,6 +721,7 @@ export function createJavaManagedAgentProvider(
               createWorkspaceSession(
                 {
                   agentId,
+                  modelId,
                   workspaceId,
                   cwdRelative,
                   approvalMode,

@@ -438,6 +438,18 @@ public class ManagedAgentStore implements AgentStateStore {
             String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
             String requestedApprovalMode, boolean approvalSelectionSupported, Boolean requestedPlanMode,
             boolean planModeSupported, List<Map<String, Object>> skills, boolean publicChildrenSupported) {
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, requestedApprovalMode,
+                approvalSelectionSupported, requestedPlanMode, planModeSupported, skills, publicChildrenSupported, null);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
+            String requestedApprovalMode, boolean approvalSelectionSupported, Boolean requestedPlanMode,
+            boolean planModeSupported, List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId) {
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
@@ -448,6 +460,11 @@ public class ManagedAgentStore implements AgentStateStore {
         if (!existing.isEmpty()) {
             return replayWorkspaceCommand(tenantId, actorId,
                     requestDigest, existing.getFirst(), false);
+        }
+        if (modelId != null && (!"qwen-code".equals(agentId) || !workspaceFilesEnabled
+                || modelCatalog.stream().noneMatch(option -> option.modelId().equals(modelId)))) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_model",
+                    "The model is not published for this Agent.");
         }
         AgentPin pin = selectApprovalMode(resolveAgentPin(tenantId, agentId,
                 requestedRevision, true), requestedApprovalMode, approvalSelectionSupported);
@@ -496,7 +513,7 @@ public class ManagedAgentStore implements AgentStateStore {
         var effectiveSkills = AgentDefinitionExtensions.sessionSkills(merged);
         Admission admission = insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
-                workspace, actorId, pin, null, planMode);
+                workspace, actorId, pin, null, planMode, modelId);
         if (workspaceChildAgentsEnabled && publicChildrenSupported && !resident && !sshWorkspace
                 && "qwen-code".equals(agentId) && pin.digest() == null
                 && WorkspaceToolProfiles.SHELL.equals(pin.toolProfile())) {
@@ -1296,6 +1313,14 @@ public class ManagedAgentStore implements AgentStateStore {
             String requestDigest, String agentId, String title, List<Map<String, Object>> input,
             String payloadDigest, ResolvedBinding resolved, String actorId, AgentPin pin,
             WorkspaceCsiRegistration registration, boolean planMode) {
+        return insertSession(tenantId, operation, idempotencyKey, requestDigest, agentId, title,
+                input, payloadDigest, resolved, actorId, pin, registration, planMode, null);
+    }
+
+    private Admission insertSession(String tenantId, String operation, String idempotencyKey,
+            String requestDigest, String agentId, String title, List<Map<String, Object>> input,
+            String payloadDigest, ResolvedBinding resolved, String actorId, AgentPin pin,
+            WorkspaceCsiRegistration registration, boolean planMode, String modelId) {
         ContextBinding workspace = resolved == null ? null
                 : resolved.binding();
         long now = clock.millis();
@@ -1320,9 +1345,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " context_revision, workspace_config_ref,"
                         + " workspace_policy_ref, tool_profile,"
                         + " creator_actor_key, owner_actor_key, runtime_request_key, approval_mode,"
-                        + " plan_enabled, selected_approval_mode, approval_revision) VALUES"
+                        + " plan_enabled, selected_approval_mode, approval_revision, model_id, model_revision) VALUES"
                         + " (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?,"
-                        + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tenantId, sessionId, agentId, pin.revision(), pin.digest(),
                 title, now, now,
                 workspace == null ? null : workspace.getWorkspaceId(),
@@ -1338,7 +1363,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         : workspace == null ? null : pin.toolProfile(),
                 actorKey, actorKey,
                 runtimeRequestKey, workspace != null || pin.digest() != null ? pin.approvalMode() : "yolo",
-                planMode, planMode ? pin.approvalMode() : null, planMode ? 1 : 0);
+                planMode, planMode ? pin.approvalMode() : null, planMode ? 1 : 0, modelId, modelId == null ? 0 : 1);
         jdbc.update("INSERT INTO ma_event_stream"
                         + " (tenant_id, session_id, stream_kind, stream_id,"
                         + " covered_sequence, gmt_modified) VALUES"
@@ -6837,13 +6862,26 @@ public class ManagedAgentStore implements AgentStateStore {
             String tenantId, String sessionId, boolean legacyMutation) {
         try {
             return jdbc.queryForObject(
-                    SESSION_WITH_STREAM + " WHERE ma_session.session_kind = 'PUBLIC' AND ma_session.tenant_id ="
+                    "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session")
+                            + " FROM ma_session WHERE ma_session.session_kind = 'PUBLIC' AND ma_session.tenant_id ="
                             + " ? AND ma_session.session_id = ? FOR UPDATE",
                     (rows, rowNumber) -> {
                         if (legacyMutation) {
                             ManagedLegacySessionGuard.requireLegacyMutation(rows.getBoolean("csi_guard"));
                         }
-                        return sessionMapper.mapRow(rows, rowNumber);
+                        // H2 can retain pre-wait outer-join values after locking the Session.
+                        // Read its stream only after acquiring that lock.
+                        List<StreamCounters> streams = jdbc.query(
+                                "SELECT last_sequence, replay_floor_sequence FROM ma_event_stream"
+                                        + " WHERE tenant_id = ? AND session_id = ? AND stream_kind ="
+                                        + " 'SESSION' AND stream_id = X'' FOR UPDATE",
+                                (stream, index) -> new StreamCounters(stream.getLong("last_sequence"),
+                                        stream.getLong("replay_floor_sequence")),
+                                tenantId, sessionId);
+                        if (streams.isEmpty()) {
+                            throw new IllegalStateException("Session stream is unavailable.");
+                        }
+                        return readSession(rows, streams.getFirst());
                     },
                     tenantId,
                     sessionId);
