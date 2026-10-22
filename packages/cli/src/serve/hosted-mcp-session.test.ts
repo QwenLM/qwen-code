@@ -1737,24 +1737,18 @@ it('rejects competing settings revisions atomically before creating another phys
   expect(requests).toEqual([]);
 });
 
-it('allows a removed server to return at a lower published revision', () => {
-  const removed = { ...pin, serverRevision: 5, state: 'removed' as const };
-  const readd = managementCommand('add', 'demo', 0, {
-    ...pin,
-    serverRevision: 1,
-  });
-  expect(selectedMcpServers([removed], readd)).toEqual([
-    { ...pin, state: 'enabled' },
-  ]);
-  expect(() =>
-    selectedMcpServers(
-      [{ ...pin, serverRevision: 5, state: 'enabled' }],
-      managementCommand('edit', 'demo', 0, {
-        ...pin,
-        serverRevision: 1,
-      }),
-    ),
-  ).toThrow('MCP definition revision conflicts.');
+it('preserves definition revision monotonicity after removal', () => {
+  for (const state of ['removed', 'enabled'] as const) {
+    expect(() =>
+      selectedMcpServers(
+        [{ ...pin, serverRevision: 5, state }],
+        managementCommand(state === 'removed' ? 'add' : 'edit', 'demo', 0, {
+          ...pin,
+          serverRevision: 1,
+        }),
+      ),
+    ).toThrow('MCP definition revision conflicts.');
+  }
 });
 
 it('charges only live MCP selections against the 32-entry capacity', () => {

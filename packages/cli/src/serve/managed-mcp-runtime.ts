@@ -398,7 +398,7 @@ export class ManagedMcpRuntime {
   } {
     return {
       pendingStarts: [...this.pendingStarts.values()].reduce(
-        (total, pending) => total + pending,
+        (total, count) => total + count,
         0,
       ),
       pendingInvocations: [...this.operations.values()].filter(
@@ -500,9 +500,9 @@ export class ManagedMcpRuntime {
       try {
         directory = await this.sessionDirectory(runtimeSessionId);
       } finally {
-        const pending = this.pendingStarts.get(runtimeSessionId)! - 1;
-        if (pending === 0) this.pendingStarts.delete(runtimeSessionId);
-        else this.pendingStarts.set(runtimeSessionId, pending);
+        const remaining = this.pendingStarts.get(runtimeSessionId)! - 1;
+        if (remaining) this.pendingStarts.set(runtimeSessionId, remaining);
+        else this.pendingStarts.delete(runtimeSessionId);
       }
     }
     if (!directory && control.kind !== 'mcp-release')
@@ -578,7 +578,7 @@ export class ManagedMcpRuntime {
 
   hasPendingWork(runtimeSessionId: string): boolean {
     return (
-      (this.pendingStarts.get(runtimeSessionId) ?? 0) > 0 ||
+      this.pendingStarts.has(runtimeSessionId) ||
       [...this.operations.values()].some(
         (operation) =>
           operation.runtimeSessionId === runtimeSessionId &&

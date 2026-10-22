@@ -70,9 +70,7 @@ export function selectedMcpServers(
   if (command.action === 'add' || command.action === 'edit') {
     if (
       !command.server ||
-      (current &&
-        current.state !== 'removed' &&
-        command.server.serverRevision < current.serverRevision)
+      (current && command.server.serverRevision < current.serverRevision)
     )
       throw new HostedMcpConflictError('MCP definition revision conflicts.');
     selected.set(command.serverId, {
