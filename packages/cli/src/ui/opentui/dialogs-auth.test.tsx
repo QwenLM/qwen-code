@@ -1275,7 +1275,7 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
 
   it('refuses the recommended rows a short region cannot paint', async () => {
     // At region 21 the step's measured chrome pays for exactly one model row,
-    // so `deepseek-v4-flash` sits below the clip. A held ↓ walks `focus` on
+    // so `deepseek-flash` sits below the clip. A held ↓ walks `focus` on
     // to it and Space would toggle a model the user never saw — which the
     // Enter of the same read then writes into the install plan.
     const dialog = await runToModelsStep();
@@ -1283,16 +1283,16 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     await press('tab'); // custom-ID input → search field
     await press('tab'); // search field → the one painted row
     expect(screen.getByText(/^deepseek-v4-pro(\s|$)/)).not.toBeNull();
-    expect(screen.queryByText(/^deepseek-v4-flash(\s|$)/)).toBeNull();
+    expect(screen.queryByText(/^deepseek-flash(\s|$)/)).toBeNull();
 
     const build = vi.spyOn(coreRuntime, 'buildInstallPlan');
     try {
       await pressBatched([DOWN, SPACE, ENTER]);
       await vi.waitFor(() => expect(build).toHaveBeenCalledTimes(1));
       // Only the painted row's tick was undone. Without the window the ↓
-      // reaches `deepseek-v4-flash` below the clip and the Space unticks it,
+      // reaches `deepseek-flash` below the clip and the Space unticks it,
       // so the plan ships `deepseek-v4-pro` alone.
-      expect(build.mock.calls[0]?.[1]?.modelIds).toEqual(['deepseek-v4-flash']);
+      expect(build.mock.calls[0]?.[1]?.modelIds).toEqual(['deepseek-flash']);
     } finally {
       build.mockRestore();
     }
@@ -1333,7 +1333,7 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     try {
       await pressBatched([SPACE, ENTER]);
       await vi.waitFor(() => expect(build).toHaveBeenCalledTimes(1));
-      expect(build.mock.calls[0]?.[1]?.modelIds).toEqual(['deepseek-v4-flash']);
+      expect(build.mock.calls[0]?.[1]?.modelIds).toEqual(['deepseek-flash']);
     } finally {
       build.mockRestore();
     }
@@ -1352,7 +1352,7 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     await runToRecommendedList();
     await pressBatched([DOWN, SPACE]);
     expect(recommendedRow('deepseek-v4-pro')).toContain(ICON.RADIO_FILLED);
-    expect(recommendedRow('deepseek-v4-flash')).toContain(ICON.CIRCLE_EMPTY);
+    expect(recommendedRow('deepseek-flash')).toContain(ICON.CIRCLE_EMPTY);
   });
 
   it('filters the recommended list from the search field one Tab away', async () => {
@@ -1360,7 +1360,7 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     await press('tab'); // custom-ID input → search field
     await typeText('flash');
     expect(screen.queryByText(/^deepseek-v4-pro(\s|$)/)).toBeNull();
-    expect(recommendedRow('deepseek-v4-flash')).toContain(ICON.RADIO_FILLED);
+    expect(recommendedRow('deepseek-flash')).toContain(ICON.RADIO_FILLED);
   });
 });
 
