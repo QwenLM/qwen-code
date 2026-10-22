@@ -379,7 +379,7 @@ describe('reasoning declarations', () => {
       'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
     ],
     [
-      'deepseek-v3.2',
+      'glm-5.2',
       'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
     ],
   ])('inherits %s toggle capabilities from its provider', (model, baseUrl) => {
@@ -399,8 +399,10 @@ describe('reasoning declarations', () => {
   });
 
   it('inherits the selected provider policy for the same model', () => {
-    const target = { ...route, model: 'qwen3.8-max-preview' };
-    const input = { defaultEffort: 'medium' };
+    // glm-5.1 declares its thinking switch on Token Plan only; the Standard
+    // preset leaves it undeclared, so the same override has nothing to extend.
+    const target = { ...route, model: 'glm-5.1' };
+    const input = { canDisable: false };
     expect(
       resolveReasoningCapabilities(
         {
@@ -410,7 +412,7 @@ describe('reasoning declarations', () => {
         },
         input,
       ),
-    ).toMatchObject({ defaultEffort: 'medium', canDisable: false });
+    ).toMatchObject({ toggleOnly: true, canDisable: false });
     expect(
       resolveReasoningCapabilities(
         {
@@ -418,7 +420,7 @@ describe('reasoning declarations', () => {
           baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
         },
         input,
-      )?.canDisable,
+      ),
     ).toBeUndefined();
   });
 
