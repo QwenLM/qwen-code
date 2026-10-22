@@ -117,6 +117,7 @@ import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { serveCommand } from '../commands/serve.js';
 import { daemonCommand } from '../commands/daemon.js';
+import { attachCommand } from '../commands/attach.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { agentsCommand } from '../commands/agents.js';
 import { batchCommand } from '../commands/batch.js';
@@ -901,6 +902,8 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(serveCommand)
     // Register `qwen daemon` (local daemon inspection and control)
     .command(daemonCommand)
+    // Register `qwen attach` (terminal client for a running daemon session)
+    .command(attachCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
     // Register `qwen agents` (join a coordinator; session_send MCP server)
@@ -955,6 +958,7 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
       result._[0] === 'daemon' ||
+      result._[0] === 'attach' ||
       result._[0] === 'agents' ||
       result._[0] === 'board' ||
       result._[0] === 'batch' ||
