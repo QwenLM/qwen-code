@@ -215,6 +215,7 @@ export function registerWorkspaceLocalControlRoutes(
                 : findExplicitCandidate(body.address, networkInterfaces())
                   ? new LocalControlAddressNotGrantedError(body.address)
                   : new UnknownLanInterfaceError(body.address),
+              deps.daemonLog,
             );
             return;
           }
