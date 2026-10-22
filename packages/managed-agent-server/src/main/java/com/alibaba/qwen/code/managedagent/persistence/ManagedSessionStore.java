@@ -26,12 +26,14 @@ import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiActivationAdmission;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DeadlockLoserDataAccessException;
@@ -1016,13 +1018,29 @@ public class ManagedSessionStore {
         var hostedReferences = new HashMap<String, JsonNode>();
         java.util.function.Function<String, StoredResource> reader = resourceId -> resourceCache.computeIfAbsent(resourceId,
                 id -> storedResource(scopeKey, tenantId, request.workspaceId(), sessionId, id));
-        java.util.function.Function<String, StoredResource> closureReader = resourceId -> {
-            if (!declaredResources.contains(resourceId)) {
-                throw invalid("Hosted nested reference is absent from the transaction census.");
+        ManagedHostedRecoveryRecords.HistoricalResources closureReader = new ManagedHostedRecoveryRecords.HistoricalResources() {
+            @Override
+            public StoredResource apply(String resourceId) {
+                if (!declaredResources.contains(resourceId)) {
+                    throw invalid("Hosted nested reference is absent from the transaction census.");
+                }
+                return reader.apply(resourceId);
             }
-            return reader.apply(resourceId);
+
+            @Override
+            public void checkpointHistory(JsonNode ref) {
+                validateCheckpointHistory(ref, tenantId, request.workspaceId(), sessionId,
+                        head.journalRevision(), declaredResources, reader);
+            }
         };
         for (var resource : request.resources() == null ? List.<CommitResource>of() : request.resources()) {
+            if (ManagedCheckpointHistory.KIND.equals(resource.kind())) {
+                ObjectNode ref = CSI_JSON.valueToTree(resource);
+                ref.remove("bytesBase64");
+                closureReader.checkpointHistory(ref);
+            } else if ("managed-checkpoint".equals(resource.kind())) {
+                validatePagedCheckpoint(closureReader.apply(resource.resourceId()), tenantId, request.workspaceId(), sessionId, closureReader);
+            }
             if (ManagedHostedRecoveryRecords.KINDS.contains(resource.kind()) || "managed-action-options".equals(resource.kind())) {
                 ManagedHostedRecoveryRecords.validateResource(closureReader.apply(resource.resourceId()), tenantId,
                         request.workspaceId(), sessionId, closureReader, hostedReferences);
@@ -2245,6 +2263,114 @@ public class ManagedSessionStore {
         var request = csiTerminalRequest(bytes);
         validateCommit(request);
         return request;
+    }
+
+    private void validatePagedCheckpoint(StoredResource stored, String tenant, String workspace, String session,
+            ManagedHostedRecoveryRecords.HistoricalResources resources) {
+        JsonNode body = ManagedExtensionRecordStore.parse(new String(stored.bytes(), StandardCharsets.UTF_8));
+        if (body == null || !ManagedCheckpointHistory.paged(body)) {
+            return;
+        }
+        if (!ManagedCheckpointHistory.PROFILE.equals(body.path("storageProfile").asText())) {
+            throw invalid("Unsupported checkpoint storage profile.");
+        }
+        JsonNode history = body.path("history");
+        ManagedExtensionRecords.closed(history, Set.of("ref", "toolCount", "bindingCount"), "checkpoint history");
+        resources.checkpointHistory(history.path("ref"));
+        StoredResource page = resources.apply(history.path("ref").path("resourceId").asText());
+        JsonNode saved = ManagedCheckpointHistory.page(page.bytes());
+        if (!saved.path("sessionKey").equals(body.path("identity").path("sessionKey"))
+                || !saved.path("turnId").equals(body.path("identity").path("turnId"))
+                || !saved.path("promptId").equals(body.path("identity").path("promptId"))
+                || !saved.path("toolCount").equals(history.path("toolCount"))
+                || !saved.path("bindingCount").equals(history.path("bindingCount"))) {
+            throw invalid("Checkpoint history identity or coverage conflicts.");
+        }
+    }
+
+    private void validateCheckpointHistory(JsonNode ref, String tenant, String workspace, String session,
+            long previousRevision, Set<String> declared, java.util.function.Function<String, StoredResource> resources) {
+        try {
+            ManagedCheckpointHistory.pageRef(ref);
+            StoredResource stored = resources.apply(ref.path("resourceId").asText());
+            requireCheckpointResource(ref, stored);
+            JsonNode page = ManagedCheckpointHistory.page(stored.bytes());
+            JsonNode key = page.path("sessionKey");
+            if (!tenant.equals(key.path("tenantId").asText()) || !workspace.equals(key.path("workspaceId").asText())
+                    || !session.equals(key.path("sessionId").asText())) {
+                throw invalid("Checkpoint history belongs to another Session.");
+            }
+            Long origin = priorCheckpointResourceRevision(tenant, workspace, session, stored.resourceId(), previousRevision);
+            long ceiling = origin == null ? previousRevision : origin;
+            for (JsonNode nested : checkpointReferences(page)) {
+                StoredResource dependency = resources.apply(nested.path("resourceId").asText());
+                requireCheckpointResource(nested, dependency);
+                Long owned = priorCheckpointResourceRevision(tenant, workspace, session, dependency.resourceId(), ceiling);
+                if (owned == null && (origin != null || !declared.contains(dependency.resourceId()))) {
+                    throw invalid("Checkpoint history dependency has no committed owner.");
+                }
+            }
+            long tools = page.path("toolCount").longValue() - page.path("items").size();
+            long bindings = page.path("bindingCount").longValue() - page.path("bindings").size();
+            JsonNode previous = page.path("previous");
+            if (tools < 0 || bindings < 0) {
+                throw invalid("Checkpoint history count conflicts.");
+            }
+            if (previous.isNull()) {
+                if (tools != 0 || bindings != 0) {
+                    throw invalid("Checkpoint history predecessor is missing.");
+                }
+            } else {
+                JsonNode predecessor = ManagedCheckpointHistory.page(resources.apply(previous.path("resourceId").asText()).bytes());
+                if (!predecessor.path("sessionKey").equals(key)
+                        || !predecessor.path("turnId").equals(page.path("turnId"))
+                        || !predecessor.path("promptId").equals(page.path("promptId"))
+                        || predecessor.path("toolCount").longValue() != tools
+                        || predecessor.path("bindingCount").longValue() != bindings) {
+                    throw invalid("Checkpoint history predecessor conflicts.");
+                }
+            }
+        } catch (IllegalArgumentException | com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException error) {
+            throw invalid("Invalid checkpoint history page.");
+        }
+    }
+
+    private static void requireCheckpointResource(JsonNode ref, StoredResource stored) {
+        ManagedExtensionRecords.durableRef(ref, "checkpoint history dependency");
+        if (!stored.kind().equals(ref.path("kind").asText())
+                || stored.schemaVersion() != ref.path("schemaVersion").intValue()
+                || stored.byteLength() != ref.path("byteLength").longValue()
+                || !stored.digest().equals(ref.path("digest").asText())
+                || stored.bytes() == null || stored.bytes().length != stored.byteLength()
+                || !ToolPublicationContract.sha256(stored.bytes()).equals(stored.digest())) {
+            throw invalid("Checkpoint history resource metadata conflicts.");
+        }
+    }
+
+    private static List<JsonNode> checkpointReferences(JsonNode value) {
+        List<JsonNode> result = new ArrayList<>();
+        if (value.isObject() && value.has("resourceId")) {
+            result.add(value);
+        } else if (value.isContainerNode()) {
+            for (JsonNode child : value) {
+                result.addAll(checkpointReferences(child));
+            }
+        }
+        return result;
+    }
+
+    private Long priorCheckpointResourceRevision(String tenant, String workspace, String session,
+            String resourceId, long maximum) {
+        String scope = sessionScopeKey(tenant, session);
+        List<Long> origins = jdbc.query("SELECT x.owner_revision FROM ma_resource_ref x JOIN ma_session_journal_tx t"
+                        + " ON t.tenant_id = x.tenant_id AND t.workspace_id = x.workspace_id AND t.session_id = x.session_id"
+                        + " AND t.journal_revision = x.owner_revision WHERE x.resource_key = ? AND x.session_scope_key = ?"
+                        + " AND x.tenant_id = ? AND x.workspace_id = ? AND x.session_id = ? AND x.resource_id = ?"
+                        + " AND x.owner_kind = 'JOURNAL' AND x.owner_key = ? AND x.owner_revision = x.journal_revision"
+                        + " AND x.owner_revision <= ? ORDER BY x.owner_revision LIMIT 1",
+                (row, index) -> row.getLong(1), resourceKey(scope, resourceId), scope, tenant, workspace, session,
+                resourceId, scope, maximum);
+        return origins.isEmpty() ? null : origins.getFirst();
     }
 
     private void commitResources(String scopeKey, String tenantId,
