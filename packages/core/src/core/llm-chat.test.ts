@@ -9,7 +9,6 @@ import {
   measureToolOutput,
 } from '../tools/tool-output-size.js';
 import { logToolResultSize } from '../telemetry/loggers.js';
-import { markApiHistoryPrompt } from '../services/session-api-history.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type OpenAI from 'openai';
 import type {
