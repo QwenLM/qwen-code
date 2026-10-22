@@ -30,6 +30,21 @@ class ManagedAgentPropertiesTest {
             "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery";
 
     @Test
+    void verifiedFileRuntimeCanResolvePersistedImportsWithNewImportsDisabled() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setEnabled(true);
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+        assertThat(properties.getRuntimeBroker().isLocalDirectoryImportEnabled()).isFalse();
+        assertThat(properties.getRuntimeBroker().getWorkspaceMounts()).isEmpty();
+        assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+        properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(false);
+        assertThatThrownBy(properties::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
     void applicationYmlBindsTheDurableAndTrustedDefaults() throws java.io.IOException {
         var values = applicationYmlValues();
         // The named contract itself: reverting either fallback flips the
@@ -855,6 +870,55 @@ class ManagedAgentPropertiesTest {
                         prefix + "ssh.nodes[0].qwen-version=0.25.1")
                 .run(started -> assertThat(started).hasFailed().getFailure()
                         .hasRootCauseMessage("Resident Workspaces require exclusive CSI/files configuration"));
+    }
+
+    @Test
+    void publicChildrenDefaultOnWithoutEnablingUnsupportedRuntimeProfiles() {
+        var properties = new ManagedAgentProperties();
+        assertThat(properties.getHarness().isWorkspaceChildAgentsEnabled()).isTrue();
+        assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        assertThat(properties.admitsPublicChildAgents()).isTrue();
+        properties.getHarness().setWorkspaceChildAgentsEnabled(false);
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getHarness().setWorkspaceChildAgentsEnabled(true);
+        properties.getRuntimeBroker().setDurableLocalProcess(false);
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().setDurableLocalProcess(true);
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("session");
+        properties.getRuntimeBroker().setProvisioner("kubernetes-workspace");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+    }
+
+    @Test
+    void publicChildEnvironmentOverrideDisablesTheShippedDefault() throws Exception {
+        String key = "qwen.managed-agent.harness.workspace-child-agents-enabled";
+        String variable = "QWEN_MANAGED_AGENT_WORKSPACE_CHILD_AGENTS_ENABLED";
+        var values = applicationYmlValues();
+        assertThat(values).containsEntry(key, "${" + variable + ":true}");
+        for (boolean disabled : List.of(false, true)) {
+            new ApplicationContextRunner()
+                    .withPropertyValues(key + "=" + values.get(key))
+                    .withInitializer(ctx -> {
+                        var ambient = new java.util.LinkedHashMap<String, Object>(System.getenv());
+                        ambient.remove(variable);
+                        if (disabled) {
+                            ambient.put(variable, "false");
+                        }
+                        ctx.getEnvironment().getPropertySources().replace("systemEnvironment",
+                                new org.springframework.core.env.MapPropertySource("systemEnvironment", ambient));
+                    })
+                    .withUserConfiguration(PropertiesConfiguration.class)
+                    .run(started -> {
+                        assertThat(started).hasNotFailed();
+                        var bound = started.getBean(ManagedAgentProperties.class);
+                        assertThat(bound.getHarness().isWorkspaceChildAgentsEnabled()).isEqualTo(!disabled);
+                        assertThat(bound.admitsPublicChildAgents()).isFalse();
+                    });
+        }
     }
 
     @Test

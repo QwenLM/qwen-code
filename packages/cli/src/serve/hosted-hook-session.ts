@@ -168,6 +168,29 @@ export function semanticInputDigest(value: object): string {
     .digest('hex');
 }
 
+export function recordedToolHookFields(
+  plan: { input: Record<string, unknown>; refusedInputDigest?: string },
+  fields: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const modes = plan.refusedInputDigest
+    ? ['default', 'auto-edit', 'yolo']
+    : [plan.input['permission_mode']];
+  for (const mode of modes) {
+    if (
+      typeof mode !== 'string' ||
+      !['default', 'auto-edit', 'yolo'].includes(mode)
+    )
+      continue;
+    const candidate = { ...fields, permission_mode: mode };
+    if (
+      (plan.refusedInputDigest ?? semanticInputDigest(plan.input)) ===
+      semanticInputDigest(candidate)
+    )
+      return candidate;
+  }
+  return undefined;
+}
+
 /** Whether a saved plan was made for these event fields. */
 function plannedFor(plan: HookPlan, fields: object): boolean {
   return plan.refusedInputDigest
@@ -269,7 +292,7 @@ export function parseHostedHookPin(value: unknown): ManagedHookCatalogPin {
 
 export class HostedHookSession {
   readonly broker: HostedWorkspaceBroker;
-  private readonly ownsBroker: boolean;
+  private ownsBroker: boolean;
   private acquired = false;
   private acquiring?: Promise<void>;
   private readonly aggregator = new HookAggregator();
@@ -543,6 +566,11 @@ export class HostedHookSession {
     return this.acquired || this.broker.acquired;
   }
 
+  delegateBrokerToMcp(): void {
+    if (this.mountWorkUnproven()) throw new HostedHookRecoveryRequiredError();
+    this.ownsBroker = false;
+  }
+
   /**
    * The recovery-blocked turn's handback of this Session-scoped mount
    * (#13800), under the claim of the acquire that holds it now. Only Hook
@@ -554,6 +582,7 @@ export class HostedHookSession {
     const claim = this.broker.mountClaim();
     if (!this.ownsBroker || claim === undefined) return undefined;
     return async () => {
+      if (!this.ownsBroker) return;
       if (this.mountWorkUnproven())
         throw new Error('Hook work on the Workspace mount is unproven.');
       await this.broker.releaseMount(claim);

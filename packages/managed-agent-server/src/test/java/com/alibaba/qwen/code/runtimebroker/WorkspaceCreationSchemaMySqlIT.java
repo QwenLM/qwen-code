@@ -53,7 +53,7 @@ class WorkspaceCreationSchemaMySqlIT {
             Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load().migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(13, ManagedSchema.schemaVersion(source));
+            assertEquals(17, ManagedSchema.schemaVersion(source));
             var upgradedHead = jdbc.queryForMap("SELECT * FROM ma_session_head");
             assertThat(upgradedHead).containsEntry("cleanup_head_revision", null);
             upgradedHead.remove("cleanup_head_revision");
@@ -97,9 +97,10 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(13, ManagedSchema.schemaVersion(source));
+            assertEquals(17, ManagedSchema.schemaVersion(source));
             var upgradedSession = jdbc.queryForMap("SELECT * FROM ma_session");
             assertThat(upgradedSession.remove("plan_enabled")).isEqualTo(false);
+            assertThat(upgradedSession.remove("public_child_agents_version")).isEqualTo(0);
             var upgradedTurn = jdbc.queryForMap("SELECT * FROM ma_turn");
             assertThat(upgradedTurn).containsKey("plan_enabled");
             assertThat(upgradedTurn.remove("plan_enabled")).isNull();
@@ -135,9 +136,11 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(13, ManagedSchema.schemaVersion(source));
-            assertThat(jdbc.queryForMap("SELECT * FROM ma_operation"))
-                    .usingRecursiveComparison().isEqualTo(existing);
+            assertEquals(17, ManagedSchema.schemaVersion(source));
+            var upgraded = jdbc.queryForMap("SELECT * FROM ma_operation");
+            assertThat(upgraded.keySet()).containsAll(existing.keySet());
+            upgraded.keySet().retainAll(existing.keySet());
+            assertThat(upgraded).usingRecursiveComparison().isEqualTo(existing);
             operation(jdbc, "created", "WORKSPACE_CREATE");
             operation(jdbc, "input", "SUBMIT_INPUT");
             operation(jdbc, "cancel", "CANCEL");
@@ -168,44 +171,8 @@ class WorkspaceCreationSchemaMySqlIT {
                         + "'prompt','[]','digest','COMPLETED',1,1)");
             }
             assertEquals(1, ManagedSchema.schemaVersion(source));
-            ManagedSchema.initialize(source);
-            assertEquals(13, ManagedSchema.schemaVersion(source));
-            try (var connection = source.getConnection();
-                    var statement = connection.createStatement();
-                    var input = ManagedSchema.class.getResourceAsStream(ManagedSchema.RESOURCE)) {
-                String baseline = new String(input.readAllBytes(), StandardCharsets.UTF_8);
-                statement.execute("DROP INDEX ix_ma_head_wake ON ma_session_head");
-                statement.execute("ALTER TABLE ma_session_head DROP COLUMN wake_scan_pending");
-                statement.execute("ALTER TABLE ma_session_head DROP COLUMN wake_retry_at");
-                statement.execute("ALTER TABLE ma_session_head DROP COLUMN wake_head_revision");
-                statement.execute("ALTER TABLE ma_session_head DROP COLUMN wake_pending");
-                statement.execute(
-                        "ALTER TABLE ma_request_receipt DROP CONSTRAINT ck_ma_request_namespace");
-                statement.execute("ALTER TABLE ma_request_receipt ADD "
-                        + baselineCheck(baseline, "ck_ma_request_namespace"));
-                statement.execute("DROP INDEX ix_ma_runtime_session_harness ON ma_runtime_session");
-                statement.execute("ALTER TABLE ma_operation DROP CONSTRAINT ck_ma_operation_kind");
-                statement.execute("ALTER TABLE ma_operation ADD "
-                        + baselineCheck(baseline, "ck_ma_operation_kind"));
-                statement.execute("DROP INDEX ix_ma_storage_owner_host ON ma_storage_owner");
-                statement.execute("ALTER TABLE ma_session DROP CONSTRAINT ck_ma_session_plan");
-                statement.execute("ALTER TABLE ma_turn DROP CONSTRAINT ck_ma_turn_plan");
-                statement.execute("ALTER TABLE ma_session DROP COLUMN plan_enabled");
-                statement.execute("ALTER TABLE ma_turn DROP COLUMN plan_enabled");
-                statement.execute("ALTER TABLE ma_session DROP CONSTRAINT ck_ma_session_approval_selection");
-                statement.execute("ALTER TABLE ma_turn DROP CONSTRAINT ck_ma_turn_approval_selection");
-                statement.execute("ALTER TABLE ma_session DROP COLUMN selected_approval_mode");
-                statement.execute("ALTER TABLE ma_session DROP COLUMN approval_revision");
-                statement.execute("ALTER TABLE ma_turn DROP COLUMN approval_mode");
-                statement.execute("ALTER TABLE ma_turn DROP COLUMN approval_revision");
-                statement.execute("ALTER TABLE ma_session DROP CONSTRAINT ck_ma_session_model_selection");
-                statement.execute("ALTER TABLE ma_turn DROP CONSTRAINT ck_ma_turn_model_selection");
-                statement.execute("ALTER TABLE ma_session DROP COLUMN model_id");
-                statement.execute("ALTER TABLE ma_session DROP COLUMN model_revision");
-                statement.execute("ALTER TABLE ma_turn DROP COLUMN model_id");
-                statement.execute("ALTER TABLE ma_turn DROP COLUMN model_revision");
-                statement.execute("DROP INDEX ix_ma_session_list ON ma_session");
-                statement.execute("CREATE INDEX ix_ma_session_list ON ma_session (tenant_id, gmt_modified, session_id)");
+            try (var connection = source.getConnection()) {
+                executeResource(connection, ManagedSchema.PRIVATE_AUTHORITY);
                 assertThrows(
                         SQLException.class, () -> receipt(connection, "not-yet", "WORKSPACE_CREATE"));
             }
@@ -220,7 +187,7 @@ class WorkspaceCreationSchemaMySqlIT {
             assertEquals(4, ManagedSchema.schemaVersion(source));
             ManagedSchema.initialize(source);
             ManagedSchema.validate(source);
-            assertEquals(13, ManagedSchema.schemaVersion(source));
+            assertEquals(17, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
                 receipt(
@@ -258,15 +225,6 @@ class WorkspaceCreationSchemaMySqlIT {
                 assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_session SET model_revision=9007199254740992"));
             }
         }
-    }
-
-    private static String baselineCheck(String ddl, String name) {
-        return ddl.lines()
-                .filter(line -> line.contains("CONSTRAINT " + name + " CHECK"))
-                .findFirst()
-                .orElseThrow()
-                .trim()
-                .replaceFirst(",$", "");
     }
 
     private static void executeResource(Connection connection, String resource) throws Exception {

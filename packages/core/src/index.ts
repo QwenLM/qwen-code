@@ -362,9 +362,13 @@ export type {
   DurableCronTask,
   CronTaskRun,
   CronRunSessionOutcome,
+  CronGateStatus,
+  CronGateOutcome,
+  CronGateRunOutcome,
 } from './services/cronTasksFile.js';
 export {
   readCronTasks,
+  withTaskGate,
   cronTaskSessionDeletionId,
   updateCronTasks,
   removeCronTasks,

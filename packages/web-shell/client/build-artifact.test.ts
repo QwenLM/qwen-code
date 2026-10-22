@@ -145,6 +145,10 @@ describe('build artifact — package boundary', () => {
     expect(bundle).not.toContain('fileName:');
   });
 
+  it('uses the host React DOM server renderer for conversation exports', () => {
+    expect(readPackageJavascript()).toContain('from "react-dom/server"');
+  });
+
   it('externalizes @qwen-code/sdk subpaths', () => {
     const bundle = readPackageJavascript();
     // Should not contain raw SDK implementation
@@ -500,6 +504,19 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(readTranscriptBundle()).not.toContain('/tool-details/get');
   });
 
+  it('keeps Managed MCP management transport and copy out of the transcript entry', () => {
+    const transcript = readTranscriptBundle();
+    const packaged = readPackageJavascript();
+    for (const content of [
+      '/session-mcp/management/submit',
+      'Choose an exact definition published for this Runtime and Workspace.',
+      '原命令仍需确认，请先查询该命令，再开始其他修改。',
+    ]) {
+      expect(packaged).toContain(content);
+      expect(transcript).not.toContain(content);
+    }
+  });
+
   it('keeps workspace mutations out of the read-only transcript entry', () => {
     const transcript = readTranscriptBundle();
     const packaged = readPackageJavascript();
@@ -631,13 +648,16 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(interactive).toContain('审阅 App 消息');
   });
 
-  it('keeps trajectory filter strings in the interactive entry only', () => {
+  it('keeps trajectory chrome strings in the interactive entry only', () => {
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js).not.toMatch(/["'`]trajectory\.(filter|window)\./);
-    expect(readPackageJavascript()).toContain('trajectory.window.older');
+    expect(js).not.toMatch(
+      /["'`]trajectory\.(filter|window|summary|pill|boundary|about)\./,
+    );
+    expect(readPackageJavascript()).toContain('trajectory.window.return');
+    expect(readPackageJavascript()).toContain('trajectory.pill.live');
     expect(readPackageJavascript()).toContain('trajectory.filter.search');
     expect(readPackageJavascript()).toContain('Search loaded records');
   });

@@ -14,10 +14,13 @@ public final class CreateHarnessSession {
     private final Long approvalTimeoutMs;
     private final Long captureBytes;
     private final Map<String, Object> agentDefinition;
+    private final Map<String, Object> sessionSkillsRef;
     private final List<Map<String, Object>> mcpServers;
     private final Map<String, Object> hookCatalog;
     private final Map<String, Object> lineage;
     private final boolean suppressChildAgents;
+    private final int publicChildAgentsVersion;
+    private final Map<String, Object> publicChildModelRoute;
     private final boolean childWorkspaces;
     private final boolean foregroundOnly;
     private final boolean childSnapshots;
@@ -31,10 +34,13 @@ public final class CreateHarnessSession {
         this.approvalTimeoutMs = builder.approvalTimeoutMs;
         this.captureBytes = builder.captureBytes;
         this.agentDefinition = builder.agentDefinition;
+        this.sessionSkillsRef = builder.sessionSkillsRef;
         this.mcpServers = builder.mcpServers;
         this.hookCatalog = builder.hookCatalog;
         this.lineage = builder.lineage;
         this.suppressChildAgents = builder.suppressChildAgents;
+        this.publicChildAgentsVersion = builder.publicChildAgentsVersion;
+        this.publicChildModelRoute = builder.publicChildModelRoute;
         this.childWorkspaces = builder.childWorkspaces;
         this.foregroundOnly = builder.foregroundOnly;
         this.childSnapshots = builder.childWorkspaces && builder.childSnapshots;
@@ -61,6 +67,12 @@ public final class CreateHarnessSession {
         if (toolProfile != null) {
             result.put("toolProfile", toolProfile);
         }
+        if (publicChildModelRoute != null) {
+            result.put("publicChildModelRoute", publicChildModelRoute);
+        }
+        if (publicChildAgentsVersion != 0) {
+            result.put("publicChildAgentsVersion", publicChildAgentsVersion);
+        }
         if (suppressChildAgents) {
             result.put("suppressChildAgents", true);
         }
@@ -72,6 +84,9 @@ public final class CreateHarnessSession {
         }
         if (agentDefinition != null) {
             result.put("agentDefinition", agentDefinition);
+        }
+        if (sessionSkillsRef != null) {
+            result.put("sessionSkillsRef", sessionSkillsRef);
         }
         if (mcpServers != null) {
             result.put("mcpServers", mcpServers);
@@ -102,10 +117,13 @@ public final class CreateHarnessSession {
         private Long approvalTimeoutMs;
         private Long captureBytes;
         private Map<String, Object> agentDefinition;
+        private Map<String, Object> sessionSkillsRef;
         private List<Map<String, Object>> mcpServers;
         private Map<String, Object> hookCatalog;
         private Map<String, Object> lineage;
         private boolean suppressChildAgents;
+        private int publicChildAgentsVersion;
+        private Map<String, Object> publicChildModelRoute;
         private boolean childWorkspaces;
         private boolean foregroundOnly;
         private boolean childSnapshots;
@@ -201,8 +219,26 @@ public final class CreateHarnessSession {
             return new CreateHarnessSession(this);
         }
 
+        public Builder sessionSkillsRef(Map<String, Object> value) {
+            this.sessionSkillsRef = value == null ? null : Map.copyOf(value);
+            return this;
+        }
+
         public Builder toolProfile(String toolProfile) {
             this.toolProfile = toolProfile;
+            return this;
+        }
+
+        public Builder publicChildModelRoute(Map<String, Object> value) {
+            this.publicChildModelRoute = value == null ? null : Map.copyOf(value);
+            return this;
+        }
+
+        public Builder publicChildAgentsVersion(int value) {
+            if (value != 0 && value != 1) {
+                throw new IllegalArgumentException("Invalid public child agents version");
+            }
+            this.publicChildAgentsVersion = value;
             return this;
         }
 
