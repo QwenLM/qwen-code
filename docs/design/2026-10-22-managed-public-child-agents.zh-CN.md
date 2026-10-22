@@ -4,7 +4,7 @@
 
 ## 状态与问题
 
-已实现，符合资格的新会话默认开启公开子 Agent，基于 main `59d21e1c69`。已批准设计使用 main `4515275b1727e8f9b509e2c2aefe97e976293acf`，实现使用更新的隔离工作副本。Hosted child Session、结果中继、任务查询和持久取消原本已存在。此前公开 Shell 关闭 child orchestrator。只解除限制会同时暴露团队、工作流和消息，原 child 创建还会复制父会话初始审批模式，而非启动时的有效策略。本次增加明确的公开准入和不可变启动策略。
+已实现，符合资格的新会话默认开启公开子 Agent，已整合 main `605fd5ee17`。已批准设计使用 main `4515275b1727e8f9b509e2c2aefe97e976293acf`，实现使用更新的隔离工作副本。Hosted child Session、结果中继、任务查询和持久取消原本已存在。此前公开 Shell 关闭 child orchestrator。只解除限制会同时暴露团队、工作流和消息，原 child 创建还会复制父会话初始审批模式，而非启动时的有效策略。本次增加明确的公开准入和不可变启动策略。
 
 ## 准入与兼容
 
@@ -29,6 +29,8 @@
 现有动作查询增加可选 `include_children`/`includeChildren`，默认 false。聚合父会话和直接 child，分别验证会话读取权限，保留 Action 真正所属会话，并将分页绑定到租户、父会话与聚合模式。应答继续通过所属会话原路由提交 Action/input/policy revision 和幂等键；聚合不会授予审批权限。
 
 页面可见时每三秒串行刷新聚合审批，独立于任务面板。切换 Session、账号或 Provider 时中止请求并丢弃迟到响应。复用任务面板展示活动数量、待审批、停止中及实际 child 审批模式。任务响应增加 `stopRequested` 和实际 `approvalMode`，任务列表的 `activeChildCount` 返回不受分页影响的活动 child 总数。通过 `childSessionId` 和现有 transcript 读取结果，返回父会话时保留草稿。跟踪取消的 child 至权威终态；取消命令完成本身不足以显示已终止。
+
+[会话生命周期 UI](2026-10-22-managed-session-lifecycle-ui.zh-CN.md) 与 child 委派同时可用。WebShell 生命周期能力保留 actor 所有者校验，公开 child 继续只接收委派输入，并保持不可变策略。按归档状态筛选的 Session 分页和历史导出与聚合 Actions、child transcript 对话框相互独立；打开 child 时保持父会话及其草稿挂载。契约版本 1.84 同时包含生命周期/导出和公开 child 接口。
 
 ## 验证与发布
 

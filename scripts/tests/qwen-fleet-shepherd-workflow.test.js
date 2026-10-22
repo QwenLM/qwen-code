@@ -497,18 +497,24 @@ exit 1`;
         const gh = join(dir, 'gh');
         writeFileSync(gh, `#!/bin/bash\n${ghScript}\n`);
         chmodSync(gh, 0o755);
-        writeFileSync('/tmp/scan-runs.json', JSON.stringify(runs));
+        writeFileSync(join(dir, 'scan-runs.json'), JSON.stringify(runs));
         const out = execFileSync(
           'bash',
           [
             '-c',
-            `${busyWalk.replace(/\n {10}/g, '\n')}\nprintf '%s|%s' "$BUSY_OK" "$SHEP_BUSY"`,
+            `${busyWalk
+              .replace(/\n {10}/g, '\n')
+              .replace(
+                '/tmp/scan-runs.json',
+                '"$SCAN_RUNS_FILE"',
+              )}\nprintf '%s|%s' "$BUSY_OK" "$SHEP_BUSY"`,
           ],
           {
             env: {
               ...process.env,
               PATH: `${dir}:${process.env.PATH}`,
               SCAN_RUNS_OK: 'true',
+              SCAN_RUNS_FILE: join(dir, 'scan-runs.json'),
               ACTIONS_TOKEN: 'x',
               REPO: 'QwenLM/qwen-code',
             },
@@ -518,7 +524,6 @@ exit 1`;
         return out.split('\n').at(-1);
       } finally {
         rmSync(dir, { recursive: true, force: true });
-        rmSync('/tmp/scan-runs.json', { force: true });
       }
     };
     const live = [{ databaseId: 101, status: 'in_progress' }];

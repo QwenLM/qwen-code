@@ -306,6 +306,38 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
+  it.each(['closed', 'archived'])(
+    'keeps %s history read only when native recovery is ready',
+    async (lifecycleStatus) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          lifecycleStatus,
+          capabilities: { canSend: false, canCancel: false },
+          recovery: {
+            state: 'ready',
+            reasonCode: 'native_settled',
+            nextTurnAllowed: true,
+            actions: {
+              recheck: false,
+              cancel: false,
+              continueInNewSession: false,
+            },
+          },
+        }),
+      );
+
+      await render('s1');
+      expect(container.textContent).toContain('Persisted answer');
+      expect(container.querySelector('textarea')?.disabled).toBe(true);
+      await act(async () => {
+        await mocks.editorProps!.onSubmit('Another turn');
+        await flush();
+      });
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+      expect(mocks.client.createSession).not.toHaveBeenCalled();
+    },
+  );
+
   it('uses the shared rename dialog and synchronizes the confirmed title without submitting the composer', async () => {
     let resolve!: (value: { displayName: string }) => void;
     const renameSession = vi.fn().mockImplementation(
@@ -1766,96 +1798,109 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.cancel).toHaveBeenCalledOnce();
   });
 
-  it('reads child approvals with the panel closed and returns from the child transcript without losing the parent draft', async () => {
-    const childId = 'child-1';
-    const childTask: ManagedTask = {
-      ...task,
-      childSessionId: childId,
-      approvalMode: 'default',
-    };
-    mocks.client.getSession.mockImplementation(async (id: string) =>
-      summary(id, {
-        capabilities:
-          id === 's1'
-            ? {
-                canSend: true,
-                canCancel: false,
-                tasks: true,
-                actions: true,
-                childAgents: true,
-              }
-            : { canSend: false, canCancel: false },
-      }),
-    );
-    mocks.client.getTranscript.mockImplementation(async (id: string) => ({
-      events: [
-        {
-          ...event(1, id === childId ? 'Child result' : 'Parent answer'),
-          sessionId: id,
-        },
-        { ...event(2, ''), sessionId: id, type: 'completed' },
-      ],
-      lastEventId: 2,
-    }));
-    const childAction = { ...pendingAction, sessionId: childId };
-    const listPending = vi.fn().mockResolvedValue([childAction]);
-    const respond = vi.fn().mockResolvedValue(undefined);
-    provider = {
-      ...provider,
-      actions: { listPending, respond },
-      tasks: {
-        list: vi.fn().mockResolvedValue({
-          data: [childTask],
-          hasMore: false,
-          activeChildCount: 1,
+  it.each([false, true])(
+    'reads child approvals with the panel closed and preserves the parent draft with lifecycle support %s',
+    async (lifecycleEnabled) => {
+      const childId = 'child-1';
+      const childTask: ManagedTask = {
+        ...task,
+        childSessionId: childId,
+        approvalMode: 'default',
+      };
+      mocks.client.getSession.mockImplementation(async (id: string) =>
+        summary(id, {
+          capabilities:
+            id === 's1'
+              ? {
+                  canSend: true,
+                  canCancel: false,
+                  tasks: true,
+                  actions: true,
+                  childAgents: true,
+                  ...(lifecycleEnabled ? { sessionClose: true } : {}),
+                }
+              : { canSend: false, canCancel: false },
         }),
-        get: vi.fn().mockResolvedValue(childTask),
-        listEvents: vi.fn().mockResolvedValue({ data: [], hasMore: false }),
-      },
-    };
-    await render('s1');
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
-    expect(listPending).toHaveBeenCalledWith(
-      's1',
-      expect.objectContaining({ includeChildren: true }),
-    );
-    expect(container.textContent).toContain('Child Agent approval');
-    const composer = container.querySelector('textarea')!;
-    const setter = Object.getOwnPropertyDescriptor(
-      HTMLTextAreaElement.prototype,
-      'value',
-    )!.set!;
-    await act(async () => {
-      setter.call(composer, 'Keep the parent draft');
-      composer.dispatchEvent(new Event('input', { bubbles: true }));
-    });
-    const click = async (text: string) =>
-      act(async () => {
-        [...document.querySelectorAll('button')]
-          .find((button) => button.textContent === text)!
-          .click();
-        await flush();
+      );
+      mocks.client.getTranscript.mockImplementation(async (id: string) => ({
+        events: [
+          {
+            ...event(1, id === childId ? 'Child result' : 'Parent answer'),
+            sessionId: id,
+          },
+          { ...event(2, ''), sessionId: id, type: 'completed' },
+        ],
+        lastEventId: 2,
+      }));
+      const childAction = { ...pendingAction, sessionId: childId };
+      const listPending = vi.fn().mockResolvedValue([childAction]);
+      const respond = vi.fn().mockResolvedValue(undefined);
+      const lifecycle = {
+        submit: vi.fn(),
+        unarchive: vi.fn(),
+        query: vi.fn(),
+      };
+      provider = {
+        ...provider,
+        ...(lifecycleEnabled ? { lifecycle } : {}),
+        actions: { listPending, respond },
+        tasks: {
+          list: vi.fn().mockResolvedValue({
+            data: [childTask],
+            hasMore: false,
+            activeChildCount: 1,
+          }),
+          get: vi.fn().mockResolvedValue(childTask),
+          listEvents: vi.fn().mockResolvedValue({ data: [], hasMore: false }),
+        },
+      };
+      await render('s1');
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      expect(listPending).toHaveBeenCalledWith(
+        's1',
+        expect.objectContaining({ includeChildren: true }),
+      );
+      expect(container.textContent).toContain('Child Agent approval');
+      const composer = container.querySelector('textarea')!;
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )!.set!;
+      await act(async () => {
+        setter.call(composer, 'Keep the parent draft');
+        composer.dispatchEvent(new Event('input', { bubbles: true }));
       });
-    await click('Session tasks');
-    await click('Child Agent · 01234567');
-    await click('View child Session');
-    expect(mocks.client.getTranscript).toHaveBeenCalledWith(
-      childId,
-      expect.anything(),
-    );
-    const childDialog = [...document.querySelectorAll('[role="dialog"]')].find(
-      (dialog) => dialog.textContent?.includes('Back to parent Session'),
-    )!;
-    expect(childDialog.textContent).toContain('Child result');
-    expect(childDialog.querySelector('textarea')).toBeNull();
-    expect(container.querySelector('textarea')).toBe(composer);
-    await click('Back to parent Session');
-    await click('Close tasks');
-    expect(container.querySelector('textarea')).toBe(composer);
-    expect(composer.value).toBe('Keep the parent draft');
-    expect(container.textContent).toContain('Parent answer');
-    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
-  });
+      const click = async (text: string) =>
+        act(async () => {
+          [...document.querySelectorAll('button')]
+            .find((button) => button.textContent === text)!
+            .click();
+          await flush();
+        });
+      await click('Session tasks');
+      await click('Child Agent · 01234567');
+      await click('View child Session');
+      expect(mocks.client.getTranscript).toHaveBeenCalledWith(
+        childId,
+        expect.anything(),
+      );
+      const childDialog = [
+        ...document.querySelectorAll('[role="dialog"]'),
+      ].find((dialog) =>
+        dialog.textContent?.includes('Back to parent Session'),
+      )!;
+      expect(childDialog.textContent).toContain('Child result');
+      expect(childDialog.querySelector('textarea')).toBeNull();
+      expect(container.querySelector('textarea')).toBe(composer);
+      await click('Back to parent Session');
+      await click('Close tasks');
+      expect(container.querySelector('textarea')).toBe(composer);
+      expect(composer.value).toBe('Keep the parent draft');
+      expect(container.textContent).toContain('Parent answer');
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+      expect(lifecycle.submit).not.toHaveBeenCalled();
+    },
+  );
 
   it('opens child tasks without losing drafts or history and leaves sending available during uncertain cancellation', async () => {
     mocks.client.getSession.mockImplementation(async () =>
@@ -3968,6 +4013,39 @@ describe('ManagedSessionsPage', () => {
       random.mockRestore();
     }
   });
+
+  it.each([false, true])(
+    'announces a list failure once when interactive is %s',
+    async (interactive) => {
+      mocks.client.listSessions.mockRejectedValue(
+        new Error('History unavailable'),
+      );
+      await render('s1', 'en', provider, undefined, interactive);
+      expect(
+        [...container.querySelectorAll('[role="alert"]')].map(
+          (element) => element.textContent,
+        ),
+      ).toEqual(['History unavailable']);
+    },
+  );
+
+  it.each(['History unavailable', 'Not found'])(
+    'keeps distinct detail errors alongside an inactive navigation alert: %s',
+    async (detailError) => {
+      mocks.client.listSessions.mockRejectedValue(
+        new Error('History unavailable'),
+      );
+      mocks.client.getSession.mockRejectedValue(
+        new JavaManagedAgentHttpError(404, 'session_not_found', detailError),
+      );
+      await render('s1', 'en', provider, undefined, false);
+      expect(
+        [...container.querySelectorAll('[role="alert"]')]
+          .map((element) => element.textContent)
+          .sort(),
+      ).toEqual([...new Set(['History unavailable', detailError])].sort());
+    },
+  );
 
   it('shows a fresh action error alongside a sticky terminal stop', async () => {
     vi.useFakeTimers();

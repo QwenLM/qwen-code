@@ -4,7 +4,7 @@
 
 ## Status and problem
 
-Implemented with public child delegation enabled by default for qualified new Sessions, based on main `59d21e1c69`. The approved design used main `4515275b1727e8f9b509e2c2aefe97e976293acf`; implementation uses the newer isolated checkout. Hosted child Sessions, result relay, task queries and durable cancellation were already available. Public Shell previously suppressed the child orchestrator. Removing that suppression alone would also expose teams, workflows and messaging, and the original child creation copied the parent's initial approval mode rather than the effective launch policy. This change adds explicit public admission and immutable launch policy.
+Implemented with public child delegation enabled by default for qualified new Sessions, integrated with main `605fd5ee17`. The approved design used main `4515275b1727e8f9b509e2c2aefe97e976293acf`; implementation uses the newer isolated checkout. Hosted child Sessions, result relay, task queries and durable cancellation were already available. Public Shell previously suppressed the child orchestrator. Removing that suppression alone would also expose teams, workflows and messaging, and the original child creation copied the parent's initial approval mode rather than the effective launch policy. This change adds explicit public admission and immutable launch policy.
 
 ## Admission and compatibility
 
@@ -29,6 +29,8 @@ Parent Turn cancellation durably fences further launches and wakes from that sou
 Extend existing action queries with optional `include_children`/`includeChildren`, default false. Aggregate the parent and direct children with per-Session read authorization, preserve the actual action owner and bind pagination to tenant, parent and aggregation mode. Responses continue through the existing owner Session route with its action/input/policy revisions and idempotency key; aggregation does not grant approval permission.
 
 Refresh aggregated approvals serially every three seconds while the page is visible, independently of the task panel. Abort and discard stale requests on Session, account or Provider changes. Reuse the task panel for active count, pending approval, stopping state and actual child approval mode. Optional task metadata includes the server-wide Session count `activeChildCount`, durable `stopRequested` and the child's actual `approvalMode`; the count is independent of pagination and a stop request never implies termination. Read results through `childSessionId` and the existing transcript reader, with a return link that preserves the parent's draft. Track cancelled children until their authoritative terminal states; a completed cancel command alone is insufficient.
+
+The [Session lifecycle UI](2026-10-22-managed-session-lifecycle-ui.md) remains available alongside child delegation. WebShell lifecycle capabilities retain their actor ownership checks, while public children keep their delegated-input-only and immutable-policy restrictions. Archive-filtered Session pagination and history export remain independent of aggregated Actions and the child transcript dialog; opening a child keeps the parent Session and its draft mounted. Contract version 1.84 includes both lifecycle/export and public-child surfaces.
 
 ## Verification and rollout
 
