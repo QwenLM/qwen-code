@@ -374,6 +374,27 @@ public final class ApiModels {
     public record WebShellSessionRequest(@NotBlank String sessionId) {
     }
 
+    public record ManagedMcpServerPin(@NotBlank @Pattern(regexp = "[A-Za-z0-9._:-]{1,128}") String serverId,
+            @Min(1) @Max(9_007_199_254_740_991L) long serverRevision,
+            @NotBlank @Pattern(regexp = "[a-f0-9]{64}") String definitionDigest) { }
+
+    public record ManagedMcpManagementCommand(@NotBlank String action,
+            @NotBlank @Pattern(regexp = "[A-Za-z0-9._:-]{1,128}") String serverId,
+            @NotNull @Min(0) @Max(9_007_199_254_740_990L) Long expectedRevision,
+            @Valid ManagedMcpServerPin server) { }
+
+    public record WebShellMcpManagementQuery(@NotBlank @Size(max = 128) String sessionId,
+            @Size(max = 128) String requestId) { }
+
+    public record WebShellMcpManagementSubmit(@NotBlank @Size(max = 128) String sessionId,
+            @Size(max = 128) String requestId, @NotNull String idempotencyKey,
+            @NotBlank String action, @NotBlank @Pattern(regexp = "[A-Za-z0-9._:-]{1,128}") String serverId,
+            @NotNull @Min(0) @Max(9_007_199_254_740_990L) Long expectedRevision,
+            @Valid ManagedMcpServerPin server) { }
+
+    public record WebShellMcpManagementOperationQuery(@NotBlank @Size(max = 128) String sessionId,
+            @NotBlank String operationId, @Size(max = 128) String requestId) { }
+
     public record WebShellRenameRequest(@Size(max = 128) String requestId,
             @NotBlank @Size(max = 128) String sessionId,
             @NotNull String idempotencyKey, String title) {

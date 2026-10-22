@@ -14,10 +14,14 @@ import org.springframework.boot.web.server.Ssl;
 import org.springframework.context.EnvironmentAware;
 import org.springframework.core.env.Environment;
 
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
@@ -25,11 +29,19 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 @ConfigurationProperties("qwen.managed-agent")
 public class ManagedAgentProperties implements EnvironmentAware {
     private static final Logger LOG = LoggerFactory.getLogger(
             ManagedAgentProperties.class);
+
+    private static final Set<String> HARNESS_CREDENTIAL_KEYS =
+            Set.of("QWEN_SERVER_TOKEN", "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST");
+    // `-` stays last, where it is literal inside the character class.
+    private static final String CREDENTIAL_PUNCTUATION = "._:/+=-";
+    private static final Pattern PLAIN_CREDENTIAL =
+            Pattern.compile("[A-Za-z0-9" + CREDENTIAL_PUNCTUATION + "]*");
 
     private final Harness harness = new Harness();
     private final SessionStore sessionStore = new SessionStore();
@@ -53,6 +65,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private List<String> definitionModels = List.of();
     private List<ModelOption> modelCatalog = List.of();
     private String trustedActorHeader = "";
+    // Validation may run more than once; the file is read only the first time.
+    private boolean harnessCredentialsApplied;
     // Null on a plain `new`; the sweep then falls back to magnitude bands.
     private Environment environment;
 
@@ -174,6 +188,104 @@ public class ManagedAgentProperties implements EnvironmentAware {
         validateWorkspaceFiles();
     }
 
+    // The Harness's own environment file is the one copy of the shared
+    // credentials. Its values reach this configuration only, never this
+    // process's environment, which Runtime workers would inherit.
+    private void applyHarnessCredentialsFile() {
+        String file = harness.getCredentialsFile();
+        if (!harness.isEnabled() || harnessCredentialsApplied || StringUtils.isBlank(file)) {
+            return;
+        }
+        if (StringUtils.isNotBlank(harness.getToken()) || StringUtils.isNotBlank(harness.getCapabilityDigest())) {
+            throw new IllegalStateException("Configure the Hosted Harness token and capability digest either in"
+                    + " harness.credentials-file or directly, not both");
+        }
+        Map<String, String> values = readHarnessEnvironmentFile(file);
+        String token = credential(values, "QWEN_SERVER_TOKEN", file);
+        String digest = credential(values, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", file);
+        harness.setToken(token);
+        harness.setCapabilityDigest(digest);
+        harnessCredentialsApplied = true;
+    }
+
+    /** Whether startup validation has bound the credentials from the Harness credentials file. */
+    public boolean harnessCredentialsApplied() {
+        return harnessCredentialsApplied;
+    }
+
+    // systemd and a shell `source` both read this file for the Harness, so
+    // accept only lines both read the way this parser does and refuse the
+    // rest, instead of silently taking a different value.
+    private static Map<String, String> readHarnessEnvironmentFile(String file) {
+        String[] lines;
+        try {
+            lines = Files.readString(Path.of(file), StandardCharsets.UTF_8).split("\n", -1);
+        } catch (IOException | RuntimeException error) {
+            throw new IllegalStateException("Hosted Harness credentials file " + file + " cannot be read ("
+                    + error.getClass().getSimpleName() + ")");
+        }
+        Map<String, String> values = new LinkedHashMap<>();
+        for (int index = 0; index < lines.length; index++) {
+            // A shell keeps a carriage return in the value.
+            if (lines[index].indexOf('\r') >= 0) {
+                throw unsupportedCredentialLine(file, index, "a carriage return");
+            }
+            String line = lines[index].strip();
+            if (line.endsWith("\\")) {
+                throw unsupportedCredentialLine(file, index, "a line continuation");
+            }
+            int separator = line.indexOf('=');
+            if (line.startsWith("#") || line.startsWith(";") || separator < 0) {
+                continue;
+            }
+            String key = line.substring(0, separator).strip();
+            String value = line.substring(separator + 1);
+            boolean credential = HARNESS_CREDENTIAL_KEYS.contains(key);
+            // A shell runs `KEY = value` or `KEY= value` as a command instead.
+            if (credential && (key.length() != separator || !value.equals(value.stripLeading()))) {
+                throw unsupportedCredentialLine(file, index, "whitespace around `=` in " + key);
+            }
+            value = value.strip();
+            char quote = value.isEmpty() ? 0 : value.charAt(0);
+            if (quote == '"' && value.indexOf('\\') >= 0) {
+                throw unsupportedCredentialLine(file, index, "an escape inside double quotes");
+            }
+            if (quote == '"' || quote == '\'') {
+                int close = value.indexOf(quote, 1);
+                if (close < 0) {
+                    throw unsupportedCredentialLine(file, index, "an unterminated quote");
+                }
+                if (close != value.length() - 1) {
+                    throw unsupportedCredentialLine(file, index, "text after a closing quote");
+                }
+                value = value.substring(1, close);
+            }
+            // Both readers take these characters literally anywhere in a
+            // value; a shell gives others, such as `;`, `&` or `~`, meaning.
+            if (credential && !PLAIN_CREDENTIAL.matcher(value).matches()) {
+                throw unsupportedCredentialLine(file, index,
+                        "a character other than letters, digits and `" + CREDENTIAL_PUNCTUATION + "` in " + key);
+            }
+            values.put(key, value);
+        }
+        return values;
+    }
+
+    // Names the line, never its content: the line may hold a credential.
+    private static IllegalStateException unsupportedCredentialLine(String file, int index, String construct) {
+        return new IllegalStateException("Hosted Harness credentials file " + file + " line " + (index + 1)
+                + " uses " + construct + "; write KEY=value without continuations, escapes, expansions"
+                + " or trailing text");
+    }
+
+    private static String credential(Map<String, String> values, String key, String file) {
+        String value = values.get(key);
+        if (StringUtils.isBlank(value)) {
+            throw new IllegalStateException("Hosted Harness credentials file " + file + " does not set " + key);
+        }
+        return value;
+    }
+
     // On a single host the Harness reaches the store routes on this
     // server's loopback listener, and the store scope is the Runtime
     // Broker's workspace identity, so neither needs its own setting.
@@ -219,6 +331,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
     @PostConstruct
     void validateWorkspaceFiles() {
         applySessionStoreDefaults();
+        applyHarnessCredentialsFile();
         // The sweep runs first, so a bare milliseconds-style override
         // warns with the unit hint before the range check below fails the
         // boot, and the refusal message itself names the convention.
@@ -499,6 +612,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private String baseUrl = "http://127.0.0.1:4170";
         private String token = "";
         private String capabilityDigest = "";
+        private String credentialsFile = "";
         private String approvalMode = "yolo";
         // Unit-less operator overrides must bind in the annotated unit; an
         // un-annotated Duration silently binds milliseconds.
@@ -580,6 +694,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setCapabilityDigest(String capabilityDigest) {
             this.capabilityDigest = capabilityDigest;
+        }
+
+        public String getCredentialsFile() {
+            return credentialsFile;
+        }
+
+        public void setCredentialsFile(String credentialsFile) {
+            this.credentialsFile = credentialsFile;
         }
 
         public String getApprovalMode() {

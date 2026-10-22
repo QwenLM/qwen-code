@@ -31,6 +31,7 @@ import {
 import { ToolApproval } from '../messages/ToolApproval';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
 import { Input } from '../ui/input';
 import { createManagedMessageProjector } from './managed-session-messages';
 import {
@@ -63,6 +64,7 @@ import { useManagedModelChange } from './use-managed-model-change';
 import { useManagedApprovalChange } from './use-managed-approval-change';
 import { useManagedSkills } from './use-managed-skills';
 import { useManagedMcp } from './use-managed-mcp';
+import { ManagedMcpManagerPage } from './ManagedMcpManagerPage';
 import { ManagedSessionCwdControl } from './ManagedSessionCwdControl';
 import { toManagedPermissionRequest } from './managed-approval';
 import { isNonRetryableClientError } from './managed-request-error';
@@ -377,7 +379,14 @@ function ManagedSessionsContent({
     sessionId,
   );
   const skills = useManagedSkills(provider, clientId, sessionId);
-  const mcp = useManagedMcp(provider, clientId, sessionId);
+  const [mcpManagerSession, setMcpManagerSession] = useState<string>();
+  const mcp = useManagedMcp(
+    provider,
+    clientId,
+    sessionId,
+    JSON.stringify([interactive, mcpManagerSession]),
+  );
+  useEffect(() => setMcpManagerSession(undefined), [sessionId]);
   const referenceActions = useMemo(
     () =>
       fileReferences.actions || mcp
@@ -1090,6 +1099,22 @@ function ManagedSessionsContent({
   }
 
   const summary = detail.summary;
+  const mcpManagerAvailable = Boolean(
+    interactive &&
+      provider.mcpManagement &&
+      sessionId &&
+      summary?.sessionId === sessionId &&
+      summary.workspace,
+  );
+  const mcpManagerButton = mcpManagerAvailable ? (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={() => setMcpManagerSession(sessionId)}
+    >
+      {t('managed.mcp.manage')}
+    </Button>
+  ) : null;
   const { request: requestTurnCancel, busy: turnCancelBusy } = turnCancel;
   const failureMessage = summary?.failure
     ? (FAILURE_MESSAGES[summary.failure.code]?.[language === 'zh-CN' ? 1 : 0] ??
@@ -1440,6 +1465,25 @@ function ManagedSessionsContent({
       ref={pageRef}
       className={`flex h-full min-h-0 flex-col ${home ? '' : 'gap-3'}`}
     >
+      {mcpManagerAvailable &&
+        mcpManagerSession === sessionId &&
+        summary?.workspace && (
+          <Dialog
+            open
+            onOpenChange={(open) => !open && setMcpManagerSession(undefined)}
+          >
+            <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-5xl">
+              <DialogHeader>
+                <DialogTitle>{t('managed.mcp.manage')}</DialogTitle>
+              </DialogHeader>
+              <ManagedMcpManagerPage
+                provider={provider}
+                sessionId={summary.sessionId}
+                workspaceId={summary.workspace.workspaceId}
+              />
+            </DialogContent>
+          </Dialog>
+        )}
       {/* The uncertain-request row unmounts on the Discard click itself, so
           a persistent region announces the outcome wherever focus lands. */}
       <p role="status" className="sr-only">
@@ -1563,6 +1607,7 @@ function ManagedSessionsContent({
                         {t('sidebar.rename')}
                       </Button>
                     )}
+                    {mcpManagerButton}
                   </span>
                 }
                 workspaceName={summary.workspace?.workspaceId}
@@ -1609,6 +1654,7 @@ function ManagedSessionsContent({
                   {t('sidebar.rename')}
                 </Button>
               )}
+              {mcpManagerButton}
               {provider.tasks &&
                 (summary.capabilities.tasks === true ||
                   taskCancel.pendingTaskIds.length > 0) && (
