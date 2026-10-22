@@ -30,6 +30,7 @@ import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { SkillTool } from '../tools/skill.js';
 import type { AgentTool } from '../tools/agent/agent.js';
 import type { ToolErrorType } from '../tools/tool-error.js';
+import type { LoopProtectionMode } from '../services/loop-protection.js';
 import type {
   GoalLimitKind,
   GoalStateCause,
@@ -542,11 +543,18 @@ export enum LoopType {
   ACTION_STAGNATION = 'action_stagnation',
   /** Similar read-only shell inspection commands repeat with varied args. */
   SHELL_COMMAND_STAGNATION = 'shell_command_stagnation',
-  /** Same (tool, args) pair appears N times across the entire turn, not necessarily consecutively. */
+  /**
+   * Same (tool, args) pair appears N times across the entire turn, not
+   * necessarily consecutively, or a provider replayed an executed tool-call
+   * id. LoopReason tells the two apart.
+   */
   GLOBAL_TOOL_CALL_DUPLICATE = 'global_tool_call_duplicate',
   /** Two tools alternating in a fixed pattern (A B A B A B ...). */
   ALTERNATING_TOOL_CALL_PATTERN = 'alternating_tool_call_pattern',
-  /** Total tool calls in a single turn exceeded the always-on hard cap, regardless of pattern. */
+  /**
+   * The per-turn tool-call cap: an explicit cap, the adaptive backstop, or a
+   * stuck halt past the adaptive soft cap. LoopReason tells them apart.
+   */
   TURN_TOOL_CALL_CAP = 'turn_tool_call_cap',
   /** The same tool repeatedly failed schema validation with fresh tool-call ids. */
   INVALID_TOOL_PARAMS_STAGNATION = 'invalid_tool_params_stagnation',
@@ -554,17 +562,86 @@ export enum LoopType {
   REPEATED_TOOL_EXECUTION_FAILURE = 'repeated_tool_execution_failure',
 }
 
+/**
+ * Which cause stopped a turn when one LoopType covers several (#14828).
+ * Only TURN_TOOL_CALL_CAP and GLOBAL_TOOL_CALL_DUPLICATE carry a reason.
+ */
+export enum LoopReason {
+  /** An explicit model.maxToolCallsPerTurn was exceeded. */
+  EXPLICIT_CAP = 'explicit_cap',
+  /** The adaptive default cap passed its hard backstop. */
+  BACKSTOP = 'backstop',
+  /** The adaptive default cap passed its soft cap while one call repeated. */
+  STUCK_REPETITION = 'stuck_repetition',
+  /** The heuristic global-duplicate detector. */
+  REPEATED_CALL = 'repeated_call',
+  /** The duplicate provider tool-call id breaker. */
+  PROVIDER_DUPLICATE_ID = 'provider_duplicate_id',
+}
+
+/**
+ * Detail of a loop stop beyond its LoopType. The tool-call numbers are set
+ * only for TURN_TOOL_CALL_CAP: the calls counted when it fired and the limit
+ * that applied (explicit cap, backstop, or soft cap for a stuck halt).
+ */
+export interface LoopStopDetail {
+  loopReason?: LoopReason;
+  toolCallCount?: number;
+  toolCallLimit?: number;
+}
+
 export class LoopDetectedEvent implements BaseTelemetryEvent {
   'event.name': 'loop_detected';
   'event.timestamp': string;
   loop_type: LoopType;
   prompt_id: string;
+  declare loop_reason?: LoopReason;
+  declare tool_call_count?: number;
+  declare tool_call_limit?: number;
 
-  constructor(loop_type: LoopType, prompt_id: string) {
+  constructor(loop_type: LoopType, prompt_id: string, detail?: LoopStopDetail) {
     this['event.name'] = 'loop_detected';
     this['event.timestamp'] = new Date().toISOString();
     this.loop_type = loop_type;
     this.prompt_id = prompt_id;
+    if (detail?.loopReason !== undefined) this.loop_reason = detail.loopReason;
+    if (detail?.toolCallCount !== undefined) {
+      this.tool_call_count = detail.toolCallCount;
+    }
+    if (detail?.toolCallLimit !== undefined) {
+      this.tool_call_limit = detail.toolCallLimit;
+    }
+  }
+}
+
+/**
+ * One loop-protection decision of a governed detector (#14828): a reminder
+ * queued, the turn stopped, or (under `off`) the detection only recorded.
+ * Budget stops and the provider-id breaker are not governed and emit none.
+ */
+export class LoopProtectionEvent implements BaseTelemetryEvent {
+  'event.name': 'loop_protection';
+  'event.timestamp': string;
+  prompt_id: string;
+  loop_type: LoopType;
+  decision: 'reminded' | 'stopped' | 'observed';
+  mode: LoopProtectionMode;
+  declare loop_reason?: LoopReason;
+
+  constructor(params: {
+    prompt_id: string;
+    loop_type: LoopType;
+    decision: 'reminded' | 'stopped' | 'observed';
+    mode: LoopProtectionMode;
+    loop_reason?: LoopReason;
+  }) {
+    this['event.name'] = 'loop_protection';
+    this['event.timestamp'] = new Date().toISOString();
+    this.prompt_id = params.prompt_id;
+    this.loop_type = params.loop_type;
+    this.decision = params.decision;
+    this.mode = params.mode;
+    if (params.loop_reason !== undefined) this.loop_reason = params.loop_reason;
   }
 }
 

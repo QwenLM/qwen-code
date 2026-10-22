@@ -134,9 +134,13 @@ class WorkspaceRuntimeTest {
                 fixture.bindings().releaseOperation(stopped.getBindingId(), stopped.getOperationOwner(), stopped.getOperationGeneration());
                 assertThat(fixture.bindings().claimOperation(stopped.getBindingId(), "other", Duration.ofMinutes(5))).isNotNull();
             }
-            case "foreign-binding" -> jdbc.update("UPDATE ma_storage_owner SET binding_id = 'foreign' WHERE binding_id = ?", stopped.getBindingId());
-            case "foreign-generation" -> jdbc.update("UPDATE ma_storage_owner SET runtime_generation = runtime_generation + 1 WHERE binding_id = ?", stopped.getBindingId());
-            case "bad-digest" -> jdbc.update("UPDATE ma_storage_owner SET holder_key = 'unverified' WHERE binding_id = ?", stopped.getBindingId());
+            case "foreign-binding", "foreign-generation", "bad-digest" -> {
+                jdbc.update("UPDATE ma_storage_owner SET binding_id = ?, runtime_generation = ?, runtime_session_id = ?, holder_key = 'unverified'"
+                        + " WHERE storage_key = (SELECT execution_storage_key FROM ma_runtime_session WHERE runtime_session_id = ?)",
+                        fault.equals("foreign-binding") ? "foreign" : stopped.getBindingId(),
+                        stopped.getGeneration() + (fault.equals("foreign-generation") ? 1 : 0),
+                        fixture.session().getRuntimeSessionId(), fixture.session().getRuntimeSessionId());
+            }
             case "unknown-execution" -> {
                 var execution = ToolExecutionRecord.prepared(UUID.randomUUID().toString(), UUID.randomUUID().toString(),
                         stopped.getBindingId(), stopped.getGeneration(), fixture.session().getSession().getHarnessSessionId(),
@@ -565,34 +569,38 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
-    void serializesIndependentSqlClientsByStorageAndFencesStaleRelease() throws Exception {
+    void independentSqlClientsShareStorageAndFenceStaleRelease() throws Exception {
         SessionRecord session = createSession("storage", ".");
+        var created = sessions.insertWorkspaceSessionCommand(session.tenantId(), "actor", "second-create",
+                "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
+                new WorkspaceSelection("workspace", "."));
+        var secondSession = sessions.findSessionById(created.sessionId()).orElseThrow();
         var binding = session.workspace();
         RuntimeSessionRecord first = holder(session, "first");
-        RuntimeSessionRecord second = holder(session, "second");
+        RuntimeSessionRecord second = holder(secondSession, "second");
         var otherClient = new WorkspaceExecutionStore(new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource), new DataSourceTransactionManager(dataSource));
         CyclicBarrier start = new CyclicBarrier(2);
         try (var pool = Executors.newFixedThreadPool(2)) {
             var one = pool.submit(() -> contend(authority, binding, first, start));
             var two = pool.submit(() -> contend(otherClient, binding, second, start));
-            boolean won = one.get(5, TimeUnit.SECONDS);
-            assertThat(two.get(5, TimeUnit.SECONDS)).isEqualTo(!won);
-            var winner = won ? first : second;
-            var loser = won ? second : first;
-            otherClient.claim(binding, winner);
-            authority.assertHeld(binding, winner);
-            authority.release(binding, loser);
-            assertBusy(() -> otherClient.claim(binding, loser));
+            assertThat(one.get(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(two.get(5, TimeUnit.SECONDS)).isTrue();
+            authority.assertHeld(binding, first);
+            otherClient.assertHeld(binding, second);
+            authority.release(binding, first);
+            otherClient.assertHeld(binding, second);
+            otherClient.claim(binding, first);
+            authority.release(binding, second);
+            authority.assertHeld(binding, first);
             ContextBinding changedGeneration = new ContextBinding(binding.getTenantId(), "other-workspace", 2,
                     binding.getStorageId(), "child", binding.getContextConfigRef(), 1);
-            assertUnavailable(() -> otherClient.claim(changedGeneration, loser));
-            ContextBinding independentStorage = new ContextBinding(binding.getTenantId(), "other-workspace", 1,
-                    "other-storage", ".", binding.getContextConfigRef(), 1);
-            assertUnavailable(() -> otherClient.claim(independentStorage, loser));
-            authority.release(binding, winner);
-            otherClient.claim(binding, loser);
-            authority.release(binding, winner);
-            otherClient.assertHeld(binding, loser);
+            assertUnavailable(() -> otherClient.claim(changedGeneration, second));
+            authority.release(binding, first);
+            var undo = holder(secondSession, "undo");
+            otherClient.claim(binding, undo);
+            assertThat(otherClient.beginRewind(binding, undo)).isTrue();
+            otherClient.endRewind(binding, undo);
+            otherClient.release(binding, undo);
         }
     }
 
@@ -604,18 +612,109 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void unknownExecutionRetainsItsOwnMembershipWithoutBlockingAnotherSession() throws Exception {
+        var session = createSession("storage", ".");
+        var first = holder(session, "unknown");
+        authority.claim(session.workspace(), first);
+        var executions = new JdbcToolExecutionRepository(dataSource);
+        var prepared = executions.findOrCreate(ToolExecutionRecord.prepared(UUID.randomUUID().toString(),
+                UUID.randomUUID().toString(), first.getBindingId(), first.getRuntimeGeneration(), session.sessionId(),
+                first.getRuntimeSessionId(), "prompt", "call", "digest", Map.of("sessionId", first.getRuntimeSessionId(),
+                        "promptId", "prompt", "callId", "call", "argsDigest", "digest")));
+        var dispatched = executions.claimDispatch(prepared.getExecutionCallId(), "original", Duration.ofMinutes(1));
+        var unknown = executions.compareAndSet(dispatched, dispatched.withUnknown(), "original", dispatched.getDispatchGeneration());
+        var created = sessions.insertWorkspaceSessionCommand(session.tenantId(), "actor", "neighbor",
+                "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", "."));
+        var neighbor = holder(sessions.findSessionById(created.sessionId()).orElseThrow(), "neighbor");
+        authority.claim(session.workspace(), neighbor);
+        authority.assertHeld(session.workspace(), first);
+        authority.assertHeld(session.workspace(), neighbor);
+        authority.release(session.workspace(), neighbor);
+        assertThat(authority.isHeld(session.workspace(), neighbor)).isFalse();
+        authority.assertHeld(session.workspace(), first);
+        assertThat(executions.findByExecutionCallId(unknown.getExecutionCallId()).getState()).isEqualTo(ToolExecutionRecord.State.UNKNOWN);
+        assertThat(executions.claimDispatch(unknown.getExecutionCallId(), "replay", Duration.ofMinutes(1))).isNull();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void rewindDependsOnCurrentMembersRatherThanPastOverlap(boolean neighborHeld) throws Exception {
+        var session = createSession("storage", ".");
+        var fixture = transport(session);
+        var ready = acquireReady(fixture);
+        var created = sessions.insertWorkspaceSessionCommand(session.tenantId(), "actor", "neighbor",
+                "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", "."));
+        var neighbor = holder(sessions.findSessionById(created.sessionId()).orElseThrow(), "neighbor");
+        authority.claim(session.workspace(), neighbor);
+        var rewind = Map.<String, Object>of("kind", "raw-file-history", "action", "rewind", "promptId", "prompt");
+        if (neighborHeld) {
+            var snapshot = Map.of("ownerSessionId", session.sessionId(), "files", Map.of(), "snapshots", List.of());
+            when(fixture.http().control(any(), any(), eq(Map.of("kind", "raw-file-history", "action", "snapshot"))))
+                    .thenReturn(CompletableFuture.completedFuture(snapshot));
+            assertThat(fixture.transport().control(fixture.lease(), ready.getSession(), rewind).toCompletableFuture().join())
+                    .isEqualTo(Map.of("state", snapshot, "filesChanged", List.of(), "filesFailed", List.of(), "conflict", true));
+            verify(fixture.http(), never()).control(any(), any(), eq(rewind));
+            authority.assertHeld(session.workspace(), neighbor);
+        } else {
+            authority.release(session.workspace(), neighbor);
+            var result = Map.of("state", Map.of(), "filesChanged", List.of("tracked.txt"), "filesFailed", List.of(), "conflict", false);
+            when(fixture.http().control(any(), any(), eq(rewind))).thenReturn(CompletableFuture.completedFuture(result));
+            assertThat(fixture.transport().control(fixture.lease(), ready.getSession(), rewind).toCompletableFuture().join())
+                    .isEqualTo(result);
+            verify(fixture.http()).control(any(), any(), eq(rewind));
+        }
+        authority.assertHeld(session.workspace(), ready);
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void rewindExcludesLateAdmissionAndRetainsExclusivityOnlyOnUncertainty(boolean uncertain) throws Exception {
+        var session = createSession("storage", ".");
+        var fixture = transport(session);
+        var ready = acquireReady(fixture);
+        var rival = holder(session, "late");
+        var operation = Map.<String, Object>of("kind", "raw-file-history", "action", "rewind", "promptId", "prompt");
+        var response = new CompletableFuture<Object>();
+        when(fixture.http().control(any(), any(), eq(operation))).thenReturn(response);
+        var rewinding = fixture.transport().control(fixture.lease(), ready.getSession(), operation).toCompletableFuture();
+        assertBusy(() -> authority.claim(session.workspace(), rival));
+        if (uncertain) {
+            response.completeExceptionally(new IllegalStateException("lost rewind result"));
+            assertThatThrownBy(rewinding::join).hasRootCauseMessage("lost rewind result");
+            assertBusy(() -> authority.claim(session.workspace(), rival));
+            assertThatThrownBy(() -> fixture.transport().releaseMount(fixture.lease(), ready.getSession()))
+                    .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("workspace_writer_unproven"));
+            assertThat(fixture.transport().execute(fixture.lease(), ready.getSession(), Map.of()).toCompletableFuture().join())
+                    .containsEntry("executionStatus", "not_started");
+            verify(fixture.http(), never()).execute(any(), any(), any());
+            assertThatThrownBy(() -> authority.beginRewind(session.workspace(), ready))
+                    .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("workspace_rewind_recovery_required"));
+        } else {
+            var result = Map.of("state", Map.of(), "filesChanged", List.of(), "filesFailed", List.of(), "conflict", false);
+            response.complete(result);
+            assertThat(rewinding.join()).isEqualTo(result);
+            authority.claim(session.workspace(), rival);
+            authority.assertHeld(session.workspace(), ready);
+            authority.assertHeld(session.workspace(), rival);
+        }
+    }
+
+    @Test
     void releasesAnUnclaimedSessionWithoutActivatingItOrReleasingTheWorkspaceHolder() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var fixture = transport(session);
         var rival = holder(session, "holder");
         authority.claim(session.workspace(), rival);
+        assertThat(authority.beginRewind(session.workspace(), rival)).isTrue();
         assertBusy(() -> fixture.transport().acquire(fixture.lease(), fixture.record().getSession()));
         var repository = new JdbcRuntimeSessionRepository(dataSource);
         var releasing = repository.compareAndSet(fixture.record(),
                 fixture.record().withState(RuntimeSessionRecord.State.RELEASING, Instant.now()));
         assertThat(releasing).isNotNull();
         assertThat(fixture.transport().release(fixture.lease(), releasing.getSession()).toCompletableFuture().join()).isTrue();
-        authority.assertHeld(session.workspace(), rival);
+        assertThat(authority.isHeld(session.workspace(), rival)).isTrue();
         assertUnavailable(() -> authority.claim(session.workspace(), releasing));
         verify(fixture.http(), never()).installContext(any(), any(), any(), any());
         verify(fixture.http(), never()).activateWorkspace(any(), any(), any(), any(Boolean.class));
@@ -683,6 +782,7 @@ class WorkspaceRuntimeTest {
         var fixture = transport(session);
         var rival = holder(session, "holder");
         authority.claim(session.workspace(), rival);
+        assertThat(authority.beginRewind(session.workspace(), rival)).isTrue();
         assertBusy(() -> fixture.transport().acquire(fixture.lease(), fixture.record().getSession()));
         assertThat(fixture.transport().releaseMount(fixture.lease(), fixture.record().getSession())
                 .toCompletableFuture().join()).isTrue();
@@ -691,13 +791,13 @@ class WorkspaceRuntimeTest {
         assertThat(releasing).isNotNull();
         assertThat(fixture.transport().release(fixture.lease(), releasing.getSession()).toCompletableFuture().join())
                 .isTrue();
-        authority.assertHeld(session.workspace(), rival);
+        assertThat(authority.isHeld(session.workspace(), rival)).isTrue();
         verify(fixture.http(), never()).release(any(), any());
         verify(fixture.http(), never()).activateWorkspace(any(), any(), any(), any(Boolean.class));
     }
 
     @Test
-    void reclaimTakesAHandedBackMountAgainOnlyWhileItIsFree() throws Exception {
+    void reclaimRejoinsAHandedBackMountAlongsideAnotherMember() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var fixture = transport(session);
         var binding = session.workspace();
@@ -706,7 +806,8 @@ class WorkspaceRuntimeTest {
         fixture.transport().releaseMount(fixture.lease(), runtimeSession).toCompletableFuture().join();
         var rival = holder(session, "rival");
         authority.claim(binding, rival);
-        assertBusy(() -> fixture.transport().reclaimMount(fixture.lease(), runtimeSession));
+        fixture.transport().reclaimMount(fixture.lease(), runtimeSession).toCompletableFuture().join();
+        authority.assertHeld(binding, rival);
         authority.release(binding, rival);
         fixture.transport().reclaimMount(fixture.lease(), runtimeSession).toCompletableFuture().join();
         authority.assertHeld(binding, ready);
@@ -735,7 +836,8 @@ class WorkspaceRuntimeTest {
                 .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("lost response")));
         assertThatThrownBy(() -> fixture.transport().acquire(fixture.lease(), runtimeSession).toCompletableFuture().join())
                 .hasRootCauseMessage("lost response");
-        assertBusy(() -> authority.claim(binding, rival));
+        authority.claim(binding, rival);
+        authority.assertHeld(binding, fixture.record());
         verify(fixture.http(), never()).activateWorkspace(any(), any(), any(), eq(true));
         when(fixture.http().installContext(any(), any(), any(), any())).thenReturn(CompletableFuture.completedFuture(Map.of()));
         when(fixture.http().activateWorkspace(any(), any(), any(), eq(true))).thenReturn(CompletableFuture.completedFuture(null));
@@ -747,7 +849,8 @@ class WorkspaceRuntimeTest {
                 .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("lost release")));
         assertThatThrownBy(() -> fixture.transport().release(fixture.lease(), runtimeSession).toCompletableFuture().join())
                 .hasRootCauseMessage("lost release");
-        assertBusy(() -> authority.claim(binding, rival));
+        authority.claim(binding, rival);
+        authority.assertHeld(binding, fixture.record());
         when(fixture.http().activateWorkspace(any(), any(), any(), eq(false))).thenReturn(CompletableFuture.completedFuture(null));
         fixture.transport().release(fixture.lease(), runtimeSession).toCompletableFuture().join();
         authority.claim(binding, rival);
@@ -772,7 +875,8 @@ class WorkspaceRuntimeTest {
                     assertThat(error.getStatusCode()).isEqualTo(503);
                 });
         authority.assertHeld(session.workspace(), fixture.record());
-        assertBusy(() -> authority.claim(session.workspace(), holder(session, "rival")));
+        authority.claim(session.workspace(), holder(session, "rival"));
+        authority.assertHeld(session.workspace(), fixture.record());
     }
 
     @Test
@@ -1148,7 +1252,8 @@ class WorkspaceRuntimeTest {
         deactivation.complete(null);
         assertThatThrownBy(releasing::join).hasRootCauseInstanceOf(RuntimeBrokerException.class);
         authority.assertHeld(session.workspace(), fixture.record());
-        assertBusy(() -> authority.claim(session.workspace(), rival));
+        authority.claim(session.workspace(), rival);
+        authority.assertHeld(session.workspace(), fixture.record());
     }
 
     @Test

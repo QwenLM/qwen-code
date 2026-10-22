@@ -4008,6 +4008,43 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('lets the workspace owner remove a client artifact without impersonating its client', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    try {
+      const created = await bridge.addSessionArtifact(
+        session.sessionId,
+        { title: 'Client output', url: 'https://example.com/output' },
+        { clientId: session.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+      await expect(
+        bridge.removeSessionArtifact(session.sessionId, artifactId),
+      ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
+      await expect(
+        bridge.removeSessionArtifactForWorkspaceOwner(
+          session.sessionId,
+          artifactId,
+        ),
+      ).resolves.toMatchObject({
+        changes: [{ action: 'removed', artifactId }],
+      });
+      await expect(
+        bridge.getSessionArtifacts(session.sessionId),
+      ).resolves.toMatchObject({ artifacts: [] });
+      await expect(
+        bridge.removeSessionArtifactForWorkspaceOwner(
+          session.sessionId,
+          artifactId,
+        ),
+      ).resolves.toMatchObject({ changes: [] });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('rejects invalid client artifact records instead of dropping them', async () => {
     const bridge = makeBridge({
       channelFactory: async () => makeChannel().channel,
@@ -7758,6 +7795,9 @@ describe('createAcpSessionBridge', () => {
           code: 'LOOP_DETECTED',
           errorKind: 'loop_detected',
           loopType: 'turn_tool_call_cap',
+          loopReason: 'explicit_cap',
+          toolCallCount: 4,
+          toolCallLimit: 3,
         });
       },
       extMethodImpl: (method, params) => {
@@ -7816,6 +7856,8 @@ describe('createAcpSessionBridge', () => {
         content: { type: 'text', text: 'persisted turn content' },
       }),
     });
+    // The loop reason and tool-call numbers survive the refresh too, so Web
+    // Shell can keep showing the cause-specific text after a reload.
     expect(compactedReplay[compactedReplay.length - 1]).toMatchObject({
       type: 'turn_error',
       promptId: 'prompt-loop',
@@ -7823,6 +7865,9 @@ describe('createAcpSessionBridge', () => {
         code: 'LOOP_DETECTED',
         errorKind: 'loop_detected',
         loopType: 'turn_tool_call_cap',
+        loopReason: 'explicit_cap',
+        toolCallCount: 4,
+        toolCallLimit: 3,
       }),
     });
 

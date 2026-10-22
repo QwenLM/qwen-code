@@ -34,6 +34,7 @@ import {
   ApprovalMode,
   SendMessageType,
   SYSTEM_REMINDER_OPEN,
+  LoopReason,
   LoopType,
   getToolCallFingerprint,
   CronScheduler,
@@ -3362,18 +3363,14 @@ describe('runNonInteractive', () => {
     );
 
     expect(exitCode).toBe(1);
-    // The consecutive guard is always-on, so the headless message must flag it
-    // as always-on and must NOT suggest the skipLoopDetection escape hatch,
-    // which cannot disable it.
+    // The consecutive guard runs before the skipLoopDetection gate, so the
+    // headless message must point at model.loopProtection, which governs it,
+    // and must NOT suggest skipLoopDetection, which cannot disable it.
     expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'always-on guard and cannot be disabled via `model.skipLoopDetection`',
-      ),
+      expect.stringContaining('Set `model.loopProtection` to "warn"'),
     );
     expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining(
-        'Set the `model.skipLoopDetection` setting to true',
-      ),
+      expect.stringContaining('`model.skipLoopDetection`'),
     );
   });
 
@@ -3485,6 +3482,77 @@ describe('runNonInteractive', () => {
       expect.stringContaining(
         'Set the `model.skipLoopDetection` setting to true',
       ),
+    );
+  });
+
+  it('names the cause when the stop carries its loop reason', async () => {
+    setupMetricsMock();
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Partial work' },
+      {
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.TURN_TOOL_CALL_CAP,
+          loopReason: LoopReason.EXPLICIT_CAP,
+          toolCallCount: 4,
+          toolCallLimit: 3,
+        },
+      },
+    ];
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Long turn',
+      'prompt-id-turn-cap-reason',
+    );
+
+    expect(exitCode).toBe(1);
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)',
+      ),
+    );
+    // The reason replaces the hedged hint that lists every cause.
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('A per-turn tool-call cap was reached'),
+    );
+  });
+
+  it('offers the skipLoopDetection escape for the heuristic global duplicate', async () => {
+    setupMetricsMock();
+    const events: ServerLlmStreamEvent[] = [
+      {
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          loopReason: LoopReason.REPEATED_CALL,
+        },
+      },
+    ];
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Repeat',
+      'prompt-id-global-dup-reason',
+    );
+
+    // The heuristic detector runs only with skipLoopDetection: false, so the
+    // always-on hint the provider-id breaker gets would be wrong here.
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '`model.skipLoopDetection` to true to disable this check',
+      ),
+    );
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('always-on guard'),
     );
   });
 
@@ -3680,6 +3748,7 @@ describe('runNonInteractive', () => {
       mockSettings,
       'Use a tool',
       'prompt-id-2',
+      { humanInput: { text: 'ultracode use a tool' } },
     );
 
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
@@ -3701,6 +3770,7 @@ describe('runNonInteractive', () => {
         type: SendMessageType.UserQuery,
         modelOverride: undefined,
         submittedPrompt: 'Use a tool',
+        humanInput: { text: 'ultracode use a tool' },
       },
     );
     // Verify second call (after tool execution) has type: ToolResult
@@ -5071,6 +5141,11 @@ describe('runNonInteractive', () => {
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(LoopType.GLOBAL_TOOL_CALL_DUPLICATE),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'the provider replayed a tool call id that had already run',
+      ),
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(

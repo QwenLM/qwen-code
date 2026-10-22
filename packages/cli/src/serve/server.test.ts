@@ -754,6 +754,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_extensions',
   'session_branch',
   'session_branch_worktree',
+  'workspace_model_reload',
   'channel_delivery',
   'workspace_channel_observed_contacts',
   'workspace_display_name',
@@ -804,7 +805,12 @@ const EXPECTED_REGISTERED_FEATURES = [
       return [feature, 'workspace_skills_config_runtime'];
     }
     if (feature === 'session_artifacts') {
-      return [feature, 'session_artifacts_persistence', 'session_sources'];
+      return [
+        feature,
+        'session_artifacts_persistence',
+        'session_artifact_library',
+        'session_sources',
+      ];
     }
     if (feature === 'mcp_guardrail_events') {
       return [feature, 'external_tool_guard'];
@@ -849,6 +855,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_extensions' &&
       f !== 'session_branch' &&
       f !== 'session_branch_worktree' &&
+      f !== 'workspace_model_reload' &&
       f !== 'channel_delivery' &&
       f !== 'workspace_channel_observed_contacts' &&
       f !== 'workspace_display_name' &&
@@ -906,6 +913,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_branch_worktree',
   'rate_limit',
   'workspace_reload',
+  'workspace_model_reload',
   'channel_delivery',
   'channel_reload',
   'channel_control',
@@ -3709,6 +3717,7 @@ describe('createServeApp', () => {
         }
         if (
           feature === 'session_artifacts_persistence' ||
+          feature === 'session_artifact_library' ||
           feature === 'session_sources'
         ) {
           expect(
@@ -40983,6 +40992,45 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
         bridge: fakeBridge(),
       }),
     ).toThrow(/Non-loopback HTTP\(S\).*code execution/);
+  });
+
+  it('rejects an embedded loopback port wildcard without a token', () => {
+    const wildOpts = {
+      ...baseOpts,
+      allowOrigins: ['http://127.0.0.1:*'],
+    };
+    expect(() =>
+      createServeApp(wildOpts, () => 4170, {
+        bridge: fakeBridge(),
+      }),
+    ).toThrow(/loopback port wildcard/i);
+  });
+
+  it('serves an ephemeral loopback origin through the port wildcard', async () => {
+    const app = createServeApp(
+      {
+        ...baseOpts,
+        token: 'secret',
+        allowOrigins: ['http://127.0.0.1:*'],
+      },
+      () => 4170,
+      { bridge: fakeBridge() },
+    );
+    const res = await request(app)
+      .options('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://127.0.0.1:54321')
+      .set('Access-Control-Request-Method', 'GET');
+    expect(res.status).toBe(204);
+    expect(res.headers['access-control-allow-origin']).toBe(
+      'http://127.0.0.1:54321',
+    );
+    const foreign = await request(app)
+      .options('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://localhost:54321')
+      .set('Access-Control-Request-Method', 'GET');
+    expect(foreign.status).toBe(403);
   });
 
   it('preserves tokenless browser-extension origins for local automation', async () => {

@@ -11,6 +11,8 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -48,6 +50,39 @@ class ManagedAgentPreflightTest {
         assertTrue(ManagedAgentPreflight.isCredentialKey(encoded(32)));
         assertFalse(ManagedAgentPreflight.isCredentialKey(encoded(31)));
         assertFalse(ManagedAgentPreflight.isCredentialKey("not-base64"));
+    }
+
+    @Test
+    void reportsDurableCapacityStatesWithoutClaimingPhysicalResources()
+            throws Exception {
+        try (Connection connection = DriverManager.getConnection(
+                "jdbc:h2:mem:preflight-capacity;DB_CLOSE_DELAY=-1")) {
+            try (var statement = connection.createStatement()) {
+                statement.execute("CREATE TABLE ma_runtime_binding "
+                        + "(binding_state VARCHAR(32))");
+                statement.execute("CREATE TABLE ma_runtime_session "
+                        + "(session_state VARCHAR(32))");
+                statement.execute("CREATE TABLE ma_operation "
+                        + "(state VARCHAR(32))");
+                statement.execute("INSERT INTO ma_runtime_binding VALUES "
+                        + "('READY'), ('READY'), ('DRAINING')");
+                statement.execute("INSERT INTO ma_runtime_session VALUES "
+                        + "('READY'), ('RELEASED')");
+                statement.execute("INSERT INTO ma_operation VALUES "
+                        + "('PENDING'), ('COMPLETED')");
+            }
+
+            ManagedAgentPreflight.Check check =
+                    ManagedAgentPreflight.capacityCheck(connection);
+
+            assertEquals(ManagedAgentPreflight.Status.PASS, check.status());
+            assertTrue(check.detail().contains("READY=2"));
+            assertTrue(check.detail().contains("PENDING=1"));
+            assertTrue(check.detail().contains("physical-processes=unknown"));
+            assertTrue(check.detail().contains("memory=unknown"));
+            assertTrue(check.detail().contains(
+                    "idle-reclamation=not measured"));
+        }
     }
 
     @Test
@@ -236,6 +271,84 @@ class ManagedAgentPreflightTest {
                 ManagedAgentPreflight.configFileCheck(
                         List.of("file:/does-not-exist/application.yml"))
                         .status());
+    }
+
+    @Test
+    void reportsTheEffectiveSessionStoreWiring() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getSessionStore().setEnabled(true);
+        assertEquals(ManagedAgentPreflight.Status.SKIP,
+                ManagedAgentPreflight.sessionStoreCheck(properties).status());
+        properties.getHarness().setEnabled(true);
+        ManagedAgentPreflight.Check url =
+                ManagedAgentPreflight.sessionStoreCheck(properties);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, url.status());
+        assertTrue(url.fix().contains(
+                "QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL"));
+        properties.getSessionStore().setBaseUrl("http://127.0.0.1:8080");
+        ManagedAgentPreflight.Check workspace =
+                ManagedAgentPreflight.sessionStoreCheck(properties);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, workspace.status());
+        assertTrue(workspace.fix().contains(
+                "QWEN_MANAGED_AGENT_WORKSPACE_CWD"));
+        properties.getSessionStore().setWorkspaceId("workspace");
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                ManagedAgentPreflight.sessionStoreCheck(properties).status());
+        properties.getSessionStore().setEnabled(false);
+        assertEquals(ManagedAgentPreflight.Status.SKIP,
+                ManagedAgentPreflight.sessionStoreCheck(properties).status());
+    }
+
+    @Test
+    void derivesTheSessionStoreWiringFromTheShippedDefaults(
+            @TempDir Path workspace) throws IOException {
+        var environment = new StandardEnvironment();
+        environment.getPropertySources().addFirst(
+                new org.springframework.core.env.MapPropertySource("test",
+                        java.util.Map.of(
+                                "QWEN_MANAGED_AGENT_HARNESS_ENABLED", "true",
+                                "QWEN_MANAGED_AGENT_WORKSPACE_CWD",
+                                workspace.toString(),
+                                "server.port", "9090")));
+        List<ManagedAgentPreflight.Check> checks = new ArrayList<>();
+        ManagedAgentPreflight.loadConfiguration(environment, List.of(),
+                checks);
+        ManagedAgentProperties properties =
+                ManagedAgentPreflight.bind(environment, checks);
+        assertTrue(checks.isEmpty(), checks.toString());
+        ManagedAgentPreflight.startupValidationCheck(properties);
+        ManagedAgentPreflight.Check check =
+                ManagedAgentPreflight.sessionStoreCheck(properties);
+        assertEquals(ManagedAgentPreflight.Status.PASS, check.status());
+        assertEquals("http://127.0.0.1:9090",
+                properties.getSessionStore().getBaseUrl());
+        assertEquals(org.apache.commons.codec.digest.DigestUtils.sha256Hex(
+                        workspace.toRealPath().toString().getBytes(
+                                java.nio.charset.StandardCharsets.UTF_8))
+                        .substring(0, 16),
+                properties.getSessionStore().getWorkspaceId());
+    }
+
+    @Test
+    void failsTheDerivedStoreUrlOfATlsListener(@TempDir Path workspace) {
+        var environment = new StandardEnvironment();
+        environment.getPropertySources().addFirst(
+                new org.springframework.core.env.MapPropertySource("test",
+                        java.util.Map.of(
+                                "QWEN_MANAGED_AGENT_HARNESS_ENABLED", "true",
+                                "QWEN_MANAGED_AGENT_WORKSPACE_CWD",
+                                workspace.toString(),
+                                "server.ssl.bundle", "web")));
+        List<ManagedAgentPreflight.Check> checks = new ArrayList<>();
+        ManagedAgentPreflight.loadConfiguration(environment, List.of(),
+                checks);
+        ManagedAgentProperties properties =
+                ManagedAgentPreflight.bind(environment, checks);
+        ManagedAgentPreflight.startupValidationCheck(properties);
+        ManagedAgentPreflight.Check check =
+                ManagedAgentPreflight.sessionStoreCheck(properties);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, check.status());
+        assertEquals("base URL is empty", check.detail());
     }
 
     @Test

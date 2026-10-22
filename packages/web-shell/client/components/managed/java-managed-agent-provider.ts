@@ -1,3 +1,4 @@
+import type { components } from './generated/managed-agent-api';
 import {
   isJavaAgentResyncRequired,
   JavaManagedAgentClient,
@@ -109,6 +110,7 @@ export function createJavaManagedAgentProvider(
       input?: import('./managed-agent-provider').ManagedInputBlock[];
       approvalMode?: ManagedApprovalMode;
       planMode?: boolean;
+      skills?: import('./managed-agent-provider').ManagedSessionSkill[];
     },
     command: ManagedAgentCommandOptions,
   ) {
@@ -117,6 +119,12 @@ export function createJavaManagedAgentProvider(
         requestId: managedRequestId(),
         idempotencyKey: command.idempotencyKey,
         agentId: request.agentId,
+        ...(request.skills?.length ? { skills: request.skills } : {}),
+        // Without a title the Session list and header fall back to a UUID
+        // prefix, unlike the standard shell's prompt-derived title.
+        ...(request.text === undefined
+          ? {}
+          : { title: titleFor(request.text) }),
         ...(request.approvalMode === undefined
           ? {}
           : { approvalMode: request.approvalMode }),
@@ -144,6 +152,44 @@ export function createJavaManagedAgentProvider(
   }
   return {
     kind: 'java',
+    lifecycle: {
+      submit: (kind, sessionId, command) =>
+        client.lifecycleCommand(
+          kind,
+          {
+            sessionId,
+            idempotencyKey: command.idempotencyKey,
+            requestId: managedRequestId(),
+          },
+          command.signal,
+        ),
+      async unarchive(sessionId, command) {
+        return toSessionSummary(
+          await client.unarchiveSession(
+            {
+              sessionId,
+              idempotencyKey: command.idempotencyKey,
+              requestId: managedRequestId(),
+            },
+            command.signal,
+          ),
+        );
+      },
+      async query(sessionId, operationId, request) {
+        const operation = await client.queryOperation(
+          { sessionId, operationId },
+          request.signal,
+        );
+        if (!['close', 'archive', 'delete'].includes(operation.type))
+          throw new Error('Unexpected lifecycle operation type');
+        return operation as components['schemas']['WebShellCommandOperation'];
+      },
+    },
+    exportSnapshot: (sessionId, request) =>
+      client.exportSnapshot(
+        { sessionId, cursor: request.cursor, limit: 100 },
+        request.signal,
+      ),
     storageKey: storageKey(options),
     workspaceFiles: {
       query: (request, command) =>
@@ -153,9 +199,51 @@ export function createJavaManagedAgentProvider(
     },
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    recovery: {
+      query: (sessionId, request) =>
+        client.getRecovery(sessionId, request.signal),
+      recheck: (sessionId, turnId, request) =>
+        client.recheckRecovery(sessionId, turnId, request.signal),
+    },
+    async queryCancelOperation(sessionId, operationId, request) {
+      const operation = await client.queryOperation(
+        { sessionId, operationId },
+        request.signal,
+      );
+      if (
+        operation.type !== 'cancel' ||
+        operation.sessionId !== sessionId ||
+        operation.operationId !== operationId
+      ) {
+        throw new Error('Managed Turn cancellation identity mismatch');
+      }
+      return operation;
+    },
+    async renameSession(sessionId, displayName, command) {
+      const result = await client.renameSession(
+        {
+          sessionId,
+          title: displayName,
+          idempotencyKey: command.idempotencyKey,
+        },
+        command.signal,
+      );
+      if (
+        result.sessionId !== sessionId ||
+        typeof result.title !== 'string' ||
+        !result.title.trim()
+      ) {
+        throw new Error('Managed Agent rename response is invalid');
+      }
+      return { displayName: result.title };
+    },
     skills: {
       list: (sessionId, request) =>
         client.getSessionSkills(sessionId, request.signal),
+    },
+    mcp: {
+      list: (sessionId, request) =>
+        client.getSessionMcp(sessionId, request.signal),
     },
     tasks: {
       list: (sessionId, request) =>
@@ -235,6 +323,9 @@ export function createJavaManagedAgentProvider(
                 approvalRevision: result.approvalRevision,
                 availableApprovalModes: result.availableApprovalModes,
                 supported: result.supported,
+                ...(result.liveSupported === true
+                  ? { liveSupported: true }
+                  : {}),
                 ...(typeof result.planMode === 'boolean'
                   ? { planMode: result.planMode }
                   : {}),
@@ -354,6 +445,36 @@ export function createJavaManagedAgentProvider(
               if (result.operationId !== operationId)
                 throw new Error('Cwd operation identity mismatch');
               return result;
+            },
+          },
+          contextCompression: {
+            async submit(sessionId, request, command) {
+              return requireContextCompressionOperation(
+                await client.compressContext(
+                  {
+                    ...request,
+                    sessionId,
+                    idempotencyKey: command.idempotencyKey,
+                    requestId: managedRequestId(),
+                  },
+                  command.signal,
+                ),
+                sessionId,
+              );
+            },
+            async query(sessionId, operationId, request) {
+              const operation = requireContextCompressionOperation(
+                await client.queryOperation(
+                  { sessionId, operationId },
+                  request.signal,
+                ),
+                sessionId,
+              );
+              if (operation.operationId !== operationId)
+                throw new Error(
+                  'Context compression operation identity mismatch',
+                );
+              return operation;
             },
           },
         }
@@ -494,6 +615,8 @@ export function createJavaManagedAgentProvider(
                   page.capabilities?.workspaceCreation === true,
                 canSelectDirectory:
                   page.capabilities?.workspaceDirectorySelection === true,
+                canImportLocalDirectory:
+                  page.capabilities?.localDirectoryImport === true,
                 supportsApprovalModeSelection:
                   page.capabilities?.approvalModeSelection === true,
               };
@@ -511,11 +634,25 @@ export function createJavaManagedAgentProvider(
             getSessionOptions: (agentId, request) =>
               client.getSessionOptions(agentId, request.signal),
             createEmpty: (
-              { agentId, workspaceId, cwdRelative, approvalMode, planMode },
+              {
+                agentId,
+                workspaceId,
+                cwdRelative,
+                approvalMode,
+                planMode,
+                skills,
+              },
               command,
             ) =>
               createWorkspaceSession(
-                { agentId, workspaceId, cwdRelative, approvalMode, planMode },
+                {
+                  agentId,
+                  workspaceId,
+                  cwdRelative,
+                  approvalMode,
+                  planMode,
+                  skills,
+                },
                 command,
               ),
             createSession: createWorkspaceSession,
@@ -524,7 +661,11 @@ export function createJavaManagedAgentProvider(
       : {}),
     async listSessions(request) {
       const page = await client.listSessions(
-        { cursor: request.cursor, limit: request.limit },
+        {
+          cursor: request.cursor,
+          limit: request.limit,
+          archiveState: request.archiveState,
+        },
         request.signal,
       );
       return {
@@ -595,15 +736,22 @@ export function createJavaManagedAgentProvider(
       return { sessionId: result.sessionId, turnId: result.turnId };
     },
     async cancel(sessionId, turnId, command) {
-      await client.cancelTurn(
+      const result = await client.cancelTurn(
         {
           requestId: managedRequestId(),
           idempotencyKey: command.idempotencyKey,
           sessionId,
           turnId,
+          ...(command.admissionProfile
+            ? { admissionProfile: command.admissionProfile }
+            : {}),
         },
         command.signal,
       );
+      if (result.sessionId !== sessionId || result.turnId !== turnId) {
+        throw new Error('Managed Turn cancellation identity mismatch');
+      }
+      return { sessionId, turnId, operationId: result.operationId };
     },
     async *subscribeEvents(sessionId, request) {
       for await (const event of client.streamEvents(
@@ -672,7 +820,15 @@ function toSessionSummary(
       : {}),
     ...(observation ? { modelContext: observation } : {}),
     ...(selectedModel ? { modelSelection: selectedModel } : {}),
+    compactionRevision: session.compactionRevision ?? 0,
+    ...(session.contextCompressionOperationId
+      ? { contextCompressionOperationId: session.contextCompressionOperationId }
+      : {}),
+    lifecycleStatus: session.status.toLowerCase(),
+    lastSequence: session.lastSequence,
+    lifecycleOperation: session.lifecycleOperation,
     activeTurnId: session.activeTurn?.turnId,
+    ...(session.recovery ? { recovery: session.recovery } : {}),
     title: session.title || session.sessionId,
     workspace: session.workspace,
     createdAt: toTimestamp(session.createdAt),
@@ -684,21 +840,46 @@ function toSessionSummary(
     runtimeReady: runtimeState === 'ready',
     runtimeState,
     capabilities: {
+      ...(session.capabilities?.sessionClose === true
+        ? { sessionClose: true }
+        : {}),
+      ...(session.capabilities?.sessionArchive === true
+        ? { sessionArchive: true }
+        : {}),
+      ...(session.capabilities?.sessionUnarchive === true
+        ? { sessionUnarchive: true }
+        : {}),
+      ...(session.capabilities?.sessionDelete === true
+        ? { sessionDelete: true }
+        : {}),
+      ...(session.capabilities?.rename === true ? { canRename: true } : {}),
       ...(session.capabilities?.tasks === true ? { tasks: true } : {}),
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
       canSend:
         sessionActive &&
         !active &&
+        !session.contextCompressionOperationId &&
+        session.recovery?.nextTurnAllowed !== false &&
         (!session.workspace ||
           (workspaceTurns && session.capabilities?.foregroundShell !== false)),
       // The creator may cancel a running bound Turn after the Workspace stops
       // admitting new work, so cancel is not tied to workspaceTurns; the
       // server refuses anyone else.
-      canCancel: sessionActive && active && turnStatus !== 'cancelling',
+      canCancel:
+        sessionActive &&
+        active &&
+        turnStatus !== 'cancelling' &&
+        session.recovery?.actions.cancel !== false,
+      ...(session.capabilities?.durableOperations === true
+        ? { durableOperations: true }
+        : {}),
       ...(workspaceTurns ? { workspaceTurns: true } : {}),
       ...(session.capabilities?.cwdChange === true ? { cwdChange: true } : {}),
       ...(session.capabilities?.modelChange === true
         ? { modelChange: true }
+        : {}),
+      ...(session.capabilities?.contextCompression === true
+        ? { contextCompression: true }
         : {}),
       ...(session.capabilities?.approvalModeChange === true
         ? { approvalModeChange: true }
@@ -783,6 +964,24 @@ function requireCwdOperation(
   return operation;
 }
 
+function requireContextCompressionOperation(
+  operation: Awaited<ReturnType<JavaManagedAgentClient['queryOperation']>>,
+  sessionId: string,
+) {
+  if (
+    operation.type !== 'context_compression' ||
+    operation.sessionId !== sessionId ||
+    !operation.operationId ||
+    !Number.isSafeInteger(operation.expectedCompactionRevision) ||
+    operation.expectedCompactionRevision < 0 ||
+    !['pending', 'running', 'recovery_blocked', 'completed', 'failed'].includes(
+      operation.status,
+    )
+  )
+    throw new Error('Context compression operation identity mismatch');
+  return operation;
+}
+
 function toPendingAction(action: JavaAgentAction): ManagedAgentPendingAction[] {
   if (action.kind !== 'permission' || action.state !== 'requested') return [];
   return [
@@ -842,7 +1041,10 @@ function titleFor(text: string): string {
     .replace(/[\x00-\x1f\x7f]/g, ' ')
     .trim()
     .replace(/\s+/g, ' ');
-  return title.length <= 80 ? title : `${title.slice(0, 77)}...`;
+  // Slice by code point: a code-unit cut can leave a lone high surrogate, which
+  // no store column keeps, so the server would persist it as '?'.
+  const units = Array.from(title);
+  return units.length <= 80 ? title : `${units.slice(0, 77).join('')}...`;
 }
 
 function requireTaskCancelOperation(

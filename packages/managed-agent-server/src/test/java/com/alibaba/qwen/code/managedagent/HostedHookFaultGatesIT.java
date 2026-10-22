@@ -19,6 +19,7 @@ import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
@@ -48,6 +49,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
@@ -583,15 +585,15 @@ class HostedHookFaultGatesIT {
     }
 
     private void waitFor(org.junit.jupiter.api.function.Executable assertion) {
-        await().atMost(Duration.ofSeconds(60)).ignoreException(java.net.ConnectException.class).failFast(() -> {
-            if (modelFailure.get() != null) {
-                throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
-            }
-        }).untilAsserted(assertion::execute);
-    }
-
-    private static String quote(String text) {
-        return "'" + text.replace("'", "'\"'\"'") + "'";
+        await().atMost(Duration.ofSeconds(60))
+                .ignoreExceptionsMatching(e -> e instanceof java.net.ConnectException
+                        || e instanceof CannotAcquireLockException)
+                .failFast(() -> {
+                    if (modelFailure.get() != null) {
+                        throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
+                    }
+                })
+                .untilAsserted(assertion::execute);
     }
 
     @AfterEach

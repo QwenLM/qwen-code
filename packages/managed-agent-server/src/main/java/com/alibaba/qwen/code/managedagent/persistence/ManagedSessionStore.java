@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.BlockRecoveryRequest;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitReceipt;
@@ -41,6 +42,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -69,6 +71,7 @@ import java.util.regex.Pattern;
 public class ManagedSessionStore {
     private static final int STORAGE_VERSION = 1;
     private static final ObjectMapper CSI_JSON = new ObjectMapper();
+    private static final RequestDigests INITIAL_DIGESTS = new RequestDigests();
     private static final ObjectMapper CSI_TERMINAL_JSON = CSI_JSON.copy().enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
             .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
@@ -379,6 +382,40 @@ public class ManagedSessionStore {
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
+    }
+
+    @Transactional
+    public java.util.Map<String, Object> approvalSelection(String tenantId, String sessionId, String writerToken,
+            ManagedSessionStoreModels.AuthorizeLifecycleRequest request) {
+        if (request.kind() != null) {
+            throw invalid("Approval queries do not accept lifecycle authority.");
+        }
+        authorizeOrdinary(tenantId, sessionId, writerToken, request);
+        var rows = jdbc.queryForList("SELECT agent_id, agent_definition_digest, tool_profile, workspace_id,"
+                + " approval_mode, selected_approval_mode, approval_revision FROM ma_session"
+                + " WHERE tenant_id=? AND session_id=? FOR UPDATE", tenantId, sessionId);
+        if (rows.size() != 1) {
+            throw conflict("managed_session_scope_conflict", "The Managed Session is missing.");
+        }
+        var row = rows.getFirst();
+        String profile = (String) row.get("tool_profile");
+        if (row.get("workspace_id") == null
+                || ("qwen-code".equals(row.get("agent_id"))
+                        ? row.get("agent_definition_digest") != null : row.get("agent_definition_digest") == null)
+                || !(com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.FILES.equals(profile)
+                        || com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.isPublicShell(profile))) {
+            return null;
+        }
+        String mode = (String) row.get("selected_approval_mode");
+        if (mode == null) {
+            mode = (String) row.get("approval_mode");
+        }
+        long revision = ((Number) row.get("approval_revision")).longValue();
+        if (!com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.supportsApprovalMode(mode)
+                || revision < 0 || revision > 9_007_199_254_740_991L) {
+            throw conflict("approval_selection_conflict", "The approval selection is invalid.");
+        }
+        return java.util.Map.of("mode", mode, "revision", revision);
     }
 
     // An ordinary write against a v2-claimed Session must fail with the
@@ -1302,6 +1339,169 @@ public class ManagedSessionStore {
                 : transactions.get(transactions.size() - 1)
                         .journalRevision();
         return new TransactionPage(transactions, nextRevision, hasMore);
+    }
+
+    /** Proves only an untouched initial journal; it never opens or fences a writer. */
+    @Transactional(propagation = Propagation.NOT_SUPPORTED, readOnly = true)
+    public boolean hasPristineInitialJournal(String tenantId, String sessionId, String workspaceId) {
+        try {
+            HeadRow head = requireHead(tenantId, sessionId);
+            if (!Set.of("ACTIVE", "SEALED").contains(head.state())
+                    || !"READY".equals(head.recoveryStatus()) || head.storageVersion() != STORAGE_VERSION
+                    || head.compactedThroughRevision() != 0 || head.latestCheckpointResourceId() != null
+                    || head.journalRevision() < 1 || head.committedSequence() < 0
+                    || workspaceId != null && !workspaceId.equals(head.workspaceId())) {
+                return false;
+            }
+            var rows = jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns()
+                            + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+                            + " ORDER BY journal_revision", transactionMapper, tenantId, sessionId);
+            long revision = 0;
+            long sequence = 0;
+            long activationEpoch = 0;
+            String digest = null;
+            for (TransactionRow row : rows) {
+                if (row.journalRevision() != ++revision || !head.workspaceId().equals(row.workspaceId())
+                        || row.latestCheckpointResourceId() != null || row.activationEpoch() < activationEpoch
+                        || !Objects.equals(digest, row.previousCommitDigest())) {
+                    return false;
+                }
+                storedTransaction(row);
+                validateUtf8JsonLines(row.recordBytes(), revision == 1 ? 2 : row.eventCount() + 1);
+                String[] lines = new String(row.recordBytes(), StandardCharsets.UTF_8).split("\n");
+                if (revision == 1) {
+                    if (!"session.create".equals(row.operation()) || row.eventCount() != 0
+                            || row.firstSequence() != 0 || row.lastSequence() != 0 || lines.length != 2
+                            || row.commitDigest() != null || row.eventsDigest() != null || row.activationEpoch() != 0
+                            || !("session.create:" + sessionId).equals(row.transactionId())
+                            || !row.transactionId().equals(row.commandId())
+                            || !row.recordDigest().equals(row.contentDigest())) {
+                        return false;
+                    }
+                    JsonNode engine = CSI_TERMINAL_JSON.readTree(lines[0]);
+                    JsonNode header = CSI_TERMINAL_JSON.readTree(lines[1]);
+                    JsonNode value = header.path("managedSession");
+                    requireInitialResource(value.path("definitionRef"), head, "managed-definition");
+                    requireInitialResource(value.path("rootSnapshotRef"), head, "managed-root");
+                    if (!"session_execution_engine".equals(engine.path("subtype").asText())
+                            || !"managed".equals(engine.path("systemPayload").path("engine").asText())
+                            || !sessionId.equals(engine.path("sessionId").asText())
+                            || !"managed_session_header_v1".equals(header.path("subtype").asText())
+                            || !sessionId.equals(header.path("sessionId").asText())
+                            || value.size() != 7 || value.path("formatVersion").asInt() != STORAGE_VERSION
+                            || !"managed-session/1".equals(value.path("minimumReader").asText())
+                            || !"managed".equals(value.path("engine").asText())
+                            || !"hosted-harness".equals(value.path("createdBy").asText())
+                            || value.has("baseTranscriptProof") || !initialScope(value, head)) {
+                        return false;
+                    }
+                } else {
+                    if (row.eventCount() < 1 || lines.length != row.eventCount() + 1
+                            || row.firstSequence() != sequence + 1
+                            || row.lastSequence() != sequence + row.eventCount() || row.commitDigest() == null) {
+                        return false;
+                    }
+                    var events = CSI_JSON.createArrayNode();
+                    boolean activationChanged = false;
+                    for (int index = 0; index < row.eventCount(); index++) {
+                        JsonNode record = CSI_TERMINAL_JSON.readTree(lines[index]);
+                        JsonNode event = record.path("managedSession");
+                        JsonNode payload = event.path("payload");
+                        String kind = event.path("kind").asText();
+                        if (!sessionId.equals(record.path("sessionId").asText())
+                                || !"managed_session_event_v1".equals(record.path("subtype").asText())
+                                || event.path("v").asInt() != STORAGE_VERSION
+                                || event.path("sequence").asLong(-1) != ++sequence || !initialScope(event, head)
+                                || !("activation.changed".equals(kind)
+                                        && "activation".equals(payload.path("subject").path("type").asText())
+                                        && payload.path("activationId").isTextual()
+                                        && payload.path("activationId").equals(payload.path("subject").path("scopeId"))
+                                        && payload.path("activationId").equals(payload.path("subject").path("activationId"))
+                                        && payload.path("epoch").equals(payload.path("subject").path("epoch"))
+                                        && payload.path("epoch").asLong() > 0
+                                        && payload.path("epoch").asLong() == row.activationEpoch()
+                                        || "domain.committed".equals(kind)
+                                                && "session_metadata".equals(payload.path("domain").asText()))) {
+                            return false;
+                        }
+                        if ("domain.committed".equals(kind)) {
+                            requireInitialResource(payload.path("recordRef"), head, "managed-session_metadata");
+                        } else {
+                            activationChanged = true;
+                            if (!payload.path("installRef").isNull()) {
+                                requireInitialResource(payload.path("installRef"), head, "managed-activation-install");
+                            }
+                            if (!payload.path("boundaryRef").isNull()) {
+                                requireInitialResource(payload.path("boundaryRef"), head, "managed-activation-boundary");
+                            }
+                        }
+                        events.add(event);
+                    }
+                    if (!activationChanged && row.activationEpoch() != activationEpoch) {
+                        return false;
+                    }
+                    JsonNode markerRecord = CSI_TERMINAL_JSON.readTree(lines[lines.length - 1]);
+                    JsonNode marker = markerRecord.path("managedSession");
+                    if (!"managed_session_commit_v1".equals(markerRecord.path("subtype").asText())
+                            || !sessionId.equals(markerRecord.path("sessionId").asText())
+                            || !row.transactionId().equals(marker.path("transactionId").asText())
+                            || !row.commandId().equals(marker.path("commandId").asText())
+                            || !row.operation().equals(marker.path("operation").asText())
+                            || !row.contentDigest().equals(marker.path("contentDigest").asText())
+                            || row.firstSequence() != marker.path("firstSequence").asLong(-1)
+                            || row.lastSequence() != marker.path("lastSequence").asLong(-1)
+                            || row.eventCount() != marker.path("eventCount").asInt(-1)
+                            || !row.eventsDigest().equals(marker.path("eventsDigest").asText())
+                            || !INITIAL_DIGESTS.digest(CSI_JSON.convertValue(events, Object.class))
+                                    .equals("sha256:" + row.eventsDigest())
+                            || !INITIAL_DIGESTS.digest(CSI_JSON.convertValue(marker, Object.class))
+                                    .equals("sha256:" + row.commitDigest())
+                            || !Objects.equals(digest, marker.path("previousCommitDigest").isNull()
+                                    ? null : marker.path("previousCommitDigest").asText())) {
+                        return false;
+                    }
+                }
+                digest = row.commitDigest();
+                activationEpoch = row.activationEpoch();
+            }
+            return revision == head.journalRevision() && sequence == head.committedSequence()
+                    && activationEpoch == head.activationEpoch()
+                    && Objects.equals(digest, head.lastCommitDigest()) && head.equals(requireHead(tenantId, sessionId));
+        } catch (IOException | RuntimeException unverified) {
+            return false;
+        }
+    }
+
+    private static boolean initialScope(JsonNode value, HeadRow head) {
+        JsonNode key = value.path("sessionKey");
+        return head.tenantId().equals(key.path("tenantId").asText())
+                && head.workspaceId().equals(key.path("workspaceId").asText())
+                && head.sessionId().equals(key.path("sessionId").asText());
+    }
+
+    private void requireInitialResource(JsonNode ref, HeadRow head, String kind) throws IOException {
+        WorkspaceRecoveryReader.validateRef(ref);
+        String scope = sessionScopeKey(head.tenantId(), head.sessionId());
+        var resources = jdbc.query("SELECT " + ManagedSchemaProjection.RESOURCE.columns()
+                        + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ? AND resource_id = ?",
+                resourceMapper, resourceKey(scope, ref.path("resourceId").asText()), scope, ref.path("resourceId").asText());
+        if (resources.size() != 1) {
+            throw journalCorrupt();
+        }
+        ResourceRow resource = resources.getFirst();
+        requireResourceScope(resource, head.tenantId(), head.workspaceId(), head.sessionId(), ref.path("resourceId").asText());
+        if (!"MYSQL_INLINE".equals(resource.storageKind()) || !kind.equals(resource.kind())
+                || !kind.equals(ref.path("kind").asText()) || resource.schemaVersion() != ref.path("schemaVersion").asInt()
+                || resource.byteLength() != ref.path("byteLength").asLong() || !resource.digest().equals(ref.path("digest").asText())) {
+            throw journalCorrupt();
+        }
+        verifyStoredResource(resource);
+        if ("managed-definition".equals(kind)) {
+            JsonNode definition = CSI_TERMINAL_JSON.readTree(resource.bytes());
+            if (definition == null || !definition.isObject()) {
+                throw journalCorrupt();
+            }
+        }
     }
 
     public StoredResource readResource(String tenantId, String workspaceId,

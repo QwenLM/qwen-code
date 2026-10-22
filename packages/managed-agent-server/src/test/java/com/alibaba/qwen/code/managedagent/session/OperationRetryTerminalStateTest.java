@@ -1386,16 +1386,25 @@ class OperationRetryTerminalStateTest {
         }
     }
 
-    // The daemon's recovery refusal names a wait, not a hook refusal: the
-    // operation must not be recorded BLOCKED (the lifecycle store refuses a
-    // blocked row on every later attempt, turning a recoverable daemon
-    // state into a permanent one) and its attempts must not spend the
-    // budget. Past the budget the wait is published with the daemon's own
-    // code so it stays visible, still re-driven by the recovery scan.
-    @ParameterizedTest(name = "attemptCount = {0}, wrapped = {1}")
-    @CsvSource({"0, false", "10, false", "0, true", "10, true"})
-    void aDaemonRecoveryRefusalWaitsWithoutSpendingTheBudget(
-            int attemptCount, boolean wrapped) {
+    // The daemon's recovery and busy refusals name a wait, not a hook
+    // refusal: the operation must not be recorded BLOCKED (the lifecycle
+    // store refuses a blocked row on every later attempt, turning a
+    // recoverable daemon state into a permanent one) and its attempts must
+    // not spend the budget. Past the budget the wait is published with the
+    // daemon's own code so it stays visible, still re-driven by the recovery
+    // scan.
+    @ParameterizedTest(name = "code = {0}, attemptCount = {1}, wrapped = {2}")
+    @CsvSource({
+        "hosted_lifecycle_recovery_required, 0, false",
+        "hosted_lifecycle_recovery_required, 10, false",
+        "hosted_lifecycle_recovery_required, 0, true",
+        "hosted_lifecycle_recovery_required, 10, true",
+        "hosted_turn_active, 0, false",
+        "hosted_turn_active, 10, false",
+        "hosted_turn_active, 0, true",
+        "hosted_turn_active, 10, true"})
+    void aDaemonBusyRefusalWaitsWithoutSpendingTheBudget(
+            String refusalCode, int attemptCount, boolean wrapped) {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
@@ -1418,19 +1427,18 @@ class OperationRetryTerminalStateTest {
         when(lifecycle.recoverEffects(any())).thenReturn(
                 new ObjectMapper().createObjectNode()
                         .put("storeSynthesized", true));
-        DaemonHttpException recovery = mock(DaemonHttpException.class);
-        when(recovery.getErrorCode())
-                .thenReturn("hosted_lifecycle_recovery_required");
+        DaemonHttpException refusal = mock(DaemonHttpException.class);
+        when(refusal.getErrorCode()).thenReturn(refusalCode);
         // The SDK wraps the daemon's refusal in MutationOutcomeUnknownException
         // once the non-idempotent detach may have been delivered, so the wire
         // code lives on the cause chain — the reason daemonRefusalCode walks it.
         if (wrapped) {
             com.alibaba.qwen.code.daemon.MutationOutcomeUnknownException outcome =
                     mock(com.alibaba.qwen.code.daemon.MutationOutcomeUnknownException.class);
-            when(outcome.getCause()).thenReturn(recovery);
+            when(outcome.getCause()).thenReturn(refusal);
             doThrow(outcome).when(harness).detachLifecycle(any());
         } else {
-            doThrow(recovery).when(harness).detachLifecycle(any());
+            doThrow(refusal).when(harness).detachLifecycle(any());
         }
 
         SessionLifecycleCoordinator coordinator =
@@ -1456,8 +1464,7 @@ class OperationRetryTerminalStateTest {
             if (attemptCount >= 10) {
                 verify(store).blockLifecycleOperation(eq("tenant"),
                         eq("session"), eq("op-close"), anyString(), eq(1L),
-                        eq("hosted_lifecycle_recovery_required"), anyLong(),
-                        eq(true));
+                        eq(refusalCode), anyLong(), eq(true));
             } else {
                 verify(store).retryOperation(eq("tenant"), eq("session"),
                         eq("op-close"), anyString(), eq(1L), anyLong(),

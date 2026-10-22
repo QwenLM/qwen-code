@@ -37,7 +37,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -50,8 +49,10 @@ import static org.awaitility.Awaitility.await;
 // FG12f (issues #14054/#14447): result and catalog delivery on the Hosted
 // MCP path. A settled result must replay from the committed record without
 // a second Runtime call, an oversized result must settle at the output
-// limit without leaving a hold, and a catalog change announced while a call
-// is in flight must not resend that call. The fixture counts physical
+// limit without leaving a hold, a catalog change announced while a call is
+// in flight must not resend that call, and a late conclusive reply after an
+// unknown outcome must settle from the receipt rather than call again. The
+// fixture counts physical
 // effects; the Broker-proxy wire counts controls.
 // Real packaged Harness, durable worker, real stdio MCP server on MySQL.
 class HostedMcpResultDeliveryIT {
@@ -202,6 +203,48 @@ class HostedMcpResultDeliveryIT {
                 .isGreaterThan(discoversBefore);
     }
 
+    @Test
+    @Timeout(300)
+    void lateConclusiveReplySettlesTheUnknownOperationOnceOnMySql()
+            throws Exception {
+        boot();
+        SessionRef session = createSession();
+        baseline(session);
+        proxyCalls.clear();
+        wire.clear();
+        String operation = uuid();
+        JsonNode answer = privateRequest("POST", "/session/" + session.id()
+                + "/mcp/operations", Map.of("operationId", operation,
+                        "serverId", "fixture", "request", Map.of("kind",
+                                "resource_read", "uri", "ext://late")),
+                session, 202);
+        assertThat(answer.path("state").asText())
+                .as("the unparseable answer leaves the operation unknown")
+                .isEqualTo("outcome_unknown");
+        JsonNode settled = null;
+        for (int attempt = 0; attempt < 40; attempt++) {
+            JsonNode view = privateRequest("GET", "/session/" + session.id()
+                    + "/mcp/operations/" + operation, null, session, 200);
+            if ("settled".equals(view.path("state").asText())) {
+                settled = view;
+                break;
+            }
+            Thread.sleep(100);
+        }
+        assertThat(settled).as("the late reply settles the original")
+                .isNotNull();
+        assertThat(settled.at("/response/contents/0/text").asText())
+                .isEqualTo("EXT_RESOURCE_1");
+        assertThat(effects("resource_read")).containsExactly("ext://late");
+        assertThat(controls("mcp-invoke"))
+                .as("the late reply is not a second invoke")
+                .hasSize(1);
+        assertThat(operations(session.id())).hasSize(1);
+        assertThat(operations(session.id()).getLast().at("/run/state").asText())
+                .as("the committed record settles")
+                .isEqualTo("settled");
+    }
+
     private Map<String, Object> mcpPin(int revision) {
         return Map.of("serverId", "fixture", "serverRevision", revision,
                 "definitionDigest", DigestUtils.sha256Hex(mcpDigest + revision));
@@ -268,7 +311,6 @@ class HostedMcpResultDeliveryIT {
         }
     }
 
-
     private List<String> effects(String kind) {
         if (!Files.exists(evidence)) {
             return List.of();
@@ -296,10 +338,6 @@ class HostedMcpResultDeliveryIT {
         return proxyCalls.stream().filter(call -> kind.equals(call.kind()))
                 .toList();
     }
-
-
-
-
 
     private String uuid() {
         return UUID.randomUUID().toString();
@@ -362,7 +400,6 @@ class HostedMcpResultDeliveryIT {
         return response.body().isEmpty() ? json.createObjectNode()
                 : json.readTree(response.body());
     }
-
 
     private void boot() throws Exception {
         assertThat(System.getProperty("mysql.url"))
@@ -793,6 +830,5 @@ class HostedMcpResultDeliveryIT {
             return new ProxyCall(method, path, kind, value, dropped,
                     operationId);
         }
-
     }
 }
