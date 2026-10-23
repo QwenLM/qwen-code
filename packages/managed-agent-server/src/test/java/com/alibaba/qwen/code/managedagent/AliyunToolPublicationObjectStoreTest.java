@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.AliyunToolPublicationObjectStore;
+import com.alibaba.qwen.code.managedagent.artifact.AliyunToolPublicationObjectStore;
+import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationStorageException;
 import com.aliyun.oss.ClientException;
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSException;
@@ -72,7 +73,8 @@ class AliyunToolPublicationObjectStoreTest {
     void persistentTransientFailureStopsAfterThreeRetries() {
         var failure = error("InternalError");
         when(client.getObject("bucket", "key")).thenThrow(failure);
-        assertThatThrownBy(() -> store.open("key")).isSameAs(failure);
+        assertThatThrownBy(() -> store.open("key"))
+                .isInstanceOf(ToolPublicationStorageException.class).hasCause(failure);
         verify(client, times(4)).getObject("bucket", "key");
     }
 
@@ -81,7 +83,8 @@ class AliyunToolPublicationObjectStoreTest {
         for (RuntimeException failure : new RuntimeException[] {
                 error("AccessDenied"), error("NoSuchKey"), new ClientException("unknown")}) {
             doThrow(failure).when(client).getObject("bucket", "key");
-            assertThatThrownBy(() -> store.open("key")).isSameAs(failure);
+            assertThatThrownBy(() -> store.open("key"))
+                    .isInstanceOf(ToolPublicationStorageException.class).hasCause(failure);
         }
         verify(client, times(3)).getObject("bucket", "key");
     }
@@ -122,8 +125,25 @@ class AliyunToolPublicationObjectStoreTest {
     void putFailurePropagatesWithoutSendingAnotherPut() {
         var failure = error("InternalError");
         when(client.putObject(any(PutObjectRequest.class))).thenThrow(failure);
-        assertThatThrownBy(() -> store.putIfAbsent("key", new byte[] {1})).isSameAs(failure);
+        assertThatThrownBy(() -> store.putIfAbsent("key", new byte[] {1}))
+                .isInstanceOf(ToolPublicationStorageException.class).hasCause(failure);
         verify(client).putObject(any(PutObjectRequest.class));
+    }
+
+    @Test
+    void storageDenialHasTheSameNeutralReasonForEveryOperation() {
+        var denied = error("AccessDenied");
+        when(client.getObject("bucket", "key")).thenThrow(denied);
+        when(client.putObject(any(PutObjectRequest.class))).thenThrow(denied);
+        doThrow(denied).when(client).deleteObject("bucket", "key");
+        for (Runnable operation : new Runnable[] {
+                () -> store.open("key"), () -> store.putIfAbsent("key", new byte[] {1}),
+                () -> store.deleteIfPresent("key")}) {
+            assertThatThrownBy(operation::run).isInstanceOfSatisfying(ToolPublicationStorageException.class,
+                    error -> assertThat(error.getReason())
+                            .isEqualTo(ToolPublicationStorageException.Reason.ACCESS_DENIED))
+                    .hasCause(denied);
+        }
     }
 
     private static OSSObject object(InputStream stream) {

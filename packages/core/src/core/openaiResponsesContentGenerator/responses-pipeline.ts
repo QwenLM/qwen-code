@@ -54,6 +54,7 @@ import { buildSessionAwareFetch } from '../outbound-session-id.js';
 import { createHash } from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { ResponsesHttpError } from '../../utils/responses-http-error.js';
+import { applyResponsesPromptCaching } from './prompt-caching.js';
 
 const debugLogger = createDebugLogger('RESPONSES_PIPELINE');
 
@@ -406,10 +407,8 @@ export class ResponsesPipeline {
     userPromptId: string,
   ): ResponsesApiRequest {
     const freeformExec = this.cliConfig.getFreeform();
-    const { instructions, input } = convertGeminiContentsToResponsesInput(
-      request,
-      freeformExec,
-    );
+    const { instructions, input, cacheBoundary } =
+      convertGeminiContentsToResponsesInput(request, freeformExec);
     const tools = convertGeminiToolsToResponsesTools(request, freeformExec);
 
     // History is always re-derived in full from this app's own Content[]
@@ -421,7 +420,7 @@ export class ResponsesPipeline {
 
     const apiRequest: ResponsesApiRequest = {
       model: this.config.model,
-      input: cleanOrphanedFunctionCalls(input),
+      input,
       instructions,
       tools,
       stream: true,
@@ -528,7 +527,15 @@ export class ResponsesPipeline {
       }
     }
 
-    return apiRequest;
+    const cachedRequest = applyResponsesPromptCaching(
+      apiRequest,
+      this.config,
+      cacheBoundary,
+    );
+    return {
+      ...cachedRequest,
+      input: cleanOrphanedFunctionCalls(cachedRequest.input),
+    };
   }
 
   private buildReasoning(

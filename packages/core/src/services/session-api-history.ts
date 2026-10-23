@@ -14,25 +14,19 @@ import type {
   TurnResultRecordPayload,
 } from './chatRecordingService.js';
 import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
+import { markCompressedHistory } from '../core/environmentContext.js';
+import {
+  clearApiHistoryDirectoryContext,
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
+  markApiHistoryDirectoryContext,
+} from '../utils/api-history-metadata.js';
 
-const API_HISTORY_PROMPT_ID = Symbol('apiHistoryPromptId');
-
-type IdentifiedContent = Content & {
-  [API_HISTORY_PROMPT_ID]?: string;
-};
-
-export function markApiHistoryPrompt(
-  content: Content,
-  promptId: unknown,
-): void {
-  if (typeof promptId === 'string' && promptId.length > 0) {
-    (content as IdentifiedContent)[API_HISTORY_PROMPT_ID] = promptId;
-  }
-}
-
-export function getApiHistoryPromptId(content: Content): string | undefined {
-  return (content as IdentifiedContent)[API_HISTORY_PROMPT_ID];
-}
+export {
+  cloneApiHistory,
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
+} from '../utils/api-history-metadata.js';
 
 /** Returns the unique matching entry at or after `startIndex`, or -1. */
 export function findApiHistoryPromptIndex(
@@ -80,7 +74,9 @@ export function getLastApiPromptCancellation(
   history: readonly Content[],
   records: readonly ChatRecord[],
   trailingSystemNotifications?: number,
-): { reason: 'user' | 'unknown'; promptId: string } | undefined {
+):
+  | { reason: 'user' | 'unknown'; promptId: string; confirmationId?: string }
+  | undefined {
   const promptId = getLastApiHistoryPromptId(
     history,
     trailingSystemNotifications,
@@ -127,14 +123,32 @@ export function getLastApiPromptCancellation(
   const result = results.findLast((record) => cancellation(record, false));
   if (!result)
     return results.length > 0 ? undefined : cancellation(latest, false);
+  const uniqueOwner =
+    records.filter(
+      (record) =>
+        isOwner(record) && record.daemonPromptId === owner.daemonPromptId,
+    ).length === 1;
   const owned =
-    results.length === 1 &&
-    (result.promptId === promptId ||
-      records.filter(
-        (record) =>
-          isOwner(record) && record.daemonPromptId === owner.daemonPromptId,
-      ).length === 1);
-  return cancellation(result, owned);
+    results.length === 1 && (result.promptId === promptId || uniqueOwner);
+  const cancelled = cancellation(result, owned);
+  const payload = result.systemPayload;
+  if (
+    cancelled?.reason === 'unknown' &&
+    owned &&
+    isTurnResultRecordPayload(payload) &&
+    payload.cancelReason === undefined &&
+    payload.promptId === owner.daemonPromptId &&
+    !records
+      .slice(records.indexOf(result) + 1)
+      .some((record) => cancellation(record, false)) &&
+    uniqueOwner &&
+    typeof result.uuid === 'string' &&
+    result.uuid.length > 0 &&
+    records.filter((record) => record.uuid === result.uuid).length === 1
+  ) {
+    return { ...cancelled, confirmationId: result.uuid };
+  }
+  return cancelled;
 }
 
 export interface BuildApiHistoryOptions {
@@ -209,6 +223,7 @@ function appendApiHistoryRecord(
       )
     ) {
       previous.parts = [...(previous.parts ?? []), ...(message.parts ?? [])];
+      clearApiHistoryDirectoryContext(previous);
       return;
     }
   }
@@ -348,13 +363,22 @@ export class SessionApiHistoryAccumulator {
       if (!isApiHistoryCompressionCandidate(record)) return;
       const payload = record.systemPayload as ChatCompressionRecordPayload;
       this.compressionCandidate = payload.compressedHistory;
+      const directoryContextIndices = new Set(
+        Array.isArray(payload.directoryContextIndices)
+          ? payload.directoryContextIndices
+          : [],
+      );
       this.history = Array.isArray(payload.compressedHistory)
         ? payload.compressedHistory.map((content, index) => {
             const copy = copyContentForApiHistory(content);
             markApiHistoryPrompt(copy, payload.promptIds?.[index]);
+            if (directoryContextIndices.has(index)) {
+              markApiHistoryDirectoryContext(copy);
+            }
             return copy;
           })
         : [];
+      markCompressedHistory(this.history, payload.contextPrefixLength);
       // Compressed history is raw `Content[]` with no source record behind it,
       // so no entry can claim the authoritative notification stamp.
       this.systemNotificationFlags = this.history.map(() => false);

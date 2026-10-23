@@ -117,7 +117,7 @@ describe('Hosted proxy header relay', () => {
     }
   });
 
-  it('keeps every store relay driver calling the shared helper', () => {
+  it('keeps the Hosted relays calling the shared helper', () => {
     // The sdk-java workflow step runs this file after `cd integration-tests`
     // while the repo-root lanes use `--root ./integration-tests`, so resolve
     // the drivers relative to this file, never process.cwd(). Read source
@@ -140,7 +140,9 @@ describe('Hosted proxy header relay', () => {
       'hosted-process-crash-driver.ts',
       'hosted-recovery-blocked-wedge-driver.ts',
       'hosted-shell-output-driver.ts',
+      'hosted-shell-unicode-driver.ts',
       'hosted-store-failure-driver.ts',
+      'hosted-workflow-fault-driver.ts',
       'hosted-workspace-tool-turn-driver.ts',
     ]);
   });

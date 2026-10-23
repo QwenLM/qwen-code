@@ -1,9 +1,10 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.api.ApiModels.AgentDefinition;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.AgentDefinitionRequest;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentDefinitionService;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentDefinitionService.Result;
+import com.alibaba.qwen.code.managedagent.catalog.ManagedAgentDefinitionService;
+import com.alibaba.qwen.code.managedagent.catalog.ManagedAgentDefinitionService.Result;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.AgentDefinition;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.AgentDefinitionRequest;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;

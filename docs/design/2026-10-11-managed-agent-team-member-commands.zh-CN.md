@@ -219,6 +219,7 @@ Legacy 团队这四项都有。本切片把它们带到 Hosted 团队。成员�
       - `planned`:取消该条目,并把调用答为未发送;在竞争中胜出的交接则按 `accepting` 条目的情形作答;
       - checkpoint 写明了命令调用但没有 outbound 条目:答为未发送,批次中的其他调用从 journal 补齐(决策 4);
       - `rejected`、`cancelled`、`unknown`:如实说明,`unknown` 绝不呈现为已完成。
+      - 对处于 `accepting` 或 `unknown` 的 `member_message`,答复说明部分收件人可能已经收到消息或稍后收到,并禁止重发。任务板无法证明消息是否送达。实时等待、续跑及被中断回合的答复使用 journal 中已提交的命令类型;任务板命令与 `plan_submit` 保留原有文案。
     - **lead 的调用**(`team_plan_approval`、`request_shutdown`)依据其已提交的记录作答,与 H4e-b1 的团队调用一样;对已记录但未送达的决定,使用决策 9 的两段式答复。
 
 ## 工具

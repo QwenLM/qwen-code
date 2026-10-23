@@ -1,13 +1,14 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-
 import com.alibaba.fastjson2.JSON;
+import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
+import com.alibaba.qwen.code.runtimebroker.provisioning.StaticRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.security.ProtectedSecret;
+import com.alibaba.qwen.code.runtimebroker.transport.RuntimeBrokerHttpServer;
+import org.junit.jupiter.api.Test;
+
+import java.lang.reflect.Proxy;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -15,19 +16,104 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
-import java.time.Clock;
-import java.time.Duration;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.junit.jupiter.api.Test;
+import java.util.concurrent.atomic.AtomicReference;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RuntimeBrokerHttpServerTest {
+    @Test
+    void mcpInventoryReadsTheSelectedBindingWithoutAcquiringOrReplacingAnOwner() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            String path = "/harness-sessions/harness/mcp-definitions";
+            var body = new HashMap<String, Object>(Map.of("protocolVersion", 1, "requestId", "inventory", "harnessSessionId", "harness"));
+            var first = fixture.post(path, body);
+            assertEquals(200, first.statusCode(), first.body());
+            assertEquals(0, fixture.transport.acquisitions.get());
+            assertEquals(0, fixture.transport.executions.get());
+            assertEquals("docs", JSON.parseObject(first.body()).getJSONArray("servers").getJSONObject(0).getString("serverId"));
+            assertEquals("no-store", first.headers().firstValue("Cache-Control").orElse(null));
+            var owner = fixture.service.acquire("harness", "original-mcp", "bootstrap").toCompletableFuture().join();
+            body.put("runtimeSessionId", "original-mcp");
+            assertEquals(200, fixture.post(path, body).statusCode());
+            assertEquals(owner.getBindingId(), fixture.transport.inventoryBinding.get());
+            assertEquals(1, fixture.transport.acquisitions.get());
+            body.put("runtimeSessionId", "missing-owner");
+            assertEquals(409, fixture.post(path, body).statusCode());
+            fixture.service.requestHarnessDrain("tenant", "harness");
+            body.put("runtimeSessionId", "original-mcp");
+            assertEquals(409, fixture.post(path, body).statusCode());
+            assertEquals(1, fixture.transport.acquisitions.get());
+        }
+    }
+
+    @Test
+    void privateRecoveryReadRejectsIncompleteOrNonIntegralInstalledOwner() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            Map<String, Object> body = new HashMap<>(Map.of("protocolVersion", 1, "requestId", "read",
+                    "harnessSessionId", "harness", "runtimeSessionId", "runtime", "promptId", "prompt", "batchId", "batch"));
+            Map<String, Object> owner = Map.of("writerId", "writer", "writerGeneration", 2, "activationId", "activation", "activationEpoch", 3);
+            for (String field : owner.keySet()) {
+                var missing = new HashMap<>(owner);
+                missing.remove(field);
+                body.put("recoveryOwner", missing);
+                assertEquals(400, fixture.post("/executions:read-batch", body).statusCode());
+            }
+            for (Object invalid : List.of(0, -1, 1.5, "2", 9007199254740992L)) {
+                for (String field : List.of("writerGeneration", "activationEpoch")) {
+                    var changed = new HashMap<>(owner);
+                    changed.put(field, invalid);
+                    body.put("recoveryOwner", changed);
+                    assertEquals(400, fixture.post("/executions:read-batch", body).statusCode());
+                }
+            }
+            body.put("recoveryOwner", "owner");
+            assertEquals(400, fixture.post("/executions:read-batch", body).statusCode());
+            assertEquals(0, fixture.transport.executions.get());
+            assertFalse(fixture.executions.hasActiveByRuntimeSession("runtime"));
+        }
+    }
+
+    @Test
+    void warmAndAcquireExposeTheOriginalScopeIsolationClass() throws Exception {
+        for (String capability : List.of("capability", ResidentWorkspaceProfile.CAPABILITY_DIGEST)) {
+            var scope = new RuntimeScope("tenant", "workspace", "generation", "/workspace", capability,
+                    ResidentWorkspaceProfile.CAPABILITY_DIGEST.equals(capability) ? "workspace" : "session");
+            try (Fixture fixture = new Fixture(false, null, scope)) {
+                HttpResponse<String> warmed = fixture.post("/runtimes:warm", Map.of(
+                        "protocolVersion", 1, "requestId", "warm", "harnessSessionId", "harness"));
+                HttpResponse<String> acquired = fixture.post("/tool-sessions:acquire", Map.of(
+                        "protocolVersion", 1, "requestId", "acquire", "harnessSessionId", "harness",
+                        "runtimeSessionId", "runtime", "turnKind", "bootstrap"));
+                for (var response : List.of(warmed, acquired)) {
+                    assertEquals(200, response.statusCode(), response.body());
+                    var actual = JSON.parseObject(response.body()).getJSONObject("scope");
+                    assertEquals(scope.getTenantId(), actual.getString("tenantId"));
+                    assertEquals(scope.getWorkspaceId(), actual.getString("workspaceId"));
+                    assertEquals(scope.getWorkspaceGeneration(), actual.getString("workspaceGeneration"));
+                    assertEquals(capability, actual.getString("capabilityDigest"));
+                    assertEquals(scope.getIsolationClass(), actual.getString("isolationClass"), response.body());
+                }
+            }
+        }
+    }
+
     @Test
     void unsupportedOperationsNeverDispatchOrClaimResolution() throws Exception {
         try (Fixture fixture = new Fixture()) {
@@ -105,6 +191,68 @@ class RuntimeBrokerHttpServerTest {
             assertTrue(
                     response.body().contains("runtime_hold_inventory_scope_failed"),
                     response.body());
+        }
+    }
+
+    @Test
+    void releaseDecodesTheDrainFlagFromTheWire() throws Exception {
+        // #13930 R1-19: the close's drain and the routine release differ
+        // only by this body flag; a stringified or renamed key must not
+        // degrade a drain into the routine arm that answers held.
+        try (Fixture fixture = new Fixture()) {
+            RuntimeSessionRecord session = fixture.service
+                    .acquire("harness", "runtime-drain", "bootstrap")
+                    .toCompletableFuture().join();
+            String digest = "sha256:" + "a".repeat(64);
+            ToolExecutionRecord invocation = fixture.executions.findOrCreate(
+                    ToolExecutionRecord.prepared(
+                            "call-drain", "call-drain-key",
+                            session.getBindingId(),
+                            session.getRuntimeGeneration(), "harness",
+                            "runtime-drain", "prompt", "call-drain", digest,
+                            Map.of("sessionId", "runtime-drain", "promptId",
+                                    "prompt", "callId", "call-drain",
+                                    "argsDigest", digest)));
+            fixture.executions.settlePrepared(invocation,
+                    Map.of("state", "exited", "executionStatus", "success"),
+                    Instant.now());
+            Map<String, Object> processReference = new java.util.LinkedHashMap<>();
+            processReference.put("dispatchMode", "background_v3_process");
+            processReference.put("processOf", "call-drain");
+            processReference.put("sessionId", "runtime-drain");
+            processReference.put("promptId", "prompt");
+            processReference.put("callId", "call-drain");
+            processReference.put("argsDigest", digest);
+            fixture.executions.findOrCreate(ToolExecutionRecord.prepared(
+                    "call-drain:process", "call-drain:process",
+                    session.getBindingId(), session.getRuntimeGeneration(),
+                    "harness", "runtime-drain", "prompt", "call-drain",
+                    digest, processReference));
+
+            fixture.transport.controlResults.put("shell-status",
+                    CompletableFuture.completedFuture(
+                            Map.of("operationId", "call-drain",
+                                    "state", "running")));
+            fixture.transport.controlResults.put("shell-terminate",
+                    CompletableFuture.completedFuture(
+                            Map.of("operationId", "call-drain",
+                                    "state", "exited",
+                                    "evidence", Map.of("exitCode", 0))));
+            HttpResponse<String> routine = fixture.post(
+                    "/tool-sessions/runtime-drain:release", Map.of(
+                            "protocolVersion", 1, "requestId", "routine",
+                            "harnessSessionId", "harness"));
+            assertEquals(409, routine.statusCode(), routine.body());
+            assertTrue(routine.body().contains("runtime_session_held"),
+                    routine.body());
+
+            HttpResponse<String> drained = fixture.post(
+                    "/tool-sessions/runtime-drain:release", Map.of(
+                            "protocolVersion", 1, "requestId", "drained",
+                            "harnessSessionId", "harness", "drain", true));
+            assertEquals(200, drained.statusCode(), drained.body());
+            assertTrue(drained.body().contains("\"released\":true"),
+                    drained.body());
         }
     }
 
@@ -897,6 +1045,585 @@ class RuntimeBrokerHttpServerTest {
         }
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void answersAStoreFailureAsRetryableServiceUnavailable() throws Exception {
+        InMemoryToolExecutionRepository inner = new InMemoryToolExecutionRepository(Clock.systemUTC());
+        AtomicBoolean failing = new AtomicBoolean(true);
+        AtomicReference<String> failingMethod = new AtomicReference<>("findByIdempotencyKey");
+        AtomicReference<Throwable> outage = new AtomicReference<>(
+                JdbcRepositorySupport.failure(new java.sql.SQLException("simulated outage")));
+        List<String> intercepted = java.util.Collections.synchronizedList(
+                new java.util.ArrayList<>());
+        ToolExecutionRepository gate = (ToolExecutionRepository) Proxy.newProxyInstance(
+                RuntimeBrokerHttpServerTest.class.getClassLoader(),
+                new Class<?>[] { ToolExecutionRepository.class },
+                (proxy, method, args) -> {
+                    if (failing.get() && failingMethod.get().equals(method.getName())) {
+                        intercepted.add(method.getName());
+                        throw outage.get();
+                    }
+                    try {
+                        return method.invoke(inner, args);
+                    } catch (java.lang.reflect.InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                });
+        String digest = "sha256:" + "b".repeat(64);
+        Map<String, Object> body = Map.of(
+                "protocolVersion", 1, "requestId", "prepare", "idempotencyKey", "key",
+                "harnessSessionId", "harness", "runtimeSessionId", "runtime", "turnId", "turn",
+                "toolCallId", "call", "requestDigest", digest,
+                "reference", Map.of("sessionId", "runtime", "promptId", "turn",
+                        "callId", "call", "argsDigest", digest));
+        try (Fixture fixture = new Fixture(gate)) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            HttpResponse<String> response = fixture.post("/executions:prepare", body);
+            assertEquals(503, response.statusCode(), response.body());
+            var errorBody = JSON.parseObject(response.body());
+            assertEquals("runtime_broker_store_unavailable", errorBody.getString("code"));
+            assertTrue(errorBody.getBooleanValue("retryable"));
+            // The outage wrote nothing: no reservation survives a failed prepare.
+            assertNull(inner.findByIdempotencyKey("key"));
+            // The retry is safe: the same idempotency key lands once the store answers again.
+            failing.set(false);
+            Map<String, Object> retryBody = new HashMap<>(body);
+            retryBody.put("requestId", "retry");
+            HttpResponse<String> retried = fixture.post("/executions:prepare", retryBody);
+            assertEquals(200, retried.statusCode(), retried.body());
+            String executionCallId = JSON.parseObject(retried.body()).getString("executionCallId");
+            ToolExecutionRecord landed = inner.findByIdempotencyKey("key");
+            assertEquals(executionCallId, landed.getExecutionCallId());
+            // Every route that reads the execution store maps the same outage
+            // class the same way: read, start (both variants), cancel, and
+            // acknowledge.
+            failingMethod.set("findByExecutionCallId");
+            failing.set(true);
+            HttpRequest read = HttpRequest.newBuilder(fixture.uri("/executions/" + executionCallId
+                            + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime"))
+                    .header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> readResponse = fixture.client.send(read, HttpResponse.BodyHandlers.ofString());
+            assertEquals(503, readResponse.statusCode(), readResponse.body());
+            var readError = JSON.parseObject(readResponse.body());
+            assertEquals("runtime_broker_store_unavailable", readError.getString("code"));
+            assertTrue(readError.getBooleanValue("retryable"));
+            for (Map<String, Object> startBody : List.<Map<String, Object>>of(
+                    Map.of("protocolVersion", 1, "requestId", "start",
+                            "harnessSessionId", "harness", "runtimeSessionId", "runtime"),
+                    Map.of("protocolVersion", 1, "requestId", "start-payload",
+                            "harnessSessionId", "harness", "runtimeSessionId", "runtime",
+                            "payloadJson", "{\"toolName\":\"write_file\",\"input\":{}}"))) {
+                HttpResponse<String> started = fixture.post(
+                        "/executions/" + executionCallId + ":start", startBody);
+                assertEquals(503, started.statusCode(), started.body());
+                var startError = JSON.parseObject(started.body());
+                assertEquals("runtime_broker_store_unavailable", startError.getString("code"));
+                assertTrue(startError.getBooleanValue("retryable"));
+            }
+            HttpResponse<String> cancelled = fixture.post(
+                    "/executions/" + executionCallId + ":cancel", Map.of(
+                            "protocolVersion", 1, "requestId", "cancel",
+                            "harnessSessionId", "harness", "runtimeSessionId", "runtime"));
+            assertEquals(503, cancelled.statusCode(), cancelled.body());
+            var cancelError = JSON.parseObject(cancelled.body());
+            assertEquals("runtime_broker_store_unavailable", cancelError.getString("code"));
+            assertTrue(cancelError.getBooleanValue("retryable"));
+            HttpResponse<String> acknowledged = fixture.post(
+                    "/executions/" + executionCallId + ":acknowledge", Map.of(
+                            "protocolVersion", 1, "requestId", "acknowledge",
+                            "harnessSessionId", "harness", "runtimeSessionId", "runtime",
+                            "receipt", Map.of("executionCallId", executionCallId)));
+            assertEquals(503, acknowledged.statusCode(), acknowledged.body());
+            var acknowledgeError = JSON.parseObject(acknowledged.body());
+            assertEquals("runtime_broker_store_unavailable", acknowledgeError.getString("code"));
+            assertTrue(acknowledgeError.getBooleanValue("retryable"));
+            // A failed write maps the same way and leaves nothing behind:
+            // neither the reservation a fresh prepare would create nor a
+            // cancel request on the landed execution.
+            failingMethod.set("findOrCreate");
+            Map<String, Object> writeBody = new HashMap<>(body);
+            writeBody.put("requestId", "write");
+            writeBody.put("idempotencyKey", "write-key");
+            HttpResponse<String> unwritten = fixture.post("/executions:prepare", writeBody);
+            assertEquals(503, unwritten.statusCode(), unwritten.body());
+            var writeError = JSON.parseObject(unwritten.body());
+            assertEquals("runtime_broker_store_unavailable", writeError.getString("code"));
+            assertTrue(writeError.getBooleanValue("retryable"));
+            assertNull(inner.findByIdempotencyKey("write-key"));
+            failingMethod.set("requestCancel");
+            HttpResponse<String> uncancelled = fixture.post(
+                    "/executions/" + executionCallId + ":cancel", Map.of(
+                            "protocolVersion", 1, "requestId", "cancel-write",
+                            "harnessSessionId", "harness", "runtimeSessionId", "runtime"));
+            assertEquals(503, uncancelled.statusCode(), uncancelled.body());
+            var cancelWriteError = JSON.parseObject(uncancelled.body());
+            assertEquals("runtime_broker_store_unavailable", cancelWriteError.getString("code"));
+            assertTrue(cancelWriteError.getBooleanValue("retryable"));
+            assertSame(landed, inner.findByExecutionCallId(executionCallId));
+            // A permanent invariant violation is not a store outage: it keeps
+            // the non-retryable 500 the HTTP layer gives any other failure.
+            outage.set(assertThrows(IllegalStateException.class,
+                    () -> new AesGcmSecretProtector("ring-closed-2026", new byte[32])
+                            .unprotect("context", new ProtectedSecret("legacy", "unused"))));
+            failingMethod.set("findByIdempotencyKey");
+            Map<String, Object> invariantBody = new HashMap<>(body);
+            invariantBody.put("requestId", "invariant");
+            invariantBody.put("idempotencyKey", "invariant-key");
+            HttpResponse<String> invariant = fixture.post("/executions:prepare", invariantBody);
+            assertEquals(500, invariant.statusCode(), invariant.body());
+            var invariantError = JSON.parseObject(invariant.body());
+            assertEquals("runtime_broker_internal_error", invariantError.getString("code"));
+            assertFalse(invariantError.getBooleanValue("retryable"));
+            assertFalse(invariant.body().contains("ring-closed-2026"));
+            // Nothing landed or changed while the store was failing, and the
+            // gate intercepted only the intended call on each route.
+            assertSame(landed, inner.findByExecutionCallId(executionCallId));
+            assertEquals(List.of("findByIdempotencyKey", "findByExecutionCallId",
+                    "findByExecutionCallId", "findByExecutionCallId", "findByExecutionCallId",
+                    "findByExecutionCallId", "findOrCreate", "requestCancel", "findByIdempotencyKey"),
+                    intercepted);
+            fixture.service.close();
+            HttpResponse<String> closed = fixture.post("/runtimes:warm", Map.of(
+                    "protocolVersion", 1, "requestId", "closed", "harnessSessionId", "harness"));
+            assertEquals(503, closed.statusCode(), closed.body());
+            assertEquals("runtime_broker_closed", JSON.parseObject(closed.body()).getString("code"));
+        }
+
+        // The private CSI routes reach the same store through the JDBC binding
+        // repository's own transaction; the same outage maps the same way.
+        String csiSession = "550e8400-e29b-41d4-a716-4466554400ff";
+        var csiRequest = CsiFilesRetirementProfile.request(
+                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+                        "tenant", "workspace", 1, "storage", ".",
+                        CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1),
+                "/workspace", csiSession);
+        var csiSource = new org.h2.jdbcx.JdbcDataSource();
+        csiSource.setURL("jdbc:h2:mem:csi-outage-" + java.util.UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        JdbcRuntimeBrokerSchema.initialize(csiSource);
+        try (var connection = csiSource.getConnection();
+                var statement = connection.prepareStatement(
+                        "INSERT INTO ma_session (tenant_id, session_id, agent_id, tool_profile,"
+                                + " runtime_request_key, workspace_id, workspace_generation,"
+                                + " workspace_storage_id, cwd_relative, context_config_ref,"
+                                + " context_revision, workspace_config_ref, workspace_policy_ref,"
+                                + " gmt_create, gmt_modified) VALUES ('tenant', ?, 'qwen-code', ?, ?,"
+                                + " 'workspace', 1, 'storage', '.', ?, 1, ?, ?, 0, 0)")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, csiSession);
+            statement.setString(2, CsiFilesRetirementProfile.PROFILE);
+            statement.setString(3, csiRequest.requestKey());
+            JdbcRepositorySupport.setIdentity(statement, 4,
+                    CsiFilesRetirementProfile.CONTEXT_CONFIG_REF);
+            JdbcRepositorySupport.setIdentity(statement, 5,
+                    CsiFilesRetirementProfile.CONFIG_REF);
+            JdbcRepositorySupport.setIdentity(statement, 6,
+                    CsiFilesRetirementProfile.POLICY_REF);
+            statement.executeUpdate();
+        }
+        AtomicBoolean csiFailing = new AtomicBoolean();
+        var failingSource = (javax.sql.DataSource) Proxy.newProxyInstance(
+                RuntimeBrokerHttpServerTest.class.getClassLoader(),
+                new Class<?>[] { javax.sql.DataSource.class },
+                (proxy, method, arguments) -> {
+                    if (csiFailing.get() && method.getName().equals("getConnection")) {
+                        throw new java.sql.SQLException("simulated outage");
+                    }
+                    try {
+                        return method.invoke(csiSource, arguments);
+                    } catch (java.lang.reflect.InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                });
+        var csiBindings = new JdbcRuntimeBindingRepository(failingSource,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var csiSessions = new JdbcRuntimeSessionRepository(failingSource);
+        var csiExecutions = new JdbcToolExecutionRepository(failingSource);
+        var csiCreated = csiBindings.findOrCreate(csiRequest);
+        var csiClaimed = csiBindings.claimOperation(csiCreated.getBindingId(), "setup",
+                Duration.ofMinutes(1));
+        var csiSeed = csiClaimed.getProvisionSeed();
+        var csiLease = new RuntimeLease(csiSeed.getProvisionalRuntimeId(),
+                URI.create("http://127.0.0.1:1234"), csiSeed.getToken(),
+                csiSeed.getLeaseId(), csiSeed.getEpoch());
+        var csiBinding = csiBindings.compareAndSet(csiClaimed, csiClaimed.withAttestation(
+                csiLease, new RuntimeResourceHandle(csiRequest.getProvisionerKind(), 1,
+                        Map.of("resource", "original")),
+                java.time.Instant.now(), java.time.Instant.now()));
+        var csiRuntime = new RuntimeSession(csiSession, csiSession, "bootstrap",
+                csiRequest.getScope());
+        var csiSaved = csiSessions.findOrCreate(new RuntimeSessionRecord(csiRuntime,
+                csiBinding.getBindingId(), csiBinding.getGeneration(),
+                RuntimeSessionRecord.State.ACQUIRING, 0, java.time.Instant.now()));
+        csiSessions.compareAndSet(csiSaved, csiSaved.withState(
+                RuntimeSessionRecord.State.READY, java.time.Instant.now()));
+        csiFailing.set(true);
+        try (var csiService = new RuntimeBrokerService(
+                id -> CompletableFuture.completedFuture(csiRequest.getScope()),
+                new StaticRuntimeProvisioner(csiLease), new FailingTransport(), csiBindings,
+                csiSessions, csiExecutions, "broker", Duration.ofMinutes(1),
+                Duration.ofMinutes(1));
+                var csiClient = HttpClient.newHttpClient()) {
+            var contextClass = Class.forName(
+                    RuntimeBrokerService.class.getName() + "$SessionContext");
+            var contextConstructor = contextClass.getDeclaredConstructor(
+                    RuntimeSession.class, RuntimeBindingRecord.class, RuntimeLease.class);
+            contextConstructor.setAccessible(true);
+            var installed = RuntimeBrokerService.class.getDeclaredField("sessions");
+            installed.setAccessible(true);
+            ((Map<String, CompletableFuture<?>>) installed.get(csiService)).put(csiSession,
+                    CompletableFuture.completedFuture(contextConstructor.newInstance(
+                            csiRuntime, csiBinding, csiLease)));
+            var csiServer = new RuntimeBrokerHttpServer(
+                    new InetSocketAddress("127.0.0.1", 0), "secret", csiService);
+            csiServer.start();
+            try {
+                String csiDigest = "sha256:" + "c".repeat(64);
+                Map<String, Object> csiPrepare = new java.util.LinkedHashMap<>(Map.of(
+                        "protocolVersion", 1, "requestId", "csi-prepare",
+                        "idempotencyKey", "csi-key", "harnessSessionId", csiSession,
+                        "runtimeSessionId", csiSession, "turnId", "turn", "toolCallId",
+                        "call", "requestDigest", csiDigest,
+                        "reference", Map.of("sessionId", csiSession, "promptId", "turn",
+                                "callId", "call", "argsDigest", csiDigest)));
+                csiPrepare.put("inputBytesBase64", java.util.Base64.getEncoder()
+                        .encodeToString("{\"payloadJson\":\"{}\"}"
+                                .getBytes(StandardCharsets.UTF_8)));
+                csiPrepare.put("toolDefinitionBytesBase64", java.util.Base64.getEncoder()
+                        .encodeToString("{\"name\":\"read_file\"}"
+                                .getBytes(StandardCharsets.UTF_8)));
+                HttpResponse<String> csiPrepared = csiClient.send(HttpRequest.newBuilder(
+                        csiServer.getBaseUri().resolve(RuntimeBrokerHttpServer.ROUTE_PREFIX
+                                + "/executions:prepare"))
+                        .header("Authorization", "Bearer secret")
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(JSON.toJSONString(csiPrepare)))
+                        .build(), HttpResponse.BodyHandlers.ofString());
+                assertEquals(503, csiPrepared.statusCode(), csiPrepared.body());
+                var csiPrepareError = JSON.parseObject(csiPrepared.body());
+                assertEquals("runtime_broker_store_unavailable",
+                        csiPrepareError.getString("code"));
+                assertTrue(csiPrepareError.getBooleanValue("retryable"));
+                HttpResponse<String> csiBatch = csiClient.send(HttpRequest.newBuilder(
+                        csiServer.getBaseUri().resolve(RuntimeBrokerHttpServer.ROUTE_PREFIX
+                                + "/executions:read-batch"))
+                        .header("Authorization", "Bearer secret")
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(JSON.toJSONString(Map.of(
+                                "protocolVersion", 1, "requestId", "csi-read",
+                                "harnessSessionId", csiSession,
+                                "runtimeSessionId", csiSession,
+                                "promptId", "turn", "batchId", "batch"))))
+                        .build(), HttpResponse.BodyHandlers.ofString());
+                assertEquals(503, csiBatch.statusCode(), csiBatch.body());
+                var csiBatchError = JSON.parseObject(csiBatch.body());
+                assertEquals("runtime_broker_store_unavailable",
+                        csiBatchError.getString("code"));
+                assertTrue(csiBatchError.getBooleanValue("retryable"));
+            } finally {
+                csiServer.close();
+            }
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void answersAPrivateCsiStoreFailureAsRetryableServiceUnavailable() throws Exception {
+        String session = "550e8400-e29b-41d4-a716-446655440313";
+        RuntimeProvisionRequest request = CsiFilesRetirementProfile.request(
+                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+                        "tenant", "workspace", 1, "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1),
+                "/workspace", session);
+        InMemoryRuntimeBindingRepository registry = new InMemoryRuntimeBindingRepository();
+        RuntimeBindingRecord binding = registry.claimOperation(registry.findOrCreate(request).getBindingId(),
+                "setup", Duration.ofMinutes(1));
+        var seed = binding.getProvisionSeed();
+        RuntimeLease lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"),
+                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+        binding = registry.compareAndSet(binding, binding.withAttestation(lease,
+                new RuntimeResourceHandle(request.getProvisionerKind(), 1, Map.of("fixture", true)),
+                Instant.now(), Instant.now()));
+        RuntimeSession runtime = new RuntimeSession(session, session, "bootstrap", request.getScope());
+        InMemoryRuntimeSessionRepository sessions = new InMemoryRuntimeSessionRepository();
+        RuntimeSessionRecord saved = sessions.findOrCreate(new RuntimeSessionRecord(runtime, binding.getBindingId(),
+                binding.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+        saved = sessions.compareAndSet(saved, saved.withState(RuntimeSessionRecord.State.READY, Instant.now()));
+        // The private CSI routes need the JDBC binding store, and every route
+        // that checks the ready Session (the publisher install too) reads it
+        // first. Its database is unreachable, so every connection attempt
+        // fails with a real SQLException that JdbcRepositorySupport reports
+        // as a store failure.
+        AtomicInteger connections = new AtomicInteger();
+        AtomicReference<Exception> outage = new AtomicReference<>();
+        javax.sql.DataSource unreachable = (javax.sql.DataSource) Proxy.newProxyInstance(
+                RuntimeBrokerHttpServerTest.class.getClassLoader(),
+                new Class<?>[] { javax.sql.DataSource.class },
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getConnection" -> {
+                        connections.incrementAndGet();
+                        throw outage.get();
+                    }
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    case "toString" -> "unreachable";
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        FailingTransport transport = new FailingTransport();
+        RuntimeBrokerService service = new RuntimeBrokerService(
+                id -> CompletableFuture.completedFuture(request.getScope()),
+                new StaticRuntimeProvisioner(lease), transport,
+                new JdbcRuntimeBindingRepository(unreachable, new AesGcmSecretProtector("test", new byte[32])),
+                sessions, new InMemoryToolExecutionRepository(Clock.systemUTC()),
+                "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
+        // Install the ready Runtime Session the way a completed acquire leaves it.
+        var contextClass = Class.forName(RuntimeBrokerService.class.getName() + "$SessionContext");
+        var constructor = contextClass.getDeclaredConstructor(RuntimeSession.class, RuntimeBindingRecord.class,
+                RuntimeLease.class);
+        constructor.setAccessible(true);
+        var field = RuntimeBrokerService.class.getDeclaredField("sessions");
+        field.setAccessible(true);
+        ((Map<String, CompletableFuture<?>>) field.get(service)).put(session,
+                CompletableFuture.completedFuture(constructor.newInstance(runtime, binding, lease)));
+        try (RuntimeBrokerHttpServer server = new RuntimeBrokerHttpServer(
+                new InetSocketAddress("127.0.0.1", 0), "secret", service);
+                HttpClient client = HttpClient.newHttpClient()) {
+            server.start();
+            String digest = "sha256:" + "b".repeat(64);
+            Map<String, Object> prepare = new HashMap<>(Map.of(
+                    "protocolVersion", 1, "requestId", "prepare", "idempotencyKey", "key",
+                    "harnessSessionId", session, "runtimeSessionId", session, "turnId", "turn",
+                    "toolCallId", "call", "requestDigest", digest,
+                    "reference", Map.of("sessionId", session, "promptId", "turn",
+                            "callId", "call", "argsDigest", digest)));
+            prepare.put("inputBytesBase64", java.util.Base64.getEncoder().encodeToString(
+                    "{}".getBytes(StandardCharsets.UTF_8)));
+            prepare.put("toolDefinitionBytesBase64", java.util.Base64.getEncoder().encodeToString(
+                    "{\"name\":\"write_file\"}".getBytes(StandardCharsets.UTF_8)));
+            Map<String, Object> readBatch = Map.of("protocolVersion", 1, "requestId", "read-batch",
+                    "harnessSessionId", session, "runtimeSessionId", session,
+                    "promptId", "turn", "batchId", "batch");
+            Map<String, Object> publisher = Map.of("protocolVersion", 1, "requestId", "publisher",
+                    "harnessSessionId", session, "runtimeSessionId", session,
+                    "publisher", Map.of("url", "http://127.0.0.1:1234/internal/hosted-shell-publisher/v1",
+                            "token", "a".repeat(43)));
+            int attempts = 0;
+            // A permanent invariant violation is not a store outage: it keeps
+            // the non-retryable 500 on these routes too.
+            for (Exception failure : List.<Exception>of(new java.sql.SQLException("simulated outage"),
+                    new IllegalStateException("Runtime binding identifier collision"))) {
+                outage.set(failure);
+                boolean storeOutage = failure instanceof java.sql.SQLException;
+                for (Map.Entry<String, Map<String, Object>> route : List.of(
+                        Map.entry("/executions:prepare", prepare),
+                        Map.entry("/executions:read-batch", readBatch),
+                        Map.entry("/tool-sessions/" + session + ":publisher", publisher))) {
+                    HttpResponse<String> response = client.send(HttpRequest.newBuilder(server.getBaseUri()
+                                    .resolve(RuntimeBrokerHttpServer.ROUTE_PREFIX + route.getKey()))
+                            .header("Authorization", "Bearer secret")
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(JSON.toJSONString(route.getValue())))
+                            .build(), HttpResponse.BodyHandlers.ofString());
+                    assertEquals(storeOutage ? 503 : 500, response.statusCode(), route.getKey() + " " + response.body());
+                    var error = JSON.parseObject(response.body());
+                    assertEquals(storeOutage ? "runtime_broker_store_unavailable" : "runtime_broker_internal_error",
+                            error.getString("code"), route.getKey());
+                    assertEquals(storeOutage, error.getBooleanValue("retryable"), route.getKey());
+                    // The failure came from the store, not an earlier refusal.
+                    assertEquals(++attempts, connections.get(), route.getKey());
+                }
+            }
+            assertSame(saved, sessions.findById(request.getScope(), session));
+            assertEquals(0, transport.executions.get());
+        }
+    }
+
+    @Test
+    void startWithAnUnencodablePayloadKeepsItsClientInputMapping() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            String payload = "{\"toolName\":\"write_file\",\"input\":{\"x\":1e309}}";
+            String digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(payload.getBytes(StandardCharsets.UTF_8)));
+            HttpResponse<String> reserved = fixture.post("/executions:prepare", Map.of(
+                    "protocolVersion", 1, "requestId", "prepare", "idempotencyKey", "key",
+                    "harnessSessionId", "harness", "runtimeSessionId", "runtime", "turnId", "turn",
+                    "toolCallId", "call", "requestDigest", digest,
+                    "reference", Map.of("sessionId", "runtime", "promptId", "turn",
+                            "callId", "call", "argsDigest", digest)));
+            assertEquals(200, reserved.statusCode(), reserved.body());
+            String executionCallId = JSON.parseObject(reserved.body()).getString("executionCallId");
+            HttpResponse<String> started = fixture.post("/executions/" + executionCallId + ":start", Map.of(
+                    "protocolVersion", 1, "requestId", "start", "harnessSessionId", "harness",
+                    "runtimeSessionId", "runtime", "payloadJson", payload));
+            assertEquals(400, started.statusCode(), started.body());
+            var error = JSON.parseObject(started.body());
+            assertEquals("runtime_broker_invalid_request", error.getString("code"));
+            assertFalse(error.getBooleanValue("retryable"));
+        }
+    }
+
+    @Test
+    void settledExecutionServesTheFullWireEnvelope() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            String payload = "{\"toolName\":\"write_file\",\"input\":{}}";
+            String digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(payload.getBytes(StandardCharsets.UTF_8)));
+            ToolExecutionRecord record = fixture.service.prepareExecution("harness", "runtime", "key",
+                    Map.of("sessionId", "runtime", "promptId", "turn", "callId", "call", "argsDigest", digest))
+                    .toCompletableFuture().join();
+            fixture.service.cancelExecution("harness", "runtime", record.getExecutionCallId()).toCompletableFuture().join();
+            fixture.service.startExecution("harness", "runtime", record.getExecutionCallId(), payload)
+                    .toCompletableFuture().join();
+            HttpRequest read = HttpRequest.newBuilder(fixture.uri("/executions/" + record.getExecutionCallId()
+                            + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime"))
+                    .header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> settled = fixture.client.send(read, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, settled.statusCode(), settled.body());
+            var body = JSON.parseObject(settled.body());
+            assertEquals(Set.of("protocolVersion", "harnessSessionId", "runtimeSessionId",
+                    "executionCallId", "status", "runtimeBindingId", "bindingGeneration"), body.keySet());
+            assertEquals(1, body.getIntValue("protocolVersion"));
+            assertEquals("harness", body.getString("harnessSessionId"));
+            assertEquals("runtime", body.getString("runtimeSessionId"));
+            assertEquals(record.getExecutionCallId(), body.getString("executionCallId"));
+            var status = body.getJSONObject("status");
+            assertEquals(Set.of("state", "cancelRequested", "lastSeq", "firstAvailableSeq", "progressGap",
+                    "progress", "result"), status.keySet());
+            assertEquals("settled", status.getString("state"));
+            assertEquals("cancelled", status.getJSONObject("result").getString("executionStatus"));
+            assertTrue(status.getBooleanValue("cancelRequested"));
+            assertEquals(0, status.getLongValue("lastSeq"));
+            assertEquals(0, status.getLongValue("firstAvailableSeq"));
+            assertFalse(status.getBooleanValue("progressGap"));
+            assertEquals(List.of(), status.getJSONArray("progress"));
+            assertEquals(0, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
+    void settlesWithProgressSequenceGreaterThanZeroAndPinsTheGapArms() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            ToolExecutionRecord prepared = prepareAndAcquire(fixture);
+            // Settle at sequence 7 the way runtimes carrying progress do —
+            // the production settle paths keep the recorded sequence, so the
+            // repository is the honest driver for a non-degenerate record.
+            ToolExecutionRecord claimed = fixture.executions.claimDispatch(
+                    prepared.getExecutionCallId(), "broker", Duration.ofSeconds(30));
+            ToolExecutionRecord settled = fixture.executions.compareAndSet(claimed,
+                    claimed.withResult(Map.of("executionStatus", "success"), 7, java.time.Instant.now()),
+                    "broker", claimed.getDispatchGeneration());
+            org.junit.jupiter.api.Assertions.assertNotNull(settled);
+            HttpRequest read = HttpRequest.newBuilder(fixture.uri("/executions/" + prepared.getExecutionCallId()
+                            + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime"))
+                    .header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> response = fixture.client.send(read, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, response.statusCode(), response.body());
+            var status = JSON.parseObject(response.body()).getJSONObject("status");
+            assertEquals("settled", status.getString("state"));
+            assertEquals(7, status.getLongValue("lastSeq"));
+            assertEquals(7, status.getLongValue("firstAvailableSeq"));
+            assertTrue(status.getBooleanValue("progressGap"));
+            assertEquals(List.of(), status.getJSONArray("progress"));
+            assertEquals("success", status.getJSONObject("result").getString("executionStatus"));
+        }
+    }
+
+    @Test
+    void acceptsAValidProgressCursorAndServesTheFullStatus() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            ToolExecutionRecord prepared = prepareAndAcquire(fixture);
+            ToolExecutionRecord claimed = fixture.executions.claimDispatch(
+                    prepared.getExecutionCallId(), "broker", Duration.ofSeconds(30));
+            ToolExecutionRecord settled = fixture.executions.compareAndSet(claimed,
+                    claimed.withResult(Map.of("executionStatus", "success"), 1, java.time.Instant.now()),
+                    "broker", claimed.getDispatchGeneration());
+            org.junit.jupiter.api.Assertions.assertNotNull(settled);
+            for (String cursor : new String[] {"0", "5"}) {
+                HttpRequest request = HttpRequest.newBuilder(fixture.uri("/executions/" + prepared.getExecutionCallId()
+                                + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime&afterSeq=" + cursor))
+                        .header("Authorization", "Bearer secret").GET().build();
+                HttpResponse<String> response = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
+                assertEquals(200, response.statusCode(), response.body());
+                var status = JSON.parseObject(response.body()).getJSONObject("status");
+                // The cursor is validated then ignored: the full settled
+                // status always comes back.
+                assertEquals(Set.of("state", "cancelRequested", "lastSeq", "firstAvailableSeq", "progressGap",
+                        "progress", "result"), status.keySet());
+                assertEquals(1, status.getLongValue("lastSeq"));
+                assertEquals(1, status.getLongValue("firstAvailableSeq"));
+                assertTrue(status.getBooleanValue("progressGap"));
+                assertEquals(List.of(), status.getJSONArray("progress"));
+                assertEquals("success",
+                        status.getJSONObject("result").getString("executionStatus"));
+            }
+        }
+    }
+
+    private static ToolExecutionRecord prepareAndAcquire(Fixture fixture) throws Exception {
+        String digest = "sha256:" + "b".repeat(64);
+        fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+        return fixture.service.prepareExecution("harness", "runtime", "key",
+                Map.of("sessionId", "runtime", "promptId", "turn", "callId", "call", "argsDigest", digest))
+                .toCompletableFuture().join();
+    }
+
+    @Test
+    void rejectsInvalidAfterSeqAndDuplicateQueryFields() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            for (String query : new String[] {"afterSeq=abc", "afterSeq=-1"}) {
+                HttpRequest request = HttpRequest.newBuilder(fixture.uri("/executions/call"
+                                + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime&" + query))
+                        .header("Authorization", "Bearer secret").GET().build();
+                HttpResponse<String> response = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
+                assertEquals(400, response.statusCode(), response.body());
+                assertTrue(response.body().contains("runtime_broker_invalid_request"), response.body());
+                assertTrue(response.body().contains("afterSeq must be a non-negative integer"),
+                        response.body());
+            }
+            HttpRequest duplicate = HttpRequest.newBuilder(fixture.uri("/executions/call"
+                            + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime&afterSeq=1&afterSeq=2"))
+                    .header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> duplicated = fixture.client.send(duplicate, HttpResponse.BodyHandlers.ofString());
+            assertEquals(400, duplicated.statusCode(), duplicated.body());
+            assertTrue(duplicated.body().contains("runtime_broker_invalid_request"), duplicated.body());
+            assertTrue(duplicated.body().contains("duplicate fields"), duplicated.body());
+        }
+    }
+
+    @Test
+    void rejectsOversizedContentLengthBeforeReadingTheBody() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            URI baseUri = fixture.uri("/tool-sessions:acquire");
+            try (java.net.Socket socket = new java.net.Socket(
+                    baseUri.getHost(), baseUri.getPort())) {
+                // Headers only — the body is never sent. The server must
+                // reject from Content-Length alone; streaming the 9 MiB body
+                // would race the close and abort the socket on Windows.
+                byte[] headers = ("POST " + baseUri.getRawPath()
+                        + " HTTP/1.1\r\nHost: " + baseUri.getHost() + ":"
+                        + baseUri.getPort()
+                        + "\r\nAuthorization: Bearer secret"
+                        + "\r\nContent-Type: application/json"
+                        + "\r\nContent-Length: " + (9 * 1024 * 1024)
+                        + "\r\nConnection: close\r\n\r\n")
+                        .getBytes(StandardCharsets.UTF_8);
+                socket.getOutputStream().write(headers);
+                socket.getOutputStream().flush();
+                // EOF the write side: the server drains unread request bytes
+                // before closing, so it must not wait for the 9 MiB body.
+                socket.shutdownOutput();
+                socket.setSoTimeout(30_000);
+                String response = new String(
+                        socket.getInputStream().readAllBytes(),
+                        StandardCharsets.UTF_8);
+                assertTrue(response.startsWith("HTTP/1.1 413"), response);
+                assertTrue(response.contains("runtime_broker_request_too_large"),
+                        response);
+            }
+        }
+    }
+
     private static Map<String, Object> reference() {
         return Map.of("sessionId", "runtime", "promptId", "turn",
                 "callId", "call", "argsDigest", "digest");
@@ -912,7 +1639,7 @@ class RuntimeBrokerHttpServerTest {
     private static final class Fixture implements AutoCloseable {
         private final FailingTransport transport = new FailingTransport();
         private final HttpClient client = HttpClient.newHttpClient();
-        private final InMemoryToolExecutionRepository executions = new InMemoryToolExecutionRepository(Clock.systemUTC());
+        private final ToolExecutionRepository executions;
         private final RuntimeBrokerService service;
         private final RuntimeBrokerHttpServer server;
 
@@ -924,10 +1651,25 @@ class RuntimeBrokerHttpServerTest {
             this(v3, null);
         }
 
+        private Fixture(ToolExecutionRepository executions) throws Exception {
+            this(false, null, defaultScope(), executions);
+        }
+
         private Fixture(boolean v3, HarnessSessionResolver resolverOverride)
                 throws Exception {
-            RuntimeScope scope = new RuntimeScope("tenant", "workspace",
-                    "generation", "/workspace", "capability", "workspace");
+            this(v3, resolverOverride, defaultScope());
+        }
+
+        private Fixture(boolean v3, HarnessSessionResolver resolverOverride,
+                RuntimeScope scope) throws Exception {
+            this(v3, resolverOverride, scope,
+                    new InMemoryToolExecutionRepository(Clock.systemUTC()));
+        }
+
+        private Fixture(boolean v3, HarnessSessionResolver resolverOverride,
+                RuntimeScope scope, ToolExecutionRepository executions)
+                throws Exception {
+            this.executions = executions;
             RuntimePublicationVerifier verifier = v3 ? new RuntimePublicationVerifier() {
                 @Override
                 public RuntimePublicationGrant verify(ToolExecutionRecord execution,
@@ -965,6 +1707,11 @@ class RuntimeBrokerHttpServerTest {
             server.start();
         }
 
+        private static RuntimeScope defaultScope() {
+            return new RuntimeScope("tenant", "workspace", "generation",
+                    "/workspace", "capability", "workspace");
+        }
+
         private URI uri(String path) {
             return server.getBaseUri().resolve(RuntimeBrokerHttpServer.ROUTE_PREFIX + path);
         }
@@ -989,6 +1736,15 @@ class RuntimeBrokerHttpServerTest {
     }
 
     private static final class FailingTransport implements RuntimeTransport {
+        private final AtomicInteger acquisitions = new AtomicInteger();
+        private final AtomicReference<String> inventoryBinding = new AtomicReference<>();
+
+        @Override
+        public CompletionStage<List<Map<String, Object>>> mcpDefinitions(RuntimeBindingRecord runtime) {
+            inventoryBinding.set(runtime.getBindingId());
+            return CompletableFuture.completedFuture(List.of(Map.of("serverId", "docs", "serverRevision", 1,
+                    "definitionDigest", "a".repeat(64), "transport", "stdio")));
+        }
         private static final Map<String, Object> MANIFEST = Map.of(
                 "tools", java.util.List.of(Map.of("name", "read_file")),
                 "capabilityDigest", "a".repeat(64), "policyRevision", "policy");
@@ -1006,6 +1762,8 @@ class RuntimeBrokerHttpServerTest {
         private int v3RefusalStatus = 501;
         private Map<String, Object> lastReference;
         private Map<String, Object> runtimeStatus = Map.of("state", "unknown");
+        private final Map<String, CompletionStage<Object>> controlResults =
+                new HashMap<>();
 
         @Override
         public CompletionStage<Void> installPublisher(RuntimeLease lease, RuntimeSession session, Map<String, Object> publisher) {
@@ -1031,6 +1789,7 @@ class RuntimeBrokerHttpServerTest {
 
         @Override
         public CompletionStage<Void> acquire(RuntimeLease lease, RuntimeSession session) {
+            acquisitions.incrementAndGet();
             return CompletableFuture.completedFuture(null);
         }
 
@@ -1038,6 +1797,10 @@ class RuntimeBrokerHttpServerTest {
         public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
                 Map<String, Object> operation) {
             controls.incrementAndGet();
+            CompletionStage<Object> result = controlResults.get(operation.get("kind"));
+            if (result != null) {
+                return result;
+            }
             return CompletableFuture.completedFuture(
                     "manifest".equals(operation.get("kind")) ? MANIFEST : null);
         }

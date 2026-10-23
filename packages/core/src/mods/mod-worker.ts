@@ -10,6 +10,7 @@ import {
   newQuickJSWASMModuleFromVariant,
   type QuickJSHandle,
 } from 'quickjs-emscripten-core';
+import { CLAUDE_CODE_EVENTS_VERSION } from './claude-events.js';
 import { MOD_GUEST_FACTORY } from './guest.js';
 import { compileModModules } from './module-loader.js';
 import { modToolInputView } from './tool-dialect.js';
@@ -21,11 +22,14 @@ import {
   type ModCommand,
   type ModPlugin,
   type ModReply,
-  type ModRequest,
+  type ModWorkerRequest,
 } from './types.js';
 import {
+  MOD_EVENTS,
+  MOD_METHODS,
   ModBudget,
   ModTimeoutError,
+  assertModDepth,
   engineOrigin,
   record,
   validateInput,
@@ -44,6 +48,7 @@ const realms: Realm[] = [];
 const calls = new Map<number, ModInvocation>();
 const commands = new Map<string, ModCommand & { plugin: string }>();
 const notifications = new Set<Promise<unknown>>();
+const guestNotifications = new Set<Promise<unknown>>();
 const hostOperations = new Map<
   number,
   {
@@ -55,16 +60,29 @@ const hostOperations = new Map<
 >();
 let serial = 0;
 let epoch = 0;
-let deadline = Infinity;
+let rootId = 0;
+let rootBudget: ModBudget | undefined;
+let toolRoot = false;
+let native: number | undefined;
+let reportedNative: number | undefined;
+let activityRevision = 0;
+let phase = 0;
+let reportedPhase = 0;
+let checks = 0;
+let lastCheck = 0;
+let executing = 0;
 let starting = false;
 let busy = false;
 let logChars = 0;
 let operations = 0;
 let pumping = false;
 let builtinTool: string | undefined;
-const send = (reply: ModReply) => port.postMessage(reply);
+let surface: 'terminal' | null = null;
+let version = 'unknown';
+const send = (reply: ModReply, root = rootId) =>
+  port.postMessage({ ...reply, root, phase });
 const abandoned = () =>
-  Atomics.load(cancelled, 0) !== 0 || Date.now() >= deadline;
+  Atomics.load(cancelled, 0) !== 0 || rootBudget?.expired === true;
 const callAbandoned = (call?: ModInvocation): boolean =>
   abandoned() ||
   Boolean(
@@ -77,6 +95,29 @@ const assertLive = (call?: ModInvocation) => {
   if (callAbandoned(call))
     throw new Error('Mod dispatch cancelled or timed out.');
 };
+
+function updateActivity(): void {
+  if (!busy || !toolRoot || !rootBudget) return;
+  const lending =
+    native !== undefined &&
+    hostOperations.has(native) &&
+    !abandoned() &&
+    !executing &&
+    !checks &&
+    !guestNotifications.size &&
+    !realms.some((realm) => realm.runtime.hasPendingJob()) &&
+    ![...calls.values()].some((call) => call.live && !call.budget.lending);
+  if (lending !== rootBudget.lending) {
+    if (lending) rootBudget.pause();
+    else rootBudget.resume();
+  }
+  const operation = lending ? native : undefined;
+  if (operation !== reportedNative || phase !== reportedPhase) {
+    reportedNative = operation;
+    reportedPhase = phase;
+    send({ type: 'activity', revision: ++activityRevision, operation });
+  }
+}
 
 class Realm {
   readonly runtime = wasm.newRuntime();
@@ -109,11 +150,13 @@ class Realm {
       const json = this.vm.getString(data);
       if (Buffer.byteLength(json) > MOD_MAX_BYTES)
         throw new Error('Mod API input is too large.');
+      assertModDepth(json, 'Mod API input');
       const deferred = this.vm.newPromise();
       const task = Promise.resolve().then(() =>
         hostCall(callId, method, JSON.parse(json)),
       );
       notifications.add(task);
+      if (method !== 'next') guestNotifications.add(task);
       void task
         .then((value) => {
           const json = JSON.stringify({
@@ -134,8 +177,10 @@ class Realm {
         })
         .finally(() => {
           notifications.delete(task);
+          guestNotifications.delete(task);
           deferred.dispose();
           kick();
+          updateActivity();
         });
       return deferred.handle;
     });
@@ -145,7 +190,9 @@ class Realm {
       if (name === 'validate' || name === 'validateResult') {
         if (!call?.live || callAbandoned(call))
           throw new Error('Mod continuation is no longer active.');
-        const value = JSON.parse(this.vm.getString(input));
+        const json = this.vm.getString(input);
+        assertModDepth(json, 'Mod value');
+        const value = JSON.parse(json);
         if (name === 'validateResult') validateResult(call.event, value);
         else validateInput(call.event, value, call.input);
         return this.vm.undefined;
@@ -169,12 +216,16 @@ class Realm {
     status.dispose();
   }
   execute<T>(action: () => T): T {
+    executing++;
+    updateActivity();
     this.sliceDeadline =
       performance.now() + (this.notifying ? 25 : MOD_TIMEOUT_MS);
     try {
       return action();
     } finally {
       this.sliceDeadline = Infinity;
+      executing--;
+      updateActivity();
     }
   }
   pump(): void {
@@ -191,6 +242,7 @@ class Realm {
       const json = this.vm.getString(value);
       if (Buffer.byteLength(json) > MOD_MAX_BYTES)
         throw new Error('Mod result is too large.');
+      assertModDepth(json, 'Mod result');
       return JSON.parse(json);
     } finally {
       value.dispose();
@@ -323,7 +375,27 @@ async function bounded(
     clearInterval(timer);
     call.live = false;
     if (call.aborted) realms[call.plugin].notify('abort', call.id);
+    updateActivity();
   }
+}
+
+// The engine names the plugin behind an ask it made or reworded; an answer
+// passed up as heard keeps the owner it had, and a hook cannot write one.
+async function ownCheck(
+  value: ModToolCheckResult,
+  below: Promise<unknown> | undefined,
+  plugin: string,
+): Promise<ModToolCheckResult> {
+  const { plugin: _written, ...answer } = value;
+  if (answer.decision !== 'ask') return answer;
+  const heard = (await below?.catch(() => undefined)) as
+    | ModToolCheckResult
+    | undefined;
+  if (heard?.decision === 'ask' && heard.reason === answer.reason)
+    return heard.plugin === undefined
+      ? answer
+      : { ...answer, plugin: heard.plugin };
+  return { ...answer, plugin };
 }
 
 async function dispatch(
@@ -356,12 +428,9 @@ async function dispatch(
     builtinTool,
   );
   if (!view) return next(input, frames);
-  const active = frames.filter((frame) => frame.plugin === index);
-  const lastFrame = frames.at(-1);
-  const leftOut = lastFrame?.plugin === index ? [lastFrame.registration] : [];
-  const told = active
-    .map((frame) => frame.registration)
-    .filter((id) => !leftOut.includes(id));
+  const leftOut = frames
+    .filter((frame) => frame.plugin === index)
+    .map((frame) => frame.registration);
   const call: ModInvocation = {
     id: ++serial,
     epoch,
@@ -373,7 +442,7 @@ async function dispatch(
     toNativeInput: view.toNativeInput,
     origin,
     frames,
-    budget: new ModBudget(told.length ? 1000 : MOD_TIMEOUT_MS),
+    budget: new ModBudget(MOD_TIMEOUT_MS),
     live: true,
     recovering: false,
     aborted: false,
@@ -391,10 +460,15 @@ async function dispatch(
           input: call.input,
           origin,
           leftOut,
-          told,
         }),
       );
       validateResult(event, value);
+      if (event === 'tool.check')
+        return await ownCheck(
+          value as ModToolCheckResult,
+          call.last,
+          realm.plugin.name,
+        );
       return event === 'ui.log' && record(value) && !('deny' in value)
         ? { value: value['value'] }
         : value;
@@ -426,6 +500,12 @@ async function dispatch(
         );
         if (value !== undefined) {
           validateResult(event, value);
+          if (event === 'tool.check')
+            return await ownCheck(
+              value as ModToolCheckResult,
+              recovery.last ?? call.last,
+              realm.plugin.name,
+            );
           return event === 'ui.log' && record(value) && !('deny' in value)
             ? { value: value['value'] }
             : value;
@@ -480,15 +560,28 @@ async function hostCall(
   ];
   const value = payload['value'];
   if (method === 'next') {
-    if (call.recovering && call.last) return call.budget.lend(() => call.last!);
-    validateInput(call.event, value, call.input);
-    const nativeInput = call.toNativeInput(value);
-    const task = call.budget.lend(() => call.next(nativeInput, frames));
-    call.last = task;
+    let task: Promise<unknown>;
+    if (call.recovering && call.last) {
+      task = call.budget.lend(() => call.last!);
+    } else {
+      validateInput(call.event, value, call.input);
+      const nativeInput = call.toNativeInput(value);
+      task = call.budget.lend(() => call.next(nativeInput, frames));
+      call.last = task;
+    }
     void task.catch(() => {});
-    return task;
+    updateActivity();
+    try {
+      return await task;
+    } finally {
+      updateActivity();
+    }
   }
-  if (method !== 'command.register' && method !== 'ui.log')
+  if (
+    method !== 'command.register' &&
+    method !== 'session.version' &&
+    method !== 'ui.log'
+  )
     throw new Error('Mod API not supported: ' + method);
   validateInput(method, value, {});
   const plugin = realms[call.plugin].plugin;
@@ -514,6 +607,17 @@ async function hostCall(
           commands.set(spec.name, { ...spec, plugin: plugin.id });
           return { value: { command: spec.name } };
         }
+        if (method === 'session.version')
+          return {
+            value: {
+              version,
+              qwen: {
+                claudeCode: CLAUDE_CODE_EVENTS_VERSION,
+                events: MOD_EVENTS,
+                methods: MOD_METHODS,
+              },
+            },
+          };
         logChars += String(e['text']).length + 1;
         if (logChars > 100_000) throw new Error('Mod log budget exceeded.');
         send({
@@ -565,20 +669,42 @@ async function executeHostTool(
   } finally {
     clearInterval(timer);
     hostOperations.delete(id);
+    updateActivity();
   }
 }
 
-port.on('message', async (request: ModRequest) => {
+port.on('message', async (request: ModWorkerRequest) => {
+  if (
+    request.type === 'native' ||
+    request.type === 'host-result' ||
+    request.type === 'tool-check'
+  ) {
+    if (!busy || request.root !== rootId) return;
+    if (request.phase < phase) return;
+    phase = request.phase;
+  }
+  if (request.type === 'native') {
+    if (!hostOperations.has(request.id)) return;
+    native = request.id;
+    updateActivity();
+    return;
+  }
   if (request.type === 'host-result') {
     const operation = hostOperations.get(request.id);
     if (!operation) return;
+    if (native === request.id) native = undefined;
+    updateActivity();
     hostOperations.delete(request.id);
     if (request.error !== undefined) operation.reject(new Error(request.error));
     else operation.resolve(request.result);
     return;
   }
   if (request.type === 'tool-check') {
+    if (request.id <= lastCheck) return;
+    lastCheck = request.id;
     const operation = hostOperations.get(request.operation);
+    checks++;
+    updateActivity();
     try {
       if (!busy || !operation) throw new Error('Mod tool operation has ended.');
       assertLive(operation.parent);
@@ -592,34 +718,56 @@ port.on('message', async (request: ModRequest) => {
         operation.parent,
       )) as ModToolCheckResult;
       assertLive(operation.parent);
-      send({ type: 'check-result', id: request.id, result });
+      send({ type: 'check-result', id: request.id, result }, request.root);
     } catch (error) {
-      send({
-        type: 'check-result',
-        id: request.id,
-        error: String(error).slice(0, 4000),
-      });
+      send(
+        {
+          type: 'check-result',
+          id: request.id,
+          error: String(error).slice(0, 4000),
+        },
+        request.root,
+      );
+    } finally {
+      if (request.root === rootId) {
+        checks--;
+        updateActivity();
+      }
     }
     return;
   }
   if (busy) {
-    send({
-      type: 'error',
-      message: 'Concurrent Mod dispatch is not supported.',
-    });
+    send(
+      {
+        type: 'error',
+        message: 'Concurrent Mod dispatch is not supported.',
+      },
+      request.root,
+    );
     return;
   }
+  if (request.root <= rootId) return;
   busy = true;
+  rootId = request.root;
+  phase = reportedPhase = request.phase;
+  toolRoot = request.type === 'tool';
+  native = reportedNative = undefined;
+  activityRevision = 0;
+  checks = 0;
+  lastCheck = 0;
   builtinTool = request.type === 'tool' ? request.builtinTool : undefined;
   epoch++;
   logChars = 0;
   operations = 0;
-  deadline =
-    Date.now() + (request.type === 'end' ? MOD_END_TIMEOUT_MS : 60_000);
+  rootBudget = new ModBudget(
+    request.type === 'end' ? MOD_END_TIMEOUT_MS : 60_000,
+  );
   try {
     let result: unknown;
     if (request.type === 'load') {
       if (realms.length) throw new Error('Mods already loaded.');
+      surface = request.surface;
+      version = request.version;
       for (const plugin of request.plugins) {
         assertLive();
         const realm = new Realm(plugin, realms.length);
@@ -629,11 +777,34 @@ port.on('message', async (request: ModRequest) => {
         } catch (error) {
           throw new Error('Mod ' + plugin.name + ': ' + String(error));
         }
+        const skipped = [
+          ...new Set(
+            realm.patterns.filter(
+              (pattern) => !MOD_EVENTS.some((e) => patternMatches(pattern, e)),
+            ),
+          ),
+        ].sort();
+        if (skipped.length && plugin.unsupportedEvents === 'reject')
+          throw new Error(
+            'Mod ' +
+              plugin.name +
+              ': Mod events not supported: ' +
+              skipped.join(', '),
+          );
+        if (skipped.length)
+          send({
+            type: 'log',
+            plugin: plugin.name,
+            to: 'transcript',
+            text:
+              'Hooks for unsupported events will not run: ' +
+              skipped.join(', '),
+          });
       }
       starting = true;
       await dispatch(
         'session.start',
-        { cwd: request.cwd, surface: null, isInteractive: false },
+        { cwd: request.cwd, surface, isInteractive: surface === 'terminal' },
         engineOrigin,
         [],
         async (e) => ({ cwd: e['cwd'] }),
@@ -656,8 +827,11 @@ port.on('message', async (request: ModRequest) => {
         {
           command: request.command,
           args: request.args,
-          origin: { kind: 'sdk' },
-          presentation: { isFullscreen: false, columns: 80 },
+          origin: { kind: surface === 'terminal' ? 'composer' : 'sdk' },
+          presentation:
+            surface === 'terminal' && request.presentation
+              ? request.presentation
+              : { isFullscreen: false, columns: 80 },
         },
         engineOrigin,
         [],
@@ -708,7 +882,9 @@ port.on('message', async (request: ModRequest) => {
     hostOperations.clear();
     starting = false;
     builtinTool = undefined;
-    deadline = Infinity;
+    rootBudget = undefined;
+    native = reportedNative = undefined;
+    toolRoot = false;
     busy = false;
   }
 });

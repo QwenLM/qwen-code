@@ -96,7 +96,7 @@ abstract class DelegatingToolExecutionRepository
     }
 
     @Override
-    public List<ToolExecutionRecord> findHoldRowsByHarnessSession(
+    public List<ToolHoldRow> findHoldRowsByHarnessSession(
             String harnessSessionId, String afterExecutionCallId,
             int limit) {
         return delegate.findHoldRowsByHarnessSession(harnessSessionId,
@@ -121,6 +121,13 @@ abstract class DelegatingToolExecutionRepository
             java.util.Set<String> excludingExecutionCallIds) {
         return delegate.hasActiveByRuntimeSession(bindingId,
                 runtimeGeneration, runtimeSessionId, excludingExecutionCallIds);
+    }
+
+    @Override
+    public boolean hasUnprovenCaptureByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId) {
+        return delegate.hasUnprovenCaptureByRuntimeSession(bindingId,
+                runtimeGeneration, runtimeSessionId);
     }
 
     @Override

@@ -2,28 +2,28 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ManagedSessionStoreController;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.service.RequestDigests;
-import com.alibaba.qwen.code.managedagent.service.SessionEventHub;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.DispatchTarget;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.HarnessEvent;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.ItemRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SnapshotRecord;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.session.SessionEventHub;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -58,6 +58,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
@@ -221,12 +222,12 @@ class ManagedAgentServerIntegrationTest {
         assertThat(retry.replayed()).isTrue();
         assertThatThrownBy(() -> upgraded.createSession(tenant,
                 "revision-create", "qwen-code", "2", null, null, List.of()))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("idempotency_conflict"));
         assertThatThrownBy(() -> upgraded.createSession(tenant,
                 "revision-new", "qwen-code", "1", null, null, List.of()))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("unsupported_feature"));
         CommandAdmission omitted = upgraded.createSession(tenant,
@@ -1408,7 +1409,7 @@ class ManagedAgentServerIntegrationTest {
         long retryAfter = System.currentTimeMillis() + 60_000;
 
         store.scheduleTurnRetry(tenant, session.sessionId(), turn.turnId(),
-                firstOwner, retryAfter);
+                firstOwner, retryAfter, false);
 
         assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
                 .get().satisfies(record -> {
@@ -1424,6 +1425,335 @@ class ManagedAgentServerIntegrationTest {
                 "retry-owner-2", Duration.ofMinutes(1))).isEmpty();
         assertThat(store.findDispatchable(retryAfter, 100))
                 .contains(target);
+    }
+
+    // #14387: the recovery-blocked mark is durable on the still-active
+    // row — the status the claim saw stands, no retry counter moves, the
+    // lease releases — and a stale owner never re-marks.
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"hosted_workflow_recovery_blocked", "hosted_harness_recovery_blocked"})
+    void marksATurnRecoveryBlockedWithoutSettlingIt(String recoveryCode) throws Exception {
+        pauseRecoveryScanning();
+        String tenant = "tenant-turn-blocked-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "blocked-create",
+                "sha256:" + "1".repeat(64), "qwen-code", null, null,
+                List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "blocked-turn", "sha256:" + "2".repeat(64),
+                session.sessionId(), List.of(),
+                "sha256:" + "3".repeat(64));
+        String owner = "blocked-owner";
+        var claimed = store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1)).orElseThrow();
+
+        assertThat(store.markTurnRecoveryBlocked(tenant,
+                session.sessionId(), turn.turnId(), owner,
+                recoveryCode,
+                "the Harness generation was lost")).isTrue();
+
+        assertThat(store.findTurn(tenant, session.sessionId(),
+                turn.turnId())).get().satisfies(record -> {
+                    assertThat(record.status()).isEqualTo(claimed.status());
+                    assertThat(record.errorCode()).isEqualTo(
+                            recoveryCode);
+                    assertThat(record.errorMessage()).isEqualTo(
+                            "the Harness generation was lost");
+                    assertThat(record.dispatchOwner()).isNull();
+                    assertThat(record.dispatchLeaseUntil()).isNull();
+                    assertThat(record.retryCount()).isZero();
+                    assertThat(record.completedAt()).isNull();
+                });
+        assertThat(store.markTurnRecoveryBlocked(tenant,
+                session.sessionId(), turn.turnId(), owner,
+                recoveryCode,
+                "the Harness generation was lost")).isFalse();
+
+        if ("hosted_harness_recovery_blocked".equals(recoveryCode)) {
+            mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
+                    .header(TenantContextFilter.HEADER, tenant)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"sessionId\":\"" + session.sessionId() + "\"}"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.activeTurn.status").value("recovery_blocked"))
+                    .andExpect(jsonPath("$.activeTurn.errorCode").value(recoveryCode));
+        }
+
+        DispatchTarget target = new DispatchTarget(tenant,
+                session.sessionId(), turn.turnId());
+        if ("hosted_harness_recovery_blocked".equals(recoveryCode)) {
+            long due = store.findTurn(tenant, session.sessionId(), turn.turnId()).orElseThrow().retryAfter();
+            assertThat(store.findDispatchable(due - 1, 100)).doesNotContain(target);
+            assertThat(store.findDispatchable(due, 100)).contains(target);
+            assertThat(store.claimTurn(tenant, session.sessionId(), turn.turnId(),
+                    "too-soon", Duration.ofMinutes(1))).isEmpty();
+            assertThatThrownBy(() -> store.beginOperation(tenant, session.sessionId(),
+                    OperationKind.CLOSE, "", "blocked-close", "close-digest"))
+                    .isInstanceOfSatisfying(ManagedAgentException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("turn_active"));
+        } else {
+            assertThat(store.findDispatchable(Long.MAX_VALUE, 100)).doesNotContain(target);
+        }
+        store.insertCancelCommand(tenant, "CANCEL_TURN", "blocked-cancel",
+                "sha256:" + "4".repeat(64), session.sessionId(),
+                turn.turnId());
+        assertThat(store.findDispatchable(Long.MAX_VALUE, 100))
+                .contains(target);
+        assertThat(store.findTurn(tenant, session.sessionId(),
+                turn.turnId()).get().status()).isEqualTo("CANCELLING");
+
+        if ("hosted_harness_recovery_blocked".equals(recoveryCode)) {
+            assertThat(store.claimTurn(tenant, session.sessionId(), turn.turnId(),
+                    "cancel-owner", Duration.ofMinutes(1))).isPresent();
+            assertThat(store.markTurnRecoveryBlocked(tenant, session.sessionId(),
+                    turn.turnId(), "cancel-owner", recoveryCode, "late status probe")).isFalse();
+            assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()).orElseThrow()
+                    .dispatchOwner()).isEqualTo("cancel-owner");
+        }
+
+        // The mark is lease-fenced: an owner whose lease already expired
+        // parks nothing — the CAS misses and the row stays unmarked.
+        Admission session2 = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "blocked-create-2",
+                "sha256:" + "5".repeat(64), "qwen-code", null, null,
+                List.of(), null);
+        Admission turn2 = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "blocked-turn-2", "sha256:" + "6".repeat(64),
+                session2.sessionId(), List.of(),
+                "sha256:" + "7".repeat(64));
+        assertThat(store.claimTurn(tenant, session2.sessionId(),
+                turn2.turnId(), owner, Duration.ofMillis(-1))).isPresent();
+        assertThat(store.markTurnRecoveryBlocked(tenant,
+                session2.sessionId(), turn2.turnId(), owner,
+                recoveryCode,
+                "the Harness generation was lost")).isFalse();
+        assertThat(store.findTurn(tenant, session2.sessionId(),
+                turn2.turnId()).get().errorCode()).isNull();
+    }
+
+    @Test
+    void aHarnessParkSettlesOnlyFromItsOriginalLeasedJournal() {
+        pauseRecoveryScanning();
+        String tenant = "tenant-harness-recheck-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant, "CREATE_SESSION", "create",
+                "sha256:" + "1".repeat(64), "qwen-code", null, null, List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN", "turn", "sha256:" + "2".repeat(64),
+                session.sessionId(), List.of(), "sha256:" + "3".repeat(64));
+        store.claimTurn(tenant, session.sessionId(), turn.turnId(), "first", Duration.ofMinutes(1)).orElseThrow();
+        assertThat(store.bindHarness(tenant, session.sessionId(), turn.turnId(), "first", "boot")).isTrue();
+        store.recordAdmission(tenant, session.sessionId(), turn.turnId(), "first", "epoch", 1);
+        assertThat(store.markTurnRecoveryBlocked(tenant, session.sessionId(), turn.turnId(), "first",
+                "hosted_harness_recovery_blocked", "Awaiting original result")).isTrue();
+        jdbc.update("UPDATE ma_turn SET retry_after=0 WHERE tenant_id=?", tenant);
+        var recheck = store.claimTurn(tenant, session.sessionId(), turn.turnId(), "observer", Duration.ofMinutes(1))
+                .orElseThrow();
+        assertThat(recheck.retryCount()).isZero();
+        var terminal = List.of(new HarnessEvent(2, "boot:epoch:2",
+                new ProjectedEvent("turn.completed", Map.of(), true, "COMPLETED", null, null)));
+        assertThatThrownBy(() -> store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(),
+                "first", "epoch", terminal)).hasMessageContaining("lease was lost");
+        assertThatThrownBy(() -> store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(),
+                "observer", "other-epoch", terminal)).hasMessageContaining("epoch changed");
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(), "observer", "epoch", terminal);
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()).orElseThrow())
+                .satisfies(record -> {
+                    assertThat(record.status()).isEqualTo("COMPLETED");
+                    assertThat(record.errorCode()).isNull();
+                    assertThat(record.completedAt()).isNotNull();
+                });
+        assertThat(store.beginOperation(tenant, session.sessionId(), OperationKind.CLOSE,
+                "", "close", "close-digest").replayed()).isFalse();
+    }
+
+    // The terminal retry budget counts consecutive failures without
+    // journaled progress: every fenced cursor update — admission, recovery
+    // admission, and the journaled-event cursor — restarts it (review round
+    // 6, R6-1). The pacing counter is NOT restarted with it: retry_count
+    // feeds the dispatch backoff, and a crash loop that keeps making
+    // progress must still see growing delays and still converge to the
+    // terminal arm (review round 8, R8-3).
+    @Test
+    void journaledProgressRestartsTheRetryBudget() {
+        pauseRecoveryScanning();
+        String tenant = "tenant-retry-reset-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "reset-create", "sha256:" + "4".repeat(64),
+                "qwen-code", null, null, List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "reset-turn", "sha256:" + "5".repeat(64),
+                session.sessionId(), List.of(), "sha256:" + "6".repeat(64));
+        String owner = "reset-owner";
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        store.scheduleTurnRetry(tenant, session.sessionId(), turn.turnId(),
+                owner, 0, false);
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        store.scheduleTurnRetry(tenant, session.sessionId(), turn.turnId(),
+                owner, 0, false);
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> {
+                    assertThat(record.retryCount()).isEqualTo(2);
+                    assertThat(record.consecutiveFailures()).isEqualTo(2);
+                });
+
+        store.markSubmissionAttempted(tenant, session.sessionId(),
+                turn.turnId(), owner);
+        store.recordAdmission(tenant, session.sessionId(), turn.turnId(),
+                owner, "epoch-1", 0);
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> {
+                    // The budget restarts on journaled progress...
+                    assertThat(record.consecutiveFailures()).isZero();
+                    // ...but the pacing counter never rewinds.
+                    assertThat(record.retryCount()).isEqualTo(2);
+                });
+
+        store.scheduleTurnRetry(tenant, session.sessionId(), turn.turnId(),
+                owner, 0, false);
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(),
+                owner, "epoch-1",
+                List.of(new HarnessEvent(1, "boot:epoch-1:1", null)));
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> {
+                    assertThat(record.consecutiveFailures()).isZero();
+                    assertThat(record.retryCount()).isEqualTo(3);
+                });
+
+        store.scheduleTurnRetry(tenant, session.sessionId(), turn.turnId(),
+                owner, 0, false);
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        store.recordRecoveryAdmission(tenant, session.sessionId(),
+                turn.turnId(), owner, "epoch-1", "epoch-1", "epoch-2", 5);
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> {
+                    assertThat(record.consecutiveFailures()).isZero();
+                    assertThat(record.retryCount()).isEqualTo(4);
+                });
+
+        // Three more crash-loop rounds — schedule a retry, claim it, then
+        // recovery-admit with a fresh boot epoch. The budget counter
+        // restarts every round, while the retry_after the coordinator would
+        // write keeps growing: the pacing mirrors retryDelay under the
+        // default properties (1s initial, 1min cap). The claim below stands
+        // in for the scanner firing once the backoff has elapsed — the
+        // growth assertion reads the pacing the coordinator WOULD compute
+        // from retryCount, so the schedule is written as immediately due.
+        long previousDelay = 0;
+        String epoch = "epoch-2";
+        for (int round = 0; round < 3; round++) {
+            int retryCount = store.findTurn(tenant, session.sessionId(),
+                    turn.turnId()).orElseThrow().retryCount();
+            long delay = Math.min(1000L << Math.min(retryCount, 62), 60_000L);
+            assertThat(delay).isGreaterThan(previousDelay);
+            previousDelay = delay;
+            store.scheduleTurnRetry(tenant, session.sessionId(),
+                    turn.turnId(), owner, 0, false);
+            assertThat(store.claimTurn(tenant, session.sessionId(),
+                    turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+            String nextEpoch = "epoch-" + (3 + round);
+            store.recordRecoveryAdmission(tenant, session.sessionId(),
+                    turn.turnId(), owner, epoch, epoch, nextEpoch, 6 + round);
+            epoch = nextEpoch;
+            int expectedRetryCount = 5 + round;
+            assertThat(store.findTurn(tenant, session.sessionId(),
+                    turn.turnId())).get().satisfies(record -> {
+                        assertThat(record.consecutiveFailures()).isZero();
+                        assertThat(record.retryCount())
+                                .isEqualTo(expectedRetryCount);
+                    });
+        }
+    }
+
+    // An exempt wait (a predecessor's lease-bounded 409) must not consume
+    // the terminal retry budget: after a full pre-admission budget of exempt
+    // waits the first real transient failure still reschedules instead of
+    // terminally failing the Turn (review round 10, R10-2).
+    @Test
+    void exemptWaitsDoNotConsumeTheTurnRetryBudget() {
+        pauseRecoveryScanning();
+        String tenant = "tenant-exempt-budget-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "exempt-create", "sha256:" + "7".repeat(64),
+                "qwen-code", null, null, List.of(), null);
+        // The recovery attach is what makes the 409 lease-bounded.
+        jdbc.update("UPDATE ma_session SET harness_boot_id ="
+                        + " 'boot-old' WHERE tenant_id = ? AND session_id = ?",
+                tenant, session.sessionId());
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "exempt-turn", "sha256:" + "8".repeat(64),
+                session.sessionId(), List.of(), "sha256:" + "9".repeat(64));
+        DaemonHttpException writerConflict = mock(DaemonHttpException.class);
+        when(writerConflict.getStatusCode()).thenReturn(409);
+        when(writerConflict.getErrorCode())
+                .thenReturn("managed_session_writer_conflict");
+        HarnessCoordinator coordinator =
+                applicationContext.getBean(HarnessCoordinator.class);
+        int budget = applicationContext.getBean(ManagedAgentProperties.class)
+                .getDispatch().getMaxPreAdmissionRetries();
+
+        for (int round = 1; round <= budget; round++) {
+            harness.failRecoveries(session.sessionId(), writerConflict);
+            int expectedRetries = round;
+            await().atMost(Duration.ofSeconds(5)).until(() -> {
+                var record = store.findTurn(tenant, session.sessionId(),
+                        turn.turnId()).orElseThrow();
+                if (record.retryCount() >= expectedRetries) {
+                    return true;
+                }
+                // Dispatch only while no pass is in flight, so a trailing
+                // evaluation cannot launch a pass with an empty failure
+                // queue.
+                if (record.dispatchOwner() == null) {
+                    jdbc.update("UPDATE ma_turn SET retry_after ="
+                                    + " NULL WHERE tenant_id = ? AND"
+                                    + " session_id = ? AND turn_id = ?",
+                            tenant, session.sessionId(), turn.turnId());
+                    coordinator.dispatch(tenant, session.sessionId(),
+                            turn.turnId());
+                }
+                return false;
+            });
+        }
+        var afterExempt = store.findTurn(tenant, session.sessionId(),
+                turn.turnId()).orElseThrow();
+        assertThat(afterExempt.consecutiveFailures()).isEqualTo(budget);
+        assertThat(afterExempt.budgetExemptFailures()).isEqualTo(budget);
+
+        harness.failRecoveries(session.sessionId(),
+                new IllegalStateException("harness process died"));
+        await().atMost(Duration.ofSeconds(5)).until(() -> {
+            var record = store.findTurn(tenant, session.sessionId(),
+                    turn.turnId()).orElseThrow();
+            if (record.retryCount() >= budget + 1
+                    || "FAILED".equals(record.status())) {
+                return true;
+            }
+            if (record.dispatchOwner() == null) {
+                jdbc.update("UPDATE ma_turn SET retry_after = NULL"
+                                + " WHERE tenant_id = ? AND session_id = ?"
+                                + " AND turn_id = ?",
+                        tenant, session.sessionId(), turn.turnId());
+                coordinator.dispatch(tenant, session.sessionId(),
+                        turn.turnId());
+            }
+            return false;
+        });
+
+        // The exempt waits bought nothing against the budget: one real
+        // failure reschedules, with the watermark intact.
+        var settled = store.findTurn(tenant, session.sessionId(),
+                turn.turnId()).orElseThrow();
+        assertThat(settled.status()).isNotEqualTo("FAILED");
+        assertThat(settled.errorCode()).isNull();
+        assertThat(settled.retryCount()).isEqualTo(budget + 1);
+        assertThat(settled.consecutiveFailures()).isEqualTo(budget + 1);
+        assertThat(settled.budgetExemptFailures()).isEqualTo(budget);
     }
 
     @Test
@@ -2569,40 +2899,6 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.metadata.title").doesNotExist());
     }
 
-    // A row written while the create bound was 512 keeps its long title:
-    // the unified 256 policy rejects that title as new input, but echoing
-    // the stored title back is a no-op rewrite rather than a permanent 400
-    // — and the over-bound title is never forwarded to the Harness.
-    @Test
-    void aLegacyOverBoundTitleEchoesBackAsANoOpRewrite() throws Exception {
-        String tenant = "tenant-title-legacy-" + UUID.randomUUID();
-        String sessionId = objectMapper.readTree(mvc.perform(
-                        post("/v1/agents/sessions")
-                                .header(TenantContextFilter.HEADER, tenant)
-                                .header("Idempotency-Key", "legacy-title-create")
-                                .contentType(MediaType.APPLICATION_JSON)
-                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
-                .andExpect(status().isAccepted()).andReturn()
-                .getResponse().getContentAsString()).get("id").asText();
-        String legacyTitle = "t".repeat(300);
-        jdbc.update("UPDATE ma_session SET title = ?"
-                        + " WHERE tenant_id = ? AND session_id = ?",
-                legacyTitle, tenant, sessionId);
-        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"title\":\"" + legacyTitle + "\"}"), tenant,
-                "legacy-title-echo")
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.metadata.title").value(legacyTitle));
-        // A different over-bound title is still new input, still refused.
-        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"title\":\"" + "x".repeat(300) + "\"}"), tenant,
-                "legacy-title-other")
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error.code").value("invalid_title"));
-    }
-
     @Test
     void foldsTurnStatusesAndConflictMessagesWithTheRootLocaleUnderATurkishDefault()
             throws Exception {
@@ -2904,6 +3200,8 @@ class ManagedAgentServerIntegrationTest {
         private volatile String closeAnswer = BOOT_ID;
         private final Map<String, HarnessRuntimeRecovery>
                 tenantRecoveries = new ConcurrentHashMap<>();
+        private final Map<String, Queue<RuntimeException>> recoverFailures =
+                new ConcurrentHashMap<>();
         /** H6b: the automation funnel this fixture answers for. */
         final AutomationHarnessFake automations;
 
@@ -2937,9 +3235,22 @@ class ManagedAgentServerIntegrationTest {
                     tenantRecoveries.remove(tenantId));
         }
 
+        /** Queues failures recoverManagedRuntime throws, one per call. */
+        void failRecoveries(String sessionId, RuntimeException... failures) {
+            recoverFailures.put(sessionId,
+                    new ConcurrentLinkedQueue<>(List.of(failures)));
+        }
+
         @Override
         public Attachment recoverManagedRuntime(String tenantId,
                 String sessionId, boolean cancellation) {
+            Queue<RuntimeException> failures =
+                    recoverFailures.get(sessionId);
+            RuntimeException failure = failures == null ? null
+                    : failures.poll();
+            if (failure != null) {
+                throw failure;
+            }
             return createOrLoad(tenantId, sessionId, true);
         }
 
@@ -3199,7 +3510,7 @@ class ManagedAgentServerIntegrationTest {
         String operation = "operation-" + UUID.randomUUID();
         var scope = new com.alibaba.qwen.code.runtimebroker.RuntimeScope(tenant, "workspace", "1", "/workspace", "capability", "session");
         var bindings = new com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository(jdbc.getDataSource(),
-                new com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector("test", new byte[32]));
+                new com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector("test", new byte[32]));
         var sessions = new com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository(jdbc.getDataSource());
         var executions = new com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository(jdbc.getDataSource());
         var provisioner = org.mockito.Mockito.mock(com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner.class,

@@ -6,8 +6,8 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -30,6 +30,7 @@ import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -150,6 +151,13 @@ class HostedTeamMemberCommandMySqlIT {
      * session_command it did not receipt.
      */
     @Test
+    // Kept below the ~295 s its waits add up to: every Hosted*IT class
+    // runs in one failsafe fork, and this class's ceilings together must
+    // leave that fork its budget (scripts/tests/hosted-process-ci.test.js).
+    // A case cut here still reports the wait it was in: every Awaitility
+    // wait goes through waiting(), which fails on the @Timeout's
+    // interrupt, and the raw waits left (Process.waitFor, the relay
+    // hold's latch, HttpClient.send) throw on that interrupt too.
     @Timeout(240)
     void membersReadAndWriteTheBoardTheirLeadReads() throws Exception {
         boot();
@@ -205,6 +213,8 @@ class HostedTeamMemberCommandMySqlIT {
      * generation parked.
      */
     @Test
+    // Kept below the ~465 s its waits add up to, for the fork budget
+    // described on the board case.
     @Timeout(180)
     void memberHarnessRestartDuringCommandWait() throws Exception {
         boot();
@@ -238,9 +248,9 @@ class HostedTeamMemberCommandMySqlIT {
             // The relay goes on only once the takeover holds carol's
             // Session: while it is held, nothing but the coordinator's
             // takeover load can fence the dead generation. A relay attach
-            // that wins the load race instead leaves the parked Turn
-            // without its continue — a separate race this case does not
-            // pin.
+            // that wins the load race instead gets the takeover's load
+            // refused (409 hosted_session_already_attached) and deferred a
+            // full backoff step — a separate race this case does not pin.
             waiting().atMost(Duration.ofSeconds(100))
                     .pollInterval(Duration.ofMillis(500)).untilAsserted(() ->
                             assertThat(writerGeneration(carol))
@@ -273,22 +283,9 @@ class HostedTeamMemberCommandMySqlIT {
      * handover, from running until the latch is released.
      */
     private CountDownLatch holdMessageRelay() throws InterruptedException {
-        ThreadPoolTaskScheduler scheduler = spring.getBean(
-                "messageRelayScheduler", ThreadPoolTaskScheduler.class);
-        CountDownLatch held = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        scheduler.execute(() -> {
-            held.countDown();
-            try {
-                release.await();
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        });
-        assertThat(held.await(30, TimeUnit.SECONDS))
-                .as("the message relay's scheduler takes the hold")
-                .isTrue();
-        return release;
+        return SchedulerHold.hold(spring.getBean(
+                "messageRelayScheduler", ThreadPoolTaskScheduler.class),
+                Duration.ofSeconds(30));
     }
 
     /** The writer generation of a Session's journal head. */
@@ -1015,7 +1012,7 @@ class HostedTeamMemberCommandMySqlIT {
     }
 
     private static ConditionFactory waiting() {
-        return await().failFast("The case's @Timeout interrupted it",
-                () -> Thread.currentThread().isInterrupted());
+        return await().ignoreExceptionsInstanceOf(CannotAcquireLockException.class)
+                .failFast("The case's @Timeout interrupted it", () -> Thread.currentThread().isInterrupted());
     }
 }

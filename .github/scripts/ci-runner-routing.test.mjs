@@ -1,5 +1,6 @@
 // Runner-routing regression guards for ci.yml, serve-ab.yml, e2e.yml, the
-// qwen-autofix.yml scan lane, and the trusted-PR lanes of #13245.
+// qwen-autofix.yml scan lane, the trusted-PR lanes of #13245, and the
+// control-plane jobs that run no PR code.
 //
 // classify_pr carries the routing logic TWICE — the `runs-on` expression
 // (which selects the classify job's own runner) and the `pick_runner` shell
@@ -69,6 +70,7 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /github\.event_name == 'merge_group'/,
       String(eventName === 'merge_group'),
     ],
+    [/github\.event_name == 'push'/, String(eventName === 'push')],
     // Longest term first as a convention; both patterns are quote-anchored
     // (the closing quote is part of each regex), so neither can match
     // inside the other and the substitution order is behaviorally inert.
@@ -83,6 +85,10 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
     [
       /github\.event_name != 'pull_request'/,
       String(eventName !== 'pull_request'),
+    ],
+    [
+      /github\.event_name == 'pull_request'/,
+      String(eventName === 'pull_request'),
     ],
     [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
     [
@@ -228,44 +234,21 @@ describe('ci.yml classify_pr runner routing', () => {
     );
   });
 
-  it('a push to main reaches ECS, and the kill-switch still wins', () => {
-    // The post-merge fast signal (Classify PR + Test on `main`) runs the same
-    // ten-plus-minute Test job a pull request does, in the most trusted
-    // context there is: the code is already merged and the YAML is main's
-    // own. Route it to the pool instead of spending a scarce hosted Linux
-    // runner on every merge. A push carries no author association, so this
-    // arm is necessarily event-based.
-    assert.equal(
-      runPickRunner({
-        ecsDisabled: false,
+  it('routes the push classifier and downstream jobs to the same pool', () => {
+    for (const ecsDisabled of [false, true]) {
+      const inputs = {
+        ecsDisabled,
         sameRepo: false,
         assoc: '',
         eventName: 'push',
-      }),
-      ECS,
-    );
-    assert.equal(
-      runPickRunner({
-        ecsDisabled: true,
-        sameRepo: false,
-        assoc: '',
-        eventName: 'push',
-      }),
-      HOSTED,
-      'kill-switch must revert post-merge runs to hosted',
-    );
-  });
-
-  it('keeps the push arm out of the classify runs-on expression', () => {
-    // classify_pr routes twice, and on a push the two halves deliberately
-    // disagree: the shell step sends downstream Linux jobs to ECS while this
-    // expression leaves classify_pr itself hosted. Pin the asymmetry so a
-    // future "drift fix" has to read why first — this expression is the
-    // canonical association-routing text that sdk-java.yml and serve-ab.yml
-    // mirror, a push has no association to route on, and classify_pr is a
-    // seconds-long job whose pool costs nothing either way. The drift guard
-    // above evaluates both halves on pull_request, where they must agree.
-    assert.doesNotMatch(classifyRunsOn, /github\.event_name == 'push'/);
+      };
+      const expected = ecsDisabled ? HOSTED : ECS;
+      assert.deepEqual(
+        evalRunsOn(classifyRunsOn, inputs),
+        JSON.parse(expected),
+      );
+      assert.equal(runPickRunner(inputs), expected);
+    }
   });
 
   it('the runs-on expression keeps the trusted clause and kill-switch', () => {
@@ -724,6 +707,53 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
       'pull_request',
       ['push', 'workflow_dispatch'],
     ],
+    // managed-agent-gate.yml calls sdk-java.yml on an approval, whose event
+    // a fork PR can raise too: approving one must not put it on the pool.
+    [
+      'sdk-java.yml',
+      'mysql-integration',
+      'pull_request_review',
+      ['push', 'merge_group', 'workflow_dispatch'],
+    ],
+    // The gate's own jobs report the would-be required check, so a starved
+    // hosted queue must not hold them; fork PRs and fork approvals stay hosted.
+    [
+      'managed-agent-gate.yml',
+      'scope',
+      'pull_request',
+      ['push', 'merge_group'],
+    ],
+    [
+      'managed-agent-gate.yml',
+      'scope',
+      'pull_request_review',
+      ['push', 'merge_group'],
+    ],
+    [
+      'sdk-java.yml',
+      'event-transport-broker',
+      'pull_request',
+      ['schedule', 'workflow_dispatch'],
+    ],
+    [
+      'sdk-java.yml',
+      'event-transport-multi-node',
+      'pull_request',
+      ['schedule', 'workflow_dispatch'],
+    ],
+    // Both gate lanes also run in the gate's approval-triggered full tier.
+    [
+      'sdk-java.yml',
+      'event-transport-broker',
+      'pull_request_review',
+      ['schedule', 'workflow_dispatch'],
+    ],
+    [
+      'sdk-java.yml',
+      'event-transport-multi-node',
+      'pull_request_review',
+      ['schedule', 'workflow_dispatch'],
+    ],
     [
       'assign-pr-owner.yml',
       'assign',
@@ -780,6 +810,68 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     });
   }
 
+  it('release-managed-agent-reference.yml build: only trusted PR dry runs reach the pool', () => {
+    const doc = parse(
+      readFileSync(
+        join(workflowsDir, 'release-managed-agent-reference.yml'),
+        'utf8',
+      ),
+    );
+    const runsOn = String(doc.jobs.build['runs-on']);
+    const route = (eventName, sameRepo, assoc, ecsDisabled = false) =>
+      evalRunsOn(runsOn, { ecsDisabled, eventName, sameRepo, assoc });
+    assert.deepEqual(route('pull_request', true, 'NONE'), ECS_LABELS);
+    for (const assoc of TRUSTED) {
+      assert.deepEqual(route('pull_request', false, assoc), ECS_LABELS, assoc);
+    }
+    for (const assoc of ['CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'NONE']) {
+      assert.deepEqual(route('pull_request', false, assoc), HOSTED_LABELS);
+    }
+    // The dispatch build produces the published assets.
+    assert.deepEqual(route('workflow_dispatch', true, ''), HOSTED_LABELS);
+    assert.deepEqual(route('pull_request', true, 'OWNER', true), HOSTED_LABELS);
+    assert.equal(doc.jobs.publish['runs-on'], 'ubuntu-latest');
+  });
+
+  it('release-managed-agent-reference.yml build is safe on a shared pool host', () => {
+    const text = readFileSync(
+      join(workflowsDir, 'release-managed-agent-reference.yml'),
+      'utf8',
+    );
+    const build = parse(text).jobs.build;
+    // A service container cannot take a command, so it always reserves native
+    // AIO contexts and can exhaust the pool host's fs.aio-max-nr (#14416).
+    assert.equal(build.services, undefined);
+    const start = build.steps.find(
+      (s) => s.name === 'Start MySQL without native AIO',
+    );
+    assert.match(start.run, /--publish '127\.0\.0\.1::3306'/);
+    assert.match(start.run, /type=tmpfs,destination=\/var\/lib\/mysql/);
+    assert.match(start.run, /--innodb-use-native-aio=0/);
+    assert.match(start.run, /MYSQL_PORT=.*GITHUB_ENV/);
+    const remove = build.steps.find(
+      (s) => s.name === 'Remove the MySQL container',
+    );
+    assert.match(remove.if, /always\(\)/);
+    const run = (name) => build.steps.find((s) => s.name === name).run;
+    assert.match(run('Build Java components'), /-Dmaven\.repo\.local=/);
+    assert.match(
+      run('Build Java components'),
+      /rm -rf -- "\$\{repo\}\/com\/alibaba\/qwencode-sdk" "\$\{repo\}\/com\/alibaba\/qwen-managed-agent-server"/,
+    );
+    assert.match(
+      run('Assemble reference distribution'),
+      /rm -rf -- "\$\{RUNNER_TEMP\}\/managed-agent-reference"\n\s*node scripts\/package-managed-agent-reference\.mjs/,
+    );
+    const boot = run('Verify and boot the exact archive');
+    assert.match(boot, /SERVER_PORT="\$\{server_port\}"/);
+    assert.doesNotMatch(boot, /:8080|:3306\//);
+    const setupNode = build.steps.find((s) =>
+      String(s.uses || '').startsWith('actions/setup-node'),
+    );
+    assert.equal(setupNode.if, "${{ runner.environment == 'github-hosted' }}");
+  });
+
   it('tui-parity keeps setup-node and the pnpm cache off the pool', () => {
     // nodejs.org may be unreachable through the pool's egress proxy, and the
     // pool keeps its pnpm store on local disk — the ci.yml split.
@@ -813,4 +905,88 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     );
     assert.equal(gate.env?.OUT, '${{ runner.temp }}/opentui-noflicker-out');
   });
+});
+
+describe('control-plane jobs moved off the hosted queue', () => {
+  // None of these checks out or runs PR code, so each reaches the pool on
+  // every trigger, fork-raised events included; the kill-switch wins.
+  const ECS_LABELS = ['self-hosted', 'linux', 'x64', 'ecs-qwen'];
+  const HOSTED_LABELS = ['ubuntu-latest'];
+  const jobs = [
+    [
+      'qwen-code-pr-review.yml',
+      'delay-automatic-review',
+      ['pull_request_target'],
+    ],
+    ['assign-issue-owner.yml', 'assign', ['issues', 'workflow_dispatch']],
+    [
+      'auto-minimize-spam.yml',
+      'minimize',
+      [
+        'issue_comment',
+        'pull_request_review_comment',
+        'schedule',
+        'push',
+        'workflow_dispatch',
+      ],
+    ],
+  ];
+
+  for (const [file, jobName, events] of jobs) {
+    const job = parse(readFileSync(join(workflowsDir, file), 'utf8')).jobs[
+      jobName
+    ];
+    const runsOn = String(job['runs-on']);
+    const route = (eventName, assoc, ecsDisabled = false) =>
+      evalRunsOn(runsOn, { ecsDisabled, eventName, sameRepo: false, assoc });
+    const checkouts = job.steps.filter((s) =>
+      String(s.uses || '').startsWith('actions/checkout'),
+    );
+
+    it(`${file} ${jobName}: every trigger reaches the pool, forks included`, () => {
+      assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
+      for (const eventName of events) {
+        for (const assoc of ASSOCIATIONS) {
+          assert.deepEqual(route(eventName, assoc), ECS_LABELS, eventName);
+        }
+      }
+    });
+
+    it(`${file} ${jobName}: the kill-switch wins on every event`, () => {
+      for (const eventName of events) {
+        assert.deepEqual(route(eventName, 'OWNER', true), HOSTED_LABELS);
+      }
+    });
+
+    it(`${file} ${jobName}: checks out only the default branch`, () => {
+      // An omitted ref is the default branch on issues events and the
+      // write-access dispatcher's choice on workflow_dispatch.
+      for (const step of checkouts) {
+        assert.ok(
+          [undefined, '${{ github.event.repository.default_branch }}'].includes(
+            step.with?.ref,
+          ),
+          String(step.with?.ref),
+        );
+      }
+    });
+
+    if (checkouts.length > 0) {
+      it(`${file} ${jobName}: checkout is safe on a reused pool workspace`, () => {
+        const heal = job.steps.findIndex(
+          (s) => s.name === 'Restore workspace ownership',
+        );
+        assert.ok(heal !== -1 && heal < job.steps.indexOf(checkouts[0]));
+        assert.equal(
+          job.steps[heal].if,
+          "${{ runner.environment == 'self-hosted' }}",
+        );
+        // Cone mode rejects a file entry the reused index holds as a file.
+        for (const step of checkouts) {
+          assert.equal(step.with['sparse-checkout'], '.github/scripts');
+          assert.equal(step.with['sparse-checkout-cone-mode'], undefined);
+        }
+      });
+    }
+  }
 });

@@ -6,7 +6,7 @@ import java.util.Comparator;
 import java.util.Map;
 
 /** Process-local logical Session repository for tests and single-node use. */
-public final class InMemoryRuntimeSessionRepository
+public class InMemoryRuntimeSessionRepository
         implements RuntimeSessionRepository {
     private final Map<RuntimeScope, Map<String, RuntimeSessionRecord>> records =
             new HashMap<>();
@@ -72,6 +72,42 @@ public final class InMemoryRuntimeSessionRepository
     }
 
     @Override
+    public synchronized java.util.List<RuntimeSessionRecord> findHistoricalByIds(
+            String tenantId, String harnessSessionId,
+            java.util.Collection<String> runtimeSessionIds) {
+        String tenant = BrokerValues.requireId(tenantId, "tenantId");
+        String harness = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        java.util.LinkedHashSet<String> ids = new java.util.LinkedHashSet<>();
+        for (String runtimeSessionId : runtimeSessionIds) {
+            ids.add(BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"));
+        }
+        java.util.Map<String, java.util.List<RuntimeSessionRecord>> matches =
+                new java.util.HashMap<>();
+        for (RuntimeSessionRecord record : records.values().stream()
+                .flatMap(scoped -> scoped.values().stream()).toList()) {
+            if (tenant.equals(record.getSession().getScope().getTenantId())
+                    && harness.equals(record.getSession().getHarnessSessionId())
+                    && ids.contains(record.getRuntimeSessionId())) {
+                matches.computeIfAbsent(record.getRuntimeSessionId(),
+                        ignored -> new java.util.ArrayList<>()).add(record);
+            }
+        }
+        java.util.List<RuntimeSessionRecord> found = new java.util.ArrayList<>();
+        for (String id : ids) {
+            java.util.List<RuntimeSessionRecord> rows = matches.get(id);
+            if (rows == null) {
+                continue;
+            }
+            if (rows.size() > 1) {
+                throw new RuntimeBrokerException(409, "runtime_session_ambiguous",
+                        "Historical Runtime Session is ambiguous", false);
+            }
+            found.add(rows.getFirst());
+        }
+        return java.util.List.copyOf(found);
+    }
+
+    @Override
     public synchronized RuntimeSessionRecord compareAndSet(
             RuntimeSessionRecord expected,
             RuntimeSessionRecord replacement) {
@@ -106,6 +142,25 @@ public final class InMemoryRuntimeSessionRepository
                         && generation == record.getRuntimeGeneration()
                         && (afterSessionId == null || record.getRuntimeSessionId().compareTo(afterSessionId) > 0))
                 .sorted(Comparator.comparing(RuntimeSessionRecord::getRuntimeSessionId)).limit(limit).toList();
+    }
+
+    @Override
+    public synchronized java.util.List<RuntimeSessionRecord> findActiveByHarnessSession(String tenantId,
+            String harnessSessionId, RuntimeSessionRecord after, int limit) {
+        BrokerValues.requireId(tenantId, "tenantId");
+        BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Release batch must contain 1-100 Sessions");
+        }
+        Comparator<RuntimeSessionRecord> order = Comparator
+                .comparing((RuntimeSessionRecord record) -> JdbcRepositorySupport.scopeKey(record.getSession().getScope()))
+                .thenComparing(RuntimeSessionRecord::getRuntimeSessionId);
+        return records.values().stream().flatMap(scoped -> scoped.values().stream())
+                .filter(RuntimeSessionRecord::isActive)
+                .filter(record -> tenantId.equals(record.getSession().getScope().getTenantId())
+                        && harnessSessionId.equals(record.getSession().getHarnessSessionId())
+                        && (after == null || order.compare(record, after) > 0))
+                .sorted(order).limit(limit).toList();
     }
 
     @Override

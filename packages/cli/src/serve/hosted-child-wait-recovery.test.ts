@@ -751,8 +751,8 @@ describe('hosted child wait recovery (#13708)', () => {
   });
 
   // #13753 I2: a worktree orphan's fold carries its merge outcome, as the
-  // live wait's answer does; a shared one's carries none.
-  it.each(['shared', 'worktree'] as const)(
+  // live wait's answer does; a shared or snapshot one's carries none (I3).
+  it.each(['shared', 'worktree', 'snapshot'] as const)(
     'an admitted %s orphan never gets the fabricated answer: its own outcome folds',
     async (workspaceMode) => {
       await parkWedged(true);
@@ -862,12 +862,15 @@ describe('hosted child wait recovery (#13708)', () => {
   );
 
   // A started worktree orphan that failed tells the parent to inspect its
-  // Workspace; a shared one, or one that never started, adds nothing.
+  // Workspace; a shared or snapshot one, or one that never started, adds
+  // nothing.
   it.each([
     ['worktree', true, false, true],
     ['worktree', true, true, true],
     ['worktree', false, false, false],
     ['shared', true, false, false],
+    ['snapshot', true, false, false],
+    ['snapshot', true, true, false],
   ] as const)(
     'an ended admitted %s orphan (started: %s, cancelled: %s) folds the workspace line: %s',
     async (workspaceMode, started, cancelled, line) => {

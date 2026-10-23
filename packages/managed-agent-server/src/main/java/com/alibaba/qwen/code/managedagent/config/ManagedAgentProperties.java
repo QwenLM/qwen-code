@@ -1,20 +1,27 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
 import jakarta.annotation.PostConstruct;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.convert.DurationUnit;
+import org.springframework.boot.web.server.Ssl;
 import org.springframework.context.EnvironmentAware;
 import org.springframework.core.env.Environment;
 
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
@@ -22,11 +29,19 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 @ConfigurationProperties("qwen.managed-agent")
 public class ManagedAgentProperties implements EnvironmentAware {
     private static final Logger LOG = LoggerFactory.getLogger(
             ManagedAgentProperties.class);
+
+    private static final Set<String> HARNESS_CREDENTIAL_KEYS =
+            Set.of("QWEN_SERVER_TOKEN", "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST");
+    // `-` stays last, where it is literal inside the character class.
+    private static final String CREDENTIAL_PUNCTUATION = "._:/+=-";
+    private static final Pattern PLAIN_CREDENTIAL =
+            Pattern.compile("[A-Za-z0-9" + CREDENTIAL_PUNCTUATION + "]*");
 
     private final Harness harness = new Harness();
     private final SessionStore sessionStore = new SessionStore();
@@ -46,12 +61,22 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private List<String> definitionToolProfiles =
             List.of("hosted-workspace-files/1");
     private List<String> definitionModels = List.of();
+    private List<ModelOption> modelCatalog = List.of();
     private String trustedActorHeader = "";
+    // Validation may run more than once; the file is read only the first time.
+    private boolean harnessCredentialsApplied;
     // Null on a plain `new`; the sweep then falls back to magnitude bands.
     private Environment environment;
 
     public Harness getHarness() {
         return harness;
+    }
+
+    public boolean admitsPublicChildAgents() {
+        return harness.isWorkspaceChildAgentsEnabled() && harness.isWorkspaceShellEnabled()
+                && runtimeBroker.isDurableLocalProcess()
+                && LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
+                && "session".equals(runtimeBroker.getBoundSessionIsolationClass());
     }
 
     public Auth getAuth() {
@@ -121,6 +146,24 @@ public class ManagedAgentProperties implements EnvironmentAware {
         this.definitionModels = definitionModels;
     }
 
+    public List<ModelOption> getModelCatalog() {
+        return modelCatalog;
+    }
+
+    public void setModelCatalog(List<ModelOption> modelCatalog) {
+        this.modelCatalog = List.copyOf(modelCatalog);
+    }
+
+    public static class ModelOption {
+        private String modelId;
+        private String label;
+
+        public String getModelId() { return modelId; }
+        public void setModelId(String modelId) { this.modelId = modelId; }
+        public String getLabel() { return label; }
+        public void setLabel(String label) { this.label = label; }
+    }
+
     public String getTrustedActorHeader() {
         return trustedActorHeader;
     }
@@ -134,12 +177,168 @@ public class ManagedAgentProperties implements EnvironmentAware {
         this.environment = environment;
     }
 
+    /** Runs the startup validation without a Spring context. */
+    public void validateForPreflight() {
+        validateWorkspaceFiles();
+    }
+
+    // The Harness's own environment file is the one copy of the shared
+    // credentials. Its values reach this configuration only, never this
+    // process's environment, which Runtime workers would inherit.
+    private void applyHarnessCredentialsFile() {
+        String file = harness.getCredentialsFile();
+        if (!harness.isEnabled() || harnessCredentialsApplied || StringUtils.isBlank(file)) {
+            return;
+        }
+        if (StringUtils.isNotBlank(harness.getToken()) || StringUtils.isNotBlank(harness.getCapabilityDigest())) {
+            throw new IllegalStateException("Configure the Hosted Harness token and capability digest either in"
+                    + " harness.credentials-file or directly, not both");
+        }
+        Map<String, String> values = readHarnessEnvironmentFile(file);
+        String token = credential(values, "QWEN_SERVER_TOKEN", file);
+        String digest = credential(values, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", file);
+        harness.setToken(token);
+        harness.setCapabilityDigest(digest);
+        harnessCredentialsApplied = true;
+    }
+
+    /** Whether startup validation has bound the credentials from the Harness credentials file. */
+    public boolean harnessCredentialsApplied() {
+        return harnessCredentialsApplied;
+    }
+
+    // systemd and a shell `source` both read this file for the Harness, so
+    // accept only lines both read the way this parser does and refuse the
+    // rest, instead of silently taking a different value.
+    private static Map<String, String> readHarnessEnvironmentFile(String file) {
+        String[] lines;
+        try {
+            lines = Files.readString(Path.of(file), StandardCharsets.UTF_8).split("\n", -1);
+        } catch (IOException | RuntimeException error) {
+            throw new IllegalStateException("Hosted Harness credentials file " + file + " cannot be read ("
+                    + error.getClass().getSimpleName() + ")");
+        }
+        Map<String, String> values = new LinkedHashMap<>();
+        for (int index = 0; index < lines.length; index++) {
+            // A shell keeps a carriage return in the value.
+            if (lines[index].indexOf('\r') >= 0) {
+                throw unsupportedCredentialLine(file, index, "a carriage return");
+            }
+            String line = lines[index].strip();
+            if (line.endsWith("\\")) {
+                throw unsupportedCredentialLine(file, index, "a line continuation");
+            }
+            // systemd skips a `;` comment, but a shell refuses it and stops
+            // reading the file there, wherever it falls.
+            if (line.startsWith(";")) {
+                throw unsupportedCredentialLine(file, index, "a comment starting with `;` instead of `#`");
+            }
+            int separator = line.indexOf('=');
+            if (line.startsWith("#") || separator < 0) {
+                continue;
+            }
+            String key = line.substring(0, separator).strip();
+            String value = line.substring(separator + 1);
+            boolean credential = HARNESS_CREDENTIAL_KEYS.contains(key);
+            // A shell runs `KEY = value` or `KEY= value` as a command instead.
+            if (credential && (key.length() != separator || !value.equals(value.stripLeading()))) {
+                throw unsupportedCredentialLine(file, index, "whitespace around `=` in " + key);
+            }
+            value = value.strip();
+            char quote = value.isEmpty() ? 0 : value.charAt(0);
+            if (quote == '"' && value.indexOf('\\') >= 0) {
+                throw unsupportedCredentialLine(file, index, "an escape inside double quotes");
+            }
+            if (quote == '"' || quote == '\'') {
+                int close = value.indexOf(quote, 1);
+                if (close < 0) {
+                    throw unsupportedCredentialLine(file, index, "an unterminated quote");
+                }
+                if (close != value.length() - 1) {
+                    throw unsupportedCredentialLine(file, index, "text after a closing quote");
+                }
+                value = value.substring(1, close);
+            }
+            // Both readers take these characters literally anywhere in a
+            // value; a shell gives others, such as `;`, `&` or `~`, meaning.
+            if (credential && !PLAIN_CREDENTIAL.matcher(value).matches()) {
+                throw unsupportedCredentialLine(file, index,
+                        "a character other than letters, digits and `" + CREDENTIAL_PUNCTUATION + "` in " + key);
+            }
+            values.put(key, value);
+        }
+        return values;
+    }
+
+    // Names the line, never its content: the line may hold a credential.
+    private static IllegalStateException unsupportedCredentialLine(String file, int index, String construct) {
+        return new IllegalStateException("Hosted Harness credentials file " + file + " line " + (index + 1)
+                + " uses " + construct + "; write KEY=value without continuations, escapes, expansions"
+                + " or trailing text");
+    }
+
+    private static String credential(Map<String, String> values, String key, String file) {
+        String value = values.get(key);
+        if (StringUtils.isBlank(value)) {
+            throw new IllegalStateException("Hosted Harness credentials file " + file + " does not set " + key);
+        }
+        return value;
+    }
+
+    // On a single host the Harness reaches the store routes on this
+    // server's loopback listener, and the store scope is the Runtime
+    // Broker's workspace identity, so neither needs its own setting.
+    private void applySessionStoreDefaults() {
+        if (!sessionStore.isEnabled()) {
+            return;
+        }
+        if (StringUtils.isBlank(sessionStore.getBaseUrl()) && environment != null) {
+            sessionStore.setBaseUrl(localStoreBaseUrl());
+        }
+        if (StringUtils.isNotBlank(sessionStore.getWorkspaceId())) {
+            return;
+        }
+        String provisioner = runtimeBroker.getProvisioner();
+        if (StringUtils.isNotBlank(runtimeBroker.getWorkspaceId())) {
+            sessionStore.setWorkspaceId(runtimeBroker.getWorkspaceId());
+        } else if (StringUtils.isNotBlank(runtimeBroker.getWorkspaceCwd())
+                && (LocalProcessRuntimeProvisioner.KIND.equals(provisioner)
+                        || "kubernetes".equals(provisioner))) {
+            sessionStore.setWorkspaceId(EmbeddedRuntimeBroker.workspaceId(runtimeBroker));
+        }
+    }
+
+    private String localStoreBaseUrl() {
+        boolean internal = internalServer.getPort() > 0;
+        int port = internal ? internalServer.getPort()
+                : environment.getProperty("server.port", Integer.class, 8080);
+        String address = internal ? internalServer.getAddress()
+                : environment.getProperty("server.address", "");
+        // The internal listener is always plaintext; a TLS public listener
+        // needs a URL whose certificate the Harness accepts.
+        if (port <= 0 || !internal
+                && Ssl.isEnabled(Binder.get(environment).bind("server.ssl", Ssl.class).orElse(null))) {
+            return "";
+        }
+        return switch (address) {
+            case "", "0.0.0.0", "::", "127.0.0.1" -> "http://127.0.0.1:" + port;
+            case "::1" -> "http://[::1]:" + port;
+            default -> "";
+        };
+    }
+
     @PostConstruct
     void validateWorkspaceFiles() {
+        applySessionStoreDefaults();
+        applyHarnessCredentialsFile();
         // The sweep runs first, so a bare milliseconds-style override
         // warns with the unit hint before the range check below fails the
         // boot, and the refusal message itself names the convention.
         warnOnSecondScaleOverrides();
+        if (runtimeBroker.getSsh().isEnabled() && (!harness.isWorkspaceFilesEnabled()
+                || runtimeBroker.getSsh().getNodes().isEmpty())) {
+            throw new IllegalStateException("SSH Runtime requires Workspace files and configured nodes");
+        }
         runtimeBroker.getRetention().validate();
         long timeout = harness.getApprovalTimeout().toMillis();
         if (timeout < 1000 || timeout > 86400000) {
@@ -147,6 +346,20 @@ public class ManagedAgentProperties implements EnvironmentAware {
                     + " a suffix-less number binds as seconds, so write 300s rather than 300000");
         }
         String mode = harness.getApprovalMode();
+        boolean residentFiles = "kubernetes-workspace".equals(runtimeBroker.getProvisioner())
+                && "workspace".equals(runtimeBroker.getIsolationClass())
+                && !runtimeBroker.getResidentWorkspaces().isEmpty() && runtimeBroker.getWorkspaceMounts().isEmpty()
+                && runtimeBroker.getSsh().getNodes().isEmpty()
+                && !runtimeBroker.isTrustedLocalRebootRecovery() && !runtimeBroker.isVerifiedWorkspaceRecoveryEnabled()
+                && !runtimeBroker.isChildWorkspacesEnabled() && !harness.isWorkspaceShellEnabled()
+                && !runtimeBroker.getResidentKubernetesApiUrl().isBlank()
+                && !runtimeBroker.getResidentKubernetesTokenFile().isBlank() && !runtimeBroker.getResidentKubernetesCaFile().isBlank();
+        if (!runtimeBroker.getResidentWorkspaces().isEmpty()) {
+            new com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaces(runtimeBroker.getResidentWorkspaces());
+            if (!residentFiles || !harness.isWorkspaceFilesEnabled()) {
+                throw new IllegalStateException("Resident Workspaces require exclusive CSI/files configuration");
+            }
+        }
         if (harness.isWorkspaceShellEnabled()
                 && (!harness.isWorkspaceFilesEnabled()
                         || mode == null
@@ -158,9 +371,12 @@ public class ManagedAgentProperties implements EnvironmentAware {
                 && (!harness.isEnabled()
                         || !sessionStore.isEnabled()
                         || !runtimeBroker.isEnabled()
-                        || !LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
+                        || !residentFiles && (!LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
                         || !WorkspaceExecutionProfile.admitsIsolationClass(runtimeBroker.getIsolationClass())
-                        || runtimeBroker.getWorkspaceMounts().isEmpty()
+                        || (runtimeBroker.getWorkspaceMounts().isEmpty()
+                                && runtimeBroker.getWorkspaceCreationRoot().isBlank()
+                                && !runtimeBroker.isVerifiedWorkspaceRecoveryEnabled()
+                                && runtimeBroker.getSsh().getNodes().isEmpty()))
                         || mode == null
                         || !Set.of("yolo", "default", "auto-edit")
                                 .contains(
@@ -169,6 +385,32 @@ public class ManagedAgentProperties implements EnvironmentAware {
                     "Hosted Workspace files require"
                             + " a supported Harness, Session Store and Session-isolated"
                             + " local-process Broker with Workspace mounts");
+        }
+        String boundSessionIsolation = runtimeBroker.getBoundSessionIsolationClass();
+        if (!"session".equals(boundSessionIsolation) && !"workspace".equals(boundSessionIsolation)) {
+            throw new IllegalStateException("Bound-Session isolation must be session or workspace");
+        }
+        if ("workspace".equals(boundSessionIsolation)
+                && (!LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
+                        || !runtimeBroker.isDurableLocalProcess()
+                        || runtimeBroker.isChildWorkspacesEnabled())) {
+            throw new IllegalStateException("Workspace-isolated bound Sessions require a durable"
+                    + " local-process Broker and cannot combine with child Workspaces");
+        }
+        // Under Session isolation, which SSH-bound Sessions always use, a
+        // create warm would start one worker per unused Session and
+        // disqualify its never-initialized close receipt.
+        if (runtimeBroker.isSessionCreateWarm() && (!"workspace".equals(boundSessionIsolation)
+                || !runtimeBroker.getSsh().getNodes().isEmpty())) {
+            throw new IllegalStateException("Session-create warm requires Workspace-isolated"
+                    + " bound Sessions and no SSH nodes");
+        }
+        if ((!runtimeBroker.getWorkspaceCreationRoot().isBlank() || runtimeBroker.isLocalDirectoryImportEnabled())
+                && (!harness.isWorkspaceFilesEnabled()
+                        || !runtimeBroker.isDurableLocalProcess()
+                        || !runtimeBroker.isVerifiedWorkspaceRecoveryEnabled())) {
+            throw new IllegalStateException("Workspace creation requires Workspace files, durable"
+                    + " local-process execution and verified Workspace recovery");
         }
         // A definition Session publishes its instructions through the
         // Session Store at Harness create, so the Harness implies the
@@ -197,6 +439,12 @@ public class ManagedAgentProperties implements EnvironmentAware {
                         "Automation scan-delay, lease, late-tolerance and lookback must be positive durations.");
             }
         }
+        // Snapshot children (#13753 I3) are read-only child Workspaces: they
+        // need the capability itself. Their switch is separate so it can be
+        // turned on once every replica runs a relay that knows the mode.
+        if (runtimeBroker.isChildSnapshotsEnabled() && !runtimeBroker.isChildWorkspacesEnabled()) {
+            throw new IllegalStateException("Child snapshots require child Workspaces");
+        }
         // The child Workspace capability (#13753 I1) runs Git in this
         // control plane against an administrator mount, so it needs the
         // local-process Broker that mounts the storage here.
@@ -207,7 +455,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
                     || !LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
                     || !"session".equals(runtimeBroker.getIsolationClass())
                     || !runtimeBroker.isDurableLocalProcess()
-                    || runtimeBroker.getWorkspaceMounts().isEmpty()) {
+                    || (runtimeBroker.getWorkspaceMounts().isEmpty()
+                                && runtimeBroker.getWorkspaceCreationRoot().isBlank())) {
                 throw new IllegalStateException("Child Workspaces require a Session-isolated"
                         + " durable local-process Broker with Workspace mounts");
             }
@@ -358,9 +607,11 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private boolean enabled;
         private boolean workspaceFilesEnabled;
         private boolean workspaceShellEnabled;
+        private boolean workspaceChildAgentsEnabled = true;
         private String baseUrl = "http://127.0.0.1:4170";
         private String token = "";
         private String capabilityDigest = "";
+        private String credentialsFile = "";
         private String approvalMode = "yolo";
         // Unit-less operator overrides must bind in the annotated unit; an
         // un-annotated Duration silently binds milliseconds.
@@ -408,6 +659,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
             this.workspaceFilesEnabled = workspaceFilesEnabled;
         }
 
+        public boolean isWorkspaceChildAgentsEnabled() { return workspaceChildAgentsEnabled; }
+
+        public void setWorkspaceChildAgentsEnabled(boolean value) { workspaceChildAgentsEnabled = value; }
+
         public boolean isWorkspaceShellEnabled() {
             return workspaceShellEnabled;
         }
@@ -438,6 +693,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setCapabilityDigest(String capabilityDigest) {
             this.capabilityDigest = capabilityDigest;
+        }
+
+        public String getCredentialsFile() {
+            return credentialsFile;
+        }
+
+        public void setCredentialsFile(String credentialsFile) {
+            this.credentialsFile = credentialsFile;
         }
 
         public String getApprovalMode() {
@@ -648,17 +911,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private int verificationConcurrency = 2;
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration deletionGrace = Duration.ofHours(24);
-        // Off by default: the head's activation columns are only trustworthy
-        // once no pre-V36 binary can still commit. Enable after the fleet
-        // fully runs the schema's version.
-        private boolean journalHeadAuthorization;
-
-        public boolean isJournalHeadAuthorization() { return journalHeadAuthorization; }
         public boolean isAsyncVerificationEnabled() { return asyncVerificationEnabled; }
         public void setAsyncVerificationEnabled(boolean value) { asyncVerificationEnabled = value; }
         public int getVerificationConcurrency() { return verificationConcurrency; }
         public void setVerificationConcurrency(int value) { verificationConcurrency = value; }
-        public void setJournalHeadAuthorization(boolean value) { journalHeadAuthorization = value; }
         public boolean isGcEnabled() { return gcEnabled; }
         public void setGcEnabled(boolean value) { gcEnabled = value; }
         public Duration getDeletionGrace() { return deletionGrace; }
@@ -736,6 +992,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration retryMaxDelay = Duration.ofMinutes(1);
         private int maxPreAdmissionRetries = 5;
+        private int maxPostAdmissionRetries = 10;
+        private int maxOperationRetries = 10;
 
         public Duration getLeaseDuration() {
             return leaseDuration;
@@ -775,6 +1033,22 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setMaxPreAdmissionRetries(int maxPreAdmissionRetries) {
             this.maxPreAdmissionRetries = maxPreAdmissionRetries;
+        }
+
+        public int getMaxPostAdmissionRetries() {
+            return maxPostAdmissionRetries;
+        }
+
+        public void setMaxPostAdmissionRetries(int maxPostAdmissionRetries) {
+            this.maxPostAdmissionRetries = maxPostAdmissionRetries;
+        }
+
+        public int getMaxOperationRetries() {
+            return maxOperationRetries;
+        }
+
+        public void setMaxOperationRetries(int maxOperationRetries) {
+            this.maxOperationRetries = maxOperationRetries;
         }
     }
 
@@ -879,6 +1153,11 @@ public class ManagedAgentProperties implements EnvironmentAware {
     }
 
     public static class RuntimeBroker {
+        private final SshRuntimeSettings ssh = new SshRuntimeSettings();
+
+        public SshRuntimeSettings getSsh() {
+            return ssh;
+        }
         private boolean enabled;
         private final Retention retention = new Retention();
         private String host = "127.0.0.1";
@@ -892,7 +1171,15 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private String workspaceGeneration = "1";
         private String workspaceCwd = "";
         private List<WorkspaceMount> workspaceMounts = List.of();
+        private List<ResidentWorkspace> residentWorkspaces = List.of();
+        private String residentKubernetesApiUrl = "";
+        private String residentKubernetesTokenFile = "";
+        private String residentKubernetesCaFile = "";
+        private String workspaceCreationRoot = "";
+        private boolean localDirectoryImportEnabled;
         private String isolationClass = "session";
+        private String boundSessionIsolationClass = "session";
+        private boolean sessionCreateWarm;
         private String stateDirectory = "";
         private boolean durableLocalProcess = true;
         private boolean trustedLocalRebootRecovery = true;
@@ -900,6 +1187,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private boolean verifiedWorkspaceRecoveryEnabled;
         private String credentialKeyId = "";
         private String credentialKey = "";
+        private Map<String, String> previousCredentialKeys =
+                new LinkedHashMap<>();
         private String nodeExecutable = "";
         private String workerEntry = "";
         private String staticEndpoint = "";
@@ -909,6 +1198,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private long staticEpoch = 1;
         private Map<String, String> environment = new LinkedHashMap<>();
         private boolean childWorkspacesEnabled;
+        private boolean childSnapshotsEnabled;
         private String childWorkspaceGit = "git";
         @DurationUnit(ChronoUnit.MILLIS)
         private Duration childWorkspaceGitTimeout = Duration.ofMinutes(2);
@@ -1029,6 +1319,22 @@ public class ManagedAgentProperties implements EnvironmentAware {
             return isolationClass;
         }
 
+        public String getBoundSessionIsolationClass() {
+            return boundSessionIsolationClass;
+        }
+
+        public void setBoundSessionIsolationClass(String boundSessionIsolationClass) {
+            this.boundSessionIsolationClass = boundSessionIsolationClass;
+        }
+
+        public boolean isSessionCreateWarm() {
+            return sessionCreateWarm;
+        }
+
+        public void setSessionCreateWarm(boolean sessionCreateWarm) {
+            this.sessionCreateWarm = sessionCreateWarm;
+        }
+
         public List<WorkspaceMount> getWorkspaceMounts() {
             return workspaceMounts;
         }
@@ -1037,8 +1343,58 @@ public class ManagedAgentProperties implements EnvironmentAware {
             this.workspaceMounts = workspaceMounts;
         }
 
+        public String getWorkspaceCreationRoot() {
+            return workspaceCreationRoot;
+        }
+
+        public void setWorkspaceCreationRoot(String workspaceCreationRoot) {
+            this.workspaceCreationRoot = workspaceCreationRoot;
+        }
+
+        public boolean isLocalDirectoryImportEnabled() {
+            return localDirectoryImportEnabled;
+        }
+
+        public void setLocalDirectoryImportEnabled(boolean localDirectoryImportEnabled) {
+            this.localDirectoryImportEnabled = localDirectoryImportEnabled;
+        }
+
         public record WorkspaceMount(String tenantId, String storageId, String root) {
         }
+
+        public record ResidentWorkspace(String workspaceId, long workspaceGeneration,
+                com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRegistration registration,
+                com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiResourceGuard.ProtectionIdentity protection,
+                String image, List<String> command,
+                List<com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiRuntimeProvisioner.WorkerArtifact> artifacts) {
+            public ResidentWorkspace {
+                if (registration == null || protection == null || workspaceId == null || workspaceId.isBlank()
+                        || workspaceGeneration < 1 || image == null || !image.matches("[^\\s]+@sha256:[0-9a-f]{64}")
+                        || command == null || command.isEmpty() || command.size() > 32
+                        || command.stream().anyMatch(value -> value == null || value.isBlank()
+                                || value.length() > 8192 || value.indexOf('\0') >= 0)
+                        || artifacts == null || artifacts.size() > 48
+                        || artifacts.stream().anyMatch(java.util.Objects::isNull)
+                        || artifacts.stream().map(com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiRuntimeProvisioner.WorkerArtifact::configMapName)
+                                .distinct().count() != artifacts.size()) {
+                    throw new IllegalArgumentException("Invalid resident Workspace configuration");
+                }
+                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(registration.tenantId(),
+                        workspaceId, workspaceGeneration, registration.storageId(), ".",
+                        com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+                command = List.copyOf(command);
+                artifacts = List.copyOf(artifacts);
+            }
+        }
+
+        public List<ResidentWorkspace> getResidentWorkspaces() { return residentWorkspaces; }
+        public void setResidentWorkspaces(List<ResidentWorkspace> value) { residentWorkspaces = List.copyOf(value); }
+        public String getResidentKubernetesApiUrl() { return residentKubernetesApiUrl; }
+        public void setResidentKubernetesApiUrl(String value) { residentKubernetesApiUrl = value; }
+        public String getResidentKubernetesTokenFile() { return residentKubernetesTokenFile; }
+        public void setResidentKubernetesTokenFile(String value) { residentKubernetesTokenFile = value; }
+        public String getResidentKubernetesCaFile() { return residentKubernetesCaFile; }
+        public void setResidentKubernetesCaFile(String value) { residentKubernetesCaFile = value; }
 
         public void setIsolationClass(String isolationClass) {
             this.isolationClass = isolationClass;
@@ -1078,6 +1434,20 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setChildWorkspacesEnabled(boolean childWorkspacesEnabled) {
             this.childWorkspacesEnabled = childWorkspacesEnabled;
+        }
+
+        /**
+         * Whether hosted Sessions may launch read-only snapshot children
+         * (#13753 I3). A relay from before snapshots would create one as a
+         * shared writer, so this is turned on only after every control-plane
+         * replica runs this version.
+         */
+        public boolean isChildSnapshotsEnabled() {
+            return childSnapshotsEnabled;
+        }
+
+        public void setChildSnapshotsEnabled(boolean childSnapshotsEnabled) {
+            this.childSnapshotsEnabled = childSnapshotsEnabled;
         }
 
         public String getChildWorkspaceGit() {
@@ -1122,6 +1492,15 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setCredentialKey(String credentialKey) {
             this.credentialKey = credentialKey;
+        }
+
+        public Map<String, String> getPreviousCredentialKeys() {
+            return previousCredentialKeys;
+        }
+
+        public void setPreviousCredentialKeys(
+                Map<String, String> previousCredentialKeys) {
+            this.previousCredentialKeys = previousCredentialKeys;
         }
 
         public String getNodeExecutable() {

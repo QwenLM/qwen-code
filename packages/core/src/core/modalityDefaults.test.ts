@@ -177,10 +177,16 @@ describe('defaultModalities', () => {
       ['deepseek-reasoner', TEXT_ONLY],
       // (QwenLM/qwen-code#10270)
       ['non-vision deepseek-v4-flash', TEXT_ONLY, 'deepseek-v4-flash'],
+      ['deepseek-v4.1-flash', TEXT_ONLY],
+      ['deepseek-v4-pro', TEXT_ONLY],
     ]);
 
     it('returns image for deepseek-v4-flash-vision-exp', () => {
       IMAGE_NO_PDF('deepseek-v4-flash-vision-exp');
+    });
+
+    it('returns image for the official deepseek-flash', () => {
+      IMAGE_NO_PDF('deepseek-flash');
     });
   });
 

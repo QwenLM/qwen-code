@@ -219,6 +219,7 @@ So this slice builds one member-to-lead **command channel** for those calls. The
       - `planned`: the entry is cancelled, and the call answered as not sent; a handover that wins the race is answered as an `accepting` entry is;
       - a checkpoint naming a command call with no outbound entry: answered as not sent, and the batch's other calls filled from the journal (decision 4);
       - `rejected`, `cancelled`, `unknown`: said so, with `unknown` never presented as done.
+      - For a `member_message` in `accepting` or `unknown`, the answer says some recipients may already have the message or receive it later, and prohibits sending it again. The task board cannot establish message delivery. Live, resumed and interrupted-turn answers use the command kind committed in the journal; board commands and `plan_submit` retain their existing wording.
     - **The lead's calls** (`team_plan_approval`, `request_shutdown`) are answered from their committed records, as H4e-b1's team calls are, with the split answer of decision 9 for a decision recorded but not delivered.
 
 ## Tools

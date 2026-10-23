@@ -9,6 +9,7 @@
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ManagedAgentProvider } from '../managed/managed-agent-provider';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -95,6 +96,26 @@ vi.mock('../mcp/McpManagerPage', () => ({
 const { PluginManagerPage } = await import('./PluginManagerPage');
 const { I18nProvider } = await import('../../i18n');
 
+it('keeps the Managed MCP entry separate from the daemon when no Session is selected', async () => {
+  const provider = { storageKey: 'managed' } as ManagedAgentProvider;
+  await act(async () =>
+    root.render(
+      <I18nProvider language="en">
+        <PluginManagerPage
+          onClose={vi.fn()}
+          onUseSkill={vi.fn()}
+          initialTab="mcp"
+          managedMcp={{ provider }}
+        />
+      </I18nProvider>,
+    ),
+  );
+  expect(container.querySelector('[data-testid="mcp-page"]')).toBeNull();
+  expect(container.querySelector('[data-managed-mcp-manager]')).not.toBeNull();
+  expect(container.textContent).toContain('Select a Managed Session');
+  expect(container.querySelector('[aria-label="Workspace"]')).toBeNull();
+});
+
 let container: HTMLDivElement;
 let root: Root;
 
@@ -156,6 +177,40 @@ describe('PluginManagerPage Skills workspace selector', () => {
       container.querySelector('[data-testid="workspace-cwd"]')?.textContent,
     ).toBe('/work/b');
   });
+
+  it.each([false, true])(
+    'reports the displayed Skills workspace (split runtime: %s)',
+    async (split) => {
+      workspaceState.capabilities.features = split
+        ? ['workspace_skills_config_runtime']
+        : [];
+      workspaceState.capabilities.workspaces[0]!.trusted = true;
+      const onSkillsWorkspaceChange = vi.fn();
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <PluginManagerPage
+              initialTab="skills"
+              skillsWorkspaceCwd="/work/b"
+              onSkillsWorkspaceChange={onSkillsWorkspaceChange}
+              managedSkills
+              onClose={vi.fn()}
+              onUseSkill={vi.fn()}
+            />
+          </I18nProvider>,
+        );
+      });
+      const expected = split ? '/work/b' : '/work/a';
+      expect(onSkillsWorkspaceChange).toHaveBeenLastCalledWith(expected);
+      const openSkill = [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'open skill',
+      );
+      await act(async () => openSkill!.click());
+      expect(
+        container.querySelector('[data-testid="workspace-cwd"]')?.textContent,
+      ).toBe(expected);
+    },
+  );
 
   it('keeps legacy Skills management on the primary workspace', async () => {
     workspaceState.capabilities.features = [];

@@ -173,7 +173,7 @@ public final class InMemoryRuntimeBindingRepository
             RuntimeSessionRepository sessions, RuntimeSessionRecord candidate) {
         RuntimeBindingRecord binding = findById(candidate.getBindingId());
         RuntimeAdmission.requireReady(binding, candidate.getRuntimeGeneration());
-        requireAdmission(binding.getRequest());
+        requireAdmission(binding.getRequest(), candidate.getSession().getHarnessSessionId());
         if (!binding.getRequest().getScope().equals(
                 candidate.getSession().getScope())) {
             throw new IllegalArgumentException("Session scope differs from binding");
@@ -199,7 +199,7 @@ public final class InMemoryRuntimeBindingRepository
         }
         RuntimeBindingRecord binding = findById(expected.getBindingId());
         RuntimeAdmission.requireReady(binding, expected.getRuntimeGeneration());
-        requireAdmission(binding.getRequest());
+        requireAdmission(binding.getRequest(), expected.getSession().getHarnessSessionId());
         if (!binding.getRequest().getScope().equals(expected.getSession().getScope())) {
             throw new IllegalArgumentException("Session scope differs from binding");
         }
@@ -226,7 +226,7 @@ public final class InMemoryRuntimeBindingRepository
         }
         RuntimeBindingRecord binding = findById(candidate.getBindingId());
         RuntimeAdmission.requireReady(binding, candidate.getRuntimeGeneration());
-        requireAdmission(binding.getRequest());
+        requireAdmission(binding.getRequest(), candidate.getHarnessSessionId());
         synchronized (sessions) {
             RuntimeAdmission.requireSession(sessions.findById(
                     binding.getRequest().getScope(),
@@ -273,12 +273,15 @@ public final class InMemoryRuntimeBindingRepository
                 .sorted(java.util.Comparator.comparing(RuntimeBindingRecord::getBindingId)).limit(limit).toList();
     }
 
-    private void requireAdmission(RuntimeProvisionRequest request) {
+    /** {@code runtimeSessionHarness} is the admitted Session's owner, or null for placement. */
+    private void requireAdmission(RuntimeProvisionRequest request, String runtimeSessionHarness) {
         if (request.getStorageId() != null && isStorageFenced(request.getScope().getTenantId(), request.getStorageId(), null)) {
             throw new RuntimeBrokerException(409, "workspace_migrating", "Storage is under maintenance.", false);
         }
-        if ("session".equals(request.getScope().getIsolationClass())
-                && isHarnessDraining(request.getScope().getTenantId(), request.getIsolationKey())) {
+        boolean shared = HarnessOwnership.sharesRuntimeSessions(request);
+        String owner = shared ? runtimeSessionHarness : request.getIsolationKey();
+        if ((shared ? owner != null : "session".equals(request.getScope().getIsolationClass()))
+                && isHarnessDraining(request.getScope().getTenantId(), owner)) {
             throw new RuntimeBrokerException(409, "runtime_admission_closed", "Session is draining.", false);
         }
     }
@@ -329,7 +332,7 @@ public final class InMemoryRuntimeBindingRepository
         if (request == null) {
             throw new IllegalArgumentException("request is required");
         }
-        requireAdmission(request);
+        requireAdmission(request, null);
         RuntimeBindingRecord existing = findActive(request);
         if (existing != null) {
             return existing;

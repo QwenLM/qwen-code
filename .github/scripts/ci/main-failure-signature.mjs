@@ -1,16 +1,15 @@
 #!/usr/bin/env node
 /**
- * Turn the logs of a failed main-branch CI run into a stable failure signature.
+ * Analyze failed CI logs and render failure details.
  *
- * `main-ci-failure-issue.yml` used to dedupe on the commit SHA, so a standing
- * red opened one fresh issue per merged commit (six duplicates for a single
- * broken E2E test on 2026-07-26). Deduping on *what broke* collapses those into
- * one issue that records each recurrence instead.
+ * main-ci-failure-issue.yml consumes only `analyze` and `comment`: extracted
+ * tests populate the failure summary, while the workflow aggregates issues
+ * by workflow identity rather than by test or commit signatures.
  *
- * Every failing test gets its own `qwen-main-ci-failure-test:<key>` marker in
- * the issue body, so an issue is matched when the current failure set overlaps
- * the recorded one at all — `[A]` then `[A, B]` updates the issue that already
- * tracks A rather than opening a second one.
+ * The legacy `plan`/title/body-renderer pipeline has no shipped caller and is
+ * retained for revertability. It places a `qwen-main-ci-failure-test:<key>`
+ * marker for each test in the body, allowing overlapping failure sets such as
+ * `[A]` then `[A, B]` to share an issue; unknown tests fall back to a commit key.
  */
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -324,9 +323,6 @@ const ALSO_FAILING_BLOCK = /\n*##\s+Also failing\s*\n+(?:- [^\n]*\n?)+/;
 // two-space ones failedJobLines emits — the strip stops at the first line
 // that is not one, never consuming a human bullet that starts with `- `.
 const FAILED_JOBS_BLOCK = /\n*- Failed jobs:\n(?: {2}- [^\n]*\n?)+/;
-// Only refresh marked machine lines; human notes can quote the visible text.
-const JOB_LOG_COVERAGE_LINE =
-  /^- Job logs analyzed:[^\n]*<!-- qwen-main-ci-failure-coverage -->\n?/gm;
 
 // The same split/merge contract — head / recorded occurrences / tail around
 // the marker, human text kept verbatim, occurrences newest-first and capped —
@@ -363,18 +359,9 @@ function failedJobLines(failedJobs) {
   });
 }
 
-function jobLogCoverageLine(analysis) {
-  const { logCount, failedJobs } = analysis;
-  if (!failedJobs.length) {
-    return `- Job logs analyzed: ${logCount}; failed-job entries empty or unavailable. <!-- qwen-main-ci-failure-coverage -->`;
-  }
-  const incomplete =
-    logCount === failedJobs.length ? '' : ' (incomplete coverage)';
-  return `- Job logs analyzed: ${logCount} of ${failedJobs.length} failed-job logs${incomplete}. <!-- qwen-main-ci-failure-coverage -->`;
-}
-
 /**
- * A run with no identifiable failing test keeps the original per-commit marker
+ * A run that failed before any test result was reported — an install or build
+ * break — has nothing to dedupe on, so it keeps the original per-commit marker
  * and title. The failed job and step still go in the body: they are what tells
  * a reader which lane broke when no test name survived to say so.
  */
@@ -382,12 +369,10 @@ function renderPerCommitBody({ analysis, occurrence }) {
   return [
     `<!-- ${LEGACY_MARKER_PREFIX}${occurrence.sha} -->`,
     '',
-    'A main-branch CI run failed on `main`.',
-    'No failing test identifiers were extracted from the available job logs,',
-    'so this issue is tracked per commit. This does not establish whether tests ran.',
+    'A CI run failed before any test result was reported, so this issue is',
+    'tracked per commit.',
     '',
     `- Workflow: ${analysis.workflow}`,
-    jobLogCoverageLine(analysis),
     ...(analysis.failedJobs.length
       ? ['- Failed jobs:', ...failedJobLines(analysis.failedJobs)]
       : []),
@@ -414,6 +399,45 @@ function cappedTestLines(tests) {
   if (tests.length > MAX_BODY_TESTS)
     lines.push(`- …and ${tests.length - MAX_BODY_TESTS} more`);
   return lines;
+}
+
+export function renderFailureComment({ analysis, occurrence, jobs = [] }) {
+  const code = (text) => `\`${String(text).replace(/[`\r\n]/g, ' ')}\``;
+  const failedJobs = jobs.filter((job) => job.conclusion === 'failure');
+  const coverage = failedJobs.length
+    ? `${analysis.logCount} of ${failedJobs.length} failed-job logs${analysis.logCount === failedJobs.length ? '' : ' (incomplete coverage)'}.`
+    : `${analysis.logCount}; failed-job entries empty or unavailable.`;
+  return [
+    `<!-- qwen-managed-agent-ci-failure:${occurrence.runId} -->`,
+    `### ${code(analysis.workflow)} failed`,
+    '',
+    `[Run ${occurrence.runId}](${occurrence.runUrl}) · commit ${code(occurrence.sha.slice(0, 12))}`,
+    '',
+    `- Job logs analyzed: ${coverage}`,
+    '',
+    ...failedJobs.map((job) => {
+      const steps = (job.steps ?? [])
+        .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))
+        .map((step) => code(step.name));
+      return `- [${code(job.name)}](${job.html_url})${steps.length ? `: ${steps.join(', ')}` : ''}`;
+    }),
+    '',
+    ...(analysis.tests.length
+      ? [
+          '**Failing tests**',
+          '',
+          ...analysis.tests
+            .slice(0, MAX_BODY_TESTS)
+            .map((test) => `- ${code(test.id)}`),
+          ...(analysis.tests.length > MAX_BODY_TESTS
+            ? [`- …and ${analysis.tests.length - MAX_BODY_TESTS} more`]
+            : []),
+        ]
+      : [
+          'No test identifier was available; follow the run link for job logs and annotations.',
+        ]),
+    '',
+  ].join('\n');
 }
 
 /**
@@ -446,14 +470,13 @@ export function renderIssueBody({
       `<!-- ${SIGNATURE_MARKER_PREFIX}${analysis.signature} -->`,
       ...bodyMarkers.map((marker) => `<!-- ${marker} -->`),
       '',
-      `A main-branch \`${analysis.workflow}\` run failed on \`main\`.`,
+      `A \`${analysis.workflow}\` run failed.`,
       // The failing tests name what broke; the failed jobs name which lane
       // broke — a guard's diagnosis (the colliding files) lives only in its
       // job log.
       ...(analysis.failedJobs.length
         ? ['', '- Failed jobs:', ...failedJobLines(analysis.failedJobs)]
         : []),
-      jobLogCoverageLine(analysis),
       '',
       '## Failing tests',
       '',
@@ -488,7 +511,6 @@ export function renderIssueBody({
   const strippedProse = prose
     .replace(ALSO_FAILING_BLOCK, '')
     .replace(FAILED_JOBS_BLOCK, '\n')
-    .replace(JOB_LOG_COVERAGE_LINE, '')
     .trimEnd();
 
   // Record markers for tests that joined the failure set after the issue was
@@ -507,10 +529,9 @@ export function renderIssueBody({
   const withJobs = analysis.failedJobs.length
     ? `${withMarkers}\n\n- Failed jobs:\n${failedJobLines(analysis.failedJobs).join('\n')}`
     : withMarkers;
-  const withCoverage = `${withJobs}\n${jobLogCoverageLine(analysis)}`;
   const withTests = missingTests.length
-    ? `${withCoverage}\n\n${ALSO_FAILING_HEADING}\n\n${missingTests.join('\n')}`
-    : withCoverage;
+    ? `${withJobs}\n\n${ALSO_FAILING_HEADING}\n\n${missingTests.join('\n')}`
+    : withJobs;
 
   // A re-run of the same run must not add a second line for it. Match the
   // `[run <id>]` link text, not the run URL: `/301` is a substring of `/3010`,
@@ -559,10 +580,38 @@ function readFailedJobs(path) {
     return [];
   }
 }
+/**
+ * The workflow's jobs listing can be missing or truncated (the redirect
+ * empties it when `gh api` dies before writing), and the comment must degrade
+ * the same way the issue path does — name no job — instead of failing the
+ * analyze job and losing both reports.
+ */
+function readJobs(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')).jobs ?? [];
+  } catch {
+    return [];
+  }
+}
 
 export function runCli(argv) {
   const [command, ...rest] = argv;
   const { options, positional } = parseArgs(rest);
+
+  if (command === 'comment') {
+    process.stdout.write(
+      renderFailureComment({
+        analysis: JSON.parse(readFileSync(options.analysis, 'utf8')),
+        occurrence: {
+          sha: options.sha,
+          runId: options['run-id'],
+          runUrl: options['run-url'],
+        },
+        jobs: readJobs(options['jobs-json']),
+      }),
+    );
+    return;
+  }
 
   if (command === 'analyze') {
     const logTexts = positional.map((file) => readFileSync(file, 'utf8'));

@@ -1,15 +1,10 @@
 package com.alibaba.qwen.code.runtimebroker.managedschema;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
+import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+
+import javax.sql.DataSource;
 
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -17,20 +12,103 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-import javax.sql.DataSource;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ManagedSchemaTest {
+    @Test
+    void preservesSessionAndTurnModelsAcrossRestart() throws Exception {
+        DataSource source = source();
+        ManagedSchema.initialize(source);
+        assertEquals(1, ManagedSchema.schemaVersion(source));
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
+                    + " VALUES ('tenant','session','qwen-code',1,1)");
+            statement.execute("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,"
+                    + "payload_digest,status,gmt_create,gmt_modified) VALUES ('tenant','session','turn',"
+                    + "'prompt','[]','digest','COMPLETED',1,1)");
+        }
+        ManagedSchema.initialize(source);
+        assertEquals(1, ManagedSchema.schemaVersion(source));
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            try (var row = statement.executeQuery("SELECT model_id,model_revision FROM ma_session")) {
+                assertTrue(row.next());
+                assertNull(row.getObject(1));
+                assertEquals(0, row.getLong(2));
+            }
+            try (var row = statement.executeQuery("SELECT model_id,model_revision FROM ma_turn")) {
+                assertTrue(row.next());
+                assertNull(row.getObject(1));
+                assertNull(row.getObject(2));
+            }
+            assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_session SET model_id='m'"));
+            assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_turn SET model_id='m'"));
+            assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_turn SET model_revision=1"));
+            statement.execute("UPDATE ma_session SET model_id='m',model_revision=1");
+            statement.execute("UPDATE ma_turn SET model_id='m',model_revision=1");
+            assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_session SET model_revision=9007199254740992"));
+        }
+        ManagedSchema.validate(source);
+    }
+
     @Test
     void initializesExactly32TablesAndValidatesWithoutRewriting() throws Exception {
         DataSource source = source();
         ManagedSchema.initialize(source);
         ManagedSchema.initialize(source);
         ManagedSchema.validate(source);
+        assertEquals(1, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection()) {
             assertEquals(
                     ManagedSchemaContract.TABLES, ManagedSchemaCatalog.tables(connection).keySet());
             assertEquals(32, ManagedSchemaCatalog.tables(connection).size());
         }
+    }
+
+    @Test
+    void preservesReceiptsAndNamespaceConstraintsAcrossRestart() throws Exception {
+        DataSource source = initialized();
+        try (var connection = source.getConnection()) {
+            receipt(connection, "session", "SESSION_COMMAND");
+            receipt(connection, "workspace", "WORKSPACE_CREATE");
+        }
+        ManagedSchema.initialize(source);
+        assertEquals(1, ManagedSchema.schemaVersion(source));
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            try (var row = statement.executeQuery("SELECT COUNT(*) FROM ma_request_receipt")) {
+                assertTrue(row.next());
+                assertEquals(2, row.getInt(1));
+            }
+            for (String invalid : Set.of("WORKSPACE_CREATE ", "workspace_create", "OTHER")) {
+                assertThrows(SQLException.class, () -> receipt(connection, invalid, invalid));
+            }
+        }
+    }
+
+    @Test
+    void rejectsSameNameNamespaceConstraintWithAnUnpublishedDefinition() throws Exception {
+        DataSource source = initialized();
+        String declaration =
+                ManagedSchema.ddl()
+                        .lines()
+                        .filter(line -> line.contains("CONSTRAINT ck_ma_request_namespace CHECK"))
+                        .findFirst()
+                        .orElseThrow()
+                        .trim()
+                        .replaceFirst(",$", "");
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute(
+                    "ALTER TABLE ma_request_receipt DROP CONSTRAINT ck_ma_request_namespace");
+            statement.execute(
+                    "ALTER TABLE ma_request_receipt ADD "
+                            + declaration.replace("'WORKSPACE_CREATE'", "'WORKSPACE_ATTACK'"));
+        }
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.schemaVersion(source));
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
     }
 
     @Test
@@ -314,9 +392,9 @@ class ManagedSchemaTest {
                 var statement = connection.createStatement()) {
             statement.execute(
                     "INSERT INTO ma_session_head"
-                        + " (tenant_key,harness_key,tenant_id,session_id,harness_session_id,head_kind,gmt_create,gmt_modified,o3_backfill_pending)"
+                        + " (tenant_key,harness_key,tenant_id,session_id,harness_session_id,head_kind,gmt_create,gmt_modified)"
                         + " VALUES ('tenant',"
-                        + "'harness','tenant','harness','harness','HARNESS'," + ManagedSchemaTime.SQL_NOW + "," + ManagedSchemaTime.SQL_NOW + ",FALSE)");
+                        + "'harness','tenant','harness','harness','HARNESS'," + ManagedSchemaTime.SQL_NOW + "," + ManagedSchemaTime.SQL_NOW + ")");
             try (var row =
                     statement.executeQuery(
                             "SELECT journal_revision,writer_generation,activation_epoch FROM"
@@ -388,6 +466,30 @@ class ManagedSchemaTest {
             assertThrows(
                     SQLException.class,
                     () -> statement.execute("UPDATE ma_operation SET claim_generation = -1"));
+        }
+    }
+
+    // Server and Broker must admit every operation kind their routes write.
+    @Test
+    void theCurrentOperationKindCheckAdmitsEveryShippedKind() throws Exception {
+        DataSource migrated = source();
+        Flyway.configure()
+                .dataSource(migrated)
+                .locations(ManagedSchema.FLYWAY_LOCATION)
+                .load()
+                .migrate();
+        for (DataSource source : new DataSource[] {initialized(), migrated}) {
+            try (var connection = source.getConnection();
+                    var statement = connection.createStatement()) {
+                for (var kind : ManagedSchemaContract.OperationKind.values()) {
+                    operation(statement, kind.name(), kind.name(), kind.name(), null);
+                }
+                // SshWorkspaceStore writes this kind as a plain string.
+                operation(statement, "WORKSPACE_CREATE", "WORKSPACE_CREATE",
+                        "WORKSPACE_CREATE", null);
+                assertThrows(SQLException.class,
+                        () -> operation(statement, "unknown", "INPUT", "unknown", null));
+            }
         }
     }
 
@@ -573,6 +675,23 @@ class ManagedSchemaTest {
         DataSource source = source();
         ManagedSchema.initialize(source);
         return source;
+    }
+
+    private static void receipt(Connection connection, String key, String namespace)
+            throws SQLException {
+        try (var statement =
+                connection.prepareStatement(
+                        "INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key,"
+                            + " tenant_id, scope_kind, scope_key, scope_id, idempotency_key,"
+                            + " idempotency_digest, request_digest, state, gmt_create, gmt_modified)"
+                            + " VALUES (?, ?, 'tenant-key', 'tenant', 'ACTOR', 'scope', 'actor', ?,"
+                            + " ?, 'digest', 'PENDING', 1, 1)")) {
+            statement.setString(1, ManagedSchemaKeys.key(key));
+            statement.setString(2, namespace);
+            statement.setString(3, key);
+            statement.setString(4, ManagedSchemaKeys.key(key));
+            statement.executeUpdate();
+        }
     }
 
     private static DataSource source() {
