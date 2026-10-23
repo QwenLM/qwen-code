@@ -319,6 +319,18 @@ cat "\${RUNNER_TEMP}/pulls.json"
       expect(resolved.args).toBe('');
       expect(resolved.stdout).not.toContain('::warning::');
     });
+    it('still files for a later attempt of a main run', () => {
+      // The attempt guard lives in the PR-lookup else branch, so a main run
+      // files at every attempt; hoisting it below the `fi` would silently
+      // delete main's attempt-2 recovery path.
+      expect(
+        resolve([], {
+          EVENT_NAME: 'push',
+          HEAD_BRANCH: 'main',
+          RUN_ATTEMPT: '2',
+        }).output,
+      ).toBe('pr_number=\nfile_issue=true\n');
+    });
     it('warns and reports nothing when the run resolves to no destination', () => {
       // A manual dispatch on a branch with no open PR is admitted and then
       // dropped; the warning keeps the miss distinguishable from "correctly
@@ -1458,11 +1470,22 @@ printf '%s\\n' '{"jobs":[]}'
     ['github-actions[bot]', 'PATCH', 'issues/comments/456', '', 1, false],
     // A suppressed rerun finds the comment an earlier attempt linked to a
     // still-open issue; the whole-body PATCH must not drop that link.
-    ['github-actions[bot]', 'PATCH', 'issues/comments/456', '', 0, true],
-    ['github-actions[bot]', null, null, '', 3, false],
+    ['github-actions[bot]', 'PATCH', 'issues/comments/456', '', 0, true, 0],
+    // A publish failure on attempt 1 re-enters the loop with the body already
+    // written once; the assembly truncate must keep the link single.
+    ['github-actions[bot]', 'PATCH', 'issues/comments/456', '', 0, true, 1],
+    ['github-actions[bot]', null, null, '', 3, false, 0],
   ])(
     'upserts a %s comment via %s with %s and issue=%s after %s lookup errors (existing tracking: %s)',
-    (login, method, endpoint, issueUrl, failures, existingTracking) => {
+    (
+      login,
+      method,
+      endpoint,
+      issueUrl,
+      failures,
+      existingTracking,
+      publishFailures = 0,
+    ) => {
       const tmp = mkdtempSync(join(tmpdir(), 'java-ci-comment-'));
       try {
         const step = jobs.report_pr.steps[0];
@@ -1498,6 +1521,10 @@ if [[ "$*" == *--paginate* ]]; then
   if [[ "$count" -le "\${LOOKUP_FAILURES}" ]]; then exit 1; fi
   cat "\${RUNNER_TEMP}/comments.json"
 else
+  count=$(cat "\${RUNNER_TEMP}/publishes" 2>/dev/null || echo 0)
+  count=$((count + 1))
+  echo "$count" > "\${RUNNER_TEMP}/publishes"
+  if [[ "$count" -le "\${PUBLISH_FAILURES:-0}" ]]; then exit 1; fi
   printf '%s\n' "$@" > "\${RUNNER_TEMP}/published-args"
 fi
 `,
@@ -1517,6 +1544,7 @@ fi
             COMMENT_BODY: comment,
             ISSUE_URL: issueUrl,
             LOOKUP_FAILURES: String(failures),
+            PUBLISH_FAILURES: String(publishFailures),
           },
         });
         expect(result.status, result.stderr).toBe(method ? 0 : 1);
@@ -1526,15 +1554,30 @@ fi
             `${method}\nrepos/QwenLM/qwen-code/${endpoint}\n`,
           );
         else expect(existsSync(published)).toBe(false);
-        const publishedBody = readFileSync(join(tmp, 'pr-comment.md'), 'utf8');
-        if (existingTracking) {
-          expect(publishedBody).toContain(
-            '[Tracking issue](https://github.com/QwenLM/qwen-code/issues/15240)',
+        if (method) {
+          const publishedBody = readFileSync(
+            join(tmp, 'pr-comment.md'),
+            'utf8',
           );
-        } else {
-          expect(publishedBody.includes('[Tracking issue]')).toBe(
-            Boolean(issueUrl),
-          );
+          if (existingTracking) {
+            expect(publishedBody).toContain(
+              '[Tracking issue](https://github.com/QwenLM/qwen-code/issues/15240)',
+            );
+            expect(publishedBody.match(/\[Tracking issue\]\(/g)).toHaveLength(
+              1,
+            );
+          } else {
+            expect(publishedBody.includes('[Tracking issue]')).toBe(
+              Boolean(issueUrl),
+            );
+          }
+          // The emitter's line must stay the one the recovery grep accepts;
+          // decorating it would silently drop the link on a suppressed rerun.
+          if (issueUrl) {
+            expect(/^\[Tracking issue\]\([^)]*\)$/m.test(publishedBody)).toBe(
+              true,
+            );
+          }
         }
         expect(JSON.stringify(jobs.report_pr)).not.toContain(
           'actions/checkout',
