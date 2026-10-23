@@ -46,7 +46,7 @@ const CHECK_CONTEXT_FIELDS = `nodes {
   __typename
   ... on CheckRun {
     name status conclusion detailsUrl databaseId
-    checkSuite { workflowRun { event workflow { name } } }
+    checkSuite { app { databaseId } workflowRun { event workflow { databaseId } } }
   }
   ... on StatusContext { context state targetUrl createdAt }
 }`;
@@ -167,9 +167,10 @@ type CheckContext =
       /** Grows with every run, so it orders the attempts of one check. */
       databaseId: number;
       checkSuite?: {
+        app: { databaseId: number } | null;
         workflowRun: {
           event: string;
-          workflow: { name: string } | null;
+          workflow: { databaseId: number } | null;
         } | null;
       } | null;
     }
@@ -288,7 +289,6 @@ const TRUSTED_ASSOCIATIONS: Record<string, Trust> = {
 const FAILED_CONCLUSIONS = new Set(['FAILURE', 'TIMED_OUT', 'STARTUP_FAILURE']);
 const FAILED_STATUSES = new Set(['FAILURE', 'ERROR']);
 const PENDING_STATUSES = new Set(['PENDING', 'EXPECTED']);
-/** Comment ids a gate cursor remembers; older ones can no longer be new. */
 /** Reported comment ids the query no longer returns are bounded to this
  * many; ids still on the page are always kept (see `buildGateSnapshot`). */
 const MAX_OFF_PAGE_COMMENT_IDS = 2000;
@@ -325,16 +325,29 @@ type CiFailed = Extract<SnapshotEvent, { type: 'ci_failed' }>;
  * and each trigger of a workflow that runs on several events. Only the
  * latest run of a check says whether it is failing now; a failure that a
  * re-run turned green is history.
+ *
+ * A check run is one check per app, workflow, trigger and name. The app
+ * keeps apart two providers that publish the same name, since a branch rule
+ * can require the check from one of them; workflows are told apart by id,
+ * since two workflow files may share a display name.
  */
 function latestContexts(nodes: CheckContext[]): CheckContext[] {
   const latest = new Map<string, CheckContext>();
   for (const ctx of nodes) {
-    const run =
-      ctx.__typename === 'CheckRun' ? ctx.checkSuite?.workflowRun : null;
-    const key =
-      ctx.__typename === 'CheckRun'
-        ? `run\0${run?.workflow?.name ?? ''}\0${run?.event ?? ''}\0${ctx.name}`
-        : `status\0${ctx.context}`;
+    let key: string;
+    if (ctx.__typename === 'CheckRun') {
+      const suite = ctx.checkSuite;
+      const run = suite?.workflowRun;
+      key = [
+        'run',
+        suite?.app?.databaseId ?? '',
+        run?.workflow?.databaseId ?? '',
+        run?.event ?? '',
+        ctx.name,
+      ].join('\0');
+    } else {
+      key = `status\0${ctx.context}`;
+    }
     const seen = latest.get(key);
     if (!seen || attemptOrder(ctx) > attemptOrder(seen)) latest.set(key, ctx);
   }
@@ -661,9 +674,18 @@ export function buildGateSnapshot(
   for (const id of next.reportedCommentIds) {
     (onPage.has(id) ? kept : gone).push(id);
   }
+  // What the prepared watch handled becomes the gate's own while the query
+  // returns it: `cleanup` removes the state and keeps this cursor, and the
+  // scheduled gate must stay quiet about those comments afterwards. One
+  // off the page can no longer be an event, so it is not adopted.
+  const known = new Set(next.reportedCommentIds);
+  const adopted = new Set(
+    watch.seenCommentIds.filter((id) => onPage.has(id) && !known.has(id)),
+  );
   next.reportedCommentIds = [
     ...gone.slice(-MAX_OFF_PAGE_COMMENT_IDS),
     ...kept,
+    ...adopted,
     ...comments.ids,
   ];
 

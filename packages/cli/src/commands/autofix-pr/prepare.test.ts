@@ -384,6 +384,15 @@ describe('runPrepare (real git)', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     runPrepare({ pr: 7, repo: 'O/R', host: 'GitHub.com' });
     expect(lastReport()).toMatchObject({ resumed: true, headSha });
+    runPrepare({ pr: 7, repo: 'o/r', host: 'github.com:443' });
+    expect(lastReport()).toMatchObject({ resumed: true, headSha });
+  });
+
+  it('does not resume a watch of the same host on another port', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(() =>
+      runPrepare({ pr: 7, repo: 'o/r', host: 'github.com:8443' }),
+    ).toThrow(/is a watch of github\.com\/o\/r, not github\.com:8443\/o\/r/);
   });
 
   it('refuses to create the worktree through a symlinked .qwen', () => {

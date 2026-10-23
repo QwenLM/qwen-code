@@ -165,7 +165,10 @@ worktree included:
    worktree was removed (also with `rm -rf`, which `git worktree prune`
    clears), it is recreated and the recorded `pushedShas`,
    `handledCommentIds` and `postedCommentIds` are kept. A state file for
-   another repository's PR of the same number is a refusal.
+   another repository's PR of the same number is a refusal. Repositories
+   compare as on GitHub: owner and name without case, and the host without
+   case or the default port, but with any other port, which may name another
+   instance.
 8. Print a JSON report: worktree path, branch, head SHA, base/head refs, push
    target, viewer and PR author logins, draft and fork flags, and
    `localUnpushedCommits`, the number of commits on the user's own copy of the
@@ -191,9 +194,12 @@ reads:
 
 The rollup lists every run on the head: earlier attempts of a re-run job,
 and each trigger of a workflow that runs on several events. Only the latest
-run of each check counts — a check is a workflow, its trigger event and the
-job name, ordered by the run's id; a commit status is its context, ordered by
-creation time — so a failure that a re-run turned green is not reported.
+run of each check counts — a check run is its app, its workflow (by id: two
+workflow files may share a name), the trigger event and the job name,
+ordered by the run's id; a commit status is its context, ordered by creation
+time — so a failure that a re-run turned green is not reported. Two apps that
+publish a check of the same name publish two checks: a branch rule can
+require it from either, so one's success does not clear the other's failure.
 
 Without `--gate`, `snapshot` compares them with the state file `prepare`
 wrote and prints events plus one action:
@@ -279,9 +285,10 @@ PR's repository (or the prepared state supplies it), and its own cursor,
 `.qwen/tmp/autofix-pr-<n>-gate.json`, records what it has already reported.
 Without `--host` (or `GH_HOST`) it uses the host the PR is already watched
 on — its cursor's, or the prepared state's — before falling back to
-github.com. It prints the same JSON, but only the transitions since the
-previous run, and prints nothing when there are none, so the session is
-woken only for them:
+github.com. A cursor for another repository's PR of the same number is a
+refusal, compared as `prepare` compares state files. It prints the same
+JSON, but only the transitions since the previous run, and prints nothing
+when there are none, so the session is woken only for them:
 
 - A failed check is reported once per (check, head, attempt): the cursor key
   carries the run's id (a commit status: its creation time), so a re-run
@@ -294,7 +301,9 @@ woken only for them:
 - Comments, reviews and thread comments are reported once each, by node id,
   with the trust rules of Section 8. The viewer's own comments are never
   events, nor are the ones a prepared watch of the same PR has handled
-  (`handledCommentIds`, `postedCommentIds`). An untrusted comment alone is
+  (`handledCommentIds`, `postedCommentIds`); those the query returns are
+  adopted into the cursor, so they stay quiet once `cleanup` has removed the
+  state file. An untrusted comment alone is
   reported as a notice (`wait`). The cursor keeps every reported id the query
   still returns, however many, and bounds only the ids that left the page, so
   an identical poll is quiet.

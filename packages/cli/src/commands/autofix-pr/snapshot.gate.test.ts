@@ -462,7 +462,7 @@ describe('buildGateSnapshot', () => {
     ).toMatchObject({ action: 'fix', events: [{ type: 'ci_failed' }] });
   });
 
-  it('does not report comments the prepared watch already handled', () => {
+  it('does not report comments the prepared watch already handled, nor once it is gone', () => {
     const data = pr({
       reviewThreads: {
         pageInfo: { hasNextPage: false },
@@ -471,9 +471,16 @@ describe('buildGateSnapshot', () => {
     });
     const result = buildGateSnapshot(data, cursor({ headSha: null }), {
       knownHeads: [],
-      seenCommentIds: ['C1'],
+      seenCommentIds: ['C1', 'C1', 'C9'],
     });
     expect(result.snapshot).toBeNull();
+    // Adopted while on the page; an id off the page cannot be an event.
+    expect(result.cursor.reportedCommentIds).toEqual(['C1']);
+    // `cleanup` removed the state; the cursor alone keeps the gate quiet.
+    expect(buildGateSnapshot(data, result.cursor)).toEqual({
+      snapshot: null,
+      cursor: result.cursor,
+    });
   });
 });
 
@@ -603,6 +610,50 @@ describe('fetchPrData', () => {
     expect(mockGh.mock.calls[1]).toContain('after=t1');
   });
 
+  it('reads the newest 100 comments of each thread, and its root apart', () => {
+    mockGh
+      .mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            viewer: { login: 'me' },
+            repository: {
+              pullRequest: pr({
+                reviewThreads: {
+                  pageInfo: { hasNextPage: true, endCursor: 't1' },
+                  nodes: [],
+                },
+              }),
+            },
+          },
+        }),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                reviewThreads: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [],
+                },
+              },
+            },
+          },
+        }),
+      );
+    fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 });
+    // A reply past the 100th comment of a thread is the one that can be new.
+    for (const call of mockGh.mock.calls) {
+      const query = (call as string[]).find((arg) => arg.startsWith('query='));
+      expect(query).toMatch(/root: comments\(first: 1\)/);
+      expect(query).toMatch(
+        /\n\s*comments\(last: 100\) \{\s*pageInfo \{ hasPreviousPage \}/,
+      );
+      expect(query).not.toMatch(/comments\(first: 100/);
+    }
+    expect(mockGh).toHaveBeenCalledTimes(2);
+  });
+
   it('fails clearly when the PR does not exist', () => {
     mockGh.mockReturnValueOnce(
       JSON.stringify({
@@ -697,6 +748,27 @@ describe('runSnapshot --gate', () => {
     expect(() => runSnapshot({ pr: 7, repo: 'O/R', gate: true })).not.toThrow();
   });
 
+  it('tells apart Enterprise instances on different ports', () => {
+    respond(withComments());
+    runSnapshot({ pr: 7, repo: 'o/r', host: 'ghe.corp:8443', gate: true });
+    expect(() =>
+      runSnapshot({ pr: 7, repo: 'o/r', host: 'ghe.corp:9443', gate: true }),
+    ).toThrow(/gate on ghe\.corp:8443\/o\/r, not ghe\.corp:9443\/o\/r/);
+    expect(mockGh).toHaveBeenCalledTimes(1);
+    respond(withComments());
+    runSnapshot({ pr: 7, repo: 'o/r', host: 'GHE.corp:8443', gate: true });
+    expect(mockGh).toHaveBeenCalledTimes(2);
+
+    // The default port is no port at all.
+    rmSync(gatePath());
+    respond(withComments());
+    runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+    respond(withComments());
+    expect(() =>
+      runSnapshot({ pr: 7, repo: 'o/r', host: 'github.com:443', gate: true }),
+    ).not.toThrow();
+  });
+
   it('asks for --repo on a first run with nothing prepared', () => {
     expect(() => runSnapshot({ pr: 7, gate: true })).toThrow(/pass --repo/);
     expect(mockGh).not.toHaveBeenCalled();
@@ -740,5 +812,14 @@ describe('runSnapshot --gate', () => {
     respond(pushed);
     runSnapshot({ pr: 7, gate: true });
     expect(mocks.stdout).not.toHaveBeenCalled();
+
+    // `cleanup` removes the state and keeps the cursor: the handled comment
+    // stays handled, and the recorded host is still the one asked.
+    rmSync(statePath);
+    setGhHost(undefined);
+    respond(pushed);
+    runSnapshot({ pr: 7, gate: true });
+    expect(mocks.stdout).not.toHaveBeenCalled();
+    expect(getGhHost()).toBe('ghe.corp');
   });
 });

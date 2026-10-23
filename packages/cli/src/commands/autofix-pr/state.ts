@@ -7,10 +7,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
-import {
-  hostsEquivalent,
-  normalizeSegment,
-} from '../review/lib/remote-match.js';
+import { normalizeGhHostForUrl } from '../review/lib/gh.js';
+import { normalizeSegment } from '../review/lib/remote-match.js';
 
 export const REPLY_MARKER = '<!-- qwen-autofix-pr:v1 -->';
 
@@ -127,15 +125,17 @@ export function writeGateCursor(
 
 /**
  * Whether two `host/owner/repo` triples name the same repository. GitHub
- * compares owner and repository names without case, and a host's spelling
- * (case, port, trailing dot) does not change the instance.
+ * compares owner and repository names without case. The hosts are API
+ * hosts: case, a trailing dot and the default port do not change the
+ * instance, but any other port may name another one, so it is kept (unlike
+ * remote matching, where a Git transport's port says nothing about the API).
  */
 export function sameRepository(
   a: { host: string; owner: string; repo: string },
   b: { host: string; owner: string; repo: string },
 ): boolean {
   return (
-    hostsEquivalent(a.host, b.host) &&
+    normalizeGhHostForUrl(a.host) === normalizeGhHostForUrl(b.host) &&
     normalizeSegment(a.owner) === normalizeSegment(b.owner) &&
     normalizeSegment(a.repo) === normalizeSegment(b.repo)
   );

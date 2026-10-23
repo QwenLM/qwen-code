@@ -48,14 +48,15 @@ clone of a repository with open PRs you can read.
 ## Automated coverage
 
 `snapshot.test.ts` pins the prepared-mode diffing, including the latest run
-per check and the reply-marker rule; `snapshot.gate.test.ts` pins the gate
+per check (apps and workflows kept apart) and the reply-marker rule; `snapshot.gate.test.ts` pins the gate
 cursor rules (quiet runs, a failure once per attempt and again after a re-run
 fails, a failure re-run green, conflict marks and their clearing, the
 viewer's own comments, an untrusted comment as a notice, merge and close once
-and reopen, a new cut once, a prepared watch's pushes and handled comments),
-the check rollup and review thread paging, and the command layer (cursor
-written before the output, byte-identical quiet runs, repository identity,
-the recorded host). `watch-repo.test.ts` pins the silent first run,
+and reopen, a new cut once, a prepared watch's pushes and handled comments,
+which stay quiet after its state is gone), the check rollup and review
+thread paging and the newest-100 read of a thread, and the command layer
+(cursor written before the output, byte-identical quiet runs, repository
+identity including a non-default port, the recorded host). `watch-repo.test.ts` pins the silent first run,
 opened/pushed/ready events, quiet repeats, cursor pruning only when the list
 was cut, the cursor file name, a viewer change, and every filter.
 `prepare.test.ts`, `cleanup.test.ts` and `ci-log.test.ts` cover the helpers

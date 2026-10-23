@@ -106,7 +106,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 4. 确定推送目标。优先使用唯一一个和 head 仓库匹配、并且只推送到它的本地 remote：匹配器只读 fetch URL，所以该 remote 推送到的每一个 URL——它的 `pushurl`，或者多条 `url` 里的每一条——都用同一个匹配器再核对一遍，任何一个目的地在别处的 remote 都不算。没有的话，按 `gh config get git_protocol` 给出的协议使用 head 仓库的 URL。把结果记到状态文件里。
 5. 状态文件就是锁。它记录会话 id（`QWEN_CODE_SESSION_ID`）；由另一个会话写下的状态文件直接导致拒绝，绝不抢占。
 6. 把 `refs/pull/<n>/head` fetch 到本地分支 `qwen-autofix/pr-<n>`，并在它上面创建 worktree。`prepare` 从不丢弃之前的工作：残留的 worktree，或可能含有超出记录 head 的提交的残留分支，都会导致拒绝，并提示先运行 `cleanup`。
-7. 在拥有这次监视的会话里重新运行 `prepare`，且 worktree 还在时，直接报告现有状态并带上 `resumed: true`，不再调用其他任何东西。如果 worktree 已被删除（包括用 `rm -rf` 删除，`git worktree prune` 会清掉它的登记），就重新创建它，并保留已记录的 `pushedShas`、`handledCommentIds` 和 `postedCommentIds`。状态文件属于另一个仓库的同号 PR 时直接拒绝。
+7. 在拥有这次监视的会话里重新运行 `prepare`，且 worktree 还在时，直接报告现有状态并带上 `resumed: true`，不再调用其他任何东西。如果 worktree 已被删除（包括用 `rm -rf` 删除，`git worktree prune` 会清掉它的登记），就重新创建它，并保留已记录的 `pushedShas`、`handledCommentIds` 和 `postedCommentIds`。状态文件属于另一个仓库的同号 PR 时直接拒绝。仓库按 GitHub 的方式比较：owner 和仓库名不区分大小写；host 不区分大小写、忽略默认端口，但保留其他端口，因为不同端口可能是不同的实例。
 8. 输出 JSON 报告：worktree 路径、分支、head SHA、base/head ref、推送目标、当前用户和 PR 作者的 login、draft 和 fork 标志，以及 `localUnpushedCommits`，即用户自己那份 head 分支上 PR 还没有的提交数。worktree 看不到这些提交。只有 upstream 是推送 remote 上 head 分支的本地分支才算这份副本，因此 fork 的 `main` 永远不会和用户自己的 `main` 比较。
 
 ### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate]`
@@ -118,7 +118,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - `reviewThreads`，翻页读到前 100 个之后（最多十页：thread 按创建先后排列，新 thread 在最后一页），每个 thread 带第一条评论的 `databaseId` 和最后 100 条评论（`id`、`databaseId`、`author { __typename login }`、`authorAssociation`、`body`、`url`）
 - 最后 100 条 `reviews` 和最后 100 条 issue 评论
 
-汇总列出 head 上的每一次运行：被重跑的 job 的早先 attempt，以及在多个事件上触发的 workflow 的每一次触发。每个检查只看最新一次运行——检查由 workflow、触发事件和 job 名确定，按运行 id 排序；commit status 由 context 确定，按创建时间排序——所以被重跑转绿的失败不会被报告。
+汇总列出 head 上的每一次运行：被重跑的 job 的早先 attempt，以及在多个事件上触发的 workflow 的每一次触发。每个检查只看最新一次运行——check run 由 app、workflow（按 id 区分：两个 workflow 文件可能同名）、触发事件和 job 名确定，按运行 id 排序；commit status 由 context 确定，按创建时间排序——所以被重跑转绿的失败不会被报告。两个 app 发布同名的检查时算两个检查：分支规则可以要求其中任一个 app 的检查，所以一个的成功不会抵消另一个的失败。
 
 不带 `--gate` 时，`snapshot` 把它们和 `prepare` 写下的状态文件对比，输出事件列表和一个动作：
 
@@ -178,12 +178,12 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 #### 闸门模式（`--gate`）
 
-`snapshot <n> --gate` 是定时任务闸门背后的那条命令。它不需要 worktree，也不需要状态文件：首次运行用 `--repo` 指定 PR 所在的仓库（或由已准备好的状态提供），它自己的游标 `.qwen/tmp/autofix-pr-<n>-gate.json` 记录已经报告过的内容。没有 `--host`（或 `GH_HOST`）时，先用该 PR 已在监视的 host——游标里的，或已准备状态里的——最后才回落到 github.com。它输出同样的 JSON，但只包含自上次运行以来的迁移，没有迁移时什么都不输出，因此会话只会为迁移被唤醒：
+`snapshot <n> --gate` 是定时任务闸门背后的那条命令。它不需要 worktree，也不需要状态文件：首次运行用 `--repo` 指定 PR 所在的仓库（或由已准备好的状态提供），它自己的游标 `.qwen/tmp/autofix-pr-<n>-gate.json` 记录已经报告过的内容。没有 `--host`（或 `GH_HOST`）时，先用该 PR 已在监视的 host——游标里的，或已准备状态里的——最后才回落到 github.com。游标属于另一个仓库的同号 PR 时直接拒绝，比较方式与 `prepare` 比较状态文件相同。它输出同样的 JSON，但只包含自上次运行以来的迁移，没有迁移时什么都不输出，因此会话只会为迁移被唤醒：
 
 - 失败的检查按（检查，head，attempt）报告一次：游标键带上运行 id（commit status 则是它的创建时间），所以重跑后再次失败的检查会再次报告，即使没有任何一次轮询看到它处于运行中。游标只保留仍然存在的失败，新的 head 从头开始。
 - 进行中的检查从不报告；不会出现 `ci_pending`。
 - 冲突按 head 报告一次；`mergeable` 清除标记，`UNKNOWN` 保留标记。
-- 评论、review 和 thread 评论按 node id 各报告一次，沿用第 8 节的信任规则。当前用户自己的评论永远不是事件，同一 PR 的已准备监视处理过的评论（`handledCommentIds`、`postedCommentIds`）也不是。只有不可信评论时作为提醒报告（`wait`）。查询结果里仍然出现的已报告 id 全部保留在游标里，不论多少；只有已经离开页面的 id 才有上限，所以内容相同的轮询是安静的。
+- 评论、review 和 thread 评论按 node id 各报告一次，沿用第 8 节的信任规则。当前用户自己的评论永远不是事件，同一 PR 的已准备监视处理过的评论（`handledCommentIds`、`postedCommentIds`）也不是；其中查询结果里还在的会被并入游标，所以 `cleanup` 删掉状态文件之后它们仍然保持安静。只有不可信评论时作为提醒报告（`wait`）。查询结果里仍然出现的已报告 id 全部保留在游标里，不论多少；只有已经离开页面的 id 才有上限，所以内容相同的轮询是安静的。
 - head 与上次运行不同时记为 `head_moved_externally`（`resync`），除非同一 PR 的已准备监视记录过或推送过它（`lastKnownHeadSha`、`pushedShas`）；首次运行只记录 head，不报告。
 - 合并或关闭报告一次（`stop`）；之后探针保持安静，重新打开的 PR 会再次被监视。
 - 某个连接开始被截断（`truncated`）时报告一次，没有其他事件时动作为 `wait`：超出最后一页的新 thread 不会留下别的痕迹。持续的截断保持安静。

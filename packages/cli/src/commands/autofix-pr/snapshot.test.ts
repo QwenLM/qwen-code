@@ -234,7 +234,7 @@ describe('buildSnapshot', () => {
     const run = (
       databaseId: number,
       conclusion: string | null,
-      workflow = 'CI',
+      workflow = 1,
       event = 'pull_request',
     ): Contexts[number] => ({
       __typename: 'CheckRun',
@@ -243,7 +243,10 @@ describe('buildSnapshot', () => {
       conclusion,
       detailsUrl: `https://github.com/o/r/actions/runs/${databaseId}/job/1`,
       databaseId,
-      checkSuite: { workflowRun: { event, workflow: { name: workflow } } },
+      checkSuite: {
+        app: { databaseId: 15368 },
+        workflowRun: { event, workflow: { databaseId: workflow } },
+      },
     });
     const failures = (contexts: Contexts) =>
       buildSnapshot(pr({}, contexts), state())
@@ -258,17 +261,51 @@ describe('buildSnapshot', () => {
     expect(
       buildSnapshot(pr({}, [run(1, 'FAILURE'), run(2, null)]), state()).events,
     ).toEqual([{ type: 'ci_pending', checks: ['Test ubuntu'] }]);
-    // The same job name in another workflow, or on another trigger, is
-    // another check.
-    expect(failures([run(1, 'FAILURE'), run(2, 'SUCCESS', 'Release')])).toEqual(
-      [1],
-    );
+    // The same job name in another workflow (even one with the same display
+    // name), or on another trigger, is another check.
+    expect(failures([run(1, 'FAILURE'), run(2, 'SUCCESS', 2)])).toEqual([1]);
     expect(
       failures([
         run(1, 'FAILURE'),
-        run(2, 'SKIPPED', 'CI', 'pull_request_review'),
+        run(2, 'SKIPPED', 1, 'pull_request_review'),
       ]),
     ).toEqual([1]);
+  });
+
+  it('keeps apart checks of the same name from different apps', () => {
+    const external = (
+      databaseId: number,
+      app: number,
+      conclusion: string,
+    ): Contexts[number] => ({
+      __typename: 'CheckRun',
+      name: 'build',
+      status: 'COMPLETED',
+      conclusion,
+      detailsUrl: `https://ci.example.com/${databaseId}`,
+      databaseId,
+      checkSuite: { app: { databaseId: app }, workflowRun: null },
+    });
+    const snap = buildSnapshot(
+      pr({}, [external(101, 1, 'FAILURE'), external(102, 2, 'SUCCESS')]),
+      state(),
+    );
+    expect(snap.action).toBe('fix');
+    expect(snap.events).toEqual([
+      {
+        type: 'ci_failed',
+        check: 'build',
+        url: 'https://ci.example.com/101',
+        runId: null,
+      },
+    ]);
+    // A later run of the same app's check does replace it.
+    expect(
+      buildSnapshot(
+        pr({}, [external(101, 1, 'FAILURE'), external(103, 1, 'SUCCESS')]),
+        state(),
+      ).events,
+    ).toEqual([]);
   });
 
   it('judges a commit status by its latest post', () => {
