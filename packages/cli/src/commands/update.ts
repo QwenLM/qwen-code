@@ -11,8 +11,15 @@ interface UpdateArgs {
   targetVersion?: string;
 }
 
-/** Longest rejected-target or download error echoed to stderr. */
+/** Longest rejected --target-version value echoed to stderr. */
 const UPDATE_ERROR_ECHO_LIMIT = 500;
+
+/**
+ * Longest updater failure echoed to stderr. The updater's own rollback
+ * failure carries a manual-recovery command, so the argv-sized bound above
+ * would cut off the only actionable part of the message.
+ */
+const UPDATE_FAILURE_ECHO_LIMIT = 4096;
 
 export const updateCommand: CommandModule<object, UpdateArgs> = {
   command: 'update',
@@ -136,7 +143,7 @@ export const updateCommand: CommandModule<object, UpdateArgs> = {
           t('Update failed: {{error}}', {
             error: sanitizeForStderr(
               err instanceof Error ? err.message : String(err),
-              UPDATE_ERROR_ECHO_LIMIT,
+              UPDATE_FAILURE_ECHO_LIMIT,
             ),
           }),
         );

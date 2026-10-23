@@ -205,6 +205,27 @@ describe('update command', () => {
     );
   });
 
+  it('keeps the manual recovery step in a long rollback failure', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/test/qwen',
+    });
+    const installs =
+      '/home/runner/.local/share/qwen-code/installations/qwen-code-linux-x64-0123456789abcdef';
+    performStandaloneUpdate.mockRejectedValue(
+      new Error(
+        'Standalone update failed AND rollback failed.\n' +
+          `Original error: EXDEV: cross-device link not permitted, rename '${installs}' -> '${installs}.old'\n` +
+          `Rollback error: ENOTEMPTY: directory not empty, rename '${installs}.old' -> '${installs}'\n` +
+          `Manual recovery: mv "${installs}.old" "${installs}"`,
+      ),
+    );
+    await updateCommand.handler({ ...updateArgs, targetVersion: '1.2.3' });
+    expect(process.exitCode).toBe(1);
+    const message = String(writeStderrLine.mock.calls.at(-1)?.[0]);
+    expect(message).toContain('Manual recovery: mv');
+  });
+
   it('rejects an unmanaged exact target without suggesting an unpinned upgrade', async () => {
     await updateCommand.handler({ ...updateArgs, targetVersion: 'v1.2.3' });
     expect(checkForUpdatesDetailed).not.toHaveBeenCalled();

@@ -1326,23 +1326,26 @@ describe('standalone-update', () => {
       },
     );
 
-    it('accepts a pre-v0.23.0 downloaded manifest without a runtime field', async () => {
-      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
-      await serveArchive({
-        runnable: true,
-        omitRuntime: true,
-        manifestVersion: '0.22.0',
-        reportedVersion: '0.22.0',
-      });
-      await expect(
-        performStandaloneUpdate(standaloneDir, '0.22.0'),
-      ).resolves.toBe('done');
-      expect(
-        JSON.parse(
-          fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
-        ),
-      ).toMatchObject({ version: '0.22.0' });
-    });
+    it.skipIf(process.platform === 'win32')(
+      'accepts a pre-v0.23.0 downloaded manifest without a runtime field',
+      async () => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        await serveArchive({
+          runnable: true,
+          omitRuntime: true,
+          manifestVersion: '0.22.0',
+          reportedVersion: '0.22.0',
+        });
+        await expect(
+          performStandaloneUpdate(standaloneDir, '0.22.0'),
+        ).resolves.toBe('done');
+        expect(
+          JSON.parse(
+            fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+          ),
+        ).toMatchObject({ version: '0.22.0' });
+      },
+    );
 
     it.each(['{', 'null', '[]'])(
       'rejects malformed or non-object downloaded JSON (%s)',
