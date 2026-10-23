@@ -85,7 +85,7 @@ for (const width of [1280, 390]) {
         return route.fulfill({ json: summary });
       if (path.endsWith('/transcript/query'))
         return route.fulfill({
-          json: { events: [], lastSequence: 0, hasMore: false },
+          json: { items: [], events: [], lastSequence: 0, hasMore: false },
         });
       if (path.endsWith('/events/stream'))
         return route.fulfill({ contentType: 'text/event-stream', body: '' });
@@ -111,6 +111,9 @@ for (const width of [1280, 390]) {
           json: {
             sessionId: summary!.sessionId,
             turnId: 'skill-turn',
+            operationId: 'submit-skill-turn',
+            admissionStage: 'java_durable',
+            deliveryState: 'pending',
             status: 'accepted',
             replayed: false,
           },

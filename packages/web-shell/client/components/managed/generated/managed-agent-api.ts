@@ -110,6 +110,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Admits the command durably and returns its operation identity, admission stage and delivery state. Replaying the same idempotency key returns the original command operation. Existing Session and actor authorization checks apply. */
         post: operations["webShellSubmitTurn"];
         delete?: never;
         options?: never;
@@ -126,6 +127,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Admits the command durably and returns its operation identity, admission stage and delivery state. Replaying the same idempotency key returns the original command operation. Existing Session and actor authorization checks apply. */
         post: operations["webShellCancelTurn"];
         delete?: never;
         options?: never;
@@ -909,7 +911,7 @@ export interface components {
             /** @default 20 */
             limit?: number | null;
             /**
-             * @description Filter before pagination. Omission preserves all readable, undeleted Sessions. Cursors are bound to this filter; legacy cursors are valid only for all.
+             * @description Filter before pagination. Omission preserves all readable, undeleted Sessions. Cursors are bound to the normalized archive state and title query.
              * @default all
              * @enum {string}
              */
@@ -944,8 +946,6 @@ export interface components {
             agentId: string;
             /** @description Optional host-catalog model for a bound built-in qwen-code Session. Requires modelSelectionSupported. Persisted atomically before the first Turn and included in creation idempotency; omission preserves the default model and old digest. */
             modelId?: string;
-            /** @description Planned; phase one rejects non-blank values. */
-            environmentId?: string | null;
             /** @description The server enforces the bound in UTF-16 code units (Java String.length()), so an astral character counts as two: a title this schema's code-point maxLength accepts can still exceed the server's 256-unit bound and answer 400 invalid_title. */
             title?: string | null;
             /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit for text-only inputs and a 32 MiB prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 8 MiB and requires input-attachments/1. */
@@ -971,12 +971,6 @@ export interface components {
             /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit for text-only inputs and a 32 MiB prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 8 MiB and requires input-attachments/1. */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
-            /**
-             * @description D7-3. java_durable asks for the java_durable admission view: the 202 then names the command's operation (operationId, admissionStage, deliveryState), so a lost response resolves through that operation. Only a deployment whose Sessions advertise durableOperations admits it; elsewhere it answers 400 unsupported_feature before anything is read or written. Absent or harness_confirmed keeps today's response. harness_confirmed is the pinned reference design's qwen_confirmed. The request digest leaves this field out, so a retry under the same idempotencyKey replays the same command in either view.
-             * @default harness_confirmed
-             * @enum {string}
-             */
-            admissionProfile?: "harness_confirmed" | "java_durable";
         };
         WebShellCancelRequest: {
             /** @description Trace correlation only. */
@@ -985,28 +979,29 @@ export interface components {
             /** Format: uuid */
             sessionId: string;
             turnId: string;
-            /**
-             * @description D7-3. java_durable asks for the java_durable admission view: the 202 then names the command's operation (operationId, admissionStage, deliveryState), so a lost response resolves through that operation. Only a deployment whose Sessions advertise durableOperations admits it; elsewhere it answers 400 unsupported_feature before anything is read or written. Absent or harness_confirmed keeps today's response. harness_confirmed is the pinned reference design's qwen_confirmed. The request digest leaves this field out, so a retry under the same idempotencyKey replays the same command in either view.
-             * @default harness_confirmed
-             * @enum {string}
-             */
-            admissionProfile?: "harness_confirmed" | "java_durable";
         };
         /** @description Arbitrary caller metadata, as a JSON object (or null). Accepted and ignored in Phase 1: nothing from it is persisted. On WebShellCreateRequest the Session title travels in that request's own `title` field; WebShellSubmitRequest has no title surface. Any keys are valid. */
         WebShellMetadata: {
             [key: string]: unknown;
         } | null;
-        /** @description accepted means Java durable delivery responsibility, not model execution. The three operation fields come together, and only on a Turn input or cancel admission that asked for admissionProfile java_durable on a deployment advertising durableOperations (D7-3): operationId names the command's original submit_input or cancel operation, readable through the operation query, and admissionStage and deliveryState are that operation's latest durable values. A fresh input reads java_durable and pending; a cancel of a Turn that already ended reads its settled values. A retry under the same key answers the same operation with replayed true. Missing fields keep the legacy harness_confirmed response semantics, also for Session creation and for a replayed command recorded before v1.58. */
+        /** @description Command admission. Session creation and internal commands may omit operation fields. */
         WebShellAdmission: {
             /** Format: uuid */
             sessionId: string;
             turnId?: string | null;
             status: string;
             replayed: boolean;
+            /** @description Durable operation identifier for turn submission or cancellation. */
             operationId?: string;
-            /** @enum {string} */
+            /**
+             * @description Persisted admission stage of the operation.
+             * @enum {string}
+             */
             admissionStage?: "java_durable" | "harness_confirmed";
-            /** @enum {string} */
+            /**
+             * @description Current delivery state of the operation.
+             * @enum {string}
+             */
             deliveryState?: "pending" | "leased" | "confirmed" | "blocked";
         };
         WebShellTurn: {
@@ -1075,11 +1070,6 @@ export interface components {
              * @default false
              */
             cwdChange?: boolean;
-            /**
-             * @description D7-3. Present only on a deployment that enables the java_durable admission profile, where it is true while the Session is readable: a Turn input or cancel may then ask for admissionProfile java_durable. Omitted elsewhere, where asking for it answers 400 unsupported_feature.
-             * @default false
-             */
-            durableOperations?: boolean;
             /** @default false */
             actions: boolean;
             /**
@@ -1951,7 +1941,7 @@ export interface components {
         };
         WebShellRenameResult: {
             sessionId: string;
-            /** @description Current persisted title from the confirmed mutation or completed replay. Existing legacy titles can exceed the fresh-title input bound. */
+            /** @description Current persisted title from the confirmed mutation or completed replay. */
             title: string;
             replayed: boolean;
         };
@@ -2098,6 +2088,26 @@ export interface components {
             cursor?: string | null;
             /** @default 100 */
             limit?: number | null;
+        };
+        /** @description Durable Turn input or cancellation admission. The operation identifies the saved command and remains stable across idempotent retries. */
+        WebShellTurnAdmission: {
+            /** Format: uuid */
+            sessionId: string;
+            turnId: string;
+            status: string;
+            replayed: boolean;
+            /** @description Durable operation identifier for turn submission or cancellation. */
+            operationId: string;
+            /**
+             * @description Persisted admission stage of the operation.
+             * @enum {string}
+             */
+            admissionStage: "java_durable" | "harness_confirmed";
+            /**
+             * @description Current delivery state of the operation.
+             * @enum {string}
+             */
+            deliveryState: "pending" | "leased" | "confirmed" | "blocked";
         };
     };
     responses: {
@@ -2395,7 +2405,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WebShellAdmission"];
+                    "application/json": components["schemas"]["WebShellTurnAdmission"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -2426,7 +2436,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WebShellAdmission"];
+                    "application/json": components["schemas"]["WebShellTurnAdmission"];
                 };
             };
             400: components["responses"]["BadRequest"];
