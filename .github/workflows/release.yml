@@ -452,6 +452,16 @@ jobs:
       - *download_release_build
       - *unpack_release_build
 
+      # Same host-wide archive cache as ci.yml's test job, which runs the same
+      # standalone runtime regression; this job also runs on a persistent host.
+      - name: 'Configure persistent standalone runtime cache (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/standalone-runtimes"
+          echo "QWEN_STANDALONE_RUNTIME_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent standalone runtime cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
       - name: 'Run Script Tests'
         env:
           VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"

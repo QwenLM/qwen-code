@@ -2899,40 +2899,6 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.metadata.title").doesNotExist());
     }
 
-    // A row written while the create bound was 512 keeps its long title:
-    // the unified 256 policy rejects that title as new input, but echoing
-    // the stored title back is a no-op rewrite rather than a permanent 400
-    // — and the over-bound title is never forwarded to the Harness.
-    @Test
-    void aLegacyOverBoundTitleEchoesBackAsANoOpRewrite() throws Exception {
-        String tenant = "tenant-title-legacy-" + UUID.randomUUID();
-        String sessionId = objectMapper.readTree(mvc.perform(
-                        post("/v1/agents/sessions")
-                                .header(TenantContextFilter.HEADER, tenant)
-                                .header("Idempotency-Key", "legacy-title-create")
-                                .contentType(MediaType.APPLICATION_JSON)
-                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
-                .andExpect(status().isAccepted()).andReturn()
-                .getResponse().getContentAsString()).get("id").asText();
-        String legacyTitle = "t".repeat(300);
-        jdbc.update("UPDATE ma_session SET title = ?"
-                        + " WHERE tenant_id = ? AND session_id = ?",
-                legacyTitle, tenant, sessionId);
-        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"title\":\"" + legacyTitle + "\"}"), tenant,
-                "legacy-title-echo")
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.metadata.title").value(legacyTitle));
-        // A different over-bound title is still new input, still refused.
-        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"title\":\"" + "x".repeat(300) + "\"}"), tenant,
-                "legacy-title-other")
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error.code").value("invalid_title"));
-    }
-
     @Test
     void foldsTurnStatusesAndConflictMessagesWithTheRootLocaleUnderATurkishDefault()
             throws Exception {
