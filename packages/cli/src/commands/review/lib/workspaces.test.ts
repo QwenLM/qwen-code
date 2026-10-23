@@ -515,8 +515,14 @@ describe('rootBuildFanOutScript', () => {
       ].join('\n'),
       'scripts/url.js':
         "fetch('https://example.com/x'); execSync('pnpm -r run build');",
+      // Flush against the code, with no space before the `//`.
+      'scripts/flush.js':
+        "execSync('tsc -p tsconfig.json');// pnpm -r run build",
     });
     expect(rootBuildFanOutScript(root, 'node scripts/line.js')).toBeUndefined();
+    expect(
+      rootBuildFanOutScript(root, 'node scripts/flush.js'),
+    ).toBeUndefined();
     expect(
       rootBuildFanOutScript(root, 'node scripts/block.js'),
     ).toBeUndefined();
