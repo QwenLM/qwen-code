@@ -531,6 +531,33 @@ describe('runReply', () => {
     expect(state().summarizedSha).toBe(pushed);
   });
 
+  it("still summarizes a push when the summary's comments were answered meanwhile", () => {
+    const pushed = 'b'.repeat(40);
+    writeState(paths.statePath, {
+      ...state(),
+      lastKnownHeadSha: pushed,
+      pushedShas: [pushed],
+      summarizedSha: HEAD,
+      handledCommentIds: ['IC_1'],
+    });
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({ headRefOid: pushed }),
+      viewer: 'me',
+    }));
+    const outcome = reply({
+      summary: { body: 'Pushed bbb: renamed.', handled: ['IC_1'] },
+    });
+    expect(outcome).toMatchObject({ summarySkipped: false });
+    expect(posts().map((p) => p.path)).toEqual(['repos/o/r/issues/7/comments']);
+    expect(state().summarizedSha).toBe(pushed);
+    // Once.
+    expect(
+      reply({ summary: { body: 'Pushed bbb: renamed.', handled: ['IC_1'] } }),
+    ).toMatchObject({
+      summarySkipped: true,
+    });
+  });
+
   it('posts again when the reply an earlier run announced never reached the PR', () => {
     mocks.ghWithInput.mockImplementationOnce(() => {
       throw new Error('connection refused');

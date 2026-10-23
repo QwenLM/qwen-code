@@ -278,8 +278,12 @@ Event rules:
   Resolved threads, empty or pending reviews, and dismissed reviews (a
   dismissed review was withdrawn) are skipped; outdated threads are kept
   with `outdated: true`.
-- A head SHA that differs from `lastKnownHeadSha` and is not in `pushedShas`
-  is `head_moved_externally`.
+- A head SHA that differs from `lastKnownHeadSha` is `head_moved_externally`
+  when the branch itself (`git ls-remote` on the push target) has left the
+  known head too — a rollback to a head the watch pushed earlier included;
+  while the branch still stands at the known head, the API is lagging
+  (`lagging`, above). When the branch cannot be read, a head in
+  `pushedShas` is taken for the watch's own.
 - `truncated` names the connections (`checks`, `reviewThreadComments`,
   `reviewThreads`, `reviews`, `comments`) that had more entries than the
   query reads.
@@ -591,7 +595,12 @@ afterwards answers `{"synced": false, "reason"}`. Whenever `sync` moves the
 worktree, it moves its checked-out submodules to the commits the new head
 records the same way, fetching a commit a submodule lacks from that
 submodule's own remote (the PR's fetch does not recurse into submodules, so
-a submodule commit that cannot be fetched does not fail it), and a worktree that is not clean afterwards answers
+a submodule commit that cannot be fetched does not fail it). `foreach` only
+lists the checked-out submodules; the fetch, with a minute of its own and
+the protocol policy git applies to submodules, and the reset run outside it,
+since a child of `foreach` would outlive a timeout that kills only the
+top-level git and go on changing the submodule after `sync` returned. No
+reset recurses into submodules, whatever `submodule.recurse` says, and a worktree that is not clean afterwards answers
 `synced: false`, so a fix never commits a submodule back to an old commit. When the
 PR's branch cannot be read (the PR was closed, the branch deleted, the
 network is down), it returns to the head the watch last knew instead.
@@ -642,10 +651,10 @@ holder's pid is checked only from the same namespace; any other lock is
 taken over once it is older than any helper runs (fifteen minutes), and
 `cleanup --force` removes it at once. Stale locks are broken one at a time,
 under an exclusive `<lock>.break` file (one left by a killed helper is
-cleared once it is a minute old, either way from now); the lock is moved
-aside first — the file itself, whatever its path holds by then — removed
-only if it holds the stale token, and put back otherwise, so a fresh lock
-is never removed.
+cleared once it is a minute old, either way from now): a lock that still
+holds the stale token there is replaced by the breaker's own token in one
+rename, so the lock path never stands empty for another helper to slip
+into, and a fresh lock is never touched.
 
 ## 7. One check (`tick`)
 

@@ -125,33 +125,43 @@ describe('withWatchLock', () => {
     });
   });
 
-  it('removes a stale lock only if it is still the one judged stale', () => {
+  it('takes over a stale lock in one step, and never a fresh one', () => {
     const stale = JSON.stringify({ pid: 1, ns: 'x', at: 0, id: 'stale' });
+    const pending = `${paths.lockPath}.mine`;
+    const mine = JSON.stringify({
+      pid: 2,
+      ns: 'x',
+      at: Date.now(),
+      id: 'mine',
+    });
     writeFileSync(paths.lockPath, stale);
     // Another helper is breaking it: this one stands back.
     const breaker = `${paths.lockPath}.break`;
     writeFileSync(breaker, '1');
-    expect(breakStaleLock(paths.lockPath, stale)).toBe(false);
+    writeFileSync(pending, mine);
+    expect(breakStaleLock(paths.lockPath, stale, pending)).toBe(false);
     expect(readFileSync(paths.lockPath, 'utf8')).toBe(stale);
     // One left by a killed helper is cleared once a minute old — either
-    // way, for a clock that is off — and the lock is broken in that call.
+    // way, for a clock that is off — and the lock is taken in that call:
+    // the stale token is replaced by this helper's, never removed first.
     const hourAgo = new Date(Date.now() - 3_600_000);
     utimesSync(breaker, hourAgo, hourAgo);
-    expect(breakStaleLock(paths.lockPath, stale)).toBe(true);
-    expect(existsSync(paths.lockPath)).toBe(false);
+    expect(breakStaleLock(paths.lockPath, stale, pending)).toBe(true);
+    expect(readFileSync(paths.lockPath, 'utf8')).toBe(mine);
     expect(existsSync(breaker)).toBe(false);
     writeFileSync(paths.lockPath, stale);
+    writeFileSync(pending, mine);
     writeFileSync(breaker, '1');
     const hourAhead = new Date(Date.now() + 3_600_000);
     utimesSync(breaker, hourAhead, hourAhead);
-    expect(breakStaleLock(paths.lockPath, stale)).toBe(true);
-    expect(existsSync(paths.lockPath)).toBe(false);
-    // Another helper took over meanwhile: its fresh lock is put back.
-    const fresh = JSON.stringify({ pid: 1, ns: 'x', at: Date.now(), id: 'f' });
+    expect(breakStaleLock(paths.lockPath, stale, pending)).toBe(true);
+    expect(readFileSync(paths.lockPath, 'utf8')).toBe(mine);
+    // A lock that is no longer the stale one is left alone.
+    const fresh = JSON.stringify({ pid: 3, ns: 'x', at: Date.now(), id: 'f' });
     writeFileSync(paths.lockPath, fresh);
-    expect(breakStaleLock(paths.lockPath, stale)).toBe(false);
+    writeFileSync(pending, mine);
+    expect(breakStaleLock(paths.lockPath, stale, pending)).toBe(false);
     expect(readFileSync(paths.lockPath, 'utf8')).toBe(fresh);
-    expect(readdirSync(dirname(paths.lockPath))).toEqual(['autofix-pr-7.lock']);
   });
 
   it('replaces a symlink planted as the lock, and refuses a directory', () => {

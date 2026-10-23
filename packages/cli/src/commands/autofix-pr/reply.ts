@@ -475,10 +475,14 @@ function replyLocked(
   // is still open; one that only reports a push, once per head.
   const summary = plan.summary;
   const summaryHandled = (summary?.handled ?? []).filter((id) => !done.has(id));
+  // A head this watch pushed and has not summarized needs its summary even
+  // when the comments it names were answered meanwhile.
+  const pushUnsummarized =
+    state.pushedShas.includes(head) && state.summarizedSha !== head;
   const summaryDue =
     summary !== null &&
     ((summary.handled ?? []).length > 0
-      ? summaryHandled.length > 0
+      ? summaryHandled.length > 0 || pushUnsummarized
       : state.summarizedSha !== head);
   if (summary && summaryDue) {
     // Its comments are recorded with it. `--no-post` records the same,

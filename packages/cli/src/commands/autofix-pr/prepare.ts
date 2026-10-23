@@ -305,15 +305,29 @@ export function runPrepare(args: PrepareArgs): void {
       `refusing to create ${paths.worktreePath}: ${redirected} is a symlink.`,
     );
   }
+  // Not into submodules: a submodule commit the PR records but no remote
+  // has must not fail the PR's own fetch, which would leave the branch
+  // behind with no state file to account for it.
   git(
     'fetch',
     '--quiet',
+    '--no-recurse-submodules',
     remote,
     `+refs/pull/${args.pr}/head:refs/heads/${paths.branch}`,
   );
   const headSha = git('rev-parse', `refs/heads/${paths.branch}`);
   mkdirSync(dirname(paths.worktreePath), { recursive: true });
-  git('worktree', 'add', '--quiet', paths.worktreePath, paths.branch);
+  // Submodules stay unpopulated whatever `submodule.recurse` says: a fix
+  // that needs one checks it out itself.
+  git(
+    '-c',
+    'submodule.recurse=false',
+    'worktree',
+    'add',
+    '--quiet',
+    paths.worktreePath,
+    paths.branch,
+  );
 
   let history: AutofixPrHistory | null = null;
   try {

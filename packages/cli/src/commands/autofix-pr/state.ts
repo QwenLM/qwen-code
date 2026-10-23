@@ -479,11 +479,8 @@ export function withWatchLock<T>(
         );
       }
       const held = readFileSync(lockPath, 'utf8');
-      if (
-        attempt === 0 &&
-        lockIsStale(held, stat.mtimeMs) &&
-        breakStaleLock(lockPath, held)
-      ) {
+      if (attempt === 0 && lockIsStale(held, stat.mtimeMs)) {
+        if (breakStaleLock(lockPath, held, pending)) break;
         continue;
       }
       throw new Error(
@@ -505,33 +502,29 @@ export function withWatchLock<T>(
 }
 
 /**
- * Removes a stale lock, unless another helper replaced it meanwhile. Locks
- * are broken one at a time, under `<lock>.break`; the lock is moved aside
- * first — the file itself, whatever its path holds by then — and removed
- * only if it is the stale one, else put back, so a fresh lock is never
- * removed.
+ * Takes over a stale lock: under `<lock>.break`, so one helper at a time,
+ * the lock still holding the stale token is replaced by `pending` (this
+ * helper's own token) in one rename. The lock path never stands empty, so
+ * no other helper can slip in between, and a fresh lock is never touched.
+ * True when this helper now holds the lock.
  */
-export function breakStaleLock(lockPath: string, stale: string): boolean {
+export function breakStaleLock(
+  lockPath: string,
+  stale: string,
+  pending: string,
+): boolean {
   const breaker = `${lockPath}.break`;
   if (!takeBreaker(breaker)) return false;
   try {
-    const aside = `${lockPath}.stale.${randomUUID()}`;
+    let current: string;
     try {
-      renameSync(lockPath, aside);
+      current = readFileSync(lockPath, 'utf8');
     } catch {
-      return true; // Gone already: try to take it.
+      return false; // Gone already: the caller takes it the usual way.
     }
-    try {
-      if (readFileSync(aside, 'utf8') === stale) return true;
-      try {
-        linkSync(aside, lockPath);
-      } catch {
-        // A helper took the free lock meanwhile; it holds it now.
-      }
-      return false;
-    } finally {
-      rmSync(aside, { force: true });
-    }
+    if (current !== stale) return false;
+    renameSync(pending, lockPath);
+    return true;
   } finally {
     rmSync(breaker, { force: true });
   }

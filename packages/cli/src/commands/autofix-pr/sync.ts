@@ -19,6 +19,11 @@
 // a round whose work was not pushed.
 
 import type { CommandModule } from 'yargs';
+import { execFileSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
+import { join } from 'node:path';
+import { isWithinRoot } from '../../config/path-comparison.js';
+import { sanitizedGitEnv } from '../review/lib/worktree.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { git, gitOpt } from '../review/lib/git.js';
 import { liveDestination } from './push.js';
@@ -119,7 +124,15 @@ function syncLocked(
   let discardedChanges = false;
   if (discard) {
     discardedChanges = hasUncommittedChanges(worktree);
-    git('-C', worktree, 'reset', '--hard', '--quiet', prHead);
+    git(
+      '-C',
+      worktree,
+      'reset',
+      '--hard',
+      '--quiet',
+      '--no-recurse-submodules',
+      prHead,
+    );
     // `-ff`: an untracked nested repository would survive one `-f`, and
     // keep the worktree from ever being clean again.
     git('-C', worktree, 'clean', '-ffdq');
@@ -143,7 +156,15 @@ function syncLocked(
         `${worktree} has uncommitted changes; commit or discard them before moving it to the new PR head.`,
       );
     }
-    git('-C', worktree, 'reset', '--hard', '--quiet', prHead);
+    git(
+      '-C',
+      worktree,
+      'reset',
+      '--hard',
+      '--quiet',
+      '--no-recurse-submodules',
+      prHead,
+    );
     alignSubmodules(worktree);
     if (own > 0) dropped = own;
   } else if (head !== prHead && !isAncestor(worktree, prHead, head)) {
@@ -163,7 +184,16 @@ function syncLocked(
         `${worktree} has uncommitted changes; commit or discard them before moving it to the new PR head.`,
       );
     }
-    git('-C', worktree, 'merge', '--ff-only', '--quiet', prHead);
+    git(
+      '-c',
+      'submodule.recurse=false',
+      '-C',
+      worktree,
+      'merge',
+      '--ff-only',
+      '--quiet',
+      prHead,
+    );
     alignSubmodules(worktree);
   }
 
@@ -190,25 +220,83 @@ function syncLocked(
   };
 }
 
+/** A submodule fetch gets less than the helper's own time. */
+const SUBMODULE_FETCH_TIMEOUT_MS = 60_000;
+
 /**
  * Moves the checked-out submodules to the commits the worktree's head
- * records, and cleans them. `foreach` visits only checked-out submodules: a
- * reset with `--recurse-submodules` would write a gitfile for one that is
- * not, and leave the worktree unreadable.
+ * records, and cleans them. Only checked-out submodules are visited (one
+ * that is not would get a gitfile pointing nowhere, and leave the worktree
+ * unreadable). `foreach` only lists them: a child it starts would outlive a
+ * timeout that kills the top-level git, and go on changing the submodule
+ * after the helper returned. A commit a submodule lacks is fetched from its
+ * own remote, under the protocol policy git applies to submodules.
  */
 function alignSubmodules(worktree: string): void {
-  gitOpt(
+  const listed = gitOpt(
     '-C',
     worktree,
     'submodule',
     'foreach',
     '--quiet',
     '--recursive',
-    // `$sha1` is the commit the superproject records (set by git); one the
-    // submodule does not have yet is fetched from its own remote first.
-    'git cat-file -e "$sha1^{commit}" 2>/dev/null || git fetch --quiet origin "$sha1"; ' +
-      'git reset --hard --quiet "$sha1" && git clean -ffdq',
+    'printf "%s %s\\n" "$sha1" "$displaypath"',
   );
+  if (!listed) return;
+  const root = realpathSync(worktree);
+  for (const line of listed.split('\n')) {
+    const match = /^([0-9a-f]{40,64}) (.+)$/.exec(line);
+    if (!match) continue;
+    const [, sha, path] = match;
+    const dir = join(worktree, path);
+    let real: string;
+    try {
+      real = realpathSync(dir);
+    } catch {
+      continue;
+    }
+    if (real === root || !isWithinRoot(real, root)) continue;
+    if (gitOpt('-C', dir, 'cat-file', '-e', `${sha}^{commit}`) === null) {
+      fetchSubmoduleCommit(dir, sha);
+    }
+    if (
+      gitOpt(
+        '-C',
+        dir,
+        'reset',
+        '--hard',
+        '--quiet',
+        '--no-recurse-submodules',
+        sha,
+      ) !== null
+    ) {
+      gitOpt('-C', dir, 'clean', '-ffdq');
+    }
+  }
+}
+
+function fetchSubmoduleCommit(dir: string, sha: string): void {
+  try {
+    execFileSync(
+      'git',
+      ['-C', dir, 'fetch', '--quiet', '--no-recurse-submodules', 'origin', sha],
+      {
+        timeout: SUBMODULE_FETCH_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
+        stdio: 'ignore',
+        // As in `git submodule` itself: transports a submodule's URL may
+        // use only with the user's own consent (`file://` among them) stay
+        // refused.
+        env: {
+          ...sanitizedGitEnv(),
+          GIT_TERMINAL_PROMPT: '0',
+          GIT_PROTOCOL_FROM_USER: '0',
+        },
+      },
+    );
+  } catch {
+    // Not fetched: the reset fails, and sync answers synced:false.
+  }
 }
 
 export const syncCommand: CommandModule = {

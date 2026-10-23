@@ -58,7 +58,7 @@ Comments are acted on when their author is an owner, member or collaborator of t
 
 ## Stopping and files
 
-`/autofix-pr stop <n>` deletes the scheduled task and removes the worktree, its branch and the state file; the gate cursor and the PR's history stay, so a later watch does not answer the same comments again. A worktree that still holds unpushed work is kept, and the report says why; `qwen autofix-pr cleanup <n> --force` discards it. The watch also ends when the session exits.
+`/autofix-pr stop <n>` deletes the scheduled task and removes the worktree, its branch and the state file; the gate cursor and the PR's history stay, so a later watch does not answer the same comments again. A worktree that still holds unpushed work is kept, and the report says why; `qwen autofix-pr cleanup <n> --force` discards it. The watch also ends when the session exits; its state file stays, owned by that session, so a new session first runs `qwen autofix-pr cleanup <n> --force` (what the watch posted is kept in the PR's history either way).
 
 Files live under `.qwen/tmp/` of the clone's main worktree:
 

@@ -539,6 +539,72 @@ describe('runPrepare (real git)', () => {
     });
   });
 
+  it('fetches a PR whose submodule commit no remote has, without recursing into submodules', () => {
+    const sub = join(dir, 'sub');
+    run(dir, 'init', '-q', '-b', 'main', sub);
+    run(
+      sub,
+      'commit',
+      '-q',
+      '--allow-empty',
+      '-m',
+      's1',
+      '--author',
+      't <t@example.com>',
+    );
+    // The user's clone has the submodule checked out.
+    run(clone, 'config', 'user.email', 't@example.com');
+    run(clone, 'config', 'user.name', 't');
+    run(
+      clone,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      sub,
+      'vendor/sub',
+    );
+    run(clone, 'commit', '-q', '-m', 'add sub');
+    run(
+      join(clone, 'vendor', 'sub'),
+      'config',
+      'protocol.file.allow',
+      'always',
+    );
+    // The PR records a submodule commit its author never pushed.
+    const src = join(dir, 'src');
+    run(
+      src,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      sub,
+      'vendor/sub',
+    );
+    run(
+      src,
+      'update-index',
+      '--cacheinfo',
+      `160000,${'e'.repeat(40)},vendor/sub`,
+    );
+    run(src, 'commit', '-q', '-m', 'bump to an unpushed commit');
+    const prHead = run(src, 'rev-parse', 'HEAD');
+    run(src, 'push', '-q', join(dir, 'bare.git'), `+HEAD:refs/pull/7/head`);
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr')
+        return JSON.stringify(prView({ headRefOid: prHead }));
+      if (args[0] === 'repo') return JSON.stringify(writable);
+      if (args[0] === 'config') return 'https';
+      throw new Error(`unexpected gh ${args.join(' ')}`);
+    });
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const paths = autofixPrPaths(clone, 7);
+    expect(run(paths.worktreePath, 'rev-parse', 'HEAD')).toBe(prHead);
+  });
+
   it('recreates a worktree deleted with rm -rf', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     const paths = autofixPrPaths(clone, 7);

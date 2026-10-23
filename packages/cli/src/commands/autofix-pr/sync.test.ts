@@ -362,6 +362,40 @@ describe('runSync (real git, bare remote)', () => {
     expect(runSync(7)).toMatchObject({ synced: false, moved: true });
   });
 
+  it('never recurses into a submodule the worktree has not checked out, whatever submodule.recurse says', () => {
+    // The user's own checkout has the submodule; the config is shared by
+    // every worktree of the clone, and says to recurse.
+    const sub = join(base, 'sub3');
+    run(base, 'init', '-q', '-b', 'main', sub);
+    run(sub, 'config', 'user.email', 't@example.com');
+    run(sub, 'config', 'user.name', 't');
+    commitIn(sub, 's1.txt');
+    run(repo, 'switch', '-q', 'feat');
+    run(
+      repo,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      sub,
+      'vendor/sub',
+    );
+    run(repo, 'commit', '-q', '-m', 'add sub');
+    run(repo, 'push', '-q', 'origin', 'feat');
+    run(repo, 'switch', '-q', 'main');
+    run(repo, 'config', 'submodule.recurse', 'true');
+    // The worktree follows the head that added it, and discards a round.
+    expect(runSync(7)).toMatchObject({ synced: true, moved: true });
+    commitIn(paths.worktreePath, 'attempt.txt');
+    expect(runSync(7, true)).toMatchObject({ synced: true, dropped: 1 });
+    // A rewritten history is followed the same way.
+    forcePushFromElsewhere('rewritten.txt');
+    expect(runSync(7)).toMatchObject({ synced: true, moved: true });
+    // The worktree stays readable throughout.
+    expect(run(paths.worktreePath, 'status', '--porcelain')).toBe('');
+  });
+
   it('follows only the branch GitHub names, not one an edited state file names', () => {
     run(repo, 'branch', 'release', 'main');
     const release = run(repo, 'rev-parse', 'release');
