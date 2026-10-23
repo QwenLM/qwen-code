@@ -845,17 +845,6 @@ describe('normalizeMonitorCommand', () => {
     );
   });
 
-  it('keeps a command on the line after the script on a line of its own', () => {
-    // The newline separates the next command; on the same line the words
-    // are the script's positional parameters.
-    expectNormalized(
-      "bash -c 'echo hi'\nrm -rf /tmp/x",
-      'echo hi',
-      'echo hi\nrm -rf /tmp/x',
-      "bash -c 'echo hi' rm -rf /tmp/x",
-    );
-  });
-
   it('preserves wrapper flags while stripping trailing ampersands', () => {
     expectNormalized(
       `/bin/bash --noprofile -c 'tail -f /tmp/app.log &'`,

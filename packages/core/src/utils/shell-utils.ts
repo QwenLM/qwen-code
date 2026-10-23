@@ -1589,20 +1589,14 @@ export function normalizeMonitorCommand(
   // execute: leading env assignments, the -c script, and argv suffixes. Wrapper
   // flags are preserved in spawnCommand, but are not converted into Bash(...)
   // command-rule surface.
-  // A newline right after the script ends the wrapper's command: what
-  // follows runs as the next command (a scheduled-task gate runs the text
-  // as written), so the rules must see it on a line of its own, not as the
-  // script's positional words.
-  const suffixIsNextCommand = /^\r?\n/.test(innerArgsSuffix ?? '');
   const safetyParts = [
     ...(wrapperTokens ? leadingEnvTokens : []),
     analysisCommand,
+    ...(normalizedInnerArgsSuffix ? [normalizedInnerArgsSuffix] : []),
   ];
   const safetyCommand =
     wrapperTokens && safetyParts.length > 0
-      ? [safetyParts.join(' ').trim(), normalizedInnerArgsSuffix]
-          .filter(Boolean)
-          .join(suffixIsNextCommand ? '\n' : ' ')
+      ? safetyParts.join(' ').trim()
       : analysisCommand;
   const strippedTrailingAmp =
     analysisCommand !== innerCommand ||
@@ -1632,6 +1626,24 @@ export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
   return (
     hasNonFinalTopLevelBackgroundOperator(innerCommand) ||
     hasNonFinalTopLevelBackgroundOperator(innerArgsSuffix ?? '')
+  );
+}
+
+/**
+ * Whether `command` is a shell wrapper with more after its script than the
+ * script's positional words: a separator (a newline, `;`, `&`, `|`, a
+ * parenthesis, a backtick or `$(`) that starts another command. The Monitor
+ * normalization reads the script and what follows it as one command line,
+ * which is what Monitor itself spawns; a command run as written (a
+ * scheduled-task gate) runs what follows as a command of its own, which a
+ * script ending in `\`, an open quote or a here-document start can hide
+ * from that reading.
+ */
+export function runsMoreAfterWrapperScript(command: string): boolean {
+  const { wrapperTokens, innerArgsSuffix } = parseMonitorShellWrapper(command);
+  return (
+    wrapperTokens !== undefined &&
+    /[;&|()\n\r`]|\$\(/.test(innerArgsSuffix ?? '')
   );
 }
 

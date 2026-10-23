@@ -605,8 +605,8 @@ nothing on stdout skips it, and a non-zero exit is reported once per streak.
   that sets a gate on a one-shot or turns a gated task one-shot, answers 400
   `gate_requires_recurring`; a task already in that state keeps its other
   edits. A malformed gate (empty on `POST`, only a comment, over 2048
-  characters, a NUL character, or any part backgrounded with `&`) answers
-  400 `invalid_gate`.
+  characters, a NUL character, a command after a shell wrapper's script,
+  or any part backgrounded with `&`) answers 400 `invalid_gate`.
   The `&` check is lexical and best-effort; where unsure it refuses (an `&` in
   a comment, a heredoc body or `(( … ))`), and a gate that gets past it is
   reported `failed` when it exits with nothing on stdout while a background

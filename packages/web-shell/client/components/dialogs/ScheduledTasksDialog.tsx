@@ -1650,7 +1650,9 @@ export function ScheduledTasksDialog({
               </div>
             </div>
 
-            {gateAvailable &&
+            {/* A change made before the daemon stopped advertising gates
+                stays visible, so it can be undone: the save refuses it. */}
+            {(gateAvailable || gate.trim() !== editedGate.trim()) &&
               (editingId === null ||
                 editedRecurring ||
                 editedGate.trim() !== '') && (

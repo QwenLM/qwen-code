@@ -28,6 +28,7 @@ import { getErrorMessage } from '../utils/errors.js';
 import {
   backgroundsAnyPart,
   normalizeMonitorCommand,
+  runsMoreAfterWrapperScript,
   runsOnlyComments,
 } from '../utils/shell-utils.js';
 import { extractCommandRules } from '../utils/shellAstParser.js';
@@ -131,6 +132,13 @@ export function gateCommandError(gate: unknown): string | null {
   // A process argument cannot carry one: such a gate could never start.
   if (gate.includes('\0')) {
     return 'must not contain a NUL character';
+  }
+  // The permission rules read a wrapper's script and what follows it as one
+  // command line, while the gate runs what follows a separator as a
+  // command of its own: a script ending in `\`, an open quote or a
+  // here-document start would hide that command from the rules.
+  if (runsMoreAfterWrapperScript(gate)) {
+    return "must keep every command inside the shell wrapper's script";
   }
   // A shell runs a comment as nothing: exit 0, no stdout. Explicit no-ops
   // such as `true` and `:` stay accepted.

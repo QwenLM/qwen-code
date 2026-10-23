@@ -560,17 +560,6 @@ describe('gateCommandError', () => {
     ['a quoted &', "gh api 'repos/o/r/pulls?state=open&per_page=5'"],
     ['&&', 'a && b'],
     ['an & in $(( ))', 'echo $(( 5 & 3 ))'],
-    // The command after a wrapper runs: the wrapper's comment scope ends
-    // with its script.
-    [
-      'a wrapper comment then a command',
-      "bash -c '# comment' && printf 'ready\\n'",
-    ],
-    // A newline after the script starts the next command, not an argument.
-    [
-      'a wrapper comment, a newline, then a command',
-      "bash -c '# setup'\n./probe.sh",
-    ],
     ['a command at the cap', 'x'.repeat(MAX_CRON_GATE_CHARS)],
   ])('accepts %s', (_what, gate) => {
     expect(gateCommandError(gate)).toBeNull();
@@ -662,10 +651,38 @@ describe('gateCommandError', () => {
     ['a bare #', '#', 'not only a comment'],
     ['comment lines only', '# a\n  # b\n', 'not only a comment'],
     ['a wrapper running a comment', "bash -c '# probe'", 'not only a comment'],
+    // A command after a wrapper's script runs on its own, which the rules
+    // read as part of the script's line: a trailing `\` or an open quote in
+    // the script would hide it.
+    [
+      'a command on the line after a wrapper script',
+      "bash -c 'echo probe \\'\ntouch /tmp/x",
+      'inside the shell wrapper',
+    ],
+    // Whitespace bash does not count as a blank still leaves the newline a
+    // separator.
+    ...['\v', '\f', '\u00a0', '\r ', '\r\r'].map(
+      (blank) =>
+        [
+          `a command after a wrapper script and ${JSON.stringify(blank)} then a newline`,
+          `bash -c 'echo hi'${blank}\nrm -rf /tmp/x`,
+          'inside the shell wrapper',
+        ] as const,
+    ),
+    [
+      'a command after a wrapper script with an open quote',
+      "bash -c 'echo \"' ; rm -rf /tmp/x",
+      'inside the shell wrapper',
+    ],
+    [
+      'a command chained after a wrapper script',
+      "bash -c '# comment' && printf 'ready\\n'",
+      'inside the shell wrapper',
+    ],
     [
       'a wrapper comment, a newline, then only a comment',
       "bash -c '#'\n# only a comment",
-      'not only a comment',
+      'inside the shell wrapper',
     ],
     // Words after the script are its positional parameters.
     [

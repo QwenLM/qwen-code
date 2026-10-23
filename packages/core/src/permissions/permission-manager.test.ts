@@ -1725,25 +1725,6 @@ describe('PermissionManager', () => {
   });
 
   describe('monitor command-level evaluation', () => {
-    it('sees a command on the line after a wrapper script, as a shell runs it', async () => {
-      // A scheduled-task gate runs the text as written: the newline ends
-      // the wrapper's command, so the next line must not hide behind the
-      // script as its positional words.
-      const pm2 = makePm({ permissionsDeny: ['Monitor(rm *)'] });
-      expect(
-        await pm2.evaluate({
-          toolName: 'monitor',
-          command: "bash -c 'echo hi'\nrm -rf /tmp/x",
-        }),
-      ).toBe('deny');
-      expect(
-        await pm2.evaluate({
-          toolName: 'monitor',
-          command: "bash -c 'echo hi' rm -rf /tmp/x",
-        }),
-      ).not.toBe('deny');
-    });
-
     it('Monitor(...) allow rule matches monitor invocations', async () => {
       const pm2 = makePm({ permissionsAllow: ['Monitor(tail -f *)'] });
       expect(await pm2.evaluate(mon('tail -f /var/log/app.log'))).toBe('allow');

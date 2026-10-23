@@ -439,6 +439,19 @@ describe('ScheduledTasksDialog editing', () => {
     expect(document.body.textContent).toContain(
       'This daemon does not accept gate changes',
     );
+    // The changed field stays on screen, so the change can be undone and
+    // the rest of the edit saved.
+    const field = document.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Gate command (optional)"]',
+    );
+    expect(field).not.toBeNull();
+    input(field!, './probe.sh');
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask).toHaveBeenCalledTimes(1);
+    expect(actions.updateScheduledTask.mock.calls[0]?.[1]).not.toHaveProperty(
+      'gate',
+    );
   });
 
   it('keeps a multi-line gate intact through an edit', async () => {
