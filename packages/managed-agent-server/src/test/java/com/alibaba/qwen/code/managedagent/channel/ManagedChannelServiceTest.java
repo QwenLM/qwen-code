@@ -20,6 +20,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.persistence.ChannelInstanceStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelRouteRepository;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -574,7 +575,7 @@ class ManagedChannelServiceTest {
                 new java.util.concurrent.CountDownLatch(1);
         java.util.concurrent.CountDownLatch bound =
                 new java.util.concurrent.CountDownLatch(1);
-        JdbcTemplate latching = new JdbcTemplate(jdbc.getDataSource()) {
+        JdbcTemplate latching = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
             @Override
             public <T> T queryForObject(String sql, Class<T> requiredType,
                     Object... args) {

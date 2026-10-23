@@ -11,6 +11,8 @@ import { act } from 'react';
 // import is the real createRoot — used to mount the boot gate for real.
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
+import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -73,6 +75,7 @@ describe('web shell boot', () => {
     document.documentElement.removeAttribute(
       'data-web-shell-unsupported-browser',
     );
+    document.querySelector('meta[name="qwen-managed-app"]')?.remove();
     window.history.replaceState(null, '', '/');
     vi.unstubAllGlobals();
   });
@@ -119,6 +122,56 @@ describe('web shell boot', () => {
     // the page's own origin: booting with an invalid ?daemon= burns nothing.
     expect(window.location.hash).toBe('');
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('fixes Managed boot to the page origin and removes daemon and fanout overrides', async () => {
+    const marker = document.createElement('meta');
+    marker.name = 'qwen-managed-app';
+    marker.content = 'true';
+    document.head.appendChild(marker);
+    window.history.replaceState(
+      null,
+      '',
+      '/?daemon=https://attacker.example&fanout=https://other.example#token=browser-token',
+    );
+    testState.storedToken = 'browser-token';
+    document.body.innerHTML = '<div id="root"></div>';
+    await import('./main');
+    await vi.waitFor(() => expect(testState.rendered).toHaveLength(1));
+    const url = new URL(window.location.href);
+    expect(url.searchParams.has('daemon')).toBe(false);
+    expect(url.searchParams.has('fanout')).toBe(false);
+    const strictMode = testState.rendered[0] as React.ReactElement<{
+      children: React.ReactElement<{
+        baseUrl: string;
+        invalidTarget: boolean;
+        children: (token: string) => React.ReactElement;
+      }>;
+    }>;
+    const gate = strictMode.props.children;
+    expect(gate.props.baseUrl).toBe(window.location.origin);
+    expect(gate.props.invalidTarget).toBe(false);
+    const managedBoot = gate.props.children(
+      'browser-token',
+    ) as React.ReactElement<{
+      daemonToken: string;
+      children: (provider: ManagedAgentProvider) => React.ReactElement<{
+        daemonToken: string;
+        managedAgentProvider: ManagedAgentProvider;
+      }>;
+    }>;
+    expect(managedBoot.type).toBe(
+      (await import('./ManagedStandaloneApp')).ManagedStandaloneApp,
+    );
+    expect(managedBoot.props.daemonToken).toBe('browser-token');
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: window.location.origin,
+      productScope: 'local:installation-1',
+    });
+    const shell = managedBoot.props.children(provider);
+    expect(shell.type).toBe((await import('./main')).StandaloneApp);
+    expect(shell.props.daemonToken).toBe('browser-token');
+    expect(shell.props.managedAgentProvider).toBe(provider);
   });
 
   it('connects with the stored token when the pairing exchange fails', async () => {
