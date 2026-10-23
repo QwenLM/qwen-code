@@ -371,7 +371,10 @@ the command is proposed and checked again where it runs.
   approval mode is `yolo` or `auto`, when a saved `Monitor(...)` or
   `Bash(...)` rule or the read-only check allows the command, or when this
   job was confirmed in this process. Anything else is `blocked`, with one
-  notice naming the exact rule to add. Plan mode blocks. The daemon's default
+  notice naming the rule to add: the one `Monitor`'s "always allow" would
+  save, which for a compound command may not cover every part (a test of a
+  command substitution, an `if`, a heredoc), as for `Monitor` itself; such a
+  probe belongs in a script. Plan mode blocks. The daemon's default
   is auto mode, so a gated task created in a daemon conversation keeps working
   after a restart.
 - **Output is data.** Gate output is sanitized like `Monitor` lines (ANSI
