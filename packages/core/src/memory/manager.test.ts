@@ -2063,6 +2063,46 @@ describe('MemoryManager', () => {
       expect(vi.mocked(runAutoMemoryExtract)).toHaveBeenCalledTimes(2);
     });
 
+    it('does not leak an unhandled rejection when the queued extract fails', async () => {
+      // The trailing run starts from `runExtract`'s `finally`, which cannot
+      // await it. A queued extract that rejects therefore used to escape as an
+      // unhandled rejection: vitest fails the whole file (`Errors 1 error`)
+      // even though every test passed, which is how a drain timeout followed by
+      // the test's own teardown showed up in CI (#15269).
+      const leakProbe = 'queued extract failed';
+      const first = deferred<ExtractResult>();
+      vi.mocked(runAutoMemoryExtract)
+        .mockReturnValueOnce(first.promise)
+        .mockRejectedValueOnce(new Error(leakProbe));
+
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        const mgr = new MemoryManager();
+        const firstPromise = mgr.scheduleExtract(
+          extractParams(tmp.projectRoot, 'sess-1', 'first'),
+        );
+        const queued = await mgr.scheduleExtract(
+          extractParams(tmp.projectRoot, 'sess-1', 'second'),
+        );
+        expect(queued.skippedReason).toBe('queued');
+
+        first.resolve(extractResult('sess-1', ['user']));
+        await firstPromise;
+        // The trailing run rejects on its own microtask chain; give Node the
+        // turn in which it would report an unsettled rejection.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(vi.mocked(runAutoMemoryExtract)).toHaveBeenCalledTimes(2);
+        expect(
+          unhandled.some((reason) => String(reason).includes(leakProbe)),
+        ).toBe(false);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+    });
+
     it('isolates state between manager instances', async () => {
       vi.mocked(runAutoMemoryExtract).mockResolvedValue(
         extractResult('sess-1', ['user']),
