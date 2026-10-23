@@ -137,6 +137,56 @@ const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
 });
 
 describe('OpenTuiTranscriptView', () => {
+  it('matches Ink retry wording while the countdown advances', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(100_000);
+    let view: ReturnType<typeof render> | undefined;
+    try {
+      const retry: LiveHistoryItem = {
+        kind: 'retry',
+        id: 'retry-wording',
+        attempt: 1,
+        maxRetries: 10,
+        delayMs: 5_000,
+        startedAt: Date.now(),
+      };
+      view = render(<OpenTuiTranscriptView items={[retry]} />);
+      expect(view.container.textContent).toContain(
+        'Rate limit exceeded. Please wait and try again.',
+      );
+      expect(view.container.textContent).toContain(
+        '↻ Retrying in 5 seconds… (attempt 1/10)',
+      );
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(view.container.textContent).toContain(
+        '↻ Retrying in 4 seconds… (attempt 1/10)',
+      );
+      expect(view.container.textContent).not.toContain('Retrying in 5');
+      view.rerender(
+        <OpenTuiTranscriptView
+          items={[
+            {
+              ...retry,
+              attempt: 2,
+              maxRetries: 3,
+              message: 'PROVIDER RETRY REASON',
+            },
+          ]}
+        />,
+      );
+      expect(view.container.textContent).toContain('PROVIDER RETRY REASON');
+      expect(view.container.textContent).not.toContain(
+        'Rate limit exceeded. Please wait and try again.',
+      );
+      expect(view.container.textContent).toContain(
+        '↻ Retrying in 4 seconds… (attempt 2/3)',
+      );
+    } finally {
+      view?.unmount();
+      vi.useRealTimers();
+    }
+  });
+
   it('filters restored suppression only at display time, including full-detail mode', () => {
     const hidden: LiveHistoryItem = {
       kind: 'user',

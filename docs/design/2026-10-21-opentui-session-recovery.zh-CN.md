@@ -4,7 +4,9 @@
 
 ## 状态与源码边界
 
-**当前交付检查点：基于 `4d57a2d218` 加三处生产修复的会话恢复 Draft 批次。** 修后源码通过三个完整 unit 文件的 736 案及 fresh build/type/bundle 验证。最终采用 readiness helper 的持久测试结果为 **18 案通过、零跳过、24 次完成 HTTP 和 30 次自然 exit0**。六案覆盖具名 H02a/H02b 冷恢复、H01b rewind/rollback selector 与冷召回，以及 Node24 + Ink、Bun1.3.14 + Ink、strict Bun1.3.14 + OpenTUI 的 H15 quit/exit summary。这些属于源码 bundle 结果，不是完整 H01–H15 或安装产品验收。本批次及父 PR #14959 仍未合并；最终安装产物与平台门禁仍未关闭。不改生产运行时、依赖、默认 renderer 或记录 schema。
+**当前检查点：#15283 仍为 Draft，基于已提交的 `3301fee0` 加 shell 生命周期、本地键盘取消及重试文案工作变更。** 精确已提交 head 的 Linux CI 通过 no-flicker、20 个组件 validator 和三腿每腿 42 个产品用例；这些重叠执行不与历史本地总数相加。当前工作修复通过三个受影响的完整 CLI unit 文件（482 案、零跳过）；未改变的受影响 workflow 元测试文件通过 41 案。此前工作产物通过正常 build/type/bundle、Node22 + Ink 与 strict Bun + OpenTUI 的 held-shell Retry 接纳门禁，以及 Ink 英文倒计时精确文案。随后真实 OS 取消合同在 Node22 + Ink 上通过，在 strict OpenTUI 上失败：Ctrl+C 后已观察的 shell 仍存活，直到 fixture 清理时释放才结束。新增实际捕获 signal 的回归也在本地按键接线修复前失败。因此该整合迭代要求重新执行正常 build/type/bundle，并在精确同一新产物上验证真实终端取消、后继及自然退出合同。原产品失败和 fixture 未完成观察继续分别记录，不算本修复的通过结果。既有源码 bundle 与安装结果保留原产物归属；不改 runtime pin、依赖、默认 renderer 或记录 schema。
+
+**上一交付检查点（保留）：基于 `4d57a2d218` 加三处生产修复的会话恢复 Draft 批次。** 修后源码通过三个完整 unit 文件的 736 案及 fresh build/type/bundle 验证。最终采用 readiness helper 的持久测试结果为 **18 案通过、零跳过、24 次完成 HTTP 和 30 次自然 exit0**。六案覆盖具名 H02a/H02b 冷恢复、H01b rewind/rollback selector 与冷召回，以及 Node24 + Ink、Bun1.3.14 + Ink、strict Bun1.3.14 + OpenTUI 的 H15 quit/exit summary。这些属于源码 bundle 结果，不是完整 H01–H15 或安装产品验收。本批次及父 PR #14959 仍未合并；最终安装产物与平台门禁仍未关闭。不改生产运行时、依赖、默认 renderer 或记录 schema。
 
 **早期验证检查点（保留）：** 此处证据归属本地 `6c3c63584c01cf0a5b421aa719e6ff1df8a23700` 加冻结的七文件 v4 工作补丁 `1c4f3277b4b0e7364b5e0cee706a2750db02cbade38c66e092202feb6c7d8319`，不是已提交的最终候选。Build、typecheck 已通过；25 个 CLI 完整文件共 1,514 案全部通过，无失败、跳过或 bail 未执行。Native 组件验证通过 26 个捕获帧、19 次输入和两个精确回调。新的 WIP 源码 bundle 已通过，CLI SHA 为 `53859bf54605e32e3c594c95fc6f040d6e53644bb69f79ffad467ac95d911cf1`；它不是已安装的 npm 或 standalone 产物。不新增 core API、依赖、记录 schema 或第二个历史 owner。
 
@@ -102,6 +104,8 @@ Accepted-steering 输入记录明确补齐 Ink 的遗漏：已检查的 Ink 接�
 
 ### 重试与跳过延迟
 
+Shell 执行会晚于提交预处理结束。直到执行 promise settle 前，保留其既有 generation activity，并将捕获的 controller 登记在现有取消集合中。取消必须到达实际传给 shell 的 signal；旧的已取消 shell 完成时，不得清除后继的 busy 状态或 controller。复用现有活动计数和 same-controller 检查，不新增第二个 controller 或历史 owner。OpenTUI 独立拥有 shell 执行：既有 shell-controller 集合必须在进入 live 模型重试回调前拒绝 Retry，与普通提交和队列排空已有门禁一致。OpenTUI 倒计时采用 Ink 既有翻译模板及 attempt 格式，不能用放宽测试匹配替代真实可见差异的修复。 本地 shell 取消仍由该既有 controller 集合负责：普通 composer 按下 Ctrl+C 或 Esc 时 abort 集合，key-release、前台模型 turn 及活动中的对话框或确认框保留既有 owner。不能为了清空重试状态而把本地取消错误转交模型 interrupt。普通 pipes shell 合同不证明内层 PTY 输入、resize 或 focus 一致性（H13）。
+
 Ctrl+Y 优先恰好消费一次当前重试延迟 callback；不 abort 请求，不产生新提交或 user event。Reset/cancel 使 callback 失效。正在提交、等待权限、没有失败 attempt、重复按键均有明确结果，不能意外落入默认重试。
 
 终态失败保存该 model/tool-result hop 实际送出的 prepared payload 及 prompt ID，再使用已有 `SendMessageType.Retry`。不能重新展开 slash、再读 `@` 文件、重转图片、重复 accepted steering，或把 Retry 当 Enter/`UserQuery`。复用 core 的 orphan 处理、文件读取失效、turn 预算和 tool-call/result 配对。在已接受 steering 合并后捕获最终 payload；未接管的队列项仍可恢复。
@@ -176,10 +180,10 @@ Ignored Phase 3 计划将下列稳定案组展开成命名分支。当前源码/
 - 已合并的 #15067/#14046 与本地整合、已 Ready 但仍未合并的 #14959 具有不同依赖状态。父源码改变后需重新绑定源码/产物证据；本地验收不证明远端已合并。
 - Ink 已知 deny JSON 镜像缺口与父批次 accepted-steering 事件补齐仍是明确有意差异，不新造协议，也不为逐字 parity 削弱已有修复。
 - 无输出取消后的 journal 冷重放、retry 后 rewind 身份、纯 thought 时序和命令失败日志需精确当前 Ink 校准；本设计未宣称新增已实证 Ink bug。
-- Linux、Windows、sandbox 文件系统行为、真实麦克风/权限/音频设备、WebSocket ASR、发布版升级均 NOT_RUN；macOS 自有 fixture 或组件测试不覆盖这些能力。
+- 具名 CI 用例以外的 Linux 场景、Windows、sandbox 文件系统行为、真实麦克风/权限/音频设备、WebSocket ASR，以及本恢复批次的安装版/发布版本升级验收仍为 NOT_RUN；macOS 自有 fixture 或组件测试不覆盖这些能力。
 - 即使 renderer 依赖延迟交付，H13/H14 仍可见；没有预先授权新增库、版本或默认行为变更。
 
-Ready 需要已接受父批次、完整同步双语设计、global/当前 Ink 基线、变更路径的有意义复现、正常 full build/typecheck、定向 owner/projection/native 测试、三个本地腿的所有适用 H01–H14 分支、明确例外处置、source/artifact/runtime 身份和清理，以及两次连续干净的全 diff/consumer 审阅。实现和最终 PR 仍作为一个完整会话事务交付。历史 dry-run 与 setup 收据只满足各自具名前置条件；当前具名源码/组件门禁和六案 H15 源码 bundle 已通过，但完整 H01–H14、其余 H15 分支、冷日志/journal、安装产物与非宿主平台仍未关闭。同候选 Ink 与 OpenTUI 的真实 held-shell/Ctrl+Y 安全合同均失败。这些同候选失败既不能确立新引入的 OpenTUI 特有回归，也不能排除 C 的共享回归，更不能证明 main 运行时通过；main 运行时基线仍为 NOT_RUN。
+Ready 需要已接受父批次、完整同步双语设计、global/当前 Ink 基线、变更路径的有意义复现、正常 full build/typecheck、定向 owner/projection/native 测试、三个本地腿的所有适用 H01–H14 分支、明确例外处置、source/artifact/runtime 身份和清理，以及两次连续干净的全 diff/consumer 审阅。实现和最终 PR 仍作为一个完整会话事务交付。历史 dry-run 与 setup 收据只满足各自具名前置条件；当前具名源码/组件门禁和六案 H15 源码 bundle 已通过，但完整 H01–H14、其余 H15 分支、冷日志/journal、安装产物与非宿主平台仍未关闭。同候选 Ink 与 OpenTUI 的真实 held-shell/Ctrl+Y 安全合同均失败。另行构建的 main `7547326` 与生产源码等价于 `3301fee0` 的历史 bundle 也在原 Node22 + Ink held-shell 接纳合同上失败：真实 pipes shell 持有期间 HTTP 从 1 增至 2，随后自然 exit0。这确立了实测的共享 Node 行为，既不豁免安全门禁，也不确立 main 的 Bun 行为。工作修复必须在新构建的实际产物上通过未放宽的原 Node 与 strict OpenTUI 合同。
 
 ### 清理前的退出展示
 

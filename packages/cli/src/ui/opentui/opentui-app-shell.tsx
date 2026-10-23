@@ -406,17 +406,6 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     }
     adoptApprovalMode(next);
   }, [config, addInfoItem, adoptApprovalMode]);
-  // Shift+Tab lives here, not in the composer: ink mounts useAutoAcceptIndicator
-  // at App level (disabled only for the agent-tab view), so it still cycles
-  // while a dialog or a confirmation has the composer unmounted. The composer
-  // keeps only the Windows bare-Tab fallback — the one route that has to know
-  // whether Tab was already spent on a completion.
-  useKeyboard((key: KeyEvent) => {
-    const { name, shift, ctrl } = toOriginalKey(key);
-    if (name !== 'tab' || !shift || ctrl) return;
-    key.preventDefault();
-    cycleApprovalMode();
-  });
   // ink announces AUTO on mount too, so `--approval-mode auto` and
   // `tools.approvalMode: "auto"` do not open a session silently in AUTO. The
   // keypress and dialog routes above never fire for a mode set before start.
@@ -571,6 +560,31 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // app level; without it a `.mcp.json` checked into the project is never
   // offered here and its servers stay silently disconnected.
   const mcpApproval = useMcpApproval(config);
+
+  // Shift+Tab lives here, not in the composer: ink mounts useAutoAcceptIndicator
+  // at App level (disabled only for the agent-tab view), so it still cycles
+  // while a dialog or a confirmation has the composer unmounted. The composer
+  // keeps only the Windows bare-Tab fallback — the one route that has to know
+  // whether Tab was already spent on a completion.
+  useKeyboard((key: KeyEvent) => {
+    const { name, shift, ctrl } = toOriginalKey(key);
+    if (
+      key.eventType !== 'release' &&
+      !streaming &&
+      !dialog &&
+      !activeModal &&
+      !activeToolCall &&
+      !mcpApproval.isMcpApprovalDialogOpen &&
+      (name === 'escape' || (name === 'c' && ctrl))
+    ) {
+      for (const controller of shellControllersRef.current) {
+        controller.abort();
+      }
+    }
+    if (name !== 'tab' || !shift || ctrl) return;
+    key.preventDefault();
+    cycleApprovalMode();
+  });
 
   // ink AppContainer's contextFilesAnnouncedRef: the context-file set is
   // announced once per session, on the first submission that reaches a model.
@@ -1447,6 +1461,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 onRetry={
                   props.onRetryPrompt
                     ? () => {
+                        if (shellControllersRef.current.size > 0) return;
                         if (gateway.isBusy()) {
                           notify('A slash command is already running.');
                           return;

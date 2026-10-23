@@ -1299,11 +1299,31 @@ export const useLlmStream = (
 
   useEffect(() => () => stopRetryCountdownTimer(), [stopRetryCountdownTimer]);
 
-  const onExec = useCallback(async (done: Promise<void>) => {
-    setIsResponding(true);
-    await done;
-    setIsResponding(false);
-  }, []);
+  const onExec = useCallback(
+    async (done: Promise<void>) => {
+      const shellAbortController = abortControllerRef.current;
+      if (shellAbortController) {
+        detachedToolContinuationAbortControllersRef.current.add(
+          shellAbortController,
+        );
+      }
+      const releaseShellActivity = retainSubmissionActivity(
+        submissionLeaseGenerationRef.current,
+      );
+      setIsResponding(true);
+      try {
+        await done;
+      } finally {
+        if (shellAbortController) {
+          detachedToolContinuationAbortControllersRef.current.delete(
+            shellAbortController,
+          );
+        }
+        releaseShellActivity();
+      }
+    },
+    [retainSubmissionActivity],
+  );
   const { handleShellCommand, activeShellPtyId } = useShellCommandProcessor(
     addItem,
     setPendingHistoryItem,

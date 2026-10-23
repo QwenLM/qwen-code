@@ -75,6 +75,7 @@ import { formatClockTime, formatDuration } from '../utils/formatters.js';
 import { getArenaStatusLabel } from '../utils/displayUtils.js';
 import type { ArenaAgentCardData } from '../types.js';
 import { isHistoryItemVisibleAfterRestore } from '../types.js';
+import { t } from '../../i18n/index.js';
 
 /** ink HistoryItemDisplay picks between two hints by whether the card is
  *  clickable; `ui.mouseTracking: false` hands the pointer back to the
@@ -1101,11 +1102,18 @@ function RetryRows({
     <box flexDirection="column">
       <text fg={C.red} {...selectionProps()}>
         {sanitizeTerminalText(
-          message ?? `Attempt ${attempt} of ${maxRetries} failed`,
+          message ?? t('Rate limit exceeded. Please wait and try again.'),
         )}
       </text>
       <text fg={C.yellow}>
-        {`↻ Retrying in ${remainingSec}s… (attempt ${attempt} of ${maxRetries})`}
+        {`↻ ${t(
+          'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})',
+          {
+            seconds: String(remainingSec),
+            attempt: String(attempt),
+            maxRetries: String(maxRetries),
+          },
+        )}`}
       </text>
     </box>
   );
