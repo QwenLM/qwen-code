@@ -33,6 +33,8 @@ import {
   parseHostedMcpServers,
 } from './hosted-mcp-session.js';
 import { parseManagedRuntimeProviderRequest } from './managed-runtime-provider-protocol.js';
+import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
+import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import {
   HostedMcpManager,
   commitHostedMcpSettings,
@@ -50,6 +52,7 @@ let requests: ManagedMcpControl[];
 let replies: Map<string, ManagedMcpOperationView>;
 let loseAck: boolean;
 let unknown: boolean;
+let discoveredToolName: string;
 const pin = {
   serverId: 'demo',
   serverRevision: 1,
@@ -102,6 +105,7 @@ beforeEach(async () => {
   replies = new Map();
   loseAck = false;
   unknown = false;
+  discoveredToolName = 'echo';
   vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
     async function (this: HostedWorkspaceBroker) {
       this.runtime = {
@@ -160,7 +164,7 @@ beforeEach(async () => {
             catalogRevision: operation.configRevision,
             tools: [
               {
-                name: 'echo',
+                name: discoveredToolName,
                 description: 'Echo input',
                 inputSchema: {
                   type: 'object',
@@ -215,6 +219,55 @@ afterEach(async () => {
   vi.restoreAllMocks();
   await session?.close();
   if (root) await rm(root, { recursive: true, force: true });
+});
+
+it('keeps a server send_message in the MCP namespace and its overflow fatal (#14062)', async () => {
+  discoveredToolName = 'send_message';
+  await mcp.refresh(new AbortController().signal);
+  const name = mcp.tools()[0].name!;
+  const args = { text: '"'.repeat(20_000) };
+  expect(name).toMatch(/^mcp_[a-f0-9]{32}$/);
+  expect(mcp.toolInput('send_message', args, 'dense')).toBeUndefined();
+  expect(mcp.toolInput(name, args, 'dense')?.input.request).toEqual({
+    kind: 'tool_call',
+    name: 'send_message',
+    arguments: args,
+  });
+  const commit = vi.fn();
+  const turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    createManagedHarnessHandle(session),
+    'prompt',
+    commit,
+    () => true,
+    undefined,
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-mcp/1', mcp },
+  );
+  await expect(
+    turn.execute(
+      [
+        {
+          name,
+          callId: 'dense',
+          args,
+          isClientInitiated: false,
+          prompt_id: 'prompt',
+        },
+      ],
+      [{ functionCall: { name, id: 'dense', args } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow(
+    'Hosted tool input exceeds the inline Session Store limit.',
+  );
+  expect(
+    requests.filter((request) => request.kind === 'mcp-invoke'),
+  ).toHaveLength(0);
+  expect(commit).not.toHaveBeenCalled();
 });
 
 it('pins discovery, commits raw resource results and replays without another effect', async () => {
