@@ -210,7 +210,7 @@ export function blankReplayedMcpAppHtml(
   ) {
     return undefined;
   }
-  return {
+  const blanked = {
     ...record,
     rawOutput: {
       ...rawOutput,
@@ -219,7 +219,18 @@ export function blankReplayedMcpAppHtml(
         rawOutput['fallbackText'] ||
         'MCP App HTML omitted because the restored page exceeds its size limit.',
     },
-  } as unknown as SessionUpdate;
+  };
+  // Blanking can inject `fallbackText`, so the swapped frame may serialize
+  // larger than the one it replaces; the reclaim loops apply that signed
+  // delta. Compare whole frames, and report no App html to lose when the
+  // swap would not shrink one.
+  if (
+    Buffer.byteLength(JSON.stringify(blanked), 'utf8') >=
+    Buffer.byteLength(JSON.stringify(record), 'utf8')
+  ) {
+    return undefined;
+  }
+  return blanked as unknown as SessionUpdate;
 }
 
 /**

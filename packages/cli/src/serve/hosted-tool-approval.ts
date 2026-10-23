@@ -56,7 +56,7 @@ const PREAPPROVED_TOOLS: Readonly<
   ],
 };
 
-// `glob` ships with the `/2` search profiles and the read profile (#13753 I3),
+// `glob` ships with the search profiles and the read profile (#13753 I3),
 // so those pre-approve it and no other profile does. A name-keyed allowance
 // would also pre-approve an MCP-declared tool that happens to be called
 // `glob` — the MCP server picks its own names — and dispatch it without ever
@@ -117,7 +117,7 @@ export function hostedApprovalDefinition(
 
 /**
  * Whether a call asks the operator. `globProfile` is the Session's own
- * `/2` search or read profile, the only places `glob` is pre-approved.
+ * search or read profile, the only places `glob` is pre-approved.
  */
 export function hostedApprovalAsks(
   settings: HostedApprovalSettings,
