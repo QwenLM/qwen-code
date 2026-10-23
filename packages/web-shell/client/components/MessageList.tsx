@@ -6001,6 +6001,10 @@ export const MessageList = memo(
                 (agentReply ||
                   finalAssistantTurnIdByAssistantId.has(displayItem.message.id))
               }
+              assistantFooterAlwaysVisible={
+                finalAssistantTurnId !== undefined &&
+                finalAssistantTurnId === fallbackCurrentTimelineTurnId
+              }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
                 !agentReply &&
@@ -6084,6 +6088,7 @@ export const MessageList = memo(
         visibleItems,
         flashTarget,
         finalAssistantTurnIdByAssistantId,
+        fallbackCurrentTimelineTurnId,
         assistantFeedbackEnabled,
         assistantFeedbackHeadById,
         assistantFeedbackRatings,

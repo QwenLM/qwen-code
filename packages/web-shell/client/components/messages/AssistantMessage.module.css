@@ -67,6 +67,7 @@
   transition: opacity 0.12s ease;
 }
 
+.messageFooterVisible,
 .message:hover .messageFooter,
 .message:focus-within .messageFooter {
   opacity: 1;

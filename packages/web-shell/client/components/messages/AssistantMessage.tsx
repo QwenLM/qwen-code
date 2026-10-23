@@ -50,6 +50,7 @@ interface AssistantMessageProps {
   timestamp?: number;
   onBranchSession?: () => void | Promise<void>;
   showFooterActions?: boolean;
+  footerAlwaysVisible?: boolean;
   showBranchAction?: boolean;
   /** Satisfied / not-satisfied marks are only offered when this is set. */
   showAssistantFeedback?: boolean;
@@ -71,6 +72,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   timestamp,
   onBranchSession,
   showFooterActions = false,
+  footerAlwaysVisible = false,
   showBranchAction = false,
   showAssistantFeedback = false,
   assistantFeedbackRating,
@@ -85,6 +87,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   const documentMode = renderMode === 'document';
   const { renderAssistantTurnFooter } = useWebShellCustomization();
   const [copied, flashCopied] = useCopiedFlash();
+  const [markdownCopied, flashMarkdownCopied] = useCopiedFlash();
   const [branchPending, setBranchPending] = useState(false);
   // An agent reply of only whitespace or invisible characters (a leader's
   // U+200B, recorded before the daemon classified it) shows no bubble text;
@@ -117,13 +120,14 @@ export const AssistantMessage = memo(function AssistantMessage({
       setBranchPending(false);
     }
   }, [branchPending, onBranchSession]);
-  const handleCopy = useCallback(() => {
-    void writeClipboardText(content)
-      .then(() => {
-        flashCopied();
-      })
-      .catch(warnClipboardWriteFailure);
-  }, [content, flashCopied]);
+  const handleCopy = useCallback(
+    (flash: () => void) => {
+      void writeClipboardText(content)
+        .then(flash)
+        .catch(warnClipboardWriteFailure);
+    },
+    [content],
+  );
   // Clicking the lit icon clears the mark; clicking the other one switches it.
   const handleFeedback = useCallback(
     (
@@ -228,17 +232,30 @@ export const AssistantMessage = memo(function AssistantMessage({
         <div className={styles.customFooter}>{customFooter}</div>
       )}
       {showFooter && (
-        <div className={styles.messageFooter}>
+        <div
+          className={`${styles.messageFooter}${footerAlwaysVisible ? ` ${styles.messageFooterVisible}` : ''}`}
+        >
           {showFooterActions && (
-            <button
-              type="button"
-              className={styles.copyButton}
-              title={t('assistant.copy')}
-              aria-label={t('assistant.copy')}
-              onClick={handleCopy}
-            >
-              {copied ? <CheckIcon /> : <CopyIcon />}
-            </button>
+            <>
+              <button
+                type="button"
+                className={styles.copyButton}
+                title={t('assistant.copy')}
+                aria-label={t('assistant.copy')}
+                onClick={() => handleCopy(flashCopied)}
+              >
+                {copied ? <CheckIcon /> : <CopyIcon />}
+              </button>
+              <button
+                type="button"
+                className={styles.copyButton}
+                title={t('assistant.copyMarkdown')}
+                aria-label={t('assistant.copyMarkdown')}
+                onClick={() => handleCopy(flashMarkdownCopied)}
+              >
+                {markdownCopied ? <CheckIcon /> : <MarkdownIcon />}
+              </button>
+            </>
           )}
           {showFooterActions && showAssistantFeedback && (
             <>
@@ -311,6 +328,23 @@ function CopyIcon() {
         stroke="currentColor"
         strokeWidth="1.3"
       />
+    </svg>
+  );
+}
+
+function MarkdownIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="1" y="3" width="14" height="10" rx="1.2" />
+      <path d="M3.5 10V6l2 2 2-2v4M11 6v4m-1.5-1.5L11 10l1.5-1.5" />
     </svg>
   );
 }

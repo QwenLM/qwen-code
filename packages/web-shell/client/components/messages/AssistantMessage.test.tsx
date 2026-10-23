@@ -616,84 +616,186 @@ describe('AssistantMessage markdown tables', () => {
   });
 });
 
-describe('AssistantMessage copy reset timer', () => {
-  it('leaves no pending reset timer behind on unmount', async () => {
-    vi.useFakeTimers();
-    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+describe('AssistantMessage Markdown copy', () => {
+  it.each([
+    ['en', 'Copy', 'Copy Markdown'],
+    ['zh-CN', '复制', '复制 Markdown'],
+  ] as const)(
+    'copies source Markdown with independent feedback in %s',
+    async (language, copyLabel, markdownLabel) => {
+      vi.useFakeTimers();
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      vi.stubGlobal('navigator', { clipboard: { writeText } });
+      try {
+        const content =
+          '## Heading\n\n**Bold** [link](https://example.com)\n\n- Item\n\n```ts\nconst x = 1;\n```';
+        const container = render(
+          <AssistantMessage content={content} showFooterActions />,
+          language,
+        );
+        const copy = container.querySelector<HTMLButtonElement>(
+          `button[aria-label="${copyLabel}"]`,
+        )!;
+        const markdown = container.querySelector<HTMLButtonElement>(
+          `button[aria-label="${markdownLabel}"]`,
+        )!;
+        expect(copy.nextElementSibling).toBe(markdown);
+        expect(markdown.title).toBe(markdownLabel);
+        await act(async () => markdown.click());
+        expect(writeText).toHaveBeenCalledWith(content);
+        expect(markdown.querySelector('rect')).toBeNull();
+        expect(copy.querySelector('rect')).not.toBeNull();
+        act(() => vi.advanceTimersByTime(2000));
+        expect(markdown.querySelector('rect')).not.toBeNull();
+        await act(async () => copy.click());
+        expect(writeText).toHaveBeenLastCalledWith(content);
+        expect(markdown.querySelector('rect')).not.toBeNull();
+        expect(copy.querySelector('rect')).toBeNull();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it.each([
+    { content: '', showFooterActions: true },
+    { content: 'answer', showFooterActions: false },
+    { content: 'answer', showFooterActions: true, isStreaming: true },
+  ])('honors footer visibility: %j', (props) => {
+    const container = render(<AssistantMessage {...props} />);
+    expect(
+      container.querySelector('button[aria-label="Copy Markdown"]'),
+    ).toBeNull();
+  });
+
+  it('omits the Markdown control from exported documents', () => {
+    const container = render(
+      <AssistantMessage content="answer" showFooterActions />,
+      'en',
+      'document',
+    );
+    expect(
+      container.querySelector('button[aria-label="Copy Markdown"]'),
+    ).toBeNull();
+  });
+
+  it('reports clipboard failure without a success flash', async () => {
+    vi.stubGlobal('navigator', {
+      clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
     });
+    const originalExecCommand = document.execCommand;
+    document.execCommand = vi.fn().mockReturnValue(false);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const container = render(
-        <AssistantMessage content="copy me" showFooterActions />,
+        <AssistantMessage content="answer" showFooterActions />,
       );
-      const button = container.querySelector<HTMLButtonElement>(
-        'button[title="Copy"]',
+      const markdown = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Copy Markdown"]',
+      )!;
+      await act(async () => markdown.click());
+      expect(warn).toHaveBeenCalledWith(
+        '[web-shell] clipboard write failed:',
+        expect.any(Error),
       );
-      await act(async () => {
-        button?.click();
-        await Promise.resolve();
-      });
-      // The 2s reset is pending; unmounting must clear it, or it fires
-      // after the file's environment is torn down and the unit suites'
-      // unhandled-error gate turns an all-green run red.
-      expect(vi.getTimerCount()).toBeGreaterThan(0);
-      const { root, container: mountedContainer } = mounted.pop()!;
-      act(() => root.unmount());
-      mountedContainer.remove();
-      expect(vi.getTimerCount()).toBe(0);
+      expect(markdown.querySelector('rect')).not.toBeNull();
     } finally {
-      if (descriptor) {
-        Object.defineProperty(navigator, 'clipboard', descriptor);
-      }
+      document.execCommand = originalExecCommand;
+      vi.unstubAllGlobals();
     }
   });
 });
 
-describe('AssistantMessage copy without the async Clipboard API (issue #9485)', () => {
-  it('falls back to execCommand and still shows the copied state', async () => {
-    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: undefined,
-    });
-    let copiedViaFallback: string | null = null;
-    const originalExecCommand = document.execCommand;
-    const execCommandMock = vi.fn().mockImplementation((command: string) => {
-      if (command === 'copy') {
-        copiedViaFallback = document.querySelector('textarea')?.value ?? null;
-      }
-      return true;
-    });
-    document.execCommand = execCommandMock;
-
-    try {
-      const container = render(
-        <AssistantMessage content="copy me" showFooterActions />,
+describe('AssistantMessage copy reset timer', () => {
+  it.each(['Copy', 'Copy Markdown'])(
+    'cleans up the %s timer on unmount',
+    async (label) => {
+      vi.useFakeTimers();
+      const descriptor = Object.getOwnPropertyDescriptor(
+        navigator,
+        'clipboard',
       );
-      const button = container.querySelector<HTMLButtonElement>(
-        'button[title="Copy"]',
-      );
-      expect(button).not.toBeNull();
-
-      await act(async () => {
-        button?.click();
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: vi.fn().mockResolvedValue(undefined) },
       });
-
-      expect(execCommandMock).toHaveBeenCalledWith('copy');
-      expect(copiedViaFallback).toBe('copy me');
-      // The button should flip to the check icon even without the async API.
-      expect(
-        button?.querySelector('path[d="m3.5 8.3 3 3L12.8 5"]'),
-      ).not.toBeNull();
-    } finally {
-      document.execCommand = originalExecCommand;
-      if (descriptor) {
-        Object.defineProperty(navigator, 'clipboard', descriptor);
+      try {
+        const container = render(
+          <AssistantMessage content="copy me" showFooterActions />,
+        );
+        const button = container.querySelector<HTMLButtonElement>(
+          `button[title="${label}"]`,
+        );
+        await act(async () => {
+          button?.click();
+          await Promise.resolve();
+        });
+        // The 2s reset is pending; unmounting must clear it, or it fires
+        // after the file's environment is torn down and the unit suites'
+        // unhandled-error gate turns an all-green run red.
+        expect(vi.getTimerCount()).toBeGreaterThan(0);
+        const { root, container: mountedContainer } = mounted.pop()!;
+        act(() => root.unmount());
+        mountedContainer.remove();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        if (descriptor) {
+          Object.defineProperty(navigator, 'clipboard', descriptor);
+        }
       }
-    }
-  });
+    },
+  );
+});
+
+describe('AssistantMessage copy without the async Clipboard API (issue #9485)', () => {
+  it.each(['Copy', 'Copy Markdown'])(
+    'falls back to execCommand for %s',
+    async (label) => {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        navigator,
+        'clipboard',
+      );
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: undefined,
+      });
+      let copiedViaFallback: string | null = null;
+      const originalExecCommand = document.execCommand;
+      const execCommandMock = vi.fn().mockImplementation((command: string) => {
+        if (command === 'copy') {
+          copiedViaFallback = document.querySelector('textarea')?.value ?? null;
+        }
+        return true;
+      });
+      document.execCommand = execCommandMock;
+
+      try {
+        const container = render(
+          <AssistantMessage content="copy me" showFooterActions />,
+        );
+        const button = container.querySelector<HTMLButtonElement>(
+          `button[title="${label}"]`,
+        );
+        expect(button).not.toBeNull();
+
+        await act(async () => {
+          button?.click();
+        });
+
+        expect(execCommandMock).toHaveBeenCalledWith('copy');
+        expect(copiedViaFallback).toBe('copy me');
+        // The button should flip to the check icon even without the async API.
+        expect(
+          button?.querySelector('path[d="m3.5 8.3 3 3L12.8 5"]'),
+        ).not.toBeNull();
+      } finally {
+        document.execCommand = originalExecCommand;
+        if (descriptor) {
+          Object.defineProperty(navigator, 'clipboard', descriptor);
+        }
+      }
+    },
+  );
 });
 
 describe('AssistantMessage satisfied / not-satisfied marks', () => {

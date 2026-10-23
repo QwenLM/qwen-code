@@ -115,10 +115,12 @@ test('@smoke partial mouse selection offers plain text and Markdown copying with
     name: 'Copy plain text',
     exact: true,
   });
-  const markdown = page.getByRole('button', {
-    name: 'Copy Markdown',
-    exact: true,
-  });
+  const markdown = page
+    .locator('[data-slot="popover-content"]')
+    .getByRole('button', {
+      name: 'Copy Markdown',
+      exact: true,
+    });
 
   for (const [button, expected] of [
     [plain, 'bold'],
@@ -286,10 +288,12 @@ test('@smoke copies through the real clipboard fallback from a ShadowRoot menu',
   });
   await expect(row).toBeVisible();
   await dragBoldSubstring(page, row.locator('p'));
-  const button = page.getByRole('button', {
-    name: 'Copy Markdown',
-    exact: true,
-  });
+  const button = page
+    .locator('[data-slot="popover-content"]')
+    .getByRole('button', {
+      name: 'Copy Markdown',
+      exact: true,
+    });
   await expect(button).toBeVisible();
   const clipboard = await page.evaluateHandle(() => navigator.clipboard);
   try {
