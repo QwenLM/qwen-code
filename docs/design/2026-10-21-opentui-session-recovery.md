@@ -4,7 +4,7 @@
 
 ## Status and dependency
 
-This B source proposal depends on the complete replay/recovery batch [#15384](https://github.com/QwenLM/qwen-code/pull/15384) and A's complete shared restore repair. C is committed; B now uses A's committed c3b4a17c source from [#15386](https://github.com/QwenLM/qwen-code/pull/15386). B's own combined source and product verification remain pending. Exact source bindings belong in the candidate manifest and verification report. B adds the complete OpenTUI producer and consumer chain. No validated combined artifact is implied. Historical aggregate results remain in the preserved investigation and do not validate this extraction.
+This B source proposal depends on the complete replay/recovery batch [#15384](https://github.com/QwenLM/qwen-code/pull/15384) and A's complete shared restore repair. C is committed; B now uses A's committed 50b66105 source from [#15386](https://github.com/QwenLM/qwen-code/pull/15386). Clean B 6b92fc5c passed the named local session and hot/cold checkpoint suites. Its compact-summary correction and final runtime/installed/platform union still require their own verification. Exact source bindings belong in the candidate manifest and verification report. B adds the complete OpenTUI producer and consumer chain. No validated combined artifact is implied. Historical aggregate results remain in the preserved investigation and do not validate this extraction.
 
 ## Problem and delivery boundary
 
@@ -19,6 +19,16 @@ Keep each original replay source across fanout. For new native rows, retain cano
 Canonical numeric IDs are distinct from host IDs. Seed allocation from restored sources so a first mapped goal/blocked event cannot overwrite restored negative identity. A repeated wire call ID in a later batch receives a distinct group/render identity. Response-end markers reset first-assistant and inline-image limits at actual response boundaries. Settle native thought duration and scheduler-rejection terminal statuses without overwriting already finalized replay metadata.
 
 The real live-turn snapshot port excludes only transient retry/task, pending groups and incomplete native rows, then requires complete canonical sources. Zero-render replay sources remain in the snapshot. Missing canonical metadata fails capture rather than publishing a partial checkpoint. Existing viewport/fence layout is preserved; exact viewport chunk segmentation is not redesigned here.
+
+## Compact tool-summary presentation
+
+A successful read must retain Ink's compact `Read` summary after hot and cold restore. Reuse the existing pure summary builder and category classifier in both renderers; do not rename canonical `ReadFile` tool metadata, requests, results or journal records. Move the existing helper bodies without changing their translation, sanitization or description-count rules, and retain the existing Ink exports.
+
+For complete contiguous canonical tool groups, derive presentation rows before viewport slicing. A group identity and its ordered calls must agree before replacing successful read/search/list rows with one summary. Preserve the original live rows and canonical source objects for snapshots, checkpoint capture and persistence. Give compact and individual presentation different measured-height identities so changing the actual detail setting cannot reuse stale geometry.
+
+Keep individual approval, error, cancellation and image presentation. Full detail, nonempty requested arguments, user-initiated batches, pending owners, memory badges and interactive subagent/PTY groups retain their existing individual path. Reuse the actual subagent classifier; a successful parent scheduling call can still contain a nested confirmation. Native transcript presentation currently has no Ink shell-focus ports, so it must not infer focus from an unrelated field. This repair does not close active/memory/subagent layout parity elsewhere in the migration inventory.
+
+Require tests-first single-read and same-group multi-read failures; after the fix, require one exact shared summary, negative state controls, empty versus nonempty arguments, distinct source groups reusing a call ID, immutable source snapshots, and measured frame/scroll/detail transitions. Repeat the real checkpoint test on all three renderer/runtime legs and require the same successful Read label before and after cold resume, preserving every existing approval, payload, backup and active-ancestry assertion. Global Ink baseline and exact candidate evidence remain distinct; previous 6b92 product passes do not verify the corrected source.
 
 ## Approval and writer authority
 

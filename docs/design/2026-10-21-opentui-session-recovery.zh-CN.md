@@ -4,7 +4,7 @@
 
 ## 状态与依赖
 
-本 B 源码提案依赖完整重放/恢复批次 [#15384](https://github.com/QwenLM/qwen-code/pull/15384) 及 A 的完整共享恢复修复。C 已提交；B 现以 [#15386](https://github.com/QwenLM/qwen-code/pull/15386) 的 A 已提交源码 c3b4a17c 为基座。B 自身组合源码与产品验证仍待完成。精确源码绑定记录在候选 manifest 和验证报告中。B 补齐 OpenTUI 的生产消费链，不假定已验收组合产物。历史 aggregate 证据保留在调查目录，不代表本次抽取通过。
+本 B 源码提案依赖完整重放/恢复批次 [#15384](https://github.com/QwenLM/qwen-code/pull/15384) 及 A 的完整共享恢复修复。C 已提交；B 现以 [#15386](https://github.com/QwenLM/qwen-code/pull/15386) 的 A 已提交源码 50b66105 为基座。干净 B 6b92fc5c 的具名本地 session 与冷热 checkpoint suite 已通过；compact-summary 修复及最终 runtime/安装/平台联合仍须独立验证。精确源码绑定记录在候选 manifest 和验证报告中。B 补齐 OpenTUI 的生产消费链，不假定已验收组合产物。历史 aggregate 证据保留在调查目录，不代表本次抽取通过。
 
 ## 问题与交付边界
 
@@ -19,6 +19,16 @@
 Canonical 数字 ID 与 host ID 区分。恢复 source 为分配器播种，避免首个 goal/blocked 事件覆盖恢复的负 ID。后续批次重用 wire call ID 时使用独立 group/render identity。实际 response-end 标记重置首个 assistant 与图片上限。补齐 native thought 时长及 scheduler 拒绝后的终态，不覆盖已完成的重放元数据。
 
 真实 live-turn snapshot port 仅排除临时 retry/task、pending 工具组及未完成 native 行，再要求完整 canonical source。零可见重放来源仍进入 snapshot；缺少元数据则捕获失败，不能发布残缺 checkpoint。保留现有 viewport/fence 布局，不在此重写精确分段策略。
+
+## 紧凑工具摘要展示
+
+成功 Read 在热恢复及冷恢复后都应保持 Ink 的 `Read` 紧凑摘要。两 renderer 复用既有纯 summary builder 和类别判定，不能重命名 canonical `ReadFile` 元数据、请求、结果或 journal。搬移原 helper 函数体，保持翻译、清理和描述数量规则，保留 Ink 既有导出。
+
+对完整、连续的 canonical 工具组，在 viewport 分段前推导展示行。group 身份及 calls 顺序匹配后，才把成功 read/search/list 行替换为一个摘要。原 live rows 和 canonical source 对象仍供 snapshot、checkpoint 捕获及持久化使用。紧凑与独立展示使用不同的测量高度身份，避免切换真实 detail 设置时复用旧几何信息。
+
+审批、错误、取消和图像保持独立展示。完整详情、被请求的非空参数、用户发起批次、pending owner、memory badge 和交互 subagent/PTY 组沿用既有独立路径。复用真实 subagent 判定：父调度 call 成功后仍可能存在 nested confirmation。native transcript 目前没有 Ink shell-focus 端口，不能从无关字段猜 focus。本修复不关闭迁移清单中其余 active/memory/subagent 布局一致性义务。
+
+先证明单 Read 及同组多 Read 的失败；修复后要求一个精确共享摘要、状态负控、空与非空参数、不同 source 重用 call ID、source snapshot 不变，以及真实测量输入下 frame/scroll/detail 切换。完整 checkpoint 测试在三个 renderer/runtime 路径重新执行，冷热恢复都要求相同成功 Read 标签，保留全部原审批、payload、backup 和 active ancestry 断言。全局 Ink 基线与精确候选证据分开，旧 6b92 产品通过不能证明修改后源码。
 
 ## 审批与 writer 权威
 
