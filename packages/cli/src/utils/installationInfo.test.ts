@@ -813,6 +813,13 @@ describe('getNpmCliPath', () => {
   const userNpmWin32 =
     'C:\\Users\\dev\\AppData\\Roaming\\npm\\node_modules\\npm\\bin\\npm-cli.js';
   const hostilePrefix = 'C:\\repo\\chosen\\prefix';
+  const hostileNpmWin32 = path.win32.join(
+    hostilePrefix,
+    'node_modules',
+    'npm',
+    'bin',
+    'npm-cli.js',
+  );
 
   // npm exports a prefix to its children; a repository-controlled .env can too.
   const stubInheritedPrefixes = (value = '') => {
@@ -879,8 +886,8 @@ describe('getNpmCliPath', () => {
     // the state every interactive Windows machine runs in.
     stubInheritedPrefixes(hostilePrefix);
     vi.stubEnv('APPDATA', appDataWin32);
-    mockedExistsSync.mockImplementation(
-      (candidate) => String(candidate) === userNpmWin32,
+    mockedExistsSync.mockImplementation((candidate) =>
+      [userNpmWin32, hostileNpmWin32].includes(String(candidate)),
     );
 
     const result = getNpmCliPath(nodePathWin32, 'win32');
@@ -894,7 +901,9 @@ describe('getNpmCliPath', () => {
   it('keeps the bundled npm when APPDATA holds no npm and a hostile prefix exists', () => {
     stubInheritedPrefixes(hostilePrefix);
     vi.stubEnv('APPDATA', appDataWin32);
-    mockedExistsSync.mockReturnValue(false);
+    mockedExistsSync.mockImplementation(
+      (candidate) => String(candidate) === hostileNpmWin32,
+    );
 
     const result = getNpmCliPath(nodePathWin32, 'win32');
 
