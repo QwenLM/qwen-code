@@ -25,7 +25,11 @@
  * Pure and read at call time so the decision is pinned state-by-state with a
  * plain object instead of real time (scripts/tests/ready-prompt-budget.test.ts).
  */
+
+/** The widest branch, so a suite ceiling can be derived instead of copied. */
+export const MAX_READY_PROMPT_BUDGET_MS = 180_000;
+
 export function readyPromptBudgetMs(env: NodeJS.ProcessEnv): number {
   if (env['RUNNER_ENVIRONMENT'] !== 'self-hosted') return 30_000;
-  return env['QWEN_SANDBOX'] === 'docker' ? 180_000 : 90_000;
+  return env['QWEN_SANDBOX'] === 'docker' ? MAX_READY_PROMPT_BUDGET_MS : 90_000;
 }

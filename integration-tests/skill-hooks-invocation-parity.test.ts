@@ -27,9 +27,24 @@ import {
   makeWaitFor,
   stubFakeModelEnv,
 } from './helpers/gated-skill-fixture.js';
-import { readyPromptBudgetMs } from './ready-prompt-budget.js';
+import {
+  MAX_READY_PROMPT_BUDGET_MS,
+  readyPromptBudgetMs,
+} from './ready-prompt-budget.js';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
+
+// Per-case ceilings over a stalled boot: the ready-prompt budget plus 3/5
+// waits at the harness's 60s CI default. Derived from the budget so a raise
+// moves both ceilings. retry: 0 because the suite retries twice by default,
+// and a stall that exhausts the ready budget cannot recover on a retry —
+// three attempts would burn 18 minutes of the docker leg's 60-minute job.
+const CI_WAIT_MS = 60_000;
+const SLACK_MS = 60_000;
+const MODEL_CASE_TIMEOUT =
+  MAX_READY_PROMPT_BUDGET_MS + 3 * CI_WAIT_MS + SLACK_MS;
+const USER_CASE_TIMEOUT =
+  MAX_READY_PROMPT_BUDGET_MS + 5 * CI_WAIT_MS + SLACK_MS;
 
 describe('skill hooks fire on both invocation paths', () => {
   let rig: TestRig;
@@ -86,7 +101,7 @@ describe('skill hooks fire on both invocation paths', () => {
 
     restoreNoProxy = stubFakeModelEnv(rig, fakeServer);
 
-    const { ptyProcess } = rig.runInteractive(
+    const { ptyProcess, promise: exited } = rig.runInteractive(
       ...fakeModelLaunchArgs(fakeServer),
     );
 
@@ -97,11 +112,23 @@ describe('skill hooks fire on both invocation paths', () => {
 
     // The docker leg's container boot has stalled past 30s before the prompt
     // renders (#13552, #14191); use the measured self-hosted budget instead of
-    // the old fixed 30s.
-    const ready = await rig.waitForText(
-      'Type your message',
-      readyPromptBudgetMs(process.env),
-    );
+    // the old fixed 30s. A child that dies during startup fails fast with its
+    // exit code instead of polling the dead pty for the whole budget; only a
+    // live-but-slow boot pays it.
+    let startupUndecided = true;
+    const ready = await Promise.race([
+      rig.waitForText('Type your message', readyPromptBudgetMs(process.env)),
+      exited.then(({ exitCode, signal }) => {
+        // cleanup() kills the child on every healthy session's teardown, when
+        // the race is already settled: the abandoned arm must not reject.
+        if (!startupUndecided) return false;
+        throw new Error(
+          `CLI exited during startup (code ${exitCode}, signal ${signal})\n` +
+            `Output:\n${output}`,
+        );
+      }),
+    ]);
+    startupUndecided = false;
     expect(ready, `CLI did not start. Output:\n${output}`).toBe(true);
 
     const waitFor = makeWaitFor(rig, () => output);
@@ -151,27 +178,35 @@ describe('skill hooks fire on both invocation paths', () => {
     return { output, executed: existsSync(flagPath) };
   }
 
-  it('model-invoked skill: the gate fires and blocks the shell call', async () => {
-    const { output, executed } = await driveSession({
-      testName: 'skill hooks model invoked',
-      modelInvokesSkill: true,
-    });
-    expect(
-      output,
-      `gate did not fire. Output tail:\n${output.slice(-1500)}`,
-    ).toContain(GATE_MARKER);
-    expect(executed).toBe(false);
-  }, 420_000); // CI: 180s ready-prompt ceiling + 3 waits at 60s, plus slack.
+  it(
+    'model-invoked skill: the gate fires and blocks the shell call',
+    { timeout: MODEL_CASE_TIMEOUT, retry: 0 },
+    async () => {
+      const { output, executed } = await driveSession({
+        testName: 'skill hooks model invoked',
+        modelInvokesSkill: true,
+      });
+      expect(
+        output,
+        `gate did not fire. Output tail:\n${output.slice(-1500)}`,
+      ).toContain(GATE_MARKER);
+      expect(executed).toBe(false);
+    },
+  );
 
-  it('user-invoked skill (/<skill-name>): the gate fires and blocks the shell call', async () => {
-    const { output, executed } = await driveSession({
-      testName: 'skill hooks slash invoked',
-      modelInvokesSkill: false,
-    });
-    expect(
-      output,
-      `gate did not fire. Output tail:\n${output.slice(-1500)}`,
-    ).toContain(GATE_MARKER);
-    expect(executed).toBe(false);
-  }, 540_000); // CI: 180s ready-prompt ceiling + 5 waits at 60s, plus slack.
+  it(
+    'user-invoked skill (/<skill-name>): the gate fires and blocks the shell call',
+    { timeout: USER_CASE_TIMEOUT, retry: 0 },
+    async () => {
+      const { output, executed } = await driveSession({
+        testName: 'skill hooks slash invoked',
+        modelInvokesSkill: false,
+      });
+      expect(
+        output,
+        `gate did not fire. Output tail:\n${output.slice(-1500)}`,
+      ).toContain(GATE_MARKER);
+      expect(executed).toBe(false);
+    },
+  );
 });
