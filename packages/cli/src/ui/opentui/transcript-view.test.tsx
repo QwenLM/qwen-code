@@ -119,7 +119,10 @@ vi.mock('@opentui/react', () => ({ useRenderer: () => mocks.renderer }));
 
 import { OpenTuiTranscriptView } from './transcript-view.js';
 import { C } from './theme.js';
-import { foldLiveEvent } from './live-session-model.js';
+import {
+  foldLiveEvent,
+  snapshotCanonicalHistory,
+} from './live-session-model.js';
 import { projectHistoryToStreamEvents } from './item-projection.js';
 import { ToolCallStatus, type HistoryItem } from '../types.js';
 import type {
@@ -167,7 +170,7 @@ describe('OpenTuiTranscriptView', () => {
     expect(cards).toHaveLength(2);
     expect(new Set(cards.map((item) => item.renderId)).size).toBe(2);
     expect(cards.every((item) => item.renderId !== undefined)).toBe(true);
-    expect(cards.map((item) => item.canonicalHistoryItem)).toEqual(history);
+    expect(snapshotCanonicalHistory(items)).toEqual(history);
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const view = render(<OpenTuiTranscriptView items={items} />);
