@@ -13,6 +13,7 @@ import {
   statSync,
 } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import semver from 'semver';
 import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
 import { FatalError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import {
@@ -778,11 +779,14 @@ export async function runCliEntryPoint(
   // Consume the relaunch marker so later tool subprocesses get their own check.
   const checkedNodeVersion = process.env[CHECKED_NODE_VERSION_ENV];
   delete process.env[CHECKED_NODE_VERSION_ENV];
-  // Only versions confirmed in https://github.com/QwenLM/qwen-code/issues/15165.
+  // Bounded risk ranges based on #15165 reproductions, not every patch tested.
   if (
     !process.versions['bun'] &&
     checkedNodeVersion !== process.versions.node &&
-    ['24.13.1', '24.16.0', '24.22.1'].includes(process.versions.node)
+    semver.satisfies(
+      process.versions.node,
+      '>=24.0.0 <=24.22.1 || >=25.0.0 <=25.9.0',
+    )
   ) {
     writeStderrLine(
       `Warning: Node.js ${process.versions.node} can cause high temporary memory usage during shell safety checks. ` +

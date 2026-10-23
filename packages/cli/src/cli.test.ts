@@ -1939,7 +1939,24 @@ describe('bootstrap error handling', () => {
     vi.restoreAllMocks();
   });
 
-  it.each(['24.13.1', '24.16.0', '24.22.1'])(
+  it.each([
+    '24.0.0',
+    '24.9.0',
+    '24.13.0',
+    '24.13.1',
+    '24.13.2',
+    '24.15.0',
+    '24.16.0',
+    '24.16.1',
+    '24.22.0',
+    '24.22.1',
+    '24.22.1+build.1',
+    '25.0.0',
+    '25.1.0',
+    '25.8.0',
+    '25.9.0',
+    '25.9.0+build.1',
+  ])(
     'warns on Node %s before continuing startup without changing stdout',
     async (node) => {
       Object.defineProperty(process.versions, 'node', { value: node });
@@ -1964,61 +1981,85 @@ describe('bootstrap error handling', () => {
   );
 
   it.each([
+    '22.22.1',
     '22.23.4',
-    '24.13.0',
-    '24.13.2',
-    '24.15.0',
-    '24.16.1',
-    '24.22.0',
+    '23.0.0',
+    '23.11.1',
+    '23.99.0',
     '24.22.2',
-    '24.13.1-nightly',
+    '24.23.0',
+    '24.99.0',
+    '25.9.1',
+    '25.10.0',
     '26.0.0',
     '26.12.1',
-  ])('does not warn on unlisted Node %s', async (node) => {
-    Object.defineProperty(process.versions, 'node', { value: node });
-    vi.spyOn(process, 'on').mockReturnValue(process);
-    const run = vi.fn(async () => {});
+    '27.0.0',
+    '24.0.0-rc.1',
+    '24.13.1-nightly',
+    '24.22.1-rc.1',
+    '25.0.0-rc.1',
+    '25.8.0-nightly',
+    '25.9.0-rc.1',
+    'invalid',
+  ])(
+    'does not warn on Node %s outside the reviewed stable ranges',
+    async (node) => {
+      Object.defineProperty(process.versions, 'node', { value: node });
+      vi.spyOn(process, 'on').mockReturnValue(process);
+      const run = vi.fn(async () => {});
 
-    await runCliEntryPoint(run);
+      await runCliEntryPoint(run);
 
-    expect(run).toHaveBeenCalledOnce();
-    expect(stderr).toEqual([]);
-    expect(process.exit).not.toHaveBeenCalled();
-  });
+      expect(run).toHaveBeenCalledOnce();
+      expect(stderr).toEqual([]);
+      expect(process.exit).not.toHaveBeenCalled();
+    },
+  );
 
-  it('does not apply the V8 warning to Bun with a matching Node version', async () => {
-    Object.defineProperty(process.versions, 'node', { value: '24.13.1' });
-    Object.defineProperty(process.versions, 'bun', {
-      value: '1.3.0',
-      configurable: true,
-    });
-    vi.spyOn(process, 'on').mockReturnValue(process);
-    const run = vi.fn(async () => {});
+  it.each(['24.13.1', '25.9.0'])(
+    'does not apply the V8 warning to Bun reporting Node %s',
+    async (node) => {
+      Object.defineProperty(process.versions, 'node', { value: node });
+      Object.defineProperty(process.versions, 'bun', {
+        value: '1.3.0',
+        configurable: true,
+      });
+      vi.spyOn(process, 'on').mockReturnValue(process);
+      const run = vi.fn(async () => {});
 
-    await runCliEntryPoint(run);
+      await runCliEntryPoint(run);
 
-    expect(run).toHaveBeenCalledOnce();
-    expect(stderr).toEqual([]);
-  });
+      expect(run).toHaveBeenCalledOnce();
+      expect(stderr).toEqual([]);
+    },
+  );
 
-  it('consumes the relaunch marker without repeating the warning', async () => {
-    Object.defineProperty(process.versions, 'node', { value: '24.13.1' });
-    vi.stubEnv(CHECKED_NODE_VERSION_ENV, '24.13.1');
-    vi.spyOn(process, 'on').mockReturnValue(process);
-    const run = vi.fn(async () => {
-      expect(process.env[CHECKED_NODE_VERSION_ENV]).toBeUndefined();
-    });
+  it.each(['24.13.1', '25.9.0'])(
+    'consumes the Node %s relaunch marker without repeating the warning',
+    async (node) => {
+      Object.defineProperty(process.versions, 'node', { value: node });
+      vi.stubEnv(CHECKED_NODE_VERSION_ENV, node);
+      vi.spyOn(process, 'on').mockReturnValue(process);
+      const run = vi.fn(async () => {
+        expect(process.env[CHECKED_NODE_VERSION_ENV]).toBeUndefined();
+      });
 
-    await runCliEntryPoint(run);
+      await runCliEntryPoint(run);
 
-    expect(run).toHaveBeenCalledOnce();
-    expect(stderr).toEqual([]);
-  });
+      expect(run).toHaveBeenCalledOnce();
+      expect(stderr).toEqual([]);
+    },
+  );
 
-  it.each([undefined, '24.22.1'])(
-    'warns when relaunch is disabled and the checked version is %s',
-    async (checkedVersion) => {
-      Object.defineProperty(process.versions, 'node', { value: '24.13.1' });
+  it.each([
+    ['24.13.1', undefined],
+    ['24.13.1', '24.22.1'],
+    ['25.9.0', undefined],
+    ['25.9.0', '24.22.1'],
+  ])(
+    'warns on Node %s when relaunch is disabled and the checked version is %s',
+    async (node, checkedVersion) => {
+      Object.defineProperty(process.versions, 'node', { value: node });
       vi.stubEnv('QWEN_CODE_NO_RELAUNCH', 'true');
       vi.stubEnv(CHECKED_NODE_VERSION_ENV, checkedVersion);
       vi.spyOn(process, 'on').mockReturnValue(process);
