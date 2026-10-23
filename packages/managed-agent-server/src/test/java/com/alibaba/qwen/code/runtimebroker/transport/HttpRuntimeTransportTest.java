@@ -128,6 +128,38 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void inventoryUsesTheAttestedLeaseAndRejectsPrivateRecipeFields() throws Exception {
+        var request = ManagedContextProtocolTest.request();
+        var seed = ManagedContextProtocolTest.seed();
+        var binding = ready(request, seed, contextLease(seed));
+        var pin = new LinkedHashMap<String, Object>(Map.of("serverId", "docs", "serverRevision", 1,
+                "definitionDigest", "a".repeat(64), "transport", "stdio"));
+        reply.set(json(200, JsonCodec.encode(Map.of("protocolVersion", 1, "servers", List.of(pin)))));
+        assertEquals(1, transport.mcpDefinitions(binding).toCompletableFuture().get(2, TimeUnit.SECONDS).size());
+        assertEquals(ManagedMcpProtocol.DEFINITIONS_PATH, capturedPath.get());
+        JsonNode body = JSON.readTree(captured.get());
+        assertEquals(3, body.size());
+        assertEquals(request.getScope().getTenantId(), body.path("tenantId").asText());
+        assertEquals(request.getScope().getWorkspaceId(), body.path("workspaceId").asText());
+        assertEquals("Bearer " + binding.getLease().getToken(), capturedAuthorization.get());
+        for (String privateField : List.of("command", "args", "env", "url", "headers")) {
+            var leaked = new LinkedHashMap<>(pin);
+            leaked.put(privateField, "private");
+            reply.set(json(200, JsonCodec.encode(Map.of("protocolVersion", 1, "servers", List.of(leaked)))));
+            assertThrows(ExecutionException.class,
+                    () -> transport.mcpDefinitions(binding).toCompletableFuture().get(2, TimeUnit.SECONDS));
+        }
+        for (Number invalid : List.of(new BigDecimal("1.00000000000000000000001"), 0, 9_007_199_254_740_992L)) {
+            var changed = new LinkedHashMap<>(pin);
+            changed.put("serverRevision", invalid);
+            reply.set(json(200, JsonCodec.encode(Map.of("protocolVersion", 1, "servers", List.of(changed)))));
+            var refusal = assertThrows(ExecutionException.class,
+                    () -> transport.mcpDefinitions(binding).toCompletableFuture().get(2, TimeUnit.SECONDS));
+            assertEquals("managed_mcp_response_invalid", ((RuntimeBrokerException) refusal.getCause()).getCode());
+        }
+    }
+
+    @Test
     void acknowledgesOnlyTheOriginalV2ReferenceWithoutResendingInput() throws Exception {
         var lease = toolLease(server.getAddress().getPort());
         var session = toolSession();
