@@ -470,6 +470,83 @@ describe('SDK Java self-hosted workflow guards', () => {
   );
 
   it.skipIf(process.platform !== 'linux')(
+    'holds the host lock through the cache write-back on the success path',
+    () => {
+      const step = parse(workflow).jobs.test.steps.find(
+        (s) => s.name === 'Run Java SDK tests (self-hosted)',
+      );
+      const start = step.run.indexOf('lock_status=0');
+      expect(start).toBeGreaterThan(-1);
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-write-back-lock-'));
+      const workspace = join(dir, 'workspace');
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const shims = join(dir, 'bin');
+      const lockState = join(dir, 'lock-state');
+      mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
+      mkdirSync(home);
+      mkdirSync(join(runnerTemp, 'm2-repo', 'org', 'example'), {
+        recursive: true,
+      });
+      mkdirSync(shims);
+      // The real helper owns the ticketed acquisition, and the only cp in
+      // this slice is the write-back: probing the lock from it observes
+      // whether the step shell still owns fd 9 when the copy starts.
+      writeFileSync(
+        join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
+        readFileSync('.github/scripts/sdk-java-lock.sh', 'utf8'),
+      );
+      writeFileSync(
+        join(runnerTemp, 'm2-repo', 'org', 'example', 'dep-1.0.jar'),
+        'x',
+      );
+      writeFileSync(
+        join(shims, 'cp'),
+        '#!/bin/sh\n' +
+          'if flock --nonblock "${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock" true; then\n' +
+          '  echo free >"${LOCK_STATE_FILE}"\n' +
+          'else\n' +
+          '  echo held >"${LOCK_STATE_FILE}"\n' +
+          'fi\n' +
+          'exit 0\n',
+        { mode: 0o755 },
+      );
+      try {
+        const result = spawnSync(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-eo',
+            'pipefail',
+            '-c',
+            `mvn_status=0\n${step.run.slice(start)}`,
+          ],
+          {
+            encoding: 'utf8',
+            timeout: 30_000,
+            env: {
+              ...process.env,
+              PATH: `${shims}:${process.env.PATH}`,
+              GITHUB_WORKSPACE: workspace,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              TIER: 'fast',
+              LOCK_STATE_FILE: lockState,
+            },
+          },
+        );
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stderr).toBe(0);
+        expect(existsSync(lockState)).toBe(true);
+        expect(readFileSync(lockState, 'utf8').trim()).toBe('held');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
     'releases the host lock when a write-back child survives the step',
     () => {
       const jobs = parse(workflow).jobs;
