@@ -71,6 +71,73 @@ const timeoutMinutesOn = (job, ubuntuRunner) => {
   return Number(new Function(`return (${expr});`)());
 };
 
+describe('raw JUnit report retention', () => {
+  const steps = ci.jobs.test.steps;
+  const upload = steps.find(
+    (step) => step.name === 'Upload Test Results Artifact',
+  );
+  const evaluate = (expression, event, headRepo, skipCi, profile) =>
+    new Function(
+      'github',
+      'needs',
+      'steps',
+      'always',
+      `return (${expression.replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '')});`,
+    )(
+      {
+        event_name: event,
+        repository: 'QwenLM/qwen-code',
+        event: { pull_request: { head: { repo: { full_name: headRepo } } } },
+      },
+      { classify_pr: { outputs: { skip_ci: skipCi } } },
+      { ci_profile: { outputs: { ci_profile: profile } } },
+      () => true,
+    );
+
+  it.each([
+    [
+      'pull_request',
+      'contributor/qwen-code',
+      'test-results-fork-22.x-ubuntu-latest',
+    ],
+    ['pull_request', 'QwenLM/qwen-code', 'test-results-22.x-ubuntu-latest'],
+    ['push', '', 'test-results-22.x-ubuntu-latest'],
+  ])(
+    'retains reports for %s from %s, including failed runs',
+    (event, repo, name) => {
+      expect(upload.if).toContain('always()');
+      expect(evaluate(upload.if, event, repo, 'false', 'full')).toBe(true);
+      expect(evaluate(upload.with.name, event, repo, 'false', 'full')).toBe(
+        name,
+      );
+      expect(evaluate(upload.if, event, repo, 'true', 'full')).toBe(false);
+      expect(evaluate(upload.if, event, repo, 'false', 'web-shell-only')).toBe(
+        false,
+      );
+      expect(evaluate(upload.if, event, repo, 'false', '')).toBe(false);
+    },
+  );
+
+  it('uploads raw XML for seven days without requiring a report to exist', () => {
+    expect(upload.uses).toMatch(/^actions\/upload-artifact@/);
+    expect(upload.with.path).toBe('packages/*/junit.xml');
+    expect(upload.with['retention-days']).toBe(7);
+    expect(upload.with['if-no-files-found']).toBe('ignore');
+  });
+
+  it('keeps report publication advisory and unit-test failures blocking', () => {
+    const publisher = steps.find(
+      (step) => step.name === 'Publish Test Report (for non-forks)',
+    );
+    const unitTests = steps.find((step) => step.id === 'unit_tests');
+    expect(publisher['continue-on-error']).toBe(true);
+    expect(publisher.with['fail-on-error']).toBe('false');
+    expect(unitTests['continue-on-error']).not.toBe(true);
+    expect(unitTests.run).toContain('exit "$RC"');
+    expect(steps.indexOf(upload)).toBeGreaterThan(steps.indexOf(publisher));
+  });
+});
+
 it('gives the shared Linux test lane one ceiling on both pools', () => {
   // The full suite outgrew 60 minutes on hosted runners too: on 2026-10-17,
   // 17 of the 30 hosted runs that ended on their own were cancelled at 60.
