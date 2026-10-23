@@ -30,6 +30,7 @@
  * OpenTUI widgets are prop-driven and read keys through `@opentui/react`.
  */
 
+import type { RestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import {
   useCallback,
   useEffect,
@@ -178,7 +179,11 @@ export interface OpenTuiAppProps {
     imagePaths?: readonly string[],
     options?: OpenTuiSubmitOptions,
   ) => boolean;
-  onScheduleTool?: (name: string, args: Record<string, unknown>) => boolean;
+  onScheduleTool?: (
+    name: string,
+    args: Record<string, unknown>,
+    restoreResponseBinding?: RestoreToolResponseBinding,
+  ) => boolean;
   onRetryPrompt?: () => void;
   onInputProcessed?: () => void;
   /** Reaches the entry after `/quit`; receives the closing history rows. */
@@ -1016,7 +1021,13 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           notify('The live prompt turn is not wired in this shell.');
           return false;
         case 'schedule_tool':
-          return onScheduleTool?.(outcome.toolName, outcome.toolArgs) ?? false;
+          return outcome.restoreResponseBinding
+            ? (onScheduleTool?.(
+                outcome.toolName,
+                outcome.toolArgs,
+                outcome.restoreResponseBinding,
+              ) ?? false)
+            : (onScheduleTool?.(outcome.toolName, outcome.toolArgs) ?? false);
         case 'quit':
           // Clear both queues before interrupt creates the shell's idle edge.
           // The live turn also suppresses late restored steering after abort.

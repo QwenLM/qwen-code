@@ -20,6 +20,10 @@
  * feature parity + regression are complete.
  */
 
+import {
+  completeRestoreToolResponse,
+  type RestoreToolResponseBinding,
+} from '../utils/restore-tool-response.js';
 import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
 import {
   InteractiveModToolScheduler,
@@ -112,7 +116,11 @@ export interface LivePromptOptions {
   isCurrentTurn?: () => boolean;
   /** Per-turn model override (submit_prompt's modelOverride parity). */
   modelOverride?: string;
-  toolCall?: { name: string; args: Record<string, unknown> };
+  toolCall?: {
+    name: string;
+    args: Record<string, unknown>;
+    restoreResponseBinding?: RestoreToolResponseBinding;
+  };
   retry?: PreparedLiveRequest;
   onAcceptedSteering?: (messages: readonly string[]) => void;
   onPreparedRequest?: (request: PreparedLiveRequest | undefined) => void;
@@ -876,6 +884,7 @@ export async function* livePromptEvents(
           },
         ]
       : [];
+    const initialToolCallId = pending[0]?.callId;
     if (initialTool) {
       const request = pending[0];
       yield {
@@ -1320,6 +1329,19 @@ export async function* livePromptEvents(
     // Client-initiated slash tools finish locally in Ink. Leave queued user
     // input for its own turn rather than attaching it to tool responses.
     if (initialTool) {
+      if (initialTool.restoreResponseBinding) {
+        const index = completed.findIndex(
+          (call) => call.request.callId === initialToolCallId,
+        );
+        if (index !== -1) {
+          await completeRestoreToolResponse(
+            initialTool.restoreResponseBinding,
+            completed[index].request,
+            finalResponses[index].responseParts,
+            current,
+          );
+        }
+      }
       if (!abort.aborted && current()) {
         for (const [index, call] of completed.entries()) {
           dualOutput?.emitToolResult(call.request, {

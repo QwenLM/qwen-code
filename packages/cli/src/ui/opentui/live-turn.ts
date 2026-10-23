@@ -24,6 +24,7 @@
  * queue instead of dropping them.
  */
 
+import type { RestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
 import { stripSuppressOnRestore } from '../utils/resumeHistoryUtils.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
@@ -124,7 +125,11 @@ export interface UseOpenTuiLiveTurnOptions {
  */
 export interface OpenTuiSubmitOptions {
   promptId?: string;
-  toolCall?: { name: string; args: Record<string, unknown> };
+  toolCall?: {
+    name: string;
+    args: Record<string, unknown>;
+    restoreResponseBinding?: RestoreToolResponseBinding;
+  };
   deferUntilIdle?: boolean;
   modelOverride?: string;
   refreshContextFilesOnWrite?: boolean;
@@ -179,7 +184,11 @@ export interface OpenTuiLiveTurn {
   interrupt(onSettled?: OpenTuiCancelSettled): void;
   retryLastPrompt(): void;
   notifyInputProcessed(): void;
-  scheduleTool(name: string, args: Record<string, unknown>): boolean;
+  scheduleTool(
+    name: string,
+    args: Record<string, unknown>,
+    restoreResponseBinding?: RestoreToolResponseBinding,
+  ): boolean;
   isCurrentHistory(snapshot: readonly LiveHistoryItem[]): boolean;
   rewindTranscript(userId: string): readonly LiveHistoryItem[] | undefined;
   /** Replaces the transcript from a replay batch (session switch/resume). */
@@ -740,9 +749,19 @@ export function useOpenTuiLiveTurn(
   }, []);
 
   const scheduleTool = useCallback(
-    (name: string, args: Record<string, unknown>) => {
+    (
+      name: string,
+      args: Record<string, unknown>,
+      restoreResponseBinding?: RestoreToolResponseBinding,
+    ) => {
       if (!mountedRef.current || streamingRef.current) return false;
-      void runTurn([], nextLivePromptId(config), { toolCall: { name, args } });
+      void runTurn([], nextLivePromptId(config), {
+        toolCall: {
+          name,
+          args,
+          ...(restoreResponseBinding ? { restoreResponseBinding } : {}),
+        },
+      });
       return true;
     },
     [config, runTurn],

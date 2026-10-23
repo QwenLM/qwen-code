@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  createRestoreToolResponseBinding,
+  isRestoreToolResponseBindingCurrent,
+  type RestoreToolResponseBinding,
+} from '../utils/restore-tool-response.js';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -39,6 +44,7 @@ async function restoreAction(
   const expectedHistory = ui.history;
   let loadedHistory: HistoryItem[] | undefined;
   let restoreNoticeId: number | undefined;
+  let restoreResponseBinding: RestoreToolResponseBinding | undefined;
   const isCurrent = () => {
     const history = ui.history;
     const loaded = loadedHistory;
@@ -53,6 +59,8 @@ async function restoreAction(
       expectedHistory.length + (ownInvocationPublished ? 1 : 0);
     return (
       !context.abortSignal?.aborted &&
+      (!restoreResponseBinding ||
+        isRestoreToolResponseBindingCurrent(restoreResponseBinding)) &&
       config?.getSessionId() === sessionId &&
       ui.isIdleRef.current &&
       ((history.length === expectedLength &&
@@ -219,7 +227,23 @@ async function restoreAction(
       toolCallData.clientHistory.forEach((content: Content, index: number) => {
         markApiHistoryPrompt(content, promptIds[index]);
       });
-      await config?.getLlmClient()?.setHistory(toolCallData.clientHistory);
+      const historyInstalled = config
+        ?.getLlmClient()
+        ?.setHistory(toolCallData.clientHistory);
+      const pendingTail = toolCallData.clientHistory?.at(-1);
+      restoreResponseBinding =
+        config &&
+        pendingTail?.role === 'model' &&
+        pendingTail.parts?.some(
+          (part: NonNullable<Content['parts']>[number]) => part.functionCall,
+        )
+          ? createRestoreToolResponseBinding(
+              config,
+              toolCall.name,
+              toolCall.args,
+            )
+          : undefined;
+      await historyInstalled;
       if (!isCurrent()) return;
     }
 
@@ -340,10 +364,12 @@ async function restoreAction(
       }
     }
 
+    if (!isCurrent()) return;
     return {
       type: 'tool',
       toolName: toolCall.name,
       toolArgs: toolCall.args,
+      ...(restoreResponseBinding ? { restoreResponseBinding } : {}),
     };
   } catch (error) {
     if (!isCurrent()) return;

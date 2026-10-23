@@ -93,6 +93,9 @@ describe('restoreCommand', () => {
     'no',
     'abort',
     'current loss',
+    'API replacement',
+    'API args mutation',
+    'API id mutation',
     'deny',
     'missing',
     'cache disabled',
@@ -152,7 +155,30 @@ describe('restoreCommand', () => {
       await fs.writeFile(
         path.join(checkpointsDir, 'permission.json'),
         JSON.stringify({
-          clientHistory: [],
+          clientHistory: [
+            'API replacement',
+            'API args mutation',
+            'API id mutation',
+          ].includes(mode)
+            ? [
+                {
+                  role: 'model',
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'original-pending-edit',
+                        name: 'edit',
+                        args: {
+                          file_path: file,
+                          old_string: 'A',
+                          new_string: 'B',
+                        },
+                      },
+                    },
+                  ],
+                },
+              ]
+            : [],
           toolCall: {
             name: 'edit',
             args: { file_path: file, old_string: 'A', new_string: 'B' },
@@ -163,8 +189,19 @@ describe('restoreCommand', () => {
         mockContext,
         'permission',
       );
+      let expectedMutatedHistory: Content[] | undefined;
       try {
-        if (['yes', 'no', 'abort', 'current loss'].includes(mode)) {
+        if (
+          [
+            'yes',
+            'no',
+            'abort',
+            'current loss',
+            'API replacement',
+            'API args mutation',
+            'API id mutation',
+          ].includes(mode)
+        ) {
           await vi.waitFor(() => expect(requests).toHaveLength(1));
           expect(requests[0].signal).toBeDefined();
           expect(requests[0].isCurrent?.()).toBe(true);
@@ -172,9 +209,63 @@ describe('restoreCommand', () => {
           expect(await fs.readFile(file, 'utf8')).toBe('A');
           if (mode === 'abort') controller.abort();
           if (mode === 'current loss') mockContext.ui.isIdleRef.current = false;
+          if (mode === 'API replacement') {
+            client.setHistory([
+              {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'healthy-successor-edit',
+                      name: 'edit',
+                      args: {
+                        file_path: file,
+                        old_string: 'A',
+                        new_string: 'B',
+                      },
+                    },
+                  },
+                ],
+              },
+            ]);
+            expect(requests[0].isCurrent?.()).toBe(false);
+          }
+          if (mode === 'API args mutation' || mode === 'API id mutation') {
+            const revision = chat.getHistoryReplacementRevision();
+            const call = chat.peekLastHistoryEntry()!.parts![0].functionCall!;
+            if (mode === 'API args mutation')
+              call.args = {
+                file_path: file,
+                old_string: 'A',
+                new_string: 'SUCCESSOR_CONTENT',
+              };
+            else call.id = 'healthy-in-place-id';
+            expect(chat.getHistoryReplacementRevision()).toBe(revision);
+            expectedMutatedHistory = client.getHistory();
+            expect(requests[0].isCurrent?.()).toBe(false);
+          }
           requests[0].onConfirm(mode !== 'no');
         }
         const result = await pending;
+        if (expectedMutatedHistory)
+          expect(client.getHistory()).toEqual(expectedMutatedHistory);
+        if (mode === 'API replacement') {
+          expect(client.getHistoryShallow()).toEqual([
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'healthy-successor-edit',
+                    name: 'edit',
+                    args: { file_path: file, old_string: 'A', new_string: 'B' },
+                  },
+                },
+              ],
+            },
+          ]);
+        }
+
         if (mode === 'yes' || mode === 'missing' || mode === 'cache disabled') {
           expect(result?.type).toBe('tool');
           if (mode === 'yes') {

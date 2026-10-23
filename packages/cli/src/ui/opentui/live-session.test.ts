@@ -13,6 +13,10 @@
  * image reaching the model goes through the prompt-side vision bridge.
  */
 
+import { makeFakeConfig } from '@qwen-code/qwen-code-core/test-utils/config.js';
+import { LlmClient } from '@qwen-code/qwen-code-core/core/client.js';
+import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import { createRestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
@@ -327,6 +331,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
               __cancelled?: boolean;
               __cancelApproval?: boolean;
               __modOutput?: string;
+              __restoreResult?: Record<string, unknown>;
             };
             return {
               nativeAttemptsObserved: a.__modOutput !== undefined,
@@ -349,9 +354,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
                       name: c.name ?? 'test_tool',
                       id: c.callId,
                       response:
-                        a.__modOutput !== undefined
+                        a.__restoreResult ??
+                        (a.__modOutput !== undefined
                           ? { output: a.__modOutput }
-                          : { ok: true },
+                          : { ok: true }),
                     },
                   },
                 ],
@@ -1265,6 +1271,86 @@ describe('livePromptEvents', () => {
       expect.objectContaining({ success: false, summary: 'cancelled' }),
     ]);
   });
+
+  it.each(['success', 'cancelled', 'successor'] as const)(
+    'pairs an actual initialTool completion only with its captured restore owner: %s',
+    async (mode) => {
+      const directory = await mkdtemp(
+        path.join(tmpdir(), 'restore-live-caller-'),
+      );
+      const config = makeFakeConfig({
+        targetDir: directory,
+        cwd: directory,
+        usageStatisticsEnabled: false,
+        disableAllHooks: true,
+      });
+      const client = new LlmClient(config);
+      const chat = new LlmChat(config);
+      chat.setTools([]);
+      vi.spyOn(client, 'getChat').mockReturnValue(chat);
+      vi.spyOn(client, 'isInitialized').mockReturnValue(true);
+      vi.spyOn(config, 'getLlmClient').mockReturnValue(client);
+      vi.spyOn(config, 'getGeminiClient').mockReturnValue(client);
+      vi.spyOn(config, 'initialize').mockResolvedValue();
+      const sends = vi.spyOn(client, 'sendMessageStream');
+      const recordToolResult = vi.fn();
+      vi.spyOn(config, 'getChatRecordingService').mockReturnValue({
+        recordToolResult,
+      } as unknown as ChatRecordingService);
+      const args = {
+        __cancelled: mode === 'cancelled',
+        __restoreResult:
+          mode === 'cancelled'
+            ? { error: 'ACTUAL_CANCELLED_RESULT' }
+            : { output: 'ACTUAL_LOCAL_REPLAY_RESULT' },
+      };
+      client.setHistory([
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'original-call', name: 'test_tool', args } },
+          ],
+        },
+      ]);
+      const binding = createRestoreToolResponseBinding(
+        config,
+        'test_tool',
+        args,
+      )!;
+      let current = true;
+      try {
+        for await (const event of livePromptEvents(config, [], undefined, {
+          toolCall: {
+            name: 'test_tool',
+            args,
+            restoreResponseBinding: binding,
+          },
+          isCurrentTurn: () => current,
+        })) {
+          if (mode === 'successor' && event.type === 'tool-end')
+            current = false;
+        }
+        const history = client.getHistoryShallow();
+        if (mode === 'successor') expect(history).toHaveLength(1);
+        else {
+          expect(history).toHaveLength(2);
+          expect(history[1].parts).toEqual([
+            {
+              functionResponse: {
+                id: 'original-call',
+                name: 'test_tool',
+                response: args.__restoreResult,
+              },
+            },
+          ]);
+        }
+        expect(sends).not.toHaveBeenCalled();
+        expect(recordToolResult).not.toHaveBeenCalled();
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('passes the per-turn modelOverride through send options', async () => {
     const sendMessageStream = vi.fn(function* () {});

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { RestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
 import type {
@@ -145,6 +146,7 @@ export interface ToolActionReturn {
   type: 'tool';
   toolName: string;
   toolArgs: Record<string, unknown>;
+  restoreResponseBinding?: RestoreToolResponseBinding;
 }
 
 /** The return type for a command action that results in the app quitting. */

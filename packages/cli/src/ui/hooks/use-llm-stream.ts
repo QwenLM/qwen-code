@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  completeRestoreToolResponse,
+  type RestoreToolResponseBinding,
+} from '../utils/restore-tool-response.js';
 import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
 import {
   useState,
@@ -178,6 +182,7 @@ interface TeammateQueueEntry {
 }
 
 interface ToolContinuationOwner {
+  restoreResponseBinding?: RestoreToolResponseBinding;
   promptId: string;
   signal: AbortSignal;
   survivesGenerationChange: boolean;
@@ -1663,7 +1668,10 @@ export const useLlmStream = (
     ): Promise<{
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
-      scheduledToolCallId?: string;
+      scheduledClientTool?: {
+        request: ToolCallRequestInfo;
+        restoreResponseBinding?: RestoreToolResponseBinding;
+      };
     }> => {
       if (turnCancelledRef.current && !preserveTurnOwnership) {
         return { queryToSend: null, shouldProceed: false };
@@ -1759,12 +1767,18 @@ export const useLlmStream = (
                 // gate as model calls, never to fixed-policy semantics.
                 executionOrigin: { kind: 'client' },
               };
-              registerToolBatch(toolCallRequest);
-              scheduleToolCalls([toolCallRequest], abortSignal);
               return {
                 queryToSend: null,
                 shouldProceed: false,
-                scheduledToolCallId: toolCallRequest.callId,
+                scheduledClientTool: {
+                  request: toolCallRequest,
+                  ...(slashCommandResult.restoreResponseBinding
+                    ? {
+                        restoreResponseBinding:
+                          slashCommandResult.restoreResponseBinding,
+                      }
+                    : {}),
+                },
               };
             }
             case 'submit_prompt': {
@@ -1936,8 +1950,6 @@ export const useLlmStream = (
       handleSlashCommand,
       logger,
       shellModeActive,
-      registerToolBatch,
-      scheduleToolCalls,
       applyVisionBridgeIfNeeded,
     ],
   );
@@ -3971,7 +3983,10 @@ export const useLlmStream = (
         let preparedQuery: {
           queryToSend: PartListUnion | null;
           shouldProceed: boolean;
-          scheduledToolCallId?: string;
+          scheduledClientTool?: {
+            request: ToolCallRequestInfo;
+            restoreResponseBinding?: RestoreToolResponseBinding;
+          };
         };
         try {
           preparedQuery =
@@ -4018,17 +4033,31 @@ export const useLlmStream = (
           metadata?.onAdmissionFailed?.();
           throw error;
         }
-        const { queryToSend, shouldProceed, scheduledToolCallId } =
+        const { queryToSend, shouldProceed, scheduledClientTool } =
           preparedQuery;
 
-        if (scheduledToolCallId && foregroundAbortController) {
+        if (scheduledClientTool && foregroundAbortController) {
           keepToolContinuationAbortController = true;
-          continuationOwnersByToolCallIdRef.current.set(scheduledToolCallId, {
-            promptId: prompt_id!,
-            signal: abortSignal,
-            survivesGenerationChange: false,
-            foregroundAbortController,
-          });
+          continuationOwnersByToolCallIdRef.current.set(
+            scheduledClientTool.request.callId,
+            {
+              ...(scheduledClientTool.restoreResponseBinding
+                ? {
+                    restoreResponseBinding:
+                      scheduledClientTool.restoreResponseBinding,
+                  }
+                : {}),
+              promptId: prompt_id!,
+              signal: abortSignal,
+              survivesGenerationChange: false,
+              foregroundAbortController,
+            },
+          );
+        }
+
+        if (scheduledClientTool) {
+          registerToolBatch(scheduledClientTool.request);
+          scheduleToolCalls([scheduledClientTool.request], abortSignal);
         }
 
         if (!shouldProceed || queryToSend === null) {
@@ -4583,6 +4612,8 @@ export const useLlmStream = (
       shellModeActive,
       setModelSwitchedFromQuotaError,
       prepareQueryForLlm,
+      registerToolBatch,
+      scheduleToolCalls,
       processLlmStreamEvents,
       pendingHistoryItemRef,
       addItem,
@@ -5205,6 +5236,23 @@ export const useLlmStream = (
           t.request.isClientInitiated &&
           !historyCallIdsWithResponse.has(t.request.callId),
       );
+      for (const toolCall of clientTools) {
+        const owner = continuationOwnersByToolCallIdRef.current.get(
+          toolCall.request.callId,
+        );
+        if (owner?.restoreResponseBinding) {
+          await completeRestoreToolResponse(
+            owner.restoreResponseBinding,
+            toolCall.request,
+            toolCall.response.responseParts,
+            () =>
+              workflowConfigRef.current === config &&
+              isCurrentSession() &&
+              owner.foregroundAbortController !== undefined &&
+              abortControllerRef.current === owner.foregroundAbortController,
+          );
+        }
+      }
       if (clientTools.length > 0) {
         markToolsAsSubmitted(clientTools.map((t) => t.request.callId));
       }

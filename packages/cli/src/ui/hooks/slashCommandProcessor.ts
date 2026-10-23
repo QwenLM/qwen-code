@@ -1196,6 +1196,11 @@ export const useSlashCommandProcessor = (
                     type: 'schedule_tool',
                     toolName: result.toolName,
                     toolArgs: result.toolArgs,
+                    ...(result.restoreResponseBinding
+                      ? {
+                          restoreResponseBinding: result.restoreResponseBinding,
+                        }
+                      : {}),
                   };
                 case 'message':
                   // Picker-shaped commands can still reject their arguments

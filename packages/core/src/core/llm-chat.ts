@@ -2319,6 +2319,12 @@ function stripTrailingSessionStartContextBlock(
 }
 
 export class LlmChat {
+  private historyReplacementRevision = 0;
+
+  getHistoryReplacementRevision(): number {
+    return this.historyReplacementRevision;
+  }
+
   // A promise to represent the current state of the message being sent to the
   // model.
   private sendPromise: Promise<void> = Promise.resolve();
@@ -5950,6 +5956,7 @@ export class LlmChat {
    * Clears the chat history.
    */
   clearHistory(): void {
+    this.historyReplacementRevision++;
     this.history = [];
     this.completedToolCallIds = [];
     if (!this.isForkedChat) {
@@ -6124,6 +6131,7 @@ export class LlmChat {
     history: Content[],
     completedToolCallIds?: readonly string[],
   ): void {
+    this.historyReplacementRevision++;
     markCompressedHistory(history);
     this.history = history;
     this.markToolResultsInjected(this.history);
@@ -6151,6 +6159,7 @@ export class LlmChat {
   }
 
   truncateHistory(keepCount: number): void {
+    this.historyReplacementRevision++;
     const prevLen = this.history.length;
     this.history = this.history.slice(0, keepCount);
     markCompressedHistory(this.history);
@@ -6176,6 +6185,7 @@ export class LlmChat {
   }
 
   stripThoughtsFromHistory(): void {
+    this.historyReplacementRevision++;
     this.history = this.history
       .map(stripThoughtPartsFromContent)
       .filter((content): content is Content => content !== null);
@@ -6258,6 +6268,7 @@ export class LlmChat {
         ?.syncReviewedDeclarations?.(this.history, this);
     }
     this.clearPendingPartialState();
+    if (strippedEntries.length > 0) this.historyReplacementRevision++;
     return strippedEntries;
   }
 
