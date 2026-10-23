@@ -6026,6 +6026,16 @@ exit 1
     expect(seedOf('@qwen-code /takeover from 3')).toBe('add|3');
     expect(seedOf('  @qwen-code /takeover from 12  ')).toBe('add|12');
     expect(seedOf('@qwen-code /takeover from 99')).toBe('add|99');
+    // A trailing NEWLINE also engages, but through a DIFFERENT mechanism than
+    // the trailing-space body above, which is the whole reason it needs its
+    // own pin: the sed at qwen-autofix.yml:419 never sees it (sed is
+    // line-oriented, so the newline is a record terminator rather than
+    // trailing content), and it is the surrounding $(...) COMMAND SUBSTITUTION
+    // that strips it. Break that strip and BODY_TRIMMED keeps the newline, so
+    // the end-anchored `from N` regex at yml:427 can no longer match and this
+    // body — documented harmless at qwen-autofix-round-seed.md:123 — silently
+    // fails closed while the trailing-space case above still passes.
+    expect(seedOf('@qwen-code /takeover from 4\n')).toBe('add|4');
     // 'from 0' is the explicit no-seed spelling: it must engage exactly like
     // the bare command rather than being rejected, so a maintainer who types
     // it gets management, not silence.
@@ -6056,6 +6066,18 @@ exit 1
       '@qwen-code /takeover from 3; rm -rf /',
       '@qwen-code /takeover from $(id)',
       '@qwen-code /takeover from `id`',
+      // A leading NEWLINE fails closed for its own reason, not the prefixed-
+      // body reason above: the line-oriented sed at qwen-autofix.yml:419
+      // strips nothing from a blank first line, and $(...) strips only
+      // TRAILING newlines, so BODY_TRIMMED keeps the leading '\n'. The
+      // end-anchored `from N` regex at yml:427 STILL MATCHES, but
+      // BASH_REMATCH[1] is then '\n@qwen-code /takeover', which fails the
+      // TAKEOVER_COMMAND comparison at yml:432 — so CMD stays empty and the
+      // body does nothing. Production stops a leading-whitespace body even
+      // earlier, at the job-level prefilter (yml:245, and the operator guide
+      // says so at qwen-autofix-round-seed.md:120-122); this pins the in-job
+      // trim's OWN fail-closed behavior, i.e. defense in depth.
+      '\n@qwen-code /takeover from 4',
     ]) {
       expect(seedOf(body)).toBe('|');
     }
