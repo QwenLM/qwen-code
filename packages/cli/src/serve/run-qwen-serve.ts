@@ -6208,6 +6208,7 @@ async function runQwenServeImpl(
         cron,
         prompt,
         recurring,
+        gate,
         assertCallerPromptActive,
       }) => {
         const targetBridge = getBridge();
@@ -6235,10 +6236,11 @@ async function runQwenServeImpl(
               cron,
               prompt,
               recurring,
+              ...(gate !== undefined ? { gate } : {}),
             },
             { source: 'cron-tool', assertCallerPromptActive },
           );
-        return { id: task.id, cron: task.cron };
+        return { id: task.id, cron: task.cron, gate: task.gate ?? null };
       };
     // Late-binds the bridge (constructed just below) via `() => bridgeRef`. Only
     // wired on the daemon-created bridge — an injected `deps.bridge` (embed/test)
