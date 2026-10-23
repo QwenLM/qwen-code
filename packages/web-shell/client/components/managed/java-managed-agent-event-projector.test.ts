@@ -1,8 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   projectJavaAgentEvent,
   projectJavaAgentItem,
-  toTimestamp,
 } from './java-managed-agent-event-projector';
 import { result } from './managed-tool-result.test-fixtures';
 import { managedEventsToMessages } from './managed-session-messages';
@@ -428,11 +427,6 @@ describe('java managed agent event projector', () => {
         }),
       }),
     );
-  });
-
-  it('uses a safe timestamp fallback for invalid legacy values', () => {
-    vi.spyOn(Date, 'now').mockReturnValue(42);
-    expect(toTimestamp('not-a-date')).toBe(42);
   });
 
   it('projects a durable message part as one complete delta', () => {

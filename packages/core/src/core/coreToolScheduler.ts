@@ -3736,9 +3736,11 @@ export class CoreToolScheduler {
         const { request: reqInfo, invocation } = toolCall;
         const canonicalName = canonicalToolName(reqInfo.name);
         const toolSpan = this.openToolSpan(reqInfo, toolCall.tool, batchState);
-        // The user must confirm a PreToolUse 'ask'; no permission rule,
-        // approval mode or PermissionRequest hook may approve it instead.
-        const preToolUseAsk = this.preToolUseAsks.get(reqInfo.callId);
+        // The user must confirm a PreToolUse 'ask' or a Mod's own ask; no
+        // permission rule, approval mode or PermissionRequest hook may approve
+        // it instead.
+        let preToolUseAsk = this.preToolUseAsks.get(reqInfo.callId);
+        let modAsk: string | undefined;
 
         try {
           if (
@@ -3785,12 +3787,24 @@ export class CoreToolScheduler {
           }
           const modToolCheck = this.schedulerOptions.modToolCheck;
           if (modToolCheck) {
+            const isReadOnly =
+              canonicalName === ToolNames.SHELL
+                ? flowResult.defaultPermission === 'allow'
+                : CONCURRENCY_SAFE_KINDS.has(toolCall.tool.kind);
+            const approver = !this.canPromptForPreToolUseAsk()
+              ? undefined
+              : this.config.isInteractive() ||
+                  this.config.getExperimentalZedIntegration()
+                ? 'person'
+                : 'host';
             const decision = await runInRequestGoalContext(reqInfo, () =>
               modToolCheck(
                 {
                   tool: canonicalName,
                   input: structuredClone(toolParams),
                   tool_use_id: reqInfo.callId,
+                  ...(approver && { approver }),
+                  ...(isReadOnly && { isReadOnly: true as const }),
                 },
                 {
                   decision:
@@ -3818,11 +3832,15 @@ export class CoreToolScheduler {
                 flowResult.denyMessage =
                   decision.reason?.trim() ||
                   `Tool "${reqInfo.name}" is denied by a Mod.`;
-              } else if (
-                decision.decision === 'ask' &&
-                flowResult.finalPermission === 'allow'
-              ) {
-                flowResult.finalPermission = 'ask';
+              } else if (decision.decision === 'ask') {
+                if (flowResult.finalPermission === 'allow')
+                  flowResult.finalPermission = 'ask';
+                if (decision.plugin !== undefined && !preToolUseAsk) {
+                  modAsk = preToolUseAsk = decision.reason?.trim()
+                    ? `Mod ${decision.plugin}: ${decision.reason.trim()}`
+                    : `Mod ${decision.plugin} requested confirmation before running ${reqInfo.name}.`;
+                  this.preToolUseAsks.set(reqInfo.callId, preToolUseAsk);
+                }
               }
             }
           }
@@ -4386,7 +4404,9 @@ export class CoreToolScheduler {
               const errorMessage =
                 planShellDecision.classification === 'unknown'
                   ? planShellDecision.noApprovalMessage
-                  : `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
+                  : modAsk
+                    ? `Qwen Code could not ask the user to confirm "${reqInfo.name}" in non-interactive mode, so it was not run. ${modAsk}`
+                    : `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
               if (planShellDecision.classification === 'unknown') {
                 rejectPlanShell(errorMessage);
                 continue;
@@ -4398,7 +4418,8 @@ export class CoreToolScheduler {
                   ToolErrorType.EXECUTION_DENIED,
                   'not_started',
                 ),
-                approvalRequired: true,
+                // No approval mode answers for a hook or Mod that asked a person.
+                ...(!preToolUseAsk && { approvalRequired: true as const }),
               });
               setToolSpanFailure(
                 toolSpan,
