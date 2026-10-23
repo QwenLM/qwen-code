@@ -15632,6 +15632,192 @@ class QwenAgent implements Agent {
           reason,
         };
       }
+      case SERVE_CONTROL_EXT_METHODS.workspaceDirectories: {
+        const action = params['action'];
+        const rawPath = params['path'];
+        if (action !== 'add' && action !== 'remove') {
+          throw RequestError.invalidParams(
+            undefined,
+            "action must be 'add' or 'remove'",
+          );
+        }
+        if (
+          typeof rawPath !== 'string' ||
+          rawPath.length === 0 ||
+          rawPath.includes('\0') ||
+          !path.isAbsolute(rawPath)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'path must be an absolute directory path',
+          );
+        }
+        if (this.config.isRestrictiveSandbox()) {
+          throw new RequestError(-32003, 'Restrictive sandbox mode active', {
+            errorKind: 'restrictive_sandbox',
+          });
+        }
+        if (
+          isReservedStandaloneSessionSourceType(
+            this.config.getSessionSourceType(),
+          ) ||
+          this.config.getSessionExecutionEngine?.() === 'managed'
+        ) {
+          throw new RequestError(
+            -32004,
+            'This workspace cannot manage extra directories',
+            { errorKind: 'directory_management_unsupported' },
+          );
+        }
+        if (!this.workspaceSettings.workspaceSettingsActive) {
+          throw new RequestError(-32005, 'Workspace is not trusted.', {
+            errorKind: 'untrusted_workspace',
+          });
+        }
+
+        let canonicalPath: string;
+        if (action === 'add') {
+          try {
+            const stats = await fs.stat(rawPath);
+            if (!stats.isDirectory()) {
+              throw new Error('not a directory');
+            }
+            canonicalPath = await fs.realpath(rawPath);
+          } catch {
+            throw new RequestError(-32002, `Directory not found: ${rawPath}`, {
+              errorKind: 'directory_not_found',
+              path: rawPath,
+            });
+          }
+        } else {
+          // Removal must still work after the directory disappears from disk;
+          // otherwise a stale entry could never leave the workspace list.
+          try {
+            canonicalPath = await fs.realpath(rawPath);
+          } catch {
+            canonicalPath = path.resolve(rawPath);
+          }
+        }
+
+        const configs: Config[] = [this.config];
+        for (const session of this.getActiveSessions()) {
+          const sessionConfig = session.getConfig();
+          if (!configs.includes(sessionConfig)) {
+            configs.push(sessionConfig);
+          }
+        }
+
+        let canonicalPrimary = this.config.getTargetDir();
+        try {
+          canonicalPrimary = await fs.realpath(canonicalPrimary);
+        } catch {
+          // A missing primary keeps its configured form; comparisons below
+          // still match the canonicalized request where possible.
+        }
+        if (action === 'remove' && canonicalPath === canonicalPrimary) {
+          throw new RequestError(
+            -32602,
+            'The primary workspace directory cannot be removed',
+            { errorKind: 'initial_directory' },
+          );
+        }
+
+        const workspaceFile = this.workspaceSettings.workspace;
+        const configured =
+          workspaceFile.originalSettings.context?.includeDirectories;
+        const existing = Array.isArray(configured)
+          ? configured.filter(
+              (entry): entry is string => typeof entry === 'string',
+            )
+          : [];
+        // Existing entries may be non-canonical or already deleted; compare on
+        // the canonical form so a symlinked duplicate is not listed twice.
+        const entries = await Promise.all(
+          existing.map(async (entry) => {
+            let canonical = entry;
+            try {
+              canonical = await fs.realpath(entry);
+            } catch {
+              // Keep the raw entry: removal must still be able to drop it.
+            }
+            return { entry, canonical };
+          }),
+        );
+        const normalizedRawPath = path.resolve(rawPath);
+        const next =
+          action === 'add'
+            ? entries.some(({ canonical }) => canonical === canonicalPath)
+              ? existing
+              : [...existing, canonicalPath]
+            : entries
+                .filter(
+                  ({ entry, canonical }) =>
+                    canonical !== canonicalPath && entry !== normalizedRawPath,
+                )
+                .map(({ entry }) => entry);
+        const listChanged =
+          next.length !== existing.length ||
+          next.some((entry, index) => entry !== existing[index]);
+
+        if (listChanged) {
+          this.workspaceSettings.setValue(
+            SettingScope.Workspace,
+            'context.includeDirectories',
+            next,
+          );
+        }
+
+        const warnings: string[] = [];
+        for (const config of configs) {
+          const workspaceContext = config.getWorkspaceContext();
+          if (action === 'add') {
+            const before = workspaceContext.getDirectories().length;
+            workspaceContext.addDirectory(canonicalPath);
+            if (workspaceContext.getDirectories().length === before) continue;
+          } else if (workspaceContext.isInitialDirectory(canonicalPath)) {
+            // A session that /cd'd into this directory uses it as its working
+            // directory. The workspace list still drops it; this session keeps
+            // it as its root, so report that instead of failing the whole
+            // workspace-level removal.
+            warnings.push(
+              `A session keeps ${canonicalPath} as its working directory`,
+            );
+            continue;
+          } else if (!workspaceContext.removeDirectory(canonicalPath)) {
+            continue;
+          }
+          try {
+            if (config.shouldLoadMemoryFromIncludeDirectories()) {
+              await config.refreshHierarchicalMemory();
+            }
+          } catch (error) {
+            warnings.push(
+              `Memory refresh failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+          try {
+            const llmClient = config.getLlmClient();
+            if (llmClient) {
+              await llmClient.addDirectoryContext();
+            }
+          } catch (error) {
+            warnings.push(
+              `Model context refresh failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+        }
+
+        return {
+          primaryDirectory: this.config.getTargetDir(),
+          directories: next,
+          changed: listChanged,
+          warnings,
+        };
+      }
       default:
         throw RequestError.methodNotFound(method);
     }

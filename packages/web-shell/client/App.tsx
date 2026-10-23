@@ -338,6 +338,7 @@ import {
   type WebShellSettingsOptions,
 } from './settings';
 import { SettingsMessage } from './components/messages/SettingsMessage';
+import { WorkspaceDirectoriesSection } from './components/workspaces/WorkspaceDirectoriesSection';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
 import { AskUserQuestion } from './components/messages/AskUserQuestion';
@@ -4232,6 +4233,13 @@ export function App({
     workspace.capabilities?.features?.includes(
       'scratch_workspace_registration',
     ) === true;
+  // SSH workspaces validate paths on the remote host; the daemon route
+  // refuses them, so do not offer the section at all.
+  const workspaceDirectoriesSupported =
+    workspace.capabilities?.features?.includes('workspace_directories') ===
+      true &&
+    workspace.workspaceCwd !== undefined &&
+    !workspace.workspaceCwd.startsWith('ssh://');
   const workspaceDisplayNameSupported =
     workspace.capabilities?.features?.includes('workspace_display_name') ===
     true;
@@ -22528,6 +22536,11 @@ export function App({
                         onChatWidthModeChange={handleChatWidthModeChange}
                         connections={
                           standalone ? <DaemonConnectionsSettings /> : undefined
+                        }
+                        workspaceDirectoriesSection={
+                          workspaceDirectoriesSupported ? (
+                            <WorkspaceDirectoriesSection />
+                          ) : undefined
                         }
                         modelManagementSectionProps={{
                           ...modelManagementPolicy,

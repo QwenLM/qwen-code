@@ -754,6 +754,8 @@ export type {
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpServerStatus,
+  DaemonWorkspaceDirectories,
+  DaemonWorkspaceDirectoriesMutation,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpConfigStatus,
   DaemonMcpConfigMutationResult,

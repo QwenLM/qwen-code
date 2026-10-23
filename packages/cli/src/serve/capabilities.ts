@@ -490,6 +490,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Workspace-owned runtime lifecycle status and explicit on-demand startup.
   workspace_runtime: { since: 'v1' },
   workspace_runtime_stop: { since: 'v1' },
+  // List, add, and remove the extra directories persisted at workspace scope
+  // (`context.includeDirectories`). Advertised with `workspace_settings`: a
+  // daemon without settings persistence cannot make the change durable.
+  workspace_directories: { since: 'v1' },
   // The daemon host can open a workspace directory in the host's OS file
   // manager (Finder via `open` on macOS, Explorer via `explorer.exe` on
   // Windows, xdg-open on a Linux host with a display). Headless hosts omit
@@ -672,6 +676,7 @@ export interface AdvertiseFeatureToggles {
   persistentWorkspaceRegistrationAvailable?: boolean;
   scratchWorkspaceRegistrationAvailable?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
+  workspaceDirectoriesAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
   workspaceRuntimeAvailable?: boolean;
   workspaceRuntimeStopAvailable?: boolean;
@@ -846,6 +851,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'workspace_runtime_removal',
     (toggles) => toggles.workspaceRuntimeRemovalAvailable === true,
+  ],
+  [
+    'workspace_directories',
+    (toggles) => toggles.workspaceDirectoriesAvailable === true,
   ],
   [
     'native_directory_picker',

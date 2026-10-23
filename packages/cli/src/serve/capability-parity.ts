@@ -454,6 +454,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_runtime_removal: NO_MANAGED_EQUIVALENT(
     'no Managed Workspace removal route',
   ),
+  workspace_directories: NO_MANAGED_EQUIVALENT(
+    'a Managed Workspace exposes one root; there is no extra-directory list',
+  ),
   native_directory_picker: LEGACY_ONLY(
     'a daemon-host dialog; Managed has none',
   ),

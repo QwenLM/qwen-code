@@ -50,6 +50,10 @@ export interface WorkspaceLocationOption {
 }
 
 interface AddWorkspaceDialogProps {
+  /** Overrides the default "Add Workspace" heading. */
+  title?: string;
+  /** Overrides the default submit label; the in-flight label is unchanged. */
+  submitLabel?: string;
   executionMode?: WorkspaceExecutionMode;
   onExecutionModeChange?: (mode: WorkspaceExecutionMode) => void;
   executionModeLocked?: boolean;
@@ -87,6 +91,8 @@ function isAbsoluteLike(value: string): boolean {
 }
 
 export function AddWorkspaceDialog({
+  title,
+  submitLabel,
   executionMode,
   onExecutionModeChange,
   executionModeLocked,
@@ -396,7 +402,7 @@ export function AddWorkspaceDialog({
 
   return (
     <DialogShell
-      title={t('sidebar.addWorkspaceTitle')}
+      title={title ?? t('sidebar.addWorkspaceTitle')}
       size="md"
       dismissible={!submitting}
       onClose={onClose}
@@ -671,11 +677,12 @@ export function AddWorkspaceDialog({
           >
             {submitting
               ? t('sidebar.addWorkspaceAdding')
-              : t(
+              : (submitLabel ??
+                t(
                   browseDirectories
                     ? 'workspaceHost.addFolder'
                     : 'sidebar.addWorkspaceRegister',
-                )}
+                ))}
           </Button>
         </div>
       </form>

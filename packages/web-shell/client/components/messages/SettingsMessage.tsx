@@ -93,6 +93,11 @@ interface SettingsMessageProps {
   modelManagementSectionProps?: ModelManagementProps;
   /** Browser-local remote computer catalog and connection controls. */
   connections?: ReactNode;
+  /**
+   * Extra-directory management for the selected workspace. Rendered only on
+   * the Workspace scope tab; omitted when the daemon cannot manage them.
+   */
+  workspaceDirectoriesSection?: ReactNode;
   embedded?: boolean;
   /** Category to select on open (deep link, e.g. 'Daemon'). */
   initialCategory?: string;
@@ -266,6 +271,7 @@ type SettingsPageItem =
   | { type: 'local-control' }
   | { type: 'live' }
   | { type: 'connections' }
+  | { type: 'workspace-directories' }
   | { type: 'model-management' };
 
 interface SettingsPageCategory {
@@ -439,6 +445,7 @@ export function SettingsMessage({
   onChatWidthModeChange,
   modelManagementSectionProps,
   connections,
+  workspaceDirectoriesSection,
   embedded = false,
   initialCategory,
 }: SettingsMessageProps) {
@@ -541,6 +548,15 @@ export function SettingsMessage({
         items: [{ type: 'connections' }],
       });
     }
+    // Extra directories are a workspace-scope concept; the User tab has no
+    // equivalent list to show.
+    if (workspaceDirectoriesSection && scope === 'workspace') {
+      groups.push({
+        id: 'Workspace',
+        label: formatSettingCategory('Workspace', t),
+        items: [{ type: 'workspace-directories' }],
+      });
+    }
     return groups
       .map((group) => ({
         ...group,
@@ -559,7 +575,9 @@ export function SettingsMessage({
                   ? 'builtin:local-control'
                   : item.type === 'connections'
                     ? 'builtin:connections'
-                    : 'builtin:model-management';
+                    : item.type === 'workspace-directories'
+                      ? 'builtin:workspace-directories'
+                      : 'builtin:model-management';
           return isItemVisible(id, presentation);
         }),
       }))
@@ -571,6 +589,8 @@ export function SettingsMessage({
     hasNotifications,
     modelManagementSectionProps,
     connections,
+    workspaceDirectoriesSection,
+    scope,
     presentation,
     showInitialLoading,
   ]);
@@ -636,13 +656,19 @@ export function SettingsMessage({
 
   const activeRows =
     activeGroup?.items.filter(
-      (item) => item.type !== 'model-management' && item.type !== 'connections',
+      (item) =>
+        item.type !== 'model-management' &&
+        item.type !== 'connections' &&
+        item.type !== 'workspace-directories',
     ) ?? [];
   const showModelManagement = activeGroup?.items.some(
     (item) => item.type === 'model-management',
   );
   const showConnections = activeGroup?.items.some(
     (item) => item.type === 'connections',
+  );
+  const showWorkspaceDirectories = activeGroup?.items.some(
+    (item) => item.type === 'workspace-directories',
   );
 
   const renderSelect = (
@@ -1074,6 +1100,7 @@ export function SettingsMessage({
                   </div>
                 )}
                 {showConnections && connections}
+                {showWorkspaceDirectories && workspaceDirectoriesSection}
               </div>
             )}
           </section>

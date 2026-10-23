@@ -37143,6 +37143,151 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
+  it('adds and removes a workspace directory across live sessions and settings', async () => {
+    const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-ws-dirs-'));
+    const workspaceRoot = path.join(scratch, 'ws');
+    const extra = path.join(scratch, 'extra');
+    await fs.mkdir(workspaceRoot);
+    await fs.mkdir(extra);
+    let agentPromise: Promise<unknown> | undefined;
+    try {
+      const { WorkspaceContext: RealWorkspaceContext } = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core')
+      >('@qwen-code/qwen-code-core');
+      const workspaceContext = new RealWorkspaceContext(workspaceRoot);
+      const sessionContext = new RealWorkspaceContext(workspaceRoot);
+      const addDirectoryContext = vi.fn().mockResolvedValue(undefined);
+      const withDirectoryClient = (
+        config: ReturnType<typeof makeConfig>,
+      ): ReturnType<typeof makeConfig> => {
+        const getLlmClient = config.getLlmClient;
+        config.getLlmClient = vi.fn(() => ({
+          ...getLlmClient(),
+          addDirectoryContext,
+        }));
+        return config;
+      };
+      const bootstrapConfig = withDirectoryClient(
+        makeConfig({
+          getTargetDir: () => workspaceRoot,
+          getWorkspaceContext: () => workspaceContext,
+          shouldLoadMemoryFromIncludeDirectories: () => false,
+          isRestrictiveSandbox: () => false,
+          getSessionSourceType: () => undefined,
+        }),
+      );
+      const sessionConfig = withDirectoryClient(
+        makeConfig({
+          getTargetDir: () => workspaceRoot,
+          getWorkspaceContext: () => sessionContext,
+          shouldLoadMemoryFromIncludeDirectories: () => false,
+        }),
+      );
+      const settings = {
+        merged: {},
+        workspaceSettingsActive: true,
+        workspace: { originalSettings: {} },
+        setValue: vi.fn((scope: SettingScope, key: string, value: unknown) => {
+          expect(scope).toBe(SettingScope.Workspace);
+          expect(key).toBe('context.includeDirectories');
+          settings.workspace.originalSettings = {
+            context: { includeDirectories: value as string[] },
+          };
+        }),
+        getSystemHooks: () => undefined,
+        getUserHooks: () => ({}),
+        getProjectHooks: () => ({}),
+      } as unknown as LoadedSettings;
+      vi.mocked(loadSettings).mockReturnValue(settings);
+      vi.mocked(loadCliConfig).mockResolvedValue(
+        sessionConfig as unknown as Config,
+      );
+      vi.mocked(Session).mockImplementation(
+        () =>
+          ({
+            getDefaultReasoningConfig: vi.fn(),
+            getId: () => 'dir-session',
+            shouldHintAskUserQuestionRestore: () => false,
+            getConfig: () => sessionConfig,
+            sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+            installRewriter: vi.fn(),
+            startCronScheduler: vi.fn(),
+            dispose: vi.fn(),
+          }) as unknown as InstanceType<typeof Session>,
+      );
+
+      const runningAgent = (agentPromise = runAcpAgent(
+        bootstrapConfig as unknown as Config,
+        settings,
+        mockArgv,
+      ));
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      });
+
+      await agent.newSession({ cwd: workspaceRoot, mcpServers: [] });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceDirectories, {
+          action: 'add',
+          path: extra,
+        }),
+      ).resolves.toMatchObject({
+        primaryDirectory: workspaceRoot,
+        directories: [extra],
+        changed: true,
+      });
+      expect(workspaceContext.getDirectories()).toContain(extra);
+      expect(sessionContext.getDirectories()).toContain(extra);
+      expect(settings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'context.includeDirectories',
+        [extra],
+      );
+      expect(addDirectoryContext).toHaveBeenCalled();
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceDirectories, {
+          action: 'remove',
+          path: extra,
+        }),
+      ).resolves.toMatchObject({ directories: [], changed: true });
+      expect(workspaceContext.getDirectories()).not.toContain(extra);
+      expect(sessionContext.getDirectories()).not.toContain(extra);
+
+      // A directory that disappeared from disk can still leave the list.
+      const stale = path.join(scratch, 'stale');
+      await fs.mkdir(stale);
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceDirectories, {
+        action: 'add',
+        path: stale,
+      });
+      await fs.rm(stale, { recursive: true, force: true });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceDirectories, {
+          action: 'remove',
+          path: stale,
+        }),
+      ).resolves.toMatchObject({ directories: [], changed: true });
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceDirectories, {
+          action: 'remove',
+          path: workspaceRoot,
+        }),
+      ).rejects.toMatchObject({ data: { errorKind: 'initial_directory' } });
+
+      mockConnectionState.resolve();
+      await runningAgent;
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise?.catch(() => {});
+      await fs.rm(scratch, { recursive: true, force: true });
+    }
+  });
+
   it('refreshes only selected skill sessions after validating the entire selection', async () => {
     const selectedId = '550e8400-e29b-41d4-a716-446655440000';
     const settings = {
