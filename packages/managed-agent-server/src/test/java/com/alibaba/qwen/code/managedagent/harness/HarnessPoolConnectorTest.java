@@ -34,6 +34,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -288,7 +289,7 @@ class HarnessPoolConnectorTest {
             verify(leafA, times(refreshFailure ? 0 : 1)).createOrLoad("tenant", "session", false);
             verify(placements, never()).assign(anyString(), anyString(), anyString(), anyString());
             verify(placements, never()).takeover(anyString(), anyString(), any(), anyString(), anyString());
-            when(clientA.readInstance()).thenThrow(transport);
+            doThrow(transport).when(clientA).readInstance();
             snapshot.set(new HarnessDiscovery.Snapshot(List.of(a, b), true));
             pool.refresh();
             pool.createOrLoad("tenant", "session", false);
