@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
 import { promisify } from 'node:util';
+import { getNpmNodePath } from './npm-runtime.js';
 
 export enum PackageManager {
   NPM = 'npm',
@@ -24,7 +25,7 @@ export enum PackageManager {
 }
 
 export function getNpmCliPath(
-  nodePath = process.execPath,
+  nodePath = getNpmNodePath(),
   platform = process.platform,
 ): string {
   if (platform === 'win32') {

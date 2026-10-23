@@ -99,7 +99,6 @@ export function ManagedChildSessionView({
               hasOlderHistory={Boolean(detail.olderCursor)}
               loadingOlderHistory={detail.loadingOlder}
               onLoadOlderHistory={detail.loadOlder}
-              workspaceCwd={detail.summary?.workspaceCwd}
               hideSessionTimeline
             />
           </ToolDetailsContext.Provider>
