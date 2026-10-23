@@ -22,10 +22,14 @@ const ACTIONLINT_SHA256 = {
     '5b44c3bc2255115c9b69e30efc0fecdf498fdb63c5d58e17084fd5f16324c644',
   darwin_arm64:
     'aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f',
+  linux_arm64:
+    '325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6',
 };
 const SHELLCHECK_SHA256 = {
   'linux.x86_64':
     '8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198',
+  'linux.aarch64':
+    '12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588',
   'darwin.x86_64':
     '3c89db4edcab7cf1c27bff178882e0f6f27f7afdf54e859fa041fca10febe4c6',
   'darwin.aarch64':
@@ -124,6 +128,12 @@ function getPlatformArch() {
     return {
       actionlint: 'linux_amd64',
       shellcheck: 'linux.x86_64',
+    };
+  }
+  if (platform === 'linux' && arch === 'arm64') {
+    return {
+      actionlint: 'linux_arm64',
+      shellcheck: 'linux.aarch64',
     };
   }
   if (platform === 'darwin' && arch === 'x64') {
