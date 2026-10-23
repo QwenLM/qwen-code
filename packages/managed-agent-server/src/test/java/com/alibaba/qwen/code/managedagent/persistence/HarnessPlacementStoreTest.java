@@ -12,6 +12,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -62,6 +63,22 @@ public class HarnessPlacementStoreTest {
         store.setCredentials(credentials);
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'qwen-code', 1, 1)", TENANT, SESSION);
+    }
+
+    @Test
+    void freshBaselineRefusesAnAssignedPlacementWithoutItsOwner() {
+        assertThat(jdbc.queryForMap("SELECT harness_instance_id, harness_owner_boot_id,"
+                + " harness_placement_epoch, harness_placement_state FROM ma_session"))
+                .containsEntry("harness_instance_id", null)
+                .containsEntry("harness_owner_boot_id", null)
+                .containsEntry("harness_placement_epoch", 0L)
+                .containsEntry("harness_placement_state", "UNASSIGNED");
+        assertThatThrownBy(() -> jdbc.update("UPDATE ma_session SET harness_instance_id = 'pod-a',"
+                + " harness_placement_epoch = 1, harness_placement_state = 'ACTIVE'"))
+                .isInstanceOfSatisfying(DataAccessException.class, error ->
+                        assertThat(error.getMostSpecificCause().getMessage())
+                                .containsIgnoringCase("ck_ma_harness_placement"));
+        assertThat(placements.get(TENANT, SESSION)).isNull();
     }
 
     @ParameterizedTest

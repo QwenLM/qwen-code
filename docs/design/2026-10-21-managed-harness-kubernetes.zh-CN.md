@@ -2,7 +2,7 @@
 
 [English](2026-10-21-managed-harness-kubernetes.md) | [简体中文](2026-10-21-managed-harness-kubernetes.zh-CN.md)
 
-状态：实现候选，2026-10-22，基于 `74c67c9e94`。最初源码审计基于 `97567d5dd733ad905aacf61f1f61a1e71c6fcc72`。临时 ACK 的空闲服务池验收已通过；完整 CI、前台/故障矩阵及自动扩缩容门禁仍待完成。本文细化[共享多租户 Harness](2026-10-21-managed-shared-harness.zh-CN.md)。
+状态：实现候选，2026-10-23，已衔接 main `32b4234b84` 及其首发单 V1 契约。最初源码审计：`97567d5dd733ad905aacf61f1f61a1e71c6fcc72`。历史 ACK 空闲服务池验收早于本基线；当前提交 CI、前台/故障和自动扩缩容门禁仍待完成。本文细化[共享多租户 Harness](2026-10-21-managed-shared-harness.zh-CN.md)。
 
 ## 范围与决策
 
@@ -14,18 +14,18 @@ Java 高可用、新 Tool Runtime provisioner、通用热迁移、缩容到零�
 
 ## 已验证的起点
 
-| 审计提交中的发现                                                     | 源码与含义                                                                                                                                                                                                                                                                                                                               |
-| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Hosted 要求回环监听和 bearer 认证。                                  | [Profile:40](../../packages/cli/src/serve/hosted-harness-profile.ts)、[解析后地址检查:3539](../../packages/cli/src/serve/run-qwen-serve.ts)。Pod 不能直接将 Harness 暴露在 `0.0.0.0`。                                                                                                                                                   |
-| 回环请求有 Host 校验；远程 Store/Broker 默认要求 TLS。               | [Host 校验:340](../../packages/cli/src/serve/auth.ts)、[Broker URL:26](../../packages/cli/src/serve/managed-runtime-broker-url.ts)、[Store URL:844](../../packages/core/src/managed-runtime/http-managed-session-store.ts)。代理必须保留这些边界。                                                                                       |
-| Java 只有一个 SDK 客户端，并全局处理 boot 更替。                     | [连接器:63,1557,1591](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/harness/QwenHostedHarnessConnector.java)。通过 Service 随机负载均衡，会使无关附件失效。                                                                                                                                       |
-| 所有者订阅使用单个 writer 身份。                                     | [订阅:130](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/session/OwnerSubscriptions.java)、[连接器契约:200](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/harness/HarnessConnector.java)。需要逐附件携带所有者身份。                                       |
-| 绑定 writer token 只覆盖租户、Workspace 和 Session，不覆盖实例归属。 | [凭据:57](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/security/WriterCredentialPolicy.java)、[writer 获取:670](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionStore.java)。只更新路由 CAS，不能防止旧所有者重新获取资格。       |
-| 普通 Hosted 注册不返回排空句柄；SIGTERM 会在宿主清理的同时关闭监听。 | [注册:10816](../../packages/cli/src/serve/hosted-harness-session.ts)、[关闭:193](../../packages/cli/src/serve/serve-app-lifecycle.ts)。默认监听关闭超时为五秒，与 Pod 宽限期独立。                                                                                                                                                       |
-| Detach 会取消部分待处理业务输入，并排空 Runtime 资源。               | [Detach:10269,10443](../../packages/cli/src/serve/hosted-harness-session.ts)。它不是所有权移交操作。                                                                                                                                                                                                                                     |
-| Wake pump 可以独立于 HTTP 提交，启动已接受的积压输入。               | [Pump:213](../../packages/cli/src/serve/hosted-monitor-wake.ts)。只拒绝新建 Session，不能让 Pod 停止开工。                                                                                                                                                                                                                               |
-| 已有 Session/队列指标统计 ACP bridge，不统计 Hosted Session Map。    | [指标:7313](../../packages/cli/src/serve/run-qwen-serve.ts)、[Hosted Map:3663](../../packages/cli/src/serve/hosted-harness-session.ts)。已有 daemon 指标不能直接驱动 Harness HPA。                                                                                                                                                       |
-| 当前规范 schema 支持 V1–V14 的追加迁移。                             | [迁移注册:32](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/runtimebroker/managedschema/ManagedSchema.java)、[Flyway 策略:59](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/config/ManagedSchemaConfiguration.java)。拒绝旧格式 catalog，不等于拒绝规范 schema 的升级。 |
+| 审计提交中的发现                                                     | 源码与含义                                                                                                                                                                                                                                                                                                                                                                                  |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Hosted 要求回环监听和 bearer 认证。                                  | [Profile:40](../../packages/cli/src/serve/hosted-harness-profile.ts)、[解析后地址检查:3539](../../packages/cli/src/serve/run-qwen-serve.ts)。Pod 不能直接将 Harness 暴露在 `0.0.0.0`。                                                                                                                                                                                                      |
+| 回环请求有 Host 校验；远程 Store/Broker 默认要求 TLS。               | [Host 校验:340](../../packages/cli/src/serve/auth.ts)、[Broker URL:26](../../packages/cli/src/serve/managed-runtime-broker-url.ts)、[Store URL:844](../../packages/core/src/managed-runtime/http-managed-session-store.ts)。代理必须保留这些边界。                                                                                                                                          |
+| Java 只有一个 SDK 客户端，并全局处理 boot 更替。                     | [连接器:63,1557,1591](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/harness/QwenHostedHarnessConnector.java)。通过 Service 随机负载均衡，会使无关附件失效。                                                                                                                                                                                          |
+| 所有者订阅使用单个 writer 身份。                                     | [订阅:130](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/session/OwnerSubscriptions.java)、[连接器契约:200](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/harness/HarnessConnector.java)。需要逐附件携带所有者身份。                                                                                          |
+| 绑定 writer token 只覆盖租户、Workspace 和 Session，不覆盖实例归属。 | [凭据:57](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/security/WriterCredentialPolicy.java)、[writer 获取:670](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionStore.java)。只更新路由 CAS，不能防止旧所有者重新获取资格。                                                          |
+| 普通 Hosted 注册不返回排空句柄；SIGTERM 会在宿主清理的同时关闭监听。 | [注册:10816](../../packages/cli/src/serve/hosted-harness-session.ts)、[关闭:193](../../packages/cli/src/serve/serve-app-lifecycle.ts)。默认监听关闭超时为五秒，与 Pod 宽限期独立。                                                                                                                                                                                                          |
+| Detach 会取消部分待处理业务输入，并排空 Runtime 资源。               | [Detach:10269,10443](../../packages/cli/src/serve/hosted-harness-session.ts)。它不是所有权移交操作。                                                                                                                                                                                                                                                                                        |
+| Wake pump 可以独立于 HTTP 提交，启动已接受的积压输入。               | [Pump:213](../../packages/cli/src/serve/hosted-monitor-wake.ts)。只拒绝新建 Session，不能让 Pod 停止开工。                                                                                                                                                                                                                                                                                  |
+| 已有 Session/队列指标统计 ACP bridge，不统计 Hosted Session Map。    | [指标:7313](../../packages/cli/src/serve/run-qwen-serve.ts)、[Hosted Map:3663](../../packages/cli/src/serve/hosted-harness-session.ts)。已有 daemon 指标不能直接驱动 Harness HPA。                                                                                                                                                                                                          |
+| 当前首发 schema 使用单个 V1 基线。                                   | [Schema 初始化](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/runtimebroker/managedschema/ManagedSchema.java)、[Flyway 策略](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/config/ManagedSchemaConfiguration.java)、[首发策略](2026-10-23-managed-first-release-contract.zh-CN.md)。旧开发库需要全新安装，不提供升级路径。 |
 
 以上是源码观察。本轮读取了已有测试定义，没有执行这些测试。
 
@@ -158,9 +158,9 @@ Harness 镜像需要专用 launcher、挂载 Secret 读取、探针 helper 和 p
 
 ## Schema 发布与本地兼容
 
-实现是在刷新后的 main V1–V17 之后追加 V18。保留已发布 V1–V17 的字节。注册 extension，更新 schema projection/身份解码、CSI inventory/恢复验证和相关构造器。证明 Flyway 和 Broker 管理的规范 schema 升级后，保留 Session、Turn、journal、资源及历史数据。继续拒绝旧格式、不完整和外来 catalog。
+实现遵循[首发单 V1 契约](2026-10-23-managed-first-release-contract.zh-CN.md)。四个 placement 字段、精确归属约束和 owner/boot 索引直接进入 `V1__managed_schema.sql`；数据库版本保持 1，不保留运行时 V2–V18 迁移链。Server 的 Flyway 和 Broker 初始化使用相同基线。Schema projection/身份解码及 CSI inventory/恢复校验包含 placement 字段，默认保留 `UNASSIGNED` 本地语义。验证 Server 先启动、Broker 先启动的全新初始化、重启保留，以及不完整或不兼容 catalog 的拒绝。
 
-追加 DDL 不证明混合二进制安全：结构校验器要求已知列精确匹配，旧 Java/Broker 也不执行 placement grant 校验。迁移并启用服务池隔离前，先 quiesce/对账，再停止或隔离旧 Java/Broker writer。私有 Store 和 Harness 读取器一并升级。新字段默认保留未分配的本地语义。回退使用兼容二进制并关闭服务池准入；不能在扩展后的 schema 上启动旧校验器，也不能重写迁移历史。
+旧开发数据库和状态不升级。需要历史访问时保留原产物和部署，或为本构建使用独立的全新数据库和状态目录。启用 pool 准入前，Server、Broker 和 Harness 必须使用匹配构建；旧二进制不执行 placement grant 校验。不能在该基线上运行旧校验器，也不能使用 Flyway repair、乱序迁移或历史编辑绕过拒绝。回退保留原部署及其独立状态，不对新数据库原地降级。
 
 默认本地 base URL 继续表示一个静态实例，无需 Kubernetes token、服务发现、mTLS 配置或 Pod 元数据。共用正确性修复需要本地回归，但 `LocalProcessRuntimeProvisioner` 保留启动/ready/执行/取消/恢复契约。Kubernetes Harness 配合本地 Runtime，需要单独验证网络和存储：Harness 访问 Java/Store/Broker，同机 Broker 仍可消费本地 worker 回环端点。不能由此推断通用混合拓扑已经验收。
 
@@ -186,7 +186,7 @@ Harness 镜像需要专用 launcher、挂载 Secret 读取、探针 helper 和 p
 
 客户端回收区分业务终态 Session 与活动归属。关闭、归档或删除的根记录，仅在 SQL 证明仍有 active 且租约有效的 writer 时保留旧客户端；pending lifecycle 的根仍保留。这避免普通业务关闭只 seal writer、不产生归属释放回执时，在滚动更新中持续积累旧 boot 客户端。Lifecycle writer 校验在 claim/head 查询前显式锁住 Session 根。
 
-Pool 模式要求 HMAC binding key 和显式实例身份。`qwp1` grant 绑定 scope、owner digest 和 placement epoch；凭证认证不会在 tenant guard 前查询 SQL，变更路径在锁住 root 后重新校验当前归属，再获取 head。V18 使本地旧行保持 `UNASSIGNED`。首版 pool 拒绝已有私有 CSI 配置，CSI closure inventory 也明确要求未分配归属。
+Pool 模式要求 HMAC binding key 和显式实例身份。`qwp1` grant 绑定 scope、owner digest 和 placement epoch；凭证认证不会在 tenant guard 前查询 SQL，变更路径在锁住 root 后重新校验当前归属，再获取 head。V1 基线使本地行默认保持 `UNASSIGNED`。首版 pool 拒绝已有私有 CSI 配置，CSI closure inventory 也明确要求未分配归属。
 
 进程的禁止新开工截止点先于 SQL quiesce。忙碌的驻留 Session 可以保持 SQL `ACTIVE`，避免打断既有 Hook activation 转换；进程门禁仍拒绝新开工。只有通过保守的本地资源空闲检查后，Harness 才调用私有 Store `writers:quiesce-ownership`，停止 activation 续期、释放附件 activation，再调用 `writers:release-ownership`。后者在同一事务写入有界 `hosted_harness_release` 控制记录/资源、seal 精确 head，并将归属标为 `RELEASED`。这个终态标记在继任者 CAS 前就隔离所有旧 epoch 变更，也支持通过索引清理所有者客户端。不推进 journal、不产生业务生命周期事件。普通 domain commit 不能伪造这个保留回执。回执通过 `ma_resource_ref` 固定资源；即使继任者已经更新归属，精确重试也不会重新获取旧 writer。
 
@@ -202,7 +202,7 @@ PreStop 通过本地端点发起实例 drain，只尝试释放满足条件的归
 | 租户/用户隔离   | 两个租户及同租户两个用户共享各 Harness；拒绝跨范围 ID/句柄/事件/命令/审批。覆盖 CONTROL ID 和关闭 Session 的隔离。                                                                               |
 | 服务池归属      | 两个同时存活的实例保持独立 boot/缓存和 SQL 已证明的事件订阅；路由表中的全部消费者都进入正确所有者。                                                                                              |
 | Store 隔离      | 释放和租约过期后，恢复旧 Pod 并携带原 scope token/grant；acquire、renew、activation、commit 和 seal 全部失败，继任者仍正常。                                                                     |
-| SQL 并发/升级   | 真实 MySQL 的 renew/commit/wake/生命周期/release/takeover 竞争、崩溃边界、V17 到 V18 升级，以及原记录/历史精确保留。                                                                             |
+| SQL 并发/基线   | 真实 MySQL 的 renew/commit/wake/生命周期/release/takeover 竞争及崩溃边界；Server 先启动、Broker 先启动的全新 V1 初始化、重启保留和不兼容 catalog 拒绝。                                          |
 | TLS/代理        | 验证 Host 重写、浏览器拒绝、bearer/协议请求头、SSE 重连/epoch、有界请求体、不重试变更请求和可信 SAN。拒绝错误 CA/客户端/SAN 和过期 Pod 身份。                                                    |
 | 服务发现        | List/watch 重连、`410 Gone`、重复/双栈端点、Service UID 变化、API 中断、ready/终止变化和 IP 复用；不回退 localhost。                                                                             |
 | 停止开工        | 将截止点与所有开工来源并发竞争。截止前运行的 Turn 许可允许完成自身前台/模型步骤；已接受但未尝试的输入和独立子任务/自主工作保持 pending，在继任者只启动一次。                                     |
@@ -220,4 +220,4 @@ PreStop 通过本地端点发起实例 drain，只尝试释放满足条件的归
 
 首个支持的移交边界为资源空闲释放。继续支持 Hook/MCP/后台和混合版本续接，分别需要故障证据。Lifecycle 协议 1/2 的子任务清理使用独立 lifecycle 归属路径；带有子任务清理债务的历史协议 0 父 Session，需要单独证明可达性和恢复路径后才能将这种组合纳入服务池。共享 Harness 进程仍是受信任基础设施，进程内被攻破可能影响常驻租户；本文不提供 Java 管控面高可用，也不提供 Harness 内任意代码隔离。
 
-PR 整理时已衔接 main `10e4701862`：保留 V17 公开子代理迁移，placement 顺延为 V18。上述 ACK 验证执行于衔接前、placement 使用 V17 的实现；V18 升级与合并后的 Java/跨语言门禁须由 CI 重新验证。首版 pool 不开放新增的 MCP 管理 API 或公开子代理能力，单实例模式沿用 main 行为。
+当前衔接遵循 main `32b4234b84` 的首发单 V1 策略，用户已于 2026-10-23 明确授权。早期 placement V17 的 ACK 证据及后续 V18 的 CI 结果属于此前的 schema 版本线，均不能证明本次全新 V1 基线或当前合并提交已验收。当前提交仍需 Java、真实 MySQL/Hosted 和跨语言门禁。首版 pool 不开放 MCP 管理 API 或公开子代理能力，单实例模式沿用 main 行为。

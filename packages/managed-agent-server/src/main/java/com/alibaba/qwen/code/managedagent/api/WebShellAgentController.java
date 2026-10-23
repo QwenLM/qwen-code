@@ -215,12 +215,6 @@ public class WebShellAgentController {
             selection = WorkspaceSelection.parse(request.workspace(), true);
             tenant.requireActorId();
         }
-        if (request.environmentId() != null
-                && !request.environmentId().isBlank()) {
-            throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
-                    "unsupported_feature",
-                    "Standalone Phase 1 has no environment templates.");
-        }
         if (selection == null && (request.approvalMode() != null || request.planMode() != null)) {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
                     "unsupported_approval_mode",
@@ -266,7 +260,7 @@ public class WebShellAgentController {
         WebShellAdmission admission = webShell(service.submitTurn(
                 tenant.tenantId(), tenant.actorId(),
                 request.idempotencyKey(), request.sessionId(),
-                request.input(), request.admissionProfile()));
+                request.input()));
         return ResponseEntity.accepted().body(admission);
     }
 
@@ -279,7 +273,7 @@ public class WebShellAgentController {
         WebShellAdmission admission = webShell(service.cancelTurn(
                 tenant.tenantId(), tenant.actorId(),
                 request.idempotencyKey(), request.sessionId(),
-                request.turnId(), request.admissionProfile()));
+                request.turnId()));
         return ResponseEntity.accepted().body(admission);
     }
 

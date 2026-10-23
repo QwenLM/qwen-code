@@ -26,6 +26,7 @@ import type {
 } from '../../hooks/useComposerCore';
 import {
   clearComposerDraftIfMatches,
+  captureComposerDraftGuard,
   getComposerDraftStorageKey,
 } from '../../hooks/useComposerCore';
 import { ToolApproval } from '../messages/ToolApproval';
@@ -100,7 +101,6 @@ interface PendingPrompt {
   text: string;
   draftText?: string;
   sessionId?: string;
-  cwd?: string;
   input?: ManagedInputBlock[];
 }
 
@@ -143,8 +143,6 @@ function readPending(
       typeof pending['sessionId'] !== 'string'
     )
       return undefined;
-    if (pending['cwd'] !== undefined && typeof pending['cwd'] !== 'string')
-      return undefined;
     if (
       pending['draftText'] !== undefined &&
       typeof pending['draftText'] !== 'string'
@@ -177,7 +175,6 @@ export function ManagedSessionsPage({
   workspaceId,
   onSelectWorkspace,
   onSessionWorkspaceChange,
-  workspaceCwd,
   managedAgentProvider,
   navigationTarget,
   interactive = true,
@@ -202,7 +199,6 @@ export function ManagedSessionsPage({
   workspaceId?: string;
   onSelectWorkspace?: (workspaceId: string) => void;
   onSessionWorkspaceChange?: (workspaceId: string | null) => void;
-  workspaceCwd?: string;
   managedAgentProvider?: ManagedAgentProvider;
   /** Null keeps home layout while its sidebar slot is temporarily unmounted. */
   navigationTarget?: HTMLElement | null;
@@ -230,7 +226,6 @@ export function ManagedSessionsPage({
         workspaceId={workspaceId}
         onSelectWorkspace={onSelectWorkspace}
         onSessionWorkspaceChange={onSessionWorkspaceChange}
-        workspaceCwd={workspaceCwd}
         provider={managedAgentProvider}
         cancellationEnabled={managedAgentProvider.canCancel}
         navigationTarget={navigationTarget}
@@ -298,7 +293,6 @@ function ManagedSessionsContent({
   workspaceId,
   onSelectWorkspace,
   onSessionWorkspaceChange,
-  workspaceCwd,
   provider,
   cancellationEnabled,
   navigationTarget,
@@ -324,7 +318,6 @@ function ManagedSessionsContent({
   workspaceId?: string;
   onSelectWorkspace?: (workspaceId: string) => void;
   onSessionWorkspaceChange?: (workspaceId: string | null) => void;
-  workspaceCwd?: string;
   provider: ManagedAgentProvider;
   cancellationEnabled: boolean;
   navigationTarget?: HTMLElement | null;
@@ -791,9 +784,6 @@ function ManagedSessionsContent({
     // disablement by delivering a new summary without touching the record.
   }, [pending, sessionId, detail.summary, interactive]);
 
-  // Depend on the value the request actually sends: a provider that drops
-  // workspaceCwd must not refetch (and lose paged rows) on folder change.
-  const listCwd = provider.acceptsWorkspaceCwd ? workspaceCwd : undefined;
   const listTitleQuery = provider.titleSearch ? titleQuery : '';
   const navigationSessions = listTitleQuery ? sessions : lifecycleSummaries;
   useEffect(() => {
@@ -806,7 +796,6 @@ function ManagedSessionsContent({
     void provider
       .listSessions({
         clientId,
-        workspaceCwd: listCwd,
         ...(provider.lifecycle ? { archiveState } : {}),
         ...(listTitleQuery ? { titleQuery: listTitleQuery } : {}),
         limit: 50,
@@ -829,7 +818,7 @@ function ManagedSessionsContent({
         if (!abort.signal.aborted) setListLoading(false);
       });
     return () => abort.abort();
-  }, [provider, clientId, listCwd, listRevision, archiveState, listTitleQuery]);
+  }, [provider, clientId, listRevision, archiveState, listTitleQuery]);
 
   useEffect(() => {
     const current = detail.summary;
@@ -914,7 +903,6 @@ function ManagedSessionsContent({
     try {
       const page = await provider.listSessions({
         clientId,
-        workspaceCwd: listCwd,
         ...(provider.lifecycle ? { archiveState } : {}),
         ...(listTitleQuery ? { titleQuery: listTitleQuery } : {}),
         cursor: nextCursor,
@@ -964,6 +952,12 @@ function ManagedSessionsContent({
       return;
     setDiscarded(false);
     let attempt = pendingRef.current;
+    const ownerSession = attempt ? attempt.sessionId : sessionId;
+    const draftKey = getComposerDraftStorageKey(
+      undefined,
+      `managed:${provider.storageKey}:${ownerSession ?? 'new'}`,
+    );
+    const isDraftUnchanged = captureComposerDraftGuard(draftKey);
     if (!attempt) {
       if (
         (!submittedText.trim() && !images?.length && !files?.length) ||
@@ -996,7 +990,6 @@ function ManagedSessionsContent({
         text: submittedText,
         draftText: composerRef.current?.getText(),
         sessionId,
-        cwd: workspaceCwd,
         ...(input.some(
           (block) =>
             block.type === 'input_file' || block.type === 'input_image',
@@ -1044,9 +1037,6 @@ function ManagedSessionsContent({
             {
               text: attempt.text,
               ...(attempt.input ? { input: attempt.input } : {}),
-              workspaceCwd: provider.acceptsWorkspaceCwd
-                ? attempt.cwd
-                : undefined,
             },
             opts,
           );
@@ -1056,17 +1046,16 @@ function ManagedSessionsContent({
       await persistPending(pendingKey, undefined);
       if (abort.signal.aborted) return;
       setListRevision((current) => current + 1);
+      const clearDraft = isDraftUnchanged();
       composerCommit.current?.();
       composerCommit.current = undefined;
-      const draftKey = getComposerDraftStorageKey(
-        undefined,
-        `managed:${provider.storageKey}:${attempt.sessionId ?? 'new'}`,
-      );
-      for (const draft of [attempt.draftText, attempt.text]) {
-        if (draft !== undefined) clearComposerDraftIfMatches(draftKey, draft);
-      }
+      if (clearDraft)
+        for (const draft of [attempt.draftText, attempt.text]) {
+          if (draft !== undefined) clearComposerDraftIfMatches(draftKey, draft);
+        }
       const editor = composerRef.current;
       if (
+        clearDraft &&
         selection.current === attempt.sessionId &&
         editor &&
         [attempt.draftText, attempt.text].includes(editor.getText())
@@ -1611,7 +1600,6 @@ function ManagedSessionsContent({
                   </span>
                 }
                 workspaceName={summary.workspace?.workspaceId}
-                workspacePath={summary.workspaceCwd}
                 location={
                   <Badge variant="secondary">
                     {t(`managed.phase.${summary.phase}`)}
@@ -1888,13 +1876,12 @@ function ManagedSessionsContent({
                   hasOlderHistory={Boolean(detail.olderCursor)}
                   loadingOlderHistory={detail.loadingOlder}
                   onLoadOlderHistory={detail.loadOlder}
-                  workspaceCwd={summary?.workspaceCwd}
                   hideSessionTimeline
                   welcomeHeader={
                     messages.length === 0 && !detail.loading ? (
                       <WelcomeHeader
                         version=""
-                        cwd={summary?.workspaceCwd ?? ''}
+                        cwd=""
                         currentModel={displayedModel}
                         currentMode=""
                       />

@@ -8,7 +8,7 @@
 
 ## 前提与输入
 
-- Kubernetes 1.33+，支持原生 sidecar 并执行 NetworkPolicy；已有 Java 控制面、持久化 Session Store 和 Runtime Broker。数据库包含 V18 placement 列。Harness Pod 不持有 Kubernetes API token，也不挂载租户工作目录。
+- Kubernetes 1.33+，支持原生 sidecar 并执行 NetworkPolicy；已有 Java 控制面、持久化 Session Store 和 Runtime Broker。Server/Broker 使用匹配构建及包含 placement 列的全新单 V1 catalog；旧开发库需要独立的全新数据库和状态目录，不提供升级。Harness Pod 不持有 Kubernetes API token，也不挂载租户工作目录。
 - 构建并发布不可变 Harness 镜像，在 `harness-pool.yaml` 中将两个镜像都固定到已验证的 digest。示例 Envoy 版本为 1.39.4；上线前用实际选定镜像验证配置。
 - 填写 `settings.example.yaml`：使用 Java 同样要求的 capability digest、HTTPS Broker URL 和批准的模型配置。设置由运维持有并共享；租户文件不得成为运维 HOME、设置文件或工作目录。
 - 从文件创建 `qwen-harness-secrets` Secret，键名为 `harness-token`、`broker-token`、`model-api-key` 和 `outbound-ca.crt`。前三个文件分别只包含对应凭据。CA 文件信任真实 HTTPS Store、Broker、模型网关。启动器读取文件并通过子进程环境传递凭据；Deployment 参数不包含秘密。
@@ -84,4 +84,4 @@ Drain helper 在 Pod 的 120 秒终止宽限内最多等待 90 秒。超时、St
 
 参考：[Kubernetes 原生 sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/)、[Envoy TLS 验证](https://www.envoyproxy.io/docs/envoy/v1.39.4/api-v3/extensions/transport_sockets/tls/v3/common.proto)、[HPA 行为](https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/)。
 
-首版 pool 不开放 MCP 管理 API 或公开子代理委派；现有单实例部署保留 main 中的这些能力。已记录的 ACK 空闲服务池验收发生在衔接 main 与顺延 V18 之前，合并后的版本仍须完成 CI 和迁移验证。
+首版 pool 不开放 MCP 管理 API 或公开子代理委派；现有单实例部署保留 main 中的这些能力。历史 placement V17 的 ACK 验收及后续 V18 的 CI 结果均早于当前单 V1 衔接；仍需全新基线、Java/MySQL/Hosted 及跨语言 CI 验收。需要历史访问时保留原产物及其独立状态，不得通过修复 Flyway 历史复用旧库。

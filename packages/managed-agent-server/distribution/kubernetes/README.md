@@ -8,7 +8,7 @@ See the [design](../../../../docs/design/2026-10-21-managed-harness-kubernetes.m
 
 ## Prerequisites and inputs
 
-- Kubernetes 1.33+ with native sidecars, NetworkPolicy enforcement, an existing Java control plane, durable Session Store and Runtime Broker. The schema includes V18 placement columns. Harness Pods have no Kubernetes API token or tenant workspace mount.
+- Kubernetes 1.33+ with native sidecars, NetworkPolicy enforcement, an existing Java control plane, durable Session Store and Runtime Broker. Use matching Server/Broker builds and a fresh single-V1 catalog containing the placement columns; earlier development catalogs require a separate fresh database and state directory rather than an upgrade. Harness Pods have no Kubernetes API token or tenant workspace mount.
 - Build and publish an immutable Harness image, and pin both container images to verified digests in `harness-pool.yaml`. The example Envoy version is 1.39.4; validate the configuration with the selected image before rollout.
 - Fill `settings.example.yaml` with the same capability digest required by Java, an HTTPS Broker URL and the approved model provider. Settings are operator-owned and shared; tenant files must never become operator HOME, settings or working directory.
 - Create Secret `qwen-harness-secrets` from files named `harness-token`, `broker-token`, `model-api-key` and `outbound-ca.crt`. The first three contain only their respective credential. The CA file trusts the actual HTTPS Store/Broker/model gateways. The launcher reads files and passes credentials through the child environment; Deployment arguments contain no secrets.
@@ -84,4 +84,4 @@ Validate the selected Envoy image configuration, Kubernetes server-side schema a
 
 References: [Kubernetes native sidecars](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/), [Envoy TLS validation](https://www.envoyproxy.io/docs/envoy/v1.39.4/api-v3/extensions/transport_sockets/tls/v3/common.proto), [HPA behavior](https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/).
 
-The first pool does not expose MCP management APIs or public child-agent delegation. Existing single-instance deployments retain those capabilities from main. The recorded ACK idle-pool acceptance predates integration of main and the V18 renumbering; the integrated revision still requires CI and migration validation.
+The first pool does not expose MCP management APIs or public child-agent delegation. Existing single-instance deployments retain those capabilities from main. Historical placement-V17 ACK acceptance and later V18 CI results predate the current single-V1 integration; fresh-baseline, Java/MySQL/Hosted and cross-language CI acceptance remain required. Preserve old artifacts and their own state for historical access; do not repair Flyway history to reuse them.

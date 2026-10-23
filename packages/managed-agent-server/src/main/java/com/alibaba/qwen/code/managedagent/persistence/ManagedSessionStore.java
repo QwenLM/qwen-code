@@ -634,7 +634,7 @@ public class ManagedSessionStore {
                         sessionId);
         if (!kinds.isEmpty() && "HARNESS".equals(kinds.getFirst())) {
             jdbc.update(
-                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, wake_head_revision = 0, cleanup_head_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', o3_backfill_through = 0, o3_backfill_pending = FALSE, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
+                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, wake_head_revision = 0, cleanup_head_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
                     request.workspaceId(),
                     STORAGE_VERSION,
                     request.writerId(),
@@ -649,7 +649,7 @@ public class ManagedSessionStore {
         }
         try {
             jdbc.update(
-                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, cleanup_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, o3_backfill_through, o3_backfill_pending, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 0, 'READY', 0, FALSE, ?, ?)",
+                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, cleanup_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 0, 'READY', ?, ?)",
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
                             .harnessDrainKey(tenantId),
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
@@ -1310,22 +1310,7 @@ public class ManagedSessionStore {
                         || !Objects.equals(activation.epoch(), head.activationEventEpoch()))) {
             throw HarnessPlacementStore.blocked("harness_placement_quiescing");
         }
-        // A payload wider than the columns blanks them instead of
-        // failing the commit: authorization then reads the journal
-        // directly, exactly as before the columns existed.
-        boolean fits = activation == null
-                || (activation.id() == null || activation.id().length()
-                        <= ManagedSessionStoreModels.MAX_ACTIVATION_ID_CHARS)
-                        && (activation.phase() == null
-                                || activation.phase().length()
-                                        <= ManagedSessionStoreModels.MAX_ACTIVATION_PHASE_CHARS);
-        // activation_head_revision stamps which journal revision the
-        // columns reflect, so a head written by a binary that does not
-        // maintain the columns is detected (stamp lags journal_revision)
-        // and rescanned instead of trusted. A commit that keeps the
-        // existing columns advances their stamp only when they were
-        // current at the previous revision — re-stamping a skewed set
-        // would certify it as fresh.
+        // Never certify a skewed activation projection as current.
         Long activationHeadRevision = head.activationHeadRevision();
         if (activation != null || (activationHeadRevision != null
                 && activationHeadRevision == head.journalRevision())) {
@@ -1353,13 +1338,13 @@ public class ManagedSessionStore {
                 request.activationEpoch(),
                 request.latestCheckpointResourceId(),
                 activation == null ? head.activationId()
-                        : fits ? activation.id() : null,
+                        : activation.id(),
                 activation == null ? head.activationPhase()
-                        : fits ? activation.phase() : null,
+                        : activation.phase(),
                 activation == null ? head.activationEventEpoch()
-                        : fits ? activation.epoch() : null,
+                        : Long.valueOf(activation.epoch()),
                 activation == null ? head.activationExpiresAt()
-                        : fits ? activation.expiresAt() : null,
+                        : activation.expiresAt(),
                 activationHeadRevision, Math.max(head.storageVersion(), promotes ? 2 : 1), now.getTime(), JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
         if (toolResults != null && csiOriginal == null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
@@ -2800,8 +2785,7 @@ public class ManagedSessionStore {
     /**
      * Converts the last activation.changed payload of a committed transaction, so the head row can
      * answer authorization reads without rescanning the journal. The payload was already parsed by
-     * the extension record pass of this commit. Text fields read with the same leniency as the
-     * authorization scans, so the two never disagree.
+     * the extension record pass of this commit.
      */
     private static ActivationChange activationChange(JsonNode payload) {
         if (payload == null) {
