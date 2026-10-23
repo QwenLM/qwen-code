@@ -92,10 +92,16 @@ try {
   );
   assert(editor, 'The native textarea must be mounted');
   await input(() => ui.mockInput.pasteBracketedText(JSON.stringify(a)));
-  await ui.waitFor(async () => {
+  // A single act around the wait defers the async attachment update we need.
+  const attachmentDeadline = Date.now() + 5_000;
+  while (
+    !/📎 clipboard-/.test(ui.captureCharFrame()) &&
+    Date.now() < attachmentDeadline
+  ) {
+    await new Promise((done) => setTimeout(done, 10));
     await idle();
-    return /📎 clipboard-/.test(ui.captureCharFrame());
-  });
+  }
+  assert.match(ui.captureCharFrame(), /📎 clipboard-/);
   await key('RETURN');
   assert.equal(
     submissions.length,
