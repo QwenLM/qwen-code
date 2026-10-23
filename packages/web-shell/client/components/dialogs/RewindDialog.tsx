@@ -70,40 +70,45 @@ export function RewindDialog({
     };
   }, [loadSnapshots, onError]);
 
-  const items = useMemo(
-    () =>
-      snapshots
-        .map((snapshot) => {
-          const identity = snapshot.daemonPromptId;
-          // A duplicated identity cannot be resolved to one turn, so both rows
-          // refuse rather than pointing at the same checkpoint twice.
-          const usable =
-            identity !== undefined &&
-            snapshots.filter((entry) => entry.daemonPromptId === identity)
-              .length === 1;
-          const block = usable
-            ? findDaemonRewindUserBlock(blocks, identity)
-            : undefined;
-          // The ordinal has to match what the chat numbers, so it skips the
-          // same rows `findDaemonRewindUserBlock` above skips.
-          const turnIndex = block
-            ? blocks.filter(isDaemonRewindUserBlock).indexOf(block)
-            : undefined;
-          return {
-            snapshot,
-            promptText: block?.text.trim() ?? '',
-            turnIndex,
-            // The rewind itself carries only the prompt identity, so a turn
-            // outside the loaded transcript window stays targetable: the block
-            // lookup above supplies the preview text and the ordinal badge,
-            // not the permission. Only a snapshot with no usable identity is
-            // unavailable, and it says why.
-            available: usable,
-          };
-        })
-        .sort((a, b) => a.snapshot.turnIndex - b.snapshot.turnIndex),
-    [blocks, snapshots],
-  );
+  const items = useMemo(() => {
+    // One pass each: the ordinal map is shared by every row (a per-snapshot
+    // rescan is quadratic in a long transcript), and the identity census makes
+    // duplicate detection a lookup instead of a nested filter.
+    const ordinals = new Map<DaemonTranscriptBlock, number>();
+    for (const block of blocks) {
+      if (isDaemonRewindUserBlock(block)) ordinals.set(block, ordinals.size);
+    }
+    const identityCounts = new Map<string, number>();
+    for (const snapshot of snapshots) {
+      const identity = snapshot.daemonPromptId;
+      if (identity !== undefined) {
+        identityCounts.set(identity, (identityCounts.get(identity) ?? 0) + 1);
+      }
+    }
+    return snapshots
+      .map((snapshot) => {
+        const identity = snapshot.daemonPromptId;
+        // A duplicated identity cannot be resolved to one turn, so both rows
+        // refuse rather than pointing at the same checkpoint twice.
+        const usable =
+          identity !== undefined && identityCounts.get(identity) === 1;
+        const block = usable
+          ? findDaemonRewindUserBlock(blocks, identity)
+          : undefined;
+        return {
+          snapshot,
+          promptText: block?.text.trim() ?? '',
+          turnIndex: block ? ordinals.get(block) : undefined,
+          // The rewind itself carries only the prompt identity, so a turn
+          // outside the loaded transcript window stays targetable: the block
+          // lookup above supplies the preview text and the ordinal badge, not
+          // the permission. Only a snapshot with no usable identity is
+          // unavailable, and it says why.
+          available: usable,
+        };
+      })
+      .sort((a, b) => a.snapshot.turnIndex - b.snapshot.turnIndex);
+  }, [blocks, snapshots]);
 
   // Keep the cursor in range as snapshots load / change.
   useEffect(() => {
