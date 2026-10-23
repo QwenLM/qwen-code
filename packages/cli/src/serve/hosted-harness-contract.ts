@@ -36,7 +36,7 @@ export function createHostedHarnessContract(
   capabilityDigest: string,
   bootId: string = randomUUID(),
   lifecycleV2Profiles: readonly string[] = (
-    process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? ''
+    process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-shell/1'
   )
     .split(',')
     .filter(Boolean),
@@ -90,6 +90,7 @@ export function createHostedHarnessContract(
       // GET /session/:id/events writes keepalive comments while no event
       // is committed, so a client may bound a stream by its silence.
       'event-keepalive/1',
+      'web-fetch/1',
     ]),
   });
 }

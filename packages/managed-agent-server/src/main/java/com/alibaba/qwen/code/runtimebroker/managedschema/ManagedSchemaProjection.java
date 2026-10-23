@@ -107,7 +107,9 @@ public enum ManagedSchemaProjection {
             "tenant_id, schedule_id, session_id, workspace_id, actor_id, record_revision, "
                     + "definition_revision, definition_digest, goal, cron, timezone, session_mode, "
                     + "overlap, catch_up, catch_up_limit, enabled, state, blocked_reason, armed_at, "
-                    + "watermark_slot, lease_owner, lease_until, fence, gmt_create, gmt_modified"),
+                    + "watermark_slot, lease_owner, lease_until, fence, gmt_create, gmt_modified, "
+                    + "gate, gate_last_outcome, gate_last_at, gate_quiet_since_delivery, "
+                    + "gate_failures, gate_last_error"),
     SCHEDULE_OCCURRENCE(
             "tenant_id, schedule_id, occurrence_key, run_id, session_id, slot, trigger_kind, "
                     + "outcome, reason, definition_revision, fence, attempts, next_retry_at, last_error, "
@@ -129,8 +131,7 @@ public enum ManagedSchemaProjection {
                     + "writer_id, writer_lease_until, lease_token_hash, journal_revision, "
                     + "committed_sequence, last_commit_digest, activation_epoch, "
                     + "latest_checkpoint_resource_id, compacted_through_revision, recovery_status, "
-                    + "recovery_detail_code, gmt_create, gmt_modified, o3_backfill_revision, "
-                    + "o3_backfill_through, o3_backfill_error, o3_backfill_pending, activation_id, "
+                    + "recovery_detail_code, gmt_create, gmt_modified, activation_id, "
                     + "activation_phase, activation_event_epoch, activation_expires_at, "
                     + "activation_head_revision, tenant_key, harness_key, harness_session_id, head_kind, "
                     + "phase, operation_id, claim_generation, claim_lease_until, wake_pending, "

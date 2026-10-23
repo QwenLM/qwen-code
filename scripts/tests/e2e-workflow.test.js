@@ -14,6 +14,10 @@ describe('TUI product evidence', () => {
   );
   const steps = workflow.jobs.parity.steps;
 
+  it('budgets cold setup and all three serial product acceptance legs', () => {
+    expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
+  });
+
   it('treats unhandled errors as acceptance failures on every runner', () => {
     const product = steps.find((step) =>
       step.name?.startsWith('Three-leg product acceptance'),

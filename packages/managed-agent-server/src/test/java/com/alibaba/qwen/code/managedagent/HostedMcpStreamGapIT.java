@@ -19,7 +19,6 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.util.ReflectionTestUtils;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -49,6 +48,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.LongStream;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.camel;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -357,20 +357,12 @@ class HostedMcpStreamGapIT {
 
     /**
      * A Harness-private command under Spring's attachment to the Session:
-     * the client id its attach minted and the boot it attached to, read the
-     * way the FG13 gates read them.
+     * the client id its attach minted and the boot it attached to.
      */
     private JsonNode harness(String method, String path, Object body,
             String session, int expected) throws Exception {
-        HarnessSessionRef attachment = null;
-        for (Object value : ((Map<?, ?>) ReflectionTestUtils.getField(
-                spring.getBean(HarnessConnector.class), "attachments"))
-                .values()) {
-            if (value instanceof HarnessSessionRef ref
-                    && session.equals(ref.getHarnessSessionId())) {
-                attachment = ref;
-            }
-        }
+        HarnessSessionRef attachment = attachment(
+                spring.getBean(HarnessConnector.class), session);
         assertThat(attachment).as("Spring's attachment to %s", session)
                 .isNotNull();
         var response = http.send(HttpRequest.newBuilder(URI.create(
