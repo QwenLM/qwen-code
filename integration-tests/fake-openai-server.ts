@@ -80,6 +80,10 @@ export type FakeOpenAIChoice = {
 export type FakeOpenAIRequest = {
   body: JsonObject;
   headers: IncomingHttpHeaders;
+  transport: {
+    closedAt?: number;
+    writableEndedAtClose?: boolean;
+  };
 };
 
 export type FakeOpenAIServer = {
@@ -145,7 +149,12 @@ export async function startFakeOpenAIServer(
       }
 
       const requestIndex = requests.length;
-      requests.push({ body, headers: req.headers });
+      const transport: FakeOpenAIRequest['transport'] = {};
+      res.once('close', () => {
+        transport.closedAt = performance.now();
+        transport.writableEndedAtClose = res.writableEnded;
+      });
+      requests.push({ body, headers: req.headers, transport });
 
       const response = await handler({ body, requestIndex });
       if (body['stream'] === true) {
