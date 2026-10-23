@@ -566,7 +566,7 @@ export async function startOpenTuiUI(
     // Start the one shared initialization flight before anything can load
     // commands or submit; the turn path and the registry loader both await
     // (or join) this same flight via ensureConfigInitialized.
-    void ensureConfigInitialized(config);
+    const initialization = ensureConfigInitialized(config);
     const version = await getCliVersion();
     if (
       !settings.merged.ui?.hideWindowTitle &&
@@ -581,6 +581,12 @@ export async function startOpenTuiUI(
     runtime = OpenTuiRuntime.create({ config, version });
     await runtime.writeRuntimeSidecar();
     runtime.startPressureMonitor();
+
+    let resumedSession = config.getResumedSessionData();
+    if (resumedSession) {
+      await initialization;
+      resumedSession = config.getResumedSessionData();
+    }
 
     // Drain the early-captured input exactly once, before the renderer takes
     // over stdin; the decoded text is injected into the composer after mount.
@@ -598,7 +604,6 @@ export async function startOpenTuiUI(
           }
         : null;
 
-    const resumedSession = config.getResumedSessionData();
     const startupHistory = resumedSession
       ? buildUiHistoryItems(resumedSession, { config, settings })
       : [];

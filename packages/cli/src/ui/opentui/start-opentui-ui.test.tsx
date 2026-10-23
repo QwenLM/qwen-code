@@ -246,6 +246,7 @@ import type { ReactElement } from 'react';
 import { render, renderHook, screen } from '@testing-library/react';
 import { act, cloneElement } from 'react';
 import { exitSession } from './exit-lifecycle.js';
+import * as sessionSwitch from './session-switch.js';
 import { startOpenTuiUI } from './start-opentui-ui.js';
 import { createCliRenderer } from '@opentui/core';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -370,6 +371,184 @@ describe('startOpenTuiUI fallback contract', () => {
       );
       expect(mocks.state.replayOrder).not.toContain('reset');
     });
+  });
+
+  it.each(['resolve', 'reject'] as const)(
+    'waits for the shared init before resumed tool metadata: %s',
+    async (outcome) => {
+      const config = buildConfig();
+      let release!: () => void;
+      let reject!: (reason: Error) => void;
+      const initialization = new Promise<void>((yes, no) => {
+        release = yes;
+        reject = no;
+      });
+      vi.mocked(config.initialize).mockReturnValue(initialization);
+      let resumed = {
+        filePath: '/tmp/project/transcript.jsonl',
+        lastCompletedUuid: 'result-row',
+        conversation: {
+          sessionId: 'test-session-id',
+          projectHash: 'project',
+          startTime: '2026-10-23T00:00:00Z',
+          lastUpdated: '2026-10-23T00:00:00Z',
+          messages: [
+            {
+              uuid: 'call-row',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: '2026-10-23T00:00:00Z',
+              cwd: '/tmp/project',
+              version: 'test',
+              type: 'assistant',
+              provenance: 'assistant_output',
+              message: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'resume-call',
+                      name: 'read_file',
+                      args: { file_path: '/tmp/project/owned' },
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              uuid: 'result-row',
+              parentUuid: 'call-row',
+              sessionId: 'test-session-id',
+              timestamp: '2026-10-23T00:00:01Z',
+              cwd: '/tmp/project',
+              version: 'test',
+              type: 'tool_result',
+              provenance: 'tool_result',
+              message: {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'resume-call',
+                      name: 'read_file',
+                      response: { output: 'REAL_RESULT' },
+                    },
+                  },
+                ],
+              },
+              toolCallResult: {
+                callId: 'resume-call',
+                status: 'success',
+                resultDisplay: 'REAL_RESULT',
+              },
+            },
+          ],
+        },
+      } as NonNullable<ReturnType<Config['getResumedSessionData']>>;
+      let ready = false;
+      const getTool = vi.fn(() => ({
+        displayName: 'Ready registry metadata',
+        build: () => ({ getDescription: () => 'actual resumed description' }),
+      }));
+      const registry = vi.fn(() => {
+        if (!ready) throw new Error('tool registry not initialized');
+        return { getTool };
+      });
+      Object.assign(config, {
+        getResumedSessionData: () => resumed,
+        getToolRegistry: registry,
+        getGeminiClient: () => ({ isInitialized: () => false }),
+      });
+      const history = vi.spyOn(sessionSwitch, 'buildUiHistoryItems');
+      mocks.state.runtime.startPressureMonitor.mockClear();
+      const pending = startOpenTuiUI(
+        config,
+        settings,
+        [],
+        '/tmp/project',
+        {} as InitializationResult,
+      );
+      try {
+        await vi.waitFor(() =>
+          expect(mocks.state.runtime.startPressureMonitor).toHaveBeenCalled(),
+        );
+        expect(config.initialize).toHaveBeenCalledOnce();
+        expect(history).not.toHaveBeenCalled();
+        expect(registry).not.toHaveBeenCalled();
+        expect(mocks.state.root.render).not.toHaveBeenCalled();
+        if (outcome === 'resolve') {
+          // Real initialization can replace sessionData under the writer lease.
+          resumed = structuredClone(resumed);
+          const authoritative = resumed.conversation.messages[1];
+          authoritative.message!.parts![0].functionResponse!.response = {
+            output: 'AUTHORITATIVE_RESULT',
+          };
+          authoritative.toolCallResult!.resultDisplay = 'AUTHORITATIVE_RESULT';
+          ready = true;
+          release();
+          expect(await pending).toBe(true);
+          expect(history).toHaveBeenCalledExactlyOnceWith(resumed, {
+            config,
+            settings,
+          });
+          expect(getTool).toHaveBeenCalledWith('read_file');
+          expect(JSON.stringify(history.mock.results[0].value)).toContain(
+            'Ready registry metadata',
+          );
+          expect(JSON.stringify(history.mock.results[0].value)).toContain(
+            'AUTHORITATIVE_RESULT',
+          );
+          expect(JSON.stringify(history.mock.results[0].value)).not.toContain(
+            'REAL_RESULT',
+          );
+          expect(mocks.state.root.render).toHaveBeenCalledOnce();
+        } else {
+          reject(new Error('owned shared initialization rejected'));
+          expect(await pending).toBe(false);
+          expect(history).not.toHaveBeenCalled();
+          expect(mocks.state.root.render).not.toHaveBeenCalled();
+          expect(mocks.state.root.unmount).toHaveBeenCalledOnce();
+          expect(mocks.state.renderer.destroy).toHaveBeenCalledOnce();
+          expect(mocks.state.runtime.shutdown).toHaveBeenCalledOnce();
+          expect(mocks.state.stderrLines.join('\n')).toContain(
+            'owned shared initialization rejected',
+          );
+        }
+      } finally {
+        release();
+        await pending;
+        history.mockRestore();
+      }
+    },
+  );
+
+  it('still paints a fresh session while shared initialization is held', async () => {
+    const config = buildConfig();
+    let release!: () => void;
+    vi.mocked(config.initialize).mockReturnValue(
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    let settled = false;
+    const pending = startOpenTuiUI(
+      config,
+      settings,
+      [],
+      '/tmp/project',
+      {} as InitializationResult,
+    ).then((value) => {
+      settled = value;
+      return value;
+    });
+    try {
+      await vi.waitFor(() => expect(settled).toBe(true));
+      expect(mocks.state.root.render).toHaveBeenCalledOnce();
+      expect(config.initialize).toHaveBeenCalledOnce();
+    } finally {
+      release();
+      await pending;
+    }
   });
 
   it('uses the existing startup fallback when resumed history cannot be read', async () => {

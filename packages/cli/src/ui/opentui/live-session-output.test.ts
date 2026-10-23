@@ -956,6 +956,7 @@ describe('logical tools and actual permission transitions', () => {
       expect(h.recorder.recordToolResult).toHaveBeenCalledWith(
         finalParts,
         expect.objectContaining({ callId: request.callId, resultDisplay }),
+        undefined,
       );
 
       const frames = await h.frames();
