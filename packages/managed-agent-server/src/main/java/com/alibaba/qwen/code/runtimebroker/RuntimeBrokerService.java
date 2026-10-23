@@ -3602,9 +3602,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
             boolean busy = failure instanceof RuntimeBrokerException brokerFailure && brokerFailure.isRetryable()
                     && ((request.isManagedContext() && brokerFailure.getStatusCode() == 409
                             && "workspace_csi_busy".equals(brokerFailure.getCode()))
-                            || (!request.isManagedContext() && "kubernetes-scratch".equals(request.getProvisionerKind())
-                                    && brokerFailure.getStatusCode() == 503
-                                    && "runtime_kubernetes_capacity".equals(brokerFailure.getCode())));
+                            || (!request.isManagedContext() && brokerFailure.getStatusCode() == 503
+                                    && (("kubernetes-scratch".equals(request.getProvisionerKind())
+                                            && "runtime_kubernetes_capacity".equals(brokerFailure.getCode()))
+                                            || ("external-scratch".equals(request.getProvisionerKind())
+                                                    && "runtime_external_capacity".equals(brokerFailure.getCode())))));
             if (!busy) {
                 blockRecoveryQuietly(claimed, failure);
             }
