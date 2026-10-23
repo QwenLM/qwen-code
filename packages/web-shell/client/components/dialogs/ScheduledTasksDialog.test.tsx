@@ -515,13 +515,13 @@ describe('ScheduledTasksDialog editing', () => {
           lastAt: 1_700_000_300_000,
           lastOutcome: 'blocked',
           quietSinceDelivery: 0,
-          consecutiveFailures: 57,
+          consecutiveFailures: 1,
           lastError: 'this session cannot run shell commands',
         },
       }),
     ]);
-    expect(document.body.textContent).toContain(
-      'blocked: this session cannot run shell commands · quiet ×0 · last delivered never · 57 failures',
+    expect(document.body.textContent).toMatch(
+      /blocked: this session cannot run shell commands · quiet ×0 · last delivered never · 1 failure(?!s)/,
     );
   });
 

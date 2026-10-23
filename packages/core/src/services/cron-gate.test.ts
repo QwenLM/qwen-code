@@ -561,6 +561,7 @@ describe('gateCommandError', () => {
     ['&&', 'a && b'],
     ['an & in $(( ))', 'echo $(( 5 & 3 ))'],
     ['a command at the cap', 'x'.repeat(MAX_CRON_GATE_CHARS)],
+    ['a character outside the BMP', 'echo 😀'],
   ])('accepts %s', (_what, gate) => {
     expect(gateCommandError(gate)).toBeNull();
   });
@@ -575,6 +576,8 @@ describe('gateCommandError', () => {
   });
 
   it.each<[string, string, string]>([
+    ['an unpaired high surrogate', 'echo \ud800', 'unpaired UTF-16 surrogate'],
+    ['an unpaired low surrogate', 'echo \udc00x', 'unpaired UTF-16 surrogate'],
     ['a trailing &', 'echo done &', 'must not background'],
     // A literal backslash, then a backgrounding `&`.
     [

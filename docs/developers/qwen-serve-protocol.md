@@ -606,7 +606,8 @@ starts failing, not at every fire.
   that sets a gate on a one-shot or turns a gated task one-shot, answers 400
   `gate_requires_recurring`; a task already in that state keeps its other
   edits. A malformed gate (empty on `POST`, only a comment, over 2048
-  characters, a NUL character, a shell wrapper such as `bash -c '…'`, or
+  characters, a NUL character or an unpaired UTF-16 surrogate, a shell wrapper
+  such as `bash -c '…'`, or
   any part backgrounded with `&`) answers 400 `invalid_gate`.
   The `&` check is lexical and best-effort; where unsure it refuses (an `&` in
   a comment, a heredoc body or `(( … ))`), and a gate that gets past it is

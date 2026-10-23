@@ -1886,7 +1886,7 @@ const EN: Messages = {
   'scheduledTasks.gate.lastFailed': 'last run failed',
   'scheduledTasks.gate.lastBlocked': 'blocked',
   'scheduledTasks.gate.status': (v) =>
-    `quiet ×${v?.quiet ?? 0} · last delivered ${v?.delivered ?? 'never'} · ${v?.failures ?? 0} failures`,
+    `quiet ×${v?.quiet ?? 0} · last delivered ${v?.delivered ?? 'never'} · ${v?.failures ?? 0} ${v?.failures === 1 ? 'failure' : 'failures'}`,
   'scheduledTasks.runKind.gateFailed': 'gate failed',
   'scheduledTasks.runKind.gateBlocked': 'gate blocked',
   'turnOutputs.filesEdited': (v) => `Edited ${v?.count ?? 0} files`,

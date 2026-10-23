@@ -135,6 +135,11 @@ export function gateCommandError(gate: unknown): string | null {
   if (gate.includes('\0')) {
     return 'must not contain a NUL character';
   }
+  // Bash gets the gate as UTF-8, which cannot carry an unpaired surrogate: it
+  // would run as U+FFFD, not the text the permission rules checked.
+  if (/[\uD800-\uDFFF]/u.test(gate)) {
+    return 'must be valid Unicode, without an unpaired UTF-16 surrogate';
+  }
   // A shell runs a comment as nothing: exit 0, no stdout. Explicit no-ops
   // such as `true` and `:` stay accepted.
   if (runsOnlyComments(gate)) {
