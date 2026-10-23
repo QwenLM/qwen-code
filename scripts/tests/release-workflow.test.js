@@ -25,6 +25,7 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { PUBLISHED_PACKAGES } from '../assert-release-version.mjs';
 import { RELEASE_WORKSPACES } from '../release-packages.mjs';
+import { isAlreadyPublishedDryRunFailure } from '../../packages/cua-driver/scripts/publish-dry-run-skip.mjs';
 import { getTestCiWorkspacePackageJsonPaths } from '../workspaces.js';
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
@@ -3460,5 +3461,41 @@ describe('release lane runner routing', () => {
     expect(wipe.if).toBe("${{ runner.environment == 'self-hosted' }}");
     expect(wipe.run).toBe('rm -rf prebuilds');
     expect(rest[0].name).toBe('Merge per-platform prebuilds');
+  });
+});
+
+describe('SDK publish dry-run already-published tolerance', () => {
+  // After a release, the packaged version lives in the registry and the
+  // dry-run's collision probe is permanently red until the next bump; only
+  // that exact registry state may be treated as a skip.
+  it.each([
+    {
+      label: 'npm stderr line',
+      text: 'npm error You cannot publish over the previously published versions: 0.26.0.',
+    },
+    {
+      label: 'npm --json error summary',
+      text: '{"error":{"code":"E403","summary":"You cannot publish over the previously published versions: 0.26.0."}}',
+    },
+  ])('skips the registry-collision case: $label', ({ text }) => {
+    expect(isAlreadyPublishedDryRunFailure(text)).toBe(true);
+  });
+
+  it.each([
+    {
+      label: 'permission denied',
+      text: 'npm error code E403\nnpm error 403 403 Forbidden - PUT https://registry.npmjs.org/@qwen-code%2fcua-sdk - You do not have permission to publish "@qwen-code/cua-sdk".',
+    },
+    {
+      label: 'network failure',
+      text: 'npm error code ENOTFOUND\nnpm error network request to https://registry.npmjs.org/@qwen-code%2fcua-sdk failed',
+    },
+    {
+      label: 'bare exit without captured detail',
+      text: 'npm exited with status 1',
+    },
+    { label: 'empty', text: '' },
+  ])('keeps failing every other registry failure: $label', ({ text }) => {
+    expect(isAlreadyPublishedDryRunFailure(text)).toBe(false);
   });
 });
