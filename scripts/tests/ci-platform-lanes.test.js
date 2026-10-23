@@ -419,6 +419,17 @@ describe('post-merge push lane', () => {
       new Map(
         (ci.jobs[job].steps ?? []).map((s) => {
           const { name: _artifactName, ...restWith } = s.with ?? {};
+          if (job === 'lint_and_static' && s.name === 'Install dependencies') {
+            expect(s.env).toEqual({
+              QWEN_SKIP_PREPARE: '1',
+              QWEN_SKIP_NOTICE_GENERATION: '1',
+            });
+            const { env: _installEnv, ...install } = s;
+            return [
+              s.name,
+              JSON.stringify(canon({ ...install, with: restWith })),
+            ];
+          }
           return [s.name, JSON.stringify(canon({ ...s, with: restWith }))];
         }),
       );
@@ -457,6 +468,13 @@ describe('post-merge push lane', () => {
       'shared prelude reordered between the two jobs',
     ).toEqual(namesIn('test').filter((n) => sharedSet.has(n)));
     const lintNames = namesIn('lint_and_static');
+    expect(ci.jobs.lint_and_static.env?.QWEN_SKIP_PREPARE).toBeUndefined();
+    expect(
+      ci.jobs.lint_and_static.env?.QWEN_SKIP_NOTICE_GENERATION,
+    ).toBeUndefined();
+    expect(
+      lintNames.indexOf('Check serve fast-path bundle closure'),
+    ).toBeLessThan(lintNames.indexOf('Run i18n check'));
     expect(lintNames.indexOf('Use trusted CI profile')).toBeLessThan(
       lintNames.indexOf('Install dependencies'),
     );
@@ -486,13 +504,13 @@ describe('post-merge push lane', () => {
       'Run yamllint',
       'Run Prettier',
       'Run sensitive keyword linter',
+      'Check serve fast-path bundle closure',
+      'Check core subpath exports resolve',
       'Run i18n check',
       'Generate settings schema',
       'Check settings schema is up-to-date',
       'Generate Web Shell and VS Code companion notices',
       'Check Web Shell and VS Code companion notices are up-to-date',
-      'Check serve fast-path bundle closure',
-      'Check core subpath exports resolve',
       'Run .github/scripts helper tests',
     ];
     const steps = ci.jobs.lint_and_static.steps ?? [];

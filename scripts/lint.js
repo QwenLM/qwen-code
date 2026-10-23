@@ -6,11 +6,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execSync } from 'node:child_process';
+import { execSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { getLintScope } from './lint-scope.js';
 
 const ACTIONLINT_VERSION = '1.7.12';
 const SHELLCHECK_VERSION = '0.11.0';
@@ -308,13 +309,15 @@ function runCommand(command, stdio = 'inherit') {
   }
 }
 
-export function setupLinters() {
+export function setupLinters(scope = { full: true }) {
   console.log('Setting up linters...');
   rmSync(TEMP_DIR, { recursive: true, force: true });
   mkdirSync(TEMP_DIR, { recursive: true });
 
   const linters = getLinters();
   for (const linter in linters) {
+    if (!scope.full && !scope[linter]?.length && scope[linter] !== true)
+      continue;
     const { check, installer } = linters[linter];
     if (!runCommand(check, 'ignore')) {
       console.log(`Installing ${linter}...`);
@@ -372,37 +375,105 @@ export function runPrettier() {
   }
 }
 
-function main() {
-  const args = process.argv.slice(2);
-
-  if (args.includes('--setup')) {
-    setupLinters();
+function runChangedFiles(command, options, files) {
+  if (files.length === 0) {
+    console.log(`Skipping ${command}: no relevant changed files.`);
+    return;
   }
-  if (args.includes('--eslint')) {
-    runESLint();
-  }
-  if (args.includes('--actionlint')) {
-    runActionlint();
-  }
-  if (args.includes('--shellcheck')) {
-    runShellcheck();
-  }
-  if (args.includes('--yamllint')) {
-    runYamllint();
-  }
-  if (args.includes('--prettier')) {
-    runPrettier();
-  }
-
-  if (args.length === 0) {
-    setupLinters();
-    runESLint();
-    runActionlint();
-    runShellcheck();
-    runYamllint();
-    runPrettier();
-    console.log('\nAll linting checks passed!');
+  console.log(`\nRunning ${command} on ${files.length} selected files...`);
+  // Explicit targets do not make the experimental Prettier CLI discover
+  // nested config/ignore files. Start in each target directory to load them.
+  const groups =
+    command === 'prettier'
+      ? Object.groupBy(files, (file) => dirname(file))
+      : { '.': files };
+  for (const [directory, selected] of Object.entries(groups)) {
+    const targets =
+      command === 'prettier'
+        ? selected.map((file) => basename(file))
+        : selected;
+    for (let index = 0; index < targets.length; index += 50) {
+      const result = spawnSync(
+        command,
+        [
+          ...options,
+          // Prettier's experimental CLI escapes paths after `--` as globs.
+          // The ./ prefix already prevents filenames being parsed as options.
+          ...(command === 'prettier' ? [] : ['--']),
+          ...targets.slice(index, index + 50).map((file) => `./${file}`),
+        ],
+        {
+          cwd: join(process.cwd(), directory),
+          env: { ...process.env, PATH: getLinterPath() },
+          stdio: 'inherit',
+          encoding: 'utf8',
+          maxBuffer: 32 * 1024 * 1024,
+        },
+      );
+      if (result.error) console.error(result.error.message);
+      if (result.status !== 0) process.exit(1);
+    }
   }
 }
 
-main();
+async function main() {
+  const args = process.argv.slice(2);
+
+  const scope = await getLintScope();
+  if (
+    !scope.full &&
+    scope.prettier.length &&
+    (args.length === 0 || args.includes('--prettier'))
+  ) {
+    const { getFileInfo } = await import('prettier');
+    const supported = await Promise.all(
+      scope.prettier.map(async (file) =>
+        (await getFileInfo(file)).inferredParser ? file : null,
+      ),
+    );
+    scope.prettier = supported.filter(Boolean);
+  }
+  console.log(
+    scope.full ? `Full lint: ${scope.reason}` : 'Incremental PR lint.',
+  );
+  if (args.length === 0 || args.includes('--setup')) setupLinters(scope);
+  const lanes = {
+    eslint: () =>
+      scope.full
+        ? runESLint()
+        : runChangedFiles(
+            'eslint',
+            ['--ext', '.ts,.tsx', '--max-warnings', '0', '--no-warn-ignored'],
+            scope.eslint,
+          ),
+    actionlint: () => {
+      if (scope.full || scope.actionlint) runActionlint();
+      else console.log('Skipping actionlint: no workflow or action changes.');
+    },
+    shellcheck: () => {
+      if (scope.full || scope.shellcheck) runShellcheck();
+      else console.log('Skipping shellcheck: no shell or helper changes.');
+    },
+    yamllint: () =>
+      scope.full
+        ? runYamllint()
+        : runChangedFiles('yamllint', ['--format', 'github'], scope.yamllint),
+    prettier: () =>
+      scope.full
+        ? runPrettier()
+        : runChangedFiles(
+            'prettier',
+            ['--experimental-cli', '--check', '--ignore-unknown'],
+            scope.prettier,
+          ),
+  };
+  for (const [name, run] of Object.entries(lanes)) {
+    if (args.length === 0 || args.includes(`--${name}`)) run();
+  }
+  if (args.length === 0) console.log('\nAll linting checks passed!');
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
