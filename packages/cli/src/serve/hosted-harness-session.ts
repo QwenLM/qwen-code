@@ -298,6 +298,7 @@ import {
   answerResumedTurnCalls,
   fillParkedRoundAgentGaps,
   fillParkedRoundCommandGaps,
+  HostedRecoveryQuiescingError,
   isDurableBlockedVerdict,
   originalRuntimeBroker,
   RecoveryDeclined,
@@ -3177,7 +3178,7 @@ async function startHostedRecoveredTurn(
   cancellationTakeover = false,
 ): Promise<void> {
   if (session.poolAccepting?.() === false)
-    throw new HostedToolRecoveryRequiredError('The Harness is quiescing.');
+    throw new HostedRecoveryQuiescingError('The Harness is quiescing.');
   const abort = new AbortController();
   const accepted = session.managed.authority
     .eventsInSequenceRange(1, session.managed.authority.committedSequence)
@@ -5122,6 +5123,13 @@ export function registerHostedHarnessSessionRoutes(
             return;
           }
         } catch (cause) {
+          if (
+            cause instanceof HostedRecoveryQuiescingError &&
+            !resident.managed.authority.writesStopped
+          ) {
+            error(res, 409, 'hosted_harness_quiescing');
+            return;
+          }
           blockRecovery(resident, namedStoreFailure(cause));
           writeStderrLineSafe(
             'qwen serve: Hosted recovery redrive failed: ' + String(cause),
@@ -5182,6 +5190,13 @@ export function registerHostedHarnessSessionRoutes(
         writeStderrLineSafe(
           `qwen serve: Hosted Harness recovery re-answer of session ${sessionId} failed: ${sanitizeDaemonLogLine(String(cause))}`,
         );
+        if (
+          cause instanceof HostedRecoveryQuiescingError &&
+          !resident.managed.authority.writesStopped
+        ) {
+          error(res, 409, 'hosted_harness_quiescing');
+          return;
+        }
         // Retry-inviting, like the first load's recovery failure; the
         // attached Session keeps its owed lease for the next redrive. A
         // stopped writer outranks the takeover label, exactly as the
@@ -6886,6 +6901,10 @@ export function registerHostedHarnessSessionRoutes(
             writeStderrLineSafe(
               `qwen serve: Hosted Harness recovery of session ${sessionId} failed: ${sanitizeDaemonLogLine(String(cause))}`,
             );
+            if (cause instanceof HostedRecoveryQuiescingError) {
+              error(res, 409, 'hosted_harness_quiescing');
+              return;
+            }
             // A failed takeover keeps the turn parked for the next attempt:
             // refuse exactly like a plain recovery refusal so the coordinator
             // retries instead of failing the Turn.
@@ -7180,7 +7199,9 @@ export function registerHostedHarnessSessionRoutes(
       }
       const cause =
         thrown instanceof ManagedSessionCloseError ? thrown.sealError : thrown;
-      if (isRetryableWorkspaceAcquisition(cause)) {
+      if (cause instanceof HostedRecoveryQuiescingError) {
+        error(res, 409, 'hosted_harness_quiescing');
+      } else if (isRetryableWorkspaceAcquisition(cause)) {
         error(res, 409, cause.code);
       } else if (
         cause instanceof ManagedSessionStoreHttpError &&

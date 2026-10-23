@@ -116,6 +116,8 @@ MCP 和 Hook pins 继续通过 Session create/load 及现有 Runtime 边界传�
 
 授权和精确已提交回执的回放，先于对新工作的拒绝。Drain 拒绝必须明确表示没有发生新的准入。已准入工作需要的状态、事件流、原始执行观察、审批和取消继续可用。截止点限制的是新的顶层工作；已经运行的 Turn 保留下文定义的续跑许可。没有既有许可的恢复，不能在 quiesce 实例上启动模型或工具工作。
 
+如果准入在恢复等待持久化读取或 Runtime 获取期间关闭，派发守卫会在既有租约清理后返回 `409 hosted_harness_quiescing`。这仍属于执行重试预算之外的 pool 等待。驻留 writer 的写入已停止状态仍优先于 quiescing。`RecoveryDeclined` 继续只表示确定性的持久状态拒绝，其他恢复失败保留原有预算处理。
+
 ## Quiesce 与释放状态机
 
 ```mermaid

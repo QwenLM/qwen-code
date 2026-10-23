@@ -118,6 +118,9 @@ import {
 /** The parked turn is not one this recovery can drive; the caller 409s. */
 export class RecoveryDeclined extends Error {}
 
+/** A temporary pool wait, distinct from a deterministic takeover decline. */
+export class HostedRecoveryQuiescingError extends Error {}
+
 /** The states a recovery report may advertise: exactly the vocabulary the
  * hosted client's validator accepts (HostedHarnessClient's
  * RUNTIME_EXECUTION_STATES). The broker's wider union folds into it at the
@@ -2589,7 +2592,7 @@ export async function recoverHostedRuntimeTurn(input: {
           if (typeof stored.payloadJson !== 'string')
             throw new RecoveryDeclined();
           if (input.canStart?.() === false)
-            throw new Error('The Harness is quiescing.');
+            throw new HostedRecoveryQuiescingError('The Harness is quiescing.');
           const result = await broker
             .execute(
               item.executionCallId,

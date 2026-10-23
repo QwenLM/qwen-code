@@ -22,6 +22,7 @@ import {
   settleParkedTurnCancelled,
   answerCommittedTurnCalls,
   recoverHostedRuntimeTurn,
+  HostedRecoveryQuiescingError,
   RecoveryDeclined,
   settleInterruptedTurnRuntime,
   type HostedRecoveryTurn,
@@ -1663,7 +1664,7 @@ describe('recoverHostedRuntimeTurn', () => {
           () => undefined,
           (error: unknown) => error,
         );
-        expect(cause).toBeInstanceOf(Error);
+        expect(cause).toBeInstanceOf(HostedRecoveryQuiescingError);
         expect(cause).not.toBeInstanceOf(RecoveryDeclined);
         expect(cause).toHaveProperty('message', 'The Harness is quiescing.');
         expect(execute).not.toHaveBeenCalled();

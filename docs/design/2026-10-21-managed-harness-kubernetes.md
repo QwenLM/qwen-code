@@ -116,6 +116,8 @@ Require explicit negotiated features `harness-pool-owner/1` and `harness-instanc
 
 Authorization and exact committed-receipt replay precede refusal of fresh work. A drain refusal must unambiguously mean no fresh admission occurred. Status, streaming, original execution observation, approval and cancellation needed by admitted work remain available. The cutoff concerns new top-level work: an already running Turn retains the continuation permit defined below. Recovery without that existing permit cannot start model or tool work on the quiescing instance.
 
+If admission closes while a recovery is awaiting durable reads or Runtime acquisition, its dispatch guard returns `409 hosted_harness_quiescing` after the usual lease cleanup. This remains a pool wait outside the execution retry budget. A resident writer's stopped state still takes precedence over quiescing. `RecoveryDeclined` remains reserved for deterministic durable refusals, and unrelated recovery failures retain their existing budget handling.
+
 ## Quiesce and release state machine
 
 ```mermaid

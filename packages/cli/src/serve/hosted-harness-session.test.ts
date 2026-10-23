@@ -26077,12 +26077,14 @@ describe('Hosted Harness Runtime turn takeover', () => {
     });
   });
 
-  async function replacementApp() {
+  async function replacementApp(instanceId?: string) {
     const result = express();
     result.use(express.json());
     const contract = createHostedHarnessContract(
       `sha256:${'a'.repeat(64)}`,
       BOOT_ID_2,
+      undefined,
+      instanceId,
     );
     installHostedHarnessContractMiddleware(result, contract);
     registerHostedHarnessSessionRoutes(result, contract, state.root, {
@@ -26268,6 +26270,65 @@ describe('Hosted Harness Runtime turn takeover', () => {
     });
     return { server, loaded };
   }
+
+  it.each([false, true])(
+    'keeps a quiescing recovery load in the pool-wait lane (resident: %s)',
+    async (resident) => {
+      await parkToolTurn();
+      const server = await replacementApp('recovery-pod');
+      const descriptor = {
+        managedSessionStore: {
+          ...storeFor(BOOT_ID_2),
+          writerToken: 'a'.repeat(32),
+        },
+        harnessPlacement: {
+          instanceId: 'recovery-pod',
+          bootId: BOOT_ID_2,
+          placementEpoch: 1,
+        },
+        toolProfile: FILE_PROFILE,
+      };
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+        state: 'prepared',
+      });
+      if (resident) {
+        const attached = await replacementHeaders(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        ).send({ ...descriptor, passiveManagedRuntimeRecovery: true });
+        expect(attached.status).toBe(200);
+      }
+      try {
+        acquireSpy.mockClear();
+        const execute = vi.mocked(HostedWorkspaceBroker.prototype.execute);
+        execute.mockClear();
+        const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+        release.mockClear();
+        acquireSpy.mockImplementationOnce(async () => {
+          const draining = await replacementHeaders(
+            supertest(server).post(
+              '/internal/hosted-harness/v1/instance:drain',
+            ),
+          ).send({ operationId: randomUUID(), expectedBootId: BOOT_ID_2 });
+          expect(draining.status).toBe(202);
+          expect(draining.body.state).toBe('QUIESCING');
+          expect(draining.body.counters.inFlightMutations).toBeGreaterThan(0);
+        });
+        const loaded = await replacementHeaders(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        ).send({ ...descriptor, driveRuntimeRecovery: true });
+        expect(loaded.status).toBe(409);
+        expect(loaded.body.code).toBe('hosted_harness_quiescing');
+        expect(acquireSpy).toHaveBeenCalledOnce();
+        expect(execute).not.toHaveBeenCalled();
+        expect(release).toHaveBeenCalledTimes(resident ? 0 : 1);
+      } finally {
+        if (resident)
+          await replacementHeaders(
+            supertest(server).delete(`/session/${SESSION_ID}`),
+          ).expect(204);
+      }
+    },
+  );
 
   it.each(['cancel', 'close', 'continue-refusal'])(
     'preserves the actual passive MCP owner through %s',
