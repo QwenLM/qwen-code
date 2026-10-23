@@ -30,13 +30,19 @@ vi.mock('../contexts/ConfigContext.js', () => ({
   useConfig: () => ({ getProjectRoot: () => '/tmp/project' }),
 }));
 
+// Models in the mocked session; a test sets this to make the Session tab long
+// enough to scroll.
+const sessionModels = vi.hoisted(() => ({
+  current: {} as SessionMetrics['models'],
+}));
+
 vi.mock('../contexts/SessionContext.js', () => ({
   useSessionStats: () => ({
     stats: {
       sessionId: 'session-1',
       sessionStartTime: new Date(0),
       metrics: {
-        models: {},
+        models: sessionModels.current,
         tools: {
           totalCalls: 0,
           totalSuccess: 0,
@@ -79,6 +85,7 @@ afterEach(() => {
   delete process.env['NO_COLOR'];
   themeManager.setActiveTheme(DEFAULT_THEME.name);
   loadStatsDataMock.mockReset();
+  sessionModels.current = {};
 });
 
 const modelEntry = (totalTokens: number) => ({
@@ -149,5 +156,34 @@ describe('<StatsDialog /> height props', () => {
     expect(frame).toContain('read');
     expect(frame).not.toContain('more (run /stats');
     expect(frame).not.toContain('(Tab to switch)');
+  });
+});
+
+describe('<StatsDialog /> Session tab height', () => {
+  it('renders exactly sessionAvailableHeight rows when the Session tab scrolls', async () => {
+    sessionModels.current = {
+      'qwen3-coder': {
+        api: { totalRequests: 3, totalErrors: 0, totalLatencyMs: 0 },
+        tokens: {
+          prompt: 100,
+          candidates: 50,
+          total: 150,
+          cached: 0,
+          thoughts: 0,
+        },
+        bySource: {},
+      },
+    } as SessionMetrics['models'];
+    loadStatsDataMock.mockResolvedValue(makeData());
+    const { lastFrame } = render(
+      <StatsDialog onClose={vi.fn()} sessionAvailableHeight={24} />,
+    );
+    await flush();
+
+    const frame = lastFrame() ?? '';
+    // The content overflows its budget, so the Session tab fills all of it and
+    // the frame height is the dialog chrome plus that budget.
+    expect(frame).toContain('Use ↑/↓ to scroll');
+    expect(frame.split('\n')).toHaveLength(24);
   });
 });
