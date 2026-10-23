@@ -980,7 +980,7 @@ class HostedTeamLeadMySqlIT {
         harness.waitFor(10, TimeUnit.SECONDS);
     }
 
-    private void stopSpringAndWorkers() {
+    private void stopSpringAndWorkers() throws Exception {
         try {
             if (spring != null) {
                 spring.close();
