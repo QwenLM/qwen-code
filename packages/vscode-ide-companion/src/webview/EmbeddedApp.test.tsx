@@ -75,6 +75,9 @@ vi.mock('@qwen-code/sdk/daemon', async (importOriginal) => ({
   findDaemonRewindUserBlock: (
     await importOriginal<typeof import('@qwen-code/sdk/daemon')>()
   ).findDaemonRewindUserBlock,
+  isDaemonRewindUserBlock: (
+    await importOriginal<typeof import('@qwen-code/sdk/daemon')>()
+  ).isDaemonRewindUserBlock,
   DaemonClient: class {
     workspaceByCwd() {
       return {
