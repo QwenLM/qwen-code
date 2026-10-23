@@ -70,6 +70,22 @@ export interface ModLog {
   to: 'debug' | 'transcript';
 }
 
+export interface ModSessionUsage {
+  startedAt: number;
+  context: { tokens: number; window: number; percent?: number };
+  rateLimits: Array<{ kind: string; percentUsed: number; resetsAt?: string }>;
+}
+
+/** Read on the main thread when a dispatch starts; `$.session` answers from it. */
+export interface ModSessionFacts {
+  id: string;
+  cwd: string;
+  root: string;
+  model: string;
+  turns: number;
+  usage: ModSessionUsage;
+}
+
 export type ModRequest =
   | {
       type: 'load';
@@ -110,5 +126,9 @@ export type ModReply =
     }
   | ({ type: 'log'; plugin: string } & ModLog);
 
-export type ModWorkerRequest = ModRequest & { root: number; phase: number };
+export type ModWorkerRequest = ModRequest & {
+  root: number;
+  phase: number;
+  facts?: ModSessionFacts;
+};
 export type ModWorkerReply = ModReply & { root: number; phase: number };
