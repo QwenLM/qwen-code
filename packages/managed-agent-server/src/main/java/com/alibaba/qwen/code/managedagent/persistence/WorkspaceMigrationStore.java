@@ -357,7 +357,7 @@ public final class WorkspaceMigrationStore {
         // one proven never delivered, has settled.
         check(count("SELECT COUNT(*) FROM ma_session s JOIN ma_operation r"
                 + " ON r.session_scope_key = s.session_scope_key AND r.tenant_id = s.tenant_id AND r.session_id = s.session_id WHERE s.tenant_id = ?"
-                + " AND s.workspace_storage_id = ? AND r.operation_kind = 'RENAME' AND r.state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED', 'UNKNOWN')") == 0,
+                + " AND s.workspace_storage_id = ? AND r.operation_kind = 'RENAME' AND r.state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED')") == 0,
                 "migration_work_unsettled");
         // A child Workspace's worktree records absolute paths of this root
         // (#13753 I1): it must be merged or discarded before the storage

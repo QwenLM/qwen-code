@@ -317,7 +317,7 @@ describe('PreToolUse updatedInput', () => {
     expect(hookHits()).toHaveLength(1);
     expect(file('ask-a.txt')).toBeUndefined();
     expect(file('ask-b.txt')).toBe('REWRITTEN');
-  });
+  }, 360_000); // CI: 5 waits at the 60s default + 60s setup slack.
 
   it('ACP: asks for and writes the replacement once', async () => {
     const server = await setup(
