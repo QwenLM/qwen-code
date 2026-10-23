@@ -76,6 +76,23 @@ describe('raw JUnit report retention', () => {
   const upload = steps.find(
     (step) => step.name === 'Upload Test Results Artifact',
   );
+  // The rule `gateRunsOn` states for itself applies here too: a context term
+  // these stubs do not model must throw rather than read as `undefined`,
+  // where an inequality such as `x != true` would silently evaluate true.
+  const loud = (value, path) =>
+    typeof value !== 'object' || value === null
+      ? value
+      : new Proxy(value, {
+          get: (target, key) => {
+            if (typeof key === 'symbol' || key in target) {
+              return loud(target[key], `${path}${String(key)}.`);
+            }
+            throw new Error(
+              `gate carries a term this guard does not model: ${path}${String(key)}`,
+            );
+          },
+        });
+
   const evaluate = (expression, event, headRepo, skipCi, profile) =>
     new Function(
       'github',
@@ -84,13 +101,16 @@ describe('raw JUnit report retention', () => {
       'always',
       `return (${expression.replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '')});`,
     )(
-      {
-        event_name: event,
-        repository: 'QwenLM/qwen-code',
-        event: { pull_request: { head: { repo: { full_name: headRepo } } } },
-      },
-      { classify_pr: { outputs: { skip_ci: skipCi } } },
-      { ci_profile: { outputs: { ci_profile: profile } } },
+      loud(
+        {
+          event_name: event,
+          repository: 'QwenLM/qwen-code',
+          event: { pull_request: { head: { repo: { full_name: headRepo } } } },
+        },
+        'github.',
+      ),
+      loud({ classify_pr: { outputs: { skip_ci: skipCi } } }, 'needs.'),
+      loud({ ci_profile: { outputs: { ci_profile: profile } } }, 'steps.'),
       () => true,
     );
 
@@ -119,10 +139,28 @@ describe('raw JUnit report retention', () => {
   );
 
   it('uploads raw XML for seven days without requiring a report to exist', () => {
-    expect(upload.uses).toMatch(/^actions\/upload-artifact@/);
+    // Pinned to the 40-hex SHA, not the bare action name: this step now runs
+    // on every full-profile lane inside a job holding `checks: write`, so a
+    // relaxation to a mutable tag must not pass unnoticed.
+    expect(upload.uses).toMatch(/^actions\/upload-artifact@[0-9a-f]{40}$/);
     expect(upload.with.path).toBe('packages/*/junit.xml');
     expect(upload.with['retention-days']).toBe(7);
     expect(upload.with['if-no-files-found']).toBe('ignore');
+  });
+
+  it('throws on a context term the stubs do not model', () => {
+    // An inequality over an unmodelled term would otherwise read `undefined`
+    // and pass: `undefined != true` is true, so all three rows above would
+    // stay green while asserting nothing about the new term.
+    expect(() =>
+      evaluate(
+        '${{ github.event.pull_request.draft != true }}',
+        'push',
+        '',
+        'false',
+        'full',
+      ),
+    ).toThrow(/does not model/);
   });
 
   it('keeps report publication advisory and unit-test failures blocking', () => {
@@ -132,6 +170,7 @@ describe('raw JUnit report retention', () => {
     const unitTests = steps.find((step) => step.id === 'unit_tests');
     expect(publisher['continue-on-error']).toBe(true);
     expect(publisher.with['fail-on-error']).toBe('false');
+    expect(upload['continue-on-error']).toBe(true);
     expect(unitTests['continue-on-error']).not.toBe(true);
     expect(unitTests.run).toContain('exit "$RC"');
     expect(steps.indexOf(upload)).toBeGreaterThan(steps.indexOf(publisher));
