@@ -4,20 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   CAPABILITY_PARITY,
   MANAGED_ONLY_NOT_A_GAP,
   MANAGED_ONLY_REPORTED,
-  managedOnlyLabels,
-  MANAGED_SURFACE_FILE,
-  MANAGED_SURFACE_SOURCE,
   PARITY_COLUMNS,
   capabilityParityMatrix,
-  readManagedSurfaceSet,
-  routeLinesDigest,
+  managedOnlyLabels,
+  type ManagedSurfaceSet,
 } from './capability-parity.js';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
 import {
@@ -36,35 +34,70 @@ import {
 } from './hosted-team-session.js';
 
 const REPO = resolve(import.meta.dirname, '../../../..');
+const MANAGED_SURFACE_FILE = resolve(
+  REPO,
+  'packages/managed-agent-server/src/test/resources/capability-parity/managed-surface.txt',
+);
+const ROUTE_METHODS: ReadonlySet<string> = new Set([
+  'GET',
+  'POST',
+  'PATCH',
+  'DELETE',
+]);
 
-function tools(
+function toolNames(
   declarations: ReadonlyArray<{ name?: string | undefined }>,
 ): string[] {
-  return declarations.map((tool) => tool.name ?? '');
+  return declarations.flatMap((tool) => (tool.name ? [tool.name] : []));
 }
 
 const HOSTED_TOOLS = new Set([
-  ...tools(HOSTED_WORKSPACE_FILE_TOOLS),
-  ...tools(HOSTED_WORKSPACE_SHELL_TOOLS),
-  ...tools(HOSTED_WORKSPACE_FILE_TOOLS_V2),
-  ...tools(HOSTED_WORKSPACE_SHELL_TOOLS_V2),
-  ...tools(HOSTED_WORKSPACE_READ_TOOLS),
-  ...tools(HOSTED_MEMBER_BOARD_TOOLS),
+  ...toolNames(HOSTED_WORKSPACE_FILE_TOOLS),
+  ...toolNames(HOSTED_WORKSPACE_SHELL_TOOLS),
+  ...toolNames(HOSTED_WORKSPACE_FILE_TOOLS_V2),
+  ...toolNames(HOSTED_WORKSPACE_SHELL_TOOLS_V2),
+  ...toolNames(HOSTED_WORKSPACE_READ_TOOLS),
+  ...toolNames(HOSTED_MEMBER_BOARD_TOOLS),
   ...HOSTED_MEMBER_COMMAND_TOOL_NAMES,
-  ...tools(HOSTED_TEAM_TOOLS),
+  ...toolNames(HOSTED_TEAM_TOOLS),
   HOSTED_TEAM_PLAN_TOOL.name,
   HOSTED_WORKFLOW_TOOL.name,
 ]);
 
-/**
- * The `SurfaceRegistry.Capability` names the committed twin records: a route
- * answers with its first declared capability, a twin repeats it.
- */
-function managedCapabilities(): ReadonlySet<string> {
-  return readManagedSurfaceSet().labels;
+/** The twin `label method template surface`, read without a Java build. */
+function readManagedSurfaceSet(
+  file: string = MANAGED_SURFACE_FILE,
+): ManagedSurfaceSet {
+  const labels = new Set<string>();
+  const routes = new Set<string>();
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
+    if (line === '' || line.startsWith('#')) continue;
+    const [label, method, template] = line.trim().split(' ') as [
+      string,
+      string,
+      string,
+    ];
+    if (!ROUTE_METHODS.has(method)) continue;
+    labels.add(label);
+    routes.add(template);
+  }
+  return { labels, routes };
 }
 
-function parseEvidence(token: string): void {
+/** sha256 over the sorted route lines, as `ManagedSurfaceCapture` computes it. */
+function routeLinesDigest(lines: Iterable<string>): string {
+  const hash = createHash('sha256');
+  for (const line of [...lines].sort()) hash.update(`${line}\n`);
+  return hash.digest('hex');
+}
+
+/**
+ * Checks one evidence token against the code it names. Every kind fails
+ * closed on a name that matches nothing: `docs:` must resolve to a file, and
+ * `surface:` / `tool:` must be recorded, so the shape `'surface:X,docs:'` —
+ * what a bad merge produces when a path drops out — cannot pass.
+ */
+function parseEvidence(token: string, surface: ManagedSurfaceSet): void {
   const match = /^([a-z]+):(.*)$/.exec(token);
   if (match === null) throw new Error(`malformed evidence ${token}`);
   const [, kind, name] = match as unknown as [string, string, string];
@@ -75,23 +108,25 @@ function parseEvidence(token: string): void {
       }
       return;
     case 'surface':
-      if (!managedCapabilities().has(name)) throw new Error(token);
+      if (!surface.labels.has(name)) throw new Error(token);
       return;
-    case 'route':
-      if (
-        ![...readManagedSurfaceSet().routes].some((route) =>
-          route.startsWith(name),
-        )
-      )
-        throw new Error(token);
+    case 'docs': {
+      const path = resolve(REPO, name);
+      if (!existsSync(path) || !statSync(path).isFile()) {
+        throw new Error(`${token}: not a file`);
+      }
       return;
-    case 'docs':
-      if (!existsSync(resolve(REPO, name))) throw new Error(token);
-      return;
+    }
     default:
       throw new Error(`unknown evidence kind in ${token}`);
   }
 }
+
+function tokensOf(evidence: string): string[] {
+  return evidence.split(',').map((token) => token.trim());
+}
+
+const SURFACE = readManagedSurfaceSet();
 
 describe('capability parity matrix', () => {
   it('holds one row per legacy capability tag', () => {
@@ -101,7 +136,7 @@ describe('capability parity matrix', () => {
   });
 
   it('reports three columns over tags the registry declares', () => {
-    const matrix = capabilityParityMatrix();
+    const matrix = capabilityParityMatrix(SURFACE);
     expect(Object.keys(matrix)).toEqual([...PARITY_COLUMNS]);
     const tags = new Set(Object.keys(SERVE_CAPABILITY_REGISTRY));
     for (const tag of [...matrix['legacy only'], ...matrix.both]) {
@@ -123,40 +158,37 @@ describe('capability parity matrix', () => {
       ([, row]) => row.standing === 'managed',
     ),
   )('%s points at Managed evidence that exists', (_tag, row) => {
-    for (const token of row.evidence.split(',')) parseEvidence(token);
+    for (const token of tokensOf(row.evidence)) parseEvidence(token, SURFACE);
   });
 
   it('keeps a documented Managed surface out of the legacy-only column', () => {
     expect(CAPABILITY_PARITY.web_shell_brand.standing).toBe('managed');
-    expect(capabilityParityMatrix()['legacy only']).not.toContain(
+    expect(capabilityParityMatrix(SURFACE)['legacy only']).not.toContain(
       'web_shell_brand',
     );
   });
 
   it('derives the managed-only column from uncited route labels', () => {
-    const surface = readManagedSurfaceSet();
     const cited = new Set(
       Object.values(CAPABILITY_PARITY).flatMap((row) =>
-        row.evidence
-          .split(',')
-          .map((token) => /^surface:(.+)$/.exec(token.trim())?.[1])
+        tokensOf(row.evidence)
+          .map((token) => /^surface:(.+)$/.exec(token)?.[1])
           .filter((label): label is string => label !== undefined),
       ),
     );
-    const uncited = [...surface.labels]
+    const uncited = [...SURFACE.labels]
       .filter(
         (label) => !cited.has(label) && !MANAGED_ONLY_NOT_A_GAP.has(label),
       )
       .sort();
-    expect(managedOnlyLabels(surface)).toEqual(uncited);
+    expect(managedOnlyLabels(SURFACE)).toEqual(uncited);
     expect(uncited).toEqual([...MANAGED_ONLY_REPORTED].sort());
   });
 
   it('reports a Managed route with no legacy tag', () => {
-    const surface = readManagedSurfaceSet();
     const extra = {
-      labels: new Set([...surface.labels, 'SOME_FUTURE_ROUTE']),
-      routes: surface.routes,
+      labels: new Set([...SURFACE.labels, 'SOME_FUTURE_ROUTE']),
+      routes: SURFACE.routes,
     };
     expect(capabilityParityMatrix(extra)['managed only']).toContain(
       'SOME_FUTURE_ROUTE',
@@ -164,15 +196,60 @@ describe('capability parity matrix', () => {
   });
 
   it('excludes only labels the twin actually records', () => {
-    const surface = readManagedSurfaceSet();
     expect(
-      [...MANAGED_ONLY_NOT_A_GAP].filter((l) => !surface.labels.has(l)),
+      [...MANAGED_ONLY_NOT_A_GAP].filter((label) => !SURFACE.labels.has(label)),
     ).toEqual([]);
   });
 });
 
+describe('evidence tokens', () => {
+  it('rejects evidence that names nothing', () => {
+    const accepted = ['docs:', 'surface:', 'tool:', 'route:'].filter(
+      (token) => {
+        try {
+          parseEvidence(token, SURFACE);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+    );
+    expect(accepted).toEqual([]);
+  });
+
+  it('rejects a docs target that is a directory', () => {
+    expect(() => parseEvidence('docs:docs/design', SURFACE)).toThrow();
+  });
+
+  it('rejects a route prefix, now that no row cites one', () => {
+    const tokens = Object.values(CAPABILITY_PARITY).flatMap((row) =>
+      tokensOf(row.evidence),
+    );
+    expect(tokens.filter((token) => token.startsWith('route:'))).toEqual([]);
+  });
+
+  it('fails a surface claim the twin does not record', () => {
+    const withoutRead: ManagedSurfaceSet = {
+      labels: new Set(
+        [...SURFACE.labels].filter((label) => label !== 'WORKSPACE_FILES_READ'),
+      ),
+      routes: SURFACE.routes,
+    };
+    expect(() =>
+      parseEvidence('surface:WORKSPACE_FILES_READ', withoutRead),
+    ).toThrow();
+    expect(() =>
+      parseEvidence('surface:WORKSPACE_FILES_READ', SURFACE),
+    ).not.toThrow();
+  });
+});
+
 describe('committed Managed surface twin', () => {
-  it('records one route per line', () => {
+  it('resolves to the fixture inside this repository', () => {
+    expect(existsSync(MANAGED_SURFACE_FILE)).toBe(true);
+  });
+
+  it('records one four-field route per line', () => {
     const lines = readFileSync(MANAGED_SURFACE_FILE, 'utf8')
       .split('\n')
       .filter((line) => line !== '' && !line.startsWith('#'));
@@ -180,38 +257,40 @@ describe('committed Managed surface twin', () => {
     for (const line of lines) expect(line.split(' ')).toHaveLength(4);
   });
 
-  it('stays identical to the SurfaceRegistry it was captured from', () => {
-    const java = readFileSync(resolve(REPO, MANAGED_SURFACE_SOURCE), 'utf8');
-    const body = java.slice(
-      java.indexOf('public enum SurfaceRegistry'),
-      java.indexOf('private final String method;'),
-    );
-    const declared = new Set<string>();
-    for (const [, method, literal] of body.matchAll(
-      /^\s{4}[A-Z][A-Z0-9_]*\(Method\.([A-Z]+),\s*((?:\s*"[^"]*"\s*\+)*\s*"[^"]+")\s*,\s*Surface\./gm,
-    )) {
-      const template = [...literal!.matchAll(/"([^"]*)"/g)]
-        .map(([, part]) => part)
-        .join('');
-      declared.add(`${method} ${template}`);
-    }
-    const committed = new Set<string>();
-    let recorded = '';
-    for (const line of readFileSync(MANAGED_SURFACE_FILE, 'utf8').split('\n')) {
-      const digest = /^# sha256 of the route lines below: ([0-9a-f]{64})$/.exec(
-        line,
-      );
-      if (digest) recorded = digest[1]!;
-      if (line === '' || line.startsWith('#')) continue;
-      const [label, method, template] = line.trim().split(' ') as [
-        string,
-        string,
-        string,
-      ];
-      committed.add(`${method} ${template}`);
-      expect(label).toMatch(/^[A-Z][A-Z0-9_]*$/);
-    }
-    expect([...committed].sort()).toEqual([...declared].sort());
-    expect(recorded).toBe(routeLinesDigest(committed));
+  it('records each route once', () => {
+    const keys = readFileSync(MANAGED_SURFACE_FILE, 'utf8')
+      .split('\n')
+      .filter((line) => line !== '' && !line.startsWith('#'))
+      .map((line) => {
+        const [label, method, template] = line.trim().split(' ') as [
+          string,
+          string,
+          string,
+        ];
+        expect(label).toMatch(/^[A-Z][A-Z0-9_]*$/);
+        return `${method} ${template}`;
+      });
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it('pins the digest of its own route lines', () => {
+    const lines = readFileSync(MANAGED_SURFACE_FILE, 'utf8').split('\n');
+    const header = lines
+      .map((line) =>
+        /^# sha256 of the route lines below: ([0-9a-f]{64})$/.exec(line),
+      )
+      .find((match) => match !== null);
+    expect(header).not.toBeNull();
+    const committed = lines
+      .filter((line) => line !== '' && !line.startsWith('#'))
+      .map((line) => {
+        const [, method, template] = line.trim().split(' ') as [
+          string,
+          string,
+          string,
+        ];
+        return `${method} ${template}`;
+      });
+    expect(header![1]).toBe(routeLinesDigest(committed));
   });
 });

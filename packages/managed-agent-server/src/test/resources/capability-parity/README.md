@@ -25,8 +25,7 @@ test checks each evidence token against the code:
 - `tool:<name>`: a Hosted Workspace profile declares the tool.
 - `surface:<CAPABILITY>`: `managed-surface.txt` records a route for this
   `SurfaceRegistry.Capability`.
-- `route:<prefix>`: `managed-surface.txt` records a route with this prefix.
-- `docs:<path>`: the file exists in the repository.
+- `docs:<path>`: the named file exists in the repository (never a directory).
 
 A `docs:` token proves only that the file is there, never that the behavior
 exists. Prefer a `surface:` or `tool:` token whenever one applies.
@@ -38,3 +37,7 @@ exists. Prefer a `surface:` or `tool:` token whenever one applies.
 name a label the twin records. Whatever remains is a real Managed-only
 capability, pinned by `MANAGED_ONLY_REPORTED` so an addition fails the suite
 until someone decides how to account for it.
+
+The twin's authority is `ManagedSurfaceCaptureTest`, which byte-compares it
+with `render()`. The TypeScript side reads the twin and checks its internal
+consistency; it does not re-parse the Java enum.

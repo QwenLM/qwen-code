@@ -47,8 +47,7 @@ against the code:
 
 - `tool:<name>`: a Hosted Workspace profile declares the tool.
 - `surface:<CAPABILITY>`: a route exists for this `SurfaceRegistry.Capability`.
-- `route:<prefix>`: a route exists with this prefix.
-- `docs:<path>`: the file exists.
+- `docs:<path>`: the named file exists (never a directory).
 
 A row that names evidence which no longer exists fails the suite. A prose claim
 cannot do that.
@@ -69,9 +68,13 @@ baseline turns a second run green against data the first run edited:
 mvn -Dtest=ManagedSurfaceCaptureTest -Dcapability.parity.capture=true test
 ```
 
-The TypeScript test also reads `SurfaceRegistry.java` and fails when the twin
-and the enum disagree. That check runs only when `packages/cli` tests run, so a
-registry change fails on both sides.
+`ManagedSurfaceCaptureTest` is the authority: it byte-compares the twin with
+`render()`, which covers the label, method, template and surface columns. The
+TypeScript side does not re-parse the enum. A parser that reads Java source
+goes blind on shapes it cannot read and red on a correct re-capture, which is
+what review round 2 demonstrated. It asserts the twin's internal consistency
+instead: four fields per line, one line per route, and a header digest that
+matches its own route lines.
 
 ## Boundaries
 

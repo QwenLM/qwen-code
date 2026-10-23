@@ -34,8 +34,7 @@ Issue #15075 要求一个持续校验的矩阵。矩阵只报告差异。矩阵�
 
 - `tool:<name>`：某个 Hosted Workspace profile 声明该工具。
 - `surface:<CAPABILITY>`：存在属于该 `SurfaceRegistry.Capability` 的路由。
-- `route:<prefix>`：存在该前缀的路由。
-- `docs:<path>`：文件存在。
+- `docs:<path>`：该文件存在（目录不算）。
 
 依据已失效的行会让测试失败。纯文字声明做不到这一点。
 
@@ -49,7 +48,7 @@ TypeScript 测试不能读取 Java 枚举。提交文件 `packages/managed-agent
 mvn -Dtest=ManagedSurfaceCaptureTest -Dcapability.parity.capture=true test
 ```
 
-TypeScript 测试也会解析 `SurfaceRegistry.java`，副本与枚举不一致时失败。该检查只在 `packages/cli` 测试运行时执行，因此注册表改动会令两侧都失败。
+`ManagedSurfaceCaptureTest` 是权威：它把副本与 `render()` 逐字节比对，覆盖 label、method、template、surface 四列。TypeScript 侧不再解析枚举——读取 Java 源码的解析器对无法识别的形态会失明，而正确重放反而变红，这正是第二轮评审证实的。它改为断言副本的内部一致性：每行四个字段、每条路由只出现一次、头部摘要与自身路由行匹配。
 
 ## 边界
 

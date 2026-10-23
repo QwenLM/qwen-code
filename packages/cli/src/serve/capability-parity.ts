@@ -15,27 +15,23 @@
  * to be closed.
  */
 
-import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import {
   SERVE_CAPABILITY_REGISTRY,
   type ServeFeature,
 } from './capabilities.js';
 
-/** The Managed route twin of the Java `SurfaceRegistry` enum. */
-export const MANAGED_SURFACE_FILE = resolve(
-  import.meta.dirname,
-  '../../../../packages/managed-agent-server/src/test/resources/capability-parity/managed-surface.txt',
-);
-
 /**
- * The route set is copied from `SurfaceRegistry` by hand; this digest is the
- * copy's only guard, so a Java-side route change must re-capture the file
- * (the test names that path when the digest drifts).
+ * The Managed route labels and templates a caller supplies, read from the
+ * committed twin by the test. This module stays pure data and pure functions:
+ * it ships in `dist`, where a path resolved from the source tree would be
+ * wrong and the fixture, which lives in another package, is absent.
  */
-export const MANAGED_SURFACE_SOURCE =
-  'packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/api/SurfaceRegistry.java';
+export interface ManagedSurfaceSet {
+  /** `SurfaceRegistry` capability of each route; a twin repeats its label. */
+  labels: ReadonlySet<string>;
+  /** Every route template, as the twin records it. */
+  routes: ReadonlySet<string>;
+}
 
 export const PARITY_COLUMNS = ['legacy only', 'both', 'managed only'] as const;
 
@@ -61,7 +57,6 @@ export interface ParityRow {
  * - `tool:<name>`: a Hosted Workspace profile declares the tool.
  * - `surface:<capability>`: a `SurfaceRegistry.Capability` has a mounted
  *   route in the committed twin.
- * - `route:<prefix>`: the twin records a route with this prefix.
  * - `docs:<path>`: the file exists (documented behavior with no route or
  *   tool to point at).
  */
@@ -292,7 +287,7 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   },
   workspace_file_read: {
     standing: 'managed',
-    evidence: 'route:/api/agent/web-shell/v1/workspaces/files',
+    evidence: 'surface:WORKSPACE_FILES_READ',
   },
   workspace_file_bytes: NO_MANAGED_EQUIVALENT('no Managed raw byte read route'),
   workspace_file_read_cursor: NO_MANAGED_EQUIVALENT(
@@ -637,9 +632,7 @@ function citedLabels(): Set<string> {
  * serves with no legacy tag behind it. Derived from the twin, so a newly
  * mounted route shows up here instead of needing a hand edit.
  */
-export function managedOnlyLabels(
-  surface: ManagedSurfaceSet = readManagedSurfaceSet(),
-): string[] {
+export function managedOnlyLabels(surface: ManagedSurfaceSet): string[] {
   const cited = citedLabels();
   return [...surface.labels]
     .filter((label) => !cited.has(label))
@@ -648,7 +641,7 @@ export function managedOnlyLabels(
 }
 
 export function capabilityParityMatrix(
-  surface: ManagedSurfaceSet = readManagedSurfaceSet(),
+  surface: ManagedSurfaceSet,
 ): CapabilityParityMatrix {
   const legacyOnly: ServeFeature[] = [];
   const both: ServeFeature[] = [];
@@ -661,46 +654,4 @@ export function capabilityParityMatrix(
     both,
     'managed only': managedOnlyLabels(surface),
   };
-}
-
-/**
- * The route labels the committed `managed-surface.txt` records, read without
- * a Java build. Each line is `<label> <method> <template>`; the fixture also
- * pins the source digest the test checks against the Java file.
- */
-export interface ManagedSurfaceSet {
-  /** `SurfaceRegistry` capability of each route; a twin repeats its label. */
-  labels: ReadonlySet<string>;
-  /** Every route template, as the twin records it. */
-  routes: ReadonlySet<string>;
-}
-
-const ROUTE_METHODS: Readonly<Record<string, true>> = {
-  GET: true,
-  POST: true,
-  PATCH: true,
-  DELETE: true,
-};
-
-export function readManagedSurfaceSet(
-  file: string = MANAGED_SURFACE_FILE,
-): ManagedSurfaceSet {
-  const labels = new Set<string>();
-  const routes = new Set<string>();
-  for (const line of readFileSync(file, 'utf8').split('\n')) {
-    if (line === '' || line.startsWith('#')) continue;
-    const parts = line.trim().split(' ') as [string, string, string, string];
-    const [label, method, template] = parts;
-    if (!(method in ROUTE_METHODS)) continue;
-    labels.add(label);
-    routes.add(template);
-  }
-  return { labels, routes };
-}
-
-/** sha256 over the Java registry's route lines, stable across re-captures. */
-export function routeLinesDigest(lines: Iterable<string>): string {
-  const hash = createHash('sha256');
-  for (const line of [...lines].sort()) hash.update(`${line}\n`);
-  return hash.digest('hex');
 }
