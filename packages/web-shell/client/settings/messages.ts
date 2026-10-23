@@ -16,6 +16,10 @@ type SettingsMessage =
   | ((vars?: Record<string, string | number>) => string);
 
 export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
+  'settings.label.ui.accessibility.enableLoadingPhrases':
+    'Enable Loading Phrases',
+  'settings.description.ui.accessibility.enableLoadingPhrases':
+    'Show rotating loading phrases. Turn off to hide both built-in and host-provided phrases.',
   'settings.label.experimental.generatedUi': 'Generated UI',
   'settings.description.experimental.generatedUi':
     'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
@@ -296,6 +300,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.description.ui.showStatusInTitle':
     '在终端窗口标题中显示 Qwen Code 会话名称和状态。',
   'settings.label.ui.showResponseTokensPerSecond': '显示回复 Tokens/秒',
+  'settings.label.ui.accessibility.enableLoadingPhrases': '启用加载文案',
+  'settings.description.ui.accessibility.enableLoadingPhrases':
+    '显示轮换加载文案。关闭后隐藏内置及宿主提供的文案。',
   'settings.description.ui.showResponseTokensPerSecond':
     '模型流式输出时，在回复 token 计数旁显示实时的 tokens/秒估值。下个会话生效。',
   'settings.label.ui.showToolCallDetails': '显示工具调用详情',
