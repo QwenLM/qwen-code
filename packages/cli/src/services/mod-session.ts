@@ -401,6 +401,8 @@ export class ModSession implements ICommandLoader {
       this.startedAt = undefined;
       this.recorder = undefined;
       this.context = { tokens: 0, window: 0 };
+      // The adopted session may end before any hook or API response reads it.
+      this.capture();
       this.toolGeneration = new AbortController();
     });
     this.toolQueue = task.catch(() => {});
@@ -502,17 +504,20 @@ export class ModSession implements ICommandLoader {
     ]);
   }
 
-  private facts(): ModSessionFacts {
+  private capture(): number {
     this.observe();
-    if (this.startedAt === undefined) {
-      // A resumed session began at its first record; a new one when adopted.
-      const resumed = this.config.getResumedSessionData()?.conversation;
-      const first =
-        resumed?.sessionId === this.sessionId
-          ? Date.parse(resumed.startTime)
-          : NaN;
-      this.startedAt = Number.isFinite(first) ? first : this.adoptedAt;
-    }
+    if (this.startedAt !== undefined) return this.startedAt;
+    // A resumed session began at its first record; a new one when adopted.
+    const resumed = this.config.getResumedSessionData()?.conversation;
+    const first =
+      resumed?.sessionId === this.sessionId
+        ? Date.parse(resumed.startTime)
+        : NaN;
+    return (this.startedAt = Number.isFinite(first) ? first : this.adoptedAt);
+  }
+
+  private facts(): ModSessionFacts {
+    const startedAt = this.capture();
     const { tokens, window } = this.context;
     return {
       id: this.sessionId,
@@ -521,7 +526,7 @@ export class ModSession implements ICommandLoader {
       model: this.config.getModel(),
       turns: this.recorder?.getUserTurnCount() ?? 0,
       usage: {
-        startedAt: this.startedAt,
+        startedAt,
         context: {
           tokens,
           window,

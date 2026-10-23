@@ -69,6 +69,9 @@ describe('Mod session ownership', () => {
       getHookSystem: () => undefined,
       getSandbox: () => undefined,
       isSessionAgentSession: () => false,
+      getChatRecordingService: () => undefined,
+      getContentGeneratorConfig: () => undefined,
+      getResumedSessionData: () => undefined,
       ...overrides,
     };
     const adapter = { emitSystemMessage: vi.fn() };
@@ -487,6 +490,53 @@ describe('Mod session ownership', () => {
     });
     expect(next.usage.startedAt).toBeGreaterThanOrEqual(switched);
     expect(next.usage.startedAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('keeps the facts of a resumed session that ends before anything reads it', async () => {
+    const recorder = vi.fn<() => unknown>(() => ({
+      getUserTurnCount: () => 2,
+    }));
+    const resumed = vi.fn<() => unknown>(() => undefined);
+    const { session, runtime, config } = setup({
+      getProjectRoot: () => '/project',
+      getModel: () => 'qwen-max',
+      getChatRecordingService: recorder,
+      getContentGeneratorConfig: () => ({ contextWindowSize: 1_000 }),
+      getResumedSessionData: resumed,
+    });
+    await session.loadCommands(new AbortController().signal);
+    const facts = mocks.create.mock.calls[0][7] as () => ModSessionFacts;
+
+    // /resume replays the resumed session's figures before the Mod adopts it.
+    config.getSessionId.mockReturnValue('session-2');
+    recorder.mockReturnValue({ getUserTurnCount: () => 5 });
+    resumed.mockReturnValue({
+      conversation: {
+        sessionId: 'session-2',
+        startTime: '2026-10-21T09:00:00.000Z',
+      },
+    });
+    uiTelemetryService.setLastPromptTokenCount(812);
+    await session.syncSession('resume');
+
+    // /clear switches the config again with no dispatch or API response.
+    config.getSessionId.mockReturnValue('session-3');
+    recorder.mockReturnValue({ getUserTurnCount: () => 0 });
+    resumed.mockReturnValue(undefined);
+    uiTelemetryService.setLastPromptTokenCount(0);
+    let ending: ModSessionFacts | undefined;
+    runtime.end.mockImplementation(async () => {
+      ending = facts();
+    });
+    await session.syncSession('clear');
+    expect(ending).toMatchObject({
+      id: 'session-2',
+      turns: 5,
+      usage: {
+        startedAt: Date.parse('2026-10-21T09:00:00.000Z'),
+        context: { tokens: 812, window: 1_000, percent: 81 },
+      },
+    });
   });
 
   it('answers no turns without chat recording and no percent without a window', async () => {
