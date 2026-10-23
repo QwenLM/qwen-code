@@ -521,14 +521,17 @@ describe('AssistantMessage footer tooltips', () => {
     [
       'en',
       [
-        'Copy',
+        'Copy content',
         'Copy Markdown',
         'Satisfied',
         'Not satisfied',
         'New chat from here',
       ],
     ],
-    ['zh-CN', ['复制', '复制 Markdown', '满意', '不满意', '从此处新建对话']],
+    [
+      'zh-CN',
+      ['复制内容', '复制 Markdown', '满意', '不满意', '从此处新建对话'],
+    ],
   ] as const)(
     'shows localized tooltips in the Web Shell portal on keyboard focus in %s',
     async (language, labels) => {
@@ -671,10 +674,10 @@ describe('AssistantMessage markdown tables', () => {
 
 describe('AssistantMessage Markdown copy', () => {
   it.each([
-    ['en', 'Copy', 'Copy Markdown'],
-    ['zh-CN', '复制', '复制 Markdown'],
+    ['en', 'Copy content', 'Copy Markdown'],
+    ['zh-CN', '复制内容', '复制 Markdown'],
   ] as const)(
-    'copies source Markdown with independent feedback in %s',
+    'copies rendered content and source Markdown with independent feedback in %s',
     async (language, copyLabel, markdownLabel) => {
       vi.useFakeTimers();
       const writeText = vi.fn().mockResolvedValue(undefined);
@@ -701,7 +704,9 @@ describe('AssistantMessage Markdown copy', () => {
         act(() => vi.advanceTimersByTime(2000));
         expect(markdown.querySelector('rect')).not.toBeNull();
         await act(async () => copy.click());
-        expect(writeText).toHaveBeenLastCalledWith(content);
+        expect(writeText).toHaveBeenLastCalledWith(
+          'Heading\nBold link\nItem\nconst x = 1;',
+        );
         expect(markdown.querySelector('rect')).not.toBeNull();
         expect(copy.querySelector('rect')).toBeNull();
       } finally {
@@ -709,6 +714,31 @@ describe('AssistantMessage Markdown copy', () => {
       }
     },
   );
+
+  it('copies the whole rendered reply without replacing a partial selection', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const selection = window.getSelection()!;
+    try {
+      const container = render(
+        <AssistantMessage content="Before **bold** after." showFooterActions />,
+      );
+      const range = document.createRange();
+      range.selectNodeContents(container.querySelector('strong')!);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Copy content"]',
+      )!;
+      await act(async () => button.click());
+      expect(writeText).toHaveBeenCalledWith('Before bold after.');
+      expect(selection.toString()).toBe('bold');
+      expect(selection.getRangeAt(0)).toBe(range);
+    } finally {
+      selection.removeAllRanges();
+      vi.unstubAllGlobals();
+    }
+  });
 
   it.each([
     { content: '', showFooterActions: true },
@@ -760,7 +790,7 @@ describe('AssistantMessage Markdown copy', () => {
 });
 
 describe('AssistantMessage copy reset timer', () => {
-  it.each(['Copy', 'Copy Markdown'])(
+  it.each(['Copy content', 'Copy Markdown'])(
     'cleans up the %s timer on unmount',
     async (label) => {
       vi.useFakeTimers();
@@ -801,7 +831,7 @@ describe('AssistantMessage copy reset timer', () => {
 });
 
 describe('AssistantMessage copy without the async Clipboard API (issue #9485)', () => {
-  it.each(['Copy', 'Copy Markdown'])(
+  it.each(['Copy content', 'Copy Markdown'])(
     'falls back to execCommand for %s',
     async (label) => {
       const descriptor = Object.getOwnPropertyDescriptor(
@@ -824,7 +854,7 @@ describe('AssistantMessage copy without the async Clipboard API (issue #9485)', 
 
       try {
         const container = render(
-          <AssistantMessage content="copy me" showFooterActions />,
+          <AssistantMessage content="**copy me**" showFooterActions />,
         );
         const button = container.querySelector<HTMLButtonElement>(
           `button[aria-label="${label}"]`,
@@ -836,7 +866,9 @@ describe('AssistantMessage copy without the async Clipboard API (issue #9485)', 
         });
 
         expect(execCommandMock).toHaveBeenCalledWith('copy');
-        expect(copiedViaFallback).toBe('copy me');
+        expect(copiedViaFallback).toBe(
+          label === 'Copy content' ? 'copy me' : '**copy me**',
+        );
         // The button should flip to the check icon even without the async API.
         expect(
           button?.querySelector('path[d="m3.5 8.3 3 3L12.8 5"]'),
@@ -1045,7 +1077,9 @@ describe('AssistantMessage agent replies', () => {
       />,
     );
 
-    expect(container.querySelector('button[aria-label="Copy"]')).not.toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Copy content"]'),
+    ).not.toBeNull();
     expect(
       container.querySelector('button[aria-label="New chat from here"]'),
     ).toBeNull();

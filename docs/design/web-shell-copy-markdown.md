@@ -5,16 +5,22 @@
 ## Problem and scope
 
 The assistant footer has a generic Copy button that already copies the original
-Markdown. Users need an explicit Markdown entry beside it. Preserve existing
-copy behavior, streaming gates, and exported transcripts. The latest completed
-turn keeps its footer visible.
+Markdown. Users need two distinct entries: Copy content for the rendered plain
+text and Copy Markdown for the complete original source. Preserve clipboard
+fallback, streaming gates, and exported transcripts. The latest completed turn
+keeps its footer actions visible.
 
 ## Solution and decisions
 
 Add a Markdown M↓ icon immediately after Copy in `AssistantMessage.tsx`, reusing
-`assistant.copyMarkdown` for its localized title and accessible name. Both
-buttons copy the complete `content` through the existing clipboard helper,
-including its HTTP fallback and failure reporting. Each button uses its own
+`assistant.copyMarkdown` for its localized tooltip and accessible name. Label
+the first action Copy content / 复制内容 with its own footer-specific translation
+key. It extracts the entire rendered body through the existing selection-copy
+serializer using a local Range, without changing the user's selection. This
+preserves paragraph/code line breaks, math source and image descriptions while
+excluding controls and Markdown formatting. The second action copies the exact
+original `content`. Both use the existing clipboard helper, including HTTP
+fallback and failure reporting. Each button uses its own
 `useCopiedFlash` state, so only the clicked button reports success. Reuse the
 existing footer styling and a small inline SVG beside the existing footer icons;
 no new primitive,
@@ -22,7 +28,8 @@ dependency, public option, or daemon route is needed.
 
 ## Validation and acceptance
 
-Update `AssistantMessage.test.tsx` to check exact Markdown preservation,
+Update `AssistantMessage.test.tsx` to check distinct rendered-text and exact
+source-Markdown payloads, partial-selection preservation,
 independent feedback, localization, timer cleanup, fallback, and visibility.
 Add a focused browser test for adjacent buttons, real clipboard contents,
 keyboard activation, and a screenshot using the existing mock daemon. This
@@ -45,7 +52,7 @@ browser and focused MessageList tests.
 ## Footer tooltips and new-chat label
 
 Use the shared Tooltip provider, trigger and content for all five icon actions
-(Copy, Copy Markdown, satisfied, not satisfied and new chat). Remove native title
+(Copy content, Copy Markdown, satisfied, not satisfied and new chat). Remove native title
 attributes, retain accessible names and route tooltip portals through the shared
 Web Shell portal root. Reuse native button children so Radix refs remain valid
 on React 18 and 19. The new-chat action uses the Lucide Split icon and is labeled

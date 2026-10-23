@@ -17,6 +17,9 @@ async function hoverAction(page: Page, button: Locator) {
   });
 }
 
+const plainContent =
+  'Markdown example\nCopy formatted text and a link.\nFirst item\nSecond item\nconst answer = 42;';
+
 const content =
   '## Markdown example\n\nCopy **formatted text** and [a link](https://example.com).\n\n- First item\n- Second item\n\n```ts\nconst answer = 42;\n```';
 
@@ -26,7 +29,7 @@ for (const language of ['en', 'zh-CN'] as const) {
       page,
       context,
     }, info) => {
-      const copyLabel = language === 'en' ? 'Copy' : '复制';
+      const copyLabel = language === 'en' ? 'Copy content' : '复制内容';
       const markdownLabel =
         language === 'en' ? 'Copy Markdown' : '复制 Markdown';
       const newChatLabel =
@@ -152,7 +155,13 @@ for (const language of ['en', 'zh-CN'] as const) {
       await copy.click();
       await expect
         .poll(() => page.evaluate(() => navigator.clipboard.readText()))
-        .toBe(content);
+        .toBe(plainContent);
+      await page.evaluate(() => navigator.clipboard.writeText('SENTINEL'));
+      await copy.focus();
+      await copy.press('Enter');
+      await expect
+        .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+        .toBe(plainContent);
       await page
         .locator('[data-web-shell-composer-editor] .cm-content')
         .focus();

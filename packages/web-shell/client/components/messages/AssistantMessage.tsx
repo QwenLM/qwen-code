@@ -33,6 +33,7 @@ import {
   writeClipboardText,
 } from '../../utils/clipboard';
 import { useCopiedFlash } from '../../hooks/useCopiedFlash';
+import { getSelectedReplyContent } from '../../utils/selectionClipboard';
 import type {
   DaemonSessionGenerationEvent,
   QwenAgentMessageMeta,
@@ -97,6 +98,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   const renderMode = useTranscriptRenderMode();
   const documentMode = renderMode === 'document';
   const { renderAssistantTurnFooter } = useWebShellCustomization();
+  const contentRef = useRef<HTMLDivElement>(null);
   const [copied, flashCopied] = useCopiedFlash();
   const [markdownCopied, flashMarkdownCopied] = useCopiedFlash();
   const [branchPending, setBranchPending] = useState(false);
@@ -132,12 +134,20 @@ export const AssistantMessage = memo(function AssistantMessage({
     }
   }, [branchPending, onBranchSession]);
   const handleCopy = useCallback(
-    (flash: () => void) => {
-      void writeClipboardText(content)
-        .then(flash)
+    (format: 'text' | 'markdown') => {
+      let value = content;
+      if (format === 'text') {
+        const body = contentRef.current;
+        if (!body) return;
+        const range = body.ownerDocument.createRange();
+        range.selectNodeContents(body);
+        value = getSelectedReplyContent(body, range)?.text ?? '';
+      }
+      void writeClipboardText(value)
+        .then(format === 'text' ? flashCopied : flashMarkdownCopied)
         .catch(warnClipboardWriteFailure);
     },
-    [content],
+    [content, flashCopied, flashMarkdownCopied],
   );
   // Clicking the lit icon clears the mark; clicking the other one switches it.
   const handleFeedback = useCallback(
@@ -219,6 +229,7 @@ export const AssistantMessage = memo(function AssistantMessage({
       )}
       {content && !blankAgentReply && (
         <div
+          ref={contentRef}
           className={`${styles.content}${
             isLocateFlashing ? ` ${flashStyles.flash}` : ''
           }`}
@@ -254,14 +265,14 @@ export const AssistantMessage = memo(function AssistantMessage({
                     <button
                       type="button"
                       className={styles.copyButton}
-                      aria-label={t('assistant.copy')}
-                      onClick={() => handleCopy(flashCopied)}
+                      aria-label={t('assistant.copyContent')}
+                      onClick={() => handleCopy('text')}
                     >
                       {copied ? <CheckIcon /> : <CopyIcon />}
                     </button>
                   </TooltipTrigger>
                   <TooltipContent side="top" variant="black">
-                    {t('assistant.copy')}
+                    {t('assistant.copyContent')}
                   </TooltipContent>
                 </Tooltip>
                 <Tooltip>
@@ -270,7 +281,7 @@ export const AssistantMessage = memo(function AssistantMessage({
                       type="button"
                       className={styles.copyButton}
                       aria-label={t('assistant.copyMarkdown')}
-                      onClick={() => handleCopy(flashMarkdownCopied)}
+                      onClick={() => handleCopy('markdown')}
                     >
                       {markdownCopied ? <CheckIcon /> : <MarkdownIcon />}
                     </button>
