@@ -29,6 +29,7 @@ import {
   type DaemonWorkspaceCapability,
   type SessionMetadataResult,
 } from '@qwen-code/sdk/daemon';
+import type { ManagedArchivedSessionsStatus } from '../managed/ManagedArchivedSessions';
 import {
   HouseIcon,
   InboxIcon,
@@ -524,6 +525,9 @@ interface WebShellSidebarProps {
   sessionContent?: ReactNode;
   sessionHeader?: ReactNode;
   managedWorkspaces?: ReactNode;
+  managedArchivedSessions?: ManagedArchivedSessionsStatus & {
+    content: ReactNode;
+  };
   onSearchQueryChange?: (query: string) => void;
   /** Selection styling only; the attached session still owns its actions. */
   currentSessionActive?: boolean;
@@ -1120,6 +1124,7 @@ export function WebShellSidebar({
   sessionContent,
   sessionHeader,
   managedWorkspaces,
+  managedArchivedSessions,
   onSearchQueryChange,
   currentSessionActive = true,
   showSessionSourceSwitch = true,
@@ -5555,7 +5560,9 @@ export function WebShellSidebar({
 
   const archivedSection = useMemo(() => {
     if (
-      (!sessionArchiveEnabled && !standaloneSessionsVisible) ||
+      (!sessionArchiveEnabled &&
+        !standaloneSessionsVisible &&
+        managedArchivedSessions === undefined) ||
       searchQuery.trim()
     ) {
       return null;
@@ -5563,10 +5570,12 @@ export function WebShellSidebar({
 
     const archivedCount =
       allArchivedSessions.length +
-      (standaloneSessionsVisible ? standaloneArchivedStatus.count : 0);
+      (standaloneSessionsVisible ? standaloneArchivedStatus.count : 0) +
+      (managedArchivedSessions?.count ?? 0);
     const archivedLoadingWithStandalone =
       effectiveArchivedLoading ||
-      (standaloneSessionsVisible && standaloneArchivedStatus.loading);
+      (standaloneSessionsVisible && standaloneArchivedStatus.loading) ||
+      managedArchivedSessions?.loading;
     const archivedErrorWithStandalone =
       effectiveArchivedError ||
       (standaloneSessionsVisible && standaloneArchivedStatus.error);
@@ -5616,7 +5625,11 @@ export function WebShellSidebar({
       archivedCount === 0
     ) {
       notice = retry;
-    } else if (!archivedLoadingWithStandalone && archivedCount === 0) {
+    } else if (
+      !archivedLoadingWithStandalone &&
+      archivedCount === 0 &&
+      !managedArchivedSessions?.error
+    ) {
       notice = (
         <div className={styles.notice}>{t('sidebar.archivedEmpty')}</div>
       );
@@ -5624,6 +5637,7 @@ export function WebShellSidebar({
 
     const content = (
       <>
+        {managedArchivedSessions?.content}
         {standaloneSessionsVisible &&
           onLoadStandaloneSession &&
           onStandaloneNotice && (
@@ -5699,6 +5713,7 @@ export function WebShellSidebar({
     effectiveArchivedLoading,
     handleStandaloneArchivedStatus,
     handleStandaloneMutation,
+    managedArchivedSessions,
     onError,
     onLoadStandaloneSession,
     onSessionRenameConfirmed,
@@ -6660,18 +6675,7 @@ export function WebShellSidebar({
                   <SquarePenIcon size={16} strokeWidth={1.2} />
                 </span>
                 {(!collapsed || homePreviewOpen) && (
-                  <span>
-                    {t('sidebar.newTask')}
-                    {managedWorkspaces !== undefined && (
-                      <span className="ml-2 text-xs text-muted-foreground">
-                        {t(
-                          currentSessionActive
-                            ? 'managed.localMode'
-                            : 'managed.managedMode',
-                        )}
-                      </span>
-                    )}
-                  </span>
+                  <span>{t('sidebar.newTask')}</span>
                 )}
               </button>
             </div>

@@ -175,6 +175,9 @@ function renderSidebar(
     onSessionsDeleted?: (sessionIds: string[]) => void;
     currentSessionActive?: boolean;
     managedWorkspaces?: React.ReactNode;
+    managedArchivedSessions?: React.ComponentProps<
+      typeof WebShellSidebar
+    >['managedArchivedSessions'];
     onSearchQueryChange?: (query: string) => void;
   } = {},
 ): void {
@@ -197,6 +200,7 @@ function renderSidebar(
           onSessionsDeleted={props.onSessionsDeleted}
           currentSessionActive={props.currentSessionActive}
           managedWorkspaces={props.managedWorkspaces}
+          managedArchivedSessions={props.managedArchivedSessions}
           onSearchQueryChange={props.onSearchQueryChange}
           // Surface delete as an inline hover button so the row's disabled
           // state is directly assertable without opening the dropdown.
@@ -263,7 +267,47 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar current-session delete (issue #12619)', () => {
-  it('shows the active task service and labels daemon workspaces when Managed is available', async () => {
+  it('keeps Managed and Local archives in the single bottom fold', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_archive'],
+    };
+    archived.sessions = [
+      makeSession('local-archive', { displayName: 'Local archive' }),
+    ];
+    archived.data = archived.sessions;
+    renderSidebar({
+      managedWorkspaces: <div>Managed workspace</div>,
+      managedArchivedSessions: {
+        content: <div data-managed-archive>Managed archive</div>,
+        count: 1,
+        loading: false,
+        error: false,
+      },
+    });
+    await flushSidebar();
+    const fold = [
+      ...container.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Archived')!;
+    expect(fold.getAttribute('aria-expanded')).toBe('false');
+    expect(container.querySelector('[data-managed-archive]')).toBeNull();
+    act(() => click(fold));
+    await flushSidebar();
+    expect(fold.getAttribute('aria-expanded')).toBe('true');
+    expect(container.querySelector('[data-managed-archive]')?.textContent).toBe(
+      'Managed archive',
+    );
+    expect(container.textContent).toContain('Local archive');
+    expect(container.textContent).toContain('Managed workspace');
+    act(() => click(fold));
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-managed-archive]')?.closest('[hidden]'),
+    ).not.toBeNull();
+    expect(fold.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('keeps New task plain and labels daemon workspaces when Managed is available', async () => {
     renderSidebar({
       currentSessionActive: false,
       managedWorkspaces: <div>Managed workspace</div>,
@@ -272,7 +316,7 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     const newTask = container.querySelector<HTMLButtonElement>(
       'button[aria-label="New task"]',
     )!;
-    expect(newTask.textContent).toContain('Managed');
+    expect(newTask.textContent).toBe('New task');
     expect(
       [...container.querySelectorAll('button')].some(
         (item) =>
@@ -285,7 +329,7 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
       managedWorkspaces: <div>Managed workspace</div>,
     });
     await flushSidebar();
-    expect(newTask.textContent).toContain('Local');
+    expect(newTask.textContent).toBe('New task');
   });
   it('keeps Local history beside Managed workspace content without selecting the hidden Local conversation', async () => {
     active.sessions = [
