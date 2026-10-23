@@ -187,6 +187,9 @@ describe('automation definitions', () => {
       ["bash -c './probe.sh &'", /gate must not background/],
       ["nohup bash -c './probe.sh &'", /gate must not background/],
       ['x'.repeat(2049), /gate must be at most 2048 characters/],
+      // Refused before the definition commits, so no fire ever acquires a
+      // Runtime only for the Broker to refuse the payload.
+      ['echo \ud800', /gate must be valid Unicode/],
     ] as const) {
       expect(() => assertAutomationDefinition({ ...base, gate })).toThrow(
         message,

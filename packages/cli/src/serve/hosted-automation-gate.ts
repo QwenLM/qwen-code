@@ -84,6 +84,12 @@ export interface HostedAutomationGateRunnerOptions {
   readonly sessionKey: ManagedSessionKey;
   /** The Session's tool profile as it stands when the probe is asked for. */
   readonly toolProfile: () => unknown;
+  /**
+   * Probes started and not yet answered by a receipt, by derived call id,
+   * with their execution. One map serves a Session's runner and release, so
+   * a release can ask the Runtime about a record its probe left UNKNOWN.
+   */
+  readonly startedProbes?: Map<string, string>;
 }
 
 function derivedBroker(
@@ -108,14 +114,27 @@ function derivedBroker(
 export function createHostedAutomationGateRelease(
   options: HostedAutomationGateRunnerOptions,
 ): (automationRunId: string, definitionRevision: number) => Promise<void> {
-  return (automationRunId, definitionRevision) =>
-    releaseDerivedSession(
-      derivedBroker(
-        options,
-        automationGateCallId(automationRunId, definitionRevision),
-      ),
-      { notFoundIsFinal: true, reconciliationIsFinal: true },
-    );
+  const startedCalls = options.startedProbes ?? new Map<string, string>();
+  return async (automationRunId, definitionRevision) => {
+    const callId = automationGateCallId(automationRunId, definitionRevision);
+    const broker = derivedBroker(options, callId);
+    const executionCallId = startedCalls.get(callId);
+    if (executionCallId !== undefined) {
+      // A probe this process started may have left its record UNKNOWN,
+      // which holds the Session, and no runner asks about it now: ask its
+      // Runtime first. A record it settles or fences releases at once; one
+      // it still cannot settle keeps the release refused, and the fire is
+      // retried.
+      await broker
+        .status(executionCallId, { reconcile: true })
+        .catch(() => undefined);
+    }
+    await releaseDerivedSession(broker, {
+      notFoundIsFinal: true,
+      reconciliationIsFinal: true,
+    });
+    startedCalls.delete(callId);
+  };
 }
 
 /** The observation window: the probe's own timeout plus Runtime slack. */
@@ -130,7 +149,7 @@ export function createHostedAutomationGateRunner(
   // since the answer can be lost and the fire driven again; bounded, oldest
   // first, for occurrences that never come back. Each names its execution,
   // so a later attempt can ask the Runtime about a record left UNKNOWN.
-  const startedCalls = new Map<string, string>();
+  const startedCalls = options.startedProbes ?? new Map<string, string>();
   return async ({ automationRunId, definitionRevision, gate, signal }) => {
     if (!isHostedWorkspaceShellProfile(options.toolProfile())) {
       return {
@@ -509,6 +528,16 @@ async function reconciledReceipt(
   const status = await broker
     .status(executionCallId, { reconcile: true })
     .catch((cause: unknown) => {
+      // The Runtime generation that ran it is gone, or its records disagree:
+      // no retry gets an answer, so the probe's outcome is unknown.
+      if (
+        cause instanceof HostedWorkspaceBrokerRejection &&
+        cause.status === 409 &&
+        (cause.code === 'runtime_execution_evidence_unavailable' ||
+          cause.code === 'runtime_execution_conflict')
+      ) {
+        return { state: 'unknown' as const };
+      }
       throw new HostedAutomationGateHeld(
         `the Runtime was asked how the occurrence's probe ended and the answer was lost: ${
           cause instanceof Error ? cause.message : String(cause)

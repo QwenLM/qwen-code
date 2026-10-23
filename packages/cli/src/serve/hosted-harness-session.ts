@@ -1656,9 +1656,12 @@ function gateOptions(options: HostedAutomationGateRunnerOptions): {
   gate: ReturnType<typeof createHostedAutomationGateRunner>;
   releaseGate: ReturnType<typeof createHostedAutomationGateRelease>;
 } {
+  // One memory of started probes for both, so the release of a revision
+  // that went stale can ask about a probe the runner started.
+  const shared = { ...options, startedProbes: new Map<string, string>() };
   return {
-    gate: createHostedAutomationGateRunner(options),
-    releaseGate: createHostedAutomationGateRelease(options),
+    gate: createHostedAutomationGateRunner(shared),
+    releaseGate: createHostedAutomationGateRelease(shared),
   };
 }
 

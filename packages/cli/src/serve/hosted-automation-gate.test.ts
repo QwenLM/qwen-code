@@ -91,6 +91,8 @@ async function rig(
       sessionId: 'session',
     },
     toolProfile: () => profile,
+    // Shared, as the Harness wires them.
+    startedProbes: new Map<string, string>(),
   };
   const run = createHostedAutomationGateRunner(options);
   const release = createHostedAutomationGateRelease(options);
@@ -532,6 +534,35 @@ describe('createHostedAutomationGateRunner', () => {
         kind: 'unknown',
         reason: "the Runtime lost the occurrence's probe before it settled",
       });
+    });
+
+    it('answers unknown once the Runtime generation that ran it is gone', async () => {
+      // A definitive answer, not a lost one: no retry would ever get more.
+      const { probe, later } = await laterAttempt(
+        rejection(409, 'runtime_execution_evidence_unavailable'),
+        { body: printed },
+        rejection(503, 'runtime_reconciliation_required'),
+      );
+      await expect(probe()).resolves.toEqual({
+        kind: 'unknown',
+        reason: "the Runtime lost the occurrence's probe before it settled",
+      });
+      expect(later()).toEqual([
+        '/executions:prepare',
+        '/executions/gate-execution',
+        RELEASE,
+      ]);
+    });
+
+    it('lets the release of a revision gone stale ask about the probe first', async () => {
+      // No runner comes back for a stale revision: its release asks the
+      // Runtime, so the record it settles stops holding the Session.
+      const { release, later } = await laterAttempt(
+        { body: printed },
+        { body: printed },
+      );
+      await expect(release()).resolves.toBeUndefined();
+      expect(later()).toEqual(['/executions/gate-execution', RELEASE]);
     });
 
     it('keeps retrying while the Broker still holds the record UNKNOWN', async () => {

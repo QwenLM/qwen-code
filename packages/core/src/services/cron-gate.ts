@@ -127,6 +127,11 @@ export function gateCommandError(gate: unknown): string | null {
   if (gate.length > MAX_CRON_GATE_CHARS) {
     return `must be at most ${MAX_CRON_GATE_CHARS} characters`;
   }
+  // Bash gets the gate as UTF-8, which cannot carry an unpaired surrogate: it
+  // would run as U+FFFD, not the text the permission rules checked.
+  if (/[\uD800-\uDFFF]/u.test(gate)) {
+    return 'must be valid Unicode, without an unpaired UTF-16 surrogate';
+  }
   if (backgroundsAnyPart(gate) || /(^|[^&])&\s*$/.test(gate.trim())) {
     return 'must not background any part of the command with "&"';
   }

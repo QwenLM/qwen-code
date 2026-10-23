@@ -76,7 +76,7 @@ The facts below are from `main` at `13a4fea516` plus PR #15069.
   which the scanner defers and re-drives.
 - **Public API.** `AutomationDefinitionRequest`, `PublicAutomation` and
   `PublicAutomationRun` are `additionalProperties: false` schemas in the
-  public contract (1.88.0 before this change); `ManagedAgentApiContractTest` fails on any drift between
+  public contract (1.89.0 before this change); `ManagedAgentApiContractTest` fails on any drift between
   the `ApiModels` records, the mounted routes and the document.
 - **Ledger.** `ma_schedule` mirrors the definition for the scanner;
   `ma_schedule_occurrence` keeps one row per decision with `outcome`,
@@ -232,7 +232,9 @@ the route wires the real one:
    receipt. The ask itself may settle the record, so a reply or a read that
    goes missing after it retries the fire rather than answer `unknown`; only
    a Broker that still holds the record UNKNOWN (the release then fails and
-   the fire is retried) or has fenced it for good (the answer is `unknown`)
+   the fire is retried), has fenced it for good, or answers that the Runtime
+   generation which ran it can no longer answer
+   (`409 runtime_execution_evidence_unavailable`; the answer is `unknown`)
    ends the ask without a receipt. A
    reservation under the same key for another request is a
    conflict, never a second run: it answers `unknown` too. An attempt that
@@ -297,7 +299,11 @@ A re-drive that no longer probes under the occurrence's pinned revision —
 the revision went stale, the definition retired or is gone — first releases
 that revision's derived Session, because the attempt that could not release
 it left the release to the next one through the runner, which now never
-comes. While the Harness process knows it owes that release (one of its
+comes. The runner and the release share the Harness's memory of started
+probes, so a release of a probe this process started asks the Runtime about
+its record first: no runner comes back to settle a record left UNKNOWN, and
+until it settles the Broker refuses the release. While the Harness process
+knows it owes that release (one of its
 attempts under the revision ended without it), a release that fails keeps
 the fire unsettled the same way; otherwise the release is a courtesy whose
 failure is ignored, because most such fires never probed (an ungated
