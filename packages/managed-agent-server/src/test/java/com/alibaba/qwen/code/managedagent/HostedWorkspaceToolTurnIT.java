@@ -222,7 +222,7 @@ class HostedWorkspaceToolTurnIT {
                 context.getBean(JdbcTemplate.class), context.getBean(PlatformTransactionManager.class),
                 context.getBean(ManagedSessionStore.class), context.getBean(ToolExecutionRepository.class),
                 context.getBean(RuntimeBindingRepository.class),
-                new ToolPublicationStore.Capacity(1024 * 1024, 16 * 1024 * 1024, 64 * 1024 * 1024, 4), false));
+                new ToolPublicationStore.Capacity(1024 * 1024, 16 * 1024 * 1024, 64 * 1024 * 1024, 4)));
         context.registerBean("unicodeData", ToolPublicationDataStore.class, () -> new ToolPublicationDataStore(
                 context.getBean(JdbcTemplate.class), context.getBean(PlatformTransactionManager.class),
                 context.getBean(ToolPublicationStore.class), context.getBean(ManagedSessionStore.class),
