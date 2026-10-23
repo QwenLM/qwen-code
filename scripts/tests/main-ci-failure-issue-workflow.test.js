@@ -425,30 +425,71 @@ printf '%s\\n' '${liveAttempt}'
 
   describe('workflow issue reuse', () => {
     const writer = jobs.file_issue.steps.find((step) => step.id === 'issue');
+    const botIssue = (number, suffix = '') => ({
+      number,
+      title: `Main CI failed: SDK Java${suffix}`,
+      author: { login: 'qwen-code-dev-bot' },
+    });
     const run = (issues, opts = {}) => {
-      const { failLookup = false, failEdit = false } = opts;
+      const {
+        lookupFailures = 0,
+        failMarkerLookup = false,
+        failClosedLookup = false,
+        failEdit = false,
+        failBodyRead = false,
+        issueBody = '<!-- main-ci-failure-aggregate:1234 -->',
+        markerIssues = [],
+        closedIssues = [],
+      } = opts;
       const tmp = mkdtempSync(join(tmpdir(), 'ci-issue-reuse-'));
       try {
+        writeFileSync(join(tmp, 'issues.json'), JSON.stringify(issues));
+        writeFileSync(join(tmp, 'closed.json'), JSON.stringify(closedIssues));
+        writeFileSync(join(tmp, 'current-body.md'), issueBody + '\n');
         writeFileSync(
-          join(tmp, 'issues.json'),
-          typeof issues === 'string' ? issues : JSON.stringify(issues),
+          join(tmp, 'marker-issues.json'),
+          typeof markerIssues === 'string'
+            ? markerIssues
+            : JSON.stringify(markerIssues),
         );
+        writeFileSync(join(tmp, 'sleep'), '#!/usr/bin/env bash\nexit 0\n');
+        chmodSync(join(tmp, 'sleep'), 0o755);
         writeFileSync(
           join(tmp, 'gh'),
           `#!/usr/bin/env bash
 set -eu
 printf '%s\\n' "$*" >> "${tmp}/calls"
-if [[ "$1" == api ]]; then
+if [[ "$1 $2" == 'issue list' ]]; then
+  [[ "$*" == *'--json number,title,author'* && "$*" != *'--search'* ]] || exit 2
+  if [[ "$*" == *'--state open'* ]]; then
+    [[ "$*" == *'--limit 3000'* ]] || exit 2
+    count=0
+    [[ ! -f '${tmp}/lookup-count' ]] || read -r count < '${tmp}/lookup-count'
+    count=$((count + 1))
+    echo "$count" > '${tmp}/lookup-count'
+    [[ "$count" -gt "$LOOKUP_FAILURES" ]] || exit 1
+    cat '${tmp}/issues.json'
+  elif [[ "$*" == *'--state closed'* ]]; then
+    [[ "$*" == *'--limit 1000'* ]] || exit 2
+    ${failClosedLookup ? 'exit 1' : `cat '${tmp}/closed.json'`}
+  else
+    exit 2
+  fi
+elif [[ "$1" == api ]]; then
   [[ "$*" == *'state=open&per_page=100'* && "$*" == *'--paginate'* ]] || exit 2
-  ${failLookup ? 'exit 1' : `cat '${tmp}/issues.json'`}
+  ${failMarkerLookup ? 'exit 1' : `cat '${tmp}/marker-issues.json'`}
 elif [[ "$1 $2" == 'issue create' ]]; then
+  # Label churn must not prevent creation of the failure record.
+  [[ "$*" != *'--label'* ]] || exit 1
   echo 'https://github.com/QwenLM/qwen-code/issues/999'
-${
-  failEdit
-    ? `elif [[ "$1 $2" == 'issue edit' ]]; then
-  exit 1`
-    : ''
-}
+elif [[ "$1 $2" == 'issue view' ]]; then
+  [[ "$*" == *'--json body'* ]] || exit 2
+  ${failBodyRead ? 'exit 1' : `cat '${tmp}/current-body.md'`}
+elif [[ "$1 $2" == 'issue edit' ]]; then
+  ${failEdit ? 'exit 1' : ':'}
+  if [[ "$*" == *'--body-file'* ]]; then
+    cp "\${@: -1}" '${tmp}/migrated-body.md'
+  fi
 fi
 `,
         );
@@ -465,13 +506,20 @@ fi
               GITHUB_OUTPUT: join(tmp, 'output'),
               REPO: 'QwenLM/qwen-code',
               WORKFLOW_NAME: 'SDK Java',
+              WORKFLOW_ID: '1234',
+              BOT_LOGIN: 'qwen-code-dev-bot',
               ISSUE_BODY: 'Run 123 failed at commit abcdef123456',
               RUN_ATTEMPT: '2',
+              LOOKUP_FAILURES: String(lookupFailures),
             },
           },
         );
         return {
           status: result.status,
+          stdout: result.stdout,
+          migratedBody: existsSync(join(tmp, 'migrated-body.md'))
+            ? readFileSync(join(tmp, 'migrated-body.md'), 'utf8')
+            : null,
           calls: readFileSync(join(tmp, 'calls'), 'utf8'),
           output: existsSync(join(tmp, 'output'))
             ? readFileSync(join(tmp, 'output'), 'utf8')
@@ -488,18 +536,21 @@ fi
     it.each(['', ' on abcdef123456', ' — Foo.test'])(
       'comments on an open workflow issue with suffix %s',
       (suffix) => {
-        const result = run([
-          { number: 42, title: `Main CI failed: SDK Java${suffix}` },
-        ]);
+        const result = run([botIssue(42, suffix)]);
         expect(result.status).toBe(0);
         expect(result.calls).toContain('issue comment 42');
         expect(result.output).toContain(
           'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
         );
         expect(result.calls).not.toContain('issue create');
-        expect(result.calls).toContain(
-          'issue edit 42 --repo QwenLM/qwen-code --remove-label status/ready-for-agent --remove-label autofix/approved',
-        );
+        if (suffix) {
+          expect(result.calls).toContain(
+            'issue edit 42 --repo QwenLM/qwen-code --remove-label status/ready-for-agent --remove-label autofix/approved',
+          );
+        } else {
+          expect(result.calls).not.toContain('issue edit');
+          expect(result.calls).not.toContain('--remove-label');
+        }
         expect(result.calls).not.toMatch(
           /--add-label|--add-assignee|--remove-assignee|autofix\/in-progress/,
         );
@@ -508,71 +559,191 @@ fi
       },
     );
 
-    it('creates a fixed-title triage issue when only other workflow issues or PRs exist', () => {
+    it('creates a fixed-title triage issue when only other workflow issues exist', () => {
       const result = run([
-        { number: 10, title: 'Main CI failed: SDK Java extra' },
-        { number: 11, title: 'Main CI failed: SDK Python on abc123' },
-        { number: 12, title: 'Main CI failed: SDK Java', pull_request: {} },
+        botIssue(10, ' extra'),
+        { ...botIssue(11), title: 'Main CI failed: SDK Python on abc123' },
       ]);
       expect(result.status).toBe(0);
       expect(result.calls).toContain(
         'issue create --repo QwenLM/qwen-code --title Main CI failed: SDK Java --body-file',
       );
-      expect(result.calls).toContain('--label status/needs-triage');
+      expect(result.calls).toContain(
+        'issue edit 999 --repo QwenLM/qwen-code --add-label scope/ci-cd --add-label status/needs-triage',
+      );
       expect(result.output).toContain(
         'issue_url=https://github.com/QwenLM/qwen-code/issues/999',
       );
+      expect(result.body).toContain('<!-- main-ci-failure-aggregate:1234 -->');
       expect(result.calls).not.toMatch(
         /autofix|ready-for-agent|assignee|issue comment/,
       );
     });
 
-    it('chooses the oldest matching issue consistently', () => {
+    it('does not adopt a matching title owned by someone other than the reporting bot', () => {
       const result = run([
-        { number: 50, title: 'Main CI failed: SDK Java' },
-        { number: 42, title: 'Main CI failed: SDK Java on abc123' },
+        { ...botIssue(7), author: { login: 'not-the-bot' } },
       ]);
-      expect(result.calls).toContain('issue comment 42');
-      expect(result.output).toContain(
-        'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
-      );
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue create');
+      expect(result.calls).not.toContain('issue comment 7');
     });
 
-    it('does not create an issue when lookup fails', () => {
-      const result = run([], { failLookup: true });
-      expect(result.status).not.toBe(0);
-      expect(result.calls).not.toMatch(/issue (create|comment)/);
-    });
-
-    it('publishes the issue url and the recurrence comment when the label retirement fails', () => {
-      // Under bash -e a failed cosmetic edit aborts the step; report_pr still
-      // needs the tracking-issue link, and the comment is the only record of
-      // that red main run.
-      const result = run([{ number: 42, title: 'Main CI failed: SDK Java' }], {
-        failEdit: true,
+    it('adopts a retitled bot aggregate by marker and excludes other authors and PRs', () => {
+      const marked = {
+        number: 42,
+        title: 'Investigating Java CI',
+        user: { login: 'qwen-code-dev-bot' },
+        body: '<!-- main-ci-failure-aggregate:1234 -->',
+      };
+      const result = run([], {
+        markerIssues: [
+          { ...marked, number: 1, user: { login: 'someone-else' } },
+          { ...marked, number: 2, pull_request: {} },
+          { ...marked, number: 3, body: null },
+          marked,
+        ],
       });
-      expect(result.calls).toContain('issue edit 42');
-      expect(result.output).toContain(
-        'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
-      );
-      expect(result.calls).toContain('issue comment 42');
-    });
-
-    it('merges every lookup page before choosing the oldest match', () => {
-      // `--paginate` emits one JSON document per page; without `jq -s … add`
-      // only the last page would be considered.
-      const result = run(
-        JSON.stringify([{ number: 50, title: 'Main CI failed: SDK Java' }]) +
-          JSON.stringify([
-            { number: 42, title: 'Main CI failed: SDK Java on abc123' },
-          ]),
-      );
       expect(result.status).toBe(0);
       expect(result.calls).toContain('issue comment 42');
+      expect(result.calls).not.toMatch(/issue (create|edit|reopen)/);
+    });
+
+    it('migrates an adopted legacy body and reuses it after a maintainer retitles the issue', () => {
+      const originalBody =
+        'Main CI failed at commit abc123.\n\n<!-- qwen-main-ci-failure:abc123 -->\n\nMaintainer notes: investigate the runner lock.';
+      const adopted = run([botIssue(42, ' on abc123')], {
+        issueBody: originalBody,
+      });
+      expect(adopted.status).toBe(0);
+      expect(adopted.migratedBody).toBe(
+        `${originalBody}\n\n<!-- main-ci-failure-aggregate:1234 -->\n`,
+      );
+      expect(adopted.calls.indexOf('issue comment 42')).toBeLessThan(
+        adopted.calls.indexOf('issue view 42'),
+      );
+      expect(adopted.calls).toMatch(/issue edit 42 .*--body-file/);
+
+      const retitled = run([], {
+        issueBody: adopted.migratedBody,
+        markerIssues: [
+          {
+            number: 42,
+            title: 'Investigating Java runner locks',
+            user: { login: 'qwen-code-dev-bot' },
+            body: adopted.migratedBody,
+          },
+        ],
+      });
+      expect(retitled.status).toBe(0);
+      expect(retitled.calls).toContain('issue comment 42');
+      expect(retitled.calls).not.toMatch(/issue (create|edit)/);
+      expect(retitled.migratedBody).toBeNull();
+    });
+
+    it.each([{ failBodyRead: true }, { failEdit: true }])(
+      'keeps the recorded occurrence when marker migration fails: %j',
+      (failure) => {
+        const result = run([botIssue(42)], {
+          issueBody: 'Original unmarked body',
+          ...failure,
+        });
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue comment 42');
+        expect(result.output).toContain(
+          'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
+        );
+        expect(result.stdout).toContain('::warning::');
+      },
+    );
+
+    it('chooses the oldest matching issue consistently', () => {
+      const result = run([botIssue(50), botIssue(42, ' on abc123')]);
+      expect(result.calls).toContain('issue comment 42');
       expect(result.output).toContain(
         'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
       );
+    });
+
+    it('retries a transient light lookup failure and still records the failure', () => {
+      const result = run([botIssue(42)], { lookupFailures: 1 });
+      expect(result.status).toBe(0);
+      expect(result.calls.match(/issue list .*--state open/g)).toHaveLength(2);
+      expect(result.calls).toContain('issue comment 42');
+    });
+
+    it.each([{ lookupFailures: 3 }, { failMarkerLookup: true }])(
+      'does not write when an open lookup fails after retries: %j',
+      (opts) => {
+        const result = run([], opts);
+        expect(result.status).not.toBe(0);
+        expect(result.calls).not.toMatch(/issue (create|comment|reopen|edit)/);
+        expect(result.calls).not.toContain('--state closed');
+      },
+    );
+
+    it('publishes the issue url and recurrence comment before a failed legacy label retirement', () => {
+      const result = run([botIssue(42, ' on abc123')], { failEdit: true });
+      expect(result.status).not.toBe(0);
+      expect(result.output).toContain(
+        'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
+      );
+      expect(result.calls.indexOf('issue comment 42')).toBeLessThan(
+        result.calls.indexOf('issue edit 42'),
+      );
+    });
+
+    it('keeps a newly created failure record when adding triage labels fails', () => {
+      const result = run([], { failEdit: true });
+      expect(result.status).toBe(0);
+      expect(result.output).toContain(
+        'issue_url=https://github.com/QwenLM/qwen-code/issues/999',
+      );
+      expect(result.calls).toContain('issue create');
+      expect(result.calls).toContain('issue edit 999');
+    });
+
+    it('merges every marker lookup page before choosing the oldest match', () => {
+      const marked = {
+        user: { login: 'qwen-code-dev-bot' },
+        body: '<!-- main-ci-failure-aggregate:1234 -->',
+      };
+      const result = run([], {
+        markerIssues:
+          JSON.stringify([{ ...marked, number: 50 }]) +
+          JSON.stringify([{ ...marked, number: 42 }]),
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue comment 42');
       expect(result.calls).not.toContain('issue create');
+    });
+
+    it.each(['', ' — Foo.test'])(
+      'reopens a closed bot issue before commenting, with suffix %s',
+      (suffix) => {
+        const result = run([], {
+          closedIssues: [
+            { ...botIssue(7), author: { login: 'not-the-bot' } },
+            botIssue(42, suffix),
+          ],
+        });
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue reopen 42');
+        expect(result.calls).toContain('issue comment 42');
+        expect(result.calls.indexOf('issue reopen 42')).toBeLessThan(
+          result.calls.indexOf('issue comment 42'),
+        );
+        expect(result.calls).not.toContain('issue create');
+        expect(result.calls.includes('--remove-label')).toBe(Boolean(suffix));
+      },
+    );
+
+    it('creates a fresh aggregate when the bounded closed lookup fails', () => {
+      const result = run([], { failClosedLookup: true });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('--state closed');
+      expect(result.calls).toContain('issue create');
+      expect(result.calls).not.toContain('issue reopen');
     });
 
     it('serializes lookup and write per workflow and reuses the failure renderer', () => {
@@ -584,6 +755,10 @@ fi
       expect(writer.env.ISSUE_BODY).toBe(
         '${{ needs.analyze.outputs.comment_body }}',
       );
+      expect(writer.env.WORKFLOW_ID).toBe('${{ github.event.workflow.id }}');
+      expect(writer.env.BOT_LOGIN).toBe(
+        "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}",
+      );
       expect(jobs.analyze.outputs.comment_body).toBe(
         '${{ steps.summary.outputs.body }}',
       );
@@ -592,10 +767,8 @@ fi
   });
 
   it('hands the helper the failed job and step of a run with no test result', () => {
-    // A lane that dies before printing any test result leaves no failing test to
-    // dedupe on, so the issue falls back to one per commit — and without the job
-    // list the fallback body named nothing but the commit, which is what made a
-    // standing red lane undiagnosable from its own issue.
+    // A lane can die before printing test results. Its job/step details must
+    // still reach the failure summary so the report remains diagnosable.
     //
     // Each pin below is scoped to the step that owns it and spans a producer
     // together with its consumer. Isolated substrings cannot express this
@@ -637,23 +810,21 @@ fi
     // The ids projection is bound to the array the download loop iterates and to
     // the payload the fetch wrote. Swapping it with the TSV projection below
     // hands `mapfile` whole TSV lines so every log download 404s; renaming the
-    // array on one side only returns every run to the per-commit fallback while
-    // the failed-jobs section still renders.
+    // array on one side only loses the failing-test details while the job/step
+    // summary still renders.
     expect(download).toContain(
       'mapfile -t job_ids < <( jq -r \'.jobs[] | select(.conclusion == "failure") | .id\' "${jobs_json}" 2>/dev/null )',
     );
     expect(download).toContain('for job_id in "${job_ids[@]}"; do');
     // The same bindings for the projection this PR adds, plus the `|| true` that
     // keeps an errored jobs response from aborting the step under `bash -e`
-    // before the issue is planned at all, and the `2>/dev/null` that keeps the
+    // before a failure summary is rendered, and the `2>/dev/null` that keeps the
     // resulting jq parse error out of the log.
     expect(download).toContain(
       'jq -r \'.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure") | .name] | @tsv\' "${jobs_json}" 2>/dev/null > "${RUNNER_TEMP}/failed-jobs.tsv" || true',
     );
-    // `--jobs` has to ride the `analyze` invocation: `plan` never reads
-    // `options.jobs`, so moving the flag there drops the section silently. The
-    // span ends at the first analysis redirect, so no later helper call in the
-    // step can satisfy it.
+    // Keep the TSV job details in the analysis payload. The span ends at the
+    // first analysis redirect, so the later comment invocation cannot satisfy it.
     const analyzeInvocation = summary.match(
       /node "\$\{helper\}" analyze .*?> "\$\{RUNNER_TEMP\}\/analysis\.json"/,
     )?.[0];
@@ -705,8 +876,8 @@ printf '%s\\n' '{"jobs":[]}'
     // carrying terminal escape sequences unless the flag opts out, and the
     // colourised vitest/pytest logs always carry them: without the flag
     // every download fails deterministically — a retry would hit the
-    // identical refusal — and the plan falls back to a per-commit issue
-    // naming no failing test. The analyzer strips ANSI before matching, so
+    // identical refusal — so analyze finds no tests for the comment renderer
+    // and the summary degrades to job/step names. The analyzer strips ANSI, so
     // the escapes never reach an issue body.
     const download = oneLine(
       jobs.analyze.steps.find(
@@ -724,8 +895,8 @@ printf '%s\\n' '{"jobs":[]}'
   });
 
   it('uses a random heredoc delimiter for the multiline body output', () => {
-    // A constant delimiter lets issue-body prose (which the autofix agent
-    // writes into) end the heredoc early and inject fresh GITHUB_OUTPUT keys.
+    // A constant delimiter lets failure-summary text end the heredoc early
+    // and inject fresh GITHUB_OUTPUT keys.
     expect(workflow).toContain('openssl rand -hex 16');
     expect(workflow).toContain('echo "body<<${delim}"');
     expect(workflow).toContain('echo "${delim}"');
