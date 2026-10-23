@@ -49,6 +49,7 @@ on:
         type: 'choice'
         options:
           - 'self-hosted'
+          - 'self-hosted-arm64'
           - 'hosted'
 
 concurrency:
@@ -202,6 +203,11 @@ jobs:
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
             if [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted" ]]; then
               ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+            elif [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted-arm64" ]]; then
+              # Experimental ARM64 ECS fleet (Hangzhou, ecs.q8y). No arch label
+              # set is required by any production lane; this only selects the
+              # fleet that self-identifies as ARM64.
+              ubuntu_runner='["self-hosted", "linux", "arm64"]'
             fi
           elif [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" || "${EVENT_NAME}" == "push" ) ]]; then
             ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
