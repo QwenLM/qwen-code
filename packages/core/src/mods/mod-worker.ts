@@ -29,6 +29,7 @@ import {
   MOD_METHODS,
   ModBudget,
   ModTimeoutError,
+  assertModDepth,
   engineOrigin,
   record,
   validateInput,
@@ -149,6 +150,7 @@ class Realm {
       const json = this.vm.getString(data);
       if (Buffer.byteLength(json) > MOD_MAX_BYTES)
         throw new Error('Mod API input is too large.');
+      assertModDepth(json, 'Mod API input');
       const deferred = this.vm.newPromise();
       const task = Promise.resolve().then(() =>
         hostCall(callId, method, JSON.parse(json)),
@@ -188,7 +190,9 @@ class Realm {
       if (name === 'validate' || name === 'validateResult') {
         if (!call?.live || callAbandoned(call))
           throw new Error('Mod continuation is no longer active.');
-        const value = JSON.parse(this.vm.getString(input));
+        const json = this.vm.getString(input);
+        assertModDepth(json, 'Mod value');
+        const value = JSON.parse(json);
         if (name === 'validateResult') validateResult(call.event, value);
         else validateInput(call.event, value, call.input);
         return this.vm.undefined;
@@ -238,6 +242,7 @@ class Realm {
       const json = this.vm.getString(value);
       if (Buffer.byteLength(json) > MOD_MAX_BYTES)
         throw new Error('Mod result is too large.');
+      assertModDepth(json, 'Mod result');
       return JSON.parse(json);
     } finally {
       value.dispose();
@@ -374,6 +379,25 @@ async function bounded(
   }
 }
 
+// The engine names the plugin behind an ask it made or reworded; an answer
+// passed up as heard keeps the owner it had, and a hook cannot write one.
+async function ownCheck(
+  value: ModToolCheckResult,
+  below: Promise<unknown> | undefined,
+  plugin: string,
+): Promise<ModToolCheckResult> {
+  const { plugin: _written, ...answer } = value;
+  if (answer.decision !== 'ask') return answer;
+  const heard = (await below?.catch(() => undefined)) as
+    | ModToolCheckResult
+    | undefined;
+  if (heard?.decision === 'ask' && heard.reason === answer.reason)
+    return heard.plugin === undefined
+      ? answer
+      : { ...answer, plugin: heard.plugin };
+  return { ...answer, plugin };
+}
+
 async function dispatch(
   event: ModEvent,
   input: ModInput,
@@ -439,6 +463,12 @@ async function dispatch(
         }),
       );
       validateResult(event, value);
+      if (event === 'tool.check')
+        return await ownCheck(
+          value as ModToolCheckResult,
+          call.last,
+          realm.plugin.name,
+        );
       return event === 'ui.log' && record(value) && !('deny' in value)
         ? { value: value['value'] }
         : value;
@@ -470,6 +500,12 @@ async function dispatch(
         );
         if (value !== undefined) {
           validateResult(event, value);
+          if (event === 'tool.check')
+            return await ownCheck(
+              value as ModToolCheckResult,
+              recovery.last ?? call.last,
+              realm.plugin.name,
+            );
           return event === 'ui.log' && record(value) && !('deny' in value)
             ? { value: value['value'] }
             : value;
