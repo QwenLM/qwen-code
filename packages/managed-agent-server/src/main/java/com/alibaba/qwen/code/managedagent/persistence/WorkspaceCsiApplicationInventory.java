@@ -195,7 +195,8 @@ final class WorkspaceCsiApplicationInventory {
                     + "goal:VARCHAR,cron:VARCHAR,timezone:VARCHAR,session_mode:VARCHAR,overlap:VARCHAR,catch_up:VARCHAR,"
                     + "catch_up_limit:BIGINT,enabled:BOOLEAN,state:VARCHAR,blocked_reason:VARCHAR,armed_at:BIGINT,"
                     + "watermark_slot:BIGINT,lease_owner:VARBINARY,lease_until:BIGINT,fence:BIGINT,gmt_create:BIGINT,"
-                    + "gmt_modified:BIGINT"),
+                    + "gmt_modified:BIGINT,gate:VARCHAR,gate_last_outcome:VARCHAR,gate_last_at:BIGINT,"
+                    + "gate_quiet_since_delivery:INT,gate_failures:INT,gate_last_error:VARCHAR"),
             declaration("ma_schedule_occurrence", "tenant_id,schedule_id,occurrence_key",
                     "tenant_id:VARBINARY,schedule_id:VARBINARY,occurrence_key:VARBINARY,run_id:VARBINARY,"
                     + "session_id:VARBINARY,slot:BIGINT,trigger_kind:VARCHAR,outcome:VARCHAR,reason:VARCHAR,"
@@ -222,8 +223,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "writer_generation:BIGINT,writer_id:VARBINARY,writer_lease_until:BIGINT,lease_token_hash:CHAR,"
                     + "journal_revision:BIGINT,committed_sequence:BIGINT,last_commit_digest:CHAR,activation_epoch:BIGINT,"
                     + "latest_checkpoint_resource_id:VARBINARY,compacted_through_revision:BIGINT,recovery_status:VARCHAR,"
-                    + "recovery_detail_code:VARCHAR,gmt_create:BIGINT,gmt_modified:BIGINT,o3_backfill_revision:BIGINT,"
-                    + "o3_backfill_through:BIGINT,o3_backfill_error:VARCHAR,o3_backfill_pending:BOOLEAN,"
+                    + "recovery_detail_code:VARCHAR,gmt_create:BIGINT,gmt_modified:BIGINT,"
                     + "activation_id:VARBINARY,activation_phase:VARCHAR,activation_event_epoch:BIGINT,"
                     + "activation_expires_at:BIGINT,activation_head_revision:BIGINT,tenant_key:CHAR,harness_key:CHAR,"
                     + "harness_session_id:VARBINARY,head_kind:VARCHAR,phase:VARCHAR,operation_id:VARBINARY,"
