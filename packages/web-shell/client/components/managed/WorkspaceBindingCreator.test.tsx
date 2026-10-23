@@ -182,10 +182,8 @@ describe('WorkspaceBindingCreator', () => {
     onSelectWorkspace = vi.fn();
     onWorkspaceCreated = vi.fn();
     provider = {
-      kind: 'java',
       storageKey: 'host:scope-a:agent-a:workspace-v1',
       canCancel: false,
-      acceptsWorkspaceCwd: false,
       workspaceBinding: {
         agentId: 'agent-a',
         list: vi.fn().mockResolvedValue({
@@ -202,6 +200,7 @@ describe('WorkspaceBindingCreator', () => {
       createSession: vi.fn(),
       submitPrompt: vi.fn(),
       cancel: vi.fn(),
+      queryCancelOperation: vi.fn(),
       async *subscribeEvents() {
         yield* [];
       },
@@ -877,6 +876,7 @@ describe('WorkspaceBindingCreator', () => {
       sessionId: 'session-a',
       agentId: 'agent-a',
       approvalMode: 'default',
+      initialApprovalMode: 'default',
       workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
     });
     return { createSession, getSessionOptions };
@@ -903,6 +903,7 @@ describe('WorkspaceBindingCreator', () => {
         sessionId: 'session-a',
         agentId: 'qwen-code',
         approvalMode,
+        initialApprovalMode: approvalMode,
         modelSelection: { modelId: 'model-b', revision: 1 },
         workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
       });
@@ -953,6 +954,7 @@ describe('WorkspaceBindingCreator', () => {
       sessionId: 'session-a',
       agentId: 'qwen-code',
       approvalMode: 'yolo',
+      initialApprovalMode: 'yolo',
       modelSelection: { modelId: 'model-a', revision: 1 },
       workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
     });
@@ -1001,6 +1003,7 @@ describe('WorkspaceBindingCreator', () => {
       sessionId: 'session-a',
       agentId: 'agent-a',
       approvalMode: 'auto-edit',
+      initialApprovalMode: 'auto-edit',
       workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
     });
     const commit = await sendInitial('Write a file');
@@ -1508,6 +1511,7 @@ describe('WorkspaceBindingCreator', () => {
       sessionId: 'session-a',
       agentId: 'agent-a',
       approvalMode: 'auto-edit',
+      initialApprovalMode: 'auto-edit',
       workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
     });
     await click('Retry the same request');
@@ -1611,12 +1615,28 @@ describe('WorkspaceBindingCreator', () => {
     expect(commit).toHaveBeenCalledOnce();
   });
 
+  it('does not substitute current policy when creation policy is absent', async () => {
+    approvalSelection();
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      agentId: 'agent-a',
+      approvalMode: 'default',
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    await render();
+    const commit = await sendInitial('Confirm the original creation policy');
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('could not be confirmed');
+  });
+
   it('keeps explicit policy frozen when Session read-back reports another mode', async () => {
     const { createSession } = approvalSelection();
     getSession.mockResolvedValue({
       sessionId: 'session-a',
       agentId: 'agent-a',
       approvalMode: 'auto-edit',
+      initialApprovalMode: 'auto-edit',
       workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
     });
     await render();

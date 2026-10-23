@@ -6,6 +6,7 @@
 
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import * as installationInfo from '../../utils/installationInfo.js';
+import * as npmRuntime from '../../utils/npm-runtime.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -215,6 +216,30 @@ describe('checkForUpdates', () => {
         },
       },
     });
+  });
+
+  it('uses the original Node identity for both npm executable and CLI resolution', async () => {
+    vi.spyOn(npmRuntime, 'getNpmNodePath').mockReturnValue('/original/node');
+    const run = vi.fn().mockResolvedValue({ stdout: '"1.1.0"\n', stderr: '' });
+    const resolveNpm = vi.fn().mockReturnValue('/original/npm-cli.js');
+    await expect(
+      runGlobalNpm(
+        ['view', '@qwen-code/qwen-code', '--global'],
+        run as unknown as NonNullable<Parameters<typeof runGlobalNpm>[1]>,
+        'linux',
+        undefined,
+        resolveNpm,
+      ),
+    ).resolves.toBe('"1.1.0"');
+    expect(resolveNpm).toHaveBeenCalledExactlyOnceWith(
+      '/original/node',
+      'linux',
+    );
+    expect(run).toHaveBeenCalledWith(
+      '/original/node',
+      ['/original/npm-cli.js', 'view', '@qwen-code/qwen-code', '--global'],
+      expect.objectContaining({ timeout: FETCH_TIMEOUT_MS }),
+    );
   });
 
   it('checks npm updates in the global npm context', async () => {
