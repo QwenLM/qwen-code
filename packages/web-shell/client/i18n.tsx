@@ -2121,6 +2121,8 @@ const EN: Messages = {
   'sidebar.gitCloneTargetPlaceholder': '/absolute/path/for/new/repo',
   'sidebar.gitCloneTargetHint':
     'An absolute path that does not exist yet. Its parent directory must already exist.',
+  'sidebar.gitCloneTargetSuggestHint':
+    'Type a parent path to pick from its subfolders.',
   'sidebar.gitCloneSubmit': 'Clone and add',
   'sidebar.gitCloneProgress': (vars) => `Cloning… ${vars?.percent}%`,
   'sidebar.gitCloneProgressLabel': 'Clone progress',
@@ -6530,6 +6532,7 @@ const ZH: Messages = {
   'sidebar.gitCloneTargetPlaceholder': '/绝对路径/新目录',
   'sidebar.gitCloneTargetHint':
     '必须是尚不存在的绝对路径，其父目录需要已经存在。',
+  'sidebar.gitCloneTargetSuggestHint': '输入父目录可从中选择子目录。',
   'sidebar.gitCloneSubmit': '克隆并添加',
   'sidebar.gitCloneProgress': (vars) => `正在克隆… ${vars?.percent}%`,
   'sidebar.gitCloneProgressLabel': '克隆进度',

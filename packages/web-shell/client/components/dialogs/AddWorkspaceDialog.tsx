@@ -99,6 +99,7 @@ const HINT_ID = 'add-workspace-hint';
 const DISPLAY_NAME_HINT_ID = 'add-workspace-display-name-hint';
 const ERROR_ID = 'add-workspace-error';
 const LISTBOX_ID = 'add-workspace-suggestions';
+const GIT_LISTBOX_ID = 'add-workspace-git-suggestions';
 const SUGGEST_DEBOUNCE_MS = 150;
 
 function isAbsoluteLike(value: string): boolean {
@@ -166,6 +167,17 @@ export function AddWorkspaceDialog({
   const cloneJobIdRef = useRef<string | undefined>(undefined);
   const cloneUnmountedRef = useRef(false);
   const autoGitTargetRef = useRef<string | undefined>(undefined);
+  const [gitSuggestions, setGitSuggestions] = useState<
+    WorkspacePathSuggestion[]
+  >([]);
+  const [gitSuggestOpen, setGitSuggestOpen] = useState(false);
+  const [gitSuggestHighlight, setGitSuggestHighlight] = useState(-1);
+  const [gitSuggestSep, setGitSuggestSep] = useState('/');
+  const [gitSuggestEpoch, setGitSuggestEpoch] = useState(0);
+  const gitSuggestSeqRef = useRef(0);
+  const gitBlurTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
   const [suggestions, setSuggestions] = useState<WorkspacePathSuggestion[]>([]);
   const [suggestionsLoaded, setSuggestionsLoaded] = useState(false);
   const [suggestionsError, setSuggestionsError] = useState(false);
@@ -284,6 +296,41 @@ export function AddWorkspaceDialog({
     }, SUGGEST_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [browseDirectories, path, onSuggest, closeList]);
+
+  // Debounced directory suggestions for the clone target. A suggestion is an
+  // existing directory, so accepting one uses it as the parent and appends the
+  // repository name; the target itself must remain a new path.
+  useEffect(() => {
+    if (!onSuggest || source !== 'git' || clonedCwd !== undefined) {
+      ++gitSuggestSeqRef.current;
+      setGitSuggestions([]);
+      setGitSuggestOpen(false);
+      return undefined;
+    }
+    const trimmed = gitTarget.trim();
+    if (!isAbsoluteLike(trimmed) || trimmed.startsWith('ssh://')) {
+      ++gitSuggestSeqRef.current;
+      setGitSuggestions([]);
+      setGitSuggestOpen(false);
+      return undefined;
+    }
+    const seq = ++gitSuggestSeqRef.current;
+    const timer = setTimeout(() => {
+      onSuggest(trimmed).then(
+        (result) => {
+          if (seq !== gitSuggestSeqRef.current) return;
+          setGitSuggestions(result.suggestions);
+          setGitSuggestSep(result.sep || '/');
+          setGitSuggestHighlight(-1);
+        },
+        () => {
+          if (seq !== gitSuggestSeqRef.current) return;
+          setGitSuggestions([]);
+        },
+      );
+    }, SUGGEST_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [clonedCwd, gitSuggestEpoch, gitTarget, onSuggest, source]);
 
   // Radix listens for Escape on document capture; intercept one step earlier
   // (window capture) so an open suggestion list consumes the Escape instead
@@ -486,6 +533,91 @@ export function AddWorkspaceDialog({
     [gitTarget, path],
   );
 
+  const cancelGitBlur = useCallback(() => {
+    if (gitBlurTimeoutRef.current !== undefined) {
+      clearTimeout(gitBlurTimeoutRef.current);
+      gitBlurTimeoutRef.current = undefined;
+    }
+  }, []);
+
+  useEffect(() => () => cancelGitBlur(), [cancelGitBlur]);
+
+  useEffect(() => {
+    if (!gitSuggestOpen || gitSuggestions.length === 0) return undefined;
+    const handler = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        event.isComposing ||
+        event.keyCode === 229
+      ) {
+        return;
+      }
+      event.preventDefault();
+      setGitSuggestOpen(false);
+      setGitSuggestHighlight(-1);
+    };
+    window.addEventListener('keydown', handler, { capture: true });
+    return () =>
+      window.removeEventListener('keydown', handler, { capture: true });
+  }, [gitSuggestOpen, gitSuggestions.length]);
+
+  const acceptGitSuggestion = useCallback(
+    (suggestion: WorkspacePathSuggestion) => {
+      const name = repoNameFromUrl(gitUrl);
+      autoGitTargetRef.current = undefined;
+      setGitTarget(
+        `${suggestion.path.replace(/[\\/]+$/, '')}${gitSuggestSep}${name}`,
+      );
+      setGitSuggestOpen(false);
+      setGitSuggestHighlight(-1);
+      setError(null);
+    },
+    [gitSuggestSep, gitUrl],
+  );
+
+  const handleGitTargetKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLInputElement>) => {
+      const open = gitSuggestOpen && gitSuggestions.length > 0;
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        if (!open) {
+          if (gitSuggestions.length > 0) setGitSuggestOpen(true);
+          return;
+        }
+        setGitSuggestHighlight(
+          (current) => (current + 1) % gitSuggestions.length,
+        );
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        if (!open) return;
+        event.preventDefault();
+        setGitSuggestHighlight(
+          (current) => (current <= 0 ? gitSuggestions.length : current) - 1,
+        );
+        return;
+      }
+      if (event.key === 'Tab' && open && !event.shiftKey) {
+        const target =
+          gitSuggestHighlight >= 0
+            ? gitSuggestions[gitSuggestHighlight]
+            : gitSuggestions.length === 1
+              ? gitSuggestions[0]
+              : undefined;
+        if (target) {
+          event.preventDefault();
+          acceptGitSuggestion(target);
+        }
+        return;
+      }
+      if (event.key === 'Enter' && open && gitSuggestHighlight >= 0) {
+        event.preventDefault();
+        acceptGitSuggestion(gitSuggestions[gitSuggestHighlight]);
+      }
+    },
+    [acceptGitSuggestion, gitSuggestHighlight, gitSuggestOpen, gitSuggestions],
+  );
+
   const handleInputKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLInputElement>) => {
       const open = listOpen && suggestions.length > 0;
@@ -659,6 +791,8 @@ export function AddWorkspaceDialog({
   );
 
   const showList = (browseDirectories || listOpen) && suggestions.length > 0;
+  const showGitSuggestions =
+    gitSuggestOpen && !submitting && !clonedCwd && gitSuggestions.length > 0;
 
   return (
     <DialogShell
@@ -1032,22 +1166,89 @@ export function AddWorkspaceDialog({
                       {t('sidebar.gitCloneTarget')}
                     </FieldLabel>
                     <div className="flex gap-2">
-                      <Input
-                        id="add-workspace-git-target"
-                        type="text"
-                        placeholder={t('sidebar.gitCloneTargetPlaceholder')}
-                        value={gitTarget}
-                        onChange={(event) => {
-                          autoGitTargetRef.current = undefined;
-                          setGitTarget(event.target.value);
-                          if (error) setError(null);
-                        }}
-                        disabled={submitting || clonedCwd !== undefined}
-                        autoCapitalize="off"
-                        autoCorrect="off"
-                        autoComplete="off"
-                        spellCheck={false}
-                      />
+                      <div className="relative flex-1">
+                        <Input
+                          id="add-workspace-git-target"
+                          type="text"
+                          placeholder={t('sidebar.gitCloneTargetPlaceholder')}
+                          value={gitTarget}
+                          onChange={(event) => {
+                            autoGitTargetRef.current = undefined;
+                            setGitTarget(event.target.value);
+                            setGitSuggestOpen(true);
+                            if (error) setError(null);
+                          }}
+                          onKeyDown={handleGitTargetKeyDown}
+                          onFocus={() => {
+                            cancelGitBlur();
+                            setGitSuggestOpen(true);
+                            setGitSuggestEpoch((value) => value + 1);
+                          }}
+                          onBlur={() => {
+                            cancelGitBlur();
+                            gitBlurTimeoutRef.current = setTimeout(() => {
+                              gitBlurTimeoutRef.current = undefined;
+                              ++gitSuggestSeqRef.current;
+                              setGitSuggestions([]);
+                              setGitSuggestOpen(false);
+                            }, 100);
+                          }}
+                          disabled={submitting || clonedCwd !== undefined}
+                          autoCapitalize="off"
+                          autoCorrect="off"
+                          autoComplete="off"
+                          spellCheck={false}
+                          role="combobox"
+                          aria-expanded={showGitSuggestions}
+                          aria-controls={
+                            showGitSuggestions ? GIT_LISTBOX_ID : undefined
+                          }
+                          aria-activedescendant={
+                            showGitSuggestions && gitSuggestHighlight >= 0
+                              ? `${GIT_LISTBOX_ID}-${gitSuggestHighlight}`
+                              : undefined
+                          }
+                          aria-autocomplete="list"
+                        />
+                        {showGitSuggestions && (
+                          <ul
+                            id={GIT_LISTBOX_ID}
+                            role="listbox"
+                            aria-label={t('sidebar.addWorkspaceSuggestions')}
+                            className="absolute inset-x-0 top-full z-50 mt-1 max-h-56 overflow-y-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-md"
+                          >
+                            {gitSuggestions.map((suggestion, index) => (
+                              <li
+                                key={suggestion.path}
+                                id={`${GIT_LISTBOX_ID}-${index}`}
+                                role="option"
+                                aria-selected={index === gitSuggestHighlight}
+                                className={`cursor-pointer truncate px-3 py-1.5 ${
+                                  index === gitSuggestHighlight
+                                    ? 'bg-accent text-accent-foreground'
+                                    : 'hover:bg-accent/50'
+                                }`}
+                                onMouseDown={(event) => {
+                                  event.preventDefault();
+                                  acceptGitSuggestion(suggestion);
+                                }}
+                                onMouseEnter={() =>
+                                  setGitSuggestHighlight(index)
+                                }
+                              >
+                                <FolderOpenIcon
+                                  className="mr-2 inline size-4"
+                                  aria-hidden="true"
+                                />
+                                {suggestion.name}
+                                <span className="text-muted-foreground">
+                                  {gitSuggestSep}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
                       {onPick && (
                         <Button
                           type="button"
@@ -1067,6 +1268,9 @@ export function AddWorkspaceDialog({
                             path: clonedCwd,
                           })
                         : t('sidebar.gitCloneTargetHint')}
+                      {!clonedCwd && onSuggest
+                        ? ` ${t('sidebar.gitCloneTargetSuggestHint')}`
+                        : ''}
                     </FieldDescription>
                     {error && <FieldError id={ERROR_ID}>{error}</FieldError>}
                   </Field>

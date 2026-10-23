@@ -1552,4 +1552,37 @@ describe('AddWorkspaceDialog', () => {
 
     expect(gitTargetInput().value).toBe('/custom/target');
   });
+
+  it('selects a clone parent from directory suggestions', async () => {
+    const onSuggest = vi.fn().mockResolvedValue({
+      dir: '/home/me',
+      sep: '/',
+      suggestions: [{ name: 'src', path: '/home/me/src' }],
+      truncated: false,
+    });
+    mount(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        onSuggest={onSuggest}
+        gitClone={{ start: vi.fn(), poll: vi.fn(), cancel: vi.fn() }}
+      />,
+    );
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), '/home/me/');
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    });
+
+    expect(onSuggest).toHaveBeenCalledWith('/home/me/');
+    const option = [
+      ...document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ].find((item) => item.textContent?.startsWith('src'));
+    expect(option).toBeTruthy();
+    await act(async () => {
+      option!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    });
+    expect(gitTargetInput().value).toBe('/home/me/src/repo');
+  });
 });
