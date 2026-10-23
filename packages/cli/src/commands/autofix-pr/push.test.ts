@@ -247,6 +247,18 @@ describe('runPush (real git, bare remote)', () => {
     expect(state()).toMatchObject({ lastKnownHeadSha: fix, pushedShas: [fix] });
   });
 
+  it('does not count as its own push a commit someone else pushed already', () => {
+    // Someone pushed X on top of the known head; the worktree was moved to X.
+    run(repo, 'switch', '-q', 'feat');
+    const theirs = commitIn(repo, 'theirs.txt');
+    run(repo, 'push', '-q', 'origin', 'feat');
+    run(repo, 'switch', '-q', 'main');
+    run(paths.worktreePath, 'merge', '-q', '--ff-only', theirs);
+    expect(runPush(7)).toMatchObject({ pushed: false, action: 'resync' });
+    expect(state()).toMatchObject({ pushedShas: [] });
+    expect(state().pushCount).toBeUndefined();
+  });
+
   it('never pushes to the default branch, asked at push time', () => {
     commitIn(paths.worktreePath, 'fix.txt');
     defaultBranch = 'feat';

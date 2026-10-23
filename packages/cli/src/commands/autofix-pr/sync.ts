@@ -116,24 +116,14 @@ function syncLocked(
   let discardedChanges = false;
   if (discard) {
     discardedChanges = hasUncommittedChanges(worktree);
-    // Submodules a round checked out or changed go back to the commits the
-    // PR records; a reset that cannot reach them still resets the rest.
-    if (
-      gitOpt(
-        '-C',
-        worktree,
-        'reset',
-        '--hard',
-        '--quiet',
-        '--recurse-submodules',
-        prHead,
-      ) === null
-    ) {
-      git('-C', worktree, 'reset', '--hard', '--quiet', prHead);
-    }
+    git('-C', worktree, 'reset', '--hard', '--quiet', prHead);
     // `-ff`: an untracked nested repository would survive one `-f`, and
     // keep the worktree from ever being clean again.
     git('-C', worktree, 'clean', '-ffdq');
+    // Submodules a round checked out go back to the commits the PR
+    // records. `foreach` visits only checked-out submodules (a reset with
+    // `--recurse-submodules` would write a gitfile for one that is not,
+    // and leave the worktree unreadable).
     gitOpt(
       '-C',
       worktree,
@@ -141,9 +131,20 @@ function syncLocked(
       'foreach',
       '--quiet',
       '--recursive',
-      'git reset --hard --quiet && git clean -ffdq',
+      'git reset --hard --quiet $sha1 && git clean -ffdq',
     );
     if (own > 0) dropped = own;
+    if (hasUncommittedChanges(worktree)) {
+      if (moved) {
+        writeState(paths.statePath, { ...state, lastKnownHeadSha: prHead });
+      }
+      return {
+        synced: false,
+        headSha: prHead,
+        moved,
+        reason: `${worktree} is still not clean after discarding (a submodule git could not reset?); remove it with \`qwen autofix-pr cleanup ${prNumber} --force\` and prepare the watch again`,
+      };
+    }
   } else if (!isAncestor(worktree, known, prHead)) {
     // The author rewrote the history the watch knew.
     if (hasUncommittedChanges(worktree)) {

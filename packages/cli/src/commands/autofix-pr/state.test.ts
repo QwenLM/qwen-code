@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
   autofixPrPaths,
+  breakStaleLock,
   historyPath,
   isBranchName,
   keepHistory,
@@ -123,6 +124,19 @@ describe('withWatchLock', () => {
     });
   });
 
+  it('removes a stale lock only if it is still the one judged stale', () => {
+    const stale = JSON.stringify({ pid: 1, ns: 'x', at: 0, id: 'stale' });
+    writeFileSync(paths.lockPath, stale);
+    expect(breakStaleLock(paths.lockPath, stale)).toBe(true);
+    expect(existsSync(paths.lockPath)).toBe(false);
+    // Another helper took over meanwhile: its fresh lock is put back.
+    const fresh = JSON.stringify({ pid: 1, ns: 'x', at: Date.now(), id: 'f' });
+    writeFileSync(paths.lockPath, fresh);
+    expect(breakStaleLock(paths.lockPath, stale)).toBe(false);
+    expect(readFileSync(paths.lockPath, 'utf8')).toBe(fresh);
+    expect(readdirSync(dirname(paths.lockPath))).toEqual(['autofix-pr-7.lock']);
+  });
+
   it('replaces a symlink planted as the lock, and refuses a directory', () => {
     const target = join(dir, 'target');
     writeFileSync(target, 'keep');
@@ -172,6 +186,25 @@ describe('history', () => {
         handledConflictSha: 'a'.repeat(40),
       });
       expect(readHistory(fork)).toMatchObject({ handledCommentIds: ['F1'] });
+      // Names that `_` would have joined alike stay apart, and no name ends
+      // like a file the skill may write.
+      expect(
+        historyPath(paths, { host: 'ghe.corp:8443', owner: 'o', repo: 'r_x' }),
+      ).not.toBe(
+        historyPath(paths, { host: 'ghe.corp', owner: '8443', repo: 'o_r_x' }),
+      );
+      expect(
+        historyPath(paths, { host: 'github.com', owner: 'a', repo: 'b_c' }),
+      ).not.toBe(
+        historyPath(paths, { host: 'github.com', owner: 'a_b', repo: 'c' }),
+      );
+      expect(
+        historyPath(paths, {
+          host: 'github.com',
+          owner: 'a',
+          repo: 'release-plan',
+        }),
+      ).toMatch(/\.history\.json$/);
       // Spellings of one repository share a file.
       expect(
         historyPath(paths, {

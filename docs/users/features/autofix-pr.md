@@ -9,7 +9,7 @@
 ```
 
 - No PR argument: the PR whose head is your current branch.
-- `--once`: check and fix once, schedule nothing, and end the watch afterwards (a later `--once` starts afresh, from the PR's history).
+- `--once`: check and fix once, schedule nothing, and end the watch afterwards (a later `--once` starts afresh, from the PR's history). On a PR this session already watches, the running watch is left as it is.
 - `--every <minutes>`: how often to check, one of 1, 2, 5, 10, 15, 30 or 60. Default 2.
 - `--no-reply`: push fixes, post nothing on the PR.
 - `--yes`: skip the start confirmation. Needed where no dialog can be shown.

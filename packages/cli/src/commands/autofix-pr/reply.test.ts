@@ -310,37 +310,18 @@ describe('runReply', () => {
     });
   });
 
-  it('adopts an unrecorded reply only when it is the same reply', () => {
-    // Round 1 answered A1; its POST landed after A2 arrived, answer lost.
-    const r1 = {
-      ...comment('PRRC_150', 'me', 'OWNER'),
-      body: `Fixed in abc: renamed x\n\n${REPLY_MARKER}`,
-    };
+  it("ignores failures of the round's head when someone else pushed while it ran", () => {
+    const theirs = 'c'.repeat(40);
+    // The round declined Test on HEAD; the author pushed meanwhile.
     mocks.fetchPrData.mockImplementation(() => ({
-      pr: prData({
-        reviewThreads: {
-          pageInfo: { hasNextPage: false },
-          nodes: [
-            thread('T1', [
-              comment('PRRC_101', 'alice', 'COLLABORATOR'),
-              comment('PRRC_102', 'alice', 'COLLABORATOR'),
-              r1,
-            ]),
-          ],
-        },
-      }),
+      pr: prData({ headRefOid: theirs }),
       viewer: 'me',
     }));
     const outcome = reply({
-      replies: [
-        {
-          replyTo: 101,
-          body: 'Fixed in def: renamed x and y',
-          handled: ['PRRC_101', 'PRRC_102'],
-        },
-      ],
+      replies: [{ replyTo: 101, body: 'Not changed.', handled: ['PRRC_101'] }],
+      handledChecks: [`Test@${HEAD}@#5`],
     });
-    expect(outcome).toMatchObject({ adopted: 0 });
+    expect(outcome).toMatchObject({ ignoredChecks: 1, handledChecks: 0 });
     expect(posts()).toHaveLength(1);
   });
 
@@ -361,7 +342,7 @@ describe('runReply', () => {
     expect(state().handledConflictSha).toBeNull();
   });
 
-  it('never posts a reply whose comments were partly answered already', () => {
+  it('answers the comments of a reply that are still open, not the ones answered already', () => {
     writeState(paths.statePath, {
       ...state(),
       handledCommentIds: ['PRRC_101'],
@@ -385,9 +366,10 @@ describe('runReply', () => {
         { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101', 'PRRC_102'] },
       ],
     });
-    expect(outcome).toMatchObject({ posted: [], skipped: 1 });
-    expect(mocks.ghWithInput).not.toHaveBeenCalled();
-    expect(state().handledCommentIds).toEqual(['PRRC_101']);
+    // A comment that arrived while the round ran is not left unanswered.
+    expect(outcome).toMatchObject({ skipped: 0, handledCommentIds: 1 });
+    expect(posts()).toHaveLength(1);
+    expect(state().handledCommentIds).toEqual(['PRRC_101', 'PRRC_102']);
   });
 
   it('with --no-post records the summary as given, so a later run does not post it', () => {
@@ -467,8 +449,20 @@ describe('runReply', () => {
     expect(mocks.ghWithInput).toHaveBeenCalledTimes(4);
   });
 
-  it('records a reply a lost response left on the PR instead of posting it again', () => {
-    const ours = {
+  it('recognizes a reply whose answer was lost by what it was posted for, not by the next plan', () => {
+    // The POST reaches GitHub; its answer does not.
+    mocks.ghWithInput.mockImplementation(() => {
+      throw new Error('HTTP 502');
+    });
+    expect(() =>
+      reply({
+        replies: [
+          { replyTo: 101, body: 'Fixed in abc.', handled: ['PRRC_101'] },
+        ],
+      }),
+    ).toThrow(/HTTP 502/);
+    expect(state().pendingPosts).toHaveLength(1);
+    const landed = {
       ...comment('PRRC_150', 'me', 'OWNER'),
       body: `Fixed in abc.\n\n${REPLY_MARKER}`,
     };
@@ -477,21 +471,98 @@ describe('runReply', () => {
         reviewThreads: {
           pageInfo: { hasNextPage: false },
           nodes: [
-            thread('T1', [comment('PRRC_101', 'alice', 'COLLABORATOR'), ours]),
+            thread('T1', [
+              comment('PRRC_101', 'alice', 'COLLABORATOR'),
+              landed,
+            ]),
+          ],
+        },
+      }),
+      viewer: 'me',
+    }));
+    mocks.ghWithInput.mockReset();
+    // The next round words its answer differently.
+    const outcome = reply({
+      replies: [
+        { replyTo: 101, body: 'Renamed as asked.', handled: ['PRRC_101'] },
+      ],
+    });
+    expect(outcome).toMatchObject({ adopted: 1, skipped: 1, posted: [] });
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+    expect(state()).toMatchObject({
+      postedCommentIds: ['PRRC_150'],
+      handledCommentIds: ['PRRC_101'],
+      pendingPosts: [],
+    });
+  });
+
+  it('posts again when the reply an earlier run announced never reached the PR', () => {
+    mocks.ghWithInput.mockImplementationOnce(() => {
+      throw new Error('connection refused');
+    });
+    expect(() =>
+      reply({
+        replies: [{ replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'] }],
+      }),
+    ).toThrow(/connection refused/);
+    // An older reply of the tool's sits in the thread, unrecorded: it is
+    // not the announced one, whatever comes after.
+    const older = {
+      ...comment('PRRC_140', 'me', 'OWNER'),
+      body: `Not changed: earlier.\n\n${REPLY_MARKER}`,
+    };
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        reviewThreads: {
+          pageInfo: { hasNextPage: false },
+          nodes: [
+            thread('T1', [comment('PRRC_101', 'alice', 'COLLABORATOR'), older]),
           ],
         },
       }),
       viewer: 'me',
     }));
     const outcome = reply({
-      replies: [{ replyTo: 101, body: 'Fixed in abc.', handled: ['PRRC_101'] }],
+      replies: [{ replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'] }],
     });
-    expect(outcome).toMatchObject({ posted: [], adopted: 1 });
-    expect(mocks.ghWithInput).not.toHaveBeenCalled();
-    expect(state()).toMatchObject({
-      postedCommentIds: ['PRRC_150'],
-      handledCommentIds: ['PRRC_101'],
+    expect(outcome).toMatchObject({ adopted: 0 });
+    expect(outcome.posted).toHaveLength(1);
+    expect(state().pendingPosts).toEqual([]);
+  });
+
+  it('never takes an unannounced reply of the tool for the answer to other comments', () => {
+    // The tool's own reply to PRRC_101 with a generic body, unrecorded and
+    // not announced (posted before this state existed).
+    const generic = {
+      ...comment('PRRC_150', 'me', 'OWNER'),
+      body: `Needs a human decision: which name?\n\n${REPLY_MARKER}`,
+    };
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        reviewThreads: {
+          pageInfo: { hasNextPage: false },
+          nodes: [
+            thread('T1', [
+              comment('PRRC_101', 'alice', 'COLLABORATOR'),
+              comment('PRRC_102', 'alice', 'COLLABORATOR'),
+              generic,
+            ]),
+          ],
+        },
+      }),
+      viewer: 'me',
+    }));
+    const outcome = reply({
+      replies: [
+        {
+          replyTo: 101,
+          body: 'Needs a human decision: which name?',
+          handled: ['PRRC_101', 'PRRC_102'],
+        },
+      ],
     });
+    expect(outcome).toMatchObject({ adopted: 0 });
+    expect(posts()).toHaveLength(1);
   });
 
   it('holds the watch lock, so a second helper cannot interleave its write', () => {

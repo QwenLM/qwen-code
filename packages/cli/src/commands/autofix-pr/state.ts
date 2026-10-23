@@ -11,6 +11,7 @@ import {
   lstatSync,
   readFileSync,
   readlinkSync,
+  renameSync,
   rmSync,
   unlinkSync,
   writeFileSync,
@@ -68,6 +69,17 @@ export interface AutofixPrState {
   authorCanPush?: boolean;
   /** Runs `rerun` was asked for while they were still in progress. */
   deferredRuns?: number[];
+  /** Replies `reply` is about to post, written before each POST: one whose
+   * answer is lost is recognized on the PR by these, never by a new plan. */
+  pendingPosts?: PendingPost[];
+}
+
+export interface PendingPost {
+  /** A review thread's `replyTo`, or `summary` for the PR comment. */
+  where: number | 'summary';
+  handled: string[];
+  /** sha256 of the body as posted, marker included. */
+  bodyHash: string;
 }
 
 /**
@@ -303,14 +315,20 @@ export function historyPath(
   paths: AutofixPrPaths,
   repository: { host: string; owner: string; repo: string },
 ): string {
+  // `+` and `@` appear in no host, owner or repository name, so every
+  // repository has a name of its own; `.history.json` keeps the name from
+  // ever ending like a file the skill may write (`-plan.json`).
   const slug = [
-    normalizeGhHostForUrl(repository.host),
+    normalizeGhHostForUrl(repository.host).replace(/:/g, '@'),
     normalizeSegment(repository.owner),
     normalizeSegment(repository.repo),
   ]
-    .join('_')
-    .replace(/[^a-z0-9._-]/g, '_');
-  return join(dirname(paths.statePath), `${historyPrefix(paths)}${slug}.json`);
+    .join('+')
+    .replace(/[^a-z0-9._@+-]/g, '_');
+  return join(
+    dirname(paths.statePath),
+    `${historyPrefix(paths)}${slug}.history.json`,
+  );
 }
 
 /** Every history file of the PR's number starts with this. */
@@ -341,6 +359,7 @@ export function keepHistory(
   } catch {
     // An unreadable history is replaced rather than blocking cleanup.
   }
+  if (earlier && !sameRepository(earlier, state)) earlier = null;
   const union = (a: string[] | undefined, b: string[] | undefined) => [
     ...new Set([...(a ?? []), ...(b ?? [])]),
   ];
@@ -429,6 +448,9 @@ export function withWatchLock<T>(
   try {
     for (let attempt = 0; ; attempt += 1) {
       if (takeLock(pending, lockPath, token)) break;
+      if (attempt >= 4) {
+        throw new Error(`could not take the lock ${lockPath}`);
+      }
       let stat;
       try {
         stat = lstatSync(lockPath);
@@ -436,7 +458,7 @@ export function withWatchLock<T>(
         continue; // Released meanwhile.
       }
       if (stat.isSymbolicLink()) {
-        unlinkSync(lockPath);
+        rmSync(lockPath, { force: true });
         continue;
       }
       if (!stat.isFile()) {
@@ -444,11 +466,12 @@ export function withWatchLock<T>(
           `${lockPath} is not a lock file; remove it, or run \`qwen autofix-pr cleanup ${prNumber} --force\`.`,
         );
       }
+      const held = readFileSync(lockPath, 'utf8');
       if (
         attempt === 0 &&
-        lockIsStale(readFileSync(lockPath, 'utf8'), stat.mtimeMs)
+        lockIsStale(held, stat.mtimeMs) &&
+        breakStaleLock(lockPath, held)
       ) {
-        unlinkSync(lockPath);
         continue;
       }
       throw new Error(
@@ -466,6 +489,33 @@ export function withWatchLock<T>(
     } catch {
       // Already gone.
     }
+  }
+}
+
+/**
+ * Removes a stale lock, unless another helper replaced it meanwhile: two
+ * helpers that both found it stale must not both remove a lock, or the
+ * second would remove the first one's fresh lock. The lock is moved aside
+ * first, which only one can do, and is put back if it is not the one that
+ * was judged stale.
+ */
+export function breakStaleLock(lockPath: string, stale: string): boolean {
+  const aside = `${lockPath}.stale.${randomUUID()}`;
+  try {
+    renameSync(lockPath, aside);
+  } catch {
+    return true; // Gone already: try to take it.
+  }
+  try {
+    if (readFileSync(aside, 'utf8') === stale) return true;
+    try {
+      linkSync(aside, lockPath);
+    } catch {
+      // A third helper took the lock meanwhile; it holds it.
+    }
+    return false;
+  } finally {
+    rmSync(aside, { force: true });
   }
 }
 

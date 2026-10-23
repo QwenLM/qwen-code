@@ -236,10 +236,25 @@ describe('runRerun', () => {
     mocks.ghWithInput.mockImplementationOnce(() => {
       throw new Error('HTTP 502');
     });
-    expect(() => runRerun(7, 50)).toThrow(/HTTP 502/);
+    expect(() => runRerun(7, 50)).toThrow(/or its answer was lost/);
     expect(state().rerunChecks).toHaveLength(2);
+    // Not marked handled: a human answers them if no re-run happened.
+    expect(state().handledChecks).toBeUndefined();
     expect(runRerun(7, 50)).toMatchObject({ rerun: false });
     expect(mocks.ghWithInput).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives the re-run back when GitHub refuses it, and never hides the failure', () => {
+    mocks.ghWithInput.mockImplementationOnce(() => {
+      throw new Error('HTTP 403: Resource not accessible by integration');
+    });
+    expect(() => runRerun(7, 50)).toThrow(
+      /GitHub did not re-run run 50: .*answer its failures as needing a human/,
+    );
+    // Nothing re-ran: the failures stay reported, the budget stays unspent.
+    expect(state().rerunChecks).toBeUndefined();
+    expect(state().handledChecks).toBeUndefined();
+    expect(runRerun(7, 50)).toMatchObject({ rerun: true });
   });
 
   it('asks for a resync when the PR head moved, and re-runs nothing', () => {

@@ -406,7 +406,10 @@ rejected lease (`[rejected] (stale info)`, or a remote branch that
 `git ls-remote` no longer finds at the known head, whatever language git
 prints in) means someone else pushed; the result is `resync`, not a retry,
 and nothing is recorded. A push whose answer was lost — the remote already
-holds the commit — is recorded as pushed. Any other refusal —
+holds the commit — is recorded as pushed. A commit the remote held before
+the push is not the watch's — the worktree was moved onto someone else's
+push — and answers `resync`, so `sync` adopts it instead of counting it as
+a push. Any other refusal —
 a hook, branch protection, credentials — is an error with git's last lines.
 The output is one JSON line: `{"pushed": true, "sha", "pushes", "maxPushes"}`,
 or `{"pushed": false, "action": "resync" | "stop", "reason"}`.
@@ -446,13 +449,16 @@ The helper decides what may be posted, against one fresh read of the PR
 - A plan with two replies to one thread, or one comment id twice, is refused.
 - Every check runs before anything is posted, so a refused plan posts
   nothing.
-- A reply of the tool's with the same body that already follows the
-  comments a reply answers, and is not recorded — a POST that reached GitHub
-  although its answer was lost — is recorded instead of posted again
-  (`adopted`). A reply written for other comments is never taken for it. The same holds for
-  a summary that answers conversation comments; reviews sit on another list
-  with no shared order, so a summary answering only reviews, or nothing, has
-  no such check.
+- Each POST is announced in the state file first (`pendingPosts`: where it
+  goes, the comments it answers, a hash of its body). The next run looks for
+  each announced reply on the PR: one that is there — a POST that reached
+  GitHub although its answer was lost — is recorded with exactly the
+  comments it was posted for (`adopted`); one that is not was never posted.
+  A reply is never recognized by a later plan's wording, and a reply the
+  tool posted for other comments is never taken for the answer to new ones.
+- A comment a reply names that is answered already is left out of it; the
+  reply still answers the rest, so a comment that arrived while a round ran
+  is not left without an answer.
 - Each body gets the marker once and must fit GitHub's 65,536 characters.
 - Each posted id is written to the state file the moment it exists, with the
   comments its reply handled. A run that fails part way leaves the rest
@@ -499,8 +505,10 @@ same number is refused until that file is removed.
 What the watch posted and handled — `handledCommentIds`,
 `postedCommentIds`, `handledChecks`, `rerunChecks`, `handledConflictSha` —
 is added to the PR's history before the state file goes,
-`.qwen/tmp/autofix-pr-<n>-history-<host>_<owner>_<repo>.json` (one clone may
-watch PRs of one number in a fork and its upstream), and that file is kept
+`.qwen/tmp/autofix-pr-<n>-history-<host>+<owner>+<repo>.history.json` (one
+clone may watch PRs of one number in a fork and its upstream; `+` and `@`, in
+place of a port's `:`, occur in no name, and the suffix never matches a file
+the skill may write), and that file is kept
 as well (`history` in the report). `--force` also removes the watch's lock,
 in case a helper was killed holding it. A later watch of the same
 PR's `prepare` starts from it, so it does not answer the comments an earlier
@@ -570,8 +578,10 @@ checkout is untouched), and checks the worktree as `push` does. Then:
 A worktree with uncommitted changes is never moved or reset. `--discard`
 returns the worktree to the PR head whatever it holds — unpushed commits and
 uncommitted changes, nested repositories (`git clean -ffd`) and changes in
-submodules included — to
-end a round whose work was not pushed, and reports what it dropped. When the
+checked-out submodules included (`git submodule foreach`, which never
+touches one that is not checked out) — to end a round whose work was not
+pushed, and reports what it dropped. A worktree that is still not clean
+afterwards answers `{"synced": false, "reason"}`. When the
 PR's branch cannot be read (the PR was closed, the branch deleted, the
 network is down), it returns to the head the watch last knew instead.
 
@@ -597,9 +607,12 @@ re-ran are recorded in `handledChecks`, so the prepared snapshot does not
 dispatch them again while the re-run is going; a re-run that fails again is
 a new attempt. A head that moved since the watch last saw it answers
 `resync`, and a run with no failed check on the head is an error. The re-run
-is recorded before GitHub is asked and the call is not retried, so a re-run
+is counted before GitHub is asked and the call is not retried, so a re-run
 whose answer was lost is not asked for a second time: at most once, never
-twice.
+twice. Its failures are marked handled only once GitHub took the re-run: a
+refusal (HTTP 4xx — a token without `actions: write`, a run too old) gives
+the re-run back, and every error tells the round to answer those failures
+as needing a human, so a check is never left red and unreported.
 
 GitHub re-runs a run only once it has ended, while `snapshot` reports a
 failed job as soon as it fails. A run still in progress therefore answers
@@ -616,7 +629,9 @@ token, and removed only while it still holds that token. A sandbox may run
 each command in a pid namespace of its own, where pids repeat, so the
 holder's pid is checked only from the same namespace; any other lock is
 taken over once it is older than any helper runs (fifteen minutes), and
-`cleanup --force` removes it at once.
+`cleanup --force` removes it at once. Taking over a stale lock first moves
+it aside, which only one helper can do, and puts it back if it is not the
+one that was judged stale.
 
 ## 7. One check (`tick`)
 

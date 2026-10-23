@@ -12,6 +12,7 @@
 // it exists, so a retry after a failure never posts the same reply twice.
 
 import type { CommandModule } from 'yargs';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
@@ -37,6 +38,7 @@ import {
   writeState,
   type AutofixPrPaths,
   type AutofixPrState,
+  type PendingPost,
 } from './state.js';
 
 /** GitHub refuses a comment body longer than this. */
@@ -232,41 +234,12 @@ function actionable(snapshot: Snapshot): {
   return { threads, comments, untrusted, checks };
 }
 
-/**
- * A reply of this tool's that already follows every comment in `handled`
- * on the list `nodes` (oldest first) and is not recorded: a POST that
- * reached GitHub although its answer was lost. Adopting it, instead of
- * posting again, keeps a retry from answering the same comments twice.
- */
-function unrecordedReply(
-  nodes: CommentNode[],
-  handled: string[],
-  body: string,
-  viewer: string,
-  posted: Set<string>,
-): CommentNode | null {
-  const last = Math.max(
-    ...handled.map((id) => nodes.findIndex((n) => n.id === id)),
-  );
-  if (last < 0 || handled.some((id) => !nodes.some((n) => n.id === id))) {
-    return null;
-  }
-  return (
-    nodes.slice(last + 1).find(
-      (node) =>
-        isOwnReply(node, viewer) &&
-        !posted.has(node.id) &&
-        // The same reply, not one written for other comments: a round
-        // that answered one comment must not count as the answer to a
-        // comment posted while it ran.
-        sameBody(node.body, body),
-    ) ?? null
-  );
-}
-
-function sameBody(a: string, b: string): boolean {
-  const normal = (text: string) => text.replace(/\r\n/g, '\n').trimEnd();
-  return normal(a) === normal(b);
+/** sha256 of a body as GitHub stores it (line endings and trailing space
+ * aside), to recognize a reply on the PR as the one an earlier run posted. */
+function bodyHash(body: string): string {
+  return createHash('sha256')
+    .update(body.replace(/\r\n/g, '\n').trimEnd())
+    .digest('hex');
 }
 
 function threadComments(pr: PrData, replyTo: number): CommentNode[] {
@@ -325,10 +298,52 @@ function replyLocked(
       `PR #${args.pr} is ${pr.state.toLowerCase()}; nothing is posted on it.`,
     );
   }
-  const offer = actionable(buildSnapshot(pr, state));
+  const record = (patch: Partial<AutofixPrState>) => {
+    state = { ...state, ...patch };
+    writeState(paths.statePath, state);
+  };
   // The head the watch knows — `sync` and `push` read it from the branch —
   // rather than the API's, which can lag a push by some seconds.
   const head = state.lastKnownHeadSha;
+
+  // Replies an earlier run was posting when it stopped: each one on the PR
+  // was posted although its answer was lost, and is recorded with exactly
+  // the comments it answered; one that is not on the PR never was posted.
+  let adopted = 0;
+  if ((state.pendingPosts ?? []).length > 0) {
+    const posted = new Set(state.postedCommentIds);
+    const postedIds: string[] = [];
+    const handledIds: string[] = [];
+    let summarized = false;
+    for (const intent of state.pendingPosts ?? []) {
+      const nodes =
+        intent.where === 'summary'
+          ? pr.comments.nodes
+          : threadComments(pr, intent.where);
+      const node = nodes.find(
+        (n) =>
+          isOwnReply(n, state.viewer) &&
+          !posted.has(n.id) &&
+          bodyHash(n.body) === intent.bodyHash,
+      );
+      if (!node) continue;
+      posted.add(node.id);
+      postedIds.push(node.id);
+      handledIds.push(...intent.handled);
+      if (intent.where === 'summary') summarized = true;
+      adopted += 1;
+    }
+    record({
+      postedCommentIds: [...state.postedCommentIds, ...postedIds],
+      handledCommentIds: [
+        ...new Set([...state.handledCommentIds, ...handledIds]),
+      ],
+      pendingPosts: [],
+      ...(summarized ? { summarizedSha: head } : {}),
+    });
+  }
+
+  const offer = actionable(buildSnapshot(pr, state));
   const handledBefore = new Set(state.handledCommentIds);
   const done = new Set(handledBefore);
 
@@ -336,14 +351,13 @@ function replyLocked(
   const pending: typeof plan.replies = [];
   let skipped = 0;
   for (const reply of plan.replies) {
-    if (reply.handled.some((id) => done.has(id))) {
-      // Posted by an earlier run of this plan, which recorded its ids with
-      // it. A comment of the thread it did not name stays open for the
-      // next round rather than risk a second copy of this reply.
+    // A comment answered already — by an earlier run of this plan, or by a
+    // reply the step above found — is not answered again; the rest are.
+    const open = reply.handled.filter((id) => !done.has(id));
+    if (open.length === 0) {
       skipped += 1;
       continue;
     }
-    const fresh = reply.handled;
     const thread = offer.threads.get(reply.replyTo);
     if (!thread) {
       throw new Error(
@@ -351,13 +365,13 @@ function replyLocked(
           `autofix replies only to the threads snapshot reports.`,
       );
     }
-    const foreign = fresh.filter((id) => !thread.has(id));
+    const foreign = open.filter((id) => !thread.has(id));
     if (foreign.length > 0) {
       throw new Error(
         `replies to thread ${reply.replyTo} name comments outside it or not actionable: ${foreign.join(', ')}`,
       );
     }
-    pending.push(reply);
+    pending.push({ ...reply, handled: open });
   }
   const otherHandled = [...(plan.summary?.handled ?? []), ...plan.handled];
   for (const id of otherHandled) {
@@ -368,13 +382,14 @@ function replyLocked(
         : `${id} is not a new comment from a trusted author on PR #${args.pr}.`,
     );
   }
-  // A failure of an earlier head — the round pushed past it — is history:
-  // prepared snapshots read only the current head, so it is not recorded.
+  // A failure of another head — the round pushed past it, or someone else
+  // pushed while it ran — is history: prepared snapshots read only the
+  // current head, so it is not recorded.
   const knownChecks = new Set(state.handledChecks ?? []);
   const currentChecks: string[] = [];
   let ignoredChecks = 0;
   for (const key of new Set(plan.handledChecks)) {
-    if (keyHead(key) !== head) {
+    if (keyHead(key) !== head || keyHead(key) !== pr.headRefOid) {
       ignoredChecks += 1;
       continue;
     }
@@ -394,11 +409,7 @@ function replyLocked(
     handledCommentIds: 0,
     handledChecks: 0,
     ignoredChecks,
-    adopted: 0,
-  };
-  const record = (patch: Partial<AutofixPrState>) => {
-    state = { ...state, ...patch };
-    writeState(paths.statePath, state);
+    adopted,
   };
   const addHandled = (ids: string[]) => {
     const fresh = [...new Set(ids)].filter((id) => !done.has(id));
@@ -407,6 +418,22 @@ function replyLocked(
     return fresh;
   };
   const base = `repos/${state.owner}/${state.repo}`;
+  // Each POST is announced in the state file first, so that a POST whose
+  // answer is lost is recognized on the PR by the next run.
+  const post = (
+    where: number | 'summary',
+    handled: string[],
+    path: string,
+    body: string,
+  ) => {
+    const intent: PendingPost = { where, handled, bodyHash: bodyHash(body) };
+    record({ pendingPosts: [...(state.pendingPosts ?? []), intent] });
+    const posted = postComment(path, body);
+    return {
+      posted,
+      settled: (state.pendingPosts ?? []).filter((p) => p !== intent),
+    };
+  };
 
   for (const reply of pending) {
     if (!args.post) {
@@ -418,20 +445,12 @@ function replyLocked(
       });
       continue;
     }
-    const earlier = unrecordedReply(
-      threadComments(pr, reply.replyTo),
+    const { posted, settled } = post(
+      reply.replyTo,
       reply.handled,
+      `${base}/pulls/${args.pr}/comments/${reply.replyTo}/replies`,
       reply.body,
-      state.viewer,
-      new Set(state.postedCommentIds),
     );
-    const posted = earlier
-      ? { id: earlier.id, url: earlier.url }
-      : postComment(
-          `${base}/pulls/${args.pr}/comments/${reply.replyTo}/replies`,
-          reply.body,
-        );
-    if (earlier) outcome.adopted += 1;
     // Recorded at once: a later failure must not leave this reply unknown,
     // or the next round would answer the same comments again.
     record({
@@ -440,50 +459,43 @@ function replyLocked(
         ...state.handledCommentIds,
         ...addHandled(reply.handled),
       ],
+      pendingPosts: settled,
     });
-    if (!earlier) outcome.posted.push({ kind: 'thread', ...posted });
+    outcome.posted.push({ kind: 'thread', ...posted });
   }
 
   // A summary is posted once: one that handles comments, while any of them
   // is still open; one that only reports a push, once per head.
   const summary = plan.summary;
+  const summaryHandled = (summary?.handled ?? []).filter((id) => !done.has(id));
   const summaryDue =
     summary !== null &&
-    (summary.handled && summary.handled.length > 0
-      ? summary.handled.some((id) => !handledBefore.has(id))
+    ((summary.handled ?? []).length > 0
+      ? summaryHandled.length > 0
       : state.summarizedSha !== head);
   if (summary && summaryDue) {
-    // Its comments are recorded with it, so a retry after a later failure
-    // finds it posted. `--no-post` records the same, posting nothing.
-    // Only a summary answering conversation comments can be matched to one
-    // already on the PR: reviews sit on another list, in no shared order.
-    const earlier =
-      args.post && (summary.handled ?? []).length > 0
-        ? unrecordedReply(
-            pr.comments.nodes,
-            summary.handled ?? [],
-            summary.body,
-            state.viewer,
-            new Set(state.postedCommentIds),
-          )
-        : null;
-    if (earlier) outcome.adopted += 1;
-    const posted = earlier
-      ? { id: earlier.id, url: earlier.url }
-      : args.post
-        ? postComment(`${base}/issues/${args.pr}/comments`, summary.body)
-        : null;
+    // Its comments are recorded with it. `--no-post` records the same,
+    // posting nothing.
+    const result = args.post
+      ? post(
+          'summary',
+          summaryHandled,
+          `${base}/issues/${args.pr}/comments`,
+          summary.body,
+        )
+      : null;
     record({
-      postedCommentIds: posted
-        ? [...state.postedCommentIds, posted.id]
+      postedCommentIds: result
+        ? [...state.postedCommentIds, result.posted.id]
         : state.postedCommentIds,
       handledCommentIds: [
         ...state.handledCommentIds,
-        ...addHandled(summary.handled ?? []),
+        ...addHandled(summaryHandled),
       ],
       summarizedSha: head,
+      ...(result ? { pendingPosts: result.settled } : {}),
     });
-    if (posted && !earlier) outcome.posted.push({ kind: 'summary', ...posted });
+    if (result) outcome.posted.push({ kind: 'summary', ...result.posted });
   } else if (summary) {
     outcome.summarySkipped = true;
   }

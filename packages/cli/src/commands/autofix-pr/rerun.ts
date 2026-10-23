@@ -113,25 +113,43 @@ function rerunLocked(
   const attempts = failed.map(({ event, attempt }) =>
     checkAttemptKey(event.check, pr.headRefOid, attempt),
   );
-  // Recorded before GitHub is asked, so a re-run whose answer is lost is
-  // not asked for twice: at most once, never twice.
+  // The re-run is counted before GitHub is asked, so one whose answer is
+  // lost is not asked for twice: at most once, never twice. The failures
+  // are marked handled only once GitHub took it, so a re-run GitHub refused
+  // leaves them for a human instead of hiding them.
+  writeState(paths.statePath, {
+    ...state,
+    rerunChecks: [...already, ...rerunKeys],
+    deferredRuns: (state.deferredRuns ?? []).filter((id) => id !== runId),
+  });
+  try {
+    // `--failed` re-runs every failed job of the run, so every failed
+    // check of it spends its re-run. Not retried, for the same reason.
+    ghWithInput(
+      '',
+      'run',
+      'rerun',
+      String(runId),
+      '--failed',
+      '-R',
+      `${state.owner}/${state.repo}`,
+    );
+  } catch (err) {
+    const message = (err as Error).message;
+    // A refusal (4xx: no permission, a run too old) re-ran nothing, so the
+    // budget is given back; anything else may have reached GitHub.
+    const refused = /\bHTTP 4\d\d\b/.test(message);
+    if (refused) writeState(paths.statePath, { ...state });
+    throw new Error(
+      `GitHub did not re-run run ${runId}${refused ? '' : ' (or its answer was lost; the re-run is counted)'}: ${message.trim().split('\n').slice(-3).join(' ')} — answer its failures as needing a human.`,
+    );
+  }
   writeState(paths.statePath, {
     ...state,
     rerunChecks: [...already, ...rerunKeys],
     handledChecks: [...(state.handledChecks ?? []), ...attempts],
     deferredRuns: (state.deferredRuns ?? []).filter((id) => id !== runId),
   });
-  // `--failed` re-runs every failed job of the run, so every failed check
-  // of it spends its re-run. Not retried, for the same reason.
-  ghWithInput(
-    '',
-    'run',
-    'rerun',
-    String(runId),
-    '--failed',
-    '-R',
-    `${state.owner}/${state.repo}`,
-  );
   return { rerun: true, runId, checks };
 }
 

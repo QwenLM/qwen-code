@@ -252,6 +252,16 @@ function pushLocked(paths: AutofixPrPaths, prNumber: number): PushOutcome {
     }
   }
 
+  // A commit the remote holds already was not pushed by this watch — the
+  // worktree was moved onto someone else's push — so it is adopted through
+  // `sync`, never recorded as a push (git would answer it "up to date").
+  if (remoteHead(worktree, state.pushTarget, state.headRefName) === head) {
+    return {
+      pushed: false,
+      action: 'resync',
+      reason: `the PR branch already holds ${head.slice(0, 12)}: it was pushed from elsewhere`,
+    };
+  }
   const result = pushRef(
     worktree,
     state.pushTarget,
