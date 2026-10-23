@@ -22,6 +22,7 @@ import {
   settleParkedTurnCancelled,
   answerCommittedTurnCalls,
   recoverHostedRuntimeTurn,
+  HostedRecoveryQuiescingError,
   RecoveryDeclined,
   settleInterruptedTurnRuntime,
   type HostedRecoveryTurn,
@@ -1635,6 +1636,48 @@ describe('recoverHostedRuntimeTurn', () => {
       await replacement.close();
     }
   });
+
+  it.each([false, true])(
+    'keeps quiescing recovery retryable without executing tools (lease already held: %s)',
+    async (leaseAlreadyHeld) => {
+      await parkAtAwaitRuntime();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+      const release = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'release')
+        .mockResolvedValue();
+      const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
+      const replacement = await open('boot-2', false);
+      try {
+        const checkpoint =
+          await replacement.authority.harnessRunAuthorization();
+        const sequence = replacement.authority.committedSequence;
+        const cause = await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+          canStart: () => false,
+          leaseAlreadyHeld,
+        }).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        expect(cause).toBeInstanceOf(HostedRecoveryQuiescingError);
+        expect(cause).not.toBeInstanceOf(RecoveryDeclined);
+        expect(cause).toHaveProperty('message', 'The Harness is quiescing.');
+        expect(execute).not.toHaveBeenCalled();
+        expect(release).toHaveBeenCalledTimes(leaseAlreadyHeld ? 0 : 1);
+        expect(replacement.authority.committedSequence).toBe(sequence);
+        expect(await replacement.authority.harnessRunAuthorization()).toEqual(
+          checkpoint,
+        );
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
 
   it('declines to re-dispatch a parked execution whose intent is missing', async () => {
     // No tool.intent: the recovery cannot rebuild the original arguments, so

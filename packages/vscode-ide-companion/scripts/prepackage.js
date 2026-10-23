@@ -126,6 +126,29 @@ function pruneBundledRipgrep() {
   );
 }
 
+function pruneBundledOpenTui() {
+  if (process.env.UNIVERSAL_BUILD === 'true' || !process.env.VSCODE_TARGET) {
+    return;
+  }
+  const expected = getExpectedRipgrepDirName();
+  if (!expected) return;
+  const [arch, platform] = expected.split('-');
+  const scope = path.join(bundledCliDir, 'opentui-assets', '@opentui');
+  if (!fs.existsSync(scope)) return;
+  for (const entry of fs.readdirSync(scope, { withFileTypes: true })) {
+    if (
+      entry.isDirectory() &&
+      entry.name.startsWith('core-') &&
+      entry.name !== `core-${platform}-${arch}`
+    ) {
+      fs.rmSync(path.join(scope, entry.name), {
+        recursive: true,
+        force: true,
+      });
+    }
+  }
+}
+
 function removeSelfReferenceFromNodeModules() {
   if (process.platform !== 'win32') return;
 
@@ -187,7 +210,11 @@ function main() {
   run(npm, ['--prefix', repoRoot, 'run', 'bundle'], { cwd: repoRoot });
 
   console.log('[prepackage] Preparing root dist/ package metadata...');
-  run(npm, ['--prefix', repoRoot, 'run', 'prepare:package'], { cwd: repoRoot });
+  run(
+    npm,
+    ['--prefix', repoRoot, 'run', 'prepare:package', '--', '--host-runtime'],
+    { cwd: repoRoot },
+  );
 
   console.log('[prepackage] Preparing web-shell dist/ package metadata...');
   run(
@@ -247,6 +274,7 @@ function main() {
 
   removeSelfReferenceFromNodeModules();
   pruneBundledRipgrep();
+  pruneBundledOpenTui();
 }
 
 main();
