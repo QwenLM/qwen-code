@@ -218,14 +218,20 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
     ? trimmed.slice(0, -INDEX_TRUNCATION_NOTICE.length).split('\n')
     : lines;
   const { content, dropped } = trimIndexToBudgetDetailed(entries);
-  const hasOverlongEntry = entries.some(
-    (line) => line.length > MAX_INDEX_LINE_CHARS,
-  );
+  const candidates = entries.slice(0, MAX_MANAGED_AUTO_MEMORY_INDEX_LINES);
+  const candidateCharCount = candidates.join('\n').length;
+  const ordinaryCharCount = candidates
+    .map((line) => line.slice(0, MAX_INDEX_LINE_CHARS))
+    .join('\n').length;
+  // Blame long candidates only when the ordinary-entry bound clears overflow.
+  const overlongEntriesCauseOverflow =
+    candidateCharCount > MAX_INDEX_CHARS &&
+    ordinaryCharCount <= MAX_INDEX_CHARS;
 
   const reason =
     wasCharTruncated && !wasLineTruncated
       ? `${charCount} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — ${
-          hasOverlongEntry
+          overlongEntriesCauseOverflow
             ? 'index entries are too long'
             : `too many index entries (${entries.length})`
         }`
@@ -233,12 +239,11 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
         ? `${lineCount} lines (limit: ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES})`
         : `${lineCount} lines and ${charCount} UTF-16 code units`;
 
-  // Name a lever that can actually move the number. Shortening entries only
-  // helps when one is over the per-line limit; with every entry legal the
-  // overflow is the entry COUNT, and no amount of rewording clears it.
-  const lever = hasOverlongEntry
+  const lever = overlongEntriesCauseOverflow
     ? ` Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files. Prune or merge entries if the count is still over budget.`
-    : ` No entry exceeds the ${MAX_INDEX_LINE_CHARS}-unit line limit, so shortening entries cannot help — prune or merge entries.`;
+    : wasLineTruncated
+      ? ' Shortening entries cannot reduce the line count — prune or merge entries.'
+      : ' Shorten index descriptions, or prune or merge entries, to fit the character budget.';
 
   return `${content}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded.${describeDroppedEntries(
     dropped,

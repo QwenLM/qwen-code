@@ -396,37 +396,98 @@ describe('managed auto-memory prompt helpers', () => {
     },
   );
 
-  // Issue #14834: a store can blow the character budget while every entry stays
-  // within the per-line limit, because MAX_INDEX_LINES * MAX_INDEX_LINE_CHARS
-  // exceeds MAX_INDEX_CHARS. The old message blamed entry length in that state,
-  // which named a lever that cannot move the number.
-  const uniformOverBudgetIndex = () => {
+  // Issue #14834: ordinary entries can exceed the total character budget.
+  // Issue #15277: shortening descriptions can still recover those entries.
+  const uniformOverBudgetIndex = (
+    count = 170,
+    lineChars = MAX_INDEX_LINE_CHARS,
+  ) => {
     const entry = (i: number) => {
       const prefix = `- [Topic ${i}](project/topic-${i}.md) — `;
-      return `${prefix}${'h'.repeat(MAX_INDEX_LINE_CHARS - prefix.length)}`;
+      return `${prefix}${'h'.repeat(lineChars - prefix.length)}`;
     };
-    return Array.from({ length: 170 }, (_, i) => entry(i));
+    return Array.from({ length: count }, (_, i) => entry(i));
   };
 
-  it('blames the entry count, not entry length, when every entry is legal', () => {
-    const lines = uniformOverBudgetIndex();
-    for (const line of lines) expect(line).toHaveLength(MAX_INDEX_LINE_CHARS);
-    const index = lines.join('\n');
-    expect(index.length).toBeGreaterThan(MAX_INDEX_CHARS);
-    expect(lines.length).toBeLessThan(MAX_MANAGED_AUTO_MEMORY_INDEX_LINES);
+  it.each([
+    [170, MAX_INDEX_LINE_CHARS],
+    [200, 200],
+  ])(
+    'offers effective character-budget advice for %i entries of %i units',
+    (count, lineChars) => {
+      const lines = uniformOverBudgetIndex(count, lineChars);
+      for (const line of lines) expect(line).toHaveLength(lineChars);
+      const index = lines.join('\n');
+      expect(index.length).toBeGreaterThan(MAX_INDEX_CHARS);
+      expect(lines.length).toBeLessThanOrEqual(
+        MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
+      );
+      expect(
+        lines.map((line) => line.slice(0, MAX_INDEX_LINE_CHARS)).join('\n')
+          .length,
+      ).toBeGreaterThan(MAX_INDEX_CHARS);
 
-    const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
+      const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
 
-    expect(result).toContain(
-      `${index.length} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — too many index entries (170)`,
+      expect(result).toContain(
+        `${index.length} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — too many index entries (${count})`,
+      );
+      expect(result).not.toContain('index entries are too long');
+      expect(result).not.toContain('Keep index entries to one line at most');
+      expect(result).toContain('Shorten index descriptions');
+      expect(result).not.toContain('shortening entries cannot help');
+      expect(result).toContain('prune or merge entries');
+      // The budget is a hardcoded constant with no settings surface, so the
+      // advice must not send the reader after a lever they cannot pull.
+      expect(result).not.toContain('raise the budget');
+
+      const shortened = lines.map((line) => line.slice(0, 100));
+      const recovered = buildManagedAutoMemoryPrompt(
+        '/tmp/memory',
+        shortened.join('\n'),
+      );
+      expect(recovered).not.toContain('Only part of it was loaded.');
+      expect(recovered.match(/^- \[Topic \d+\]/gm)).toHaveLength(count);
+    },
+  );
+
+  it('limits the cannot-shorten advice to a line-count overflow', () => {
+    const lines = uniformOverBudgetIndex(201, 100);
+    expect(lines.join('\n').length).toBeLessThan(MAX_INDEX_CHARS);
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.join('\n'),
     );
-    expect(result).not.toContain('index entries are too long');
-    expect(result).not.toContain('Keep index entries to one line at most');
-    expect(result).toContain('shortening entries cannot help');
+    expect(result).toContain('201 lines (limit: 200)');
+    expect(result).toContain('Shortening entries cannot reduce the line count');
     expect(result).toContain('prune or merge entries');
-    // The budget is a hardcoded constant with no settings surface, so the
-    // advice must not send the reader after a lever they cannot pull.
-    expect(result).not.toContain('raise the budget');
+    expect(result).not.toContain('Shorten index descriptions');
+
+    const shortened = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.map((line) => line.slice(0, 50)).join('\n'),
+    );
+    expect(shortened).toContain('Dropped 1 of 201 entries');
+    const pruned = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.slice(0, 200).join('\n'),
+    );
+    expect(pruned).not.toContain('Only part of it was loaded.');
+  });
+
+  it('does not take length advice from an entry beyond the line cap', () => {
+    const lines = [
+      ...uniformOverBudgetIndex(200, 100),
+      `- [Outside](notes/${'x'.repeat(MAX_INDEX_CHARS)}.md)`,
+    ];
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.join('\n'),
+    );
+    expect(result).toContain('Dropped 1 of 201 entries: "Outside".');
+    expect(result).toContain('Shortening entries cannot reduce the line count');
+    expect(result).not.toContain('Keep index entries to one line at most');
+    expect(result.match(/^- \[Topic \d+\]/gm)).toHaveLength(200);
   });
 
   it('names what the budget evicted instead of only saying part was loaded', () => {
