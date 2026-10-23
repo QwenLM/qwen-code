@@ -472,8 +472,9 @@ The helper decides what may be posted, against one fresh read of the PR
   comments its reply handled. A run that fails part way leaves the rest
   unposted and unrecorded; running the same plan again recognizes what was
   posted (above) and skips a reply whose comments are all handled, and the
-  summary when its comments are (a summary that handles none is posted once
-  per head, `summarizedSha`).
+  summary when its comments are — unless the head is a push of the watch's
+  that has no summary yet: each push gets one, once per head
+  (`summarizedSha`), whether or not it answers comments.
 - `handledChecks` and `handledConflict` record failures and a conflict the
   round did not fix with a push, so prepared snapshots stop reporting them:
   a failure by its attempt (a re-run that fails again is new), a conflict by
@@ -599,7 +600,13 @@ a submodule commit that cannot be fetched does not fail it). `foreach` only
 lists the checked-out submodules; the fetch, with a minute of its own and
 the protocol policy git applies to submodules, and the reset run outside it,
 since a child of `foreach` would outlive a timeout that kills only the
-top-level git and go on changing the submodule after `sync` returned. No
+top-level git and go on changing the submodule after `sync` returned (a
+fetch that times out is killed; a transport process it started may linger
+until its connection ends, but it only downloads objects). Submodules are
+aligned one level at a time, so a nested one gets the commit its parent
+records once the parent has moved, and also when the worktree already
+contains the PR head (a round merged it: a merge moves the gitlinks, not the
+checked-out submodules). No
 reset recurses into submodules, whatever `submodule.recurse` says, and a worktree that is not clean afterwards answers
 `synced: false`, so a fix never commits a submodule back to an old commit. When the
 PR's branch cannot be read (the PR was closed, the branch deleted, the

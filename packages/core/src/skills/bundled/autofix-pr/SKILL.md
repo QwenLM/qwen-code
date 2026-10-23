@@ -108,8 +108,12 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
    Run the narrowest checks that cover your change — targeted tests, lint,
    typecheck — as the repository documents them (AGENTS.md, CONTRIBUTING,
    README). Commit only when they pass, with a message that says what was
-   fixed. If you cannot make them pass, leave no change behind:
-   `git reset --hard <headSha>` and `git clean -fd`.
+   fixed. Stage the files you changed by name — never `git add -A` or
+   `git commit -a` — and never commit a submodule (gitlink) change the fix
+   does not need: after a merge a checked-out submodule can show as
+   modified only because it was not moved along. If you cannot make the
+   checks pass, say so (`verified: false`) and leave the worktree as it is:
+   the round discards it.
 
    ## Answer
 
@@ -138,7 +142,7 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
      - `action: "resync"` → someone pushed while the round ran, or the branch already holds the round's commit; run `sync <n>`:
        - `synced: true` with no `dropped` → the worktree contains the new head: run `push <n>` once more. If it answers "nothing to push", the round's commits are already on the PR — `sync`'s `headSha` contains them (an earlier push whose answer was lost, or someone pushed them): they count as pushed at that head, and the items they fixed are answered as fixed.
        - `synced: false` with no `action` (with or without `dropped`) → the worktree could not follow the new head: run `sync <n> --discard`, then start the round over from step 1 as for `dropped` — once per turn; the second time, report it and end the round.
-       - `action: "merge"` → run one more `agent` call in the worktree: merge the commit `sync` named (never rebase), resolve, re-run the same verification, commit; then `sync <n>` and `push <n>` once more. If that does not push, nothing is pushed this round: report it.
+       - `action: "merge"` → run one more `agent` call in the worktree: merge the commit `sync` named (never rebase), resolve, re-run the same verification, commit (the same staging rules as the brief); then `sync <n>`. If it answers `synced: false`, nothing is pushed this round: run `sync <n> --discard` and report it. Otherwise `push <n>` once more; if that does not push, nothing is pushed this round: report it.
        - `dropped` → the author rewrote the PR's history, and the round's commits were made on the old one. Nothing is pushed or recorded. The gate will not report the same events again, so start the round over from step 1 now, on the new head — once per turn; a second rewrite ends the round with a report. (The `dropped` that `sync --discard` reports is expected and needs nothing.)
      - `action: "stop"` → Section "Stop" with its `reason`.
      - A refusal (a pre-push hook failed, uncommitted changes) → nothing is pushed: report it, and answer the items the push would have fixed as `needs_human` with the reason.

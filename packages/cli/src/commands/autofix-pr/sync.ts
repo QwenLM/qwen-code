@@ -123,7 +123,9 @@ function syncLocked(
   let dropped: number | undefined;
   let discardedChanges = false;
   if (discard) {
-    discardedChanges = hasUncommittedChanges(worktree);
+    // Whatever git can still read of it: a worktree it cannot read is
+    // reset all the same, and judged again below.
+    discardedChanges = dirtyOrUnreadable(worktree);
     git(
       '-C',
       worktree,
@@ -138,7 +140,7 @@ function syncLocked(
     git('-C', worktree, 'clean', '-ffdq');
     alignSubmodules(worktree);
     if (own > 0) dropped = own;
-    if (hasUncommittedChanges(worktree)) {
+    if (dirtyOrUnreadable(worktree)) {
       if (moved) {
         writeState(paths.statePath, { ...state, lastKnownHeadSha: prHead });
       }
@@ -197,12 +199,17 @@ function syncLocked(
     alignSubmodules(worktree);
   }
 
+  if (!discard && (head === prHead || isAncestor(worktree, prHead, head))) {
+    // The worktree contains the PR head already (a round merged it): a
+    // merge moves the gitlinks, not the checked-out submodules.
+    alignSubmodules(worktree);
+  }
   if (moved) {
     writeState(paths.statePath, { ...state, lastKnownHeadSha: prHead });
   }
   // A submodule the new head moved, which git could not check out, would
   // otherwise be committed back to its old commit by the next fix.
-  if (!discard && hasUncommittedChanges(worktree)) {
+  if (!discard && dirtyOrUnreadable(worktree)) {
     return {
       synced: false,
       headSha: prHead,
@@ -232,23 +239,28 @@ const SUBMODULE_FETCH_TIMEOUT_MS = 60_000;
  * after the helper returned. A commit a submodule lacks is fetched from its
  * own remote, under the protocol policy git applies to submodules.
  */
-function alignSubmodules(worktree: string): void {
+function alignSubmodules(
+  repository: string,
+  root = realpathSync(repository),
+  depth = 0,
+): void {
+  // One level at a time: a nested submodule's commit is the one its parent
+  // records once the parent has moved, so it is listed only then.
+  if (depth > 8) return;
   const listed = gitOpt(
     '-C',
-    worktree,
+    repository,
     'submodule',
     'foreach',
     '--quiet',
-    '--recursive',
-    'printf "%s %s\\n" "$sha1" "$displaypath"',
+    'printf "%s %s\\n" "$sha1" "$sm_path"',
   );
   if (!listed) return;
-  const root = realpathSync(worktree);
   for (const line of listed.split('\n')) {
     const match = /^([0-9a-f]{40,64}) (.+)$/.exec(line);
     if (!match) continue;
     const [, sha, path] = match;
-    const dir = join(worktree, path);
+    const dir = join(repository, path);
     let real: string;
     try {
       real = realpathSync(dir);
@@ -271,7 +283,17 @@ function alignSubmodules(worktree: string): void {
       ) !== null
     ) {
       gitOpt('-C', dir, 'clean', '-ffdq');
+      alignSubmodules(dir, root, depth + 1);
     }
+  }
+}
+
+/** A worktree git cannot read counts as not clean. */
+function dirtyOrUnreadable(worktree: string): boolean {
+  try {
+    return hasUncommittedChanges(worktree);
+  } catch {
+    return true;
   }
 }
 

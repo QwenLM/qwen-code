@@ -396,6 +396,144 @@ describe('runSync (real git, bare remote)', () => {
     expect(run(paths.worktreePath, 'status', '--porcelain')).toBe('');
   });
 
+  /** A repository of its own, with one commit, for a submodule. */
+  const repoOf = (name: string): string => {
+    const dir = join(base, name);
+    run(base, 'init', '-q', '-b', 'main', dir);
+    run(dir, 'config', 'user.email', 't@example.com');
+    run(dir, 'config', 'user.name', 't');
+    commitIn(dir, `${name}.txt`);
+    return dir;
+  };
+  /** Lets submodule commands in `dir` fetch from a local path. */
+  const allowFile = (dir: string) =>
+    run(dir, 'config', 'protocol.file.allow', 'always');
+  /** The author moves a gitlink of the PR branch to `sha`. */
+  const authorBumps = (path: string, sha: string) => {
+    const author = join(base, `author-${sha.slice(0, 7)}`);
+    run(base, 'clone', '-q', '-b', 'feat', remote, author);
+    run(author, 'config', 'user.email', 'a@example.com');
+    run(author, 'config', 'user.name', 'a');
+    run(author, 'update-index', '--cacheinfo', `160000,${sha},${path}`);
+    run(author, 'commit', '-q', '-m', `bump ${path}`);
+    run(author, 'push', '-q', 'origin', 'feat');
+  };
+
+  it('aligns nested submodules one level at a time, each to what its parent records', () => {
+    const inner = repoOf('inner');
+    const outer = repoOf('outer');
+    run(
+      outer,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      inner,
+      'inner',
+    );
+    run(outer, 'commit', '-q', '-m', 'add inner');
+    run(
+      paths.worktreePath,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      outer,
+      'outer',
+    );
+    run(
+      paths.worktreePath,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'update',
+      '-q',
+      '--init',
+      '--recursive',
+    );
+    run(paths.worktreePath, 'commit', '-q', '-m', 'add outer');
+    run(paths.worktreePath, 'push', '-q', 'origin', 'HEAD:feat');
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      lastKnownHeadSha: worktreeHead(),
+    });
+    allowFile(join(paths.worktreePath, 'outer'));
+    allowFile(join(paths.worktreePath, 'outer', 'inner'));
+    // outer moves on, and records a newer inner.
+    const i2 = commitIn(inner, 'i2.txt');
+    run(join(outer, 'inner'), 'pull', '-q', 'origin', 'main');
+    run(outer, 'add', 'inner');
+    run(outer, 'commit', '-q', '-m', 'bump inner');
+    authorBumps('outer', run(outer, 'rev-parse', 'HEAD'));
+    expect(runSync(7)).toMatchObject({ synced: true, moved: true });
+    expect(
+      run(join(paths.worktreePath, 'outer', 'inner'), 'rev-parse', 'HEAD'),
+    ).toBe(i2);
+    expect(run(paths.worktreePath, 'status', '--porcelain')).toBe('');
+  });
+
+  it('aligns submodules after a round merged a head that moved one', () => {
+    const sub = repoOf('msub');
+    run(
+      paths.worktreePath,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      sub,
+      'vendor/sub',
+    );
+    run(paths.worktreePath, 'commit', '-q', '-m', 'add sub');
+    run(paths.worktreePath, 'push', '-q', 'origin', 'HEAD:feat');
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      lastKnownHeadSha: worktreeHead(),
+    });
+    allowFile(join(paths.worktreePath, 'vendor', 'sub'));
+    // The round's fix, while the author bumps the submodule on top.
+    commitIn(paths.worktreePath, 'fix.txt');
+    const s2 = commitIn(sub, 's2.txt');
+    authorBumps('vendor/sub', s2);
+    expect(runSync(7)).toMatchObject({ synced: false, action: 'merge' });
+    run(
+      paths.worktreePath,
+      'fetch',
+      '-q',
+      '--no-recurse-submodules',
+      'origin',
+      'feat',
+    );
+    run(paths.worktreePath, 'merge', '-q', '--no-edit', 'FETCH_HEAD');
+    expect(runSync(7)).toMatchObject({ synced: true, moved: true });
+    expect(
+      run(join(paths.worktreePath, 'vendor', 'sub'), 'rev-parse', 'HEAD'),
+    ).toBe(s2);
+    expect(run(paths.worktreePath, 'status', '--porcelain')).toBe('');
+  });
+
+  it('with --discard does not throw on a worktree git cannot read', () => {
+    // A submodule whose gitfile points nowhere: git status fails.
+    run(
+      paths.worktreePath,
+      'update-index',
+      '--add',
+      '--cacheinfo',
+      `160000,${featSha},vendor/broken`,
+    );
+    run(paths.worktreePath, 'commit', '-q', '-m', 'gitlink');
+    mkdirSync(join(paths.worktreePath, 'vendor', 'broken'), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(paths.worktreePath, 'vendor', 'broken', '.git'),
+      'gitdir: /nowhere\n',
+    );
+    expect(() => runSync(7, true)).not.toThrow();
+  });
+
   it('follows only the branch GitHub names, not one an edited state file names', () => {
     run(repo, 'branch', 'release', 'main');
     const release = run(repo, 'rev-parse', 'release');
