@@ -20,7 +20,7 @@
 - `gh` is signed in, with push access to the PR branch: write access to a same-repository PR, or your own fork, or a fork that allows edits from maintainers.
 - You run it from a clone of the PR's repository with one git remote for it.
 - In the default [approval mode](./approval-mode.md), every shell command asks first: the helper calls (the push included), `gh pr view`, and every command a fix runs. That suits a watch you keep an eye on. To let it run unattended, choose a mode that lets commands run, such as [Auto Mode](./auto-mode.md), and keep in mind that the fix runs the repository's own build and test commands. The skill itself grants only reading its own files under `.qwen/tmp/`, writing its fix brief and reply plan there, and listing scheduled tasks.
-- A PR whose author cannot push to the repository runs someone else's code when a fix is verified. Such a PR is watched only from a [sandboxed](./sandbox.md) session; elsewhere only `--once` is offered, after a confirmation that `--yes` does not skip.
+- A PR whose author cannot push to the repository runs someone else's code, with your `gh` and `git` credentials in reach, when a fix is verified. Such a PR is never watched: only `--once` is offered, after a confirmation that says so and that `--yes` does not skip.
 
 When it starts, it asks once to confirm where it will push and that it will reply on the PR.
 
@@ -58,15 +58,16 @@ Comments are acted on when their author is an owner, member or collaborator of t
 
 ## Stopping and files
 
-`/autofix-pr stop <n>` deletes the scheduled task and removes the worktree, its branch and the state file. A worktree that still holds unpushed work is kept, and the report says why; `qwen autofix-pr cleanup <n> --force` discards it. The watch also ends when the session exits.
+`/autofix-pr stop <n>` deletes the scheduled task and removes the worktree, its branch and the state file; the gate cursor and the PR's history stay, so a later watch does not answer the same comments again. A worktree that still holds unpushed work is kept, and the report says why; `qwen autofix-pr cleanup <n> --force` discards it. The watch also ends when the session exits.
 
 Files live under `.qwen/tmp/` of the clone's main worktree:
 
-| File                           | Contents                                   |
-| ------------------------------ | ------------------------------------------ |
-| `autofix-pr-<n>/`              | the PR worktree                            |
-| `autofix-pr-<n>-state.json`    | the watch: known head, pushes, handled ids |
-| `autofix-pr-<n>-gate.json`     | the gate probe's cursor                    |
-| `autofix-pr-<n>-*.log`, `*.md` | CI logs and fix briefs                     |
+| File                                     | Contents                                                          |
+| ---------------------------------------- | ----------------------------------------------------------------- |
+| `autofix-pr-<n>/`                        | the PR worktree                                                   |
+| `autofix-pr-<n>-state.json`              | the watch: known head, pushes, handled ids                        |
+| `autofix-pr-<n>-gate.json`               | the gate probe's cursor                                           |
+| `autofix-pr-<n>-history.json`            | what earlier watches of the PR posted and handled, kept by `stop` |
+| `autofix-pr-<n>-*.log`, `*.md`, `*.json` | CI logs, fix briefs and reply plans                               |
 
 The design is in [`docs/design/2026-10-21-autofix-pr-command.md`](../../design/2026-10-21-autofix-pr-command.md).

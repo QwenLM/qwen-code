@@ -51,7 +51,7 @@ const CHECK_CONTEXT_FIELDS = `nodes {
   __typename
   ... on CheckRun {
     name status conclusion detailsUrl databaseId
-    checkSuite { app { databaseId } workflowRun { event workflow { databaseId } } }
+    checkSuite { status app { databaseId } workflowRun { event workflow { databaseId } } }
   }
   ... on StatusContext { context state targetUrl createdAt }
 }`;
@@ -172,6 +172,8 @@ type CheckContext =
       /** Grows with every run, so it orders the attempts of one check. */
       databaseId: number;
       checkSuite?: {
+        /** The whole run's progress: `COMPLETED` once every job ended. */
+        status?: string;
         app: { databaseId: number } | null;
         workflowRun: {
           event: string;
@@ -384,6 +386,9 @@ export interface FailedCheck {
   identity: string;
   /** A GitHub Actions job, the only kind `gh run rerun` can re-run. */
   actions: boolean;
+  /** Its run has ended: GitHub re-runs a run only then. Commit statuses
+   * and other apps' checks have no run and count as ended. */
+  runDone: boolean;
 }
 
 /** The failed checks of the head, each with the identity of its attempt. */
@@ -414,6 +419,9 @@ export function checkEvents(pr: PrData): {
           attempt: `#${ctx.databaseId}`,
           identity: checkIdentity(ctx),
           actions: Boolean(ctx.checkSuite?.workflowRun),
+          runDone:
+            !ctx.checkSuite?.workflowRun ||
+            (ctx.checkSuite.status ?? 'COMPLETED') === 'COMPLETED',
         });
       }
     } else if (PENDING_STATUSES.has(ctx.state)) {
@@ -429,6 +437,7 @@ export function checkEvents(pr: PrData): {
         attempt: ctx.createdAt,
         identity: checkIdentity(ctx),
         actions: false,
+        runDone: true,
       });
     }
   }
@@ -620,6 +629,13 @@ export function buildSnapshot(pr: PrData, state: AutofixPrState): Snapshot {
 export interface GateWatch {
   knownHeads: string[];
   seenCommentIds: string[];
+  /** Failed attempts a round handled without a push. */
+  handledChecks?: string[];
+  /** Head whose conflict a round left for a human. */
+  handledConflictSha?: string | null;
+  /** Runs a round wanted re-run while they were still in progress: their
+   * failures are reported once more when the run has ended. */
+  deferredRuns?: number[];
 }
 
 /**
@@ -676,10 +692,14 @@ export function buildGateSnapshot(
   next.headSha = pr.headRefOid;
 
   if (pr.mergeable === 'CONFLICTING') {
-    if (next.conflictSha !== pr.headRefOid) {
+    // A conflict a round left for a human is not news either.
+    if (
+      next.conflictSha !== pr.headRefOid &&
+      watch.handledConflictSha !== pr.headRefOid
+    ) {
       events.push({ type: 'conflict' });
-      next.conflictSha = pr.headRefOid;
     }
+    next.conflictSha = pr.headRefOid;
   } else if (pr.mergeable === 'MERGEABLE') {
     next.conflictSha = null;
   }
@@ -689,17 +709,28 @@ export function buildGateSnapshot(
   // fails again between two polls is still new. The cursor keeps only the
   // failures still present, so a check that goes green and fails later is
   // new as well.
+  // A failure a round handled without a push counts as reported; one of a
+  // run the round could not re-run yet is reported once more, under a key
+  // of its own, when that run has ended.
   const checks = checkEvents(pr);
-  const reportedChecks = new Set(next.reportedChecks);
+  const reportedChecks = new Set([
+    ...next.reportedChecks,
+    ...(watch.handledChecks ?? []),
+  ]);
+  const deferred = new Set(watch.deferredRuns ?? []);
   next.reportedChecks = [];
-  const checkKeys = new Map<SnapshotEvent, string>();
+  const checkKeys = new Map<SnapshotEvent, string[]>();
   const candidates: SnapshotEvent[] = [];
-  for (const { event, attempt } of checks.failed) {
+  for (const { event, attempt, runDone } of checks.failed) {
     const key = checkAttemptKey(event.check, pr.headRefOid, attempt);
-    if (reportedChecks.has(key)) {
-      next.reportedChecks.push(key);
-    } else {
-      checkKeys.set(event, key);
+    const keys = [key];
+    if (runDone && event.runId !== null && deferred.has(event.runId)) {
+      keys.push(`${key}@ended`);
+    }
+    const unreported = keys.filter((k) => !reportedChecks.has(k));
+    next.reportedChecks.push(...keys.filter((k) => reportedChecks.has(k)));
+    if (unreported.length > 0) {
+      checkKeys.set(event, unreported);
       candidates.push(event);
     }
   }
@@ -731,8 +762,8 @@ export function buildGateSnapshot(
   events.push(...shown.events);
   const printedIds: string[] = [];
   for (const event of shown.events) {
-    const key = checkKeys.get(event);
-    if (key) next.reportedChecks.push(key);
+    const keys = checkKeys.get(event);
+    if (keys) next.reportedChecks.push(...keys);
     printedIds.push(...commentIds(event));
   }
 
@@ -1022,6 +1053,9 @@ function runGate(args: SnapshotArgs): void {
             ...state.handledCommentIds,
             ...state.postedCommentIds,
           ],
+          handledChecks: state.handledChecks ?? [],
+          handledConflictSha: state.handledConflictSha ?? null,
+          deferredRuns: state.deferredRuns ?? [],
         }
       : { knownHeads: [], seenCommentIds: [] };
 

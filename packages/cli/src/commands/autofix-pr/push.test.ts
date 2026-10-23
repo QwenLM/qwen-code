@@ -35,7 +35,7 @@ vi.mock('../review/lib/gh.js', async (importOriginal) => ({
   ensureAuthenticated: () => {},
 }));
 
-import { leaseRejected, runPush } from './push.js';
+import { leaseRejected, remoteHeadMoved, runPush } from './push.js';
 import {
   MAX_PUSHES,
   autofixPrPaths,
@@ -204,6 +204,33 @@ describe('runPush (real git, bare remote)', () => {
       lastKnownHeadSha: featSha,
       pushedShas: [],
     });
+  });
+
+  it('lets the lease, not fast-forwarding alone, keep an author rollback from being undone', () => {
+    // The watch's fix builds on featSha; the author resets the branch to its
+    // parent. Without the lease the push would fast-forward the remote and
+    // put back the commit the author removed.
+    const fix = commitIn(paths.worktreePath, 'fix.txt');
+    run(repo, 'push', '-q', '--force', 'origin', 'main:refs/heads/feat');
+    const rolledBack = remoteFeat();
+    expect(runPush(7)).toMatchObject({ pushed: false, action: 'resync' });
+    expect(remoteFeat()).toBe(rolledBack);
+    expect(remoteFeat()).not.toBe(fix);
+  });
+
+  it('reads a lease the remote no longer holds from the remote, whatever language git prints in', () => {
+    // A localized git could print the porcelain summary in another
+    // language; the remote's own head says the same thing.
+    expect(remoteHeadMoved(paths.worktreePath, 'origin', 'feat', featSha)).toBe(
+      false,
+    );
+    run(repo, 'switch', '-q', 'feat');
+    commitIn(repo, 'theirs.txt');
+    run(repo, 'push', '-q', 'origin', 'feat');
+    run(repo, 'switch', '-q', 'main');
+    expect(remoteHeadMoved(paths.worktreePath, 'origin', 'feat', featSha)).toBe(
+      true,
+    );
   });
 
   it('never pushes to the default branch, asked at push time', () => {

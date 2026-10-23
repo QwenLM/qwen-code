@@ -28,10 +28,12 @@ import {
   assertOwnedBySession,
   autofixPrPaths,
   currentSessionId,
+  readHistory,
   readState,
   repoRoot,
   sameRepository,
   writeState,
+  type AutofixPrHistory,
   type AutofixPrState,
 } from './state.js';
 
@@ -197,8 +199,6 @@ function report(state: AutofixPrState, extra: Record<string, unknown>): void {
       viewer: state.viewer,
       prAuthor: state.prAuthor,
       authorCanPush: state.authorCanPush ?? false,
-      // Set by every sandbox Qwen Code runs in (container, seatbelt, bwrap).
-      sandboxed: Boolean(process.env['SANDBOX']),
       ...extra,
     }),
   );
@@ -314,6 +314,15 @@ export function runPrepare(args: PrepareArgs): void {
   mkdirSync(dirname(paths.worktreePath), { recursive: true });
   git('worktree', 'add', '--quiet', paths.worktreePath, paths.branch);
 
+  let history: AutofixPrHistory | null = null;
+  try {
+    history = readHistory(paths.historyPath);
+  } catch {
+    // An unreadable history is ignored; cleanup replaces it.
+  }
+  if (history && !sameRepository(history, { host, owner, repo: repoName })) {
+    history = null;
+  }
   const state: AutofixPrState = {
     version: 1,
     sessionId: currentSessionId(),
@@ -332,10 +341,19 @@ export function runPrepare(args: PrepareArgs): void {
     authorCanPush: authorCanPush(args.repo, pr.author?.login ?? '', viewer),
     lastKnownHeadSha: headSha,
     // A watch whose worktree was removed keeps its history, so it does not
-    // answer the same comments again, and keeps its budgets.
+    // answer the same comments again, and keeps its budgets. A new watch of
+    // a PR watched before starts from what that one posted and handled.
     pushedShas: existing?.pushedShas ?? [],
-    handledCommentIds: existing?.handledCommentIds ?? [],
-    postedCommentIds: existing?.postedCommentIds ?? [],
+    handledCommentIds:
+      existing?.handledCommentIds ?? history?.handledCommentIds ?? [],
+    postedCommentIds:
+      existing?.postedCommentIds ?? history?.postedCommentIds ?? [],
+    ...(history && !existing
+      ? {
+          handledChecks: history.handledChecks,
+          rerunChecks: history.rerunChecks,
+        }
+      : {}),
     ...(existing
       ? {
           handledChecks: existing.handledChecks,

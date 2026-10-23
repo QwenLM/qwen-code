@@ -17,10 +17,11 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  writeFileSync,
   symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const mocks = vi.hoisted(() => ({
   gh: vi.fn((..._args: string[]): string => ''),
@@ -441,64 +442,81 @@ describe('runPrepare (real git)', () => {
     expect(lastReport()).toMatchObject({ resumed: false });
   });
 
-  it("reports whether the PR's author could push, and whether this runs sandboxed", () => {
-    const savedSandbox = process.env['SANDBOX'];
-    delete process.env['SANDBOX'];
-    try {
-      runPrepare({ pr: 7, repo: 'o/r' });
-      // The user's own PR.
-      expect(lastReport()).toMatchObject({
-        authorCanPush: true,
-        sandboxed: false,
-      });
-      const paths = autofixPrPaths(clone, 7);
+  it("reports whether the PR's author could push", () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    // The user's own PR.
+    expect(lastReport()).toMatchObject({ authorCanPush: true });
+    const paths = autofixPrPaths(clone, 7);
+    const restart = () => {
       execFileSync(
         'git',
         ['worktree', 'remove', '--force', paths.worktreePath],
-        {
-          cwd: clone,
-        },
+        { cwd: clone },
       );
       execFileSync('git', ['branch', '-D', paths.branch], { cwd: clone });
       rmSync(paths.statePath);
-      let permission = 'read';
-      mocks.gh.mockImplementation((...args: string[]) => {
-        if (args[0] === 'pr') {
-          return JSON.stringify(
-            prView({ headRefOid: headSha, author: { login: 'outsider' } }),
-          );
-        }
-        if (args[0] === 'repo') return JSON.stringify(writable);
-        if (args[0] === 'config') return 'https';
-        if (args[0] === 'api') {
-          expect(args[1]).toBe('repos/o/r/collaborators/outsider/permission');
-          return permission;
-        }
-        throw new Error(`unexpected gh ${args.join(' ')}`);
-      });
-      process.env['SANDBOX'] = 'qwen-code-sandbox';
-      runPrepare({ pr: 7, repo: 'o/r' });
-      expect(lastReport()).toMatchObject({
-        authorCanPush: false,
-        sandboxed: true,
-      });
+    };
+    restart();
+    let permission = 'read';
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr') {
+        return JSON.stringify(
+          prView({ headRefOid: headSha, author: { login: 'outsider' } }),
+        );
+      }
+      if (args[0] === 'repo') return JSON.stringify(writable);
+      if (args[0] === 'config') return 'https';
+      if (args[0] === 'api') {
+        expect(args[1]).toBe('repos/o/r/collaborators/outsider/permission');
+        return permission;
+      }
+      throw new Error(`unexpected gh ${args.join(' ')}`);
+    });
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({ authorCanPush: false });
+    restart();
+    permission = 'write';
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({ authorCanPush: true });
+  });
 
-      execFileSync(
-        'git',
-        ['worktree', 'remove', '--force', paths.worktreePath],
-        {
-          cwd: clone,
-        },
-      );
-      execFileSync('git', ['branch', '-D', paths.branch], { cwd: clone });
-      rmSync(paths.statePath);
-      permission = 'write';
-      runPrepare({ pr: 7, repo: 'o/r' });
-      expect(lastReport()).toMatchObject({ authorCanPush: true });
-    } finally {
-      if (savedSandbox === undefined) delete process.env['SANDBOX'];
-      else process.env['SANDBOX'] = savedSandbox;
-    }
+  it('starts a new watch from what earlier watches of the PR posted and handled', () => {
+    const paths = autofixPrPaths(clone, 7);
+    mkdirSync(dirname(paths.historyPath), { recursive: true });
+    const history = {
+      version: 1,
+      host: 'github.com',
+      owner: 'o',
+      repo: 'r',
+      prNumber: 7,
+      handledCommentIds: ['C1'],
+      postedCommentIds: ['P1'],
+      handledChecks: [`Test@${headSha}@#5`],
+      rerunChecks: [`run:1:2:push:Test@${headSha}`],
+    };
+    writeFileSync(paths.historyPath, JSON.stringify(history));
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(readState(paths.statePath)).toMatchObject({
+      handledCommentIds: ['C1'],
+      postedCommentIds: ['P1'],
+      handledChecks: history.handledChecks,
+      rerunChecks: history.rerunChecks,
+    });
+    // Not another repository's PR of the same number.
+    execFileSync('git', ['worktree', 'remove', '--force', paths.worktreePath], {
+      cwd: clone,
+    });
+    execFileSync('git', ['branch', '-D', paths.branch], { cwd: clone });
+    rmSync(paths.statePath);
+    writeFileSync(
+      paths.historyPath,
+      JSON.stringify({ ...history, owner: 'elsewhere' }),
+    );
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(readState(paths.statePath)).toMatchObject({
+      handledCommentIds: [],
+      postedCommentIds: [],
+    });
   });
 
   it('recreates a worktree deleted with rm -rf', () => {

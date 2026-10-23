@@ -19,14 +19,23 @@ import {
   ghWithInput,
   setGhHost,
 } from '../review/lib/gh.js';
-import { buildSnapshot, fetchPrData, type Snapshot } from './snapshot.js';
+import {
+  buildSnapshot,
+  fetchPrData,
+  isOwnReply,
+  type CommentNode,
+  type PrData,
+  type Snapshot,
+} from './snapshot.js';
 import {
   REPLY_MARKER,
   assertOwnedBySession,
   autofixPrPaths,
   repoRoot,
   requireState,
+  withWatchLock,
   writeState,
+  type AutofixPrPaths,
   type AutofixPrState,
 } from './state.js';
 
@@ -50,10 +59,16 @@ export interface ReplyOutcome {
   posted: Array<{ kind: 'thread' | 'summary'; id: string; url: string }>;
   /** Replies already posted by an earlier run of the same plan. */
   skipped: number;
+  /** The summary was posted already (its comments are handled, or it
+   * reported this head's push). */
+  summarySkipped: boolean;
   handledCommentIds: number;
   handledChecks: number;
   /** Keys of an earlier head, which the round pushed past: not recorded. */
   ignoredChecks: number;
+  /** Replies found already on the PR (a POST whose answer was lost) and
+   * recorded instead of posted again. */
+  adopted: number;
 }
 
 function stringList(value: unknown, what: string): string[] {
@@ -217,6 +232,39 @@ function actionable(snapshot: Snapshot): {
   return { threads, comments, untrusted, checks };
 }
 
+/**
+ * A reply of this tool's that already follows every comment in `handled`
+ * on the list `nodes` (oldest first) and is not recorded: a POST that
+ * reached GitHub although its answer was lost. Adopting it, instead of
+ * posting again, keeps a retry from answering the same comments twice.
+ */
+function unrecordedReply(
+  nodes: CommentNode[],
+  handled: string[],
+  viewer: string,
+  posted: Set<string>,
+): CommentNode | null {
+  const last = Math.max(
+    ...handled.map((id) => nodes.findIndex((n) => n.id === id)),
+  );
+  if (last < 0 || handled.some((id) => !nodes.some((n) => n.id === id))) {
+    return null;
+  }
+  return (
+    nodes
+      .slice(last + 1)
+      .find((node) => isOwnReply(node, viewer) && !posted.has(node.id)) ?? null
+  );
+}
+
+function threadComments(pr: PrData, replyTo: number): CommentNode[] {
+  return (
+    pr.reviewThreads.nodes.find(
+      (thread) => thread.root.nodes[0]?.databaseId === replyTo,
+    )?.comments.nodes ?? []
+  );
+}
+
 function postComment(path: string, body: string): { id: string; url: string } {
   // Not retried: a POST that reached GitHub before a proxy error would be
   // posted twice.
@@ -247,6 +295,14 @@ export interface ReplyArgs {
 export function runReply(args: ReplyArgs): ReplyOutcome {
   const plan = parsePlan(JSON.parse(readFileSync(args.planPath, 'utf8')));
   const paths = autofixPrPaths(repoRoot(), args.pr);
+  return withWatchLock(paths, args.pr, () => replyLocked(args, plan, paths));
+}
+
+function replyLocked(
+  args: ReplyArgs,
+  plan: Required<ReplyPlan>,
+  paths: AutofixPrPaths,
+): ReplyOutcome {
   let state = requireState(paths.statePath, args.pr);
   assertOwnedBySession(state);
   setGhHost(state.host);
@@ -319,9 +375,11 @@ export function runReply(args: ReplyArgs): ReplyOutcome {
   const outcome: ReplyOutcome = {
     posted: [],
     skipped,
+    summarySkipped: false,
     handledCommentIds: 0,
     handledChecks: 0,
     ignoredChecks,
+    adopted: 0,
   };
   const record = (patch: Partial<AutofixPrState>) => {
     state = { ...state, ...patch };
@@ -345,10 +403,19 @@ export function runReply(args: ReplyArgs): ReplyOutcome {
       });
       continue;
     }
-    const posted = postComment(
-      `${base}/pulls/${args.pr}/comments/${reply.replyTo}/replies`,
-      reply.body,
+    const earlier = unrecordedReply(
+      threadComments(pr, reply.replyTo),
+      reply.handled,
+      state.viewer,
+      new Set(state.postedCommentIds),
     );
+    const posted = earlier
+      ? { id: earlier.id, url: earlier.url }
+      : postComment(
+          `${base}/pulls/${args.pr}/comments/${reply.replyTo}/replies`,
+          reply.body,
+        );
+    if (earlier) outcome.adopted += 1;
     // Recorded at once: a later failure must not leave this reply unknown,
     // or the next round would answer the same comments again.
     record({
@@ -358,7 +425,7 @@ export function runReply(args: ReplyArgs): ReplyOutcome {
         ...addHandled(reply.handled),
       ],
     });
-    outcome.posted.push({ kind: 'thread', ...posted });
+    if (!earlier) outcome.posted.push({ kind: 'thread', ...posted });
   }
 
   // A summary is posted once: one that handles comments, while any of them
@@ -372,9 +439,23 @@ export function runReply(args: ReplyArgs): ReplyOutcome {
   if (summary && summaryDue) {
     // Its comments are recorded with it, so a retry after a later failure
     // finds it posted. `--no-post` records the same, posting nothing.
-    const posted = args.post
-      ? postComment(`${base}/issues/${args.pr}/comments`, summary.body)
-      : null;
+    // Only a summary answering conversation comments can be matched to one
+    // already on the PR: reviews sit on another list, in no shared order.
+    const earlier =
+      args.post && (summary.handled ?? []).length > 0
+        ? unrecordedReply(
+            pr.comments.nodes,
+            summary.handled ?? [],
+            state.viewer,
+            new Set(state.postedCommentIds),
+          )
+        : null;
+    if (earlier) outcome.adopted += 1;
+    const posted = earlier
+      ? { id: earlier.id, url: earlier.url }
+      : args.post
+        ? postComment(`${base}/issues/${args.pr}/comments`, summary.body)
+        : null;
     record({
       postedCommentIds: posted
         ? [...state.postedCommentIds, posted.id]
@@ -385,9 +466,9 @@ export function runReply(args: ReplyArgs): ReplyOutcome {
       ],
       summarizedSha: pr.headRefOid,
     });
-    if (posted) outcome.posted.push({ kind: 'summary', ...posted });
+    if (posted && !earlier) outcome.posted.push({ kind: 'summary', ...posted });
   } else if (summary) {
-    outcome.skipped += 1;
+    outcome.summarySkipped = true;
   }
 
   outcome.handledChecks = currentChecks.length;

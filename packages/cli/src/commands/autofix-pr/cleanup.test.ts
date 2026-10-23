@@ -25,7 +25,13 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 }));
 
 import { runCleanup } from './cleanup.js';
-import { autofixPrPaths, writeState, type AutofixPrState } from './state.js';
+import {
+  autofixPrPaths,
+  readHistory,
+  readState,
+  writeState,
+  type AutofixPrState,
+} from './state.js';
 
 describe('runCleanup (real git)', () => {
   let repo: string;
@@ -100,6 +106,7 @@ describe('runCleanup (real git)', () => {
     expect(lastReport()).toEqual({
       removed: true,
       worktreePath: paths.worktreePath,
+      history: paths.historyPath,
     });
   });
 
@@ -112,6 +119,37 @@ describe('runCleanup (real git)', () => {
       removed: true,
       worktreePath: paths.worktreePath,
       gateCursor: paths.gatePath,
+      history: paths.historyPath,
+    });
+  });
+
+  it('keeps what the watch posted and handled, adding to an earlier watch of the PR', () => {
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      handledCommentIds: ['C2'],
+      postedCommentIds: ['P2'],
+      rerunChecks: ['run:1:2:push:Test@x'],
+    });
+    writeFileSync(
+      paths.historyPath,
+      JSON.stringify({
+        version: 1,
+        host: 'github.com',
+        owner: 'O',
+        repo: 'R',
+        prNumber: 7,
+        handledCommentIds: ['C1'],
+        postedCommentIds: ['P1'],
+        handledChecks: [],
+        rerunChecks: [],
+      }),
+    );
+    runCleanup(7, false);
+    expect(readHistory(paths.historyPath)).toMatchObject({
+      owner: 'o',
+      handledCommentIds: ['C1', 'C2'],
+      postedCommentIds: ['P1', 'P2'],
+      rerunChecks: ['run:1:2:push:Test@x'],
     });
   });
 
@@ -223,6 +261,7 @@ describe('runCleanup (real git)', () => {
       expect(lastReport()).toEqual({
         removed: true,
         worktreePath: paths.worktreePath,
+        history: paths.historyPath,
       });
       expect(branchExists()).toBe(false);
     } finally {

@@ -41,6 +41,7 @@ function failedRun(
   name: string,
   runId: number,
   workflow = 1,
+  status = 'COMPLETED',
 ) {
   return {
     __typename: 'CheckRun' as const,
@@ -50,6 +51,7 @@ function failedRun(
     conclusion: 'FAILURE',
     detailsUrl: `https://github.com/o/r/actions/runs/${runId}/job/${databaseId}`,
     checkSuite: {
+      status,
       app: { databaseId: 15368 },
       workflowRun: {
         event: 'pull_request',
@@ -212,6 +214,22 @@ describe('runRerun', () => {
       /no failed GitHub Actions run of o\/r/,
     );
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
+  });
+
+  it('defers a run still in progress, and re-runs it once it has ended', () => {
+    contexts = [failedRun(5, 'Lint', 50, 1, 'IN_PROGRESS')];
+    expect(runRerun(7, 50)).toMatchObject({
+      rerun: false,
+      deferred: true,
+      checks: ['Lint'],
+    });
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+    expect(state()).toMatchObject({ deferredRuns: [50] });
+    expect(state().rerunChecks).toBeUndefined();
+
+    contexts = [failedRun(5, 'Lint', 50)];
+    expect(runRerun(7, 50)).toMatchObject({ rerun: true });
+    expect(state()).toMatchObject({ deferredRuns: [] });
   });
 
   it('asks for a resync when the PR head moved, and re-runs nothing', () => {

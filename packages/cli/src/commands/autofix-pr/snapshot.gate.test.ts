@@ -629,6 +629,60 @@ describe('buildGateSnapshot', () => {
       cursor: result.cursor,
     });
   });
+
+  it('does not report a failure or a conflict a round left for a human', () => {
+    const data = pr({ mergeable: 'CONFLICTING' }, [failed('Test', 5)]);
+    const result = buildGateSnapshot(data, cursor(), {
+      knownHeads: [],
+      seenCommentIds: [],
+      handledChecks: [`Test@${HEAD}@#5`],
+      handledConflictSha: HEAD,
+    });
+    expect(result.snapshot).toBeNull();
+    // Remembered, so the gate stays quiet once the state file is gone.
+    expect(result.cursor).toMatchObject({
+      reportedChecks: [`Test@${HEAD}@#5`],
+      conflictSha: HEAD,
+    });
+  });
+
+  it('reports the failures of a deferred re-run once more when their run has ended', () => {
+    const lint = (status: string): Contexts[number] => ({
+      __typename: 'CheckRun',
+      name: 'Lint',
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      detailsUrl: 'https://github.com/o/r/actions/runs/123/job/5',
+      databaseId: 5,
+      checkSuite: {
+        status,
+        app: { databaseId: 1 },
+        workflowRun: { event: 'pull_request', workflow: { databaseId: 2 } },
+      },
+    });
+    const running = lint('IN_PROGRESS');
+    const first = buildGateSnapshot(pr({}, [running]), cursor());
+    expect(first.snapshot).toMatchObject({ action: 'fix' });
+    const watch = { knownHeads: [], seenCommentIds: [], deferredRuns: [123] };
+    // Still running: nothing new.
+    expect(
+      buildGateSnapshot(pr({}, [running]), first.cursor, watch).snapshot,
+    ).toBeNull();
+    const ended = lint('COMPLETED');
+    const second = buildGateSnapshot(pr({}, [ended]), first.cursor, watch);
+    expect(second.snapshot).toMatchObject({
+      action: 'fix',
+      events: [{ type: 'ci_failed', check: 'Lint', runId: 123 }],
+    });
+    // Once.
+    expect(
+      buildGateSnapshot(pr({}, [ended]), second.cursor, watch).snapshot,
+    ).toBeNull();
+    // A run nobody deferred is not reported again when it ends.
+    expect(
+      buildGateSnapshot(pr({}, [ended]), first.cursor).snapshot,
+    ).toBeNull();
+  });
 });
 
 describe('fetchPrData', () => {

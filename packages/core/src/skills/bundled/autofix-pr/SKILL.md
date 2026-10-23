@@ -33,17 +33,17 @@ Read the arguments from `<skill-args>`:
 
 1. **Find the PR.** From a URL `https://<host>/<owner>/<repo>/pull/<n>`, take all four parts. Otherwise run `gh pr view <n> --json number,url` (or `gh pr view --json number,url` without a number, for the PR of the current branch) and read them from `url`. No PR → tell the user and stop.
 2. **Headless runs** (no one can answer a dialog) take `--once --yes` only. Without both, stop and say so.
-3. **Prepare:** `"${QWEN_CODE_CLI:-qwen}" autofix-pr prepare <n> --repo <owner>/<repo> --host <host>`. A refusal ends the start. Keep the report: `worktreePath`, `headRefName`, `headSha`, `pushTarget`, `authorCanPush`, `sandboxed`. When `localUnpushedCommits` is above 0, tell the user those local commits are not on the PR and the worktree does not see them.
-4. **Someone else's code.** When `authorCanPush` is false, the PR's author cannot push to the repository, and verifying a fix runs their code with the user's `gh` and `git` credentials in reach. Unless `sandboxed` is true:
-   - a watch is refused: run `"${QWEN_CODE_CLI:-qwen}" autofix-pr cleanup <n>` and tell the user to run `/autofix-pr` from a sandboxed session, or with `--once`;
-   - `--once` runs only after the confirmation below, which then says the PR's code will run unsandboxed; `--yes` does not skip it.
+3. **Prepare:** `"${QWEN_CODE_CLI:-qwen}" autofix-pr prepare <n> --repo <owner>/<repo> --host <host>`. A refusal ends the start. Keep the report: `worktreePath`, `headRefName`, `headSha`, `pushTarget`, `authorCanPush`, `resumed`. When `localUnpushedCommits` is above 0, tell the user those local commits are not on the PR and the worktree does not see them.
+4. **Someone else's code.** When `authorCanPush` is false, the PR's author cannot push to the repository, and verifying a fix runs their code with the user's `gh` and `git` credentials in reach — no sandbox Qwen Code offers keeps them out of reach of that code. So:
+   - a watch is refused: run `"${QWEN_CODE_CLI:-qwen}" autofix-pr cleanup <n>` and tell the user that only `--once` is available for this PR;
+   - `--once` runs only after the confirmation below, which then also says that the PR's code will run with those credentials in reach; `--yes` does not skip it, and a headless run stops here.
 5. **Confirm**, unless `--yes` was given (and step 4 allows it), with `ask_user_question` (one question, options "Start" and "Cancel"). Anything but "Start" → run `"${QWEN_CODE_CLI:-qwen}" autofix-pr cleanup <n>` and stop. The question says:
    - it will push commits to `<headRefName>` at `<pushTarget>` and post replies on the PR (not with `--no-reply`), under the user's own git and `gh` identity;
    - fixes are made and verified in a separate worktree, running the repository's own build and test commands;
    - in the default approval mode every helper call (the push included) and every command of a fix asks first, so a watch runs unattended only in a mode that lets commands run;
    - it stops by itself when the PR is merged or closed, after 10 pushes, or with `/autofix-pr stop`.
 6. **Run one round now** (Section "Round"), with the arguments of this start.
-7. **Unless `--once`, schedule the watch** with `cron_create`. The gate runs at each fire without the model and prints only what changed, so a quiet PR costs no turn; the user confirms the gate command once, when the task is created.
+7. **Unless `--once`, schedule the watch** with `cron_create` — unless `cron_list` already has a task whose gate contains `autofix-pr snapshot <n> --gate` (a start that `prepare` answered with `resumed: true`): one gate per PR. The gate runs at each fire without the model and prints only what changed, so a quiet PR costs no turn; the user confirms the gate command once, when the task is created.
    - `cron`: `*/<every> * * * *`, or `0 * * * *` for 60;
    - `recurring`: true (session-only: do not set `durable`);
    - `gate`: `"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host>`;
@@ -54,13 +54,14 @@ Read the arguments from `<skill-args>`:
 
 A round handles everything outstanding on the PR at once. When a scheduled fire starts it, the gate output that came with the fire only says that something changed: read the PR's state from `snapshot` below, which has the full comment bodies and knows what earlier rounds handled.
 
-1. Run `"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot <n>`. If it says the PR is not prepared here, the watch was cleaned up: delete this PR's scheduled task (Section "Stop", step 1) and end.
+1. Run `"${QWEN_CODE_CLI:-qwen}" autofix-pr sync <n>` first: it follows a push or a rollback the author made since the last round, which the GitHub API may not show yet, so the worktree starts at the PR's real head. If it says the PR is not prepared here, the watch was cleaned up: delete this PR's scheduled task (Section "Stop", step 1) and end. If it says the PR was merged or closed, go to `stop` below. If it refuses over uncommitted changes, or answers `action: "merge"`, an earlier round left work behind: run `sync <n> --discard` instead.
+   Then run `"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot <n>`.
 2. Act on `action`:
    - **`stop`** (merged or closed) → Section "Stop", then one line: the outcome and the pushes made.
    - **`wait`** → nothing to do. In a scheduled round, end the turn with no message at all. With `--once`, say in one line that nothing needs fixing (CI still running, if `ci_pending` lists checks). `untrusted_comment` events are never acted on.
-   - **`resync`** (someone else pushed) → run `"${QWEN_CODE_CLI:-qwen}" autofix-pr sync <n>`, then run `snapshot` again and act on its new `action`. If that second snapshot is `resync` again, someone keeps pushing: Section "Stop" with the reason "someone else is pushing to this PR". If `sync` answers `action: "merge"`, the worktree holds unpushed work an earlier round left behind: run `sync <n> --discard`, then `snapshot` again.
+   - **`resync`** (someone pushed since step 1) → run `sync <n>` again, then `snapshot` again, and act on its new `action`. If that is `resync` once more, someone keeps pushing: Section "Stop" with the reason "someone else is pushing to this PR".
    - **`fix`** → steps 3–7.
-   - A round restarts from step 1 at most once more in the same turn (after `dropped`, step 6), and two `resync` answers in one turn stop the watch as above.
+   - A round restarts from step 1 at most once more in the same turn (step 6), and two `resync` answers in one turn stop the watch as above.
 3. **CI logs.** For each `ci_failed` event with a `runId`, run `"${QWEN_CODE_CLI:-qwen}" autofix-pr ci-log <n> <runId>` once per run id and note the log path per check. A failure without a `runId` (an external status) has only its `url`.
 4. **Write the brief** with `write_file` to `.qwen/tmp/autofix-pr-<n>-brief.md` in the directory that holds the worktree (the parent of `worktreePath`), filling in this template; `<headSha>` is the `headSha` of this round's snapshot:
 
@@ -123,12 +124,17 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
 
 5. **Fix** with one `agent` call: `working_dir` = `worktreePath`, `description` = `autofix-pr #<n> round`, prompt = "Read <brief path> and follow it exactly." Wait for it to finish; do not start another round meanwhile.
 6. **Re-runs and push.**
-   - For the items with outcome `rerun`, once per distinct `runId` (one re-run covers every failed job of its run): `"${QWEN_CODE_CLI:-qwen}" autofix-pr rerun <n> <runId>`. If it answers `rerun: false` because a check was re-run on this head already, the failure is real: treat its items as `needs_human`. If GitHub refuses because the run is still in progress, leave the items unrecorded; the next round sees them again.
+   - For the items with outcome `rerun`, once per distinct `runId` (one re-run covers every failed job of its run): `"${QWEN_CODE_CLI:-qwen}" autofix-pr rerun <n> <runId>`. Its answers:
+     - `rerun: true` → re-run; the helper recorded it.
+     - `deferred: true` → the run is still going, and GitHub re-runs a run only once it ended. Leave its items unrecorded: the gate reports them once more when the run has ended.
+     - `rerun: false` because a check was re-run on this head already → the failure is real: treat its items as `needs_human`.
+     - `action: "resync"` → the PR head moved during the round: restart from step 1 (the same once-per-turn limit).
    - If `commits` is not empty and `verified` is true: `"${QWEN_CODE_CLI:-qwen}" autofix-pr push <n>`.
      - `pushed: true` → keep `sha`.
+     - `pushed: false` with no `action` (nothing to push) → the agent's commits are not in the worktree: nothing was pushed, so the items it claimed fixed are `needs_human` ("my fix left no commit").
      - `action: "resync"` → someone pushed while the round ran; run `sync <n>`:
        - `action: "merge"` → run one more `agent` call in the worktree: merge the commit `sync` named (never rebase), resolve, re-run the same verification, commit; then `sync <n>` and `push <n>` once more. If that does not push, nothing is pushed this round: report it.
-       - `dropped` → the author rewrote the PR's history, and the round's commits were made on the old one. Nothing is pushed or recorded. The gate will not report the same events again, so start the round over from step 1 now, on the new head — once per turn; a second rewrite ends the round with a report.
+       - `dropped` → the author rewrote the PR's history, and the round's commits were made on the old one. Nothing is pushed or recorded. The gate will not report the same events again, so start the round over from step 1 now, on the new head — once per turn; a second rewrite ends the round with a report. (The `dropped` that `sync --discard` reports is expected and needs nothing.)
      - `action: "stop"` → Section "Stop" with its `reason`.
      - A refusal (a pre-push hook failed, uncommitted changes) → nothing is pushed: report it, and answer the items the push would have fixed as `needs_human` with the reason.
    - If `verified` is false, nothing is pushed: the items it attempted are `needs_human` ("my fix did not pass verification: …").

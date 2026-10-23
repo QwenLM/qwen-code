@@ -6,7 +6,13 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PrData } from './snapshot.js';
@@ -338,7 +344,8 @@ describe('runReply', () => {
     expect(state().summarizedSha).toBe(HEAD);
     expect(reply({ summary: { body: 'Pushed.' } })).toMatchObject({
       posted: [],
-      skipped: 1,
+      skipped: 0,
+      summarySkipped: true,
     });
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
@@ -401,8 +408,58 @@ describe('runReply', () => {
     ]);
     // A third run finds everything posted.
     const third = reply(plan);
-    expect(third).toMatchObject({ posted: [], skipped: 3 });
+    expect(third).toMatchObject({
+      posted: [],
+      skipped: 2,
+      summarySkipped: true,
+    });
     expect(mocks.ghWithInput).toHaveBeenCalledTimes(4);
+  });
+
+  it('records a reply a lost response left on the PR instead of posting it again', () => {
+    const ours = {
+      ...comment('PRRC_150', 'me', 'OWNER'),
+      body: `Fixed in abc.\n\n${REPLY_MARKER}`,
+    };
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        reviewThreads: {
+          pageInfo: { hasNextPage: false },
+          nodes: [
+            thread('T1', [comment('PRRC_101', 'alice', 'COLLABORATOR'), ours]),
+          ],
+        },
+      }),
+      viewer: 'me',
+    }));
+    const outcome = reply({
+      replies: [{ replyTo: 101, body: 'Fixed in abc.', handled: ['PRRC_101'] }],
+    });
+    expect(outcome).toMatchObject({ posted: [], adopted: 1 });
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+    expect(state()).toMatchObject({
+      postedCommentIds: ['PRRC_150'],
+      handledCommentIds: ['PRRC_101'],
+    });
+  });
+
+  it('holds the watch lock, so a second helper cannot interleave its write', () => {
+    mocks.ghWithInput.mockImplementation(() => {
+      // The model issued another helper call in parallel.
+      expect(() => reply({ handled: ['IC_1'] })).toThrow(
+        /another autofix-pr helper is working on PR #7/,
+      );
+      return JSON.stringify({ node_id: 'POSTED_1', html_url: '' });
+    });
+    reply({
+      replies: [{ replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'] }],
+    });
+    expect(mocks.ghWithInput).toHaveBeenCalledTimes(1);
+    expect(state().handledCommentIds).toEqual(['PRRC_101']);
+    // Released afterwards.
+    expect(existsSync(join(repo, '.qwen', 'tmp', 'autofix-pr-7.lock'))).toBe(
+      false,
+    );
   });
 
   it('refuses to post on a PR that is no longer open', () => {

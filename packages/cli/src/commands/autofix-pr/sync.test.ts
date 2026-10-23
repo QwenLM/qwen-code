@@ -4,17 +4,43 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+
+const mocks = vi.hoisted(() => ({
+  live: {
+    state: 'OPEN',
+    headRefName: 'feat',
+    isCrossRepository: false,
+    headRepository: { name: 'r' },
+    headRepositoryOwner: { login: 'o' },
+  } as Record<string, unknown>,
+}));
+vi.mock('../review/lib/gh.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../review/lib/gh.js')>()),
+  gh: (...args: string[]) => {
+    if (args[0] === 'pr') return JSON.stringify(mocks.live);
+    throw new Error(`unexpected gh ${args.join(' ')}`);
+  },
+  setGhHost: () => {},
+  ensureAuthenticated: () => {},
+}));
+// The bare remote is a local path the real matcher cannot read.
+vi.mock('../review/lib/remote-match.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../review/lib/remote-match.js')>()),
+  matchRemotes: () => ({ matched: ['origin'] }),
+}));
+
 import { runSync } from './sync.js';
 import {
   autofixPrPaths,
@@ -111,6 +137,13 @@ describe('runSync (real git, bare remote)', () => {
       postedCommentIds: [],
     };
     writeState(paths.statePath, initial);
+    mocks.live = {
+      state: 'OPEN',
+      headRefName: 'feat',
+      isCrossRepository: false,
+      headRepository: { name: 'r' },
+      headRepositoryOwner: { login: 'o' },
+    };
     savedCwd = process.cwd();
     savedSession = process.env['QWEN_CODE_SESSION_ID'];
     process.env['QWEN_CODE_SESSION_ID'] = 'session-a';
@@ -216,6 +249,40 @@ describe('runSync (real git, bare remote)', () => {
     });
     expect(worktreeHead()).toBe(featSha);
     expect(run(paths.worktreePath, 'status', '--porcelain')).toBe('');
+  });
+
+  it('with --discard also removes a nested repository, and works when the branch is gone', () => {
+    commitIn(paths.worktreePath, 'attempt.txt');
+    const nested = join(paths.worktreePath, 'nested');
+    run(paths.worktreePath, 'init', '-q', 'nested');
+    writeFileSync(join(nested, 'n.txt'), 'n');
+    // The PR's branch was deleted: nothing to fetch.
+    run(remote, 'update-ref', '-d', 'refs/heads/feat');
+    expect(runSync(7, true)).toMatchObject({
+      synced: true,
+      headSha: featSha,
+      dropped: 1,
+      discardedChanges: true,
+    });
+    expect(worktreeHead()).toBe(featSha);
+    expect(run(paths.worktreePath, 'status', '--porcelain')).toBe('');
+  });
+
+  it('follows only the branch GitHub names, not one an edited state file names', () => {
+    run(repo, 'branch', 'release', 'main');
+    const release = run(repo, 'rev-parse', 'release');
+    // A refspec in the branch name would write the user's `release`.
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      headRefName: 'feat:refs/heads/release',
+    } as AutofixPrState);
+    expect(() => runSync(7)).toThrow(/invalid headRefName/);
+    writeState(paths.statePath, {
+      ...JSON.parse(readFileSync(paths.statePath, 'utf8')),
+      headRefName: 'other',
+    });
+    expect(() => runSync(7)).toThrow(/head branch is feat, not the other/);
+    expect(run(repo, 'rev-parse', 'release')).toBe(release);
   });
 
   it('refuses a worktree with another branch checked out', () => {

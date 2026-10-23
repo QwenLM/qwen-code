@@ -17,6 +17,7 @@ import { git, gitOpt, refExists, releaseWorktree } from '../review/lib/git.js';
 import {
   assertOwnedBySession,
   autofixPrPaths,
+  keepHistory,
   readState,
   repoRoot,
   type AutofixPrPaths,
@@ -163,6 +164,9 @@ export function runCleanup(prNumber: number, force: boolean): void {
   if (refExists(`refs/heads/${paths.branch}`)) {
     git('branch', '-D', paths.branch);
   }
+  // What the watch posted and handled outlives it, so a later watch of the
+  // PR does not answer the same comments again.
+  if (state) keepHistory(paths.historyPath, state);
   // The state file and everything else this PR's watch wrote beside it (CI
   // logs, briefs). The gate cursor belongs to the scheduled task, which
   // outlives a watch and would report everything again without it.
@@ -170,13 +174,20 @@ export function runCleanup(prNumber: number, force: boolean): void {
   const prefix = `autofix-pr-${prNumber}-`;
   for (const name of existsSync(tmp) ? readdirSync(tmp) : []) {
     const path = join(tmp, name);
-    if (name.startsWith(prefix) && path !== paths.gatePath) {
+    if (
+      name.startsWith(prefix) &&
+      path !== paths.gatePath &&
+      path !== paths.historyPath
+    ) {
       rmSync(path, { force: true });
     }
   }
   // Named, so a later watch of another repository's PR of this number
   // knows which file its gate refuses.
-  const kept = existsSync(paths.gatePath) ? { gateCursor: paths.gatePath } : {};
+  const kept = {
+    ...(existsSync(paths.gatePath) ? { gateCursor: paths.gatePath } : {}),
+    ...(existsSync(paths.historyPath) ? { history: paths.historyPath } : {}),
+  };
   writeStdoutLine(
     JSON.stringify({
       removed: true,

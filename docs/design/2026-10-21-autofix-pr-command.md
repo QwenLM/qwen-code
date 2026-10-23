@@ -303,10 +303,15 @@ when there are none, so the session is woken only for them:
   carries the run's id (a commit status: its creation time), so a re-run
   that fails again is reported again even when no poll saw it in progress.
   The cursor keeps only the failures still present, and a new head starts
-  over.
+  over. A failure a prepared watch of the PR handled without a push
+  (`handledChecks`) counts as reported. A failure of a run whose re-run was
+  deferred because the run was still going (`deferredRuns`, Section 6.9) is
+  reported once more when that run has ended, so the watch can re-run it
+  then.
 - Pending checks are never reported; `ci_pending` does not appear.
 - A conflict is reported once per head; `mergeable` clears the mark,
-  `UNKNOWN` keeps it.
+  `UNKNOWN` keeps it. A conflict a prepared watch left for a human on the
+  head (`handledConflictSha`) is not reported.
 - Comments, reviews and thread comments are reported once each, by node id,
   with the trust rules of Section 8. The viewer's own comments are never
   events, nor are the ones a prepared watch of the same PR has handled
@@ -390,8 +395,10 @@ from the worktree, with ten minutes for pre-push hooks. `<sha>` is the commit
 the checks above passed, not `HEAD`, which could move while GitHub is asked.
 Hooks run, and there is no `--force` or `--no-verify`. On success it records
 the new SHA in `pushedShas` and `lastKnownHeadSha` and counts one push. A
-rejected lease (`[rejected] (stale info)`) means someone else pushed; the
-result is `resync`, not a retry, and nothing is recorded. Any other refusal —
+rejected lease (`[rejected] (stale info)`, or a remote branch that
+`git ls-remote` no longer finds at the known head, whatever language git
+prints in) means someone else pushed; the result is `resync`, not a retry,
+and nothing is recorded. Any other refusal —
 a hook, branch protection, credentials — is an error with git's last lines.
 The output is one JSON line: `{"pushed": true, "sha", "pushes", "maxPushes"}`,
 or `{"pushed": false, "action": "resync" | "stop", "reason"}`.
@@ -429,6 +436,12 @@ The helper decides what may be posted, against one fresh read of the PR
 - A plan with two replies to one thread, or one comment id twice, is refused.
 - Every check runs before anything is posted, so a refused plan posts
   nothing.
+- A reply of the tool's that already follows the comments a reply answers,
+  and is not recorded — a POST that reached GitHub although its answer was
+  lost — is recorded instead of posted again (`adopted`). The same holds for
+  a summary that answers conversation comments; reviews sit on another list
+  with no shared order, so a summary answering only reviews, or nothing, has
+  no such check.
 - Each body gets the marker once and must fit GitHub's 65,536 characters.
 - Each posted id is written to the state file the moment it exists, with the
   comments its reply handled. A run that fails part way leaves the rest
@@ -471,6 +484,14 @@ task, which outlives a watch, and without it the next fire would report
 everything again. Delete the task to stop the gate. The report names the
 kept cursor (`gateCursor`): a later gate on another repository's PR of the
 same number is refused until that file is removed.
+
+What the watch posted and handled — `handledCommentIds`,
+`postedCommentIds`, `handledChecks`, `rerunChecks` — is added to
+`.qwen/tmp/autofix-pr-<n>-history.json` before the state file goes, and that
+file is kept as well (`history` in the report). A later watch of the same
+PR's `prepare` starts from it, so it does not answer the comments an earlier
+watch answered, nor re-run a check twice on one head; a history of another
+repository's PR of the same number is ignored.
 
 ### 6.7 `review watch-repo --repo <owner>/<repo> [--host <host>] [--limit 50] [filters]`
 
@@ -534,8 +555,16 @@ checkout is untouched), and checks the worktree as `push` does. Then:
 
 A worktree with uncommitted changes is never moved or reset. `--discard`
 returns the worktree to the PR head whatever it holds — unpushed commits and
-uncommitted changes — to end a round whose work was not pushed, and reports
-what it dropped.
+uncommitted changes, nested repositories included (`git clean -ffd`) — to
+end a round whose work was not pushed, and reports what it dropped. When the
+PR's branch cannot be read (the PR was closed, the branch deleted, the
+network is down), it returns to the head the watch last knew instead.
+
+Like `push`, `sync` first asks GitHub for the PR's head branch and checks
+the destination against the clone's remotes, so an edited state file cannot
+point the fetch at another ref or repository; the head ref is validated as
+a branch name (`git check-ref-format --branch`), so it cannot carry a
+refspec.
 
 ### 6.9 `rerun <pr> <run-id>`
 
@@ -554,6 +583,18 @@ dispatch them again while the re-run is going; a re-run that fails again is
 a new attempt. A head that moved since the watch last saw it answers
 `resync`, and a run with no failed check on the head is an error. The call
 is not retried, for the same reason as a reply.
+
+GitHub re-runs a run only once it has ended, while `snapshot` reports a
+failed job as soon as it fails. A run still in progress therefore answers
+`{"rerun": false, "deferred": true}` without asking GitHub, and is recorded
+in `deferredRuns`: the gate reports its failures once more when the run has
+ended (Section 6.2), and the round then re-runs it.
+
+`push`, `sync`, `reply` and `rerun` each hold the watch's lock
+(`.qwen/tmp/autofix-pr-<n>.lock`) while they read and write the state file:
+two helper calls the model issues at once would otherwise each write back
+what they read, undoing the other's record of a push, a reply or a re-run.
+A lock whose process is gone is taken over.
 
 ## 7. One check (`tick`)
 
@@ -609,7 +650,9 @@ anyway; that attempt ends as above.
 A tick never asks the user a question. Anything that needs a human (a design
 disagreement, contradictory comments, a request outside the PR's scope) is
 replied to as "needs a human decision" and recorded in `needsHuman`. The loop
-keeps watching other events.
+keeps watching other events. (Delivery step 3 answers such items on the PR
+and reports them in the round's message; the `needsHuman` list arrives with
+`status` in step 4.)
 
 ## 8. Trust model
 
@@ -619,13 +662,16 @@ feedback is acted on, but cannot widen what the tool may do.
 Verification runs the PR's code: its tests, and build scripts the PR may
 change. For a PR whose author has no write access, that is someone else's
 code running unattended with the user's `gh` and `git` credentials in reach.
-The watch therefore verifies such a PR only in the sandbox (`QWEN_SANDBOX`);
-without one it does not watch it unattended, and `--once` runs in the
-foreground after the user confirms. A PR by the user or a collaborator is
-verified as the user would verify it. `prepare` reports `authorCanPush` (the
-author is the user, or has write access to the base repository) and
-`sandboxed` (the session runs in one of Qwen Code's sandboxes), and the skill
-applies the rule from them before it asks to start.
+No sandbox Qwen Code offers keeps those credentials out of that code's
+reach: the default macOS profile restricts only writes, and inside a
+container the helpers themselves need `gh` and `git` credentials. The watch
+therefore does not watch such a PR at all; `--once` runs in the foreground
+after the user confirms, with that risk spelled out, and `--yes` does not
+skip the confirmation. A PR by the user or a collaborator is verified as the
+user would verify it. `prepare` reports `authorCanPush` (the author is the
+user, or has write access to the base repository), and the skill applies the
+rule before it asks to start. A verification sandbox that holds no
+credentials would lift the restriction; it is not part of this design.
 
 A comment is actionable when its author is:
 
@@ -682,10 +728,11 @@ Replies are on by default; `--no-reply` turns them off.
   since its previous run.
 - The job ends with the process. The state file stays, owned by the session
   that wrote it, and a new session's `prepare` refuses it (Section 6.1).
-  Taking a watch over in a later session, keeping its handled comments and
-  pushes, is delivery step 4; until then a restart needs
-  `cleanup <n> --force`, which discards that history. A watch that stopped
-  ran `cleanup` already.
+  Taking a watch over in a later session, keeping its pushes and budgets,
+  is delivery step 4; until then a restart needs `cleanup <n> --force`.
+  What the watch posted and handled survives in the PR's history file
+  (Section 6.6), so the new watch does not answer the same comments again.
+  A watch that stopped ran `cleanup` already.
 - The cron maximum age setting (`QWEN_CODE_CRON_MAX_AGE_DAYS`) still applies.
 
 Budgets, stored in the state file:
@@ -779,7 +826,8 @@ Delivery plan:
    handled is recorded, whatever its outcome); two resyncs within one round
    stop the watch, and a round whose work was not pushed ends with
    `sync --discard`, so the next one does not build on it. The sandbox rule of
-   Section 8 is applied at the start. The skill's `allowedTools` grant
+   Section 8 is applied at the start, and each round starts with `sync`, so
+   a push or a rollback the GitHub API does not show yet is followed. The skill's `allowedTools` grant
    reading its `.qwen/tmp` files, writing its brief and plan, and
    `cron_list` — no shell command. The permission matcher reads a leading
    `"${QWEN_CODE_CLI:-qwen}"` as an empty word, so no rule can name the

@@ -13,7 +13,7 @@ import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, setGhHost } from '../review/lib/gh.js';
-import { git } from '../review/lib/git.js';
+import { git, gitOpt } from '../review/lib/git.js';
 import { sanitizedGitEnv } from '../review/lib/worktree.js';
 import { pushTargetFor } from './prepare.js';
 import {
@@ -22,7 +22,10 @@ import {
   autofixPrPaths,
   repoRoot,
   requireState,
+  withWatchLock,
   writeState,
+  type AutofixPrPaths,
+  type AutofixPrState,
 } from './state.js';
 import {
   hasUncommittedChanges,
@@ -39,6 +42,53 @@ interface LivePr {
   isCrossRepository: boolean;
   headRepository: { name: string } | null;
   headRepositoryOwner: { login: string } | null;
+}
+
+/**
+ * Asks GitHub for the PR and, while it is open, checks that its head branch
+ * and the destination of pushes to it — found from this clone's remotes the
+ * way `prepare` found them — are still the ones the state file names. The
+ * state file alone must not redirect a push, nor a fetch into the worktree.
+ */
+export function liveDestination(
+  state: AutofixPrState,
+  prNumber: number,
+): LivePr {
+  setGhHost(state.host);
+  ensureAuthenticated();
+  const live = JSON.parse(
+    gh(
+      'pr',
+      'view',
+      String(prNumber),
+      '-R',
+      `${state.owner}/${state.repo}`,
+      '--json',
+      'state,headRefName,isCrossRepository,headRepository,headRepositoryOwner',
+    ),
+  ) as LivePr;
+  if (live.state !== 'OPEN') return live;
+  if (!live.headRepository || !live.headRepositoryOwner) {
+    throw new Error(`PR #${prNumber}'s head repository no longer exists.`);
+  }
+  if (live.headRefName !== state.headRefName) {
+    throw new Error(
+      `PR #${prNumber}'s head branch is ${live.headRefName}, not the ${state.headRefName} this watch was prepared for.`,
+    );
+  }
+  const target = pushTargetFor(
+    git('remote', '-v'),
+    state.host,
+    live.headRepositoryOwner.login,
+    live.headRepository.name,
+  );
+  if (target !== state.pushTarget) {
+    throw new Error(
+      `pushes to PR #${prNumber}'s head repository now go to ${target}, not the ${state.pushTarget} this watch was prepared with; ` +
+        `run \`qwen autofix-pr cleanup ${prNumber}\` and prepare it again.`,
+    );
+  }
+  return live;
 }
 
 export interface PushOutcome {
@@ -59,6 +109,24 @@ export function leaseRejected(porcelain: string): boolean {
   return porcelain
     .split('\n')
     .some((line) => line.startsWith('!\t') && line.includes('(stale info)'));
+}
+
+/** Whether the branch on the remote is no longer `known` (or is gone). */
+export function remoteHeadMoved(
+  worktreePath: string,
+  target: string,
+  headRef: string,
+  known: string,
+): boolean {
+  const line = gitOpt(
+    '-C',
+    worktreePath,
+    'ls-remote',
+    target,
+    `refs/heads/${headRef}`,
+  );
+  if (line === null) return false;
+  return (line.split(/\s/)[0] ?? '') !== known;
 }
 
 function pushRef(
@@ -104,6 +172,10 @@ function pushRef(
 
 export function runPush(prNumber: number): PushOutcome {
   const paths = autofixPrPaths(repoRoot(), prNumber);
+  return withWatchLock(paths, prNumber, () => pushLocked(paths, prNumber));
+}
+
+function pushLocked(paths: AutofixPrPaths, prNumber: number): PushOutcome {
   const state = requireState(paths.statePath, prNumber);
   assertOwnedBySession(state);
   const worktree = paths.worktreePath;
@@ -135,20 +207,7 @@ export function runPush(prNumber: number): PushOutcome {
     };
   }
 
-  setGhHost(state.host);
-  ensureAuthenticated();
-  const slug = `${state.owner}/${state.repo}`;
-  const live = JSON.parse(
-    gh(
-      'pr',
-      'view',
-      String(prNumber),
-      '-R',
-      slug,
-      '--json',
-      'state,headRefName,isCrossRepository,headRepository,headRepositoryOwner',
-    ),
-  ) as LivePr;
+  const live = liveDestination(state, prNumber);
   if (live.state !== 'OPEN') {
     return {
       pushed: false,
@@ -156,29 +215,7 @@ export function runPush(prNumber: number): PushOutcome {
       reason: `PR #${prNumber} is ${live.state.toLowerCase()}`,
     };
   }
-  // The branch and the destination come from GitHub and this clone's
-  // remotes, the way `prepare` found them, not from the state file alone:
-  // a state file edited since must not redirect the push.
-  if (!live.headRepository || !live.headRepositoryOwner) {
-    throw new Error(`PR #${prNumber}'s head repository no longer exists.`);
-  }
-  if (live.headRefName !== state.headRefName) {
-    throw new Error(
-      `PR #${prNumber}'s head branch is ${live.headRefName}, not the ${state.headRefName} this watch was prepared for.`,
-    );
-  }
-  const target = pushTargetFor(
-    git('remote', '-v'),
-    state.host,
-    live.headRepositoryOwner.login,
-    live.headRepository.name,
-  );
-  if (target !== state.pushTarget) {
-    throw new Error(
-      `pushes to PR #${prNumber}'s head repository now go to ${target}, not the ${state.pushTarget} this watch was prepared with; ` +
-        `run \`qwen autofix-pr cleanup ${prNumber}\` and prepare it again.`,
-    );
-  }
+  const slug = `${state.owner}/${state.repo}`;
   // Asked at push time, not trusted from `prepare`: the default branch can
   // be renamed while a watch runs.
   if (!live.isCrossRepository) {
@@ -206,7 +243,12 @@ export function runPush(prNumber: number): PushOutcome {
     known,
   );
   if (!result.ok) {
-    if (leaseRejected(result.stdout)) {
+    // The porcelain summary is one witness; asking the remote is the other,
+    // and does not depend on the language git prints in.
+    if (
+      leaseRejected(result.stdout) ||
+      remoteHeadMoved(worktree, state.pushTarget, state.headRefName, known)
+    ) {
       return {
         pushed: false,
         action: 'resync',

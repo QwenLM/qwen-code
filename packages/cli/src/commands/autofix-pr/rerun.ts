@@ -23,7 +23,9 @@ import {
   checkAttemptKey,
   repoRoot,
   requireState,
+  withWatchLock,
   writeState,
+  type AutofixPrPaths,
 } from './state.js';
 
 export interface RerunOutcome {
@@ -31,12 +33,25 @@ export interface RerunOutcome {
   runId: number;
   checks: string[];
   action?: 'resync';
+  /** The run is still going: GitHub re-runs a run only once it ended. The
+   * gate reports its failures once more then. */
+  deferred?: true;
   reason?: string;
 }
 
 export function runRerun(prNumber: number, runId: number): RerunOutcome {
   assertPositiveInteger(runId, 'run id');
   const paths = autofixPrPaths(repoRoot(), prNumber);
+  return withWatchLock(paths, prNumber, () =>
+    rerunLocked(paths, prNumber, runId),
+  );
+}
+
+function rerunLocked(
+  paths: AutofixPrPaths,
+  prNumber: number,
+  runId: number,
+): RerunOutcome {
   const state = requireState(paths.statePath, prNumber);
   assertOwnedBySession(state);
   setGhHost(state.host);
@@ -82,6 +97,19 @@ export function runRerun(prNumber: number, runId: number): RerunOutcome {
       reason: `${repeated.join(', ')} was re-run on this head already; treat the failure as real`,
     };
   }
+  if (failed.some(({ runDone }) => !runDone)) {
+    writeState(paths.statePath, {
+      ...state,
+      deferredRuns: [...new Set([...(state.deferredRuns ?? []), runId])],
+    });
+    return {
+      rerun: false,
+      runId,
+      checks,
+      deferred: true,
+      reason: `run ${runId} is still in progress; the gate reports its failures again once it has ended`,
+    };
+  }
   // `--failed` re-runs every failed job of the run, so every failed check
   // of it spends its re-run. Not retried: a re-run that reached GitHub
   // before a transport error would be asked for twice.
@@ -101,6 +129,7 @@ export function runRerun(prNumber: number, runId: number): RerunOutcome {
     ...state,
     rerunChecks: [...already, ...rerunKeys],
     handledChecks: [...(state.handledChecks ?? []), ...attempts],
+    deferredRuns: (state.deferredRuns ?? []).filter((id) => id !== runId),
   });
   return { rerun: true, runId, checks };
 }

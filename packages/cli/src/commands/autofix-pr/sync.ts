@@ -21,12 +21,15 @@
 import type { CommandModule } from 'yargs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { git, gitOpt } from '../review/lib/git.js';
+import { liveDestination } from './push.js';
 import {
   assertOwnedBySession,
   autofixPrPaths,
   repoRoot,
   requireState,
+  withWatchLock,
   writeState,
+  type AutofixPrPaths,
 } from './state.js';
 import {
   hasUncommittedChanges,
@@ -51,23 +54,54 @@ export interface SyncOutcome {
 
 export function runSync(prNumber: number, discard = false): SyncOutcome {
   const paths = autofixPrPaths(repoRoot(), prNumber);
+  return withWatchLock(paths, prNumber, () =>
+    syncLocked(paths, prNumber, discard),
+  );
+}
+
+function syncLocked(
+  paths: AutofixPrPaths,
+  prNumber: number,
+  discard: boolean,
+): SyncOutcome {
   const state = requireState(paths.statePath, prNumber);
   assertOwnedBySession(state);
   const worktree = paths.worktreePath;
   requireWorktree(paths, prNumber);
 
-  // FETCH_HEAD is per worktree, so this leaves the user's checkout alone.
-  git(
-    '-C',
-    worktree,
-    'fetch',
-    '--quiet',
-    state.pushTarget,
-    `refs/heads/${state.headRefName}`,
-  );
-  const prHead = git('-C', worktree, 'rev-parse', 'FETCH_HEAD^{commit}');
-  const head = git('-C', worktree, 'rev-parse', 'HEAD');
   const known = state.lastKnownHeadSha;
+  // FETCH_HEAD is per worktree, so this leaves the user's checkout alone.
+  const fetchPrHead = (): string => {
+    const live = liveDestination(state, prNumber);
+    if (live.state !== 'OPEN') {
+      throw new Error(
+        `PR #${prNumber} is ${live.state.toLowerCase()}; there is no head to follow.`,
+      );
+    }
+    git(
+      '-C',
+      worktree,
+      'fetch',
+      '--quiet',
+      state.pushTarget,
+      `refs/heads/${state.headRefName}`,
+    );
+    return git('-C', worktree, 'rev-parse', 'FETCH_HEAD^{commit}');
+  };
+  let prHead: string;
+  if (discard) {
+    // Ending a round must not depend on the PR still having a branch: a
+    // closed PR, a deleted branch or a lost connection leave the worktree
+    // at the head the watch last knew.
+    try {
+      prHead = fetchPrHead();
+    } catch {
+      prHead = known;
+    }
+  } else {
+    prHead = fetchPrHead();
+  }
+  const head = git('-C', worktree, 'rev-parse', 'HEAD');
   const moved = prHead !== known;
   // Commits of a round that are not on the PR: the worktree's own work.
   const own = Number(
@@ -83,7 +117,9 @@ export function runSync(prNumber: number, discard = false): SyncOutcome {
   if (discard) {
     discardedChanges = hasUncommittedChanges(worktree);
     git('-C', worktree, 'reset', '--hard', '--quiet', prHead);
-    git('-C', worktree, 'clean', '-fdq');
+    // `-ff`: an untracked nested repository would survive one `-f`, and
+    // keep the worktree from ever being clean again.
+    git('-C', worktree, 'clean', '-ffdq');
     if (own > 0) dropped = own;
   } else if (!isAncestor(worktree, known, prHead)) {
     // The author rewrote the history the watch knew.
