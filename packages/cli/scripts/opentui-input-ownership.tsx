@@ -92,9 +92,10 @@ try {
   );
   assert(editor, 'The native textarea must be mounted');
   await input(() => ui.mockInput.pasteBracketedText(JSON.stringify(a)));
-  await act(async () =>
-    ui.waitForFrame((frame) => /📎 clipboard-/.test(frame)),
-  );
+  await ui.waitFor(async () => {
+    await idle();
+    return /📎 clipboard-/.test(ui.captureCharFrame());
+  });
   await key('RETURN');
   assert.equal(
     submissions.length,
