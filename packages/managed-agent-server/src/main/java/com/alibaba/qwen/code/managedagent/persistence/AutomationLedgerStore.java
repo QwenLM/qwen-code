@@ -275,7 +275,7 @@ public class AutomationLedgerStore {
                     return actor == null ? "" : new String(actor, StandardCharsets.UTF_8);
                 }, tenantId, sessionId).stream().findFirst().orElse("");
         JsonNode limit = record.required("catchUpLimit");
-        JsonNode gate = record.path("gate");
+        JsonNode gate = record.required("gate");
         String gateCommand = gate.isTextual() ? gate.textValue() : null;
         ScheduleRow next =
                 new ScheduleRow(

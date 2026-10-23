@@ -396,6 +396,45 @@ describe('managed session authority automation runs', () => {
     });
   });
 
+  it('closes a run over its gate output resource', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const schedule = await openSchedule(harness, authority);
+      const dangling: ManagedSessionDurableRef = {
+        resourceId: 'gate-x',
+        kind: AUTOMATION_RESOURCE_KINDS.gateOutput,
+        schemaVersion: 1,
+        byteLength: 40,
+        digest: 'a'.repeat(64),
+      };
+      await expect(
+        commitRun(
+          authority,
+          automationRunClaimBody({
+            schedule,
+            occurrenceKey,
+            gateOutputRef: dangling,
+          }),
+          1,
+        ),
+      ).rejects.toThrow(/resource gate-x is not present/);
+      const held = await harness.store.publish(
+        AUTOMATION_RESOURCE_KINDS.gateOutput,
+        Buffer.from('{"gate":"./probe.sh"}', 'utf8'),
+      );
+      const receipt = await commitRun(
+        authority,
+        automationRunClaimBody({
+          schedule,
+          occurrenceKey,
+          gateOutputRef: held,
+        }),
+        1,
+      );
+      expect(receipt.revision).toBe(1);
+    });
+  });
+
   it('refuses a run whose id is not the derivation of its occurrence', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {

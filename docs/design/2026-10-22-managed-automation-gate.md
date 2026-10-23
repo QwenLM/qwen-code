@@ -233,7 +233,8 @@ the route wires the real one:
    a Broker that still holds the record UNKNOWN (the release then fails and
    the fire is retried), has fenced it for good, or answers that the Runtime
    generation which ran it can no longer answer
-   (`409 runtime_execution_evidence_unavailable`; the answer is `unknown`)
+   (`409 runtime_execution_evidence_unavailable`), or that its records
+   disagree (`409 runtime_execution_conflict`; the answer is `unknown`)
    ends the ask without a receipt. A
    reservation under the same key for another request is a
    conflict, never a second run: it answers `unknown` too. An attempt that
@@ -530,6 +531,12 @@ One PR, stacked on #15069 (it reuses `cron-gate.ts`):
   re-drive's instant, not the probe's. And the gate's status counts an
   answer only once its occurrence is settled, in a second write: a crash
   between the two leaves that answer uncounted, never counted twice.
+- A claim whose dispatch failed replays with the stored gate output and the
+  definition's prompt as it stands at the re-drive. If a revision in between
+  cleared the gate and spent the full ungated prompt budget, that replay can
+  exceed the inline bound; the dispatch refusal is definitive, so the slot
+  settles skipped and the run stays at its claim. It takes a failed dispatch
+  and such a revision before the re-drive.
 - Two releases can still miss a Session. An acquisition whose answer was
   lost and that the Broker admits only after a revision's stale fire found
   nothing to release (about 30 s of Broker stall) leaves that Session held.

@@ -160,6 +160,8 @@ public final class AutomationHarnessFake {
                     schedule.put("catchUp", "none");
                     schedule.put("catchUpLimit", null);
                     schedule.put("enabled", true);
+                    // The complete shape, as the Harness writes it.
+                    schedule.put("gate", null);
                     schedule.put("state", "admitted");
                     apply(schedule, definition);
                     if (!"persistent".equals(schedule.get("sessionMode"))) {

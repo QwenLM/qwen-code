@@ -536,23 +536,29 @@ describe('createHostedAutomationGateRunner', () => {
       });
     });
 
-    it('answers unknown once the Runtime generation that ran it is gone', async () => {
-      // A definitive answer, not a lost one: no retry would ever get more.
-      const { probe, later } = await laterAttempt(
-        rejection(409, 'runtime_execution_evidence_unavailable'),
-        { body: printed },
-        rejection(503, 'runtime_reconciliation_required'),
-      );
-      await expect(probe()).resolves.toEqual({
-        kind: 'unknown',
-        reason: "the Runtime lost the occurrence's probe before it settled",
-      });
-      expect(later()).toEqual([
-        '/executions:prepare',
-        '/executions/gate-execution',
-        RELEASE,
-      ]);
-    });
+    it.each([
+      'runtime_execution_evidence_unavailable',
+      'runtime_execution_conflict',
+    ])(
+      'answers unknown once the Broker says the Runtime cannot answer (%s)',
+      async (code) => {
+        // A definitive answer, not a lost one: no retry would ever get more.
+        const { probe, later } = await laterAttempt(
+          rejection(409, code),
+          { body: printed },
+          rejection(503, 'runtime_reconciliation_required'),
+        );
+        await expect(probe()).resolves.toEqual({
+          kind: 'unknown',
+          reason: "the Runtime lost the occurrence's probe before it settled",
+        });
+        expect(later()).toEqual([
+          '/executions:prepare',
+          '/executions/gate-execution',
+          RELEASE,
+        ]);
+      },
+    );
 
     it('lets the release of a revision gone stale ask about the probe first', async () => {
       // No runner comes back for a stale revision: its release asks the

@@ -588,8 +588,8 @@ public class ManagedAutomationService {
                             : schedule.required("catchUpLimit").asLong(),
                     schedule.required("enabled").asBoolean(), row.state(),
                     row.createdAt(), row.updatedAt(),
-                    schedule.path("gate").isTextual()
-                            ? schedule.path("gate").textValue() : null,
+                    schedule.required("gate").isTextual()
+                            ? schedule.required("gate").textValue() : null,
                     null);
         }
         return publicAutomation(row);
