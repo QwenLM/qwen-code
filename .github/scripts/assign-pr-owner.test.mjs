@@ -417,15 +417,22 @@ describe('assign-pr-owner: apply boundary', () => {
     const { log, stdout } = runAssign(false);
     assert.match(log, assignCall('DennisYu07'));
     assert.match(stdout, /assigned @DennisYu07/);
+    assert.match(stdout, /Selection: draw 0\.5; loads /);
+    assert.match(stdout, /DennisYu07:0/);
+    assert.match(stdout, /ZijianZhang989:5/);
+    assert.match(stdout, /; unavailable: none/);
     // `gh pr edit` requests repository.pullRequest.projectCards, which
     // GitHub rejects on the gh builds the ECS runners carry.
     assert.doesNotMatch(log, /pr edit/);
   });
 
   it('can assign a busier owner instead of always selecting the minimum', () => {
-    const { log, stdout } = runAssign(false, { randomValue: 0.99 });
+    const { log, stdout } = runAssign(false, {
+      randomValue: 0.9900000000000001,
+    });
     assert.match(log, assignCall('ZijianZhang989'));
     assert.match(stdout, /assigned @ZijianZhang989 \(5 open\)/);
+    assert.match(stdout, /Selection: draw 0\.9900000000000001; loads /);
   });
 
   it('matches the returned assignee case-insensitively', () => {
@@ -452,6 +459,9 @@ describe('assign-pr-owner: apply boundary', () => {
     const { log, stdout } = runAssign(true);
     assert.doesNotMatch(log, ASSIGN_CALL);
     assert.match(stdout, /dry-run — would assign @DennisYu07/);
+    assert.match(stdout, /Selection: draw 0\.5; loads /);
+    assert.match(stdout, /DennisYu07:0/);
+    assert.match(stdout, /; unavailable: none/);
   });
 
   it('never assigns the PR author to their own work', () => {
@@ -614,6 +624,7 @@ describe('assign-pr-owner: apply boundary', () => {
     assert.doesNotMatch(stderr, /Cannot read open-issue load/);
     assert.match(log, assignCall('DennisYu07'));
     assert.match(stdout, /assigned @DennisYu07 \(0 open\)/);
+    assert.match(stdout, /; unavailable: none/);
   });
 
   it('still draws an owner when every issue-list lookup fails', () => {
@@ -624,6 +635,9 @@ describe('assign-pr-owner: apply boundary', () => {
     assert.match(stderr, /Cannot read open-issue load/);
     assert.match(log, assignCall('chiga0'));
     assert.match(stdout, /assigned @chiga0/);
+    const owners = policy.areas.find((area) => area.name === 'core').owners;
+    assert.ok(stdout.includes(`; unavailable: ${owners.join(', ')}`));
+    for (const owner of owners) assert.ok(stdout.includes(`${owner}:0`));
   });
 });
 

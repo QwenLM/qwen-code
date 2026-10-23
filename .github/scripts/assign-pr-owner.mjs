@@ -143,7 +143,7 @@ function ownerLoad(repository, login) {
   console.warn(
     `::warning::Cannot read open-issue load for @${login}: ${lastError.message}`,
   );
-  return 0;
+  return undefined;
 }
 
 // `gh pr view --json files` caps at 100 entries, so the REST files endpoint
@@ -235,15 +235,23 @@ function main() {
     ]);
   }
 
+  const unavailableLoads = [];
   const loadByOwner = new Map(
-    eligible.map((owner) => [owner, ownerLoad(repository, owner)]),
+    eligible.map((owner) => {
+      const load = ownerLoad(repository, owner);
+      if (load === undefined) unavailableLoads.push(owner);
+      return [owner, load ?? 0];
+    }),
   );
-  const assignee = pickPrOwner(eligible, loadByOwner);
+  const draw = Math.random();
+  const assignee = pickPrOwner(eligible, loadByOwner, draw);
+  const selectionSummary = `Selection: draw ${draw}; loads ${eligible.map((owner) => `${owner}:${loadByOwner.get(owner)}`).join(' ')}; unavailable: ${unavailableLoads.join(', ') || 'none'}`;
 
   if (dryRun) {
     record([
       `Area: ${area.name}`,
       `Assignment: dry-run — would assign @${assignee} (${loadByOwner.get(assignee)} open)`,
+      selectionSummary,
     ]);
     return;
   }
@@ -337,6 +345,7 @@ function main() {
   record([
     `Area: ${area.name}`,
     `Assignment: assigned @${assignee} (${loadByOwner.get(assignee)} open)`,
+    selectionSummary,
   ]);
 }
 
