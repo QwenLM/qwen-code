@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -392,9 +393,17 @@ function OutputLanguageCombobox({
   const [draft, setDraft] = useState(currentValue);
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
+  // Enter takes the highlighted row only after the user moved through the
+  // list; otherwise it keeps the exact typed text.
+  const [navigated, setNavigated] = useState(false);
+  const [pending, setPending] = useState(false);
+  const lastCommittedRef = useRef<string | null>(null);
   const listId = `${name}-options`;
 
-  useEffect(() => setDraft(currentValue), [currentValue]);
+  useEffect(() => {
+    setDraft(currentValue);
+    lastCommittedRef.current = null;
+  }, [currentValue]);
 
   const items = useMemo(() => {
     const all = [
@@ -427,13 +436,70 @@ function OutputLanguageCombobox({
   }, [currentValue, draft, options, placeholder, t]);
 
   const commit = (next: string) => {
-    setOpen(false);
+    if (pending) return;
     const trimmed = next.trim();
-    if (trimmed === currentValue.trim()) {
+    setOpen(false);
+    if (
+      trimmed === currentValue.trim() ||
+      trimmed === lastCommittedRef.current
+    ) {
       setDraft(currentValue);
       return;
     }
-    applyCommitResult(onCommit(trimmed), () => setDraft(currentValue));
+    lastCommittedRef.current = trimmed;
+    // Show the value being saved so a later blur cannot resubmit the query.
+    setDraft(trimmed);
+    setPending(true);
+    const settle = (applied: unknown) => {
+      setPending(false);
+      if (applied === false) {
+        lastCommittedRef.current = null;
+        setDraft(currentValue);
+      }
+    };
+    const result = onCommit(trimmed);
+    if (result && typeof (result as Promise<unknown>).then === 'function') {
+      void (result as Promise<unknown>).then(settle, () => settle(false));
+    } else {
+      settle(result);
+    }
+  };
+
+  // Enter keeps the exact typed text (or the saved value) unless the user
+  // explicitly moved through the list; only an exact or unique-prefix match
+  // resolves to a suggestion.
+  const commitDraft = () => {
+    const trimmed = draft.trim();
+    if (trimmed === currentValue.trim()) {
+      setDraft(currentValue);
+      setOpen(false);
+      return;
+    }
+    const lower = trimmed.toLowerCase();
+    const all = [
+      { value: '', label: placeholder },
+      ...options.map((option) => ({
+        value: String(option.value),
+        label: option.label,
+      })),
+    ];
+    const exact = all.find(
+      (item) =>
+        item.value.toLowerCase() === lower ||
+        item.label.toLowerCase() === lower,
+    );
+    if (exact) {
+      commit(exact.value);
+      return;
+    }
+    const prefixMatches = trimmed
+      ? all.filter(
+          (item) =>
+            item.value.toLowerCase().startsWith(lower) ||
+            item.label.toLowerCase().startsWith(lower),
+        )
+      : [];
+    commit(prefixMatches.length === 1 ? prefixMatches[0].value : trimmed);
   };
 
   return (
@@ -457,24 +523,30 @@ function OutputLanguageCombobox({
         onChange={(event) => {
           setDraft(event.target.value);
           setActiveIndex(0);
+          setNavigated(false);
           setOpen(true);
         }}
         onFocus={() => setOpen(true)}
-        onBlur={() => commit(draft)}
+        onBlur={commitDraft}
         onKeyDown={(event) => {
           if (event.key === 'ArrowDown') {
             event.preventDefault();
             setOpen(true);
+            setNavigated(true);
             setActiveIndex((index) => Math.min(index + 1, items.length - 1));
           } else if (event.key === 'ArrowUp') {
             event.preventDefault();
+            setNavigated(true);
             setActiveIndex((index) => Math.max(index - 1, 0));
           } else if (event.key === 'Enter') {
             event.preventDefault();
-            commit(open ? (items[activeIndex]?.value ?? draft) : draft);
+            const picked = open && navigated ? items[activeIndex] : undefined;
+            if (picked) commit(picked.value);
+            else commitDraft();
           } else if (event.key === 'Escape') {
             event.preventDefault();
             setOpen(false);
+            setNavigated(false);
             setDraft(currentValue);
           }
         }}
@@ -499,7 +571,10 @@ function OutputLanguageCombobox({
                   ? 'bg-accent text-accent-foreground'
                   : 'hover:bg-accent/60'
               }`}
-              onMouseEnter={() => setActiveIndex(index)}
+              onMouseEnter={() => {
+                setActiveIndex(index);
+                setNavigated(true);
+              }}
               onClick={() => commit(item.value)}
             >
               <span className="truncate">{item.label}</span>

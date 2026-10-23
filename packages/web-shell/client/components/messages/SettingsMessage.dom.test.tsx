@@ -131,8 +131,9 @@ function outputLanguageSetting(effective: string): DaemonSettingDescriptor {
     requiresRestart: true,
     default: 'auto',
     options: [
-      { value: 'Chinese', label: '中文 (Chinese)' },
       { value: 'English', label: 'English' },
+      { value: 'Traditional Chinese', label: '繁體中文 (Traditional Chinese)' },
+      { value: 'Chinese', label: '中文 (Chinese)' },
       { value: 'Japanese', label: '日本語 (Japanese)' },
     ],
     values: { effective },
@@ -678,6 +679,128 @@ describe('SettingsMessage user-scope editing', () => {
     });
 
     expect(onOutputLanguageChange).toHaveBeenCalledWith('Klingon');
+  });
+
+  it('keeps the exact typed language when Enter does not follow navigation', async () => {
+    // 'Chinese' is also a substring of the earlier 'Traditional Chinese'
+    // suggestion; Enter must not silently switch to that language.
+    const onOutputLanguageChange = vi.fn();
+    const container = renderPanel(
+      makeState([outputLanguageSetting('French')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Chinese');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('Chinese');
+  });
+
+  it('does not submit an unedited output language on Enter', async () => {
+    const onOutputLanguageChange = vi.fn();
+    const container = renderPanel(
+      makeState([outputLanguageSetting('English')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+
+    await act(async () => {
+      input!.focus();
+      await Promise.resolve();
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(onOutputLanguageChange).not.toHaveBeenCalled();
+  });
+
+  it('commits the highlighted suggestion after explicit keyboard navigation', async () => {
+    const onOutputLanguageChange = vi.fn();
+    const container = renderPanel(
+      makeState([outputLanguageSetting('auto')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+
+    await act(async () => {
+      input!.focus();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('English');
+  });
+
+  it('syncs the picked language and does not resubmit the query on blur', async () => {
+    const onOutputLanguageChange = vi.fn();
+    const container = renderPanel(
+      makeState([outputLanguageSetting('French')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Eng');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const option = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((node) => node.textContent === 'English');
+    expect(option).toBeTruthy();
+    await act(async () => {
+      option!.click();
+      await Promise.resolve();
+    });
+
+    expect(onOutputLanguageChange).toHaveBeenCalledTimes(1);
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('English');
+    expect(input?.value).toBe('English');
+
+    await act(async () => {
+      input!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(onOutputLanguageChange).toHaveBeenCalledTimes(1);
   });
 
   it('still persists to workspace scope on the default (Workspace) tab', async () => {
