@@ -143,6 +143,15 @@ qwen -p "Why does the build fail on Windows?" --output-style Concise
 
 Qwen Code supports multiple output formats for different use cases:
 
+If the model explicitly reports that its final response reached the output-token
+limit after recovery, with no pending tool calls, a one-shot run exits with code
+`1`. Text mode reports `Response truncated due to token limits.` on stderr.
+JSON modes emit an `error_during_execution` result with `is_error: true`. Any
+final assistant message emitted for that response carries
+`stop_reason: "max_tokens"`. Reusable stream-json sessions report the failed turn
+and remain available for subsequent messages. Ordinary complete text answers do
+not require a tool call and remain successful.
+
 ### Text Output (Default)
 
 Standard human-readable output:

@@ -26,6 +26,7 @@ import {
   toolResultBoundaryArtifact,
 } from '@qwen-code/qwen-code-core';
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
+import { FinishReason } from '@google/genai';
 import type {
   CLIAssistantMessage,
   CLIMessage,
@@ -59,6 +60,7 @@ export interface MessageState {
   messageStarted: boolean;
   finalized: boolean;
   currentBlockType: ContentBlock['type'] | null;
+  finishReason?: FinishReason;
 }
 
 /**
@@ -261,13 +263,14 @@ export abstract class BaseJsonOutputAdapter {
       }
     }
 
-    // Determine stop_reason based on content block types
-    // If the message contains only tool_use blocks, set stop_reason to 'tool_use'
+    // An output limit takes precedence over the content-derived tool stop.
     const stopReason =
-      state.blocks.length > 0 &&
-      state.blocks.every((block) => block.type === 'tool_use')
-        ? 'tool_use'
-        : null;
+      state.finishReason === FinishReason.MAX_TOKENS
+        ? 'max_tokens'
+        : state.blocks.length > 0 &&
+            state.blocks.every((block) => block.type === 'tool_use')
+          ? 'tool_use'
+          : null;
 
     return {
       type: 'assistant',
@@ -384,6 +387,7 @@ export abstract class BaseJsonOutputAdapter {
     state.messageStarted = false;
     state.finalized = false;
     state.currentBlockType = null;
+    state.finishReason = undefined;
   }
 
   /**
@@ -621,6 +625,7 @@ export abstract class BaseJsonOutputAdapter {
     discardedToolCalls: ToolCallRequestInfo[],
   ): void {
     if (preserveText) {
+      this.mainAgentMessageState.finishReason = undefined;
       const discardedIds = new Set(
         discardedToolCalls.map((request) => request.callId),
       );
@@ -694,6 +699,7 @@ export abstract class BaseJsonOutputAdapter {
         this.appendToolUse(state, event.value, null);
         break;
       case LlmEventType.Finished:
+        state.finishReason = event.value.reason;
         if (event.value?.usageMetadata) {
           state.usage = this.createUsage(event.value.usageMetadata);
         }
