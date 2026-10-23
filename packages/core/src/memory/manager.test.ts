@@ -2063,6 +2063,46 @@ describe('MemoryManager', () => {
       expect(vi.mocked(runAutoMemoryExtract)).toHaveBeenCalledTimes(2);
     });
 
+    it('does not emit an unhandled rejection when a queued extraction fails', async () => {
+      // The queued run has no caller: scheduleExtract returned 'queued' before
+      // it started, and runExtract already logged the failure and marked the
+      // task failed. Its rejection must not reach the process handler.
+      const failure = new Error('queued extract failed');
+      const first = deferred<ExtractResult>();
+      vi.mocked(runAutoMemoryExtract)
+        .mockReturnValueOnce(first.promise)
+        .mockRejectedValueOnce(failure);
+
+      const unhandled = vi.fn();
+      process.on('unhandledRejection', unhandled);
+      try {
+        const mgr = new MemoryManager();
+        const firstPromise = mgr.scheduleExtract(
+          extractParams(tmp.projectRoot, 'sess-1', 'first'),
+        );
+        const queued = await mgr.scheduleExtract(
+          extractParams(tmp.projectRoot, 'sess-1', 'second'),
+        );
+        expect(queued.skippedReason).toBe('queued');
+
+        first.resolve(extractResult('sess-1', []));
+        await firstPromise;
+        await mgr.drain();
+        // unhandledRejection fires once the microtask queue has drained.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        expect(unhandled).not.toHaveBeenCalled();
+        expect(
+          mgr
+            .listTasksByType('extract', tmp.projectRoot)
+            .map((task) => task.status)
+            .sort(),
+        ).toEqual(['completed', 'failed']);
+      } finally {
+        process.off('unhandledRejection', unhandled);
+      }
+    });
+
     it('isolates state between manager instances', async () => {
       vi.mocked(runAutoMemoryExtract).mockResolvedValue(
         extractResult('sess-1', ['user']),

@@ -222,6 +222,10 @@ describe('managed auto-memory lifecycle integration', () => {
   }
 
   afterEach(async () => {
+    // A failed or timed-out attempt can leave an extraction running. Wait it
+    // out before deleting tempDir, or its writes land in a removed tree and
+    // surface as ENOENT after teardown — even when a retry passed.
+    await mgr.drain();
     mgr.resetExtractStateForTests();
     if (originalMemoryBase === undefined) {
       delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
