@@ -205,6 +205,8 @@ Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, 
 
 After authentication, use the `/model` command to browse and switch between the models configured for your Token Plan. The model lineup evolves over time, so it is intentionally not listed here; model discovery from the endpoint happens during the `/auth` setup step above (the endpoint's own list is offered there and must be selected explicitly), and `/model` then shows the models configured for your plan.
 
+Qwen Code also checks the endpoint's model list at startup with your stored API key. When a newer built-in model list ships, or when the models served to your key change (for example after you switch to a key for a different plan), Qwen Code offers a **Built-in Provider Update**. The update configures only the built-in models your key is served and removes the ones it cannot use, except the model you have selected, which is always kept. If nothing would change for your key, the check is recorded without a prompt.
+
 ### Headless or scripted setup
 
 For CI, containers, or scripts, configure Token Plan with environment variables or `settings.json` instead of the interactive `/auth` flow.

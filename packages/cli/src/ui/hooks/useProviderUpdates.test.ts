@@ -5,6 +5,7 @@
  */
 // @vitest-environment jsdom
 
+import { createHash } from 'node:crypto';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
 import {
@@ -1401,15 +1402,21 @@ describe('useProviderUpdates', () => {
       (model) => !unservedIds.includes(model.id),
     );
 
+    const servedFingerprint = createHash('sha256')
+      .update(JSON.stringify(servedSpecs.map((model) => model.id).sort()))
+      .digest('hex');
+
     const setUpTokenPlanUpdate = (
       currentModel = 'qwen3.7-plus',
       installed = tokenTemplate,
+      metadata: Record<string, unknown> = {},
     ) => {
       (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
         TOKEN_METADATA_KEY
       ] = {
         baseUrl: TOKEN_PLAN_BASE_URL,
         version: 'old-version-hash',
+        ...metadata,
       };
       mockSettings.merged['modelProviders'] = {
         [AuthType.USE_OPENAI]: installed,
@@ -1447,6 +1454,7 @@ describe('useProviderUpdates', () => {
         expect.objectContaining({
           baseUrl: TOKEN_PLAN_BASE_URL,
           apiKey: 'sk-sp-personal',
+          signal: expect.any(AbortSignal),
         }),
       );
       expect(result.current.providerUpdateRequest!.entries[0]!.diff).toEqual({
@@ -1505,6 +1513,11 @@ describe('useProviderUpdates', () => {
           tokenVersion,
         );
       });
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        expect.anything(),
+        `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.servedModels`,
+        servedFingerprint,
+      );
       expect(result.current.providerUpdateRequest).toBeUndefined();
       expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
     });
@@ -1574,11 +1587,16 @@ describe('useProviderUpdates', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(labels()).toEqual(['Coding Plan']);
 
-      await result.current.providerUpdateRequest!.onConfirm('later');
+      // Two Escapes in one input chunk answer the same request twice; the
+      // second call must not dismiss the queued prompt.
+      const { onConfirm } = result.current.providerUpdateRequest!;
+      await onConfirm('later');
+      await onConfirm('later');
 
       await waitFor(() => {
         expect(labels()).toEqual(['Token Plan']);
       });
+      expect(mockSettings.setValues).toHaveBeenCalledTimes(1);
       expect(
         result.current.providerUpdateRequest!.entries[0]!.diff.removed,
       ).toEqual(unservedIds);
@@ -1605,6 +1623,331 @@ describe('useProviderUpdates', () => {
       expect(installedIds()).toEqual(
         tokenPlanProvider.models!.map((model) => model.id),
       );
+    });
+
+    it('keeps a model selected while discovery is in flight', async () => {
+      process.env[TOKEN_PLAN_ENV_KEY] = 'sk-sp-personal';
+      let resolveDiscovery!: (models: Array<{ id: string }>) => void;
+      vi.mocked(discoverProviderModels).mockReturnValue(
+        new Promise((resolve) => {
+          resolveDiscovery = resolve;
+        }),
+      );
+
+      const { result } = setUpTokenPlanUpdate('qwen3.7-plus');
+      await waitFor(() => {
+        expect(discoverProviderModels).toHaveBeenCalled();
+      });
+      mockConfig.getModel.mockReturnValue('glm-5');
+      resolveDiscovery(servedSpecs);
+
+      await waitFor(() => {
+        expect(result.current.providerUpdateRequest).toBeDefined();
+      });
+      expect(result.current.providerUpdateRequest!.entries[0]!.diff).toEqual({
+        added: [],
+        removed: ['kimi-k2.6'],
+        currentModelAffected: false,
+      });
+
+      await result.current.providerUpdateRequest!.onConfirm('update');
+
+      await waitFor(() => {
+        expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+      });
+      expect(installedIds()).toContain('glm-5');
+    });
+
+    it('keeps the model selected when the update is confirmed', async () => {
+      process.env[TOKEN_PLAN_ENV_KEY] = 'sk-sp-personal';
+      vi.mocked(discoverProviderModels).mockResolvedValue(servedSpecs);
+
+      const { result } = setUpTokenPlanUpdate('qwen3.7-plus');
+      await waitFor(() => {
+        expect(result.current.providerUpdateRequest).toBeDefined();
+      });
+      mockConfig.getModel.mockReturnValue('glm-5');
+
+      await result.current.providerUpdateRequest!.onConfirm('update');
+
+      await waitFor(() => {
+        expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+      });
+      expect(installedIds()).toContain('glm-5');
+      expect(installedIds()).not.toContain('kimi-k2.6');
+    });
+
+    it('falls back to the full built-in list when no served model is built in', async () => {
+      process.env[TOKEN_PLAN_ENV_KEY] = 'sk-sp-personal';
+      vi.mocked(discoverProviderModels).mockResolvedValue([
+        { id: 'org-alias-1' },
+      ]);
+
+      const { result } = setUpTokenPlanUpdate();
+
+      await waitFor(() => {
+        expect(result.current.providerUpdateRequest).toBeDefined();
+      });
+      expect(
+        result.current.providerUpdateRequest!.entries[0]!.diff.removed,
+      ).toEqual([]);
+
+      await result.current.providerUpdateRequest!.onConfirm('update');
+
+      await waitFor(() => {
+        expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+      });
+      expect(installedIds()).toEqual(
+        tokenPlanProvider.models!.map((model) => model.id),
+      );
+    });
+
+    it('counts a built-in stored on the Responses wire as installed', async () => {
+      process.env[TOKEN_PLAN_ENV_KEY] = 'sk-sp-personal';
+      vi.mocked(discoverProviderModels).mockResolvedValue(servedSpecs);
+      const [first, ...rest] = servedTemplate;
+
+      const { result } = setUpTokenPlanUpdate('qwen3.7-plus', [
+        { ...first!, wireApi: 'responses' },
+        ...rest,
+      ]);
+
+      await waitFor(() => {
+        expect(mockSettings.setValue).toHaveBeenCalledWith(
+          expect.anything(),
+          `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.version`,
+          tokenVersion,
+        );
+      });
+      expect(result.current.providerUpdateRequest).toBeUndefined();
+    });
+
+    it('reports a failed version write and still prompts the other providers', async () => {
+      process.env[TOKEN_PLAN_ENV_KEY] = 'sk-sp-personal';
+      process.env[CODING_PLAN_ENV_KEY] = 'sk-sp-coding';
+      vi.mocked(discoverProviderModels).mockImplementation(
+        async ({ baseUrl }) =>
+          baseUrl === TOKEN_PLAN_BASE_URL
+            ? servedSpecs
+            : codingPlanProvider.models!.map((model) => ({ id: model.id })),
+      );
+      mockSettings.setValue.mockImplementation((_scope, key: string) => {
+        if (key.endsWith(`${TOKEN_METADATA_KEY}.version`)) {
+          throw new Error('EROFS: read-only file system');
+        }
+      });
+      const metadataNs = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
+        string,
+        unknown
+      >;
+      metadataNs[METADATA_KEY] = {
+        baseUrl: CODING_PLAN_CHINA_BASE_URL,
+        version: 'old-version-hash',
+      };
+      metadataNs[TOKEN_METADATA_KEY] = {
+        baseUrl: TOKEN_PLAN_BASE_URL,
+        version: 'old-version-hash',
+      };
+      // Token Plan has nothing to change; Coding Plan gains its last model.
+      mockSettings.merged['modelProviders'] = {
+        [AuthType.USE_OPENAI]: [
+          ...chinaTemplate.slice(0, -1),
+          ...servedTemplate,
+        ],
+      };
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on('unhandledRejection', onUnhandled);
+
+      try {
+        const { result } = renderHook(() =>
+          useProviderUpdates(
+            mockSettings as never,
+            mockConfig as never,
+            mockAddItem,
+          ),
+        );
+
+        await waitFor(() => {
+          expect(
+            result.current.providerUpdateRequest?.entries.map(
+              (entry) => entry.providerLabel,
+            ),
+          ).toEqual(['Coding Plan']);
+        });
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'error',
+            text: expect.stringContaining('EROFS'),
+          }),
+          expect.any(Number),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+    });
+
+    it('does not record or prompt after the hook unmounts', async () => {
+      process.env[TOKEN_PLAN_ENV_KEY] = 'sk-sp-personal';
+      let resolveDiscovery!: (models: Array<{ id: string }>) => void;
+      vi.mocked(discoverProviderModels).mockReturnValue(
+        new Promise((resolve) => {
+          resolveDiscovery = resolve;
+        }),
+      );
+
+      const { result, unmount } = setUpTokenPlanUpdate(
+        'qwen3.7-plus',
+        servedTemplate,
+      );
+      await waitFor(() => {
+        expect(discoverProviderModels).toHaveBeenCalled();
+      });
+      unmount();
+      resolveDiscovery(servedSpecs);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+        expect.anything(),
+        `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.version`,
+        expect.anything(),
+      );
+      expect(result.current.providerUpdateRequest).toBeUndefined();
+    });
+
+    describe('up-to-date install', () => {
+      it('removes unserved models installed by an earlier update', async () => {
+        process.env[TOKEN_PLAN_ENV_KEY] = 'sk-sp-personal';
+        vi.mocked(discoverProviderModels).mockResolvedValue(servedSpecs);
+
+        const { result } = setUpTokenPlanUpdate('qwen3.7-plus', tokenTemplate, {
+          version: tokenVersion,
+        });
+
+        await waitFor(() => {
+          expect(result.current.providerUpdateRequest).toBeDefined();
+        });
+        expect(result.current.providerUpdateRequest!.entries[0]!.diff).toEqual({
+          added: [],
+          removed: unservedIds,
+          currentModelAffected: false,
+        });
+
+        await result.current.providerUpdateRequest!.onConfirm('update');
+
+        await waitFor(() => {
+          expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+        });
+        expect(installedIds()).toEqual(servedSpecs.map((model) => model.id));
+        expect(mockSettings.setValue).toHaveBeenCalledWith(
+          expect.anything(),
+          `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.servedModels`,
+          servedFingerprint,
+        );
+      });
+
+      it('offers newly served models after the key changes', async () => {
+        // Recorded for a Personal key; a Team key is now served everything.
+        process.env[TOKEN_PLAN_ENV_KEY] = 'sk-team';
+        vi.mocked(discoverProviderModels).mockResolvedValue(
+          tokenPlanProvider.models!.map((model) => ({ id: model.id })),
+        );
+
+        const { result } = setUpTokenPlanUpdate(
+          'qwen3.7-plus',
+          servedTemplate,
+          { version: tokenVersion, servedModels: servedFingerprint },
+        );
+
+        await waitFor(() => {
+          expect(result.current.providerUpdateRequest).toBeDefined();
+        });
+        expect(result.current.providerUpdateRequest!.entries[0]!.diff).toEqual({
+          added: unservedIds,
+          removed: [],
+          currentModelAffected: false,
+        });
+      });
+
+      it('does not prompt when the served models are unchanged', async () => {
+        process.env[TOKEN_PLAN_ENV_KEY] = 'sk-sp-personal';
+        vi.mocked(discoverProviderModels).mockResolvedValue(servedSpecs);
+
+        const { result } = setUpTokenPlanUpdate(
+          'qwen3.7-plus',
+          servedTemplate,
+          { version: tokenVersion, servedModels: servedFingerprint },
+        );
+
+        await waitFor(() => {
+          expect(discoverProviderModels).toHaveBeenCalled();
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(result.current.providerUpdateRequest).toBeUndefined();
+        expect(mockSettings.setValue).not.toHaveBeenCalled();
+      });
+
+      it('records the served models without prompting when nothing changes', async () => {
+        process.env[TOKEN_PLAN_ENV_KEY] = 'sk-sp-personal';
+        vi.mocked(discoverProviderModels).mockResolvedValue(servedSpecs);
+
+        const { result } = setUpTokenPlanUpdate(
+          'qwen3.7-plus',
+          servedTemplate,
+          { version: tokenVersion },
+        );
+
+        await waitFor(() => {
+          expect(mockSettings.setValue).toHaveBeenCalledWith(
+            expect.anything(),
+            `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.servedModels`,
+            servedFingerprint,
+          );
+        });
+        expect(result.current.providerUpdateRequest).toBeUndefined();
+      });
+
+      it('does not prompt when discovery fails', async () => {
+        process.env[TOKEN_PLAN_ENV_KEY] = 'sk-sp-personal';
+
+        const { result } = setUpTokenPlanUpdate('qwen3.7-plus', tokenTemplate, {
+          version: tokenVersion,
+          servedModels: servedFingerprint,
+        });
+
+        await waitFor(() => {
+          expect(discoverProviderModels).toHaveBeenCalled();
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(result.current.providerUpdateRequest).toBeUndefined();
+      });
+
+      it('skip accepts the served models instead of ignoring the version', async () => {
+        process.env[TOKEN_PLAN_ENV_KEY] = 'sk-sp-personal';
+        vi.mocked(discoverProviderModels).mockResolvedValue(servedSpecs);
+
+        const { result } = setUpTokenPlanUpdate('qwen3.7-plus', tokenTemplate, {
+          version: tokenVersion,
+        });
+
+        await waitFor(() => {
+          expect(result.current.providerUpdateRequest).toBeDefined();
+        });
+        await result.current.providerUpdateRequest!.onConfirm('skip');
+
+        expect(mockSettings.setValue).toHaveBeenCalledWith(
+          expect.anything(),
+          `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.servedModels`,
+          servedFingerprint,
+        );
+        expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+          expect.anything(),
+          `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.ignoredVersion`,
+          expect.anything(),
+        );
+      });
     });
 
     it('skips discovery when no key is stored', async () => {
