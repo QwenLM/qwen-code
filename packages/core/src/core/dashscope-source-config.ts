@@ -6,15 +6,22 @@
 
 const DASHSCOPE_SOURCE_CONFIG_HEADER = 'X-DashScope-Source-Config';
 
+/** Token Plan subscription endpoints are these hosts behind this prefix. */
+const TOKEN_PLAN_HOST_PREFIX = 'token-plan.';
+
 const SITE_CHANNELS: ReadonlyArray<readonly [host: string, channel: string]> = [
   ['maas.qianwenaiapi.com', 'qianwenai-inner-agents'],
   ['maas.qwencloudapi.com', 'qwencloud-inner-agents'],
 ];
 
+const SITE_CHANNEL_BY_HOST: ReadonlyMap<string, string> = new Map(
+  SITE_CHANNELS,
+);
+
 /**
- * 千问AI平台 (China) / QwenCloud (International) MaaS hosts. Both the
- * pay-as-you-go endpoints and the `token-plan.`-prefixed subscription
- * endpoints are subdomains of these, so one suffix match covers all four.
+ * 千问AI平台 (China) / QwenCloud (International) MaaS hosts. A request reaches
+ * one of them either as the bare pay-as-you-go host or behind the
+ * `token-plan.` prefix; attribution matches those two forms exactly.
  */
 export const QWENCLOUD_MAAS_HOSTS: readonly string[] = SITE_CHANNELS.map(
   ([host]) => host,
@@ -38,18 +45,18 @@ export function buildDashScopeSourceConfig(
   } catch {
     return undefined;
   }
+  const isTokenPlan = hostname.startsWith(TOKEN_PLAN_HOST_PREFIX);
+  const channel = SITE_CHANNEL_BY_HOST.get(
+    isTokenPlan ? hostname.slice(TOKEN_PLAN_HOST_PREFIX.length) : hostname,
+  );
+  if (!channel) return undefined;
   const t1 =
     runtimeChannel === 'desktop' ? 'qwen-code-desktop' : 'qwen-code-cli';
-  for (const [host, channel] of SITE_CHANNELS) {
-    const tags =
-      hostname === host
-        ? { t1, t2: 'payg' }
-        : hostname === `token-plan.${host}`
-          ? { t1 }
-          : undefined;
-    if (tags) return JSON.stringify({ channel, source: 'model', tags });
-  }
-  return undefined;
+  return JSON.stringify({
+    channel,
+    source: 'model',
+    tags: isTokenPlan ? { t1 } : { t1, t2: 'payg' },
+  });
 }
 
 /**
