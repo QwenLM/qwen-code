@@ -1062,6 +1062,12 @@ CREATE TABLE ma_schedule (
     fence BIGINT NOT NULL DEFAULT 0,
     gmt_create BIGINT UNSIGNED NOT NULL,
     gmt_modified BIGINT UNSIGNED NOT NULL,
+    gate VARCHAR(2048) NULL,
+    gate_last_outcome VARCHAR(16) NULL,
+    gate_last_at BIGINT UNSIGNED NULL,
+    gate_quiet_since_delivery INT NOT NULL DEFAULT 0,
+    gate_failures INT NOT NULL DEFAULT 0,
+    gate_last_error VARCHAR(1024) NULL,
     PRIMARY KEY (tenant_id, schedule_id)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 

@@ -248,6 +248,7 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
   assert.deepEqual(tools.map((tool) => tool.function.name).sort(), [
     ...(shellProfile ? ['agent'] : []),
     'edit',
+    ...(shellProfile ? ['glob'] : []),
     ...(shellProfile ? ['monitor'] : []),
     'read_file',
     ...(shellProfile
