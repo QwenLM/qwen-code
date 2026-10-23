@@ -2,9 +2,10 @@
 
 [English](2026-10-22-managed-workspace-fetch-and-todos.md) | 中文
 
-> 范围说明：本文最初为一并加入 `web_fetch` 与 `todo_write` 的变更而写。issue
-> 上已有维护者裁定暂缓原生网页抓取，因此实际交付的只有 `todo_write` 这一个切片。
-> 下面保留了抓取部分的分析，用来说明它为什么没有交付。
+> 范围说明：本文最初为一并加入 `web_fetch` 与 `todo_write` 的变更而写。原生网页
+> 抓取随后由 `main` 带着自己的目标地址校验交付，因此本分支只交付 `todo_write`
+> 这一片，并从 `main` 继承 `web_fetch`：`files/3` 声明 `files/2` 的全部工具
+> （含 `web_fetch` 与 `glob`），再加 `todo_write`。
 
 ## 问题
 
@@ -41,8 +42,8 @@ profile 名称随 Session 定义持久化，加载时改用其他 profile 会以
 
 通过一个新 profile 加入 `todo_write`：
 
-- `hosted-workspace-files/3` —— `read_file`、`write_file`、`edit`、`glob`、
-  `todo_write`
+- `hosted-workspace-files/3` —— `files/2` 的全部声明（`read_file`、
+  `write_file`、`edit`、`web_fetch`、`glob`）再加 `todo_write`
 
 `files/3` 复用 `files/2` 的声明数组并追加一个新声明，因此既有声明保持逐字节一致。
 
@@ -59,14 +60,11 @@ team lead 是控制面内部创建的会话，read profile 属于不得写入的
 1. **新增 profile 版本，不改 `/1`、`/2`。** 工具准入依赖会话自身 profile 提供
    过的工具名。把名字加进 `/2`，会让既有 `/2` 会话的下一次加载暴露此前的轮次
    从未提供的工具。先例是 `glob` 的变更（`#13166`），出于同样原因新增了 `/2`。
-2. **`web_fetch` 不交付，依据已记录的决定。** issue 上有维护者裁定暂缓原生抓取，
-   Managed 会话继续用 `run_shell_command` 访问网页。两条事实使该裁定同时是技术
-   结论。第一，出站理由对 files profile 不成立：该 profile 没有 shell，抓取会
-   新开出站路径而不是复用已有的。第二，Hosted 路径当时也不约束目标地址：那一版
-   准入只校验协议、凭据与长度，不校验主机；`isPrivateHost` 仅用于跳过 https
-   升级；`yolo` 下 Worker（以 `ApprovalMode.YOLO` 构建）与 Harness 都不会询问。
-   因此 files/3 会话本会在无人值守下访问链路本地与 metadata 端点。交付它需要先有
-   目标地址策略，这属于后续工作。
+2. **`web_fetch` 来自 `main`，不是本改动。** 本分支早期版本曾带原生抓取，并在
+   issue 维护者裁定后移除。`main` 随后为 files profile 交付了 `web_fetch`，自带
+   参数与目标地址校验，因此本分支继承它，只在其上追加 `todo_write`。当初的反对
+   意见作为历史保留、不再是约束：没有目标地址策略的抓取会让 files profile 会话
+   在无人值守下访问链路本地与 metadata 端点，而该策略现已落在 `main`。
 3. **`todo_write` 在 Worker 内执行，不写 Workspace 文件。** 清单是 Worker 运行
    目录里的记账数据，不触碰 Session Store schema、Java 存储或 Workspace，这也
    是它可以预先批准的原因。
@@ -99,8 +97,8 @@ team lead 是控制面内部创建的会话，read profile 属于不得写入的
 
 ### 本设计不覆盖的后续工作
 
-- **`web_fetch` 的目标地址策略**（允许或拒绝列表，以及私有与 metadata 主机的
-  决定）。有了它才能重新提出抓取部分；它今天不是配置开关。
+- **`web_fetch` 的目标地址策略**现在随该功能留在 `main`，由它在派发前校验 URL
+  与目标地址。本设计不复述也不扩展它。
 - **任务清单的稳定会话身份**，让计划跨轮存活。需要 Harness 向 Worker 传递稳定的
   Hosted Session id，并决定跨 Runtime 实例时清单存在哪里。
 - **`files/3` 的 Java profile 判定。** 已随本次改动交付：只改 TypeScript 会让
@@ -135,13 +133,13 @@ team lead 是控制面内部创建的会话，read profile 属于不得写入的
 
 ## 验收标准
 
-1. `hosted-workspace-files/3` 会话在四个文件工具旁声明 `todo_write`，且不声明
-   `web_fetch`；任何 Shell profile 都不声明 `todo_write`。
+1. `hosted-workspace-files/3` 会话在 `files/2` 的全部声明旁（含 `web_fetch` 与
+   `glob`）声明 `todo_write`；任何 Shell profile 都不声明 `todo_write`。
 2. `/1` 或 `/2` 会话仍以既有的 `Hosted Workspace profile refused a tool call.`
    错误拒绝 `todo_write`，且不消耗 Runtime 工作。
 3. 畸形的 `todo_write` 参数得到模型可纠正的拒绝，作为工具结果提交，不获取、
    不预留、不派发。
 4. 在 `default` 与 `auto-edit` 下，`todo_write` 不经审批请求即执行。
-5. Worker 准入 `todo_write`，保留会话内调用的清单，并拒绝依赖环。即使核心仍
-   实现 `web_fetch`，Worker 也拒绝它。
+5. Worker 准入 `todo_write`，保留会话内调用的清单，并拒绝依赖环；`web_fetch`
+   也和 `main` 一样被准入。
 6. Java 的 action 预览为 `todo_write` 返回输入。

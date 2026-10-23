@@ -3,9 +3,11 @@
 [中文](2026-10-22-managed-workspace-fetch-and-todos.zh-CN.md) | English
 
 > Scope note: this document was first written for a change that added both
-> `web_fetch` and `todo_write`. A recorded maintainer ruling on the issue
-> defers native web fetch, so the delivered change is the `todo_write` slice
-> only. The fetch analysis is kept below as the reason it is not delivered.
+> `web_fetch` and `todo_write`. Native web fetch was later delivered on `main`
+> with its own destination validation, so this branch delivers the
+> `todo_write` slice and inherits `web_fetch` from `main`: `files/3` declares
+> everything `files/2` declares — `web_fetch` and `glob` included — plus
+> `todo_write`.
 
 ## Problem
 
@@ -44,8 +46,8 @@ never offered would become callable on its next load.
 
 Add `todo_write` through one new profile:
 
-- `hosted-workspace-files/3` — `read_file`, `write_file`, `edit`, `glob`,
-  `todo_write`
+- `hosted-workspace-files/3` — everything `files/2` declares (`read_file`,
+  `write_file`, `edit`, `web_fetch`, `glob`) plus `todo_write`
 
 `files/3` borrows its tool array from the `files/2` declarations and appends
 one new declaration, so the existing declarations stay byte-identical.
@@ -68,19 +70,14 @@ read profile belongs to a snapshot child that must not write.
    would make an existing `/2` Session's next load expose a tool its earlier
    turns never had. The precedent is the `glob` change (`#13166`), which added
    `/2` for the same reason.
-2. **`web_fetch` is not delivered, by a recorded decision.** On the issue, a
-   maintainer ruled that native fetch is deferred and that a Managed Session
-   should keep using `run_shell_command` for the web. Two facts make that
-   ruling the technical answer here as well. First, the egress argument does
-   not hold for a files-profile Session: it has no shell, so a fetch there
-   would open a new outbound path rather than reuse an existing one. Second,
-   nothing in the Hosted path constrained the destination: the admission check
-   that revision carried covered the scheme, credentials and length but not the
-   host, `isPrivateHost` was only used to skip the https upgrade, and under
-   `yolo` neither the Worker (built with `ApprovalMode.YOLO`) nor the Harness
-   would have asked. A files/3 Session would therefore have reached link-local
-   and metadata endpoints unattended. Delivering it needs a destination policy
-   first, which is follow-up work.
+2. **`web_fetch` arrived from `main`, not from this change.** The earlier
+   revision of this branch carried native fetch and then dropped it after a
+   maintainer ruling on the issue. `main` has since shipped `web_fetch` for
+   the files profiles with its own argument and destination checks, so this
+   branch inherits it and adds only `todo_write` on top. The original
+   objection stands as history rather than as a constraint: a fetch without a
+   destination policy would have let a files-profile Session reach link-local
+   and metadata endpoints unattended, and that policy now lives in `main`.
 3. **`todo_write` runs inside the Worker and writes no Workspace file.** The
    list is bookkeeping in the Worker's runtime directory. It does not touch
    the Session Store schema, Java storage, or the Workspace, which is also why
@@ -126,9 +123,9 @@ read profile belongs to a snapshot child that must not write.
 
 ### Follow-ups this design does not cover
 
-- **A destination policy for `web_fetch`** (allowlist or denylist, plus a
-  decision on private and metadata hosts), after which the fetch half can be
-  re-proposed. It is not a rollout toggle today.
+- **The `web_fetch` destination policy** now lives with the feature on `main`,
+  which validates the URL and its destination before dispatch. This design
+  does not restate or extend it.
 - **A stable Session identity for the task list**, so the plan survives a
   turn. This needs the Harness to pass a stable hosted Session id to the
   Worker, and a decision on where that list is stored across Runtime
@@ -171,9 +168,9 @@ admits a payload for any tool name the Worker knows, and
 
 ## Acceptance criteria
 
-1. A `hosted-workspace-files/3` Session declares `todo_write` next to the four
-   file tools, and does not declare `web_fetch`. No Shell profile declares
-   `todo_write`.
+1. A `hosted-workspace-files/3` Session declares `todo_write` next to
+   everything `files/2` declares, `web_fetch` and `glob` included. No Shell
+   profile declares `todo_write`.
 2. A `/1` or `/2` Session still refuses `todo_write` with the existing
    `Hosted Workspace profile refused a tool call.` error and spends no Runtime
    work.
@@ -182,6 +179,5 @@ admits a payload for any tool name the Worker knows, and
 4. Under `default` and `auto-edit`, `todo_write` runs without an approval
    request.
 5. The Worker admits `todo_write`, keeps the list for the Session's calls, and
-   refuses a dependency cycle. The Worker rejects `web_fetch` even though core
-   still implements it.
+   refuses a dependency cycle. It admits `web_fetch` too, as `main` does.
 6. Java's action preview returns the input for `todo_write`.
