@@ -128,11 +128,25 @@ describe('Managed local service environment', () => {
 
 describe('Managed local startup supervision', () => {
   it.each([
-    { interruption: 'child exit', defaultModelId: undefined },
-    { interruption: 'termination signal', defaultModelId: 'model-b' },
+    {
+      interruption: 'child exit',
+      defaultModelId: undefined,
+      lifecycle: undefined,
+    },
+    {
+      interruption: 'termination signal',
+      defaultModelId: 'model-b',
+      lifecycle: '',
+    },
+    {
+      interruption: 'child exit',
+      defaultModelId: 'model-b',
+      lifecycle: 'hosted-workspace-mcp/1',
+    },
   ])(
-    'closes a listener created after $interruption during binding',
-    async ({ interruption, defaultModelId }) => {
+    'closes a listener created after $interruption with lifecycle=$lifecycle',
+    async ({ interruption, defaultModelId, lifecycle }) => {
+      vi.stubEnv('QWEN_HOSTED_LIFECYCLE_V2_PROFILES', lifecycle);
       const directory = await mkdtemp(path.join(os.tmpdir(), 'managed-start-'));
       const release = vi.fn(async () => {});
       const close = vi.fn(async () => {});
@@ -142,7 +156,7 @@ describe('Managed local startup supervision', () => {
         publicToken: 'public',
         harnessToken: 'harness',
         signingKey: 'signing',
-        capabilityDigest: 'sha256:digest',
+        capabilityDigest: `sha256:${'a'.repeat(64)}`,
         javaPort: 5011,
         harnessPort: 5012,
         brokerPort: 5013,
@@ -178,7 +192,9 @@ describe('Managed local startup supervision', () => {
               JSON.stringify({
                 hostedHarness: {
                   capabilityDigest: state.capabilityDigest,
-                  lifecycleV2Profiles: ['hosted-workspace-shell/1'],
+                  lifecycleV2Profiles: (lifecycle ?? 'hosted-workspace-shell/1')
+                    .split(',')
+                    .filter(Boolean),
                 },
               }),
             ),
@@ -237,6 +253,7 @@ describe('Managed local startup supervision', () => {
           'WebShell:',
         );
       } finally {
+        vi.unstubAllEnvs();
         vi.unstubAllGlobals();
         await rm(directory, { recursive: true, force: true });
       }
