@@ -425,26 +425,15 @@ function mediaBlockParseError(
   }
   return `each ${entryLabel} must be an inline content block or carry \`attachmentId\`, \`size\`, and \`mimeType\``;
 }
-const PRIMARY_ONLY_LIVE_SESSION_ROUTES = ['POST /session/:id/cd'] as const;
 const PRIMARY_OR_INTERNAL_LIVE_SESSION_ROUTES = [
   'POST /session/:id/branch',
   'POST /session/:id/fork',
 ] as const;
-type PrimaryOnlyLiveSessionRoute =
-  (typeof PRIMARY_ONLY_LIVE_SESSION_ROUTES)[number];
 type PrimaryOrInternalLiveSessionRoute =
   (typeof PRIMARY_OR_INTERNAL_LIVE_SESSION_ROUTES)[number];
 type RestrictedLiveSessionRoute =
-  | PrimaryOnlyLiveSessionRoute
+  | 'POST /session/:id/cd'
   | PrimaryOrInternalLiveSessionRoute;
-
-function isPrimaryOnlyLiveSessionRoute(
-  route: string,
-): route is PrimaryOnlyLiveSessionRoute {
-  return (PRIMARY_ONLY_LIVE_SESSION_ROUTES as readonly string[]).includes(
-    route,
-  );
-}
 
 function isPrimaryOrInternalLiveSessionRoute(
   route: string,
@@ -2923,8 +2912,7 @@ export function registerSessionRoutes(
     ) => Promise<void> | void,
     options: { cwdBound?: boolean; rejectStandalone?: boolean } = {},
   ): RequestHandler => {
-    const primaryOnly = isPrimaryOnlyLiveSessionRoute(route);
-    if (!primaryOnly && !isPrimaryOrInternalLiveSessionRoute(route)) {
+    if (!isPrimaryOrInternalLiveSessionRoute(route)) {
       throw new Error(`Unregistered restricted session route: ${route}`);
     }
     return async (req, res) => {
@@ -2938,10 +2926,7 @@ export function registerSessionRoutes(
           sendStandaloneActionUnsupported(res, route, sessionId);
           return;
         }
-        if (
-          !runtime.primary &&
-          (primaryOnly || !isInternalWorkspaceRuntime(runtime))
-        ) {
+        if (!runtime.primary && !isInternalWorkspaceRuntime(runtime)) {
           logSessionRoutingFailure(
             route,
             'non_primary_session_route_not_supported',
@@ -6177,9 +6162,18 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/cd',
     mutate(),
-    withRestrictedMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/cd',
       async (req, res, sessionId, runtime) => {
+        if (isInternalWorkspaceRuntime(runtime)) {
+          sendNonPrimarySessionRouteUnsupported(
+            res,
+            'POST /session/:id/cd',
+            sessionId,
+            runtime,
+          );
+          return;
+        }
         const body = safeBody(req);
         const targetPath = body['path'];
         if (
@@ -6198,13 +6192,18 @@ export function registerSessionRoutes(
         runtime.generationGuard?.assertOpen();
         const result = await runtime.bridge.changeSessionCwd(
           sessionId,
-          { path: targetPath },
+          {
+            path: targetPath,
+            ...(!runtime.primary
+              ? { allowedRoots: [runtime.workspaceCwd] }
+              : {}),
+          },
           clientId !== undefined ? { clientId } : undefined,
         );
         runtime.generationGuard?.assertOpen();
         res.status(200).json(result);
       },
-      { rejectStandalone: true },
+      { cwdBound: 'always', rejectStandalone: true },
     ),
   );
 

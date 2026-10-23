@@ -60,6 +60,29 @@ function responseMock(): {
   return { response: response as unknown as Response, set, status, json };
 }
 
+describe('session cd errors', () => {
+  it.each(['directory_not_found', 'containment_violation'])(
+    'maps %s to a path validation response',
+    (errorKind) => {
+      const { response, status, json } = responseMock();
+      const targetPath = '/outside/workspace';
+      sendBridgeError(
+        response,
+        new RequestError(-32004, 'Invalid working directory', {
+          errorKind,
+          path: targetPath,
+        }),
+      );
+      expect(status).toHaveBeenCalledWith(400);
+      expect(json).toHaveBeenCalledWith({
+        error: 'Invalid working directory',
+        code: errorKind,
+        path: targetPath,
+      });
+    },
+  );
+});
+
 describe('artifact library errors', () => {
   it.each([
     'foreign_project',
