@@ -17,6 +17,7 @@ import {
 import {
   DaemonClient,
   findDaemonRewindUserBlock,
+  isDaemonRewindUserBlock,
   type DaemonSessionSummary,
   type DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
@@ -53,14 +54,7 @@ const REWIND_APPLIED_TIMEOUT_MS = 2_000;
 function isEditableUserBlock(
   block: DaemonTranscriptBlock | undefined,
 ): boolean {
-  if (block?.kind !== 'user') {
-    return false;
-  }
-  const source = block.meta?.['source'];
-  return (
-    source !== 'background_notification' &&
-    source !== 'mid_turn_message_injected'
-  );
+  return isDaemonRewindUserBlock(block);
 }
 
 function countEditableUserTurns(

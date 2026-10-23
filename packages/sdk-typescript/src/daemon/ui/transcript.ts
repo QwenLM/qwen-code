@@ -2152,6 +2152,29 @@ function takeBlockIndexOwnership(state: DaemonTranscriptState): void {
   ownedBlockIndexes.set(state, state.blockIndexById);
 }
 
+/**
+ * Whether a transcript block is a user turn a rewind may target.
+ *
+ * The rendered chat numbers its rows by this same rule: a user-kind row only
+ * becomes a `role: 'user'` message when it is a real prompt, so
+ * `mid_turn_message_injected` (rendered as `role: 'system'`) and
+ * `background_notification` (injected without a turn) must not advance the
+ * ordinal. Any site that re-derives the rule instead of calling this function
+ * shifts every later index onto its neighbour and rewinds the wrong turn, so
+ * the ordinal consumers — the CLI/web-shell transcript projection, the VSCode
+ * webview, and the rewind dialog — all go through here.
+ */
+export function isDaemonRewindUserBlock(
+  block: DaemonTranscriptBlock | undefined,
+): boolean {
+  if (block?.kind !== 'user') return false;
+  const source = block.meta?.['source'];
+  return (
+    source !== 'background_notification' &&
+    source !== 'mid_turn_message_injected'
+  );
+}
+
 export function findDaemonRewindUserBlock(
   blocks: readonly DaemonTranscriptBlock[],
   promptId: string,
@@ -2160,8 +2183,7 @@ export function findDaemonRewindUserBlock(
   const matches = blocks.filter(
     (block): block is DaemonTextTranscriptBlock =>
       block.kind === 'user' &&
-      block.meta?.['source'] !== 'background_notification' &&
-      block.meta?.['source'] !== 'mid_turn_message_injected' &&
+      isDaemonRewindUserBlock(block) &&
       block.promptId === promptId,
   );
   return matches.length === 1 ? matches[0] : undefined;
@@ -2177,10 +2199,9 @@ function rewindTranscriptToUserTurn(
 
   for (let index = 0; index < state.blocks.length; index += 1) {
     const block = state.blocks[index];
-    if (
-      block?.kind !== 'user' ||
-      block.meta?.['source'] === 'background_notification'
-    ) {
+    // Same rule as the renderer, or a legacy turn index resolves onto the
+    // injected row that does not occupy an ordinal.
+    if (!isDaemonRewindUserBlock(block)) {
       continue;
     }
     lastUserIndex = index;

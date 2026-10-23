@@ -137,6 +137,42 @@ describe('daemon transcript rewind', () => {
     expect(state.activeAssistantBlockId).toBeUndefined();
   });
 
+  it('numbers a legacy rewind target past an injected mid-turn row', () => {
+    // The renderer never numbers `mid_turn_message_injected` (it renders as a
+    // system row), so the legacy turn index must skip it too: index 1 is the
+    // second real prompt, not the row injected during the first turn.
+    const events: DaemonUiEvent[] = [
+      { type: 'user.text.delta', text: 'first' },
+      { type: 'assistant.done' },
+      {
+        type: 'user.text.delta',
+        text: 'injected',
+        meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      },
+      { type: 'user.text.delta', text: 'second' },
+      { type: 'assistant.text.delta', text: 'second answer' },
+      { type: 'assistant.done' },
+      {
+        type: 'session.rewound',
+        promptId: 'session########1',
+        targetTurnIndex: 1,
+      },
+    ];
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      events,
+      { now: 1 },
+    );
+
+    expect(
+      state.blocks.map((block) => ('text' in block ? block.text : '')),
+    ).toEqual(['first', 'injected']);
+  });
+
   it('preserves earlier background notifications and replies when rewinding a user turn', () => {
     const retainedEvents: DaemonUiEvent[] = [
       { type: 'user.text.delta', text: 'review' },

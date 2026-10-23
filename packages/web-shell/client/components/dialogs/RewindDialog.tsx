@@ -3,7 +3,10 @@ import type {
   DaemonRewindSnapshotInfo,
   DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
-import { findDaemonRewindUserBlock } from '@qwen-code/sdk/daemon';
+import {
+  findDaemonRewindUserBlock,
+  isDaemonRewindUserBlock,
+} from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { dp } from './dialogStyles';
@@ -71,30 +74,31 @@ export function RewindDialog({
     () =>
       snapshots
         .map((snapshot) => {
-          const block =
-            snapshot.daemonPromptId &&
-            snapshots.filter(
-              (entry) => entry.daemonPromptId === snapshot.daemonPromptId,
-            ).length === 1
-              ? findDaemonRewindUserBlock(blocks, snapshot.daemonPromptId)
-              : undefined;
+          const identity = snapshot.daemonPromptId;
+          // A duplicated identity cannot be resolved to one turn, so both rows
+          // refuse rather than pointing at the same checkpoint twice.
+          const usable =
+            identity !== undefined &&
+            snapshots.filter((entry) => entry.daemonPromptId === identity)
+              .length === 1;
+          const block = usable
+            ? findDaemonRewindUserBlock(blocks, identity)
+            : undefined;
           // The ordinal has to match what the chat numbers, so it skips the
           // same rows `findDaemonRewindUserBlock` above skips.
           const turnIndex = block
-            ? blocks
-                .filter(
-                  (entry) =>
-                    entry.kind === 'user' &&
-                    entry.meta?.['source'] !== 'background_notification' &&
-                    entry.meta?.['source'] !== 'mid_turn_message_injected',
-                )
-                .indexOf(block)
+            ? blocks.filter(isDaemonRewindUserBlock).indexOf(block)
             : undefined;
           return {
             snapshot,
             promptText: block?.text.trim() ?? '',
             turnIndex,
-            available: block !== undefined,
+            // The rewind itself carries only the prompt identity, so a turn
+            // outside the loaded transcript window stays targetable: the block
+            // lookup above supplies the preview text and the ordinal badge,
+            // not the permission. Only a snapshot with no usable identity is
+            // unavailable, and it says why.
+            available: usable,
           };
         })
         .sort((a, b) => a.snapshot.turnIndex - b.snapshot.turnIndex),
@@ -197,9 +201,11 @@ export function RewindDialog({
           const isSelected = selectedPromptId === snapshot.promptId;
           const label =
             promptText ||
-            t('rewind.promptFallback', {
-              id: snapshot.promptId.slice(-8),
-            });
+            (snapshot.daemonPromptId
+              ? t('rewind.promptFallback', {
+                  id: snapshot.promptId.slice(-8),
+                })
+              : t('rewind.identityUnavailable'));
           return (
             <div
               key={snapshot.promptId}

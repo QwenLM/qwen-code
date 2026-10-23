@@ -80,6 +80,7 @@ import {
   findDaemonRewindUserBlock,
   DaemonHttpError,
   getSessionUpdatePayload,
+  isDaemonRewindUserBlock,
   isDaemonTurnError,
   isStandaloneSessionNotFoundError,
   isStaleBranchPointError,
@@ -977,11 +978,7 @@ function getLatestUserBlock(
 ): DaemonTranscriptBlock | undefined {
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
     const block = blocks[index];
-    if (
-      block?.kind === 'user' &&
-      block.meta?.['source'] !== 'background_notification' &&
-      block.meta?.['source'] !== 'mid_turn_message_injected'
-    ) {
+    if (isDaemonRewindUserBlock(block)) {
       return block;
     }
   }
@@ -995,11 +992,7 @@ function getLatestUserBlock(
 function countUserTurns(blocks: readonly DaemonTranscriptBlock[]): number {
   let count = 0;
   for (const block of blocks) {
-    if (
-      block?.kind === 'user' &&
-      block.meta?.['source'] !== 'background_notification' &&
-      block.meta?.['source'] !== 'mid_turn_message_injected'
-    ) {
+    if (isDaemonRewindUserBlock(block)) {
       count += 1;
     }
   }

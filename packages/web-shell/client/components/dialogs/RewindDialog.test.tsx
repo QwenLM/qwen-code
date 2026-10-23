@@ -147,17 +147,12 @@ describe('RewindDialog keyboard', () => {
     expect(container!.textContent).not.toContain('#3');
   });
 
-  it.each(['missing', 'unknown', 'duplicate'])(
+  it.each(['missing', 'duplicate'])(
     'refuses a %s association instead of guessing an ordinal',
     async (kind) => {
       const entry = {
         ...snapshots[0]!,
-        daemonPromptId:
-          kind === 'missing'
-            ? undefined
-            : kind === 'unknown'
-              ? 'absent'
-              : 'daemon-A',
+        daemonPromptId: kind === 'missing' ? undefined : 'daemon-A',
       };
       const rewind = vi.fn().mockResolvedValue(undefined);
       await mount(
@@ -171,6 +166,26 @@ describe('RewindDialog keyboard', () => {
       expect(rewind).not.toHaveBeenCalled();
     },
   );
+
+  it('keeps a turn outside the loaded window rewindable by its identity', async () => {
+    // The loaded transcript is a window, not the session: a truncated replay
+    // leaves snapshots whose blocks were never paged in. The rewind itself
+    // carries only the prompt identity, so those rows stay targetable and just
+    // lose the preview text and the ordinal badge.
+    const entry = { ...snapshots[0]!, daemonPromptId: 'not-paged-in' };
+    const rewind = vi.fn().mockResolvedValue(undefined);
+    await mount(rewind, [entry]);
+    // No block means no prompt text and no ordinal badge, so the row falls
+    // back to the identity-derived label instead of pretending it has one.
+    expect(container!.textContent).toContain('Prompt');
+    expect(container!.textContent).not.toContain('#1');
+    press('Enter');
+    expect(rewindButton().disabled).toBe(false);
+    await act(async () => {
+      rewindButton().click();
+    });
+    expect(rewind).toHaveBeenCalledWith(entry.promptId);
+  });
 
   it('disables keyboard navigation while a rewind is in flight', async () => {
     // A rewind that never settles keeps isRewinding true.
