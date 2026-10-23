@@ -314,7 +314,7 @@ function replyLocked(
     const posted = new Set(state.postedCommentIds);
     const postedIds: string[] = [];
     const handledIds: string[] = [];
-    let summarized = false;
+    let summarized: string | null = null;
     for (const intent of state.pendingPosts ?? []) {
       const nodes =
         intent.where === 'summary'
@@ -330,7 +330,9 @@ function replyLocked(
       posted.add(node.id);
       postedIds.push(node.id);
       handledIds.push(...intent.handled);
-      if (intent.where === 'summary') summarized = true;
+      // The head the summary reported, not the current one: a later push
+      // still needs a summary of its own.
+      if (intent.where === 'summary') summarized = intent.sha;
       adopted += 1;
     }
     record({
@@ -339,7 +341,7 @@ function replyLocked(
         ...new Set([...state.handledCommentIds, ...handledIds]),
       ],
       pendingPosts: [],
-      ...(summarized ? { summarizedSha: head } : {}),
+      ...(summarized ? { summarizedSha: summarized } : {}),
     });
   }
 
@@ -426,7 +428,12 @@ function replyLocked(
     path: string,
     body: string,
   ) => {
-    const intent: PendingPost = { where, handled, bodyHash: bodyHash(body) };
+    const intent: PendingPost = {
+      where,
+      handled,
+      bodyHash: bodyHash(body),
+      sha: head,
+    };
     record({ pendingPosts: [...(state.pendingPosts ?? []), intent] });
     const posted = postComment(path, body);
     return {

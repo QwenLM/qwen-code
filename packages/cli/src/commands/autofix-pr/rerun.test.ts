@@ -246,7 +246,10 @@ describe('runRerun', () => {
 
   it('gives the re-run back when GitHub refuses it, and never hides the failure', () => {
     mocks.ghWithInput.mockImplementationOnce(() => {
-      throw new Error('HTTP 403: Resource not accessible by integration');
+      // gh's own wording for a 403 from the re-run endpoint.
+      throw new Error(
+        'run 50 cannot be rerun; Resource not accessible by integration',
+      );
     });
     expect(() => runRerun(7, 50)).toThrow(
       /GitHub did not re-run run 50: .*answer its failures as needing a human/,

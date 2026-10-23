@@ -120,19 +120,7 @@ function syncLocked(
     // `-ff`: an untracked nested repository would survive one `-f`, and
     // keep the worktree from ever being clean again.
     git('-C', worktree, 'clean', '-ffdq');
-    // Submodules a round checked out go back to the commits the PR
-    // records. `foreach` visits only checked-out submodules (a reset with
-    // `--recurse-submodules` would write a gitfile for one that is not,
-    // and leave the worktree unreadable).
-    gitOpt(
-      '-C',
-      worktree,
-      'submodule',
-      'foreach',
-      '--quiet',
-      '--recursive',
-      'git reset --hard --quiet $sha1 && git clean -ffdq',
-    );
+    alignSubmodules(worktree);
     if (own > 0) dropped = own;
     if (hasUncommittedChanges(worktree)) {
       if (moved) {
@@ -153,6 +141,7 @@ function syncLocked(
       );
     }
     git('-C', worktree, 'reset', '--hard', '--quiet', prHead);
+    alignSubmodules(worktree);
     if (own > 0) dropped = own;
   } else if (head !== prHead && !isAncestor(worktree, prHead, head)) {
     if (!isAncestor(worktree, head, prHead)) {
@@ -172,10 +161,21 @@ function syncLocked(
       );
     }
     git('-C', worktree, 'merge', '--ff-only', '--quiet', prHead);
+    alignSubmodules(worktree);
   }
 
   if (moved) {
     writeState(paths.statePath, { ...state, lastKnownHeadSha: prHead });
+  }
+  // A submodule the new head moved, which git could not check out, would
+  // otherwise be committed back to its old commit by the next fix.
+  if (!discard && hasUncommittedChanges(worktree)) {
+    return {
+      synced: false,
+      headSha: prHead,
+      moved,
+      reason: `${worktree} is not clean after moving to ${prHead.slice(0, 12)} (a submodule git could not update?); run \`qwen autofix-pr sync ${prNumber} --discard\``,
+    };
   }
   return {
     synced: true,
@@ -184,6 +184,24 @@ function syncLocked(
     ...(dropped === undefined ? {} : { dropped }),
     ...(discardedChanges ? { discardedChanges: true as const } : {}),
   };
+}
+
+/**
+ * Moves the checked-out submodules to the commits the worktree's head
+ * records, and cleans them. `foreach` visits only checked-out submodules: a
+ * reset with `--recurse-submodules` would write a gitfile for one that is
+ * not, and leave the worktree unreadable.
+ */
+function alignSubmodules(worktree: string): void {
+  gitOpt(
+    '-C',
+    worktree,
+    'submodule',
+    'foreach',
+    '--quiet',
+    '--recursive',
+    'git reset --hard --quiet $sha1 && git clean -ffdq',
+  );
 }
 
 export const syncCommand: CommandModule = {

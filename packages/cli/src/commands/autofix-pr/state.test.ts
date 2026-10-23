@@ -127,6 +127,11 @@ describe('withWatchLock', () => {
   it('removes a stale lock only if it is still the one judged stale', () => {
     const stale = JSON.stringify({ pid: 1, ns: 'x', at: 0, id: 'stale' });
     writeFileSync(paths.lockPath, stale);
+    // Another helper is breaking it: this one stands back.
+    writeFileSync(`${paths.lockPath}.break`, '1');
+    expect(breakStaleLock(paths.lockPath, stale)).toBe(false);
+    expect(readFileSync(paths.lockPath, 'utf8')).toBe(stale);
+    rmSync(`${paths.lockPath}.break`);
     expect(breakStaleLock(paths.lockPath, stale)).toBe(true);
     expect(existsSync(paths.lockPath)).toBe(false);
     // Another helper took over meanwhile: its fresh lock is put back.
@@ -177,6 +182,10 @@ describe('history', () => {
           handledCommentIds: ids,
           postedCommentIds: [],
           handledConflictSha: 'a'.repeat(40),
+          pendingPosts: [
+            { where: 101, handled: ids, bodyHash: 'h', sha: 'a'.repeat(40) },
+          ],
+          deferredRuns: [50],
         }) as AutofixPrState;
       const upstream = keepHistory(paths, watch('upstream', ['U1']));
       const fork = keepHistory(paths, watch('fork', ['F1']));
@@ -184,6 +193,10 @@ describe('history', () => {
       expect(readHistory(upstream)).toMatchObject({
         handledCommentIds: ['U1'],
         handledConflictSha: 'a'.repeat(40),
+        // A reply whose answer was lost is still recognized by the next
+        // watch of the PR.
+        pendingPosts: [{ where: 101, handled: ['U1'] }],
+        deferredRuns: [50],
       });
       expect(readHistory(fork)).toMatchObject({ handledCommentIds: ['F1'] });
       // Names that `_` would have joined alike stay apart, and no name ends

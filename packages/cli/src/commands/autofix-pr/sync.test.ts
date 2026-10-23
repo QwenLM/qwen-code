@@ -301,6 +301,46 @@ describe('runSync (real git, bare remote)', () => {
     expect(run(paths.worktreePath, 'status', '--porcelain')).toBe('');
   });
 
+  it('moves a checked-out submodule along when the author bumps it', () => {
+    const sub = join(base, 'sub2');
+    run(base, 'init', '-q', '-b', 'main', sub);
+    run(sub, 'config', 'user.email', 't@example.com');
+    run(sub, 'config', 'user.name', 't');
+    const s1 = commitIn(sub, 's1.txt');
+    run(
+      paths.worktreePath,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      sub,
+      'vendor/sub',
+    );
+    run(paths.worktreePath, 'commit', '-q', '-m', 'add sub');
+    run(paths.worktreePath, 'push', '-q', 'origin', 'HEAD:feat');
+    const withSub = worktreeHead();
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      lastKnownHeadSha: withSub,
+    });
+    // The author bumps the submodule to s2 in a clone of their own.
+    const s2 = commitIn(sub, 's2.txt');
+    const author = join(base, 'author');
+    run(base, 'clone', '-q', '-b', 'feat', remote, author);
+    run(author, 'config', 'user.email', 'a@example.com');
+    run(author, 'config', 'user.name', 'a');
+    run(author, 'update-index', '--cacheinfo', `160000,${s2},vendor/sub`);
+    run(author, 'commit', '-q', '-m', 'bump sub');
+    run(author, 'push', '-q', 'origin', 'feat');
+    expect(runSync(7)).toMatchObject({ synced: true, moved: true });
+    expect(
+      run(join(paths.worktreePath, 'vendor', 'sub'), 'rev-parse', 'HEAD'),
+    ).toBe(s2);
+    expect(run(paths.worktreePath, 'status', '--porcelain')).toBe('');
+    expect(s1).not.toBe(s2);
+  });
+
   it('follows only the branch GitHub names, not one an edited state file names', () => {
     run(repo, 'branch', 'release', 'main');
     const release = run(repo, 'rev-parse', 'release');

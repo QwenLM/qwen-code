@@ -450,7 +450,9 @@ The helper decides what may be posted, against one fresh read of the PR
 - Every check runs before anything is posted, so a refused plan posts
   nothing.
 - Each POST is announced in the state file first (`pendingPosts`: where it
-  goes, the comments it answers, a hash of its body). The next run looks for
+  goes, the comments it answers, a hash of its body, the head it is posted
+  on — a summary adopted later counts for that head's push, not a later
+  one's). The next run looks for
   each announced reply on the PR: one that is there — a POST that reached
   GitHub although its answer was lost — is recorded with exactly the
   comments it was posted for (`adopted`); one that is not was never posted.
@@ -462,11 +464,10 @@ The helper decides what may be posted, against one fresh read of the PR
 - Each body gets the marker once and must fit GitHub's 65,536 characters.
 - Each posted id is written to the state file the moment it exists, with the
   comments its reply handled. A run that fails part way leaves the rest
-  unposted and unrecorded; running the same plan again skips a reply when any
-  of its comments is already handled (a comment it did not name stays open
-  for the next round, rather than risk a second copy), and the summary when
-  its comments are (a summary that handles none is posted once per head,
-  `summarizedSha`).
+  unposted and unrecorded; running the same plan again recognizes what was
+  posted (above) and skips a reply whose comments are all handled, and the
+  summary when its comments are (a summary that handles none is posted once
+  per head, `summarizedSha`).
 - `handledChecks` and `handledConflict` record failures and a conflict the
   round did not fix with a push, so prepared snapshots stop reporting them:
   a failure by its attempt (a re-run that fails again is new), a conflict by
@@ -503,8 +504,9 @@ kept cursor (`gateCursor`): a later gate on another repository's PR of the
 same number is refused until that file is removed.
 
 What the watch posted and handled — `handledCommentIds`,
-`postedCommentIds`, `handledChecks`, `rerunChecks`, `handledConflictSha` —
-is added to the PR's history before the state file goes,
+`postedCommentIds`, `handledChecks`, `rerunChecks`, `handledConflictSha`,
+and the replies announced but not yet settled (`pendingPosts`) and re-runs
+deferred (`deferredRuns`) — is added to the PR's history before the state file goes,
 `.qwen/tmp/autofix-pr-<n>-history-<host>+<owner>+<repo>.history.json` (one
 clone may watch PRs of one number in a fork and its upstream; `+` and `@`, in
 place of a port's `:`, occur in no name, and the suffix never matches a file
@@ -581,7 +583,10 @@ uncommitted changes, nested repositories (`git clean -ffd`) and changes in
 checked-out submodules included (`git submodule foreach`, which never
 touches one that is not checked out) — to end a round whose work was not
 pushed, and reports what it dropped. A worktree that is still not clean
-afterwards answers `{"synced": false, "reason"}`. When the
+afterwards answers `{"synced": false, "reason"}`. Whenever `sync` moves the
+worktree, it moves its checked-out submodules to the commits the new head
+records the same way, and a worktree that is not clean afterwards answers
+`synced: false`, so a fix never commits a submodule back to an old commit. When the
 PR's branch cannot be read (the PR was closed, the branch deleted, the
 network is down), it returns to the head the watch last knew instead.
 
@@ -610,8 +615,8 @@ a new attempt. A head that moved since the watch last saw it answers
 is counted before GitHub is asked and the call is not retried, so a re-run
 whose answer was lost is not asked for a second time: at most once, never
 twice. Its failures are marked handled only once GitHub took the re-run: a
-refusal (HTTP 4xx — a token without `actions: write`, a run too old) gives
-the re-run back, and every error tells the round to answer those failures
+refusal (gh's `run <id> cannot be rerun`, a 403 — a token without
+`actions: write`, a run too old — or another HTTP 4xx) gives the re-run back, and every error tells the round to answer those failures
 as needing a human, so a check is never left red and unreported.
 
 GitHub re-runs a run only once it has ended, while `snapshot` reports a
@@ -629,9 +634,10 @@ token, and removed only while it still holds that token. A sandbox may run
 each command in a pid namespace of its own, where pids repeat, so the
 holder's pid is checked only from the same namespace; any other lock is
 taken over once it is older than any helper runs (fifteen minutes), and
-`cleanup --force` removes it at once. Taking over a stale lock first moves
-it aside, which only one helper can do, and puts it back if it is not the
-one that was judged stale.
+`cleanup --force` removes it at once. Stale locks are broken one at a time,
+under an exclusive `<lock>.break` file: a lock that still holds the stale
+token there is the stale one, since no helper can replace it without
+breaking it first, so a fresh lock is never removed.
 
 ## 7. One check (`tick`)
 

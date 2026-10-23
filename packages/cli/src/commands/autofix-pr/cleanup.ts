@@ -169,7 +169,10 @@ export function runCleanup(prNumber: number, force: boolean): void {
   // PR does not answer the same comments again.
   const history = state ? keepHistory(paths, state) : null;
   // A lock a killed helper left behind would otherwise outlive the watch.
-  if (force) rmSync(paths.lockPath, { force: true, recursive: true });
+  if (force) {
+    rmSync(paths.lockPath, { force: true, recursive: true });
+    rmSync(`${paths.lockPath}.break`, { force: true, recursive: true });
+  }
   // The state file and everything else this PR's watch wrote beside it (CI
   // logs, briefs). The gate cursor belongs to the scheduled task, which
   // outlives a watch and would report everything again without it.

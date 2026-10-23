@@ -499,6 +499,9 @@ describe('runPrepare (real git)', () => {
       handledChecks: [`Test@${headSha}@#5`],
       rerunChecks: [`run:1:2:push:Test@${headSha}`],
       handledConflictSha: headSha,
+      pendingPosts: [
+        { where: 101, handled: ['C2'], bodyHash: 'h', sha: headSha },
+      ],
     };
     writeFileSync(
       historyPath(paths, { host: 'github.com', owner: 'o', repo: 'r' }),
@@ -511,6 +514,7 @@ describe('runPrepare (real git)', () => {
       handledChecks: history.handledChecks,
       rerunChecks: history.rerunChecks,
       handledConflictSha: headSha,
+      pendingPosts: history.pendingPosts,
     });
     // Not another repository's PR of the same number.
     execFileSync('git', ['worktree', 'remove', '--force', paths.worktreePath], {

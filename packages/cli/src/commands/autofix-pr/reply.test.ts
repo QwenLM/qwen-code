@@ -496,6 +496,41 @@ describe('runReply', () => {
     });
   });
 
+  it("counts an adopted summary for the head it reported, not a later push's", () => {
+    // Round N's push summary on HEAD landed; its answer was lost.
+    mocks.ghWithInput.mockImplementationOnce(() => {
+      throw new Error('connection reset');
+    });
+    expect(() => reply({ summary: { body: 'Pushed aaa.' } })).toThrow(
+      /connection reset/,
+    );
+    const landed = {
+      ...comment('IC_50', 'me', 'OWNER'),
+      body: `Pushed aaa.\n\n${REPLY_MARKER}`,
+    };
+    // Round N+1 pushed bbb and reports it.
+    const pushed = 'b'.repeat(40);
+    writeState(paths.statePath, {
+      ...state(),
+      lastKnownHeadSha: pushed,
+      pushedShas: [pushed],
+    });
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        headRefOid: pushed,
+        comments: {
+          pageInfo: { hasPreviousPage: false },
+          nodes: [landed],
+        },
+      }),
+      viewer: 'me',
+    }));
+    const outcome = reply({ summary: { body: 'Pushed bbb.' } });
+    expect(outcome).toMatchObject({ adopted: 1, summarySkipped: false });
+    expect(outcome.posted.map((p) => p.kind)).toEqual(['summary']);
+    expect(state().summarizedSha).toBe(pushed);
+  });
+
   it('posts again when the reply an earlier run announced never reached the PR', () => {
     mocks.ghWithInput.mockImplementationOnce(() => {
       throw new Error('connection refused');

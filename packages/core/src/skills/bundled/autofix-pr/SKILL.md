@@ -54,7 +54,7 @@ Read the arguments from `<skill-args>`:
 
 A round handles everything outstanding on the PR at once. When a scheduled fire starts it, the gate output that came with the fire only says that something changed: read the PR's state from `snapshot` below, which has the full comment bodies and knows what earlier rounds handled.
 
-1. Run `"${QWEN_CODE_CLI:-qwen}" autofix-pr sync <n>` first: it follows a push or a rollback the author made since the last round, which the GitHub API may not show yet, so the worktree starts at the PR's real head. If it says the PR is not prepared here, the watch was cleaned up: delete this PR's scheduled task (Section "Stop", step 1) and end. If it says the PR was merged or closed, go to `stop` below. If it refuses over uncommitted changes, or answers `action: "merge"`, an earlier round left work behind: run `sync <n> --discard` instead. If that answers `synced: false`, the worktree cannot be cleaned: Section "Stop" with its `reason`.
+1. Run `"${QWEN_CODE_CLI:-qwen}" autofix-pr sync <n>` first: it follows a push or a rollback the author made since the last round, which the GitHub API may not show yet, so the worktree starts at the PR's real head. If it says the PR is not prepared here, the watch was cleaned up: delete this PR's scheduled task (Section "Stop", step 1) and end. If it says the PR was merged or closed, go to `stop` below. If it refuses over uncommitted changes, or answers `action: "merge"` or `synced: false`, an earlier round left work behind: run `sync <n> --discard` instead. If that answers `synced: false`, the worktree cannot be cleaned: Section "Stop" with its `reason`.
    Then run `"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot <n>`.
 2. Act on `action`:
    - **`stop`** (merged or closed) → Section "Stop", then one line: the outcome and the pushes made.
@@ -135,7 +135,8 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
    - If `commits` is not empty and `verified` is true: `"${QWEN_CODE_CLI:-qwen}" autofix-pr push <n>`, with the shell tool's `timeout` set to 600000: pre-push hooks may run a test suite, and the helper gives them nine minutes.
      - `pushed: true` → keep `sha`.
      - `pushed: false` with no `action` (nothing to push) → the agent's commits are not in the worktree: nothing was pushed, so the items it claimed fixed are `needs_human` ("my fix left no commit").
-     - `action: "resync"` → someone pushed while the round ran; run `sync <n>`:
+     - `action: "resync"` → someone pushed while the round ran, or the branch already holds the round's commit; run `sync <n>`:
+       - `synced: true` with no `dropped` → the worktree contains the new head: run `push <n>` once more (it answers "nothing to push" when the commit was already there).
        - `action: "merge"` → run one more `agent` call in the worktree: merge the commit `sync` named (never rebase), resolve, re-run the same verification, commit; then `sync <n>` and `push <n>` once more. If that does not push, nothing is pushed this round: report it.
        - `dropped` → the author rewrote the PR's history, and the round's commits were made on the old one. Nothing is pushed or recorded. The gate will not report the same events again, so start the round over from step 1 now, on the new head — once per turn; a second rewrite ends the round with a report. (The `dropped` that `sync --discard` reports is expected and needs nothing.)
      - `action: "stop"` → Section "Stop" with its `reason`.

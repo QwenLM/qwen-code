@@ -354,6 +354,8 @@ export function runPrepare(args: PrepareArgs): void {
           handledChecks: history.handledChecks,
           rerunChecks: history.rerunChecks,
           handledConflictSha: history.handledConflictSha ?? null,
+          pendingPosts: history.pendingPosts ?? [],
+          deferredRuns: history.deferredRuns ?? [],
         }
       : {}),
     ...(existing
@@ -363,6 +365,8 @@ export function runPrepare(args: PrepareArgs): void {
           handledConflictSha: existing.handledConflictSha,
           pushCount: existing.pushCount,
           summarizedSha: existing.summarizedSha,
+          pendingPosts: existing.pendingPosts,
+          deferredRuns: existing.deferredRuns,
         }
       : {}),
   };

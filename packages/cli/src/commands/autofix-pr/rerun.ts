@@ -138,7 +138,9 @@ function rerunLocked(
     const message = (err as Error).message;
     // A refusal (4xx: no permission, a run too old) re-ran nothing, so the
     // budget is given back; anything else may have reached GitHub.
-    const refused = /\bHTTP 4\d\d\b/.test(message);
+    // gh words a 403 as "run <id> cannot be rerun; <reason>" (a token
+    // without `actions: write`, a run too old), other 4xx as "HTTP 4xx".
+    const refused = /\bHTTP 4\d\d\b|\bcannot be rerun\b/.test(message);
     if (refused) writeState(paths.statePath, { ...state });
     throw new Error(
       `GitHub did not re-run run ${runId}${refused ? '' : ' (or its answer was lost; the re-run is counted)'}: ${message.trim().split('\n').slice(-3).join(' ')} — answer its failures as needing a human.`,

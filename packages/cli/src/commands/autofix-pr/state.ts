@@ -11,8 +11,8 @@ import {
   lstatSync,
   readFileSync,
   readlinkSync,
-  renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -80,6 +80,8 @@ export interface PendingPost {
   handled: string[];
   /** sha256 of the body as posted, marker included. */
   bodyHash: string;
+  /** The head the reply was posted on: a summary reports that head's push. */
+  sha: string;
 }
 
 /**
@@ -98,6 +100,10 @@ export interface AutofixPrHistory {
   handledChecks: string[];
   rerunChecks: string[];
   handledConflictSha?: string | null;
+  /** Replies announced but not settled when the watch ended: the next watch
+   * recognizes those that reached the PR. */
+  pendingPosts?: PendingPost[];
+  deferredRuns?: number[];
 }
 
 /** Pushes one watch may make before it stops (Section 10 of the design). */
@@ -378,6 +384,16 @@ export function keepHistory(
     rerunChecks: union(earlier?.rerunChecks, state.rerunChecks),
     handledConflictSha:
       state.handledConflictSha ?? earlier?.handledConflictSha ?? null,
+    pendingPosts: [
+      ...(earlier?.pendingPosts ?? []),
+      ...(state.pendingPosts ?? []),
+    ],
+    deferredRuns: [
+      ...new Set([
+        ...(earlier?.deferredRuns ?? []),
+        ...(state.deferredRuns ?? []),
+      ]),
+    ],
   };
   atomicWriteFileSync(path, `${JSON.stringify(history, null, 2)}\n`);
   return path;
@@ -500,22 +516,36 @@ export function withWatchLock<T>(
  * was judged stale.
  */
 export function breakStaleLock(lockPath: string, stale: string): boolean {
-  const aside = `${lockPath}.stale.${randomUUID()}`;
+  // One breaker at a time: under `<lock>.break`, a lock that still holds
+  // the stale token is the stale one, since no helper can replace it
+  // without breaking it first, and a fresh lock is never touched.
+  const breaker = `${lockPath}.break`;
   try {
-    renameSync(lockPath, aside);
+    writeFileSync(breaker, String(process.pid), { flag: 'wx' });
   } catch {
-    return true; // Gone already: try to take it.
-  }
-  try {
-    if (readFileSync(aside, 'utf8') === stale) return true;
+    // Another helper is breaking it. A breaker left by a killed helper is
+    // cleared once it is old, for the next attempt.
     try {
-      linkSync(aside, lockPath);
+      if (Date.now() - statSync(breaker).mtimeMs > 60_000) {
+        rmSync(breaker, { force: true });
+      }
     } catch {
-      // A third helper took the lock meanwhile; it holds it.
+      // Gone.
     }
     return false;
+  }
+  try {
+    let current: string;
+    try {
+      current = readFileSync(lockPath, 'utf8');
+    } catch {
+      return true; // Gone already: try to take it.
+    }
+    if (current !== stale) return false;
+    rmSync(lockPath, { force: true });
+    return true;
   } finally {
-    rmSync(aside, { force: true });
+    rmSync(breaker, { force: true });
   }
 }
 
