@@ -140,13 +140,13 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
     // The ticketed queue makes the wake order deterministic and the fast
     // class puts this tier's ticket ahead of waiting full-tier tickets, so
-    // the pin is the sourced helper, its budget, the tier argument, and the
-    // best-effort mode that keeps a missed acquisition from failing a suite
-    // that already passed.
+    // the pin is the sourced helper, its budget, and the tier argument. The
+    // acquisition only gates the best-effort write-back, so its timeout is
+    // rewritten to a non-fatal warning below.
     expect(block).toContain(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
-    expect(block).toContain('sdk_java_lock_acquire 5400 "${TIER}" best-effort');
+    expect(block).toContain('sdk_java_lock_acquire 5400 "${TIER}"');
     // release-sdk-java.yml resumes an existing tag by checking out that
     // immutable commit, which may predate this helper; the guarded bare-lock
     // fallback keeps acquisition independent of the checkout's ref.
@@ -242,7 +242,7 @@ describe('SDK Java self-hosted workflow guards', () => {
             join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
             mode === 'helper-ok'
               ? 'sdk_java_lock_acquire() { return 0; }\n'
-              : 'sdk_java_lock_acquire() { echo "::warning::sdk-java host lock wait exhausted; cache write-back skipped"; return 1; }\n',
+              : 'sdk_java_lock_acquire() { echo "::error::sdk-java host lock not acquired within 90 minutes as queue ticket 1 (fast)"; return 1; }\n',
           );
         } else {
           // A release tag checked out before the helper keeps the bare-lock
@@ -282,6 +282,11 @@ echo REACHED_END`,
           expect(result.stdout).toContain('REACHED_END');
         } else {
           expect(result.stdout).toContain('Maven cache write-back skipped');
+          // The fatal helper signature is rewritten on the way out, so the
+          // green step carries only the non-fatal exhaustion warning.
+          expect(result.stdout).toContain(
+            '::warning::sdk-java host lock wait exhausted; cache write-back skipped',
+          );
           // The guard must stop before the copy; a warning alone would still
           // run the write-back and hold the lock.
           expect(result.stdout).not.toContain('REACHED_END');
@@ -1442,9 +1447,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(seconds).toBe(90 * 60);
     // This site stays in the normal class: a tier argument here would put
     // full-tier MariaDB holds ahead of fast PR-feedback work.
-    expect(step.run).toContain(
-      'sdk_java_lock_acquire 5400 full best-effort || lock_status=$?',
-    );
+    expect(step.run).toContain('sdk_java_lock_acquire 5400 || lock_status=$?');
     expect(step.run).toContain(
       '::warning::Maven cache write-back skipped; the gate result above is unaffected',
     );

@@ -122,7 +122,7 @@ than attributing the flake to the suite.
 
 The write-back acquisition is also best-effort at both sites: a lock that
 cannot be acquired within its budget warns and skips the copy instead of
-failing a step whose suite already passed. On that path the helper emits a
+failing a step whose suite already passed. On that path the workflow emits a
 distinct `sdk-java host lock wait exhausted` warning instead of the pinned
 `lock not acquired within` error, so a succeeding step cannot leave the
 infrastructure signature on a job where a later genuine failure would be
