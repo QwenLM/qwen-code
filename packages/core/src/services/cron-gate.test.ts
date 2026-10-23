@@ -662,6 +662,11 @@ describe('gateCommandError', () => {
     ['a bare #', '#', 'not only a comment'],
     ['comment lines only', '# a\n  # b\n', 'not only a comment'],
     ['a wrapper running a comment', "bash -c '# probe'", 'not only a comment'],
+    [
+      'a wrapper comment, a newline, then only a comment',
+      "bash -c '#'\n# only a comment",
+      'not only a comment',
+    ],
     // Words after the script are its positional parameters.
     [
       'a wrapper running a comment with arguments',

@@ -1205,13 +1205,10 @@ export function ScheduledTasksDialog({
       setFormError(t('scheduledTasks.error.emptyPrompt'));
       return;
     }
-    // A gate typed before the daemon stopped advertising gates would be
-    // dropped silently, leaving a task that runs at every slot.
-    if (
-      !gateAvailable &&
-      gate.trim() !== '' &&
-      gate.trim() !== editedGate.trim()
-    ) {
+    // Any gate change made before the daemon stopped advertising gates
+    // would be dropped from the request: a typed gate would leave a task
+    // that runs at every slot, a cleared one would keep the old command.
+    if (!gateAvailable && gate.trim() !== editedGate.trim()) {
       setFormError(t('scheduledTasks.error.gateUnavailable'));
       return;
     }

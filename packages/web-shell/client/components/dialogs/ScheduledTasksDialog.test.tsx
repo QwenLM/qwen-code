@@ -416,7 +416,28 @@ describe('ScheduledTasksDialog editing', () => {
     await enterPromptAndCreate('handle the events below');
     expect(actions.createScheduledTask).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain(
-      'This daemon does not support gate commands',
+      'This daemon does not accept gate changes',
+    );
+  });
+
+  it('refuses to drop a cleared gate when the daemon stops advertising gates', async () => {
+    // Saved without the `gate` key, the old command would keep running.
+    const { rerender } = await mount([baseTask({ gate: './probe.sh' })], {
+      gateAvailable: true,
+    });
+    click(document.querySelector('[aria-label="Edit"]'));
+    input(
+      document.querySelector<HTMLTextAreaElement>(
+        'textarea[aria-label="Gate command (optional)"]',
+      )!,
+      '',
+    );
+    await rerender({ gateAvailable: false });
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      'This daemon does not accept gate changes',
     );
   });
 

@@ -1817,7 +1817,7 @@ const EN: Messages = {
     'The selected workspace is unavailable or untrusted',
   'scheduledTasks.error.emptyPrompt': 'Prompt is required',
   'scheduledTasks.error.gateUnavailable':
-    'This daemon does not support gate commands; clear the gate or reconnect to a daemon that does',
+    'This daemon does not accept gate changes; undo the gate change, or reconnect to a daemon that supports gate commands',
   'scheduledTasks.error.promptTooLong': (v) =>
     `Prompt exceeds ${v?.max ?? 100_000}-character limit`,
   'scheduledTasks.error.goalActive':
@@ -6214,7 +6214,7 @@ const ZH: Messages = {
   'scheduledTasks.error.workspaceUnavailable': '所选工作区不可用或不受信任',
   'scheduledTasks.error.emptyPrompt': '提示词不能为空',
   'scheduledTasks.error.gateUnavailable':
-    '当前 daemon 不支持闸门命令：请清空闸门，或重新连接支持闸门的 daemon',
+    '当前 daemon 不接受闸门修改：请撤销对闸门的修改，或重新连接支持闸门命令的 daemon',
   'scheduledTasks.error.promptTooLong': (v) =>
     `提示词超过 ${v?.max ?? 100_000} 字符限制`,
   'scheduledTasks.error.goalActive': '目标运行期间无法启动定时任务。',

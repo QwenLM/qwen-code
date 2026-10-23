@@ -1589,14 +1589,20 @@ export function normalizeMonitorCommand(
   // execute: leading env assignments, the -c script, and argv suffixes. Wrapper
   // flags are preserved in spawnCommand, but are not converted into Bash(...)
   // command-rule surface.
+  // A newline right after the script ends the wrapper's command: what
+  // follows runs as the next command (a scheduled-task gate runs the text
+  // as written), so the rules must see it on a line of its own, not as the
+  // script's positional words.
+  const suffixIsNextCommand = /^\r?\n/.test(innerArgsSuffix ?? '');
   const safetyParts = [
     ...(wrapperTokens ? leadingEnvTokens : []),
     analysisCommand,
-    ...(normalizedInnerArgsSuffix ? [normalizedInnerArgsSuffix] : []),
   ];
   const safetyCommand =
     wrapperTokens && safetyParts.length > 0
-      ? safetyParts.join(' ').trim()
+      ? [safetyParts.join(' ').trim(), normalizedInnerArgsSuffix]
+          .filter(Boolean)
+          .join(suffixIsNextCommand ? '\n' : ' ')
       : analysisCommand;
   const strippedTrailingAmp =
     analysisCommand !== innerCommand ||
@@ -1642,12 +1648,18 @@ export function runsOnlyComments(command: string): boolean {
   const { wrapperTokens, innerCommand, innerArgsSuffix } =
     parseMonitorShellWrapper(command);
   if (wrapperTokens) {
+    const suffix = innerArgsSuffix ?? '';
+    // A newline right after the script starts the next command: both must
+    // run only comments.
+    if (/^\r?\n/.test(suffix)) {
+      return (
+        runsOnlyComments(innerCommand) &&
+        runsOnlyComments(suffix.replace(/^\r?\n/, ''))
+      );
+    }
     // Words after the script are its positional parameters, which run
     // nothing; an operator there (`&& echo hi`, `; …`) runs more.
-    return (
-      !/[;&|()\n`]|\$\(/.test(innerArgsSuffix ?? '') &&
-      runsOnlyComments(innerCommand)
-    );
+    return !/[;&|()\n`]|\$\(/.test(suffix) && runsOnlyComments(innerCommand);
   }
   return command.split('\n').every((line) => /^\s*(#|$)/.test(line));
 }
