@@ -142,6 +142,7 @@ import {
 } from './hosted-monitor-wake-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedSessionMessageSession } from './hosted-session-message-session.js';
+import { HostedSessionCommandSession } from './hosted-session-command-session.js';
 import { HostedContextCompression } from './hosted-context-compression.js';
 import type { HistoryMaintenance } from '@qwen-code/qwen-code-core/managed-runtime/managed-history-maintenance-record.js';
 import { HostedTeamSession } from './hosted-team-session.js';
@@ -16118,6 +16119,410 @@ describe('Hosted Harness no-tool session', () => {
       loaded.body.clientId as string,
     );
   });
+
+  it.each([
+    'member',
+    'child',
+    'assistant-member',
+    'assistant-child',
+    'hook',
+    'member-bob',
+    'member-broadcast',
+  ] as const)(
+    'preserves the real model/record boundary for send_message: %s (#14062)',
+    async (mode) => {
+      await enforceInlineResourceLimit();
+      const errors = vi.spyOn(stdio, 'writeStderrLineSafe');
+      const member = mode !== 'child' && mode !== 'assistant-child';
+      const assistantOverflow = mode.startsWith('assistant-');
+      const commandLane = mode === 'member-bob' || mode === 'member-broadcast';
+      const to =
+        mode === 'member-bob'
+          ? 'bob'
+          : mode === 'member-broadcast'
+            ? '*'
+            : 'parent';
+      const runCommand = HostedSessionCommandSession.prototype.runCommand;
+      const commandCalls = vi
+        .spyOn(HostedSessionCommandSession.prototype, 'runCommand')
+        .mockImplementation(async function (
+          this: HostedSessionCommandSession,
+          params,
+        ) {
+          await runCommand.call(this, params);
+          await this.handover(params.commandId, BOOT_ID);
+          await this.answered(params.commandId, {
+            outcome: 'answered',
+            text: 'Scripted leader accepted the short message.',
+          });
+        });
+      const dense = JSON.stringify(Array.from({ length: 6500 }, () => 'aa'));
+      const message = assistantOverflow ? 'x'.repeat(65_400) : dense;
+      const requests: Array<{
+        messages: Array<{
+          role: string;
+          content?: unknown;
+          tool_call_id?: string;
+        }>;
+      }> = [];
+      const modelServer = createServer(async (req, res) => {
+        if (req.method !== 'POST') {
+          res.writeHead(404).end();
+          return;
+        }
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(Buffer.from(chunk));
+        requests.push(JSON.parse(Buffer.concat(chunks).toString()));
+        const round = requests.length;
+        const delta =
+          round <= 2
+            ? {
+                role: 'assistant',
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: round === 1 ? 'call-dense' : 'call-retry',
+                    type: 'function',
+                    function: {
+                      name: 'send_message',
+                      arguments: JSON.stringify({
+                        to,
+                        message:
+                          round === 2
+                            ? 'shorter'
+                            : mode === 'hook'
+                              ? 'original'
+                              : message,
+                      }),
+                    },
+                  },
+                ],
+              }
+            : { role: 'assistant', content: 'RECOVERED_14062' };
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(
+          `data: ${JSON.stringify({
+            id: 'fixture',
+            object: 'chat.completion.chunk',
+            created: 0,
+            model: 'issue-14062',
+            choices: [{ index: 0, delta, finish_reason: null }],
+          })}\n\n`,
+        );
+        res.end(
+          `data: ${JSON.stringify({
+            id: 'fixture',
+            object: 'chat.completion.chunk',
+            created: 0,
+            model: 'issue-14062',
+            choices: [
+              {
+                index: 0,
+                delta: {},
+                finish_reason: round <= 2 ? 'tool_calls' : 'stop',
+              },
+            ],
+          })}\n\ndata: [DONE]\n\n`,
+        );
+      });
+      listeners.add(modelServer);
+      await new Promise<void>((resolve) =>
+        modelServer.listen(0, '127.0.0.1', resolve),
+      );
+      const address = modelServer.address();
+      if (!address || typeof address === 'string')
+        throw new Error('No model address');
+      const configDir = path.join(state.root, 'config');
+      await mkdir(configDir);
+      await writeFile(
+        path.join(configDir, 'settings.json'),
+        JSON.stringify({
+          security: { auth: { selectedType: 'openai' } },
+          model: { name: 'issue-14062' },
+          telemetry: { enabled: false },
+          modelProviders: {
+            openai: [
+              {
+                id: 'issue-14062',
+                envKey: 'OPENAI_API_KEY',
+                baseUrl: `http://127.0.0.1:${address.port}/v1`,
+                generationConfig: { contextWindowSize: 131_072 },
+              },
+            ],
+          },
+        }),
+      );
+      vi.stubEnv('QWEN_HOME', configDir);
+      vi.stubEnv('QWEN_RUNTIME_DIR', path.join(state.root, 'model-runtime'));
+      vi.stubEnv('OPENAI_API_KEY', 'test-key');
+      vi.stubEnv('OPENAI_BASE_URL', `http://127.0.0.1:${address.port}/v1`);
+      vi.stubEnv('OPENAI_MODEL', 'issue-14062');
+      vi.stubEnv('QWEN_MODEL', 'issue-14062');
+      try {
+        vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+        vi.spyOn(
+          HostedWorkspaceBroker.prototype,
+          'release',
+        ).mockResolvedValue();
+        vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+          async function (this: HostedWorkspaceBroker) {
+            this.runtime = {
+              bindingId: 'binding',
+              generation: '1',
+              workspaceGeneration: '1',
+            };
+          },
+        );
+        vi.spyOn(
+          HostedWorkspaceBroker.prototype,
+          'activeHoldRuntimeSessionIds',
+        ).mockResolvedValue([]);
+        const hookOutput = {
+          hookSpecificOutput: {
+            hookEventName: HookEventName.PreToolUse,
+            updatedInput: { to: 'parent', message: dense },
+          },
+        };
+        const hookResult = {
+          success: true,
+          outcome: 'success' as const,
+          duration: 0,
+          output: hookOutput,
+        };
+        expect(Buffer.byteLength(JSON.stringify(hookResult))).toBeLessThan(
+          60 * 1024,
+        );
+        expect(
+          Buffer.byteLength(JSON.stringify({ output: hookOutput })),
+        ).toBeLessThan(60 * 1024);
+        let rewrites = 0;
+        if (mode === 'hook') {
+          vi.spyOn(
+            HostedWorkspaceBroker.prototype,
+            'authorizeLifecycle',
+          ).mockResolvedValue();
+          vi.spyOn(
+            HostedWorkspaceBroker.prototype,
+            'hookControl',
+          ).mockImplementation(async (operation) => {
+            if (operation.kind === 'hook-catalog')
+              return {
+                operationId: operation.operationId,
+                state: 'settled',
+                catalog: {
+                  ...operation.pin,
+                  hooks: [
+                    {
+                      hookId: 'rewrite',
+                      eventName: HookEventName.PreToolUse,
+                      sequential: false,
+                      async: false,
+                      failClosed: true,
+                      onceKey: null,
+                      config: { type: 'command' },
+                    },
+                  ],
+                },
+              };
+            return {
+              operationId: operation.operationId,
+              state: 'settled',
+              result:
+                operation.kind === 'hook-execute' && rewrites++ === 0
+                  ? hookResult
+                  : { success: true, outcome: 'success', duration: 0 },
+            };
+          });
+        }
+        const actual = await vi.importActual<
+          typeof import('./hosted-harness-model.js')
+        >('./hosted-harness-model.js');
+        state.model.mockImplementationOnce(async (input) =>
+          actual.runHostedHarnessTextTurn({
+            ...input,
+            resumeFromToolResults: undefined,
+            sessionId: SESSION_ID,
+            cwd: state.root,
+            history: [],
+            prompt: 'Send the message, shorten after refusal.',
+            promptId: PROMPT_ID,
+          }),
+        );
+        const server = await app(true);
+        const created = await headers(supertest(server).post('/session'))
+          .send({
+            sessionId: SESSION_ID,
+            sessionScope: 'thread',
+            managedSessionStore: store(),
+            toolProfile: 'hosted-workspace-shell/1',
+            approvalMode: 'yolo',
+            lineage: {
+              parentSessionId: BOOT_ID,
+              rootSessionId: BOOT_ID,
+              parentChildRunId: 'run-leaf',
+              depth: 1,
+            },
+            ...(mode === 'hook' ? { hookCatalog: hookPin } : {}),
+          })
+          .expect(200);
+        const authorize = (request: supertest.Test) =>
+          headers(request).set(
+            'X-Qwen-Client-Id',
+            created.body.clientId as string,
+          );
+        const prompt = [
+          {
+            type: 'text',
+            text:
+              (member
+                ? teamMemberPreamble({ name: 'alice', teamName: 'review' })
+                : '') + 'Send the message.',
+          },
+        ];
+        await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+          .send({
+            prompt,
+            promptId: PROMPT_ID,
+            payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          })
+          .expect(202);
+        await vi.waitFor(
+          async () => {
+            const status = await authorize(
+              supertest(server).get(`/session/${SESSION_ID}/status`),
+            );
+            expect(status.body.hasActivePrompt).toBe(false);
+            expect(status.body.recoveryBlocked).toBe(false);
+          },
+          { timeout: 30_000 },
+        );
+        const journal = await LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: SESSION_ID,
+          },
+        );
+        const settlement = journal.events.filter(
+          (event) =>
+            event.kind === 'turn.settled' &&
+            event.payload['turnId'] === PROMPT_ID,
+        );
+        expect(settlement).toHaveLength(1);
+        expect(settlement[0].payload['outcome']).toBe(
+          assistantOverflow ? 'error' : 'completed',
+        );
+        const deliveries = journal.events.filter(
+          (event) =>
+            event.kind === 'domain.committed' &&
+            event.payload['domain'] === 'session_message',
+        );
+        expect(deliveries).toHaveLength(
+          assistantOverflow || commandLane ? 0 : 1,
+        );
+        expect(
+          journal.events.some(
+            (event) =>
+              event.kind === 'domain.committed' &&
+              event.payload['domain'] === 'session_command',
+          ),
+        ).toBe(commandLane);
+        const commands =
+          (
+            commandCalls.mock.contexts[0] as
+              | HostedSessionCommandSession
+              | undefined
+          )?.commands() ?? [];
+        if (commandLane) {
+          expect(commandCalls).toHaveBeenCalledOnce();
+          expect(commandCalls.mock.calls[0][0]).toMatchObject({
+            kind: 'member_message',
+            args: { to, message: 'shorter' },
+          });
+          expect(commands).toHaveLength(1);
+          expect(commands[0].run.delivery?.state).toBe('consumed');
+        } else {
+          expect(commandCalls).not.toHaveBeenCalled();
+        }
+        expect(requests).toHaveLength(assistantOverflow ? 1 : 3);
+        if (assistantOverflow)
+          expect(errors).toHaveBeenCalledWith(
+            expect.stringContaining(
+              'Hosted assistant record exceeds the inline Session Store limit.',
+            ),
+          );
+        if (!assistantOverflow) {
+          expect(requests[1].messages).toContainEqual(
+            expect.objectContaining({
+              role: 'tool',
+              tool_call_id: 'call-dense',
+              content: expect.arrayContaining([
+                expect.objectContaining({
+                  type: 'text',
+                  text: expect.stringContaining(
+                    commandLane
+                      ? 'once encoded (byte_limit) although it fits the 32768-byte member wrapper; shorten escape-dense content and retry.'
+                      : 'once encoded (byte_limit); shorten the message or other arguments and retry.',
+                  ),
+                }),
+              ]),
+            }),
+          );
+          expect(requests[2].messages).toContainEqual(
+            expect.objectContaining({
+              role: 'tool',
+              tool_call_id: 'call-retry',
+              content: expect.arrayContaining([
+                expect.objectContaining({
+                  type: 'text',
+                  text: expect.stringContaining(
+                    commandLane
+                      ? 'Scripted leader accepted'
+                      : 'queued for delivery',
+                  ),
+                }),
+              ]),
+            }),
+          );
+        }
+        const transcript = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        );
+        expect(JSON.stringify(transcript.body)).toContain(
+          assistantOverflow ? 'hosted_turn_failed' : 'RECOVERED_14062',
+        );
+        if (mode === 'member') {
+          await authorize(
+            supertest(server).post(`/session/${SESSION_ID}/detach`),
+          ).expect(204);
+          const loaded = await headers(
+            supertest(server).post(`/session/${SESSION_ID}/load`),
+          )
+            .send({ managedSessionStore: store() })
+            .expect(200);
+          const reloaded = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/transcript`),
+          ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+          expect(JSON.stringify(reloaded.body)).toContain(
+            'once encoded (byte_limit)',
+          );
+          expect(JSON.stringify(reloaded.body)).toContain('RECOVERED_14062');
+          expect(requests).toHaveLength(3);
+          await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+            .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+            .expect(204);
+        } else {
+          await authorize(
+            supertest(server).delete(`/session/${SESSION_ID}`),
+          ).expect(204);
+        }
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+    60_000,
+  );
 
   it.each(['hosted-workspace-files/1', 'hosted-workspace-shell/1'])(
     'persists the SSH foreground-only surface through resident and cold loads of %s',
