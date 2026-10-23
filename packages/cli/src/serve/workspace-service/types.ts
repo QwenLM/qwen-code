@@ -464,6 +464,26 @@ export interface PersistDisabledSkillsBatchResult {
   }>;
 }
 
+export type UserSkillActivationSettingKey =
+  | 'skills.disabled'
+  | 'skills.defaultDisabled'
+  | 'skills.enabled';
+
+export interface PersistUserSkillActivationOutcome {
+  skillName: string;
+  changed: boolean;
+  /** Set with `changed: false` when a standing entry refused an enable. */
+  block?: SkillToggleBlock;
+}
+
+export interface PersistUserSkillActivationResult {
+  outcomes: PersistUserSkillActivationOutcome[];
+  settingsChanges: Array<{
+    key: UserSkillActivationSettingKey;
+    value: string[] | undefined;
+  }>;
+}
+
 export class WorkspaceSkillNotFoundError extends Error {
   constructor(readonly skillName: string) {
     super(`Skill not found: ${skillName}`);

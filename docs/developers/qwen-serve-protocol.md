@@ -230,6 +230,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_file_upload', 'workspace_file_delete', 'workspace_directory_create', 'workspace_directory_delete',
  'session_approval_mode_control', 'workspace_tool_toggle',
  'workspace_skill_settings_toggle', 'workspace_skill_settings_batch_toggle',
+ 'user_skill_activation',
  'workspace_session_refresh',
  'extension_batch_activation_v2', 'extension_activation_explicit_refresh',
  'extension_state',
@@ -648,6 +649,7 @@ starts failing, not at every fire.
 | `user_language_sync`                     | the daemon was created with settings persistence available (same condition as `workspace_settings`), so the sessionless `POST /language` route is registered.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `workspace_voice`                        | settings persistence is available, so the legacy primary workspace Voice settings routes are active.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `workspace_voice_transcription`          | the primary workspace has a configured Voice transcription model.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `user_skill_activation`                  | the daemon was created with user Skill settings persistence, so `PUT /skills/:name/activation` and `PUT /skills/activation` are served.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `session_shell_command`                  | Session shell execution is explicitly enabled and effective under bearer auth or trusted-loopback authority; calls still require a session-bound client id.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `standalone_sessions_v1`                 | the daemon has installed the complete standalone-session runtime, lifecycle coordinator, durable deletion journal, managed-directory implementation, and `/standalone/sessions` route family. Direct embeds without the complete dependency graph omit both the routes and this tag.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `standalone_session_options_v1`          | the complete standalone-session runtime is installed (same condition as `standalone_sessions_v1`), so the read-only, sessionless `GET /standalone/session-options` route is registered on the internal Conversations runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -4073,6 +4075,87 @@ Response (200):
 ```
 
 Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_name`, or `invalid_enabled_flag`. Authentication, workspace trust, client identity, unexpected persistence failures, and runtime-generation failures fail the whole request through the standard route gates. `errors` remains in the response for wire compatibility and is empty for structurally valid names. Batch-level `activation`, `sessionsRefreshed`, and `sessionsFailed` describe child liveness and the single live-session refresh shared by all changed results. A batch in which no target changed can still answer `applied` when a child is live or `deferred` when none exists, matching the single-Skill no-op response, so derive what actually changed from each result's `changed` flag. When at least one target changes, the daemon emits the same `settings_changed` mutation metadata as the single-Skill route; every `skills.disabled` / `skills.enabled` event from that request shares one `mutation.id`.
+
+#### `PUT /skills/:name/activation`
+
+Capability tag: `user_skill_activation`. There is no workspace-qualified form: the route writes the user settings file, which every workspace merges, so it is selected by no workspace — like `PUT /extensions/activation`.
+
+Enable or disable a Skill in the user settings scope. The trimmed path name is written verbatim; send the registry name (`rust:pdf` for an Extension Skill) so grants match. Each request leaves the name in exactly one user list:
+
+| `state`    | `mode`           | User settings change                                                                |
+| ---------- | ---------------- | ----------------------------------------------------------------------------------- |
+| `disabled` | `hard` (default) | add to `skills.disabled`; remove from `skills.defaultDisabled` and `skills.enabled` |
+| `disabled` | `default`        | add to `skills.defaultDisabled`; remove from `skills.disabled` and `skills.enabled` |
+| `enabled`  | ignored          | add to `skills.enabled`; remove from `skills.disabled` and `skills.defaultDisabled` |
+
+A `hard` disable cannot be lifted by any other scope, so workspace toggles for that name report it as locked by `User`. A `default` disable can be cancelled per workspace by an identically spelled workspace `skills.enabled` entry. Only the exact spelling is edited; entries in other spellings and unrelated names are preserved.
+
+An enable is refused, without writing, when a standing entry would keep the Skill disabled: a `skills.disabled` entry in System or SystemDefaults settings under either spelling, a User `skills.disabled` entry in the other spelling, or a `skills.defaultDisabled` entry no identically spelled `skills.enabled` entry cancels. Workspace entries never refuse a user write; they keep gating only their own workspace. The route does not require the primary workspace to be trusted.
+
+Request:
+
+```json
+{ "state": "disabled", "mode": "default" }
+```
+
+Response (200):
+
+```json
+{
+  "scope": "user",
+  "state": "disabled",
+  "mode": "default",
+  "activation": "reconciling",
+  "skillName": "rust:pdf",
+  "changed": true
+}
+```
+
+`mode` is echoed only for `state: "disabled"`. A refused enable answers `200` with `changed: false` and `block: { reason, list, entry, scope }` naming the entry to edit. When nothing changed, `activation` is `applied` and no event is emitted. Otherwise every registered workspace runtime is reconciled: `reconciling` means at least one trusted live runtime is re-reading workspace and user settings in its ACP child and active sessions, `deferred` means no runtime was live and the next child start reads the committed file. Each changed key (`skills.disabled`, `skills.defaultDisabled`, `skills.enabled`) emits `settings_changed` with `scope: "user"` and the `skill_toggle` `mutation` object on every workspace's event stream.
+
+Errors:
+
+- `400 {code: 'invalid_skill_name'}` — empty path parameter, or more than 256 characters.
+- `400 {code: 'invalid_skill_activation_state'}` — `state` missing or not `enabled` / `disabled`.
+- `400 {code: 'invalid_skill_activation_mode'}` — `mode` present but not `hard` / `default`.
+- `501 {code: 'user_skill_activation_unsupported'}` — the host has no user settings persistence.
+
+#### `PUT /skills/activation`
+
+Capability tag: `user_skill_activation`.
+
+Batch form for up to 100 names in one locked user settings write; the cap counts raw `skillNames` entries before case-insensitive deduplication (first-seen order and casing are kept). All names share one `state` and `mode`. A name refused only because of a User entry another name in the same batch removes is rechecked, so the result does not depend on request order.
+
+Request:
+
+```json
+{ "skillNames": ["rust:pdf", "review"], "state": "enabled" }
+```
+
+Response (200):
+
+```json
+{
+  "scope": "user",
+  "state": "enabled",
+  "activation": "reconciling",
+  "results": [
+    { "skillName": "rust:pdf", "changed": true },
+    {
+      "skillName": "review",
+      "changed": false,
+      "block": {
+        "reason": "hard",
+        "list": "disabled",
+        "entry": "review",
+        "scope": "System"
+      }
+    }
+  ]
+}
+```
+
+Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_name`, `invalid_skill_activation_state`, or `invalid_skill_activation_mode`. Activation and events follow the single-Skill route; one `mutation.id` covers every event from the request.
 
 #### `POST /workspace/init`
 

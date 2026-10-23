@@ -148,6 +148,9 @@ export interface SkillToggleBlock {
   scope: 'SystemDefaults' | 'User' | 'Workspace' | 'System';
 }
 
+/** Settings scopes a skill toggle can write. */
+export type SkillToggleTargetScope = SettingScope.User | SettingScope.Workspace;
+
 /**
  * Decides whether a workspace toggle can change a skill's state at all, and
  * names the entry that forbids it when it cannot.
@@ -164,14 +167,26 @@ export interface SkillToggleBlock {
  * settings and must answer with more than a label. Workspace entries join
  * the inputs only while the workspace is trusted — the merge drops it
  * otherwise, so an untrusted repo's stale entries disable nothing.
+ *
+ * `target` is the scope the toggle writes. A User toggle answers for every
+ * workspace at once, so Workspace entries never block it: they keep gating
+ * only their own workspace, and the User file's own entries are the ones
+ * the toggle edits rather than a higher lock.
  */
-export function buildHigherDisabled(settings: LoadedSettings): {
+export function buildHigherDisabled(
+  settings: LoadedSettings,
+  target: SkillToggleTargetScope = SettingScope.Workspace,
+): {
   lockedIn: (skill: { name: string; authoredName?: string }) => string | null;
   blockIn: (skill: {
     name: string;
     authoredName?: string;
   }) => SkillToggleBlock | null;
 } {
+  const targetLabel: SkillToggleBlock['scope'] =
+    target === SettingScope.User ? 'User' : 'Workspace';
+  const includeWorkspace =
+    target === SettingScope.Workspace && settings.isTrusted;
   // Inserted lowest-precedence first so the highest scope that names an
   // entry wins. SystemDefaults < User < Workspace < System matches the
   // merge order in `settings.ts`.
@@ -181,6 +196,7 @@ export function buildHigherDisabled(settings: LoadedSettings): {
     [SettingScope.User, 'User'],
     [SettingScope.System, 'System'],
   ] as const) {
+    if (scope === target) continue;
     for (const name of normalizeSkillNames(
       skillSettingStrings(settings, scope, 'disabled'),
     )) {
@@ -195,7 +211,7 @@ export function buildHigherDisabled(settings: LoadedSettings): {
     [SettingScope.Workspace, 'Workspace'],
     [SettingScope.System, 'System'],
   ] as const) {
-    if (scope === SettingScope.Workspace && !settings.isTrusted) continue;
+    if (scope === SettingScope.Workspace && !includeWorkspace) continue;
     for (const name of normalizeSkillNames(
       skillSettingStrings(settings, scope, 'disabled'),
     )) {
@@ -213,17 +229,15 @@ export function buildHigherDisabled(settings: LoadedSettings): {
         SettingScope.SystemDefaults,
         SettingScope.User,
         SettingScope.System,
-        ...(settings.isTrusted ? [SettingScope.Workspace] : []),
+        ...(includeWorkspace ? [SettingScope.Workspace] : []),
       ] as SettingScope[]
     ).flatMap((scope) => [
       ...normalizeSkillNames(skillSettingStrings(settings, scope, 'enabled')),
     ]),
   );
-  const workspaceDisabled = new Set(
-    settings.isTrusted
-      ? normalizeSkillNames(
-          skillSettingStrings(settings, SettingScope.Workspace, 'disabled'),
-        )
+  const targetDisabled = new Set(
+    target === SettingScope.User || includeWorkspace
+      ? normalizeSkillNames(skillSettingStrings(settings, target, 'disabled'))
       : [],
   );
   const blockIn = (skill: {
@@ -243,8 +257,8 @@ export function buildHigherDisabled(settings: LoadedSettings): {
     for (const spelling of spellings) {
       const hard = hardEntries.get(spelling);
       if (hard) {
-        // The toggle removes an exact-spelling workspace entry itself.
-        if (spelling === registry && workspaceDisabled.has(spelling)) {
+        // The toggle removes an exact-spelling entry in its own scope itself.
+        if (spelling === registry && targetDisabled.has(spelling)) {
           continue;
         }
         return {
@@ -276,7 +290,7 @@ export function buildHigherDisabled(settings: LoadedSettings): {
       if (!block) return null;
       // A higher-scope hard block labels as the scope alone: the entry
       // name adds nothing the user can act on in another file's list.
-      if (block.reason === 'hard' && block.scope !== 'Workspace') {
+      if (block.reason === 'hard' && block.scope !== targetLabel) {
         return block.scope;
       }
       return `skills.${block.list} '${block.entry}' (${block.scope})`;
@@ -287,8 +301,9 @@ export function buildHigherDisabled(settings: LoadedSettings): {
 export function skillToggleBlockForName(
   settings: LoadedSettings,
   skill: { name: string; authoredName?: string },
+  target: SkillToggleTargetScope = SettingScope.Workspace,
 ): SkillToggleBlock | null {
-  return buildHigherDisabled(settings).blockIn(skill);
+  return buildHigherDisabled(settings, target).blockIn(skill);
 }
 
 function updateTarget(
@@ -326,6 +341,46 @@ export function updateWorkspaceSkillSettingLists(
   return {
     disabled: updateTarget(lists.disabled, skillName, true),
     enabled: updateTarget(lists.enabled, skillName, false),
+  };
+}
+
+/**
+ * How a disable is recorded: `hard` writes `skills.disabled`, which no other
+ * scope can lift; `default` writes `skills.defaultDisabled`, which an
+ * identically spelled `skills.enabled` entry in any scope cancels.
+ */
+export type SkillDisableMode = 'hard' | 'default';
+
+export interface SkillActivationSettingLists {
+  disabled: string[];
+  defaultDisabled: string[];
+  enabled: string[];
+}
+
+/**
+ * Applies one activation change to a scope's three skill lists so the name
+ * ends up in exactly one of them: `enabled` when enabling, `disabled` or
+ * `defaultDisabled` (per `mode`) when disabling. Only the exact spelling is
+ * touched; other spellings and unrelated entries are preserved verbatim.
+ */
+export function updateSkillActivationLists(
+  lists: SkillActivationSettingLists,
+  skillName: string,
+  enabled: boolean,
+  mode: SkillDisableMode = 'hard',
+): SkillActivationSettingLists {
+  return {
+    disabled: updateTarget(
+      lists.disabled,
+      skillName,
+      !enabled && mode === 'hard',
+    ),
+    defaultDisabled: updateTarget(
+      lists.defaultDisabled,
+      skillName,
+      !enabled && mode === 'default',
+    ),
+    enabled: updateTarget(lists.enabled, skillName, enabled),
   };
 }
 

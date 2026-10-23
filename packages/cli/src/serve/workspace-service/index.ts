@@ -137,7 +137,7 @@ export {
 
 const WORKSPACE_SKILLS_SNAPSHOT_TTL_MS = 5_000;
 
-function createSkillToggleMutation(input: {
+export function createSkillToggleMutation(input: {
   skills: ReadonlyArray<{ name: string; enabled: boolean }>;
   activation: WorkspaceSkillToggleActivation;
   sessionsRefreshed: number;

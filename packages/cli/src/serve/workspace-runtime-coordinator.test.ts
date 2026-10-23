@@ -158,6 +158,50 @@ describe('WorkspaceRuntimeCoordinator', () => {
     );
   });
 
+  it('asks the child to re-read user settings until a refresh carries it', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    harness.invokeWorkspaceCommand.mockRejectedValueOnce(new Error('boom'));
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    const userRefresh = {
+      cwd: '/workspace',
+      reason: 'all',
+      settingsScopes: ['workspace', 'user'],
+    };
+
+    coordinator.reconcileSkillsConfiguration({ userSettings: true });
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.skills?.state).toBe('error'),
+    );
+    // A later workspace-only reconcile still owes the failed user reload.
+    coordinator.reconcileSkillsConfiguration();
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.skills).toMatchObject({
+        state: 'ready',
+        revision: 2,
+      }),
+    );
+    expect(harness.invokeWorkspaceCommand).toHaveBeenNthCalledWith(
+      1,
+      'qwen/control/workspace/skills/refresh',
+      userRefresh,
+    );
+    expect(harness.invokeWorkspaceCommand).toHaveBeenNthCalledWith(
+      2,
+      'qwen/control/workspace/skills/refresh',
+      userRefresh,
+    );
+
+    coordinator.reconcileSkillsConfiguration();
+    await vi.waitFor(() =>
+      expect(harness.invokeWorkspaceCommand).toHaveBeenCalledTimes(3),
+    );
+    expect(harness.invokeWorkspaceCommand).toHaveBeenLastCalledWith(
+      'qwen/control/workspace/skills/refresh',
+      { cwd: '/workspace', reason: 'all' },
+    );
+  });
+
   it('keeps the Skills capability ready when only a session refresh fails', async () => {
     const harness = makeRuntime();
     harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });

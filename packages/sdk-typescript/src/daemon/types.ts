@@ -4024,6 +4024,48 @@ export interface DaemonSkillBatchToggleItem {
   changed: boolean;
 }
 
+export type DaemonSkillActivationState = 'enabled' | 'disabled';
+
+/**
+ * How a user-scope disable is recorded: `hard` writes `skills.disabled`,
+ * which no other scope can lift; `default` writes `skills.defaultDisabled`,
+ * which an identically spelled `skills.enabled` entry in any scope cancels.
+ */
+export type DaemonSkillDisableMode = 'hard' | 'default';
+
+/** The settings entry that refused an enable. */
+export interface DaemonSkillToggleBlock {
+  reason: 'hard' | 'default';
+  list: 'disabled' | 'defaultDisabled';
+  entry: string;
+  scope: 'SystemDefaults' | 'User' | 'Workspace' | 'System';
+}
+
+export interface DaemonUserSkillActivationItem {
+  skillName: string;
+  changed: boolean;
+  /** Present with `changed: false` when a standing entry refused an enable. */
+  block?: DaemonSkillToggleBlock;
+}
+
+export interface DaemonUserSkillActivationResult
+  extends DaemonUserSkillActivationItem {
+  scope: 'user';
+  state: DaemonSkillActivationState;
+  /** Echoed only for `state: 'disabled'`. */
+  mode?: DaemonSkillDisableMode;
+  activation: Exclude<DaemonSkillToggleActivation, 'partial'>;
+}
+
+export interface DaemonUserSkillsActivationResult {
+  scope: 'user';
+  state: DaemonSkillActivationState;
+  /** Echoed only for `state: 'disabled'`. */
+  mode?: DaemonSkillDisableMode;
+  activation: Exclude<DaemonSkillToggleActivation, 'partial'>;
+  results: DaemonUserSkillActivationItem[];
+}
+
 export type DaemonSkillScope = 'workspace' | 'global';
 
 export type DaemonSkillInstallSource =
