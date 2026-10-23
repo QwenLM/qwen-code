@@ -35,7 +35,7 @@ async function worker(root, node, bun, expectedHost) {
   assert.equal(host, expectedHost);
   assert.equal(
     host === 'bun' ? process.versions.bun : process.version,
-    host === 'bun' ? '1.3.14' : 'v24.19.0',
+    host === 'bun' ? '1.4.4' : 'v24.19.0',
   );
   console.log(
     JSON.stringify({
@@ -981,12 +981,10 @@ async function ci() {
     if (!bun) {
       const name = `@oven/bun-${process.platform}-${process.arch === 'arm64' ? 'aarch64' : process.arch}`;
       const metadata = JSON.parse(
-        (
-          await download(`https://registry.npmjs.org/${name}/1.3.14`)
-        ).toString(),
+        (await download(`https://registry.npmjs.org/${name}/1.4.4`)).toString(),
       );
       assert.equal(metadata.name, name);
-      assert.equal(metadata.version, '1.3.14');
+      assert.equal(metadata.version, '1.4.4');
       assert.equal(
         new URL(metadata.dist.tarball).origin,
         'https://registry.npmjs.org',
@@ -1032,7 +1030,7 @@ if (process.argv[2] === '--ci') {
   ]);
   const bun = run(process.env.PINNED_BUN || 'bun', ['-p', 'process.execPath']);
   assert.equal(run(node, ['--version']), 'v24.19.0');
-  assert.equal(run(bun, ['--version']), '1.3.14');
+  assert.equal(run(bun, ['--version']), '1.4.4');
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), 'standalone-runtime-test-'),
   );

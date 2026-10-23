@@ -2,6 +2,12 @@
 
 [English](2026-10-21-opentui-npm-distribution.md) | [简体中文](2026-10-21-opentui-npm-distribution.zh-CN.md)
 
+**已合并 [#14959](https://github.com/QwenLM/qwen-code/pull/14959) 的运行时后续批次。** 本批将 OpenTUI 统一为 Bun-only，并把 npm 私有运行时和 standalone preview 的 Bun pin 更新为 **1.4.4**，OpenTUI 保持 **0.5.10**。该更新包含上游 Brotli decoder 错误传播修复，不改变直接运行时兼容下限或默认 renderer。当前提案基于 main `249ab50d`，本次整合产物的安装与平台验收尚未执行。
+
+历史证据保持其原始产物归属：main `32b4234b` 加早期运行时改动通过正常 build/typecheck/bundle、87 项 CLI 和 46 项打包/工作流测试。真实 Node 26.4.0/npm 11.17.0 pack 与自有目录 `--ignore-scripts` 安装验证了 1,355 个发布文件及执行权限，解包大小为 152,316,775 字节，低于 160 MiB。一项 macOS arm64 strict 安装版 smoke 观察到 Node launcher、同安装私有 Bun 1.4.4、原生库、一次模型 HTTP、语法分色及 `/quit` 自然退出 0。随后禁用 relaunch、缺失私有 Bun、继承 FFI flag 的 fallback/strict 六项拒绝负控通过。这些不是本次新整合产物、其他安装布局、npm 子进程身份或其他平台的验收。
+
+早期正常 standalone updater 矩阵在真实 Node 24.19 与 Bun 1.4.4 宿主通过 152 个合成场景（各 76），使用验证证书的 loopback HTTPS 与无签名 CLI/版本归档。Node registry 调度注入了 npm executor；Bun probe 不可观察。后续本地 `a28ba265` 整合通过 fresh build/typecheck/bundle 和 133 项受影响单测。这些源码及合成结果不关闭发布版 standalone 升级、最终安装产物或受支持平台执行门禁。下文 1.3.14 证据保留历史归属。
+
 ## 状态与问题
 
 源码检查点 `0d353777bb054b9d5c9925f134dd63db7c316614` 通过普通 merge 纳入 main `19d3289f4818617efdf31ca46d4db0522da36f95`，包含已接受的输入/输出批次 #15067 和 Bun PTY #14046。49 项分发改动与现有依赖输入完整保留。该检查点的 macOS arm64 fresh build 和 typecheck 已通过。受影响 consumer、native、bundle 与安装版产品门禁分别记录在 [#14959](https://github.com/QwenLM/qwen-code/pull/14959)；源码构建成功不能代替安装产物验收。
@@ -10,9 +16,9 @@
 
 原 strict 交互 `--json-file` 缺陷已有已接受的输出改动覆盖，但最终安装组合仍须独立执行输出回归。历史 serve 关闭失败需要在当前候选上重新刻画。Linux 原生 cgroup/bwrap/landlock、其他支持平台及正式发布版本升级仍是独立未结门禁。Windows ConPTY 诊断不代表安装版 Qwen 通过，也不改变固定 Bun 版本。这仍是显式选择 OpenTUI 的 POSIX npm 交付；整体 TUI 迁移完成及默认 renderer 切换须满足整体迁移门禁。
 
-当前 npm 发布清单排除了 `opentui-assets`，也没有私有 Bun 运行时。Node 低于
-26.4 时，显式 OpenTUI 请求回退到 Ink；较新 Node 的 bundle 安装仍缺少启动
-OpenTUI 所需的 native/parser 资产。独立的 Bun standalone preview 已包含运行时
+原 npm 分发基线排除了 `opentui-assets`，也没有私有 Bun 运行时。该基线中，Node
+低于 26.4 时显式 OpenTUI 请求回退到 Ink；较新 Node 的 bundle 安装缺少启动
+OpenTUI 所需的 native/parser 资产，而独立 Bun standalone preview 当时已包含运行时
 与资产。npm/npx 应在不依赖全局 Bun、不改变默认 renderer 的前提下支持同一显式选择。
 
 相关工作：
@@ -26,13 +32,15 @@ OpenTUI 所需的 native/parser 资产。独立的 Bun standalone preview 已包
 ## 目标与边界
 
 支持通过 npm 或 npx 安装后在 darwin-arm64、darwin-x64、linux-arm64、
-linux-x64（glibc）上显式启用 OpenTUI。Node 继续承担 npm launcher 与包管理器
-解释器角色；交互 renderer 需要私有 Bun 时复用既有受监督 CLI relaunch。
+linux-x64（glibc）上显式启用 OpenTUI。所有受支持 Node 版本调用符合条件的
+npm 发布安装时，OpenTUI 都使用同安装的私有固定版本 Bun。Node 继续承担
+npm launcher 与包管理器解释器角色，复用既有受监督 CLI relaunch。
 
 不增加 `QWEN_TUI_RUNTIME`、新的平台包发布体系、运行时缓存、启动下载、
-`PATH` 全局 Bun 搜索、编译应用或包管理器变更。不切换默认 renderer/runtime。
+`PATH` 全局 Bun 搜索、编译应用或包管理器变更。不切换默认 renderer 或默认 Ink 运行时。
 Windows、musl、整个 CLI 的 sandbox 镜像和外部 Node 专用宿主不进入新 handoff。
-既有 standalone 运行时选择与更新行为保留。
+Node classic standalone 与 Node 源码调用保持 Node/Ink；Bun standalone preview
+与受支持 Bun 源码调用可以显式选择 OpenTUI。standalone 运行时打包与更新解释器边界保留。
 
 直接 `process.execPath` 审计还识别出
 [#14134 的 c807de17](https://github.com/QwenLM/qwen-code/pull/14134) 与
@@ -56,20 +64,26 @@ worktree、resume picker、鉴权、MCP 初始化和 renderer 初始化前执行
 query/prompt 为非交互，空 prompt 要求 stdin 为终端。
 私有 Bun handoff 还要求 stdout 为终端，因此重定向输出保持调用者运行时。
 
-| 调用方式                                                  | 运行时行为                                        |
-| --------------------------------------------------------- | ------------------------------------------------- |
-| renderer 未设置、`ink` 或未知值                           | 保持既有运行时与 renderer 行为                    |
-| 显式 OpenTUI、交互 Node 低于 26.4、受支持 npm 安装        | 经既有 supervisor 启动私有固定版本 Bun            |
-| 显式 OpenTUI、Node 26.4 及以上                            | 保留 Node/OpenTUI 路径；既有 FFI 要求仍适用       |
-| 已运行于 Bun                                              | 保持运行时，不递归 handoff                        |
-| screen reader，包括设置与 CLI 覆盖                        | 既有 Ink 能力回退；strict 请求失败                |
-| prompt/headless、pipe、help、version                      | 保持调用者运行时                                  |
-| `serve`、`mcp`、managed bootstrap、ACP、SDK、IDE 协议宿主 | 保持既有运行时/协议路径                           |
-| dual-output 协议输入/文件或 JSON descriptor               | 不新增运行时 handoff                              |
-| 整个 CLI 的 sandbox 或已处于其中                          | 不使用宿主私有 Bun handoff，保持既有 sandbox 行为 |
-| Windows、不支持的 CPU 或 Linux musl                       | 不进行私有 Bun handoff                            |
-| 缺少 optional runtime 或二进制不可执行                    | Node/Ink 回退；strict 显式请求失败并说明原因      |
-| 不支持的继承 Node 运行时参数                              | 保持原 Node 路径；strict 显式请求失败             |
+OpenTUI 选择统一要求受支持的 Bun 运行时。为落实 TUI 迁移到 Bun 的目标，
+退休此前 Node 26.4+ 原生 OpenTUI 例外。Node 无法 handoff 时，由既有共享门禁
+让普通请求选择 Ink、strict 请求明确失败；原生 Node FFI 不再是替代 OpenTUI 路径。
+不新增 fallback 状态、helper、依赖体系或运行时选择机制。本批另行更新既有私有 Bun 版本 pin。
+
+| 调用方式                                                  | 运行时行为                                              |
+| --------------------------------------------------------- | ------------------------------------------------------- |
+| renderer 未设置、`ink` 或未知值                           | 保持既有运行时与 renderer 行为                          |
+| 显式 OpenTUI、受支持交互 Node、受支持 npm 安装            | 经既有 supervisor 启动私有固定版本 Bun，包括 Node 26.4+ |
+| 由 Node 运行的源码或 classic standalone                   | Node/Ink；strict OpenTUI 请求失败，无原生 Node 例外     |
+| 由受支持 Bun 运行的源码或 standalone preview              | 显式 OpenTUI 使用 Bun，不进行 npm handoff               |
+| 已运行于 Bun                                              | 保持运行时，不递归 handoff                              |
+| screen reader，包括设置与 CLI 覆盖                        | 既有 Ink 能力回退；strict 请求失败                      |
+| prompt/headless、pipe、help、version                      | 保持调用者运行时                                        |
+| `serve`、`mcp`、managed bootstrap、ACP、SDK、IDE 协议宿主 | 保持既有运行时/协议路径                                 |
+| dual-output 协议输入/文件或 JSON descriptor               | 不新增运行时 handoff                                    |
+| 整个 CLI 的 sandbox 或已处于其中                          | 不使用宿主私有 Bun handoff，保持既有 sandbox 行为       |
+| npm Node 位于 Windows、不支持的 CPU 或 Linux musl         | 不进行私有 Bun handoff；Node/Ink 或 strict 失败         |
+| 缺少 optional runtime 或二进制不可执行                    | Node/Ink 回退；strict 显式请求失败并说明原因            |
+| 不支持的继承 Node 运行时参数或禁用 relaunch               | Node/Ink 回退；strict 显式请求失败                      |
 
 只向 Bun 传递本次已知启动方式支持的参数，不将 Node 内存调优参数或 Node loader
 作为 Bun 参数转发。保留脚本参数、工作目录、环境来源、可信 launcher 身份和既有
@@ -116,7 +130,7 @@ SIGBUS。仅禁用 renderer 的键盘 Ctrl+C handler 无法阻止进程级 SIGIN
 
 ## 包构建
 
-生成的 npm manifest 新增四个精确固定在 Bun 1.3.14 的官方 `@oven` 平台 optional
+生成的 npm manifest 包含四个精确固定在 Bun 1.4.4 的官方 `@oven` 平台 optional
 依赖。直接使用 tarball 已含可执行文件的平台包，不使用带安装脚本的 `bun`
 wrapper。因此支持 `--ignore-scripts`；`--omit=optional` 会明确使私有 Bun 不可用。
 
@@ -158,9 +172,11 @@ PTY 资产。本批保留该实现并加入 92d4b193 已回收主进程 guard；
 仍待执行。Windows Bun PTY 仍不支持。
 
 单机可以检查四个平台归档内容，不能证明四平台 native 行为。macOS arm64 执行证据
-必须与 Linux/x64 或 Windows 检查分开记录。保留 Node 26.4 的 Node/OpenTUI 是
-本批有意采用的兼容选择；后续全部 TUI 迁移 Bun 的里程碑仍需覆盖这些 Node 版本、
-screen reader、sandbox、Windows/musl 与 PTY 依赖。
+必须与 Linux/x64 或 Windows 检查分开记录。此前 Node 26.4+ 原生路径已作为
+兼容例外退休，不再是待选择的政策。官方 Node 26.4.0 运行时已取得并核验，
+以其为 launcher、使用同一安装私有 Bun 1.4.4 的一项真实 npm 安装版 strict OpenTUI 用例已通过；
+仅注入版本的单测不代表产品证据。screen reader、sandbox、Windows/musl
+与 PTY 依赖仍是独立的整体迁移门禁。
 
 运行时参数、managed npm 更新、符号链接/npm-prefix 安装与 optional 依赖省略
 是最高风险边界。缺少 parser worker/grammar 可能静默丢失高亮；仅检查版本不能
@@ -188,8 +204,12 @@ screen reader、sandbox、Windows/musl 与 PTY 依赖。
 6. 在原 Node 下执行真实 npm registry/config 子进程、managed update staging、
    退出码 44 重启链、IPC update-on-exit、SIGINT/SIGTERM 和无残留进程的退出。
    synthetic fixture 必须明确标注。
-7. 验证 headless/协议/help/version 保持 Node 与原输出 framing；Node 26.4+、
-   screen reader、standalone、Windows 与 musl 排除项有明确回归覆盖和平台执行限制。
+7. 验证 headless/协议/help/version 保持 Node 与原输出 framing。Node 26.4+ 须验证
+   合格 npm handoff，以及每种拒绝最终选择 Ink 或 strict 失败，包括继承 FFI 参数；
+   任何情况都不能选择原生 Node/OpenTUI。验证 Node 源码/classic standalone 保持 Ink，
+   受支持 Bun 源码/preview 可以选择 OpenTUI。保留 screen reader、Windows/musl 与
+   sandbox 对照并记录平台限制。首项真实 Node 26 安装版 strict smoke 已通过；
+   六项拒绝负控已在该历史产物上通过，本次整合产物及其他安装布局仍待实际执行。
 8. 保留 npm 发布执行权限，记录 tarball hash、解包大小、optional runtime 安装大小、
    Node/Bun 版本与精确 commit。
 9. 使用不同的私有解释器路径验证整合调用点，覆盖成对的 Mem0 身份拒绝、literal
