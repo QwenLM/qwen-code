@@ -59,4 +59,4 @@ Aone SDK、分配、入口地址、挂载和进程监管留在独立适配服务
 | Broker + 真实 worker | 身份验证和文件工具、重复或丢响应、重启接管                        | 原进程身份及真实工具调用               |
 | 公开 Hosted 远程 E2E | 文件读写编辑、前台 shell/审批/capture、租户与存储不匹配、资源丢失 | 用户使用中心服务调用远程工具的完整路径 |
 
-早期生产类曾离线编译通过，但之后已修改配置并新增测试，不能代表当前工作树通过。新增生命周期与 HTTP 测试尚未执行。前一轮 Maven 依赖解析耗尽了模块统一的本地验证预算，聚焦测试和完整 CI 门禁仍待执行。本增量没有完成 Aone 适配器，也没有取得外部 Hosted Workspace 端到端证据。
+留存的本地 Surefire 报告记录了 external provisioner、HTTP client 和配置三个测试套件共 11 项测试，失败、错误和跳过均为零。这些报告缺少将被测源码及 sibling SDK 构建输入完整绑定到当前 PR head 的来源记录，因此属于历史证据，不能作为当前 head 的验收结果。已安装 SDK jar 与 worktree 中构建的 SDK jar 一致，但构件一致本身不能确定源码输入。本次证据审计未重新运行 Maven。当前 revision 的 CI 验证另行记录；完整 MySQL/Hosted/fault 门禁需要仓库的 full-tier workflow。目前没有完整的 Java HTTP provider 到真实 worker 的贯通证据，也没有外部 Hosted Workspace E2E。另行报告的私有适配器测试不能证明这两条集成路径。
