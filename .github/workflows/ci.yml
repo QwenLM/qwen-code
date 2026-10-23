@@ -1442,14 +1442,9 @@ jobs:
         needs.classify_pr.outputs.skip_ci != 'true' &&
         needs.test.outputs.ci_profile == 'full'
       }}
-    # Routed like test's: trusted runs use the ECS pool, untrusted fork PRs
-    # stay hosted. #11250 moved it hosted after four pool attempts failed
-    # (run 34081409590). Three ran the smoke unpinned at 8 workers, half the
-    # host's 16 cores, against hosted's 2, and timed out broadly on
-    # visibility and clock waits. The fourth's transcript gate took 73 s
-    # against its 60 s budget while npm install alone took 28 min on that
-    # host. The smoke step pins the hosted worker count.
-    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    # Keep the classifier's trust and hosted overrides, but use ARM64 for
+    # this lane independently of the ordinary Linux CI fleet.
+    runs-on: '${{ contains(fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]''), ''self-hosted'') && fromJSON(''["self-hosted", "linux", "arm64"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # Slow hosted mirrors kept downloading past 23 min; reserve time for
     # the 208 smoke tests and artifact cleanup after installation.
     timeout-minutes: 60
