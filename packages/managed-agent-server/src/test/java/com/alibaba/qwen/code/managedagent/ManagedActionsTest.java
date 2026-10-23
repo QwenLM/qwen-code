@@ -175,7 +175,7 @@ class ManagedActionsTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"read_file", "write_file", "edit", "run_shell_command",
+    @ValueSource(strings = {"web_fetch", "read_file", "write_file", "edit", "run_shell_command",
             "todo_write",
             "team_create", "task_create", "task_update", "workflow",
             "request_shutdown", "exit_plan_mode", "team_plan_approval"})
@@ -183,6 +183,7 @@ class ManagedActionsTest {
         String tenant = tenant();
         String session = session(tenant);
         String arguments = switch (tool) {
+            case "web_fetch" -> "{ \"url\" : \"https://example.com/docs\", \"prompt\" : \"Summarize\" }";
             case "read_file" -> "{ \"file_path\" : \"notes.md\", \"offset\" : 1e2 }";
             case "write_file" -> "{ \"file_path\" : \"notes.md\", \"content\" : \"\\u4e2d\\n\" }";
             case "edit" -> "{ \"file_path\" : \"notes.md\", \"old_string\" : \"a\", \"new_string\" : \"b\" }";

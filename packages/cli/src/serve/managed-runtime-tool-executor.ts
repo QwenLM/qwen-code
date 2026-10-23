@@ -27,6 +27,7 @@ import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
 import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
 import { GlobTool } from '@qwen-code/qwen-code-core/tools/glob.js';
+import { WebFetchTool } from '@qwen-code/qwen-code-core/tools/web-fetch.js';
 import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
 import { TodoWriteTool } from '@qwen-code/qwen-code-core/tools/todoWrite.js';
 import {
@@ -245,9 +246,10 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   EditTool.Name,
   ShellTool.Name,
   GlobTool.Name,
-  // #15076: `todo_write`, declared only by the `/3` profiles. It writes no
+  // #15076: `todo_write`, declared only by `files/3`. It writes no
   // Workspace file: the task list is the Worker's own bookkeeping.
   TodoWriteTool.Name,
+  WebFetchTool.Name,
   // The managed automation gate probe: the Harness's own execution, never
   // a model's (docs/design/2026-10-22-managed-automation-gate.md).
   ManagedAutomationGateTool.Name,
@@ -2740,6 +2742,7 @@ export function createManagedToolSet(
         new ReadFileTool(config),
         new WriteFileTool(config),
         new EditTool(config),
+        new WebFetchTool(config, 'managed'),
         // The walk never leaves the Session, whatever the pattern spells.
         new GlobTool(config, {
           containmentRoot: directory,

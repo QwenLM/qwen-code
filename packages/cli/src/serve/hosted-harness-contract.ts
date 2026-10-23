@@ -90,6 +90,7 @@ export function createHostedHarnessContract(
       // GET /session/:id/events writes keepalive comments while no event
       // is committed, so a client may bound a stream by its silence.
       'event-keepalive/1',
+      'web-fetch/1',
     ]),
   });
 }

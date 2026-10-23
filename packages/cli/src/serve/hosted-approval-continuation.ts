@@ -37,6 +37,7 @@ const NATIVE_TOOLS = new Set([
   'edit',
   'glob',
   'todo_write',
+  'web_fetch',
 ]);
 
 export interface HostedNativePlannedCall {

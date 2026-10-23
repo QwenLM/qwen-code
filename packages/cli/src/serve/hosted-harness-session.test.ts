@@ -15927,6 +15927,7 @@ describe('Hosted Harness no-tool session', () => {
       'read_file',
       'write_file',
       'edit',
+      'web_fetch',
       'glob',
     ]);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
@@ -15976,6 +15977,7 @@ describe('Hosted Harness no-tool session', () => {
       'read_file',
       'write_file',
       'edit',
+      'web_fetch',
       'glob',
     ]);
     expect(state.model).toHaveBeenCalledTimes(2);
@@ -16055,6 +16057,7 @@ describe('Hosted Harness no-tool session', () => {
       'read_file',
       'write_file',
       'edit',
+      'web_fetch',
       'run_shell_command',
       'monitor',
       'glob',
@@ -16121,6 +16124,7 @@ describe('Hosted Harness no-tool session', () => {
       'read_file',
       'write_file',
       'edit',
+      'web_fetch',
       'run_shell_command',
       'monitor',
       'glob',
@@ -16591,6 +16595,7 @@ describe('Hosted Harness no-tool session', () => {
           'read_file',
           'write_file',
           'edit',
+          'web_fetch',
           ...(profile.includes('shell') ? ['run_shell_command', 'glob'] : []),
         ]);
       };
@@ -28871,6 +28876,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         'read_file',
         'write_file',
         'edit',
+        'web_fetch',
         ...(toolProfile.endsWith('/2') ? ['glob'] : []),
       ]);
       // The takeover-built attachment starts with an undefined slot: the

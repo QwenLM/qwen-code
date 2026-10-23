@@ -1544,6 +1544,97 @@ it('preserves trimmed and normalized valid file paths', async () => {
   await turn.finish();
 });
 
+it.each([
+  { url: 'http://example.com', prompt: 'Read' },
+  { url: 'https://user:secret@example.com', prompt: 'Read' },
+  { url: 'https://example.com', prompt: '' },
+  { url: 'https://example.com', prompt: 'Read', format: 'json' },
+  { url: 'https://example.com', prompt: 'Read', headers: {} },
+])(
+  'refuses invalid web_fetch arguments before acquiring a Runtime: %j',
+  async (args) => {
+    const call = { ...calls[0], name: 'web_fetch', args };
+    const result = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(result)).toContain('Hosted web_fetch requires');
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['default', 'auto-edit'] as const)(
+  'requires %s web_fetch approval with the actual destination and persists the result',
+  async (mode) => {
+    turn = createTurn(false, { mode });
+    const call = {
+      ...calls[0],
+      name: 'web_fetch',
+      args: {
+        url: 'https://github.com/QwenLM/qwen-code/blob/main/README.md',
+        prompt: 'Summarize',
+      },
+    };
+    const running = turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    const requestId = await requested();
+    const input = JSON.parse(
+      (
+        await session.resources.read(
+          (await checkpoint()).approval!.invocationRef!,
+        )
+      ).toString(),
+    );
+    expect(JSON.parse(input.payloadJson).input.url).toBe(
+      'https://raw.githubusercontent.com/QwenLM/qwen-code/main/README.md',
+    );
+    expect(broker.prepare).not.toHaveBeenCalled();
+    await resolveHostedAction(session, waiters, requestId, answer('allow'));
+    const result = await running;
+    expect(broker.execute).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toMatchObject({
+      url: 'https://raw.githubusercontent.com/QwenLM/qwen-code/main/README.md',
+      prompt: 'Summarize',
+    });
+    expect(result[0].functionResponse?.response?.['executionStatus']).toBe(
+      'success',
+    );
+    expect((await session.sink.project()).at(-1)?.message?.parts).toEqual(
+      JSON.parse(JSON.stringify(result)),
+    );
+    await turn.consumeResults();
+    await turn.finish();
+  },
+);
+
+it('does not dispatch a denied web_fetch', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const call = {
+    ...calls[0],
+    name: 'web_fetch',
+    args: { url: 'https://example.com/docs', prompt: 'Summarize' },
+  };
+  const running = turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  expect(JSON.stringify(await running)).toContain('denied');
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+});
+
 it('offers glob under the unified Shell, file-search and read profiles', async () => {
   const signal = new AbortController().signal;
   const advertised = async (profile?: string, shell = false) =>
@@ -1563,7 +1654,7 @@ it('offers glob under the unified Shell, file-search and read profiles', async (
         { profile },
       ).declarations(signal)
     ).map((tool) => tool.name);
-  const file = ['read_file', 'write_file', 'edit'];
+  const file = ['read_file', 'write_file', 'edit', 'web_fetch'];
   const shellTools = [...file, 'run_shell_command', 'monitor'];
   await expect(advertised()).resolves.toEqual(file);
   await expect(advertised('hosted-workspace-files/1')).resolves.toEqual(file);
@@ -1633,6 +1724,7 @@ it('dispatches read_file and glob on the read profile', async () => {
 // #13753 I3: every tool that writes, and every other tool, is refused on
 // the read profile before the Broker is acquired.
 it.each([
+  ['web_fetch', { url: 'https://example.com/docs', prompt: 'Summarize' }],
   ['write_file', { file_path: 'a.txt', content: 'x' }],
   ['edit', { file_path: 'a.txt', old_string: 'a', new_string: 'b' }],
   ['run_shell_command', { command: 'touch a.txt' }],
@@ -1841,8 +1933,8 @@ it.each([['hosted-workspace-files/3', false]])(
     const names = declarations.map((tool) => tool.name);
     expect(names).toContain('todo_write');
     expect(names).toContain('glob');
-    // The fetch half is held for a recorded maintainer decision.
-    expect(names).not.toContain('web_fetch');
+    // files/3 keeps everything files/2 declares, including the shipped fetch.
+    expect(names).toContain('web_fetch');
     if (!shell) expect(names).not.toContain('run_shell_command');
   },
 );
@@ -1875,24 +1967,6 @@ it('refuses todo_write on a /2 profile before the Broker', async () => {
     ...calls[0],
     name: 'todo_write',
     args: { todos: [{ id: 'a', content: 'a', status: 'pending' }] },
-  };
-  await expect(
-    turn.execute(
-      [call],
-      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
-      'model',
-      new AbortController().signal,
-    ),
-  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
-  expect(broker.acquire).not.toHaveBeenCalled();
-});
-
-it('refuses web_fetch on a /3 profile before the Broker', async () => {
-  turn = createV3Turn();
-  const call = {
-    ...calls[0],
-    name: 'web_fetch',
-    args: { url: 'https://example.com', prompt: 'p' },
   };
   await expect(
     turn.execute(
@@ -3108,6 +3182,7 @@ it.each(['files', 'shell', 'mcp'])(
         'read_file',
         'write_file',
         'edit',
+        'web_fetch',
         'mcp_write',
       ]);
       expect(declarations.at(-1)).toEqual(remote);
@@ -4802,6 +4877,7 @@ it('admits exactly the declared native tools to the version 2 input preview', ()
   // HOSTED_TEAM_TOOLS, not the shell set. `todo_write` is appended only for
   // `files/3` (which is not a shell profile), so it joins the set on its own.
   expect(HOSTED_INPUT_PREVIEW_TOOLS).toEqual([
+    'web_fetch',
     'read_file',
     'write_file',
     'edit',
@@ -10158,6 +10234,7 @@ it('keeps the SSH foreground-only declaration and admission free of detached too
     'read_file',
     'write_file',
     'edit',
+    'web_fetch',
     'run_shell_command',
   ]);
   const shell = declarations.find((tool) => tool.name === 'run_shell_command');
