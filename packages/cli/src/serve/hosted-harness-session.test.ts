@@ -1475,7 +1475,6 @@ describe('Hosted Harness no-tool session', () => {
       { toolProfile: 'hosted-workspace-files/1', custom: false },
       { toolProfile: 'hosted-workspace-files/1', custom: true },
       { toolProfile: 'hosted-workspace-shell/1', custom: true },
-      { toolProfile: 'hosted-workspace-shell/2', custom: true },
     ].flatMap((profile) =>
       [undefined, { mode: 'yolo', revision: 1 }].map((approvalSelection) => ({
         ...profile,
@@ -2948,6 +2947,15 @@ describe('Hosted Harness no-tool session', () => {
     });
     expect(perRun.status).toBe(409);
     expect(perRun.body.code).toBe('automation_mode_disabled');
+    // A gate the shell checks refuse is a pre-commit refusal of its own, so
+    // the control plane can release the caller's key.
+    const backgrounded = await operations({
+      kind: 'define_schedule',
+      scheduleId: AUTOMATION_ID,
+      definition: { ...automationDefinition, gate: 'sleep 5 &' },
+    });
+    expect(backgrounded.status).toBe(400);
+    expect(backgrounded.body.code).toBe('automation_gate_invalid');
     const badCron = await operations({
       kind: 'define_schedule',
       scheduleId: AUTOMATION_ID,
@@ -3357,7 +3365,7 @@ describe('Hosted Harness no-tool session', () => {
         trigger: 'scheduled',
         firedAt: Date.parse('2026-03-08T07:00:05Z'),
       });
-      if (cancel) await automations.requestCancel(fired.run.automationRunId);
+      if (cancel) await automations.requestCancel(fired.run!.automationRunId);
       return fired.inputId;
     } finally {
       await managed.close().catch(() => undefined);
@@ -3448,7 +3456,7 @@ describe('Hosted Harness no-tool session', () => {
         daemonPromptId: fired.inputId,
         message: { role: 'user', parts: [{ text: 'queued' }] },
       } as never);
-      if (cancel) await automations.requestCancel(fired.run.automationRunId);
+      if (cancel) await automations.requestCancel(fired.run!.automationRunId);
       return fired.inputId;
     } finally {
       await managed.close().catch(() => undefined);
@@ -15976,6 +15984,21 @@ describe('Hosted Harness no-tool session', () => {
     );
   });
 
+  it('rejects the removed Shell profile on creation and load', async () => {
+    const server = await app(true);
+    for (const route of ['/session', `/session/${SESSION_ID}/load`]) {
+      const response = await headers(supertest(server).post(route)).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/2',
+      });
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe('hosted_tool_profile_unavailable');
+    }
+    expect(state.model).not.toHaveBeenCalled();
+  });
+
   it('requires the saved explicit Shell profile and advertises it only with a Broker', async () => {
     const body = {
       sessionId: SESSION_ID,
@@ -16033,6 +16056,7 @@ describe('Hosted Harness no-tool session', () => {
       'edit',
       'run_shell_command',
       'monitor',
+      'glob',
       // H4b: a Shell-laned root Session advertises its Agent tool,
       // and (H4d-b) messages the child tasks it launched.
       'agent',
@@ -16098,6 +16122,7 @@ describe('Hosted Harness no-tool session', () => {
       'edit',
       'run_shell_command',
       'monitor',
+      'glob',
       // H4b: a Shell-laned root Session advertises its Agent tool,
       // and (H4d-b) messages the child tasks it launched.
       'agent',
@@ -16565,7 +16590,7 @@ describe('Hosted Harness no-tool session', () => {
           'read_file',
           'write_file',
           'edit',
-          ...(profile.includes('shell') ? ['run_shell_command'] : []),
+          ...(profile.includes('shell') ? ['run_shell_command', 'glob'] : []),
         ]);
       };
       const created = await headers(supertest(server).post('/session'))
@@ -21573,7 +21598,7 @@ describe('Hosted Harness no-tool session', () => {
       });
       const originalRun = managed.authority.extensionRecord(
         'automation_run',
-        queued.run.automationRunId,
+        queued.run!.automationRunId,
       );
       expect(originalRun).toBeDefined();
       const before = managed.authority.eventsInSequenceRange(
@@ -21648,7 +21673,10 @@ describe('Hosted Harness no-tool session', () => {
         ),
       ).toBe(false);
       expect(
-        authority.extensionRecord('automation_run', queued.run.automationRunId),
+        authority.extensionRecord(
+          'automation_run',
+          queued.run!.automationRunId,
+        ),
       ).toEqual(originalRun);
       expect(state.model).toHaveBeenCalledOnce();
       expect(state.model.mock.calls[0]?.[0].promptId).toBe(PROMPT_ID);
@@ -23150,7 +23178,6 @@ describe('Hosted Harness tool approvals', () => {
     ['hosted-workspace-files/1', true],
     ['hosted-workspace-files/2', false],
     ['hosted-workspace-shell/1', true],
-    ['hosted-workspace-shell/2', true],
     ['hosted-workspace-read/1', false],
   ] as const)(
     'queries live policy only for eligible profile %s',

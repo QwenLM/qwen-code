@@ -1021,7 +1021,6 @@ class QwenHostedHarnessConnectorTest {
     @CsvSource({"hosted-workspace-files/1,false", "hosted-workspace-files/1,true",
             "hosted-workspace-files/2,false", "hosted-workspace-files/2,true",
             "hosted-workspace-shell/1,false", "hosted-workspace-shell/1,true",
-            "hosted-workspace-shell/2,false", "hosted-workspace-shell/2,true",
             "hosted-workspace-team-lead/1,false", "hosted-workspace-team-lead/1,true",
             "hosted-workspace-mcp/1,false", "hosted-workspace-mcp/1,true"})
     void boundCreateConflictLoadsOriginalWorkspaceAndProfileAndRechecksCachedGrant(String profile, boolean publication) {
