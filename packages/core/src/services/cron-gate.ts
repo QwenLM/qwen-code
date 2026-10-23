@@ -325,7 +325,11 @@ export function gateStderrTail(
   if (maxChars <= 0) return '';
   const lines = sanitizeGateText(stderr).split('\n');
   const tail = lines.slice(-CRON_GATE_STDERR_LINES).join('\n');
-  return tail.length > maxChars ? tail.slice(-maxChars) : tail;
+  if (tail.length <= maxChars) return tail;
+  const cut = tail.slice(-maxChars);
+  // Not the low half of a pair whose high half was cut off: the notice is a
+  // model prompt, and an unpaired surrogate breaks its serialization.
+  return /^[\uDC00-\uDFFF]/.test(cut) ? cut.slice(1) : cut;
 }
 
 function seconds(durationMs: number): string {

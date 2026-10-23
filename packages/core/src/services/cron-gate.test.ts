@@ -14,6 +14,7 @@ import {
   buildGatedFirePrompt,
   buildGateFailureNotice,
   createCronGateRunner,
+  gateStderrTail,
   CRON_GATE_OUTPUT_CAP_BYTES,
   CRON_GATE_STDERR_LINES,
 } from './cron-gate.js';
@@ -358,6 +359,19 @@ describe('createCronGateRunner', () => {
 
 describe('gate fire text', () => {
   const firedAt = Date.UTC(2026, 9, 21, 5, 5, 7);
+
+  it('cuts the stderr tail without halving a character', () => {
+    // 5 × 603 units: the cap's cut lands on the low half of a pair.
+    const stderr = Array.from(
+      { length: 5 },
+      () => `xx${'😀'.repeat(300)}`,
+    ).join('\n');
+    const tail = gateStderrTail(stderr);
+    expect(/[\uD800-\uDFFF]/u.test(tail)).toBe(false);
+    expect(tail.endsWith('😀')).toBe(true);
+    // The same under a caller's tighter budget.
+    expect(/[\uD800-\uDFFF]/u.test(gateStderrTail(stderr, 1001))).toBe(false);
+  });
 
   it('keeps the prompt first and wraps the output as data', () => {
     const text = buildGatedFirePrompt(
