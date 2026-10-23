@@ -34,11 +34,14 @@ import {
   readHistory,
   readState,
   repoRoot,
+  requireState,
   sameRepository,
+  withWatchLock,
   writeState,
   type AutofixPrHistory,
   type AutofixPrState,
 } from './state.js';
+import { networkGit } from './worktree.js';
 
 export interface PrView {
   number: number;
@@ -218,6 +221,8 @@ export interface PrepareArgs {
   pr: number;
   repo: string;
   host?: string;
+  /** Move a watch another session owns to this one (`--take-over`). */
+  takeOver?: boolean;
 }
 
 export function runPrepare(args: PrepareArgs): void {
@@ -229,9 +234,9 @@ export function runPrepare(args: PrepareArgs): void {
   const root = repoRoot();
   const paths = autofixPrPaths(root, args.pr);
 
-  const existing = readState(paths.statePath);
+  let existing = readState(paths.statePath);
+  let tookOver = false;
   if (existing) {
-    assertOwnedBySession(existing);
     // State is keyed by PR number alone, and one clone can reach several
     // repositories with a PR of that number.
     const watched = `${existing.host}/${existing.owner}/${existing.repo}`;
@@ -241,11 +246,24 @@ export function runPrepare(args: PrepareArgs): void {
           `Run \`qwen autofix-pr cleanup ${args.pr}\` first.`,
       );
     }
+    // A /clear or /resume gives the session a new id while its scheduled
+    // task goes on: the user hands the watch, history and budgets kept, to
+    // the session that asks. The other session's helpers refuse from then on.
+    if (args.takeOver && existing.sessionId !== currentSessionId()) {
+      existing = withWatchLock(paths, args.pr, () => {
+        const current = requireState(paths.statePath, args.pr);
+        const moved = { ...current, sessionId: currentSessionId() };
+        writeState(paths.statePath, moved);
+        return moved;
+      });
+      tookOver = true;
+    }
+    assertOwnedBySession(existing);
     // The recorded path goes stale when the clone moves; this one does not.
     if (existsSync(paths.worktreePath)) {
       report(
         { ...existing, worktreePath: paths.worktreePath },
-        { resumed: true },
+        { resumed: true, ...(tookOver ? { tookOver } : {}) },
       );
       return;
     }
@@ -323,13 +341,13 @@ export function runPrepare(args: PrepareArgs): void {
   // Not into submodules: a submodule commit the PR records but no remote
   // has must not fail the PR's own fetch, which would leave the branch
   // behind with no state file to account for it.
-  git(
+  networkGit([
     'fetch',
     '--quiet',
     '--no-recurse-submodules',
     remote,
     `+refs/pull/${args.pr}/head:refs/heads/${paths.branch}`,
-  );
+  ]);
   const headSha = git('rev-parse', `refs/heads/${paths.branch}`);
   mkdirSync(dirname(paths.worktreePath), { recursive: true });
   // Submodules stay unpopulated whatever `submodule.recurse` says: a fix
@@ -426,6 +444,7 @@ export function runPrepare(args: PrepareArgs): void {
     isDraft: pr.isDraft,
     isCrossRepository: pr.isCrossRepository,
     localUnpushedCommits: localUnpushed === null ? 0 : Number(localUnpushed),
+    ...(tookOver ? { tookOver } : {}),
   });
 }
 
@@ -449,10 +468,21 @@ export const prepareCommand: CommandModule = {
         type: 'string',
         describe:
           'GitHub host (omitted: inherit an exported GH_HOST, else github.com)',
+      })
+      .option('take-over', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Move a watch of this PR that another session owns to this session',
       }),
   handler: (argv) => {
     const host = (argv as { host?: string }).host;
     setGhHost(host);
-    runPrepare({ pr: Number(argv['pr']), repo: String(argv['repo']), host });
+    runPrepare({
+      pr: Number(argv['pr']),
+      repo: String(argv['repo']),
+      host,
+      takeOver: Boolean(argv['takeOver']),
+    });
   },
 };

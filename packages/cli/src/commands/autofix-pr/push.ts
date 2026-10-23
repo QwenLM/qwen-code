@@ -13,8 +13,7 @@ import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, setGhHost } from '../review/lib/gh.js';
-import { git, gitOpt } from '../review/lib/git.js';
-import { sanitizedGitEnv } from '../review/lib/worktree.js';
+import { git } from '../review/lib/git.js';
 import { pushTargetFor } from './prepare.js';
 import {
   MAX_PUSHES,
@@ -32,6 +31,8 @@ import {
 import {
   hasUncommittedChanges,
   isAncestor,
+  networkGitEnv,
+  remoteRef,
   requireWorktree,
 } from './worktree.js';
 
@@ -158,15 +159,7 @@ function remoteHead(
   target: string,
   headRef: string,
 ): string | null | undefined {
-  const line = gitOpt(
-    '-C',
-    worktreePath,
-    'ls-remote',
-    target,
-    `refs/heads/${headRef}`,
-  );
-  if (line === null) return undefined;
-  return line.split(/\s/)[0] || null;
+  return remoteRef(target, `refs/heads/${headRef}`, worktreePath);
 }
 
 function pushRef(
@@ -201,7 +194,7 @@ function pushRef(
         // A hook that runs a test suite prints more than the 1 MiB default.
         maxBuffer: 256 * 1024 * 1024,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...sanitizedGitEnv(), GIT_TERMINAL_PROMPT: '0' },
+        env: networkGitEnv(),
       },
     );
     return { ok: true, stdout, stderr: '' };

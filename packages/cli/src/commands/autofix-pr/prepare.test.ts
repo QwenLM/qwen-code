@@ -693,6 +693,34 @@ describe('runPrepare (real git)', () => {
     );
   });
 
+  it('hands a watch to this session with --take-over, keeping what it recorded', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const paths = autofixPrPaths(clone, 7);
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      handledCommentIds: ['C1'],
+      pushCount: 3,
+    });
+    // A /clear started a new session.
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+    runPrepare({ pr: 7, repo: 'o/r', takeOver: true });
+    expect(lastReport()).toMatchObject({ resumed: true, tookOver: true });
+    expect(readState(paths.statePath)).toMatchObject({
+      sessionId: 'session-b',
+      handledCommentIds: ['C1'],
+      pushCount: 3,
+    });
+    // The session it was taken from is refused now.
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-a';
+    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
+      /watched by another session \(session-b\)/,
+    );
+    // Another repository's PR of the same number is never taken over.
+    expect(() => runPrepare({ pr: 7, repo: 'x/r', takeOver: true })).toThrow(
+      /is a watch of/,
+    );
+  });
+
   it('refuses when no single remote serves the repository', () => {
     mocks.matched.mockImplementation(() => []);
     expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(

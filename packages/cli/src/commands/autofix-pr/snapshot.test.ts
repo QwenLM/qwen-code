@@ -548,6 +548,22 @@ describe('buildSnapshot', () => {
     ]);
   });
 
+  it('trusts the PR author GitHub names now, not the login recorded at prepare', () => {
+    // The author renamed their account, and someone took the old login.
+    const comments = {
+      pageInfo: { hasPreviousPage: false },
+      nodes: [comment('I1', 'old-login'), comment('I2', 'new-login')],
+    };
+    const snap = buildSnapshot(
+      pr({ author: { login: 'new-login' }, comments }),
+      state({ prAuthor: 'old-login' }),
+    );
+    expect(snap.events).toMatchObject([
+      { type: 'untrusted_comment', id: 'I1', author: 'old-login' },
+      { type: 'issue_comment', id: 'I2', trust: 'pr_author' },
+    ]);
+  });
+
   it('treats a deleted author as untrusted', () => {
     const ghost = { ...comment('I1', 'x', 'OWNER'), author: null };
     const snap = buildSnapshot(

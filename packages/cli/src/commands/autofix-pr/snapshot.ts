@@ -31,7 +31,6 @@ import {
   GATE_OUTPUT_BUDGET_BYTES,
   jsonBytes,
 } from '../review/lib/gate-budget.js';
-import { gitOpt } from '../review/lib/git.js';
 import { normalizeSegment } from '../review/lib/remote-match.js';
 import {
   REPLY_MARKER,
@@ -47,6 +46,7 @@ import {
   type AutofixPrGateCursor,
   type AutofixPrState,
 } from './state.js';
+import { remoteRef } from './worktree.js';
 
 const CHECK_CONTEXT_FIELDS = `nodes {
   __typename
@@ -648,7 +648,9 @@ export function buildSnapshot(
   }
   if (checks.truncated) truncated.push('checks');
 
-  const comments = commentEvents(pr, state.prAuthor, isNew);
+  // The author GitHub names now, as the gate asks: a login can change
+  // hands after a rename.
+  const comments = commentEvents(pr, pr.author?.login ?? state.prAuthor, isNew);
   events.push(...comments.events);
   truncated.push(...comments.truncated);
 
@@ -1149,12 +1151,7 @@ export function runSnapshot(args: SnapshotArgs): void {
   // moved, or the API has yet to see the head `sync` or `push` recorded.
   let branchHead: string | null | undefined;
   if (pr.state === 'OPEN' && pr.headRefOid !== state.lastKnownHeadSha) {
-    const line = gitOpt(
-      'ls-remote',
-      state.pushTarget,
-      `refs/heads/${state.headRefName}`,
-    );
-    branchHead = line === null ? undefined : line.split(/\s/)[0] || null;
+    branchHead = remoteRef(state.pushTarget, `refs/heads/${state.headRefName}`);
   }
   writeStdoutLine(JSON.stringify(buildSnapshot(pr, state, branchHead)));
 }

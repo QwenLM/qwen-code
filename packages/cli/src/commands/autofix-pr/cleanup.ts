@@ -24,6 +24,7 @@ import {
   type AutofixPrPaths,
   type AutofixPrState,
 } from './state.js';
+import { remoteRef } from './worktree.js';
 
 /**
  * The PR head on the remote, when it is reachable and its commit is here.
@@ -31,8 +32,7 @@ import {
  * PR, although the recorded head never moved.
  */
 function livePrHead(state: AutofixPrState, prNumber: number): string | null {
-  const line = gitOpt('ls-remote', state.remote, `refs/pull/${prNumber}/head`);
-  const sha = line?.split(/\s/)[0] ?? '';
+  const sha = remoteRef(state.remote, `refs/pull/${prNumber}/head`) ?? '';
   if (!/^[0-9a-f]{40,64}$/.test(sha)) return null;
   return gitOpt('cat-file', '-e', `${sha}^{commit}`) === null ? null : sha;
 }

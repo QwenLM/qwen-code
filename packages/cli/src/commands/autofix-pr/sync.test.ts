@@ -765,12 +765,44 @@ describe('runSync (real git, bare remote)', () => {
     expect(run(repo, 'rev-parse', 'release')).toBe(release);
   });
 
+  it("fetches with the user's own ssh command", () => {
+    const ssh = join(base, 'fake-ssh');
+    writeFileSync(
+      ssh,
+      '#!/bin/sh\nfor last; do :; done\nexec sh -c "$last"\n',
+      { mode: 0o755 },
+    );
+    run(repo, 'remote', 'set-url', 'origin', `ssh://example.invalid${remote}`);
+    const saved = process.env['GIT_SSH_COMMAND'];
+    process.env['GIT_SSH_COMMAND'] = ssh;
+    try {
+      const theirs = pushFromElsewhere('theirs.txt');
+      expect(runSync(7)).toMatchObject({ synced: true, headSha: theirs });
+    } finally {
+      if (saved === undefined) delete process.env['GIT_SSH_COMMAND'];
+      else process.env['GIT_SSH_COMMAND'] = saved;
+    }
+  });
+
   it('refuses a worktree with another branch checked out', () => {
     run(repo, 'branch', 'mine', featSha);
     run(paths.worktreePath, 'switch', '-q', 'mine');
     forcePushFromElsewhere('rewritten.txt');
     expect(() => runSync(7)).toThrow(/branch mine checked out/);
     expect(run(repo, 'rev-parse', 'mine')).toBe(featSha);
+  });
+
+  it('with --discard takes the worktree back to the watch branch from one a fix switched to', () => {
+    run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
+    const theirs = commitIn(paths.worktreePath, 'on-fix-branch.txt');
+    writeFileSync(join(paths.worktreePath, 'stray.txt'), 'x');
+    expect(runSync(7, true)).toMatchObject({ synced: true, headSha: featSha });
+    expect(run(paths.worktreePath, 'symbolic-ref', 'HEAD')).toBe(
+      `refs/heads/${paths.branch}`,
+    );
+    // The other branch keeps its commit; the watch's branch is untouched.
+    expect(run(repo, 'rev-parse', 'fix/ci')).toBe(theirs);
+    expect(worktreeHead()).toBe(featSha);
   });
 
   it('refuses to move or reset a worktree with uncommitted changes', () => {

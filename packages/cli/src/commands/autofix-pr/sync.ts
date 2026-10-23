@@ -23,7 +23,6 @@ import { execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { isWithinRoot } from '../../config/path-comparison.js';
-import { sanitizedGitEnv } from '../review/lib/worktree.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { git, gitOpt } from '../review/lib/git.js';
 import { liveDestination, withLiveBase } from './push.js';
@@ -39,6 +38,8 @@ import {
 import {
   hasUncommittedChanges,
   isAncestor,
+  networkGit,
+  networkGitEnv,
   requireWorktree,
 } from './worktree.js';
 
@@ -77,7 +78,7 @@ function syncLocked(
   const state = requireState(paths.statePath, prNumber);
   assertOwnedBySession(state);
   const worktree = paths.worktreePath;
-  requireWorktree(paths, prNumber, root);
+  requireWorktree(paths, prNumber, root, discard);
 
   const known = state.lastKnownHeadSha;
   // The state with the PR's base as GitHub names it now.
@@ -93,7 +94,7 @@ function syncLocked(
     current = withLiveBase(state, live, prNumber);
     // Submodules are fetched by `alignSubmodules`, as each one needs it: a
     // submodule commit that cannot be fetched must not fail the PR's own.
-    git(
+    networkGit([
       '-C',
       worktree,
       'fetch',
@@ -101,7 +102,7 @@ function syncLocked(
       '--no-recurse-submodules',
       state.pushTarget,
       `refs/heads/${state.headRefName}`,
-    );
+    ]);
     return git('-C', worktree, 'rev-parse', 'FETCH_HEAD^{commit}');
   };
   let prHead: string;
@@ -410,11 +411,7 @@ function fetchSubmoduleCommit(
         // As in `git submodule` itself: transports a submodule's URL may
         // use only with the user's own consent (`file://` among them) stay
         // refused.
-        env: {
-          ...sanitizedGitEnv(),
-          GIT_TERMINAL_PROMPT: '0',
-          GIT_PROTOCOL_FROM_USER: '0',
-        },
+        env: { ...networkGitEnv(), GIT_PROTOCOL_FROM_USER: '0' },
       },
     );
   } catch {

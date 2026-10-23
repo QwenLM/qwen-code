@@ -160,7 +160,11 @@ worktree included:
    protocol from `gh config get git_protocol`. Record it in the state file.
 5. The state file is the lock. It records the session id
    (`QWEN_CODE_SESSION_ID`); a state file written by another session is a
-   refusal, never a takeover.
+   refusal. `/clear` and `/resume` give a session a new id while its
+   scheduled task goes on, so `prepare --take-over` moves the watch — its
+   history and budgets kept — to the session that asks, when the user says
+   so; the helpers of the session it was taken from refuse from then on,
+   and its scheduled task stops at its next fire.
 6. Fetch `refs/pull/<n>/head` into local branch `qwen-autofix/pr-<n>` and
    create the worktree on it. `prepare` never discards earlier work: a
    leftover worktree, or a leftover branch that may hold commits beyond the
@@ -343,7 +347,9 @@ when there are none, so the session is woken only for them:
   past the last page a new thread leaves no other trace. A cut that lasts is
   quiet. Comments, reviews and thread comments are read newest first, so a
   cut there hides only older ones: it is listed in `truncated` but wakes no
-  one.
+  one. The exception is a flood: more than 100 arriving between two checks
+  push out one that no check has read. That is a known limit; the round
+  names the cut in its report.
 - The output stays within 12 KiB, under the 16 KiB the gate hands the
   session (and cuts beyond). Events go in order — head move, conflict,
   failures, comments — and those that do not fit, or the later comments of a
@@ -408,7 +414,12 @@ the checks above passed, not `HEAD`, which could move while GitHub is asked.
 Hooks run, and there is no `--force` or `--no-verify`. Only that one ref
 is pushed: `--no-follow-tags` and `--recurse-submodules=no` keep
 `push.followTags` and `push.recurseSubmodules` from sending tags or
-submodule branches along. On success it records
+submodule branches along. Commands that reach a remote — this push,
+`sync`'s and `prepare`'s fetches, `ls-remote` — keep the user's own
+transport settings (`GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_ASKPASS`,
+`GIT_PROXY_COMMAND`, `GIT_CONFIG_GLOBAL`, `XDG_CONFIG_HOME`), which every
+other git call drops, so they connect and authenticate as the user's own
+`git push` does. On success it records
 the new SHA in `pushedShas` and `lastKnownHeadSha` and counts one push. A
 rejected lease (`[rejected] (stale info)`, or a remote branch that
 `git ls-remote` no longer finds at the known head, whatever language git
@@ -601,7 +612,7 @@ checkout is untouched), and checks the worktree as `push` does. Then:
   rebase), and nothing changes.
 
 A worktree with uncommitted changes is never moved or reset. `--discard`
-returns the worktree to the PR head whatever it holds — unpushed commits and
+returns the worktree to the PR head — back on the watch's branch if a fix switched to another, which keeps its commits — whatever it holds — unpushed commits and
 uncommitted changes, nested repositories (`git clean -ffd`) and changes in
 checked-out submodules included (`git submodule foreach`, which never
 touches one that is not checked out) — to end a round whose work was not

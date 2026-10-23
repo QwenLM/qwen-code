@@ -472,6 +472,42 @@ describe('runPush (real git, bare remote)', () => {
     expect(remoteFeat()).toBe(featSha);
   });
 
+  it('reads the remote branch itself, not one whose name ends like it', () => {
+    // A branch named so that `ls-remote … refs/heads/feat` lists it first,
+    // at an older commit, while the server refuses the push.
+    run(
+      remote,
+      'update-ref',
+      'refs/heads/a/refs/heads/feat',
+      run(remote, 'rev-parse', 'refs/heads/main'),
+    );
+    const hook = join(remote, 'hooks', 'pre-receive');
+    writeFileSync(hook, '#!/bin/sh\necho "protected branch" >&2\nexit 1\n');
+    chmodSync(hook, 0o755);
+    commitIn(paths.worktreePath, 'fix.txt');
+    expect(() => runPush(7)).toThrow(/protected branch/);
+    expect(remoteFeat()).toBe(featSha);
+  });
+
+  it("reaches the remote with the user's own ssh command", () => {
+    // An ssh remote, served through an ssh command of the user's that runs
+    // the git command it is handed locally.
+    const ssh = join(base, 'fake-ssh');
+    writeFileSync(ssh, '#!/bin/sh\nfor last; do :; done\nexec sh -c "$last"\n');
+    chmodSync(ssh, 0o755);
+    run(repo, 'remote', 'set-url', 'origin', `ssh://example.invalid${remote}`);
+    const saved = process.env['GIT_SSH_COMMAND'];
+    process.env['GIT_SSH_COMMAND'] = ssh;
+    try {
+      const fix = commitIn(paths.worktreePath, 'fix.txt');
+      expect(runPush(7)).toMatchObject({ pushed: true, sha: fix });
+      expect(remoteFeat()).toBe(fix);
+    } finally {
+      if (saved === undefined) delete process.env['GIT_SSH_COMMAND'];
+      else process.env['GIT_SSH_COMMAND'] = saved;
+    }
+  });
+
   it('refuses a watch owned by another session', () => {
     commitIn(paths.worktreePath, 'fix.txt');
     process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
