@@ -38,20 +38,6 @@ export function sanitizeDaemonLogLine(text: string): string {
 }
 
 /**
- * Renders untrusted free text safe for a single-line stderr sink: collapse
- * whitespace, strip terminal escapes and control characters, drop Unicode
- * format characters (bidi overrides, zero-width), then bound the length.
- * Truncation runs after stripping, so a cut cannot leave an escape
- * sequence's tail behind.
- */
-export function sanitizeForStderr(text: string, limit: number): string {
-  const clean = stripAnsiAndControl(text.replace(/\s+/g, ' '))
-    .replace(/\p{Cf}/gu, '')
-    .trim();
-  return clean.length > limit ? `${clean.slice(0, limit)}…` : clean;
-}
-
-/**
  * Writes a message to stdout with a trailing newline.
  * Use for normal command output that the user expects to see.
  * Avoids double newlines if the message already ends with one.

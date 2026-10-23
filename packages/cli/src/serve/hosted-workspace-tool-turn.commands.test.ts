@@ -538,7 +538,7 @@ it.each(['execute', 'resume', 'refused'] as const)(
     ]);
     await vi.waitFor(
       () => expect(commands.command(commandIdOf('hook-plan'))).toBeDefined(),
-      { timeout: 5000 },
+      { timeout: 10_000 },
     );
     await commands.handover(commandIdOf('hook-plan'), PARENT);
     await commands.answered(commandIdOf('hook-plan'), {

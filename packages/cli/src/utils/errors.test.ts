@@ -83,8 +83,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
-vi.mock('./stdioHelpers.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('./stdioHelpers.js')>()),
+vi.mock('./stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
   writeStdoutLine: vi.fn(),
   clearScreen: vi.fn(),

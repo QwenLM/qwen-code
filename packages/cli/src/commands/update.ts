@@ -40,6 +40,7 @@ export const updateCommand: CommandModule<object, UpdateArgs> = {
       standaloneUpdate,
       stdioHelpers,
       { updateEventEmitter },
+      { stripAnsiAndControl },
     ] = await Promise.all([
       import('../config/settings.js'),
       import('../ui/utils/updateCheck.js'),
@@ -47,13 +48,25 @@ export const updateCommand: CommandModule<object, UpdateArgs> = {
       import('../ui/standalone-update.js'),
       import('../utils/stdioHelpers.js'),
       import('../utils/updateEventEmitter.js'),
+      import('@qwen-code/qwen-code-core/utils/textUtils.js'),
     ]);
 
     const { formatUpdateInstructions, getInstallationInfo } =
       installationInfoModule;
     const { performStandaloneUpdate, normalizeVersion } = standaloneUpdate;
-    const { sanitizeForStderr, writeStdoutLine, writeStderrLine } =
-      stdioHelpers;
+    const { writeStdoutLine, writeStderrLine } = stdioHelpers;
+
+    // Echoed text is untrusted: the rejected flag is raw argv, and the
+    // updater's rollback message can carry mirror or filesystem text.
+    // Collapse whitespace, strip terminal escapes, control and Unicode
+    // format characters, then bound the length. Truncation runs after
+    // stripping, so a cut cannot leave an escape sequence's tail behind.
+    const sanitizeUpdateEcho = (text: string, limit: number): string => {
+      const clean = stripAnsiAndControl(text.replace(/\s+/g, ' '))
+        .replace(/\p{Cf}/gu, '')
+        .trim();
+      return clean.length > limit ? `${clean.slice(0, limit)}…` : clean;
+    };
 
     const cwd = process.cwd();
     const settings = loadSettings(cwd, false);
@@ -66,8 +79,7 @@ export const updateCommand: CommandModule<object, UpdateArgs> = {
       try {
         targetVersion = normalizeVersion(argv.targetVersion).slice(1);
       } catch (err) {
-        // The flag value is raw argv, so the echoed rejection is untrusted.
-        const reason = sanitizeForStderr(
+        const reason = sanitizeUpdateEcho(
           err instanceof Error ? err.message : String(err),
           UPDATE_ERROR_ECHO_LIMIT,
         );
@@ -141,7 +153,7 @@ export const updateCommand: CommandModule<object, UpdateArgs> = {
       } catch (err) {
         writeStderrLine(
           t('Update failed: {{error}}', {
-            error: sanitizeForStderr(
+            error: sanitizeUpdateEcho(
               err instanceof Error ? err.message : String(err),
               UPDATE_FAILURE_ECHO_LIMIT,
             ),
