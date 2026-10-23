@@ -1212,4 +1212,47 @@ describe('Windows temp short-alias guard', () => {
     // beats realpathSync(undefined)'s TypeError.
     expect(() => runGuard({ TEMP: '', TMP: '' })).toThrow(/TEMP is not set/);
   });
+
+  it('annotates an unset temp so the failure reaches the check UI', () => {
+    // A bare console.error leaves the run reporting only "Process completed
+    // with exit code 1". The `::error::` prefix is what GitHub turns into an
+    // annotation attached to the check — the same channel the
+    // hosted-process-suite step in this workflow already uses.
+    let err;
+    try {
+      runGuard({ TEMP: '', TMP: '' });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.stderr).toContain('::error::');
+    expect(err.stderr).toContain('TEMP is not set');
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'annotates a short alias so the failure reaches the check UI',
+    () => {
+      const base = realpathSync(
+        mkdtempSync(path.join(tmpdir(), 'temp-guard-')),
+      );
+      try {
+        const canonical = path.join(base, 'runneradmin');
+        mkdirSync(canonical);
+        const alias = path.join(base, 'RUNNER~1');
+        symlinkSync(canonical, alias);
+
+        let err;
+        try {
+          runGuard({ TEMP: alias, TMP: alias });
+        } catch (e) {
+          err = e;
+        }
+        expect(err).toBeDefined();
+        expect(err.stderr).toContain('::error::');
+        expect(err.stderr).toContain('TEMP carries a short alias');
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
 });

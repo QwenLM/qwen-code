@@ -110,6 +110,12 @@ import { useFanoutOrigins } from '../../config/host-fanout';
 import { WorkspaceRemovalDialog } from '../workspaces/WorkspaceRemovalDialog';
 import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
 import { WorkspaceMenu, type WorkspaceMenuActions } from './WorkspaceMenu';
+import {
+  moveWorkspace,
+  orderWorkspaces,
+  readWorkspaceOrder,
+  writeWorkspaceOrder,
+} from './workspaceOrder';
 import { WorkspaceRenameDialog } from './WorkspaceRenameDialog';
 import {
   DEFAULT_WORKSPACE_OVERVIEW_ITEMS,
@@ -1354,6 +1360,19 @@ export function WebShellSidebar({
     () => providedWorkspaces ?? workspace.capabilities?.workspaces ?? [],
     [providedWorkspaces, workspace.capabilities?.workspaces],
   );
+  // Display-only ordering preference, scoped per daemon host so two hosts
+  // never share one list. Workspaces the stored order does not mention (new
+  // registrations) keep the daemon's order after the listed ones.
+  const workspaceOrderScope = useMemo(
+    () => (workspace.baseUrl || window.location.origin).replace(/\/+$/, ''),
+    [workspace.baseUrl],
+  );
+  const [workspaceOrder, setWorkspaceOrder] = useState<string[]>(() =>
+    readWorkspaceOrder(workspaceOrderScope),
+  );
+  useEffect(() => {
+    setWorkspaceOrder(readWorkspaceOrder(workspaceOrderScope));
+  }, [workspaceOrderScope]);
   const workspaceCatalogAdvertised =
     workspaces.length > 0 ||
     workspace.capabilities?.workspaces !== undefined ||
@@ -2057,6 +2076,26 @@ export function WebShellSidebar({
   const projectWorkspaces = useMemo(
     () => displayedWorkspaces.filter((entry) => entry.kind !== 'live'),
     [displayedWorkspaces],
+  );
+  // Only the rendered list is reordered: the derived cwd lists above feed
+  // order-sensitive catalog query keys, so reordering them would re-subscribe
+  // every secondary workspace's session catalog.
+  const orderedProjectWorkspaces = useMemo(
+    () => orderWorkspaces(projectWorkspaces, workspaceOrder),
+    [projectWorkspaces, workspaceOrder],
+  );
+  const moveWorkspaceInList = useCallback(
+    (cwd: string, direction: -1 | 1) => {
+      const next = moveWorkspace(
+        orderedProjectWorkspaces.map((entry) => entry.cwd),
+        cwd,
+        direction,
+      );
+      if (!next) return;
+      writeWorkspaceOrder(workspaceOrderScope, next);
+      setWorkspaceOrder(next);
+    },
+    [orderedProjectWorkspaces, workspaceOrderScope],
   );
   const resolveSessionWorkspaceScope = useCallback(
     (session: DaemonSessionSummary): SessionWorkspaceScope => {
@@ -7044,7 +7083,7 @@ export function WebShellSidebar({
                             onNotice={onStandaloneNotice}
                           />
                         )}
-                      {projectWorkspaces.map((ws) => (
+                      {orderedProjectWorkspaces.map((ws) => (
                         <Fragment key={ws.id}>
                           <WorkspaceSection
                             workspace={ws}
@@ -7228,6 +7267,15 @@ export function WebShellSidebar({
                                       ws.primary &&
                                       ws.trusted &&
                                       Boolean(onOpenWorkspaceManagement);
+                                    const workspaceIndex =
+                                      orderedProjectWorkspaces.findIndex(
+                                        (entry) => entry.cwd === ws.cwd,
+                                      );
+                                    const canMoveWorkspace =
+                                      !lockedWorkspaceCwd &&
+                                      ws.trusted &&
+                                      workspaceIndex >= 0 &&
+                                      orderedProjectWorkspaces.length > 1;
                                     const menuActions: WorkspaceMenuActions = {
                                       ...(canRename
                                         ? {
@@ -7281,6 +7329,20 @@ export function WebShellSidebar({
                                         ? {
                                             newWorktreeSession: () =>
                                               handleNewWorktreeSession(wsCwd),
+                                          }
+                                        : {}),
+                                      ...(canMoveWorkspace && workspaceIndex > 0
+                                        ? {
+                                            moveUp: () =>
+                                              moveWorkspaceInList(ws.cwd, -1),
+                                          }
+                                        : {}),
+                                      ...(canMoveWorkspace &&
+                                      workspaceIndex <
+                                        orderedProjectWorkspaces.length - 1
+                                        ? {
+                                            moveDown: () =>
+                                              moveWorkspaceInList(ws.cwd, 1),
                                           }
                                         : {}),
                                       ...(canManage
