@@ -115,12 +115,10 @@ export async function resolveNetworkTarget(
   const url = value instanceof URL ? value : new URL(value);
   if (policy !== 'public') return { url };
   if (url.protocol !== 'https:') {
-    throw new Error('Public extension network requests must use HTTPS.');
+    throw new Error('Public network requests must use HTTPS.');
   }
   if (url.username || url.password) {
-    throw new Error(
-      'Public extension network requests must not use credentials.',
-    );
+    throw new Error('Public network requests must not use credentials.');
   }
 
   const hostname = stripIpv6Brackets(url.hostname);
@@ -132,13 +130,13 @@ export async function resolveNetworkTarget(
         signal,
       );
   if (addresses.length === 0) {
-    throw new Error(`Extension network host did not resolve: ${hostname}`);
+    throw new Error(`Public network host did not resolve: ${hostname}`);
   }
   if (
     addresses.some(({ address, family }) => isBlockedAddress(address, family))
   ) {
     throw new Error(
-      `Extension network host resolved to a blocked address: ${hostname}`,
+      `Public network host resolved to a blocked address: ${hostname}`,
     );
   }
 
@@ -146,7 +144,7 @@ export async function resolveNetworkTarget(
   const lookup: LookupFunction = (requestedHostname, options, callback) => {
     if (stripIpv6Brackets(requestedHostname) !== hostname) {
       const error = new Error(
-        'Pinned extension lookup hostname mismatch',
+        'Pinned public network lookup hostname mismatch',
       ) as NodeJS.ErrnoException;
       error.code = 'ENOTFOUND';
       callback(error, '', 0);
