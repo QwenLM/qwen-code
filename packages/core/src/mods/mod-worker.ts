@@ -379,6 +379,25 @@ async function bounded(
   }
 }
 
+// The engine names the plugin behind an ask it made or reworded; an answer
+// passed up as heard keeps the owner it had, and a hook cannot write one.
+async function ownCheck(
+  value: ModToolCheckResult,
+  below: Promise<unknown> | undefined,
+  plugin: string,
+): Promise<ModToolCheckResult> {
+  const { plugin: _written, ...answer } = value;
+  if (answer.decision !== 'ask') return answer;
+  const heard = (await below?.catch(() => undefined)) as
+    | ModToolCheckResult
+    | undefined;
+  if (heard?.decision === 'ask' && heard.reason === answer.reason)
+    return heard.plugin === undefined
+      ? answer
+      : { ...answer, plugin: heard.plugin };
+  return { ...answer, plugin };
+}
+
 async function dispatch(
   event: ModEvent,
   input: ModInput,
@@ -444,6 +463,12 @@ async function dispatch(
         }),
       );
       validateResult(event, value);
+      if (event === 'tool.check')
+        return await ownCheck(
+          value as ModToolCheckResult,
+          call.last,
+          realm.plugin.name,
+        );
       return event === 'ui.log' && record(value) && !('deny' in value)
         ? { value: value['value'] }
         : value;
@@ -475,6 +500,12 @@ async function dispatch(
         );
         if (value !== undefined) {
           validateResult(event, value);
+          if (event === 'tool.check')
+            return await ownCheck(
+              value as ModToolCheckResult,
+              recovery.last ?? call.last,
+              realm.plugin.name,
+            );
           return event === 'ui.log' && record(value) && !('deny' in value)
             ? { value: value['value'] }
             : value;
