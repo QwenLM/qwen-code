@@ -2019,7 +2019,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const openHelpDialog = useCallback(() => setHelpDialogOpen(true), []);
   const closeHelpDialog = useCallback(() => setHelpDialogOpen(false), []);
 
-  const { vimEnabled, vimMode } = useVimModeState();
+  const { vimEnabled } = useVimModeState();
   const { toggleVimEnabled } = useVimModeActions();
 
   useLayoutEffect(() => {
@@ -3919,6 +3919,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const submitVimPrompt = useCallback(
     (text: string) => {
+      buffer.setText('');
       handleFinalSubmit(text, {
         displayText: text,
         humanInput: {
@@ -3926,11 +3927,32 @@ export const AppContainer = (props: AppContainerProps) => {
         },
       });
     },
-    [handleFinalSubmit, pendingPastes],
+    [buffer, handleFinalSubmit, pendingPastes],
   );
-  const { handleInput: vimHandleInput } = useVim(
+  // Vim's Enter bypasses the composer, so route it through the submit path
+  // the composer registers: large-paste expansion, the submit epoch and the
+  // stash cleanup all live there.
+  const promptSubmitRef = useRef<((value: string) => void) | null>(null);
+  const registerPromptSubmit = useCallback(
+    (handler: ((value: string) => void) | null) => {
+      promptSubmitRef.current = handler;
+    },
+    [],
+  );
+  const handleVimSubmit = useCallback(
+    (value: string) => {
+      const submit = promptSubmitRef.current;
+      if (submit) {
+        submit(value);
+        return;
+      }
+      submitVimPrompt(value);
+    },
+    [submitVimPrompt],
+  );
+  const { handleInput: vimHandleInput, ownsEscape: vimOwnsEscape } = useVim(
     buffer,
-    submitVimPrompt,
+    handleVimSubmit,
     invalidateSubmittedPromptProvenance,
   );
 
@@ -5043,11 +5065,9 @@ export const AppContainer = (props: AppContainerProps) => {
         if (contextMenuOpenRef.current) {
           return;
         }
-        // In vim INSERT mode, let vim's own handler (in InputPrompt) consume
-        // the Esc to switch to NORMAL mode. Without this guard, both handlers
-        // fire on the same keypress — vim switches mode AND AppContainer
-        // shows "Press Esc again to clear" or cancels the stream.
-        if (vimEnabled && vimMode === 'INSERT') {
+        // Vim may have consumed this same broadcast before this subscriber.
+        // Pending-state cancellation must not also arm or clear the draft.
+        if (vimOwnsEscape(key)) {
           return;
         }
 
@@ -5265,8 +5285,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setRenderMode,
       refreshStatic,
       handleDoubleEscRewind,
-      vimEnabled,
-      vimMode,
+      vimOwnsEscape,
       setThoughtExpanded,
     ],
   );
@@ -5684,6 +5703,7 @@ export const AppContainer = (props: AppContainerProps) => {
       onTabConsumerChange: setHasTabConsumer,
       refreshStatic,
       handleFinalSubmit,
+      registerPromptSubmit,
       handleRetryLastPrompt: retryLastPrompt,
       handleClearScreen,
       popAllQueuedMessages,
@@ -5777,6 +5797,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEscapePromptChange,
       refreshStatic,
       handleFinalSubmit,
+      registerPromptSubmit,
       retryLastPrompt,
       handleClearScreen,
       popAllQueuedMessages,

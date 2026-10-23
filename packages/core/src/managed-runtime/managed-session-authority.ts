@@ -30,11 +30,16 @@ import {
 } from './managed-automation-record.js';
 import { automationRunId } from './managed-automation-operations.js';
 import {
+  parseHistoryMaintenance,
+  type HistoryMaintenance,
+} from './managed-history-maintenance-record.js';
+import {
   authorizeParsedHarnessCheckpoint,
-  encodeHarnessCheckpointV1,
+  parseHarnessCheckpointObject,
   HARNESS_MODEL_START_PHASES,
   tryParseHarnessCheckpointV1,
   type HarnessCheckpointV1,
+  type HarnessCheckpointParseResult,
   type HarnessRunAuthorization,
 } from './managed-harness-checkpoint.js';
 import {
@@ -51,6 +56,7 @@ import {
   assertManagedSessionChannelAdapterEnabled,
   assertManagedSessionDigest,
   assertManagedSessionDomainEnabled,
+  isChildNotificationSource,
   assertManagedSessionScheduleSessionModeEnabled,
   assertManagedSessionEventActor,
   ManagedSessionAppendUnsettledError,
@@ -72,12 +78,14 @@ import {
   type ManagedSessionCommitMarker,
   type ManagedSessionDurableRef,
   type ManagedSessionEvent,
+  type ManagedSessionJsonValue,
   type ManagedSessionEventKind,
   type ManagedSessionHeader,
   type ManagedSessionKey,
   type ManagedSessionSubject,
 } from './managed-session-records.js';
 import { readManagedBranchCheckpoint } from './managed-session-resources.js';
+import { ManagedCheckpointHistory } from './managed-checkpoint-history.js';
 import { readManagedMessageBody } from './managed-message-chunks.js';
 import {
   parseMcpConfiguration,
@@ -137,6 +145,14 @@ export type ManagedSessionRecordBody =
   | ManagedSessionHeader
   | ManagedSessionEvent
   | ManagedSessionCommitMarker;
+
+export interface ManagedHistoryCompaction {
+  readonly summaryRef: ManagedSessionDurableRef;
+  readonly compactionId: string;
+  readonly fromSequence: number;
+  readonly toSequence: number;
+  readonly replacedMessageIds: readonly string[];
+}
 
 export interface ManagedSessionCommand {
   readonly operation: string;
@@ -396,9 +412,7 @@ export class ManagedSessionNotFoundError extends ManagedSessionRecordError {
 }
 
 export interface OpenManagedSessionAuthorityOptions {
-  readonly journal?: ManagedSessionJournalHandle;
-  /** Compatibility entry point for callers that already own the local writer. */
-  readonly lease?: SessionWriterLease;
+  readonly journal: ManagedSessionJournalHandle;
   readonly sessionKey: ManagedSessionKey;
   readonly cwd: string;
   readonly version: string;
@@ -434,6 +448,7 @@ export interface OpenManagedSessionAuthorityOptions {
  * physical serialization, fencing and durability.
  */
 export class LocalManagedSessionAuthority {
+  private readonly checkpointHistory: ManagedCheckpointHistory | undefined;
   private constructor(
     private readonly journal: ManagedSessionJournalHandle,
     private readonly sessionKey: ManagedSessionKey,
@@ -451,7 +466,10 @@ export class LocalManagedSessionAuthority {
     private lastRecordUuid: string | null,
     private activation: ManagedSessionActivationState | undefined,
     private readonly resources: ManagedSessionResourceStore | undefined,
-  ) {}
+  ) {
+    this.checkpointHistory =
+      resources && new ManagedCheckpointHistory(resources);
+  }
 
   private writeFailure: Error | undefined;
   /**
@@ -580,6 +598,12 @@ export class LocalManagedSessionAuthority {
     return this.compactedThrough;
   }
 
+  get activeHistoryMaintenance(): HistoryMaintenance | undefined {
+    return this.extensionRecordsInDomain('history_maintenance')
+      .map((entry) => parseHistoryMaintenance(entry.record))
+      .find((record) => record.phase !== 'settled');
+  }
+
   get sessionHeader(): ManagedSessionHeader {
     return this.header;
   }
@@ -636,24 +660,7 @@ export class LocalManagedSessionAuthority {
     options: OpenManagedSessionAuthorityOptions,
   ): Promise<LocalManagedSessionAuthority> {
     const now = options.now ?? (() => Date.now());
-    if (options.journal !== undefined && options.lease !== undefined) {
-      throw new ManagedSessionRecordError(
-        'journal and a compatibility local lease cannot be supplied together.',
-      );
-    }
-    const journal =
-      options.journal ??
-      (options.lease === undefined
-        ? undefined
-        : LocalJsonlManagedSessionJournalStore.fromLease(
-            options.lease,
-            options.sessionKey,
-          ));
-    if (journal === undefined) {
-      throw new ManagedSessionRecordError(
-        'a Managed Session journal handle is required.',
-      );
-    }
+    const { journal } = options;
     const scan = await journal.read();
     if (options.expectedCommitProof !== undefined) {
       const expected = options.expectedCommitProof;
@@ -1190,7 +1197,7 @@ export class LocalManagedSessionAuthority {
       | ManagedSessionCommand
       | ((state: Buffer, coveredSequence: number) => ManagedSessionCommand),
     request: {
-      state: Buffer;
+      state: Buffer | HarnessCheckpointV1;
       boundary: string | null;
       toolAction?: {
         readonly requestId: string;
@@ -1222,14 +1229,17 @@ export class LocalManagedSessionAuthority {
       const checkpointId = `ckpt-${this.committed + (action ? 2 : 1)}`;
       const covered = this.committed;
       const previousCheckpointId = previous?.checkpointId ?? null;
-      const parsed = tryParseHarnessCheckpointV1(request.state);
-      const state =
-        parsed.ok &&
-        (parsed.checkpoint.identity.checkpointId !== checkpointId ||
-          parsed.checkpoint.identity.coveredSequence !== covered ||
-          parsed.checkpoint.identity.previousCheckpointId !==
-            previousCheckpointId)
-          ? encodeHarnessCheckpointV1({
+      const parsed = Buffer.isBuffer(request.state)
+        ? tryParseHarnessCheckpointV1(request.state)
+        : {
+            ok: true as const,
+            checkpoint: parseHarnessCheckpointObject(
+              request.state as unknown as ManagedSessionJsonValue,
+            ),
+          };
+      const prepared = parsed.ok
+        ? await this.checkpointHistory!.prepare(
+            {
               ...parsed.checkpoint,
               identity: {
                 ...parsed.checkpoint.identity,
@@ -1237,12 +1247,12 @@ export class LocalManagedSessionAuthority {
                 coveredSequence: covered,
                 previousCheckpointId,
               },
-              resume: {
-                ...parsed.checkpoint.resume,
-                throughSequence: covered,
-              },
-            })
-          : request.state;
+              resume: { ...parsed.checkpoint.resume, throughSequence: covered },
+            },
+            previous?.stateRef,
+          )
+        : undefined;
+      const state = prepared?.bytes ?? (request.state as Buffer);
       const assignedCommand =
         typeof command === 'function' ? command(state, covered) : command;
       const stateRef = await store.publish('managed-checkpoint', state);
@@ -1303,6 +1313,7 @@ export class LocalManagedSessionAuthority {
           'checkpoint was committed but not recorded.',
         );
       }
+      if (prepared) this.checkpointHistory!.remember(stateRef, prepared);
       return { receipt, checkpoint };
     });
   }
@@ -1333,7 +1344,7 @@ export class LocalManagedSessionAuthority {
           readonly previousCheckpointId: string | null;
         },
         previous: HarnessCheckpointV1,
-      ) => Buffer;
+      ) => Buffer | HarnessCheckpointV1;
     },
     actor: ManagedSessionActor,
   ): Promise<ManagedSessionCheckpointReceipt> {
@@ -1373,7 +1384,14 @@ export class LocalManagedSessionAuthority {
         },
         previous,
       );
-      const parsed = tryParseHarnessCheckpointV1(state);
+      const parsed = Buffer.isBuffer(state)
+        ? tryParseHarnessCheckpointV1(state)
+        : {
+            ok: true as const,
+            checkpoint: parseHarnessCheckpointObject(
+              state as unknown as ManagedSessionJsonValue,
+            ),
+          };
       if (!parsed.ok) {
         throw new ManagedSessionRecordError(
           parsed.message ?? 'turn-complete checkpoint state is not Harness v1.',
@@ -1400,7 +1418,14 @@ export class LocalManagedSessionAuthority {
           'turn-complete checkpoint requires no pending Harness work.',
         );
       }
-      const stateRef = await store.publish('managed-checkpoint', state);
+      const prepared = await this.checkpointHistory!.prepare(
+        parsed.checkpoint,
+        this.checkpoint?.stateRef,
+      );
+      const stateRef = await store.publish(
+        'managed-checkpoint',
+        prepared.bytes,
+      );
       const subject = {
         type: 'activation' as const,
         scopeId: held.activationId,
@@ -1452,14 +1477,16 @@ export class LocalManagedSessionAuthority {
           'checkpoint was committed but not recorded.',
         );
       }
+      this.checkpointHistory!.remember(stateRef, prepared);
       return { receipt, checkpoint };
     });
   }
 
   /**
-   * Reads the state the newest checkpoint references. A checkpoint whose body
-   * cannot be resolved is a blocked recovery, not an empty one, so the failure
-   * from the resource store is allowed to propagate.
+   * Reads the physical bytes the newest checkpoint references. Paged roots are
+   * not Harness v1; use readParsedCheckpointState for a logical Harness view.
+   * A checkpoint whose body cannot be resolved is a blocked recovery, not an
+   * empty one, so resource-store failures propagate.
    */
   async readCheckpointState(): Promise<Buffer | undefined> {
     const current = this.checkpoint;
@@ -1471,6 +1498,19 @@ export class LocalManagedSessionAuthority {
       );
     }
     return store.read(current.stateRef);
+  }
+
+  async readParsedCheckpointState(): Promise<
+    HarnessCheckpointParseResult | undefined
+  > {
+    const current = this.checkpoint;
+    if (!current) return undefined;
+    if (!this.checkpointHistory) {
+      throw new ManagedSessionRecordError(
+        'a resource store is required to read checkpoints.',
+      );
+    }
+    return this.checkpointHistory.tryRead(current.stateRef);
   }
 
   /**
@@ -1489,13 +1529,11 @@ export class LocalManagedSessionAuthority {
     if (expected === undefined) {
       return { status: 'blocked', reason: 'missing_checkpoint' };
     }
-    let bytes: Buffer;
+    let parsed: HarnessCheckpointParseResult;
     try {
-      const state = await this.readCheckpointState();
-      if (state === undefined) {
-        return { status: 'blocked', reason: 'missing_state' };
-      }
-      bytes = state;
+      const state = await this.readParsedCheckpointState();
+      if (!state) return { status: 'blocked', reason: 'missing_state' };
+      parsed = state;
     } catch (error) {
       if (error instanceof ManagedSessionRecordError) {
         return {
@@ -1506,7 +1544,6 @@ export class LocalManagedSessionAuthority {
       }
       throw error;
     }
-    const parsed = tryParseHarnessCheckpointV1(bytes);
     if (!parsed.ok) {
       return {
         status: 'blocked',
@@ -1576,6 +1613,20 @@ export class LocalManagedSessionAuthority {
         }
       }
       const previous = this.domainRecords.get(request.domain);
+      if (request.domain === 'config_install') {
+        const commandBody = request.content['command'];
+        if (
+          request.content['kind'] !== 'hosted-mcp-settings' ||
+          !commandBody ||
+          typeof commandBody !== 'object' ||
+          !('expectedRevision' in commandBody) ||
+          commandBody.expectedRevision !== (previous?.revision ?? 0)
+        ) {
+          throw new ManagedSessionConflictError(
+            'MCP settings revision conflicts.',
+          );
+        }
+      }
       let content = request.content;
       const incomingTitleRevision = content['managedRenameRevision'];
       if (
@@ -1673,6 +1724,45 @@ export class LocalManagedSessionAuthority {
     },
     actor: ManagedSessionActor,
   ): Promise<ManagedSessionExtensionReceipt> {
+    return this.commitExtensionRecordWithCompaction(command, request, actor);
+  }
+
+  commitHistoryMaintenance(
+    command: ManagedSessionCommand,
+    request: {
+      readonly record: HistoryMaintenance;
+      readonly compaction?: ManagedHistoryCompaction;
+    },
+    actor: ManagedSessionActor,
+  ): Promise<ManagedSessionExtensionReceipt> {
+    if (actor.class !== 'harness' || actor.activation === undefined)
+      return Promise.reject(
+        new ManagedSessionConflictError(
+          'History maintenance requires the current Harness.',
+        ),
+      );
+    return this.commitExtensionRecordWithCompaction(
+      command,
+      { domain: 'history_maintenance', record: request.record },
+      { class: 'trusted_entry' },
+      request.compaction && { ...request.compaction, actor },
+      actor,
+    );
+  }
+
+  private async commitExtensionRecordWithCompaction(
+    command: ManagedSessionCommand,
+    request: {
+      readonly domain: ManagedSessionDomain;
+      readonly record: unknown;
+      readonly input?: ManagedSessionInputRequest;
+    },
+    actor: ManagedSessionActor,
+    compaction?: ManagedHistoryCompaction & {
+      readonly actor: ManagedSessionActor;
+    },
+    maintenanceActor?: ManagedSessionActor,
+  ): Promise<ManagedSessionExtensionReceipt> {
     const body = MANAGED_EXTENSION_RECORD_BODIES[request.domain];
     if (body === undefined) {
       throw new ManagedSessionRecordError(
@@ -1690,6 +1780,19 @@ export class LocalManagedSessionAuthority {
       // since.
       const replayed = this.replayedExtension(command);
       if (replayed !== undefined) return replayed;
+      if (request.domain === 'history_maintenance') {
+        const held = maintenanceActor?.activation;
+        const active = this.currentActivation;
+        if (
+          !held ||
+          active?.phase !== 'active' ||
+          active.activationId !== held.activationId ||
+          active.epoch !== held.epoch
+        )
+          throw new ManagedSessionConflictError(
+            'History maintenance requires the current Harness activation.',
+          );
+      }
       // Every refusal the caller decides runs before any body publishes.
       assertExtensionActor(actor.class);
       assertCommandIdentity(command);
@@ -1713,7 +1816,66 @@ export class LocalManagedSessionAuthority {
       if (request.domain !== 'child_run') {
         this.assertDomainAdmittable(request.domain);
       }
-      const parsed = body.parse(request.record);
+      const incoming = compaction
+        ? {
+            ...(request.record as HistoryMaintenance),
+            compactionRevision: this.committed + 1,
+          }
+        : request.record;
+      const parsed = body.parse(incoming);
+      if (request.domain === 'history_maintenance') {
+        const maintenance = parseHistoryMaintenance(parsed.record);
+        const active = this.activeHistoryMaintenance;
+        if (active && active.operationId !== maintenance.operationId)
+          throw new ManagedSessionConflictError(
+            'Session history maintenance is active.',
+          );
+        if (
+          (this.lastEventOfKind('context.compacted')?.sequence ?? 0) !==
+          maintenance.expectedCompactionRevision
+        )
+          throw new ManagedSessionConflictError(
+            'The history compaction revision changed.',
+          );
+        if (maintenance.phase === 'admitted') {
+          const settled = new Set(
+            this.events
+              .filter((event) => event.kind === 'turn.settled')
+              .map((event) => event.payload['turnId']),
+          );
+          if (
+            maintenance.historyCutSequence > this.committed ||
+            this.events.some(
+              (event) =>
+                (event.kind === 'message.committed' &&
+                  event.sequence > maintenance.historyCutSequence) ||
+                (event.kind === 'input.accepted' &&
+                  !settled.has(event.payload['turnId'])),
+            )
+          )
+            throw new ManagedSessionConflictError(
+              'Session history changed or has pending input.',
+            );
+        }
+        if (
+          (maintenance.outcome === 'compressed') !==
+          (compaction !== undefined)
+        )
+          throw new ManagedSessionConflictError(
+            'A compressed outcome commits together with its context snapshot.',
+          );
+        if (
+          compaction &&
+          (compaction.compactionId !== maintenance.operationId ||
+            compaction.toSequence !== maintenance.historyCutSequence ||
+            compaction.fromSequence !== this.compactedThroughSequence + 1 ||
+            (this.lastEventOfKind('context.compacted')?.sequence ?? 0) !==
+              maintenance.expectedCompactionRevision)
+        )
+          throw new ManagedSessionConflictError(
+            'The history compaction basis changed.',
+          );
+      }
       if (request.domain === 'child_run') {
         // The one domain carries two capabilities with independent gates
         // (H3's shell, H4's child agent), so its admission is per kind,
@@ -1768,7 +1930,7 @@ export class LocalManagedSessionAuthority {
         `managed-${request.domain}`,
         Buffer.from(JSON.stringify(parsed.record), 'utf8'),
       );
-      const sequence = this.committed + 1;
+      const sequence = this.committed + (compaction ? 2 : 1);
       const occurredAt = this.now();
       const eventId = `${request.domain}:${
         (this.domainRecords.get(request.domain)?.revision ?? 0) + 1
@@ -1790,6 +1952,27 @@ export class LocalManagedSessionAuthority {
         },
       ];
       const actors = [actor];
+      if (compaction) {
+        const held = compaction.actor.activation!;
+        values.unshift({
+          v: MANAGED_SESSION_FORMAT_VERSION,
+          sequence: sequence - 1,
+          eventId: `compaction:${compaction.compactionId}`,
+          sessionKey: command.sessionKey,
+          kind: 'context.compacted',
+          occurredAt,
+          subject: { type: 'activation', scopeId: held.activationId, ...held },
+          payload: {
+            compactionId: compaction.compactionId,
+            fromSequence: compaction.fromSequence,
+            toSequence: compaction.toSequence,
+            summaryRef: compaction.summaryRef,
+            replacedMessageIds: [...compaction.replacedMessageIds],
+            tokenCountsRef: null,
+          },
+        });
+        actors.unshift(compaction.actor);
+      }
       if (request.input !== undefined) {
         values.push(
           ...inputEvents(command, request.input, sequence + 1, occurredAt),
@@ -2990,6 +3173,9 @@ export class LocalManagedSessionAuthority {
     } else if (domain === 'session_command') {
       const command = parseSessionCommand(record);
       refs = [command.argsRef, command.replyRef];
+    } else if (domain === 'history_maintenance') {
+      const maintenance = parseHistoryMaintenance(record);
+      refs = [maintenance.requestRef, maintenance.candidateRef];
     } else if (domain === 'team_task') {
       const task = parseTeamTask(record);
       refs = [task.descriptionRef, task.metadataRef];
@@ -3000,6 +3186,8 @@ export class LocalManagedSessionAuthority {
       refs = [plan.planRef, plan.feedbackRef];
     } else if (domain === 'schedule') {
       refs = [parseScheduleRecord(record).promptRef];
+    } else if (domain === 'automation_run') {
+      refs = [parseAutomationRunRecord(record).gateOutputRef];
     } else if (domain === 'monitor_run') {
       const monitor = parseMonitorRun(record);
       refs = [
@@ -3171,6 +3359,26 @@ export class LocalManagedSessionAuthority {
 
     const events = values.map((value, index) => {
       const event = parseManagedSessionEvent(value);
+      const maintenance = this.activeHistoryMaintenance;
+      if (maintenance) {
+        const source = event.payload['source'];
+        if (
+          event.kind === 'message.committed' ||
+          event.kind === 'checkpoint.committed' ||
+          event.kind === 'turn.settled' ||
+          (event.kind === 'context.compacted' &&
+            (!extension ||
+              event.payload['compactionId'] !== maintenance.operationId)) ||
+          (event.kind === 'input.accepted' &&
+            !isChildNotificationSource(source) &&
+            !['monitor', 'automation', 'channel', 'session_message'].includes(
+              String(source),
+            ))
+        )
+          throw new ManagedSessionConflictError(
+            'Session history maintenance is active.',
+          );
+      }
       const actor = actors[index];
       assertManagedSessionEventActor(event, actor.class);
       if (!managedSessionKeysEqual(event.sessionKey, this.sessionKey)) {

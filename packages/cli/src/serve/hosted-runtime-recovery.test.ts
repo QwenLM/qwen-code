@@ -1425,36 +1425,23 @@ describe('recoverHostedRuntimeTurn', () => {
   );
 
   it('declines a decided wait whose checkpoint the drive cannot resume', async () => {
-    // With the durable action decided, the approval wait is over — the
-    // drive load winds past inapplicable into the continuation whose own
-    // checkpoint cannot drive (P1-2); its honest answer is the typed
-    // checkpoint_blocked decline, never a lie-attach.
-    await parkAtAwaitRuntime();
+    // Advance a real decided wait through its gate, then keep a schema-valid
+    // stale authorization visible to exercise the typed continuation decline.
+    await parkAtAwaitAction();
     const replacement = await open('boot-2', false);
-    vi.spyOn(
-      replacement.authority,
-      'harnessRunAuthorization',
-    ).mockResolvedValue({
-      status: 'runnable',
-      checkpoint: {
-        identity: {
-          turnId: PROMPT_ID,
-          promptId: PROMPT_ID,
-          checkpointId: 'checkpoint-await-action',
-        },
-        attempt: {},
-        continuation: { phase: 'await_action' },
-        approval: { state: 'requested', requestId: 'request-1' },
-        output: {},
-        followUp: {},
-        runtime: {},
-        tools: { items: [] },
-      },
-    } as never);
-    vi.spyOn(replacement.authority, 'action').mockReturnValue({
-      state: 'decided',
-    } as never);
     try {
+      await endAction(replacement, 'decided');
+      const authorization =
+        await replacement.authority.harnessRunAuthorization();
+      if (authorization.status !== 'runnable')
+        throw new Error('Expected runnable approval checkpoint');
+      expect(authorization.checkpoint.continuation.phase).toBe('await_action');
+      const previousCheckpointId =
+        replacement.authority.latestCheckpoint!.checkpointId;
+      vi.spyOn(
+        replacement.authority,
+        'harnessRunAuthorization',
+      ).mockResolvedValue(authorization);
       const outcome = await recoverHostedRuntimeTurn({
         session: replacement,
         sessionId: SESSION_ID,
@@ -1467,6 +1454,15 @@ describe('recoverHostedRuntimeTurn', () => {
         kind: 'declined',
         reason: 'checkpoint_blocked',
       });
+      expect(replacement.authority.latestCheckpoint!.checkpointId).not.toBe(
+        previousCheckpointId,
+      );
+      const committed = await replacement.authority.readParsedCheckpointState();
+      if (!committed?.ok)
+        throw new Error('Expected readable advanced checkpoint');
+      expect(committed.checkpoint.continuation.phase).toBe(
+        'model_output_committed',
+      );
     } finally {
       await replacement.close();
     }

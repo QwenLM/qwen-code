@@ -15603,6 +15603,62 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('admits an ephemeral desktop origin through a loopback port wildcard', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-loopback-port-')),
+    );
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          allowOrigins: ['http://127.0.0.1:*'],
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      const port = (started.server.address() as { port: number }).port;
+      const res = await fetch(`http://127.0.0.1:${port}/capabilities`, {
+        method: 'OPTIONS',
+        headers: {
+          origin: 'http://127.0.0.1:54321',
+          'access-control-request-method': 'GET',
+        },
+      });
+      expect(res.status).toBe(204);
+      expect(res.headers.get('access-control-allow-origin')).toBe(
+        'http://127.0.0.1:54321',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('refuses a loopback port wildcard on a tokenless loopback bind', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            serveWebShell: false,
+            allowOrigins: ['http://127.0.0.1:*'],
+          },
+          { bridge: makeFakeBridge() },
+        ),
+      ).rejects.toThrow(/loopback port wildcard/i);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('refuses --require-auth and --allow-origin * on a tokenless loopback bind', async () => {
     vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
     try {
@@ -20188,6 +20244,61 @@ describe('runQwenServe channel worker supervisor', () => {
 
     expect(order).toEqual(['registry', 'worker', 'bridge']);
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+  });
+
+  it('lets the supervising application own signals while mounting Managed routes on the ordinary daemon', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-unified-managed-')),
+    );
+    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+    const listeners = signals.map((signal) => process.rawListeners(signal));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: tmpDir,
+        token: 'unified-token',
+        mode: 'http-bridge',
+        requireAuth: true,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        installSignalHandlers: false,
+        managedLocalWeb: {
+          javaUrl: 'http://127.0.0.1:5011',
+          signingKey: 'private-signing-key',
+          tenantId: 'local',
+          actorId: 'owner',
+          agentId: 'qwen-code',
+          productScope: 'local:installation',
+        },
+      },
+    );
+    try {
+      for (const [index, signal] of signals.entries()) {
+        const added = process
+          .rawListeners(signal)
+          .filter((listener) => !listeners[index].includes(listener));
+        expect(added.some((listener) => listener.name === 'onSignal')).toBe(
+          false,
+        );
+      }
+      expect((await fetch(`${handle.url}/managed/boot`)).status).toBe(401);
+      const headers = { Authorization: 'Bearer unified-token' };
+      const boot = await fetch(`${handle.url}/managed/boot`, { headers });
+      expect(boot.status).toBe(200);
+      expect(await boot.json()).toMatchObject({
+        mode: 'managed',
+        productScope: 'local:installation',
+      });
+      const capabilities = await fetch(`${handle.url}/capabilities`, {
+        headers,
+      });
+      expect(await capabilities.json()).toHaveProperty('workspaces');
+    } finally {
+      await handle.close();
+    }
   });
 
   it('force-kills channel worker, bridge, and pidfile on a second shutdown signal', async () => {

@@ -13,16 +13,25 @@
  * steering batch the stream layer could not resolve.
  */
 
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { afterAll, beforeEach, describe, it, expect, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
 import {
   ToolConfirmationOutcome,
   type Config,
 } from '@qwen-code/qwen-code-core';
-import type { LivePromptOptions, WaitingCallInfo } from './live-session.js';
+import type {
+  LivePromptOptions,
+  OpenTuiSteeringSubmission,
+  WaitingCallInfo,
+} from './live-session.js';
+import type {
+  OpenTuiCancelSettled,
+  OpenTuiInputSubmission,
+} from './input-submission.js';
 import {
   foldBatch,
   imagePathsToParts,
@@ -32,7 +41,7 @@ import {
 // Stream-layer stub: records what each turn was handed and holds the first
 // turn open until the test releases it, so a second submission lands mid-turn.
 // `declines` marks 1-based turn numbers that end without yielding — the
-// @-expansion decline path (an abort landing inside the read).
+// @-expansion decline path without an explicit user abort.
 const live = vi.hoisted(() => ({
   turns: [] as Array<{ prompt: unknown; options: unknown }>,
   waiters: [] as Array<() => void>,
@@ -67,6 +76,7 @@ vi.mock('./live-session.js', () => ({
 
 describe('imagePathsToParts', () => {
   const dir = mkdtempSync(join(tmpdir(), 'opentui-live-turn-'));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
   it('encodes a readable image as an inlineData part', () => {
     const path = join(dir, 'ok.png');
@@ -122,6 +132,13 @@ describe('foldBatch', () => {
 });
 
 describe('useOpenTuiLiveTurn submit paths', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'opentui-queue-'));
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC',
+    'base64',
+  );
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
   beforeEach(() => {
     live.turns.length = 0;
     live.waiters.length = 0;
@@ -147,6 +164,437 @@ describe('useOpenTuiLiveTurn submit paths', () => {
   function park(turn: number, call: WaitingCallInfo) {
     (live.turns[turn - 1].options as LivePromptOptions).onWaitingCall?.(call);
   }
+
+  it('returns late restored steering with image ownership at cancel settlement without resending', async () => {
+    const path = join(dir, 'cancel.png');
+    writeFileSync(path, png);
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('original', [path], {
+        submittedPrompt: 'typed original',
+      });
+    });
+    const options = live.turns[0].options as LivePromptOptions;
+    let held: OpenTuiSteeringSubmission[] = [];
+    act(() => {
+      result.current.submit('read @delayed.txt', [path]);
+      held = options.drainSteering!();
+      result.current.submit('queued before cancel');
+    });
+    const settled = vi.fn();
+    act(() => {
+      result.current.interrupt(settled);
+      result.current.submit('queued after cancel');
+    });
+    expect(settled).not.toHaveBeenCalled();
+    expect(live.signals[0].aborted).toBe(true);
+    await act(async () => {
+      options.restoreSteering!(held);
+      live.waiters.shift()!();
+    });
+    expect(settled).toHaveBeenCalledExactlyOnceWith({
+      kind: 'cancelled',
+      queued: expect.objectContaining({
+        text: 'read @delayed.txt\n\nqueued before cancel\n\nqueued after cancel',
+        imagePaths: [path],
+      }),
+      prompt: {
+        text: 'original',
+        imagePaths: [path],
+        submittedPrompt: 'typed original',
+      },
+    });
+    expect(live.turns).toHaveLength(1);
+    expect(result.current.messageQueue).toEqual([]);
+  });
+
+  it.each(['tool', 'generated', 'reset'] as const)(
+    'does not restore an unsafe cancelled prompt: %s',
+    async (kind) => {
+      const { result } = renderHook(() =>
+        useOpenTuiLiveTurn({ config: {} as Config }),
+      );
+      act(() => {
+        result.current.submit(
+          'original',
+          undefined,
+          kind === 'generated' ? { invocationEchoed: true } : undefined,
+        );
+      });
+      if (kind === 'tool') act(() => park(1, approval('tool')));
+      const settled = vi.fn();
+      act(() => {
+        result.current.interrupt(settled);
+        if (kind === 'reset') result.current.resetTranscript([]);
+      });
+      await act(async () => live.waiters.shift()!());
+      expect(settled).toHaveBeenCalledExactlyOnceWith(
+        kind === 'reset'
+          ? { kind: 'reset' }
+          : { kind: 'cancelled', queued: null, prompt: null },
+      );
+      expect(live.turns).toHaveLength(1);
+    },
+  );
+
+  it('discards cancellation once on reset without letting a late turn consume successor input', async () => {
+    const path = join(dir, 'reset.png');
+    writeFileSync(path, png);
+    live.holds.add(2);
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => result.current.submit('original', [path]));
+    const oldOptions = live.turns[0].options as LivePromptOptions;
+    let held: OpenTuiSteeringSubmission[] = [];
+    const settled = vi.fn();
+    act(() => {
+      result.current.submit('old queued', [path]);
+      held = oldOptions.drainSteering!();
+      result.current.interrupt(settled);
+      result.current.resetTranscript([]);
+      result.current.resetTranscript([]);
+    });
+    expect(settled).toHaveBeenCalledExactlyOnceWith({ kind: 'reset' });
+    expect(result.current.messageQueue).toEqual([]);
+    act(() => {
+      result.current.submit('successor');
+      result.current.submit('successor queued', [path]);
+    });
+    await act(async () => {
+      oldOptions.restoreSteering!(held);
+      live.waiters.shift()!();
+    });
+    expect(settled).toHaveBeenCalledExactlyOnceWith({ kind: 'reset' });
+    expect(live.turns).toHaveLength(2);
+    expect(live.signals[1].aborted).toBe(false);
+    expect(result.current.streaming).toBe(true);
+    expect(result.current.messageQueue).toEqual(['successor queued']);
+    const successorSettled = vi.fn();
+    act(() => result.current.interrupt(successorSettled));
+    await act(async () => live.waiters.shift()!());
+    expect(successorSettled).toHaveBeenCalledExactlyOnceWith({
+      kind: 'cancelled',
+      queued: expect.objectContaining({
+        text: 'successor queued',
+        imagePaths: [path],
+      }),
+      prompt: expect.objectContaining({ text: 'successor' }),
+    });
+    expect(live.turns).toHaveLength(2);
+  });
+
+  it('does not restart late restored steering after a bare exit interrupt', async () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => result.current.submit('original'));
+    const options = live.turns[0].options as LivePromptOptions;
+    let held: OpenTuiSteeringSubmission[] = [];
+    act(() => {
+      result.current.submit('read @delayed.txt');
+      held = options.drainSteering!();
+      result.current.popQueue();
+      result.current.interrupt();
+    });
+    await act(async () => {
+      options.restoreSteering!(held);
+      live.waiters.shift()!();
+    });
+    expect(live.signals[0].aborted).toBe(true);
+    expect(result.current.streaming).toBe(false);
+    expect(result.current.messageQueue).toEqual(['read @delayed.txt']);
+    expect(live.turns).toHaveLength(1);
+    expect(
+      result.current.items.filter((item) => item.kind === 'user'),
+    ).toHaveLength(1);
+  });
+
+  it('rejects the whole draft if any attachment cannot be read', () => {
+    const path = join(dir, 'good.png');
+    const missing = join(dir, 'missing.png');
+    writeFileSync(path, png);
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    let accepted: boolean | undefined;
+    act(() => {
+      accepted = result.current.submit('keep this', [path, missing]);
+    });
+    expect(accepted).toBe(false);
+    expect(live.turns).toEqual([]);
+    expect(result.current.messageQueue).toEqual([]);
+    expect(result.current.items.filter((item) => item.kind === 'user')).toEqual(
+      [],
+    );
+    expect(result.current.items).toMatchObject([
+      { text: `Could not read image: ${missing}` },
+    ]);
+  });
+
+  it('owns queued image bytes even if the source file changes before delivery', async () => {
+    const path = join(dir, 'owned.png');
+    writeFileSync(path, png);
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    const imagePaths = [path];
+    act(() => {
+      expect(result.current.submit('first')).toBe(true);
+      expect(
+        result.current.submit('queued image', imagePaths, {
+          submittedPrompt: 'raw queued image',
+        }),
+      ).toBe(true);
+    });
+    imagePaths.length = 0;
+    writeFileSync(path, 'replaced after admission');
+    await act(async () => live.waiters.shift()!());
+    expect(live.turns).toHaveLength(2);
+    expect(live.turns[1].prompt).toEqual([
+      { text: 'queued image' },
+      { inlineData: { mimeType: 'image/png', data: png.toString('base64') } },
+    ]);
+    expect(live.turns[1].options).toMatchObject({
+      submittedPrompt: 'raw queued image',
+    });
+  });
+
+  it('steers eligible images and keeps Ctrl+Q entries for the next turn', async () => {
+    const path = join(dir, 'deferred.png');
+    writeFileSync(path, png);
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('first');
+      result.current.submit('defer this', [path], { deferUntilIdle: true });
+      result.current.submit('steer this', [path], {
+        submittedPrompt: 'raw steer',
+      });
+    });
+    const options = live.turns[0].options as LivePromptOptions;
+    let steered: OpenTuiSteeringSubmission[] = [];
+    act(() => {
+      steered = options.drainSteering!();
+    });
+    expect(steered).toMatchObject([
+      {
+        text: 'steer this',
+        submittedPrompt: 'raw steer',
+        imagePaths: [path],
+        content: [
+          { text: 'steer this' },
+          {
+            inlineData: { mimeType: 'image/png', data: png.toString('base64') },
+          },
+        ],
+      },
+    ]);
+    expect(result.current.messageQueue).toEqual(['defer this']);
+    await act(async () => live.waiters.shift()!());
+    expect(live.turns).toHaveLength(2);
+    expect(live.turns[1].prompt).toEqual([
+      { text: 'defer this' },
+      { inlineData: { mimeType: 'image/png', data: png.toString('base64') } },
+    ]);
+    expect(live.turns[1].options).toMatchObject({
+      submittedPrompt: 'defer this',
+    });
+  });
+
+  it('starts idle Ctrl+Q immediately and restores queued payloads together', () => {
+    const path = join(dir, 'pop.png');
+    writeFileSync(path, png);
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      expect(
+        result.current.submit('idle deferred', undefined, {
+          deferUntilIdle: true,
+        }),
+      ).toBe(true);
+      result.current.submit('one', [path], {
+        deferUntilIdle: true,
+        submittedPrompt: 'raw one',
+      });
+      result.current.submit('two', [path]);
+    });
+    expect(live.turns).toHaveLength(1);
+    let popped!: OpenTuiInputSubmission;
+    act(() => {
+      popped = result.current.popQueue()!;
+    });
+    expect(popped).toMatchObject({
+      text: 'one\n\ntwo',
+      imagePaths: [path, path],
+      submittedPrompt: 'raw one\n\ntwo',
+      deferUntilIdle: false,
+    });
+    expect(result.current.messageQueue).toEqual([]);
+  });
+
+  it('keeps generated multimodal content and per-turn options out of steering and pop-back', async () => {
+    const onComplete = vi.fn(async () => {});
+    const content = [
+      { text: 'generated @literal' },
+      {
+        inlineData: { mimeType: 'image/png', data: png.toString('base64') },
+      },
+    ];
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('first');
+      result.current.submit(content, undefined, {
+        invocationEchoed: true,
+        modelOverride: 'vision',
+        refreshContextFilesOnWrite: true,
+        onComplete,
+      });
+    });
+    const options = live.turns[0].options as LivePromptOptions;
+    act(() => {
+      expect(options.drainSteering!()).toEqual([]);
+      expect(result.current.popQueue()).toBeNull();
+    });
+    await act(async () => live.waiters.shift()!());
+    expect(live.turns[1].prompt).toBe(content);
+    expect(live.turns[1].options).toMatchObject({
+      modelOverride: 'vision',
+      refreshContextFilesOnWrite: true,
+      submittedPrompt: undefined,
+    });
+    expect(onComplete).toHaveBeenCalledOnce();
+    expect(
+      result.current.items.filter((item) => item.kind === 'user'),
+    ).toHaveLength(1);
+    expect(live.turns).toHaveLength(2);
+    expect(result.current.messageQueue).toEqual([]);
+    await act(async () => {
+      expect(result.current.submit('unrelated next')).toBe(true);
+    });
+    expect(live.turns.map((turn) => turn.prompt)).toEqual([
+      'first',
+      content,
+      'unrelated next',
+    ]);
+    expect(onComplete).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])(
+    'discards cancelled generated work but preserves editable input: callback=%s',
+    async (withCallback) => {
+      const onComplete = vi.fn(async () => {});
+      const settled = vi.fn<OpenTuiCancelSettled>();
+      const { result } = renderHook(() =>
+        useOpenTuiLiveTurn({ config: {} as Config }),
+      );
+      act(() => {
+        expect(result.current.submit('original')).toBe(true);
+        expect(
+          result.current.submit('generated old', undefined, {
+            invocationEchoed: true,
+            onComplete,
+          }),
+        ).toBe(true);
+        expect(
+          result.current.submit('editable queued', undefined, {
+            submittedPrompt: 'typed editable',
+            humanInput: { text: 'typed editable' },
+          }),
+        ).toBe(true);
+      });
+      expect(live.turns).toHaveLength(1);
+      expect(result.current.messageQueue).toEqual([
+        'generated old',
+        'editable queued',
+      ]);
+      act(() => result.current.interrupt(withCallback ? settled : undefined));
+      await act(async () => live.waiters.shift()!());
+      const queueAfterCancel = [...result.current.messageQueue];
+      const settlement = settled.mock.calls[0]?.[0];
+      let restored: OpenTuiInputSubmission | null = null;
+      act(() => {
+        restored = withCallback
+          ? settlement?.kind === 'cancelled'
+            ? settlement.queued
+            : null
+          : result.current.popQueue();
+      });
+      await act(async () => {
+        expect(result.current.submit('unrelated next')).toBe(true);
+      });
+      expect(live.turns.map((turn) => turn.prompt)).toEqual([
+        'original',
+        'unrelated next',
+      ]);
+      expect(onComplete).not.toHaveBeenCalled();
+      expect(live.signals[0].aborted).toBe(true);
+      expect(result.current.streaming).toBe(false);
+      expect(result.current.messageQueue).toEqual([]);
+      expect(queueAfterCancel).toEqual(withCallback ? [] : ['editable queued']);
+      expect(restored).toMatchObject({
+        text: 'editable queued',
+        submittedPrompt: 'typed editable',
+        restoredDraft: {
+          modelText: 'editable queued',
+          humanInput: { text: 'typed editable' },
+          hasUnknownInput: false,
+        },
+      });
+      if (withCallback) {
+        expect(settled).toHaveBeenCalledExactlyOnceWith({
+          kind: 'cancelled',
+          queued: restored,
+          prompt: { text: 'original', submittedPrompt: 'original' },
+        });
+      } else {
+        expect(settled).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('ignores an old generation restoring or draining the new queue', () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('old');
+    });
+    const old = live.turns[0].options as LivePromptOptions;
+    expect(old.isCurrentTurn?.()).toBe(true);
+    act(() => {
+      result.current.interrupt();
+      expect(old.isCurrentTurn?.()).toBe(true);
+      result.current.resetTranscript([]);
+      expect(old.isCurrentTurn?.()).toBe(false);
+      result.current.submit('new');
+      result.current.submit('new queue');
+      old.restoreSteering!([{ text: 'old queue', content: 'old queue' }]);
+      expect(old.drainSteering!()).toEqual([]);
+    });
+    expect(result.current.messageQueue).toEqual(['new queue']);
+  });
+
+  it('rejects admission and prevents a queued successor after unmount', async () => {
+    const { result, unmount } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('first');
+      result.current.submit('queued');
+    });
+    const submit = result.current.submit;
+    unmount();
+    expect(submit('late')).toBe(false);
+    await act(async () => live.waiters.shift()!());
+    expect(live.turns).toHaveLength(1);
+  });
 
   it.each([false, true])(
     'retains editable paste content independently from display after completion (queued: %s)',
@@ -455,15 +903,16 @@ describe('useOpenTuiLiveTurn submit paths', () => {
         displayText: 'unknown visible text',
       });
     });
-    let popped: string | null = null;
+    let popped!: OpenTuiInputSubmission;
     act(() => {
-      popped = result.current.popQueue();
+      popped = result.current.popQueue()!;
     });
-    expect(popped).toBe('[Pasted Content]\n\nunknown visible text');
+    expect(popped?.text).toBe('[Pasted Content]\n\nunknown visible text');
     act(() =>
-      result.current.submit(popped!, undefined, {
-        displayText: popped!,
-        humanInput: { text: popped! },
+      result.current.submit(popped!.text, undefined, {
+        ...popped!,
+        displayText: popped!.text,
+        humanInput: { text: popped!.text },
       }),
     );
     await act(async () => {
@@ -491,12 +940,19 @@ describe('useOpenTuiLiveTurn submit paths', () => {
       }),
     );
     const options = live.turns[0]?.options as {
-      drainSteering: () => string[];
-      restoreSteering: (texts: string[]) => void;
+      drainSteering: () => OpenTuiSteeringSubmission[];
+      restoreSteering: (submissions: OpenTuiSteeringSubmission[]) => void;
     };
     act(() => {
       const drained = options.drainSteering();
-      expect(drained).toEqual(['expanded payload']);
+      expect(drained).toMatchObject([
+        {
+          text: 'expanded payload',
+          content: 'expanded payload',
+          humanInput,
+          displayText: 'original display',
+        },
+      ]);
       options.restoreSteering(drained);
     });
     expect(result.current.messageQueue).toEqual(['original display']);
@@ -521,16 +977,17 @@ describe('useOpenTuiLiveTurn submit paths', () => {
           pasteExpansions,
         });
       });
-      const restorePastes = vi.fn();
+      let popped!: OpenTuiInputSubmission;
       act(() => {
-        expect(result.current.popQueue(new Map(), restorePastes)).toBe(
-          displayText,
-        );
+        popped = result.current.popQueue()!;
       });
-      expect(restorePastes).toHaveBeenCalledWith(
-        expect.objectContaining({ pasteExpansions, hasUnknownInput: false }),
-        expect.any(Function),
-      );
+      expect(popped).toMatchObject({
+        text: displayText,
+        restoredDraft: {
+          pasteExpansions,
+          hasUnknownInput: false,
+        },
+      });
       if (interrupt) {
         act(() => result.current.interrupt());
         await act(async () => {
@@ -543,6 +1000,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
         result.current.submit(edited, undefined, {
           displayText: edited,
           humanInput: { text: edited },
+          restoredDraft: popped!.restoredDraft,
         });
       });
       await act(async () => {
@@ -593,8 +1051,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
   });
 
   it('consumes only its own submission when a replayed turn declines (R2-2)', async () => {
-    // The one reachable decline of the expander — an abort landing inside the
-    // @-mention read — ends the replayed turn without a send. Each queued
+    // A declined @-mention read ends the replayed turn without a send. Each queued
     // submission rides its own chained turn, so the sibling must survive the
     // decline instead of being swallowed with a joined payload.
     live.declines.add(2);
@@ -644,24 +1101,34 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     expect(result.current.messageQueue).toEqual(['queued after']);
 
     const { restoreSteering } = live.turns[0]?.options as unknown as {
-      restoreSteering: (texts: readonly string[]) => void;
+      restoreSteering: (
+        submissions: readonly OpenTuiSteeringSubmission[],
+      ) => void;
     };
     act(() => {
-      restoreSteering(['  steer me  ', '', 'then @b.ts']);
+      restoreSteering([
+        { text: '  steer me  ', content: '  steer me  ' },
+        { text: 'then @b.ts', content: 'then @b.ts' },
+      ]);
     });
     expect(result.current.messageQueue).toEqual([
-      'steer me',
+      '  steer me  ',
       'then @b.ts',
       'queued after',
     ]);
 
-    let popped: string | null = null;
+    let popped!: OpenTuiInputSubmission;
     act(() => {
-      popped = result.current.popQueue();
+      popped = result.current.popQueue()!;
     });
 
     expect(result.current.messageQueue).toEqual([]);
-    expect(popped).toBe('steer me\n\nthen @b.ts\n\nqueued after');
+    expect(popped).toMatchObject({
+      text: '  steer me  \n\nthen @b.ts\n\nqueued after',
+      submittedPrompt: '  steer me  \n\nthen @b.ts\n\nqueued after',
+      imagePaths: [],
+      deferUntilIdle: false,
+    });
   });
 
   it('drops the visible queue rows when the transcript resets', () => {
@@ -785,5 +1252,114 @@ describe('useOpenTuiLiveTurn streaming counters', () => {
     await vi.waitFor(() =>
       expect(result.current.streamingCharsRef.current).toBe(2),
     );
+  });
+});
+
+describe('live-turn dual-output ownership', () => {
+  beforeEach(() => {
+    live.turns.length = 0;
+    live.waiters.length = 0;
+    live.signals.length = 0;
+    live.script.clear();
+    live.holds.clear();
+    live.declines.clear();
+    live.errors.clear();
+  });
+
+  it.each(['reset', 'unmount'] as const)(
+    'finalizes before %s invalidation and writer shutdown',
+    async (action) => {
+      const root = mkdtempSync(join(tmpdir(), 'opentui-output-owner-'));
+      const file = join(root, 'events.jsonl');
+      const config = {
+        getSessionId: () => 'owner',
+        getModel: () => 'model',
+      } as unknown as Config;
+      const bridge = new DualOutputBridge(config, { filePath: file });
+      const hook = renderHook(() =>
+        useOpenTuiLiveTurn({ config, dualOutput: bridge }),
+      );
+      try {
+        act(() => {
+          expect(hook.result.current.submit('first')).toBe(true);
+        });
+        const options = live.turns[0].options as LivePromptOptions;
+        expect(options.dualOutput).toBe(bridge);
+        expect(options.isCurrentTurn?.()).toBe(true);
+        bridge.startAssistantMessage();
+        bridge.processEvent({
+          type: 'content',
+          value: 'accepted-partial',
+        } as Parameters<DualOutputBridge['processEvent']>[0]);
+        if (action === 'reset')
+          act(() => hook.result.current.resetTranscript([]));
+        else hook.unmount();
+        expect(options.isCurrentTurn?.()).toBe(false);
+        expect(live.signals[0].aborted).toBe(true);
+        await bridge.shutdown();
+        await act(async () => {
+          live.waiters.shift()?.();
+        });
+        const raw = readFileSync(file, 'utf8');
+        expect(raw.endsWith('\n')).toBe(true);
+        const frames = raw
+          .trimEnd()
+          .split('\n')
+          .map((line) => JSON.parse(line));
+        expect(
+          frames.filter((frame) => frame.type === 'assistant'),
+        ).toMatchObject([
+          {
+            message: { content: [{ type: 'text', text: 'accepted-partial' }] },
+          },
+        ]);
+        expect(
+          frames.filter(
+            (frame) =>
+              frame.type === 'stream_event' &&
+              frame.event.type === 'message_stop',
+          ),
+        ).toHaveLength(1);
+        expect(frames.at(-1)).toMatchObject({
+          type: 'system',
+          subtype: 'session_end',
+        });
+      } finally {
+        hook.unmount();
+        await bridge.shutdown();
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('does not emit queued, restored or replayed user rows directly', async () => {
+    const config = { getSessionId: () => 'owner' } as unknown as Config;
+    const emitUserMessage = vi.fn();
+    const dualOutput = {
+      emitUserMessage,
+      finalizeAssistantMessage: vi.fn(),
+    } as unknown as DualOutputBridge;
+    const hook = renderHook(() => useOpenTuiLiveTurn({ config, dualOutput }));
+    try {
+      act(() => {
+        hook.result.current.submit('first');
+        hook.result.current.submit('queued');
+      });
+      const options = live.turns[0].options as LivePromptOptions;
+      const drained = options.drainSteering?.() ?? [];
+      act(() => options.restoreSteering?.(drained));
+      expect(emitUserMessage).not.toHaveBeenCalled();
+      act(() =>
+        hook.result.current.resetTranscript([
+          { type: 'user', text: 'replayed' },
+        ]),
+      );
+      expect(emitUserMessage).not.toHaveBeenCalled();
+      await act(async () => {
+        live.waiters.shift()?.();
+      });
+    } finally {
+      hook.unmount();
+    }
   });
 });
