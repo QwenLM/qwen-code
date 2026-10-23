@@ -474,13 +474,13 @@ Rejected:
   in the turn. The wrapper marks it as data; step 2's probes label third-party
   fields explicitly; the fire cannot approve a pending permission.
 - The permission check is the shared `PermissionManager`, and a gate gets
-  exactly the decision the same text gets as a shell command. It does not
+  exactly the decision the same text gets as a `monitor` call. It does not
   read inside `$( … )` or backticks (an allow rule for the outer command
   covers what runs in them, a deny rule for that command does not catch it),
   and its splitter does not model comments or backtick bodies, so a quote
-  there can join the next line to the allowed command. That is the shell
-  tool's behaviour today, not something the gate adds; the read-only check
-  that applies without a rule is not fooled by it.
+  there can join the next line to the allowed command. That is how it
+  treats `Monitor` and shell commands today, not something the gate adds;
+  the read-only check that applies without a rule is not fooled by it.
 - An older binary reading a gated task file: fail-closed through the fuse,
   with a confusing but safe message, from v0.19.9 on; v0.19.8 and older fire
   it unconditionally (see the downgrade fuse above).
@@ -538,7 +538,8 @@ Web Shell-created gated task across a daemon restart.
 - A gate proposed by the model is confirmed like a `Monitor` command; a gate
   that may not run unattended is blocked with the rule to add, never run.
 - A durable gated task survives a restart of the CLI or the daemon with its
-  gate and status intact; an older binary never fires it unconditionally.
+  gate and status intact; an older binary from v0.19.9 on never fires it
+  unconditionally (v0.19.8 and older do, see the downgrade fuse).
 - Deleting or disabling a task while its gate runs delivers nothing.
 
 ## 11. Delivery

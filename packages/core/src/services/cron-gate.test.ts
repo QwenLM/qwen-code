@@ -565,6 +565,15 @@ describe('gateCommandError', () => {
     expect(gateCommandError(gate)).toBeNull();
   });
 
+  it('names a long checked command cut short, without halving a character', () => {
+    // The 79th unit is the high half of 😀: the cut backs off before it.
+    const error = gateCommandError(`bash -c '${'x'.repeat(78)}😀zzzz'`);
+    expect(error).toContain(`would check "${'x'.repeat(78)}…", not`);
+    expect(gateCommandError(`bash -c '${'x'.repeat(90)}'`)).toContain(
+      `would check "${'x'.repeat(79)}…", not`,
+    );
+  });
+
   it.each<[string, string, string]>([
     ['a trailing &', 'echo done &', 'must not background'],
     // A literal backslash, then a backgrounding `&`.
@@ -643,7 +652,7 @@ describe('gateCommandError', () => {
     [
       'a plain wrapper, naming the command the rules would check',
       "bash -c './probe.sh --gate'",
-      'not wrapped in a shell such as `bash -c`: the permission rules would check "./probe.sh --gate" instead',
+      'not wrapped in a shell such as `bash -c`: the permission rules would check "./probe.sh --gate", not the command as written',
     ],
     // The normalization takes a `/`-word for a flag and the `-c` after it
     // for a wrapper's: the rules would check `config.yml`. Refused, and the
@@ -651,7 +660,7 @@ describe('gateCommandError', () => {
     [
       'a script by absolute path given a -c argument',
       'bash /opt/probe.sh -c config.yml',
-      'the permission rules would check "config.yml" instead',
+      'the permission rules would check "config.yml", not',
     ],
     [
       'an env-prefixed wrapper',

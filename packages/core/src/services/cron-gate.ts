@@ -112,10 +112,12 @@ export const MAX_CRON_GATE_CHARS = 2048;
  * Why `gate` cannot be a gate command, or null when it can. Shared by the
  * `cron_create` tool and the daemon's scheduled-task routes so every entry
  * point refuses the same strings: empty or whitespace-only commands, commands
- * of only comments, commands past the cap, and anything backgrounded with
- * `&`. The last two run nothing in the foreground, so every fire would be
- * quiet. `backgroundsAnyPart` also looks inside a wrapper's script, behind a
- * prefix too (`nohup bash -c './probe.sh &'`).
+ * past the cap, a NUL, commands of only comments, anything backgrounded with
+ * `&`, and a command the permission rules would read differently from how it
+ * runs (a shell wrapper). Comment-only and backgrounded gates run nothing in
+ * the foreground, so every fire would be quiet. `backgroundsAnyPart` also
+ * looks inside a wrapper's script, behind a prefix too
+ * (`nohup bash -c './probe.sh &'`).
  */
 export function gateCommandError(gate: unknown): string | null {
   if (
@@ -150,8 +152,13 @@ export function gateCommandError(gate: unknown): string | null {
   // commands (`bash /opt/probe.sh -c x` reads as `x`).
   const checked = normalizeMonitorCommand(gate).safetyCommand;
   if (checked !== gate.trim()) {
-    const shown = checked.length > 80 ? `${checked.slice(0, 79)}…` : checked;
-    return `must be the command itself, not wrapped in a shell such as \`bash -c\`: the permission rules would check ${JSON.stringify(shown)} instead of what runs`;
+    let shown = checked;
+    if (checked.length > 80) {
+      // Not between the halves of a surrogate pair.
+      const high = checked.charCodeAt(78);
+      shown = `${checked.slice(0, high >= 0xd800 && high <= 0xdbff ? 78 : 79)}…`;
+    }
+    return `must be the command itself, not wrapped in a shell such as \`bash -c\`: the permission rules would check ${JSON.stringify(shown)}, not the command as written`;
   }
   return null;
 }
