@@ -5,6 +5,7 @@
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { jsonDepth } from './dispatch.js';
 import { ModRuntime } from './runtime.js';
 import type { ModLog } from './types.js';
 
@@ -647,4 +648,16 @@ describe('Mod middleware through real isolated realms', () => {
     },
     20_000,
   );
+});
+
+describe('Mod value depth', () => {
+  it.each([
+    ['1', 0],
+    ['"[{"', 0],
+    ['{"a":"\\"[{"}', 1],
+    ['[[1],[[2]]]', 3],
+    ['{"a":{"b":[{}]}}', 4],
+  ])('counts the nesting of %s without parsing it', (json, depth) => {
+    expect(jsonDepth(json)).toBe(depth);
+  });
 });
