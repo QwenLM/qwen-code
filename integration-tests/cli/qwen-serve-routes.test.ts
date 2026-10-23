@@ -415,6 +415,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_acp_status',
       'auth_provider_install',
       'workspace_memory',
+      'workspace_auto_memory',
       'workspace_memory_remember',
       'workspace_memory_remember_project_scope',
       'workspace_memory_remember_user_scope',
