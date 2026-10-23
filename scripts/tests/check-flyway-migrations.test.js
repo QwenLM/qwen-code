@@ -116,6 +116,36 @@ describe('check-flyway-migrations', () => {
     expect(result.output).toContain('all versions unique');
   });
 
+  it.each(['workflow_dispatch', 'push'])(
+    'makes the uniqueness-only scope explicit for %s',
+    (event) => {
+      vi.stubEnv('GITHUB_EVENT_NAME', event);
+      const dir = module('server', { sql: ['V58__new.sql'] });
+      const result = check(dir);
+
+      expect(result.status).toBe(0);
+      expect(result.output).toContain('all versions unique');
+      expect(
+        result.output.includes(
+          '::warning::Flyway migration ordering was not checked: workflow_dispatch has no PR or merge-queue baseline; this run checks version uniqueness only.',
+        ),
+      ).toBe(event === 'workflow_dispatch');
+    },
+  );
+
+  it('enforces an explicit baseline on workflow_dispatch without a uniqueness-only warning', () => {
+    vi.stubEnv('GITHUB_EVENT_NAME', 'workflow_dispatch');
+    module('broker', { java: ['V64__published.java'] });
+    snapshot();
+    module('server', { sql: ['V58__new.sql'] });
+
+    const result = check('server', 'broker');
+
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('V58 is not above V64');
+    expect(result.output).not.toContain('::warning::');
+  });
+
   it.each([
     ['64', '58', 1],
     ['64', '65', 0],

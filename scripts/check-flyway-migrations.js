@@ -253,6 +253,11 @@ if (baseRef) {
   }
 } else {
   console.log('ordering not checked: FLYWAY_BASE_REF is unset');
+  if (process.env.GITHUB_EVENT_NAME === 'workflow_dispatch') {
+    console.warn(
+      '::warning::Flyway migration ordering was not checked: workflow_dispatch has no PR or merge-queue baseline; this run checks version uniqueness only.',
+    );
+  }
 }
 for (const { module, count, errored } of scanned) {
   if (errored || collided.has(module) || outOfOrder.has(module)) continue;
