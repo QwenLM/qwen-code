@@ -10,6 +10,8 @@ Work in progress; not an accepted or deployed feature. The intended deployment i
 
 The current implementation is explicitly `external-scratch`: Session-isolated boot-v1 workers behind an HTTP provisioner. It does **not** enable Hosted Workspace tools. Configuration rejects managed Workspace features rather than bypassing their storage and ownership checks. The following Workspace extension is a design, not implemented functionality.
 
+In the Spring server this increment allocates, attests and recovers workers but has no tool consumer. A Session without a Workspace binding has no Hosted tool profile, so the Hosted Harness gives the model no tool declarations, while each admitted Turn still warms the Session's Runtime. Each such Session therefore holds a remote worker that receives no tool calls until the provider's own TTL ends it. Remote tool execution requires the Workspace extension below; do not enable `external-scratch` in production for tool use.
+
 ## Scratch HTTP contract
 
 The Broker POSTs `provision` or `observe` relative to the configured provider base URL. Requests use a provider Bearer credential, JSON content type and accept headers, and `Cache-Control: no-store`. Redirects are disabled; request and response bodies are limited to 64 KiB. Require HTTP 200 with `protocolVersion: 1`. Network errors, timeouts, 408, 429 and 5xx are retryable; they do not establish absence or authorize replacement. Provider response bodies must not leak through public error messages. Use HTTPS for remote services and restrict access to the trusted control plane.
@@ -29,8 +31,8 @@ Provision request:
     "isolationClass": "session",
     "isolationKey": "broker-isolation-key"
   },
-  "boot": {"type": "boot", "version": 1},
-  "handle": {"requestId": "broker-minted-request"}
+  "boot": { "type": "boot", "version": 1 },
+  "handle": { "requestId": "broker-minted-request" }
 }
 ```
 
@@ -70,11 +72,11 @@ Aone allocation, SDK authentication, ingress, mounts and process supervision liv
 
 ## Verification matrix and current evidence
 
-| Layer | Required witness | What it can establish |
-| --- | --- | --- |
-| Provider unit | Original handle retained after restart; replacement/scope drift rejected; timeout unknown | Broker placement transformation and recovery classification |
-| HTTP integration | Authenticated JSON with prefix; redirect refusal; sanitized errors; bounded responses | Actual Java HTTP wire behavior |
-| Broker + real worker | Attestation and real file tools, duplicate/lost provision response and restart adoption | Original process identity and tool dispatch |
-| Public Hosted remote E2E | Workspace read/write/edit, foreground shell/approval/capture, tenant/storage mismatch and loss | User-visible central service to remote tools |
+| Layer                    | Required witness                                                                               | What it can establish                                       |
+| ------------------------ | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Provider unit            | Original handle retained after restart; replacement/scope drift rejected; timeout unknown      | Broker placement transformation and recovery classification |
+| HTTP integration         | Authenticated JSON with prefix; redirect refusal; sanitized errors; bounded responses          | Actual Java HTTP wire behavior                              |
+| Broker + real worker     | Attestation and real file tools, duplicate/lost provision response and restart adoption        | Original process identity and tool dispatch                 |
+| Public Hosted remote E2E | Workspace read/write/edit, foreground shell/approval/capture, tenant/storage mismatch and loss | User-visible central service to remote tools                |
 
 The initial production classes compiled offline before later configuration and test edits. That does not validate the current tree. New lifecycle and HTTP test sources are not executed. The module's shared local verification budget was consumed by earlier Maven dependency resolution; focused tests and full CI gates remain pending. No Aone adapter or Hosted external Workspace E2E is claimed by this increment.

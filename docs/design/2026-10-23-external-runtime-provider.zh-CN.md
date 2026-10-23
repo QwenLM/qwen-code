@@ -10,6 +10,8 @@ Issue：https://github.com/QwenLM/qwen-code/issues/15247
 
 当前实现明确命名为 `external-scratch`：它支持 Session 隔离的 boot-v1 临时 worker，**不支持 Hosted Workspace 工具**。配置层拒绝 Workspace 功能，不能通过跳过存储身份和所有权验证来让演示运行。下文的 Workspace 扩展是待实现设计。
 
+在 Spring 服务中，本增量只完成 worker 的分配、身份认证和恢复，尚无工具调用方。未绑定 Workspace 的 Session 没有 Hosted 工具 profile，Hosted Harness 不向模型声明任何工具；但每个被接纳的 Turn 仍会预热该 Session 的 Runtime。因此每个这样的 Session 都会占用一个收不到任何工具调用的远程 worker，直到 provider 自身的 TTL 结束它。远程工具执行依赖下文的 Workspace 扩展；不要为了工具调用在生产环境启用 `external-scratch`。
+
 ## Scratch HTTP 协议
 
 Broker 在配置的 provider URL 下相对请求 `provision` 和 `observe`，使用 POST、provider Bearer 凭据、JSON 请求及响应头、`Cache-Control: no-store`。不跟随重定向，请求和响应各限制 64 KiB；成功必须返回 HTTP 200 和 `protocolVersion: 1`。网络错误、超时、408、429、5xx 可重试，但不证明资源消失，也不允许替换原 worker。错误消息不透出 provider 响应体。远程服务应使用 HTTPS，仅允许受信控制面访问。
@@ -50,11 +52,11 @@ Aone SDK、分配、入口地址、挂载和进程监管留在独立适配服务
 
 ## 验证矩阵与现有证据
 
-| 层级 | 所需证据 | 能证明什么 |
-| --- | --- | --- |
-| Provider 单测 | 重启保留原 handle、拒绝替换和 scope 漂移、超时归类 UNKNOWN | placement 转换和恢复判断 |
-| HTTP 集成 | 实际鉴权 JSON、URL 前缀、重定向拒绝、错误脱敏、响应大小限制 | Java HTTP 协议行为 |
-| Broker + 真实 worker | 身份验证和文件工具、重复或丢响应、重启接管 | 原进程身份及真实工具调用 |
+| 层级                 | 所需证据                                                          | 能证明什么                             |
+| -------------------- | ----------------------------------------------------------------- | -------------------------------------- |
+| Provider 单测        | 重启保留原 handle、拒绝替换和 scope 漂移、超时归类 UNKNOWN        | placement 转换和恢复判断               |
+| HTTP 集成            | 实际鉴权 JSON、URL 前缀、重定向拒绝、错误脱敏、响应大小限制       | Java HTTP 协议行为                     |
+| Broker + 真实 worker | 身份验证和文件工具、重复或丢响应、重启接管                        | 原进程身份及真实工具调用               |
 | 公开 Hosted 远程 E2E | 文件读写编辑、前台 shell/审批/capture、租户与存储不匹配、资源丢失 | 用户使用中心服务调用远程工具的完整路径 |
 
 早期生产类曾离线编译通过，但之后已修改配置并新增测试，不能代表当前工作树通过。新增生命周期与 HTTP 测试尚未执行。前一轮 Maven 依赖解析耗尽了模块统一的本地验证预算，聚焦测试和完整 CI 门禁仍待执行。本增量没有完成 Aone 适配器，也没有取得外部 Hosted Workspace 端到端证据。
