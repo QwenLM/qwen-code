@@ -3950,8 +3950,7 @@ export function App({
     [workspace.client],
   );
   const managedCreationSkills = useMemo(() => {
-    if (managedAgentProvider?.kind !== 'java' || !skillsSourceCwd)
-      return undefined;
+    if (!managedAgentProvider || !skillsSourceCwd) return undefined;
     const sourceCwd = skillsSourceCwd;
     return {
       workspaceCwd: sourceCwd,
@@ -3979,7 +3978,7 @@ export function App({
         return snapshot.skills;
       },
     };
-  }, [managedAgentProvider?.kind, skillsSourceCwd, workspace.client]);
+  }, [managedAgentProvider, skillsSourceCwd, workspace.client]);
 
   // Multi-daemon (#13727): saved hosts stay connected read-only alongside
   // the provider that owns this App subtree; the picker and sidebar consume
@@ -22626,7 +22625,7 @@ export function App({
                         initialTab={pluginInitialTab}
                         skillsWorkspaceCwd={skillsSourceCwd}
                         onSkillsWorkspaceChange={selectSkillsWorkspace}
-                        managedSkills={managedAgentProvider?.kind === 'java'}
+                        managedSkills={managedAgentProvider !== undefined}
                         managedMcp={managedMode && managedAgentProvider ? {
                           provider: managedAgentProvider,
                           sessionId: managedSessionId,
@@ -23145,7 +23144,6 @@ export function App({
                           returnToChat();
                         }
                       }}
-                      workspaceCwd={lockedWorkspaceCwd}
                       managedAgentProvider={managedAgentProvider}
                       creationSkills={managedCreationSkills}
                       onManageSkills={() => {

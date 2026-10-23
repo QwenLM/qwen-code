@@ -98,8 +98,8 @@ class ManagedSchemaTimeContractTest {
             }
             try (var insert = connection.prepareStatement(
                     "INSERT INTO ma_session_head (tenant_key,harness_key,tenant_id,session_id,"
-                            + "harness_session_id,head_kind,gmt_create,gmt_modified,o3_backfill_pending)"
-                            + " VALUES ('tenant','harness',?,?,?,'HARNESS',?,?,FALSE)")) {
+                            + "harness_session_id,head_kind,gmt_create,gmt_modified)"
+                            + " VALUES ('tenant','harness',?,?,?,'HARNESS',?,?)")) {
                 insert.setBytes(1, ManagedSchemaKeys.identity("tenant"));
                 insert.setBytes(2, ManagedSchemaKeys.identity("harness"));
                 insert.setBytes(3, ManagedSchemaKeys.identity("harness"));

@@ -332,9 +332,9 @@ definition was revised, or a replayed delivery of a run claimed before it —
 is not that command's. The watermark and the lease behave as for any
 decided slot.
 
-`ma_schedule` gains the `gate` column and the five status columns
-(`V18__schedule_gate.sql`, appended to `ManagedSchema`'s migration list);
-`gate_last_at` joins the pinned epoch columns.
+`ma_schedule` gains the `gate` column and the five status columns in the
+V1 baseline (`V1__managed_schema.sql`), which is updated in place until the
+first formal release; `gate_last_at` joins the pinned epoch columns.
 
 ### 5.4 Approval and trust
 
@@ -367,8 +367,10 @@ the gate block under a full 16 KiB output; admission compares that against
 the 64 KiB inline resource bound, so a gated definition never commits whose
 fire could not publish its input. The stored output is cut back to the cap
 after sanitizing, which may lengthen it, so that bound holds whatever the
-sanitizer writes. The prompt budget of a gated definition is
-therefore about 16 KiB smaller.
+sanitizer writes. The block is sized for the widest output the framing can
+carry — sanitizing keeps every `"`, which JSON writes in two bytes — so the
+prompt budget of a gated definition is about 32 KiB smaller, plus the gate
+command and the framing.
 
 ### 5.6 Fault gates (FG11g)
 
@@ -498,7 +500,7 @@ One PR, stacked on #15069 (it reuses `cron-gate.ts`):
   probe's process group in the ledger).
 - managed-agent-server: `ManagedExtensionRecords`,
   `ManagedExtensionRecordStore`, `AutomationLedgerStore`,
-  `ManagedSchemaProjection`, `V18__schedule_gate.sql`, `ManagedSchema`,
+  `ManagedSchemaProjection`, the V1 schema baseline,
   `AutomationScanner`, `ManagedAutomationService`, `ApiModels`, the OpenAPI
   document, and the tests above.
 

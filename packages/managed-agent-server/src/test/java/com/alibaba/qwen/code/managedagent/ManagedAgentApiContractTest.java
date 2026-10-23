@@ -350,12 +350,6 @@ class ManagedAgentApiContractTest {
     @Autowired
     private SshWorkspaceStore sshWorkspaces;
 
-    // D7-3: present only where the deployment enables the java_durable
-    // admission profile (JavaDurableAdmissionContractTest).
-    @Autowired(required = false)
-    private com.alibaba.qwen.code.managedagent.session.JavaDurableAdmission
-            javaDurableAdmission;
-
     @Autowired
     @Qualifier("requestMappingHandlerMapping")
     private RequestMappingHandlerMapping handlerMapping;
@@ -672,11 +666,21 @@ class ManagedAgentApiContractTest {
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
         String decoded = new String(java.util.Base64.getUrlDecoder().decode(all.path("nextCursor").asText()),
                 StandardCharsets.UTF_8);
-        String legacy = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
-                decoded.substring("v2:all:".length()).getBytes(StandardCharsets.UTF_8));
+        String prefix = "v3:all:" + org.apache.commons.codec.digest.DigestUtils.sha256Hex("") + ":";
+        assertThat(decoded).startsWith(prefix);
         mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
-                .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of("cursor", legacy))))
+                .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(
+                        Map.of("cursor", all.path("nextCursor").asText()))))
                 .andExpect(status().isOk());
+        for (String oldPrefix : List.of("", "v2:all:")) {
+            String legacy = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                    (oldPrefix + decoded.substring(prefix.length())).getBytes(StandardCharsets.UTF_8));
+            mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of("cursor", legacy))))
+                    .andExpect(status().isBadRequest());
+            mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant).param("cursor", legacy))
+                    .andExpect(status().isBadRequest());
+        }
         mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
                 .contentType(MediaType.APPLICATION_JSON).content("{\"archiveState\":\"bad\"}"))
                 .andExpect(status().isBadRequest());
@@ -736,12 +740,9 @@ class ManagedAgentApiContractTest {
             assertThat(api.path("data")).hasSize(expected);
         }
         JsonNode alias = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
-                .param("include_archived", "false").param("title_query", "_%"))
+                .param("archive_state", "unarchived").param("title_query", "_%"))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
         assertThat(alias.path("data")).hasSize(1);
-        mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
-                .param("include_archived", "false").param("archive_state", "archived"))
-                .andExpect(status().isBadRequest());
         mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
                 .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
                         "titleQuery", "other", "cursor", cursor))))
@@ -2970,16 +2971,11 @@ class ManagedAgentApiContractTest {
         for (JsonNode session : List.of(publicSession, publicListed)) {
             assertThat(session.get("id").asText()).isEqualTo(sessionId);
             assertThat(session.get("agent_revision").asText()).isEqualTo("1");
-            // D7-3: durable_operations appears only where the profile is on.
             JsonNode capabilities = json("""
                     {"items":true,"snapshots":true,"artifacts":false,
                      "resync":true,"session_lifecycle":true,"tasks":true,"actions":false,"session_close":true,
                      "session_archive":true,"session_unarchive":true,"session_delete":true,"context_compression":false}
                     """);
-            if (javaDurableAdmission != null) {
-                ((com.fasterxml.jackson.databind.node.ObjectNode) capabilities)
-                        .put("durable_operations", true);
-            }
             assertThat(session.get("capabilities")).isEqualTo(capabilities);
             assertThat(session.get("replay_floor_sequence").asLong()).isZero();
             assertThat(session.get("snapshot_through_sequence").asLong())
@@ -2998,10 +2994,6 @@ class ManagedAgentApiContractTest {
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
                                  "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false}
                                 """);
-                if (javaDurableAdmission != null) {
-                    ((com.fasterxml.jackson.databind.node.ObjectNode) webCapabilities)
-                            .put("durableOperations", true);
-                }
                 assertThat(other.get("capabilities")).isEqualTo(webCapabilities);
             }
         }
@@ -3266,88 +3258,9 @@ class ManagedAgentApiContractTest {
                 .getContentAsString(StandardCharsets.UTF_8);
     }
 
-    // D7-3, profile off (the default): asking for java_durable is refused
-    // before anything is admitted, harness_confirmed answers the legacy
-    // body, and no Session advertises durable_operations.
-    @Test
-    void javaDurableAdmissionIsRefusedWhileTheProfileIsOff() throws Exception {
-        org.junit.jupiter.api.Assumptions.assumeTrue(
-                javaDurableAdmission == null);
-        String tenant = "contract-durable-off-" + UUID.randomUUID();
-        Map<String, String> drift = new TreeMap<>();
-        String sessionId = json(exchange(drift, "createSession", 202,
-                post("/v1/agents/sessions").header(TENANT, tenant)
-                        .header(IDEMPOTENCY_KEY, "durable-off-create"),
-                """
-                {"agent_id":"qwen-code","agent_revision":"1","input":[]}
-                """)).get("id").asText();
-        JsonNode session = json(exchange(drift, "getSession", 200,
-                get("/v1/agents/sessions/{id}", sessionId)
-                        .header(TENANT, tenant), null));
-        assertThat(session.path("capabilities").has("durable_operations"))
-                .isFalse();
-        for (String body : List.of("""
-                {"type":"agent.session.input.message","admission_profile":"java_durable",
-                 "input":[{"type":"input_text","text":"refused"}]}
-                """, """
-                {"type":"agent.session.cancel","admission_profile":"java_durable",
-                 "turn_id":"turn_absent"}
-                """)) {
-            assertThat(json(exchange(drift, "postSessionEvent", 400,
-                    post("/v1/agents/sessions/{id}/events", sessionId)
-                            .header(TENANT, tenant)
-                            .header(IDEMPOTENCY_KEY, "durable-off-refused"),
-                    body)).at("/error/code").asText())
-                    .isEqualTo("unsupported_feature");
-        }
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE"
-                + " tenant_id = ?", Integer.class, tenant)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE"
-                + " tenant_id = ? AND operation_kind IN ('SUBMIT_INPUT', 'CANCEL')",
-                Integer.class, tenant)).isZero();
-        JsonNode legacy = json(exchange(drift, "postSessionEvent", 202,
-                post("/v1/agents/sessions/{id}/events", sessionId)
-                        .header(TENANT, tenant)
-                        .header(IDEMPOTENCY_KEY, "durable-off-default"),
-                """
-                {"type":"agent.session.input.message","admission_profile":"harness_confirmed",
-                 "input":[{"type":"input_text","text":"default"}]}
-                """));
-        assertThat(legacy.has("operation_id")).isFalse();
-        assertThat(legacy.has("admission_stage")).isFalse();
-        String webSessionId = json(exchange(drift, "webShellCreateSession",
-                202, post(WEB_SHELL + "/sessions/create")
-                        .header(TENANT, tenant),
-                """
-                {"requestId":"durable-off","idempotencyKey":"durable-off-web",
-                 "agentId":"qwen-code","title":"web","input":[]}
-                """)).get("sessionId").asText();
-        assertThat(json(exchange(drift, "webShellSubmitTurn", 400,
-                post(WEB_SHELL + "/turns/submit").header(TENANT, tenant),
-                """
-                {"idempotencyKey":"durable-off-web-submit","sessionId":"%s",
-                 "admissionProfile":"java_durable",
-                 "input":[{"type":"input_text","text":"refused"}]}
-                """.formatted(webSessionId))).at("/error/code").asText())
-                .isEqualTo("unsupported_feature");
-        assertThat(json(exchange(drift, "webShellCancelTurn", 400,
-                post(WEB_SHELL + "/turns/cancel").header(TENANT, tenant),
-                """
-                {"idempotencyKey":"durable-off-web-cancel","sessionId":"%s",
-                 "turnId":"turn_absent","admissionProfile":"java_durable"}
-                """.formatted(webSessionId))).at("/error/code").asText())
-                .isEqualTo("unsupported_feature");
-        assertThat(drift).isEmpty();
-    }
-
-    // D7-3, profile on: an admission that asks for java_durable names the
-    // operation it saved, before the dispatcher runs; a retry under the key
-    // answers the same operation; the default stays harness_confirmed.
     @Test
     void javaDurableAdmissionNamesTheOperationItsAdmissionSaved()
             throws Exception {
-        org.junit.jupiter.api.Assumptions.assumeTrue(
-                javaDurableAdmission != null);
         String tenant = "contract-durable-on-" + UUID.randomUUID();
         Map<String, String> drift = new TreeMap<>();
         String sessionId = json(exchange(drift, "createSession", 202,
@@ -3356,12 +3269,8 @@ class ManagedAgentApiContractTest {
                 """
                 {"agent_id":"qwen-code","agent_revision":"1","input":[]}
                 """)).get("id").asText();
-        assertThat(json(exchange(drift, "getSession", 200,
-                get("/v1/agents/sessions/{id}", sessionId)
-                        .header(TENANT, tenant), null))
-                .at("/capabilities/durable_operations").asBoolean()).isTrue();
         String hold = """
-                {"type":"agent.session.input.message","admission_profile":"java_durable",
+                {"type":"agent.session.input.message",
                  "input":[{"type":"input_text","text":"hold"}]}
                 """;
         JsonNode input = json(exchange(drift, "postSessionEvent", 202,
@@ -3376,8 +3285,7 @@ class ManagedAgentApiContractTest {
         assertThat(input.get("replayed").asBoolean()).isFalse();
         String turnId = input.get("turn_id").asText();
         int cancels = awaitHeldTurn();
-        // A lost response: the retry names the same operation, whatever its
-        // latest stage; without the profile it keeps the legacy body.
+        // A lost response replays the same operation, whatever its latest stage.
         JsonNode retry = json(exchange(drift, "postSessionEvent", 202,
                 post("/v1/agents/sessions/{id}/events", sessionId)
                         .header(TENANT, tenant)
@@ -3385,22 +3293,12 @@ class ManagedAgentApiContractTest {
         assertThat(retry.get("replayed").asBoolean()).isTrue();
         assertThat(retry.get("operation_id").asText()).isEqualTo(operationId);
         assertThat(retry.get("turn_id").asText()).isEqualTo(turnId);
-        JsonNode legacyRetry = json(exchange(drift, "postSessionEvent", 202,
-                post("/v1/agents/sessions/{id}/events", sessionId)
-                        .header(TENANT, tenant)
-                        .header(IDEMPOTENCY_KEY, "durable-on-input"),
-                """
-                {"type":"agent.session.input.message",
-                 "input":[{"type":"input_text","text":"hold"}]}
-                """));
-        assertThat(legacyRetry.get("replayed").asBoolean()).isTrue();
-        assertThat(legacyRetry.has("operation_id")).isFalse();
         JsonNode cancel = json(exchange(drift, "postSessionEvent", 202,
                 post("/v1/agents/sessions/{id}/events", sessionId)
                         .header(TENANT, tenant)
                         .header(IDEMPOTENCY_KEY, "durable-on-cancel"),
                 """
-                {"type":"agent.session.cancel","admission_profile":"java_durable",
+                {"type":"agent.session.cancel",
                  "turn_id":"%s"}
                 """.formatted(turnId)));
         String cancelId = cancel.get("operation_id").asText();
@@ -3420,8 +3318,7 @@ class ManagedAgentApiContractTest {
                     .isEqualTo(expected.getValue());
             assertThat(operation.get("status").asText()).isEqualTo("completed");
         }
-        // harness_confirmed stays the default with the profile on. The
-        // fixture Harness serves one Turn per Session, so it gets its own.
+        // The fixture Harness serves one Turn per Session, so use a fresh Session.
         String plainId = json(exchange(drift, "createSession", 202,
                 post("/v1/agents/sessions").header(TENANT, tenant)
                         .header(IDEMPOTENCY_KEY, "durable-on-plain-create"),
@@ -3436,8 +3333,8 @@ class ManagedAgentApiContractTest {
                 {"type":"agent.session.input.message",
                  "input":[{"type":"input_text","text":"plain"}]}
                 """));
-        assertThat(plain.has("operation_id")).isFalse();
-        assertThat(plain.has("admission_stage")).isFalse();
+        assertThat(plain.path("operation_id").asText()).startsWith("op_");
+        assertThat(plain.path("admission_stage").asText()).isEqualTo("java_durable");
         awaitIdle(tenant, plainId);
         String webSessionId = json(exchange(drift, "webShellCreateSession",
                 202, post(WEB_SHELL + "/sessions/create")
@@ -3450,7 +3347,6 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/turns/submit").header(TENANT, tenant),
                 """
                 {"idempotencyKey":"durable-on-web-submit","sessionId":"%s",
-                 "admissionProfile":"java_durable",
                  "input":[{"type":"input_text","text":"web"}]}
                 """.formatted(webSessionId)));
         assertThat(web.get("operationId").asText()).startsWith("op_");

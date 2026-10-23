@@ -98,7 +98,7 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 
 `AutomationScanner.fire` 从应答里读 `gate`。`delivered` 照旧结算为 `fired`。`quiet`、`failed`、`blocked`、`unknown` 结算为 `skipped`，原因分别为 `gate_quiet`、`gate_failed`、`gate_failed`、`gate_unknown`，细节写入 occurrence 的账本 `last_error`（公开 API 以 `gate_status.last_error` 显示最近一条；`PublicAutomationRun` 不带细节），且不碰 journal。每次结算都在租约下把闸门状态记到定义行：`gate_last_outcome`、`gate_last_at`、`gate_quiet_since_delivery`、`gate_failures`（连续的 failed、blocked、unknown）和 `gate_last_error`，由 `PublicAutomation.gate_status` 报告。只有定义行仍处在该 occurrence 钉住的修订时状态才会更新：此后的修订已为它自己的命令重置了状态，而更早修订下的应答——定义被修订时仍在运行的探针，或修订前已认领的运行的重放投递——都不属于那条命令。水位线与租约的行为与任何已决定的槽相同。
 
-`ma_schedule` 增加 `gate` 列和五个状态列（`V18__schedule_gate.sql`，追加到 `ManagedSchema` 的迁移列表）；`gate_last_at` 加入被锚定的纪元列。
+`ma_schedule` 增加 `gate` 列和五个状态列（写入 V1 基线 `V1__managed_schema.sql`，正式发布前就地更新）；`gate_last_at` 加入被锚定的纪元列。
 
 ### 5.4 审批与信任
 
@@ -108,7 +108,7 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 
 ### 5.5 预算
 
-带闸门定义的最坏执行输入 = 无闸门预算 + 满 16 KiB 输出下的闸门块；准入拿它与 64 KiB 内联资源上限比较，所以永远不会提交一个其触发无法发布输入的带闸门定义。因此带闸门定义的提示词预算约小 16 KiB。存下的输出在净化之后会再截回上限(净化可能使其变长)，所以无论净化写成什么，这个上界都成立。
+带闸门定义的最坏执行输入 = 无闸门预算 + 满 16 KiB 输出下的闸门块；准入拿它与 64 KiB 内联资源上限比较，所以永远不会提交一个其触发无法发布输入的带闸门定义。闸门块按框架能承载的最宽输出计算——净化保留每个 `"`，JSON 把它写成两个字节——因此带闸门定义的提示词预算约小 32 KiB，再加上闸门命令和框架本身。存下的输出在净化之后会再截回上限(净化可能使其变长)，所以无论净化写成什么，这个上界都成立。
 
 ### 5.6 故障门禁（FG11g）
 
@@ -157,7 +157,7 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 
 - core：`managed-automation-record.ts`、`managed-automation-operations.ts`、夹具、`managed-session-authority.ts`（资源闭合）、`cron-gate.ts`（可配置超时）。
 - cli：`hosted-automation-session.ts`、`hosted-automation-gate.ts`（新）、`hosted-workspace-broker.ts`（`prepareReplayable`、`settledResult`）、`hosted-harness-session.ts`（路由接线）、`managed-automation-gate-tool.ts`（新，worker 工具）、`managed-runtime-tool-executor.ts`（准入，以及把探针的进程组记入 ledger）。
-- managed-agent-server：`ManagedExtensionRecords`、`ManagedExtensionRecordStore`、`AutomationLedgerStore`、`ManagedSchemaProjection`、`V18__schedule_gate.sql`、`ManagedSchema`、`AutomationScanner`、`ManagedAutomationService`、`ApiModels`、OpenAPI 文档，以及上述测试。
+- managed-agent-server：`ManagedExtensionRecords`、`ManagedExtensionRecordStore`、`AutomationLedgerStore`、`ManagedSchemaProjection`、V1 schema 基线、`AutomationScanner`、`ManagedAutomationService`、`ApiModels`、OpenAPI 文档，以及上述测试。
 
 ## 10. 待定问题
 

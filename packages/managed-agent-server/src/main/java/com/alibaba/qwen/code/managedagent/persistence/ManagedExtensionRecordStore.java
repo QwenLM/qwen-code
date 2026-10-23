@@ -349,7 +349,7 @@ public class ManagedExtensionRecordStore {
     }
 
     /**
-     * Collects the parsed records in the same pass; the legacy cache still uses the last activation
+     * Collects the parsed records in the same pass; the head projection uses the last activation
      * payload.
      */
     record ApplyResult(List<JsonNode> receipts, JsonNode lastActivation, List<JsonNode> records) {}
@@ -484,6 +484,16 @@ public class ManagedExtensionRecordStore {
                                 + ":<n> id.");
             }
             if ("activation.changed".equals(kind)) {
+                require(payload.path("activationId").isTextual()
+                        && !payload.path("activationId").textValue().isEmpty()
+                        && payload.path("activationId").textValue().length()
+                                <= ManagedSessionStoreModels.MAX_ACTIVATION_ID_CHARS,
+                        "Activation id must fit the journal head.");
+                require(payload.path("phase").isTextual()
+                        && !payload.path("phase").textValue().isEmpty()
+                        && payload.path("phase").textValue().length()
+                                <= ManagedSessionStoreModels.MAX_ACTIVATION_PHASE_CHARS,
+                        "Activation phase must fit the journal head.");
                 lastActivation = payload;
             }
             if ("tool.receipt".equals(kind)) {

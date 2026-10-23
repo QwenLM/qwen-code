@@ -9,7 +9,6 @@ import {
 import {
   projectJavaAgentEvent,
   projectJavaAgentItem,
-  toTimestamp,
 } from './java-managed-agent-event-projector';
 import { managedRequestId } from './managed-session-storage';
 import { isManagedApprovalMode } from './managed-agent-provider';
@@ -33,7 +32,6 @@ import type {
 export interface JavaManagedAgentProviderOptions
   extends JavaManagedAgentClientOptions {
   agentId?: string;
-  environmentId?: string;
   /** Include tenant and actor identity; replace this scope/provider when either changes. Token refresh alone can use getHeaders. */
   productScope?: string;
   enableWorkspaceBinding?: boolean;
@@ -155,7 +153,6 @@ export function createJavaManagedAgentProvider(
     return { sessionId: result.sessionId };
   }
   return {
-    kind: 'java',
     lifecycle: {
       submit: (kind, sessionId, command) =>
         client.lifecycleCommand(
@@ -202,7 +199,6 @@ export function createJavaManagedAgentProvider(
         client.readWorkspaceFile(request, command.signal),
     },
     canCancel: true,
-    acceptsWorkspaceCwd: false,
     titleSearch: true,
     recovery: {
       query: (sessionId, request) =>
@@ -763,7 +759,7 @@ export function createJavaManagedAgentProvider(
         },
         request.signal,
       );
-      const itemEvents = (transcript.items ?? []).flatMap(projectJavaAgentItem);
+      const itemEvents = transcript.items.flatMap(projectJavaAgentItem);
       const tailEvents = transcript.events.flatMap((event) => {
         const projected = projectJavaAgentEvent(event);
         return projected ? [projected] : [];
@@ -782,8 +778,6 @@ export function createJavaManagedAgentProvider(
           requestId: managedRequestId(),
           idempotencyKey: command.idempotencyKey,
           agentId,
-          // environmentId scopes the storageKey only: the standalone Java
-          // server 400s any non-blank value with unsupported_feature.
           title: titleFor(request.text),
           input: request.input ?? [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
@@ -806,10 +800,20 @@ export function createJavaManagedAgentProvider(
         },
         command.signal,
       );
-      if (!result.turnId) {
-        throw new Error('Managed Agent submit response is missing turnId');
+      if (
+        result.sessionId !== sessionId ||
+        !result.turnId ||
+        !result.operationId
+      ) {
+        throw new Error(
+          'Managed Agent submit response is missing admission identity',
+        );
       }
-      return { sessionId: result.sessionId, turnId: result.turnId };
+      return {
+        sessionId,
+        turnId: result.turnId,
+        operationId: result.operationId,
+      };
     },
     async cancel(sessionId, turnId, command) {
       const result = await client.cancelTurn(
@@ -818,13 +822,14 @@ export function createJavaManagedAgentProvider(
           idempotencyKey: command.idempotencyKey,
           sessionId,
           turnId,
-          ...(command.admissionProfile
-            ? { admissionProfile: command.admissionProfile }
-            : {}),
         },
         command.signal,
       );
-      if (result.sessionId !== sessionId || result.turnId !== turnId) {
+      if (
+        result.sessionId !== sessionId ||
+        result.turnId !== turnId ||
+        !result.operationId
+      ) {
         throw new Error('Managed Turn cancellation identity mismatch');
       }
       return { sessionId, turnId, operationId: result.operationId };
@@ -908,11 +913,9 @@ function toSessionSummary(
     ...(session.recovery ? { recovery: session.recovery } : {}),
     title: session.title || session.sessionId,
     workspace: session.workspace,
-    createdAt: toTimestamp(session.createdAt),
-    admittedAt: toTimestamp(
-      session.activeTurn?.submittedAt ?? session.createdAt,
-    ),
-    updatedAt: toTimestamp(session.updatedAt),
+    createdAt: session.createdAt,
+    admittedAt: session.activeTurn?.submittedAt ?? session.createdAt,
+    updatedAt: session.updatedAt,
     phase,
     runtimeReady: runtimeState === 'ready',
     runtimeState,
@@ -948,9 +951,6 @@ function toSessionSummary(
         (active || recoveryBlocked) &&
         turnStatus !== 'cancelling' &&
         session.recovery?.actions.cancel !== false,
-      ...(session.capabilities?.durableOperations === true
-        ? { durableOperations: true }
-        : {}),
       ...(workspaceTurns ? { workspaceTurns: true } : {}),
       ...(session.capabilities?.cwdChange === true ? { cwdChange: true } : {}),
       ...(session.capabilities?.modelChange === true
@@ -1168,7 +1168,7 @@ function storageKey(options: JavaManagedAgentProviderOptions): string {
   base.search = '';
   base.hash = '';
   const baseKey = `${base.origin}${base.pathname.replace(/\/+$/, '')}`;
-  const scope = options.productScope ?? options.environmentId ?? 'default';
+  const scope = options.productScope ?? 'default';
   const prefix = `${baseKey}:managed:${scope}`;
   return options.enableWorkspaceBinding
     ? JSON.stringify([

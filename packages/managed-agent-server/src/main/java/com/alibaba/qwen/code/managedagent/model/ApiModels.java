@@ -74,18 +74,10 @@ public final class ApiModels {
             @Size(max = 256) List<@NotNull Map<String, Object>> skills) {
     }
 
-    // D7-3: admission_profile asks a Turn input or cancel for the
-    // java_durable admission view; absent means harness_confirmed.
     public record SessionEventRequest(@NotBlank String type,
             @Size(max = 100) List<@Valid InputBlock> input,
-            @JsonProperty("turn_id") String turnId,
-            @Pattern(regexp = ADMISSION_PROFILES)
-            @JsonProperty("admission_profile") String admissionProfile) {
+            @JsonProperty("turn_id") String turnId) {
     }
-
-    /** The admission profiles a Turn input or cancel may ask for (D7-3). */
-    public static final String ADMISSION_PROFILES =
-            "harness_confirmed|java_durable";
 
     public record UpdateSessionRequest(
             // Single policy owner: ManagedAgentService.validRenameTitle
@@ -145,22 +137,21 @@ public final class ApiModels {
             @JsonProperty("session_unarchive") boolean sessionUnarchive,
             @JsonProperty("session_delete") boolean sessionDelete,
             @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("foreground_shell") Boolean foregroundShell,
-            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("durable_operations") Boolean durableOperations,
             @JsonProperty("context_compression") boolean contextCompression,
             @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("child_agents") Boolean childAgents) {
         public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
                 boolean sessionLifecycle, boolean tasks, boolean actions, boolean sessionClose,
                 boolean sessionArchive, boolean sessionUnarchive, boolean sessionDelete,
-                Boolean foregroundShell, Boolean durableOperations, boolean contextCompression) {
+                Boolean foregroundShell, boolean contextCompression) {
             this(items, snapshots, artifacts, resync, sessionLifecycle, tasks, actions, sessionClose,
-                    sessionArchive, sessionUnarchive, sessionDelete, foregroundShell, durableOperations, contextCompression, null);
+                    sessionArchive, sessionUnarchive, sessionDelete, foregroundShell, contextCompression, null);
         }
         public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
                 boolean sessionLifecycle, boolean tasks, boolean actions, boolean sessionClose,
                 boolean sessionArchive, boolean sessionUnarchive, boolean sessionDelete,
-                Boolean foregroundShell, Boolean durableOperations) {
+                Boolean foregroundShell) {
             this(items, snapshots, artifacts, resync, sessionLifecycle, tasks, actions, sessionClose,
-                    sessionArchive, sessionUnarchive, sessionDelete, foregroundShell, durableOperations, false);
+                    sessionArchive, sessionUnarchive, sessionDelete, foregroundShell, false);
         }
     }
 
@@ -170,27 +161,26 @@ public final class ApiModels {
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean foregroundShell,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean modelChange,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean approvalModeChange,
-            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean durableOperations,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename, boolean contextCompression,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents) {
         public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
                 boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
                 boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange, Boolean foregroundShell,
-                Boolean modelChange, Boolean approvalModeChange, Boolean durableOperations,
+                Boolean modelChange, Boolean approvalModeChange,
                 Boolean inputAttachments, Boolean rename, boolean contextCompression) {
             this(tasks, artifacts, actions, workspaceTurns, sessionClose, sessionArchive, sessionUnarchive,
                     sessionDelete, cwdChange, foregroundShell, modelChange, approvalModeChange,
-                    durableOperations, inputAttachments, rename, contextCompression, null);
+                    inputAttachments, rename, contextCompression, null);
         }
         public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
                 boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
                 boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange, Boolean foregroundShell,
-                Boolean modelChange, Boolean approvalModeChange, Boolean durableOperations,
+                Boolean modelChange, Boolean approvalModeChange,
                 Boolean inputAttachments, Boolean rename) {
             this(tasks, artifacts, actions, workspaceTurns, sessionClose, sessionArchive, sessionUnarchive,
                     sessionDelete, cwdChange, foregroundShell, modelChange, approvalModeChange,
-                    durableOperations, inputAttachments, rename, false);
+                    inputAttachments, rename, false);
         }
     }
 
@@ -418,7 +408,7 @@ public final class ApiModels {
     public record WebShellCreateRequest(@Size(max = 128) String requestId,
             @NotBlank String idempotencyKey,
             @NotBlank @Size(max = 128) String agentId,
-            String environmentId, String title,
+            String title,
             @Size(max = 100) List<@Valid InputBlock> input,
             Map<String, Object> metadata,
             JsonNode workspace, String approvalMode, Boolean planMode, String modelId,
@@ -491,14 +481,12 @@ public final class ApiModels {
     public record WebShellSubmitRequest(@Size(max = 128) String requestId,
             @NotBlank String idempotencyKey, @NotBlank String sessionId,
             @Size(max = 100) List<@Valid InputBlock> input,
-            Map<String, Object> metadata,
-            @Pattern(regexp = ADMISSION_PROFILES) String admissionProfile) {
+            Map<String, Object> metadata) {
     }
 
     public record WebShellCancelRequest(@Size(max = 128) String requestId,
             @NotBlank String idempotencyKey, @NotBlank String sessionId,
-            @NotBlank String turnId,
-            @Pattern(regexp = ADMISSION_PROFILES) String admissionProfile) {
+            @NotBlank String turnId) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

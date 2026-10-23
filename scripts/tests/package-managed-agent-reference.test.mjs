@@ -72,7 +72,7 @@ async function fixture(root) {
       'class Latest {}',
     'packages/cli/src/serve/capabilities.ts':
       "export const SERVE_PROTOCOL_VERSION = 'v1' as const;\n",
-    'packages/cli/src/serve/broker-managed-runtime-provider.ts':
+    'packages/cli/src/serve/managed-runtime-broker-client.ts':
       'export const MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION = 2 as const;\n',
     'packages/cli/src/serve/hosted-harness-contract.ts':
       "const profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? ''\n).split(',');\n",
