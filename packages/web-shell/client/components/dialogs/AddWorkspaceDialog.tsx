@@ -123,6 +123,11 @@ function repoNameFromUrl(url: string): string {
   return last.replace(/\.git$/, '').replace(/[^A-Za-z0-9._-]/g, '') || 'repo';
 }
 
+function targetBasename(value: string): string {
+  const parts = value.split(/[\\/]+/).filter(Boolean);
+  return parts.at(-1) ?? '';
+}
+
 export function AddWorkspaceDialog({
   executionMode,
   onExecutionModeChange,
@@ -160,6 +165,7 @@ export function AddWorkspaceDialog({
   );
   const cloneJobIdRef = useRef<string | undefined>(undefined);
   const cloneUnmountedRef = useRef(false);
+  const autoGitTargetRef = useRef<string | undefined>(undefined);
   const [suggestions, setSuggestions] = useState<WorkspacePathSuggestion[]>([]);
   const [suggestionsLoaded, setSuggestionsLoaded] = useState(false);
   const [suggestionsError, setSuggestionsError] = useState(false);
@@ -438,6 +444,7 @@ export function AddWorkspaceDialog({
     try {
       const picked = await onPick();
       if (!picked) return;
+      autoGitTargetRef.current = undefined;
       setGitTarget(
         `${picked.replace(/[\\/]+$/, '')}/${repoNameFromUrl(gitUrl)}`,
       );
@@ -446,6 +453,38 @@ export function AddWorkspaceDialog({
       setError(t('sidebar.addWorkspaceBrowseError'));
     }
   }, [error, gitUrl, onPick, t]);
+
+  /**
+   * Reuses the directory path as the clone parent. It only writes while the
+   * target is empty or still the value this helper produced, so a target the
+   * user edited (or picked with Browse) survives URL changes.
+   */
+  const seedGitTargetFromDirectoryPath = useCallback(
+    (url: string) => {
+      const rawParent = path.trim();
+      if (
+        !rawParent ||
+        rawParent.startsWith('ssh://') ||
+        !isAbsoluteTarget(rawParent)
+      ) {
+        return;
+      }
+      const currentTarget = gitTarget.trim();
+      const autoTarget = autoGitTargetRef.current;
+      if (currentTarget && currentTarget !== autoTarget) return;
+      const parent = rawParent === '/' ? '/' : rawParent.replace(/[\\/]+$/, '');
+      const name = url.trim() ? repoNameFromUrl(url) : '';
+      const next =
+        name && targetBasename(parent) !== name
+          ? `${parent === '/' ? '' : parent}/${name}`
+          : parent;
+      if (next !== gitTarget) {
+        setGitTarget(next);
+        autoGitTargetRef.current = next;
+      }
+    },
+    [gitTarget, path],
+  );
 
   const handleInputKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -717,9 +756,13 @@ export function AddWorkspaceDialog({
                     value={source}
                     disabled={submitting || browsing}
                     onValueChange={(value) => {
-                      setSource(value as WorkspaceSource);
+                      const nextSource = value as WorkspaceSource;
+                      setSource(nextSource);
                       setError(null);
                       setCloneUnknown(false);
+                      if (nextSource === 'git') {
+                        seedGitTargetFromDirectoryPath(gitUrl);
+                      }
                     }}
                   >
                     <SelectTrigger
@@ -967,8 +1010,12 @@ export function AddWorkspaceDialog({
                       placeholder={t('sidebar.gitCloneUrlPlaceholder')}
                       value={gitUrl}
                       onChange={(event) => {
-                        setGitUrl(event.target.value);
+                        const nextUrl = event.target.value;
+                        setGitUrl(nextUrl);
                         if (error) setError(null);
+                        if (source === 'git') {
+                          seedGitTargetFromDirectoryPath(nextUrl);
+                        }
                       }}
                       disabled={submitting || clonedCwd !== undefined}
                       autoCapitalize="off"
@@ -991,6 +1038,7 @@ export function AddWorkspaceDialog({
                         placeholder={t('sidebar.gitCloneTargetPlaceholder')}
                         value={gitTarget}
                         onChange={(event) => {
+                          autoGitTargetRef.current = undefined;
                           setGitTarget(event.target.value);
                           if (error) setError(null);
                         }}

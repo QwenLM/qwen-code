@@ -1505,4 +1505,51 @@ describe('AddWorkspaceDialog', () => {
     expect(onAdd).toHaveBeenCalledTimes(1);
     expect(onAdd).toHaveBeenCalledWith('/home/me/repo', true);
   });
+
+  it('reuses the directory path as the clone parent', async () => {
+    mount(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        gitClone={{ start: vi.fn(), poll: vi.fn(), cancel: vi.fn() }}
+      />,
+    );
+    typeInto(input(), '/home/me/src');
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+
+    expect(gitTargetInput().value).toBe('/home/me/src/repo');
+  });
+
+  it('keeps a directory path that already ends with the repository name', async () => {
+    mount(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        gitClone={{ start: vi.fn(), poll: vi.fn(), cancel: vi.fn() }}
+      />,
+    );
+    typeInto(input(), '/home/me/src/repo');
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+
+    expect(gitTargetInput().value).toBe('/home/me/src/repo');
+  });
+
+  it('does not overwrite a manually edited clone target', async () => {
+    mount(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        gitClone={{ start: vi.fn(), poll: vi.fn(), cancel: vi.fn() }}
+      />,
+    );
+    typeInto(input(), '/home/me/src');
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), '/custom/target');
+    typeInto(gitUrlInput(), 'https://example.com/org/other.git');
+
+    expect(gitTargetInput().value).toBe('/custom/target');
+  });
 });
