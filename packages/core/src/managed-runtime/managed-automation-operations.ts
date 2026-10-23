@@ -315,9 +315,19 @@ export function assertAutomationDefinition(
     automationInputBudgetBytes(definition) >
     MANAGED_AUTOMATION_LIMITS.maxInputBytes
   ) {
-    fail(
-      `Automation definition's final execution input would exceed ${MANAGED_AUTOMATION_LIMITS.maxInputBytes} bytes once wrapped; shorten the prompt.`,
-    );
+    const message = `Automation definition's final execution input would exceed ${MANAGED_AUTOMATION_LIMITS.maxInputBytes} bytes once wrapped; shorten the prompt.`;
+    // A prompt that fits without the gate's output block is refused because
+    // of the gate: a gate refusal, answered before anything commits.
+    if (
+      definition.gate !== null &&
+      automationInputBudgetBytes({ ...definition, gate: null }) <=
+        MANAGED_AUTOMATION_LIMITS.maxInputBytes
+    ) {
+      throw new AutomationGateInvalidError(
+        `${message} A gate reserves room for its output, so a gated definition's prompt must be about 32 KiB shorter.`,
+      );
+    }
+    fail(message);
   }
   return Object.freeze(definition);
 }

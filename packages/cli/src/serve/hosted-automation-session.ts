@@ -217,6 +217,9 @@ function sanitizedWithinCap(stdout: string): { stdout: string; cut: boolean } {
 /** How long a release nobody owes may hold up the fire that asks it. */
 const COURTESY_RELEASE_WAIT_MS = 2_000;
 
+/** Owed probe releases remembered at most, oldest forgotten first. */
+const OWED_GATE_RELEASES_LIMIT = 1024;
+
 /** Why a Session whose deployment pins a Hook catalog runs no gate. */
 const GATE_HOOKS_REASON =
   'the deployment pins a Hook catalog for this Session, and a probe does not run through its Hooks yet (PreToolUse and PermissionRequest would never see the gate command)';
@@ -339,6 +342,8 @@ export class HostedAutomationSession {
   /**
    * Probes this process ran whose attempt ended without the Session's
    * release (`<runId>|<revision>`): the next fire of that occurrence owes it.
+   * Bounded, oldest first: an occurrence the scanner gave up on never fires
+   * again to settle its entry.
    */
   private readonly owedGateReleases = new Set<string>();
 
@@ -823,7 +828,13 @@ export class HostedAutomationSession {
           return result;
         },
         (cause: unknown) => {
+          this.owedGateReleases.delete(owed);
           this.owedGateReleases.add(owed);
+          if (this.owedGateReleases.size > OWED_GATE_RELEASES_LIMIT) {
+            this.owedGateReleases.delete(
+              this.owedGateReleases.values().next().value!,
+            );
+          }
           throw cause;
         },
       );

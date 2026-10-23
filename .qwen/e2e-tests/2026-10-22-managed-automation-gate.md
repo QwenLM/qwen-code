@@ -11,9 +11,10 @@ a deployment.
 A `qwen serve --profile hosted-harness` behind a managed-agent server with
 `qwen.managed-agent.automation.enabled=true`, the Runtime Broker on, and a
 Workspace whose Session uses a Shell profile (`hosted-workspace-shell/1`).
-Before this change `POST /v1/agent-automations` refuses a `gate` field
-(`400 invalid_automation` from the Harness's closed definition), and every
-slot of an every-minute definition produces a model turn.
+Before this change `POST /v1/agent-automations` ignores a `gate` field (the
+request model does not know it, and unknown request fields are dropped), so
+the definition is created ungated and every slot of an every-minute
+definition produces a model turn.
 
 ## Manual check
 

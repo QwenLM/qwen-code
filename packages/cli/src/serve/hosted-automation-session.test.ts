@@ -1669,8 +1669,8 @@ describe('hosted automation gates', () => {
   });
 
   it('cuts the stored output back to the cap when sanitizing lengthens it', async () => {
-    // A defanged tag gains a character: 16 KiB of them would outgrow the
-    // budget the definition was admitted under.
+    // An escaped `<` gains three characters: 16 KiB of tags would outgrow
+    // the budget the definition was admitted under.
     const harness = await createHarness();
     const stdout = '<result>'.repeat((16 * 1024) / 8);
     const gate = scriptedGate([
@@ -1692,7 +1692,7 @@ describe('hosted automation gates', () => {
           16 * 1024,
         );
         expect(stored.truncated).toBe(true);
-        expect(stored.stdout.startsWith('<\u200Bresult>')).toBe(true);
+        expect(stored.stdout.startsWith('&lt;result>')).toBe(true);
       },
       { gate: gate.runner },
     );
