@@ -20,10 +20,12 @@ import {
   isNegationExcluded,
   affectedWorkspaces,
   buildSetFor,
+  declaredBuildHeapMb,
   hasUnmodeledWorkspaceGlob,
   readWorkspaceGlobs,
   readRootPackage,
   readWorkspacePackages,
+  rootBuildFansOut,
   scriptFansOut,
   type WorkspacePackage,
 } from './workspaces.js';
@@ -435,6 +437,103 @@ describe('scriptFansOut', () => {
     expect(scriptFansOut(undefined)).toBe(false);
     expect(scriptFansOut(42)).toBe(false);
     expect(scriptFansOut(null)).toBe(false);
+  });
+
+  it("detects pnpm's -r/--recursive, and flags that end at a quote", () => {
+    for (const script of [
+      'pnpm -r run build',
+      'corepack pnpm -r ${filter} run build',
+      'pnpm --recursive test',
+      "execSync('npm run build --workspaces')",
+    ]) {
+      expect(scriptFansOut(script)).toBe(true);
+    }
+    for (const script of [
+      'pnpm run build',
+      'pnpm --filter @x/core run build',
+      'pnpm exec mocha -r ts-node/register',
+      'rm -r dist',
+      "execSync('vitest run --workspaces=false')",
+    ]) {
+      expect(scriptFansOut(script)).toBe(false);
+    }
+  });
+});
+
+describe('rootBuildFansOut', () => {
+  const withRoot = (files: Record<string, string>): string => {
+    const root = mkdtempSync(join(tmpdir(), 'ws-'));
+    for (const [rel, text] of Object.entries(files)) {
+      mkdirSync(join(root, rel, '..'), { recursive: true });
+      writeFileSync(join(root, rel), text);
+    }
+    return root;
+  };
+
+  it('follows `node <file>` into a local build script that fans out', () => {
+    // This repo's own root build: the fan-out lives in scripts/build.js.
+    const root = withRoot({
+      'scripts/build.js':
+        "execSync(`corepack pnpm -r ${filter} run build`, { stdio: 'inherit' });",
+    });
+    expect(
+      rootBuildFansOut(
+        root,
+        'cross-env NODE_OPTIONS="--max-old-space-size=6144" node scripts/build.js',
+      ),
+    ).toBe(true);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("is false for a build script that compiles the root's own sources", () => {
+    const root = withRoot({
+      'scripts/build.js': "execSync('tsc -p tsconfig.json');",
+    });
+    expect(rootBuildFansOut(root, 'node scripts/build.js')).toBe(false);
+    expect(rootBuildFansOut(root, 'tsc -p .')).toBe(false);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reads nothing outside the root, and treats an unreadable script as no fan-out', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'ws-'));
+    const root = join(parent, 'repo');
+    mkdirSync(root);
+    writeFileSync(join(parent, 'outside.js'), 'pnpm -r run build');
+    expect(rootBuildFansOut(root, 'node ../outside.js')).toBe(false);
+    expect(rootBuildFansOut(root, `node ${join(parent, 'outside.js')}`)).toBe(
+      false,
+    );
+    expect(rootBuildFansOut(root, 'node scripts/missing.js')).toBe(false);
+    expect(rootBuildFansOut(root, undefined)).toBe(false);
+    rmSync(parent, { recursive: true, force: true });
+  });
+});
+
+describe('declaredBuildHeapMb', () => {
+  const rootWithBuild = (build: string): string => {
+    const root = mkdtempSync(join(tmpdir(), 'ws-'));
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', scripts: { build } }),
+    );
+    return root;
+  };
+
+  it("reads the heap the root's build script declares", () => {
+    const root = rootWithBuild(
+      'cross-env NODE_OPTIONS="--max-old-space-size=6144" node scripts/build.js',
+    );
+    expect(declaredBuildHeapMb(root)).toBe(6144);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('is undefined when the root build declares no heap, or there is no root build', () => {
+    const root = rootWithBuild('tsc --build');
+    expect(declaredBuildHeapMb(root)).toBeUndefined();
+    rmSync(root, { recursive: true, force: true });
+    const empty = mkdtempSync(join(tmpdir(), 'ws-'));
+    expect(declaredBuildHeapMb(empty)).toBeUndefined();
+    rmSync(empty, { recursive: true, force: true });
   });
 });
 

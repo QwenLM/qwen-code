@@ -71,6 +71,7 @@ import {
   type ReviewToolchainAdapter,
 } from './lib/toolchain.js';
 import { type TestScope } from './lib/workspace-scope.js';
+import { declaredBuildHeapMb } from './lib/workspaces.js';
 
 /**
  * The root toolchains build-test can select. One today; the registry exists so
@@ -318,16 +319,30 @@ export function trimOutput(s: string): string {
  * when they run explicit build/bundle steps after npm ci." In a TUI A/B on PR
  * #6866 the install-time full build was the single largest thing left in Agent 7.
  * Harmless on any repo that does not read it.
+ *
+ * `heapMb` is the heap a build command gets when `NODE_OPTIONS` does not
+ * already set one — see `declaredBuildHeapMb`. A Web Shell review cannot set
+ * it from outside: `qwen serve` drops an inherited `NODE_OPTIONS`.
  */
 export function buildRunEnv(
   base: NodeJS.ProcessEnv = process.env,
+  heapMb?: number,
 ): NodeJS.ProcessEnv {
-  return {
+  const env: NodeJS.ProcessEnv = {
     ...base,
     CI: '1',
     npm_config_yes: 'true',
     QWEN_SKIP_PREPARE: '1',
   };
+  const nodeOptions = base['NODE_OPTIONS'] ?? '';
+  if (
+    heapMb !== undefined &&
+    !/--max[-_]old[-_]space[-_]size/.test(nodeOptions)
+  ) {
+    env['NODE_OPTIONS'] =
+      `${nodeOptions} --max-old-space-size=${heapMb}`.trim();
+  }
+  return env;
 }
 
 /**
@@ -431,7 +446,10 @@ export function run(
         maxBuffer: 64 * 1024 * 1024,
         // A build that asks a question is a build that hangs until the deadline.
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: buildRunEnv(),
+        env: buildRunEnv(
+          process.env,
+          kind === 'build' ? declaredBuildHeapMb(cwd) : undefined,
+        ),
       });
   if (boxed && boxedRunLeftContainer(r.status)) {
     // The deadline killed the CLIENT; the container outlives it — see the
@@ -509,7 +527,12 @@ interface BuildTestArgs {
    * hard to force out of real npm — chiefly the one that cost a live review: an
    * install that exits non-zero and leaves a working `node_modules` behind.
    */
-  exec?: (command: string, cwd: string, timeoutMs: number) => CommandResult;
+  exec?: (
+    command: string,
+    cwd: string,
+    timeoutMs: number,
+    kind?: CommandKind,
+  ) => CommandResult;
 }
 
 /** The plan's fetched commit, when it has one — a local plan does not. */

@@ -123,6 +123,24 @@ describe('buildRunEnv', () => {
     buildRunEnv(base);
     expect(base).toEqual({ PATH: '/x' });
   });
+
+  it('gives a build the declared heap, keeping any NODE_OPTIONS already set', () => {
+    expect(buildRunEnv({}, 6144)['NODE_OPTIONS']).toBe(
+      '--max-old-space-size=6144',
+    );
+    expect(
+      buildRunEnv({ NODE_OPTIONS: '--enable-source-maps' }, 6144)[
+        'NODE_OPTIONS'
+      ],
+    ).toBe('--enable-source-maps --max-old-space-size=6144');
+    // An operator's own heap wins over the declared one.
+    expect(
+      buildRunEnv({ NODE_OPTIONS: '--max-old-space-size=8192' }, 6144)[
+        'NODE_OPTIONS'
+      ],
+    ).toBe('--max-old-space-size=8192');
+    expect(buildRunEnv({})['NODE_OPTIONS']).toBeUndefined();
+  });
 });
 
 describe('run (capture-time failing-file measurement)', () => {
@@ -171,6 +189,40 @@ describe('run (capture-time failing-file measurement)', () => {
 
       expect(r.failingFiles).toBeUndefined();
       expect('failingFiles' in r).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    "hands a build — and only a build — the root build's declared heap",
+    () => {
+      // A scoped `npm run build --workspace=…` bypasses the root script that
+      // sets the heap, and `packages/cli`'s compile needs more than the
+      // default. Pinned empty: this repo's root `test` script sets its own
+      // heap, which would otherwise mask the one under test.
+      vi.stubEnv('NODE_OPTIONS', '');
+      const root = mkdtempSync(join(tmpdir(), 'bt-heap-'));
+      try {
+        writeFileSync(
+          join(root, 'package.json'),
+          JSON.stringify({
+            name: 'r',
+            scripts: {
+              build:
+                'cross-env NODE_OPTIONS="--max-old-space-size=6144" node b.js',
+            },
+          }),
+        );
+        const probe = 'node -e "console.log(process.env.NODE_OPTIONS)"';
+        expect(run(probe, root, 30_000, 'build').output).toContain(
+          '--max-old-space-size=6144',
+        );
+        expect(run(probe, root, 30_000, 'test').output).not.toContain(
+          'max-old-space-size',
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        vi.unstubAllEnvs();
+      }
     },
   );
 });
@@ -1783,6 +1835,100 @@ describe('runBuildTest', () => {
     // The root's NON-fan-out test still runs as a dependent.
     expect(calls).toContain('npm test');
     expect(rep.ok).toBe(true);
+  });
+
+  it('skips a root BUILD that hands off to a build script fanning out with `pnpm -r`', () => {
+    // This repo's shape since the pnpm migration: the root depends on its
+    // members, and its build is `node scripts/build.js`, which runs every
+    // workspace's build. Running it after the scoped loop rebuilt the whole
+    // monorepo and spent the rest of the budget before any suite started.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: {
+          build:
+            'cross-env NODE_OPTIONS="--max-old-space-size=6144" node scripts/build.js',
+          test: 'exit 0',
+        },
+        devDependencies: { '@x/core': '*' },
+      }),
+    );
+    mkdirSync(join(root, 'scripts'));
+    writeFileSync(
+      join(root, 'scripts', 'build.js'),
+      "execSync('corepack pnpm -r run build', { stdio: 'inherit' });\n",
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    for (const island of ['i1', 'i2', 'i3']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { test: 'exit 0' },
+      });
+    }
+    writePlan(['packages/core/src/a.ts']);
+
+    const calls: Array<[string, string | undefined]> = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command, _cwd, _timeoutMs, kind) => {
+        calls.push([command, kind]);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+    expect(rep.buildSet).toEqual(['packages/core']);
+    expect(calls.map(([c]) => c)).not.toContain('npm run build');
+    // Builds are marked as builds — that is what hands them the heap.
+    expect(calls).toContainEqual([
+      'npm run build --workspace="packages/core"',
+      'build',
+    ]);
+    expect(rep.ok).toBe(true);
+  });
+
+  it('reports a build that ran out of JavaScript heap as infrastructure, not a compile error', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => ({
+        command,
+        exitCode: command.startsWith('npm run build') ? 134 : 0,
+        seconds: 1,
+        timedOut: false,
+        output: command.startsWith('npm run build')
+          ? 'FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory\nError: Command failed: tsc --build'
+          : '',
+      }),
+    });
+    expect(rep.ok).toBe(false);
+    expect(rep.note).toContain('ran out of JavaScript heap');
+    expect(rep.note).toContain('not a defect in the diff');
+    expect(rep.note).not.toContain('Correlate');
   });
 
   it('carries the caveat on a FAILURE note too — the note is what the brief renders first', () => {

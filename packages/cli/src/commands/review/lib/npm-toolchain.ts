@@ -21,6 +21,7 @@ import {
   readWorkspaceGlobs,
   readWorkspacePackages,
   reverseDependencyClosure,
+  rootBuildFansOut,
   scriptFansOut,
   type WorkspacePackage,
 } from './workspaces.js';
@@ -903,14 +904,15 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   const built = new Set<string>();
   const widened = new Set<string>();
   // A root build that fans out over the workspaces (`npm run build
-  // --workspaces`) is an aggregator: it produces no artifacts of its own, the
-  // scoped loop already builds the members it drives, and as one bare command
-  // it is exactly the whole-monorepo build this module exists to stop
-  // running. Only a NON-fan-out root build — one that compiles the root's own
-  // sources — is worth its deadline.
+  // --workspaces`, or a build script that runs `pnpm -r … run build`) is an
+  // aggregator: it produces no artifacts of its own, the scoped loop already
+  // builds the members it drives, and as one bare command it is exactly the
+  // whole-monorepo build this module exists to stop running. Only a
+  // NON-fan-out root build — one that compiles the root's own sources — is
+  // worth its deadline.
   const rootBuildRuns =
     !!rootPkg?.scripts.includes('build') &&
-    !scriptFansOut(rootPkg.scriptsText['build']);
+    !rootBuildFansOut(root, rootPkg.scriptsText['build']);
   // One predicate for both the loop skip and the reported set: a fan-out
   // root's build does not run — never in single-root mode, where the root is
   // the only package there is.
@@ -955,6 +957,7 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
         buildCommand(dir),
         root,
         Math.min(perCommandMs, remainingMs()),
+        'build',
       );
       results.build.push(r);
       if (r.timedOut) results.timedOut.push(r.command);
@@ -993,9 +996,12 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       results.note = failure.timedOut
         ? `\`${failure.command}\` ran out of time (${deadlineSecs(failure)}s). That is an ` +
           'infrastructure result, not a defect in the diff — report it as informational.'
-        : `\`${failure.command}\` failed. Correlate the errors below with the diff: a ` +
-          'compile error in a file the PR changed is a Critical; one in a file it did not ' +
-          'touch is a pre-existing failure, and belongs in the terminal, not on the PR.';
+        : /JavaScript heap out of memory/.test(failure.output)
+          ? `\`${failure.command}\` ran out of JavaScript heap. That is an ` +
+            'infrastructure result, not a defect in the diff — report it as informational.'
+          : `\`${failure.command}\` failed. Correlate the errors below with the diff: a ` +
+            'compile error in a file the PR changed is a Critical; one in a file it did not ' +
+            'touch is a pre-existing failure, and belongs in the terminal, not on the PR.';
       results.buildSet = (
         rootBuildSkipped ? set.filter((d) => d !== '.') : set
       ).filter((d) => !notBuilt.includes(d));

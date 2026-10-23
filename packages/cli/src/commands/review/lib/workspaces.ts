@@ -241,17 +241,65 @@ export function readRootPackage(root: string): RootPackage | null {
  * run includes it); a fan-out root BUILD is skipped by the build loop because
  * an aggregator produces no artifacts of its own — the scoped loop already
  * builds the members it drives. Detected from the script text: the
- * `--workspaces` flag (and npm's `-ws`/`--ws` shorthands) is the fan-out;
- * `-w`/`--workspace` (singular) deliberately does NOT match, and neither does
- * an explicit opt-OUT like `--workspaces=false` — the flag must stand alone
- * (whitespace or end), not merely prefix-match. Other aggregators (turbo, nx,
+ * `--workspaces` flag (and npm's `-ws`/`--ws` shorthands) is the fan-out, and
+ * so is pnpm's `-r`/`--recursive` as pnpm's own first argument (a later `-r`
+ * belongs to the command pnpm runs, like mocha's); `-w`/`--workspace`
+ * (singular) deliberately does NOT match, and neither does an explicit
+ * opt-OUT like `--workspaces=false` — the flag must stand alone (whitespace,
+ * a quote, or end), not merely prefix-match. Other aggregators (turbo, nx,
  * lerna) are not modeled and run as written.
  */
 export function scriptFansOut(text: unknown): boolean {
   return (
     typeof text === 'string' &&
-    /(^|\s)(--workspaces(?=\s|$)|--?ws(?=\s|$))/.test(text)
+    (/(^|[\s'"`])(--workspaces|--?ws)(?=[\s'"`]|$)/.test(text) ||
+      /\bpnpm\s+(-r|--recursive)(?=[\s'"`]|$)/.test(text))
   );
+}
+
+/** `node <file>` in a script: the local build script it hands off to. */
+const NODE_SCRIPT_RE = /(?:^|[\s;&|])node\s+([\w@./-]+\.[cm]?js)(?=[\s;&|]|$)/g;
+
+/**
+ * Does the root's `build` fan out — in its own text, or in a local script it
+ * runs with `node <file>`?
+ *
+ * The second shape is where a monorepo's root build lives once the fan-out
+ * moves into a build script (`node scripts/build.js`, which runs `pnpm -r …
+ * run build`), and the script text alone cannot show it. Treating that root
+ * build as one that compiles the root's own sources runs the whole-monorepo
+ * build after the scoped loop has already built every member — measured on
+ * this repo, it spent the rest of the whole-call budget and no suite ran. A
+ * path that climbs out of the root is not followed.
+ */
+export function rootBuildFansOut(root: string, text: unknown): boolean {
+  if (typeof text !== 'string') return false;
+  if (scriptFansOut(text)) return true;
+  for (const [, file] of text.matchAll(NODE_SCRIPT_RE)) {
+    if (file.split('/').includes('..')) continue;
+    try {
+      if (scriptFansOut(readFileSync(join(root, file), 'utf8'))) return true;
+    } catch {
+      // Unreadable is not evidence of a fan-out: the build runs as written.
+    }
+  }
+  return false;
+}
+
+/**
+ * The V8 heap the root's `build` script declares for its compile
+ * (`--max-old-space-size=<MB>`), or undefined when it declares none.
+ *
+ * A scoped build runs each member's own `build` and so bypasses the root
+ * script — and with it the heap the project says its compile needs. This
+ * repo's root build sets 6144 MB, and `packages/cli`'s `tsc --build` peaks
+ * above Node's ~4 GB default, so the scoped build of that one package died of
+ * heap exhaustion while the root build of the same tree passes.
+ */
+export function declaredBuildHeapMb(root: string): number | undefined {
+  const text = readRootPackage(root)?.scriptsText['build'];
+  const mb = text?.match(/--max[-_]old[-_]space[-_]size=(\d+)/)?.[1];
+  return mb ? Number(mb) : undefined;
 }
 
 /** The manifest fields this module reads. */
