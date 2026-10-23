@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -94,7 +95,7 @@ async function createHarness(): Promise<Harness> {
     transcriptPath,
   });
   const authority = await LocalManagedSessionAuthority.open({
-    lease,
+    journal: LocalJsonlManagedSessionJournalStore.fromLease(lease, sessionKey),
     sessionKey,
     cwd: projectRoot,
     version: 'test',
@@ -855,7 +856,10 @@ describe('managed session message projection', () => {
         transcriptPath: harness.transcriptPath,
       });
       const reopened = await LocalManagedSessionAuthority.open({
-        lease,
+        journal: LocalJsonlManagedSessionJournalStore.fromLease(
+          lease,
+          sessionKey,
+        ),
         sessionKey,
         cwd: '/workspace',
         version: 'test',
@@ -1067,7 +1071,10 @@ describe('managed session message projection', () => {
       try {
         await expect(
           LocalManagedSessionAuthority.open({
-            lease,
+            journal: LocalJsonlManagedSessionJournalStore.fromLease(
+              lease,
+              sessionKey,
+            ),
             sessionKey,
             cwd: '/workspace',
             version: 'test',
@@ -1193,7 +1200,10 @@ describe('managed session message projection', () => {
         transcriptPath: harness.transcriptPath,
       });
       const reopened = await LocalManagedSessionAuthority.open({
-        lease,
+        journal: LocalJsonlManagedSessionJournalStore.fromLease(
+          lease,
+          sessionKey,
+        ),
         sessionKey,
         cwd: '/workspace',
         version: 'test',
@@ -1309,7 +1319,10 @@ describe('managed session message projection', () => {
       sessionKey,
     });
     const reopened = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',

@@ -22,7 +22,7 @@ describe('Managed standalone application', () => {
   let root: Root;
   const fetch = vi.fn();
   const renderShell = vi.fn((provider: ManagedAgentProvider) => (
-    <div>Local and Managed: {provider.kind}</div>
+    <div>Local and Managed: {String(provider.canCancel)}</div>
   ));
 
   beforeEach(() => {
@@ -87,7 +87,7 @@ describe('Managed standalone application', () => {
         redirect: 'error',
       }),
     );
-    expect(container.textContent).toBe('Local and Managed: java');
+    expect(container.textContent).toBe('Local and Managed: true');
     const provider = renderShell.mock.calls.at(-1)?.[0];
     expect(provider?.workspaceBinding?.agentId).toBe('qwen-code');
     expect(provider?.storageKey).toBe(
@@ -229,7 +229,7 @@ describe('Managed standalone application', () => {
     );
     expect(renderShell).not.toHaveBeenCalled();
     await act(async () => container.querySelector('button')?.click());
-    expect(container.textContent).toBe('Local and Managed: java');
+    expect(container.textContent).toBe('Local and Managed: true');
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 });

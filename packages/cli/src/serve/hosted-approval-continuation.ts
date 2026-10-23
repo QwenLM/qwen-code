@@ -31,7 +31,13 @@ import {
 import { hostedRuntimeSessionId } from './hosted-workspace-broker.js';
 import { readHostedTurnApprovalSelection } from './hosted-approval-selection.js';
 
-const NATIVE_TOOLS = new Set(['read_file', 'write_file', 'edit', 'glob']);
+const NATIVE_TOOLS = new Set([
+  'read_file',
+  'write_file',
+  'edit',
+  'glob',
+  'web_fetch',
+]);
 
 export interface HostedNativePlannedCall {
   readonly call: ToolCallRequestInfo;

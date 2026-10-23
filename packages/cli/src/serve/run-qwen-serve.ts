@@ -3466,6 +3466,16 @@ async function runQwenServeImpl(
   const hostedCsiSessionStoreUrl =
     optsIn.hostedCsiSessionStoreUrl ??
     process.env[HOSTED_CSI_SESSION_STORE_URL_ENV];
+  const managedRuntimeBrokerUrl =
+    optsIn.managedRuntimeBrokerUrl ??
+    (optsIn.profile === 'hosted-harness'
+      ? process.env['QWEN_HOSTED_HARNESS_BROKER_URL']
+      : undefined);
+  const managedRuntimeBrokerToken =
+    optsIn.managedRuntimeBrokerToken ??
+    (optsIn.profile === 'hosted-harness'
+      ? process.env['QWEN_HOSTED_HARNESS_BROKER_TOKEN']
+      : undefined);
   validateHostedHarnessProfile({
     ...optsIn,
     token,
@@ -3473,6 +3483,8 @@ async function runQwenServeImpl(
       optsIn.profile === 'hosted-harness' ? true : optsIn.requireAuth,
     hostedHarnessCapabilityDigest,
     hostedCsiSessionStoreUrl,
+    managedRuntimeBrokerUrl,
+    managedRuntimeBrokerToken,
   });
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
   const launchMemoryProjectScopeValue =
@@ -3610,6 +3622,8 @@ async function runQwenServeImpl(
     token,
     hostedHarnessCapabilityDigest,
     hostedCsiSessionStoreUrl,
+    managedRuntimeBrokerUrl,
+    managedRuntimeBrokerToken,
     promptDeadlineMs,
     writerIdleTimeoutMs,
     workspace: rawWorkspace,
@@ -6194,6 +6208,7 @@ async function runQwenServeImpl(
         cron,
         prompt,
         recurring,
+        gate,
         assertCallerPromptActive,
       }) => {
         const targetBridge = getBridge();
@@ -6221,10 +6236,11 @@ async function runQwenServeImpl(
               cron,
               prompt,
               recurring,
+              ...(gate !== undefined ? { gate } : {}),
             },
             { source: 'cron-tool', assertCallerPromptActive },
           );
-        return { id: task.id, cron: task.cron };
+        return { id: task.id, cron: task.cron, gate: task.gate ?? null };
       };
     // Late-binds the bridge (constructed just below) via `() => bridgeRef`. Only
     // wired on the daemon-created bridge — an injected `deps.bridge` (embed/test)

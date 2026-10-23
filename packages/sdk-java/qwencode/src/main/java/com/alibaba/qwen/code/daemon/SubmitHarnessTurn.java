@@ -42,25 +42,11 @@ public final class SubmitHarnessTurn {
         this.promptContent = Collections.unmodifiableList(content);
         this.payloadDigest = HostedHarnessClient.requireDigest(
                 builder.payloadDigest, "payloadDigest");
-        // The hosted route recomputes the digest over the received prompt's
-        // key order before any replay check, so the digest must cover the
-        // exact bytes the wire carries. New digests are minted over the
-        // canonical (key-sorted) form; a digest persisted by a build that
-        // predates canonicalization covers the as-built key order instead,
-        // and neither the stored digest nor the stored input may be
-        // rewritten. Accept that legacy shape and keep it on the wire, or
-        // recovering such a turn row fails this self-check before any
-        // request is sent.
-        if (computePayloadDigest(this.promptContent).equals(
-                this.payloadDigest)) {
-            this.wirePromptContent = canonicalForDigest(this.promptContent);
-        } else if (digestOver(this.promptContent).equals(
-                this.payloadDigest)) {
-            this.wirePromptContent = this.promptContent;
-        } else {
+        if (!computePayloadDigest(this.promptContent).equals(this.payloadDigest)) {
             throw new IllegalArgumentException(
                     "payloadDigest does not match promptContent");
         }
+        this.wirePromptContent = canonicalForDigest(this.promptContent);
         this.deadlineMillis = builder.deadlineMillis;
         this.modelSelection = builder.modelSelection;
         this.approvalSelection = builder.approvalSelection;
