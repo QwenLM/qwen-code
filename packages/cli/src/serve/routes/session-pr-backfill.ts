@@ -56,6 +56,14 @@ export interface SessionPrBackfillOptions {
    * daemon uses {@link defaultAoneMrBackend}.
    */
   aoneBackend?: AoneMrBackend;
+  /**
+   * A `/review` command from a prompt the daemon has just admitted. Its
+   * mentions are bound directly instead of being discovered by the
+   * transcript scan: the live turn's user record may not be on disk yet, and
+   * the badge must not wait for a later sweep. When set, no other session is
+   * scanned.
+   */
+  liveReview?: { sessionId: string; rawCommand: string };
 }
 
 // `--worktree=#<N>` launches persist slug `pr-<N>` with branch
@@ -154,6 +162,53 @@ interface BackfillCandidate {
 const REVIEW_COMMAND_PATTERN =
   /^\s*\/review(?:[ \t]+#?(\d{1,9})(?![\w./-])|[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d)))/;
 
+/**
+ * Longest prompt the grammar scans. The lazy URL alternative in
+ * `REVIEW_COMMAND_PATTERN` backtracks quadratically past this size, and the
+ * live hook runs the match on the synchronous prefix of every admitted
+ * prompt. 16 KiB matches `MID_TURN_MESSAGE_MAX_LENGTH` and leaves room above
+ * the 2048-char `SESSION_PR_URL_MAX_LENGTH` for flags.
+ */
+const REVIEW_COMMAND_MAX_LENGTH = 16 * 1024;
+
+// The URL form names the repo it reviewed; it is repo-gated once gh's page
+// key is known (see backfillWorkspaceSessionPrs) rather than here.
+function parseReviewCommand(prompt: string): {
+  mention?: { number: number; bare: boolean };
+  urlForm?: { number: number; url: string };
+} {
+  if (prompt.length > REVIEW_COMMAND_MAX_LENGTH) return {};
+  const match = REVIEW_COMMAND_PATTERN.exec(prompt);
+  if (!match) return {};
+  const bareNumber = match[1];
+  if (bareNumber !== undefined) {
+    // `\d{1,9}` admits 0; PR 0 does not exist and the sidecar write
+    // declines it, so it must never count as a binding.
+    return Number(bareNumber) > 0
+      ? { mention: { number: Number(bareNumber), bare: true } }
+      : {};
+  }
+  const url = match[2];
+  const urlNumber = match[3];
+  if (url === undefined || urlNumber === undefined) return {};
+  const number = Number(urlNumber);
+  return number > 0
+    ? { mention: { number, bare: false }, urlForm: { number, url } }
+    : {};
+}
+
+/** The single-command shape of {@link collectReviewedPrNumbers}. */
+function liveReviewTargets(prompt: string): {
+  mentions: ReadonlyArray<{ number: number; bare: boolean }>;
+  reviewedUrlForms: ReadonlyArray<{ number: number; url: string }>;
+} {
+  const parsed = parseReviewCommand(prompt);
+  return {
+    mentions: parsed.mention ? [parsed.mention] : [],
+    reviewedUrlForms: parsed.urlForm ? [parsed.urlForm] : [],
+  };
+}
+
 // Only the prompt the user typed counts: assistant prose, tool calls, and
 // tool results (read_file echoes of fixtures/docs) quote `/review <N>`
 // without requesting one, and the parts after the first carry @-imported
@@ -163,8 +218,6 @@ const REVIEW_COMMAND_PATTERN =
 // `/review <N>` survives only in the `slash_command` system record's
 // `rawCommand` — read that when present, falling back to the user record's
 // first text part (the daemon-provided prompt path carries no payload).
-// The URL form names the repo it reviewed; it is repo-gated once gh's page
-// key is known (see backfillWorkspaceSessionPrs) rather than here.
 function collectReviewedPrNumbers(raw: string): {
   mentions: ReadonlyArray<{ number: number; bare: boolean }>;
   reviewedUrlForms: ReadonlyArray<{ number: number; url: string }>;
@@ -214,22 +267,11 @@ function collectReviewedPrNumbers(raw: string): {
       }
     }
     if (prompt === undefined) continue;
-    const match = REVIEW_COMMAND_PATTERN.exec(prompt);
-    if (!match) continue;
-    const bareNumber = match[1];
-    if (bareNumber !== undefined) {
-      // `\d{1,9}` admits 0; PR 0 does not exist and the sidecar write
-      // declines it, so it must never count as a binding.
-      if (Number(bareNumber) > 0) noteMention(Number(bareNumber), true);
-      continue;
+    const parsed = parseReviewCommand(prompt);
+    if (parsed.mention) {
+      noteMention(parsed.mention.number, parsed.mention.bare);
     }
-    const url = match[2];
-    const urlNumber = match[3];
-    if (url === undefined || urlNumber === undefined) continue;
-    if (Number(urlNumber) > 0) {
-      noteMention(Number(urlNumber), false);
-      urlForms.push({ number: Number(urlNumber), url });
-    }
+    if (parsed.urlForm) urlForms.push(parsed.urlForm);
   }
   return { mentions, reviewedUrlForms: urlForms };
 }
@@ -288,13 +330,32 @@ export async function backfillWorkspaceSessionPrs(
     runtime.workspaceCwd,
     runtime.env.effectiveEnv,
   );
+  const live = options.liveReview;
+  // The live turn may not have a transcript yet; resolve its archive state
+  // best-effort and default to active, matching the shell post-hook.
+  let liveArchiveState: SessionArchiveState = 'active';
+  if (live) {
+    try {
+      if (
+        (await sessionService.getSessionLocation(live.sessionId)) === 'archived'
+      ) {
+        liveArchiveState = 'archived';
+      }
+    } catch {
+      /* best-effort binding */
+    }
+  }
   const candidates: BackfillCandidate[] = [];
   for (const archiveState of ['active', 'archived'] as const) {
     // Tie-safe exhaustive enumeration (see listAllProjectSessionIds): the
     // paged listSessions mtime cursor silently skips sessions tied with a
-    // page's last entry, which an all-sessions sweep must never do.
-    const sessionIds =
-      await sessionService.listAllProjectSessionIds(archiveState);
+    // page's last entry, which an all-sessions sweep must never do. A live
+    // bind names its own session, so the sweep has nothing else to scan.
+    const sessionIds = live
+      ? archiveState === liveArchiveState && isValidSessionId(live.sessionId)
+        ? [live.sessionId]
+        : []
+      : await sessionService.listAllProjectSessionIds(archiveState);
     for (const sessionId of sessionIds) {
       // The id comes verbatim from the transcript's first record, and every
       // sidecar path below embeds it — a traversal id must be rejected
@@ -316,16 +377,22 @@ export async function backfillWorkspaceSessionPrs(
       } catch {
         worktree = null;
       }
-      let transcriptRaw: string;
-      try {
-        transcriptRaw = await fs.readFile(
-          path.join(dir, `${sessionId}.jsonl`),
-          'utf8',
-        );
-      } catch {
-        transcriptRaw = '';
+      const liveCandidate = live?.sessionId === sessionId;
+      let transcriptRaw = '';
+      if (!liveCandidate) {
+        try {
+          transcriptRaw = await fs.readFile(
+            path.join(dir, `${sessionId}.jsonl`),
+            'utf8',
+          );
+        } catch {
+          transcriptRaw = '';
+        }
       }
-      const reviewed = collectReviewedPrNumbers(transcriptRaw);
+      const reviewed =
+        liveCandidate && live
+          ? liveReviewTargets(live.rawCommand)
+          : collectReviewedPrNumbers(transcriptRaw);
       const conventionNumber = worktree
         ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
         : undefined;
@@ -489,6 +556,10 @@ export async function backfillWorkspaceSessionPrs(
   }
 
   for (const candidate of candidates) {
+    // The live command names one session; the commit below uses this to
+    // decide whether a missing transcript is a brand-new turn or a deleted
+    // session, and to re-resolve its location under the lane.
+    const liveCandidate = live?.sessionId === candidate.sessionId;
     // Insert in ASCENDING authority so the strongest bindings survive the
     // sidecar's tail cap: reviewed first (the session merely looked at that
     // PR), and the worktree convention last (the session exists FOR that
@@ -617,6 +688,25 @@ export async function backfillWorkspaceSessionPrs(
     }
     if (numbers.length === 0 && repairs.size === 0) continue;
     const existingNumbers = new Set((existing ?? []).map((pr) => pr.number));
+    // A live bind names only the current command, so the sweep's
+    // transcript-order plan does not carry the session's older review
+    // bindings. Without them in the plan, every older review counts as a
+    // foreign occupant and a full sidecar leaves zero slots for the new
+    // review. Include them as evictable occupants — only `review`
+    // provenance; create/worktree and pre-provenance entries keep their
+    // slots — ordered oldest-first, so the cap trims the oldest review and
+    // the new command survives.
+    const liveReviewOccupants =
+      options.liveReview === undefined
+        ? []
+        : (existing ?? [])
+            .filter(
+              (entry) =>
+                entry.source === 'review' &&
+                !numbers.includes(entry.number) &&
+                entry.createdAt < snapshotAt,
+            )
+            .map((entry) => entry.number);
     const urls = new Map<number, string>();
     const states = new Map<number, SessionPr['state']>();
     for (const number of numbers) {
@@ -672,6 +762,7 @@ export async function backfillWorkspaceSessionPrs(
         (number) => existingNumbers.has(number) || urls.has(number),
       ),
     );
+    for (const number of liveReviewOccupants) droppable.add(number);
     const createdAt = new Date().toISOString();
     let added = 0;
     // A closed generation is a whole-run condition, not a per-session write
@@ -679,13 +770,56 @@ export async function backfillWorkspaceSessionPrs(
     // failed) instead of miscounting it in writeErrors.
     assertGenerationOpen();
     const commit = async (): Promise<void> => {
-      const persisted = await replaceSessionPrs(prPath, (fresh) => {
+      // The shared lane excludes transitions that are IN FLIGHT, but one may
+      // have completed between the pre-lane location/snapshot and this
+      // commit. A live bind re-resolves under the lane and writes where the
+      // session is NOW: a deleted session must not resurrect its sidecar, and
+      // an archived one must not have its binding stranded in the active
+      // directory. The sweep keeps its pre-lane path on purpose: a session
+      // that moved mid-scan is re-bound by a later sweep from its new
+      // transcript, and writing here would leave a stray sidecar.
+      let commitPrPath = prPath;
+      if (liveCandidate) {
+        let location: SessionArchiveState | 'conflict' | undefined = undefined;
+        try {
+          location = await sessionService.getSessionLocation(
+            candidate.sessionId,
+          );
+        } catch {
+          // An unknown location cannot be written safely: do not assume
+          // active and resurrect metadata under the wrong state.
+          return;
+        }
+        if (location === 'active' || location === 'archived') {
+          commitPrPath = sessionService.getPrSessionPathForArchiveState(
+            candidate.sessionId,
+            location,
+          );
+        } else {
+          if (location === 'conflict') return;
+          // No transcript in either state. A session the bridge still owns is
+          // a brand-new turn whose transcript has not been written yet; one
+          // the bridge no longer knows was deleted and must not be
+          // resurrected. Any throw means liveness cannot be proven; skip.
+          try {
+            runtime.bridge.getSessionSummary(candidate.sessionId);
+          } catch {
+            return;
+          }
+        }
+      }
+      const persisted = await replaceSessionPrs(commitPrPath, (fresh) => {
         assertGenerationOpen();
         // Under the archive lane no archive/delete rename can interleave
         // with this write; the existence check still covers a transcript
         // removed by a path that takes no lane, so the plan never
         // resurrects a sidecar for a session gone from this archive state.
-        if (!existsSync(transcriptPath)) return null;
+        // A live `/review` bind is exempt only after the re-check above
+        // proved the session still exists (a bridge-owned new turn); a
+        // deleted one returned already.
+        if (!liveCandidate && !existsSync(transcriptPath)) {
+          return null;
+        }
         // Repair legacy fabricated URLs first (Aone only), so the repaired
         // entries plan under their real identity and their state unblocks
         // the refresh sweep. The re-check keeps a concurrently landed
@@ -751,7 +885,7 @@ export async function backfillWorkspaceSessionPrs(
         );
         const foreignCount = foreignEntries.length;
         const slots = Math.max(0, SESSION_PR_LIST_LIMIT - foreignCount);
-        let plan = numbers.filter(
+        let plan = [...liveReviewOccupants, ...numbers].filter(
           (number) => droppable.has(number) && !foreignNumbers.has(number),
         );
         if (plan.length > slots) {
@@ -791,8 +925,12 @@ export async function backfillWorkspaceSessionPrs(
           plan = plan.filter((_, index) => !evicted.has(index));
         }
         const planSet = new Set(plan);
-        result.alreadyBound += plan.filter((number) =>
-          freshNumbers.has(number),
+        // Occupants are not requests: a live bind must not report nine
+        // older reviews as "already bound". Only numbers this run planned
+        // for count, matching the sweep (where every plan number is one).
+        const requestedNumbers = new Set(numbers);
+        result.alreadyBound += plan.filter(
+          (number) => requestedNumbers.has(number) && freshNumbers.has(number),
         ).length;
         // A re-offered occupant this run ranks higher than its persisted
         // provenance (a `/review`-bound number the session now exists for
@@ -896,7 +1034,7 @@ export async function backfillWorkspaceSessionPrs(
         // the freshest list, so a bind queued between the rewrite's commit
         // and the sync keeps its slot instead of being clobbered by the
         // rewrite-time snapshot. No-op when the session is not live.
-        await replaceSessionPrs(prPath, (fresh) => {
+        await replaceSessionPrs(commitPrPath, (fresh) => {
           // Never publish into a retired generation's bridge.
           assertGenerationOpen();
           runtime.bridge.setSessionPrs?.(
@@ -931,7 +1069,50 @@ export async function backfillWorkspaceSessionPrs(
       result.writeErrors = (result.writeErrors ?? 0) + 1;
     }
   }
+  // A live bind bypasses the sweep route, which owns the catalog mark for
+  // its own runs. Publish here so the badge does not wait for unrelated
+  // catalog churn.
+  if (options.liveReview && result.written > 0) {
+    publishSessionPrWrites(runtime);
+  }
   return result;
+}
+
+/**
+ * Publishes sidecar writes to the sidebar: drops the list cache and advances
+ * the catalog revision so live-state clients refetch (~2 s). Call it only
+ * after a write that changed something.
+ */
+function publishSessionPrWrites(runtime: WorkspaceRuntime): void {
+  // A generation retired after its last commit must not notify its obsolete
+  // bridge; the successor owns the catalog now.
+  runtime.generationGuard?.assertOpen();
+  invalidateWorkspaceSessionListCache({
+    runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+    workspaceCwd: runtime.workspaceCwd,
+    archiveStates: ['active', 'archived'],
+  });
+  runtime.bridge.markSessionCatalogChanged();
+}
+
+/**
+ * Binds the PR named by a `/review` prompt the daemon has just admitted.
+ * The transcript sweep would find the same command later (or never, for a
+ * brand-new session), so the live path injects it instead of waiting.
+ * Best-effort: callers must not fail the prompt on a binding error.
+ */
+export async function bindSessionPrsFromReviewPrompt(
+  runtime: WorkspaceRuntime,
+  sessionId: string,
+  promptText: string,
+  options: SessionPrBackfillOptions = {},
+): Promise<SessionPrBackfillWorkspaceResult | undefined> {
+  if (!runtime.trusted) return undefined;
+  if (parseReviewCommand(promptText).mention === undefined) return undefined;
+  return backfillWorkspaceSessionPrs(runtime, undefined, undefined, {
+    ...options,
+    liveReview: { sessionId, rawCommand: promptText },
+  });
 }
 
 export function registerSessionPrBackfillRoutes(
@@ -976,17 +1157,7 @@ export function registerSessionPrBackfillRoutes(
           // invisible until the cache scope is dropped and the revision
           // advances. Gate on writes, not additions: a capped plan can
           // evict an entry while adding none.
-          if (result.written > 0) {
-            // A generation retired after its last commit must not notify
-            // its obsolete bridge; the successor owns the catalog now.
-            runtime.generationGuard?.assertOpen();
-            invalidateWorkspaceSessionListCache({
-              runtimeBaseDir: runtime.sessionRuntimeBaseDir,
-              workspaceCwd: runtime.workspaceCwd,
-              archiveStates: ['active', 'archived'],
-            });
-            runtime.bridge.markSessionCatalogChanged();
-          }
+          if (result.written > 0) publishSessionPrWrites(runtime);
           workspaces.push(result);
         } catch (error) {
           workspaces.push({
