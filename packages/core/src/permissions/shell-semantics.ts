@@ -89,13 +89,17 @@ export interface ShellOperation {
 
 /**
  * A shell word with its quoting provenance. `bare` is false when any part of
- * the word was quoted or backslash-escaped: its characters are then literal
- * text, so a redirect-looking spelling inside it is an operand bash passes to
- * the command, not an operator bash performs (#12280 R3-1).
+ * the word was quoted or backslash-escaped. `barePrefix` is the length of the
+ * leading run of characters that appeared before the first quote or escape:
+ * quoting that starts before the operator characters makes the whole word an
+ * operand (`'>y'`), while quoting after a bare operator prefix only quotes the
+ * operand, so `<<'EOF'` is still a heredoc and `2>'log'` still a redirect
+ * (#12280 R3-1, R4-2).
  */
 interface ShellToken {
   text: string;
   bare: boolean;
+  barePrefix: number;
 }
 
 /**
@@ -109,6 +113,7 @@ function tokenizeDetailed(command: string): ShellToken[] {
   const tokens: ShellToken[] = [];
   let current = '';
   let bare = true;
+  let prefixLen: number | null = null;
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
@@ -124,37 +129,55 @@ function tokenizeDetailed(command: string): ShellToken[] {
     if (ch === '\\' && !inSingle) {
       escaped = true;
       bare = false;
+      if (prefixLen === null) prefixLen = current.length;
       continue;
     }
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
       bare = false;
+      if (prefixLen === null) prefixLen = current.length;
       continue;
     }
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
       bare = false;
+      if (prefixLen === null) prefixLen = current.length;
       continue;
     }
     if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
-      pushToken(tokens, current, bare);
+      pushToken(tokens, current, bare, prefixLen ?? current.length);
       current = '';
       bare = true;
+      prefixLen = null;
       continue;
     }
     current += ch;
   }
-  pushToken(tokens, current, bare);
+  pushToken(tokens, current, bare, prefixLen ?? current.length);
   return tokens;
 }
 
-function pushToken(tokens: ShellToken[], token: string, bare: boolean): void {
+function pushToken(
+  tokens: ShellToken[],
+  token: string,
+  bare: boolean,
+  barePrefix: number,
+): void {
   if (token === '{' || token === '}') return;
   const normalized = trimShellSyntax(token);
+  // trimShellSyntax drops leading `(`s, so the prefix window shifts with them.
+  let leadTrim = 0;
+  while (leadTrim < token.length && token[leadTrim] === '(') leadTrim++;
+  const adjPrefix = Math.max(
+    0,
+    Math.min(barePrefix - leadTrim, normalized.length),
+  );
   // A word that quotes away to nothing (`''`) is still a word: bash counts it
   // as an operand and `cd ''` errors without moving the cwd, so erasing it
   // would under-count the operands (#12280 R3-2).
-  if (normalized || !bare) tokens.push({ text: normalized, bare });
+  if (normalized || !bare) {
+    tokens.push({ text: normalized, bare, barePrefix: adjPrefix });
+  }
 }
 
 function trimShellSyntax(token: string): string {
@@ -467,18 +490,44 @@ function isNetworkPseudoDevice(target: string): boolean {
  *   `2> file`  `2>> file` `&> file`  `&>> file`
  *   Combined forms: `>file`, `>>file`, `1>file`, `2>/dev/null`
  */
-function extractRedirects(tokens: string[], cwd: string): RedirectResult {
+/**
+ * `>(...)` / `<(...)` fragments the tokenizer split at their inner spaces:
+ * bash expands the whole substitution to one fd path, so the fragment is not a
+ * file this analyzer can name and must not be reported as one.
+ */
+function isProcessSubstitutionFragment(target: string): boolean {
+  return (
+    target.startsWith('>(') || target.startsWith('<(') || target.startsWith('(')
+  );
+}
+
+function extractRedirects(
+  tokens: string[],
+  barePrefix: number[],
+  cwd: string,
+): RedirectResult {
   const readFiles: string[] = [];
   const writeFiles: string[] = [];
   const toRemove = new Set<number>();
 
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i]!;
+    // Only characters outside quotes/escapes can be an operator bash performs:
+    // a quoted or escaped spelling like '>y' is an operand (#12280 R3-1). But
+    // quoting after a bare operator prefix only quotes the operand, so
+    // `<<'EOF'` is still a heredoc and `2>'log'` still a redirect. A token
+    // whose bare prefix covers the whole spelling is matched exactly; shorter
+    // prefixes fall through to the combined-form check below.
+    const wholeBare = barePrefix[i]! >= tok.length;
 
     // ── Separate-token redirect operators ─────────────────────────────────
-    if (tok === '>' || tok === '1>') {
+    if (wholeBare && (tok === '>' || tok === '1>')) {
       const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
+      if (
+        target &&
+        looksLikePath(target) &&
+        !isProcessSubstitutionFragment(target)
+      ) {
         if (!isNetworkPseudoDevice(target)) {
           writeFiles.push(resolvePath(target, cwd));
         }
@@ -486,9 +535,13 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
         toRemove.add(i + 1);
         i++;
       }
-    } else if (tok === '>>' || tok === '1>>') {
+    } else if (wholeBare && (tok === '>>' || tok === '1>>')) {
       const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
+      if (
+        target &&
+        looksLikePath(target) &&
+        !isProcessSubstitutionFragment(target)
+      ) {
         if (!isNetworkPseudoDevice(target)) {
           writeFiles.push(resolvePath(target, cwd));
         }
@@ -496,15 +549,19 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
         toRemove.add(i + 1);
         i++;
       }
-    } else if (tok === '<<' || tok === '<<-') {
+    } else if (wholeBare && (tok === '<<' || tok === '<<-')) {
       toRemove.add(i);
       if (tokens[i + 1]) {
         toRemove.add(i + 1);
         i++;
       }
-    } else if (tok === '<') {
+    } else if (wholeBare && tok === '<') {
       const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
+      if (
+        target &&
+        looksLikePath(target) &&
+        !isProcessSubstitutionFragment(target)
+      ) {
         if (!isNetworkPseudoDevice(target)) {
           readFiles.push(resolvePath(target, cwd));
         }
@@ -512,13 +569,17 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
         toRemove.add(i + 1);
         i++;
       }
-    } else if (tok === '2>' || tok === '2>>' || tok === '&>' || tok === '&>>') {
+    } else if (
+      wholeBare &&
+      (tok === '2>' || tok === '2>>' || tok === '&>' || tok === '&>>')
+    ) {
       // stderr / combined redirect — consume target
       const target = tokens[i + 1];
       if (target) {
         if (
           target !== '/dev/null' &&
           looksLikePath(target) &&
+          !isProcessSubstitutionFragment(target) &&
           !isNetworkPseudoDevice(target)
         ) {
           writeFiles.push(resolvePath(target, cwd));
@@ -528,12 +589,32 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
         i++;
       }
     }
+    // ── Read-write redirect: `<> file` (with or without fd prefix) ─────────
+    else if (wholeBare && /^(?:\d+|\{[^}]*\})?<>$/.test(tok)) {
+      const target = tokens[i + 1];
+      if (
+        target &&
+        looksLikePath(target) &&
+        !isProcessSubstitutionFragment(target) &&
+        !isNetworkPseudoDevice(target)
+      ) {
+        const resolved = resolvePath(target, cwd);
+        readFiles.push(resolved);
+        writeFiles.push(resolved);
+        toRemove.add(i);
+        toRemove.add(i + 1);
+        i++;
+      }
+    }
     // ── Combined redirect tokens without space: `>file`, `>>file`, etc. ───
     else {
-      const m = tok.match(/^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/);
-      if (m) {
-        const op = m[1]!;
-        const target = m[2]!;
+      const m = tok.match(
+        /^(?:(\d+|\{[^}]*\}))?(&>>|&>|<<-?|<>|>>|<|>)([\s\S]+)$/,
+      );
+      const opLen = m ? (m[1]?.length ?? 0) + m[2]!.length : 0;
+      if (m && barePrefix[i]! >= opLen) {
+        const op = m[2]!;
+        const target = m[3]!;
         if (op.startsWith('<<')) {
           toRemove.add(i);
           continue;
@@ -541,10 +622,14 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
         if (
           target !== '/dev/null' &&
           looksLikePath(target) &&
+          !isProcessSubstitutionFragment(target) &&
           !isNetworkPseudoDevice(target)
         ) {
           if (op === '<') {
             readFiles.push(resolvePath(target, cwd));
+          } else if (op === '<>') {
+            readFiles.push(resolvePath(target, cwd));
+            writeFiles.push(resolvePath(target, cwd));
           } else {
             writeFiles.push(resolvePath(target, cwd));
           }
@@ -2155,19 +2240,39 @@ const PREFIX_COMMANDS = new Set([
  * @param simpleCommand - A single shell command without compound operators.
  * @param cwd           - Working directory for resolving relative paths.
  */
+/**
+ * File operations a `cd` segment's redirections perform.
+ *
+ * `cd` moves no data, but its redirections are still opened: `cd x > /tmp/log`
+ * truncates the log. The cd classifier cuts redirect operators to count
+ * operands, so the ops are pulled out here. Process substitutions become
+ * `/dev/fd/N` words (bash's own expansion) and are dropped: the analyzer has
+ * no name for the process on the other end.
+ */
+function cdRedirectOps(segment: string, cwd: string): ShellOperation[] {
+  return extractShellOperations(
+    cutShellCommentsAndProcessSubstitutions(segment),
+    cwd,
+  ).filter((op) => !op.filePath?.startsWith('/dev/fd/'));
+}
+
 export function extractShellOperations(
   simpleCommand: string,
   cwd: string,
 ): ShellOperation[] {
   if (!simpleCommand.trim()) return [];
 
-  const tokens = tokenize(simpleCommand);
+  const detailed = tokenizeDetailed(simpleCommand).filter((t) => t.text !== '');
+  const tokens = detailed.map((t) => t.text);
   if (tokens.length === 0) return [];
 
   // Extract I/O redirections before dispatching to the command handler.
-  // This mutates `tokens` in-place by removing redirect tokens.
+  // This mutates `tokens` in-place by removing redirect tokens; `barePrefix`
+  // runs parallel so only characters bash really reads as operators (those
+  // outside quotes/escapes) are treated as redirects.
+  const barePrefix = detailed.map((t) => t.barePrefix);
   const { readFiles: redirectReads, writeFiles: redirectWrites } =
-    extractRedirects(tokens, cwd);
+    extractRedirects(tokens, barePrefix, cwd);
 
   while (tokens[0] && isEnvAssignmentToken(tokens[0])) {
     tokens.shift();
@@ -2829,6 +2934,14 @@ function walkCompoundCommand(
       artifactSegment[index] ?? false,
     );
     if (cdTarget.kind === 'static') {
+      // A `cd` still performs its redirections: `cd x > /tmp/log` truncates the
+      // log even though the command itself only moves the cwd, so the segment's
+      // redirect targets are collected here or the write would go unjudged
+      // (#12280 review). Redirections are opened before the command runs, so
+      // they resolve against the cwd the segment starts in. Process
+      // substitutions are erased first — bash expands them to an fd path, not a
+      // file this analyzer can name.
+      ops.push(...cdRedirectOps(sub, effectiveCwd));
       if (!backgrounded) {
         effectiveCwd = cdTarget.cwd;
         cwdUnknown = cdTarget.cwdUnknown;
@@ -2836,6 +2949,7 @@ function walkCompoundCommand(
       continue;
     }
     if (cdTarget.kind === 'dynamic') {
+      ops.push(...cdRedirectOps(sub, effectiveCwd));
       if (!backgrounded) {
         cwdUnknown = true;
       }

@@ -812,15 +812,6 @@ describe('R8 review round: operand counting, directional artifacts, bash-authori
       'cd sub > >(tee log) ; cd .qwen ; echo {} > settings.json',
       '/repo/sub/.qwen/settings.json',
     ],
-    [
-      'cd sub <> l ; cd .qwen ; echo {} > settings.json',
-      '/repo/sub/.qwen/settings.json',
-    ],
-    [
-      'cd sub 4>log ; cd .qwen ; echo {} > settings.json',
-      '/repo/sub/.qwen/settings.json',
-    ],
-    ['cd .qwen {fd}>log ; echo {} > settings.json', REPO_SETTINGS],
     // bash drops a `\<newline>` continuation outright, so a `#` opening the
     // continuation line still starts a comment; emitting the pair as an
     // escaped newline would keep the comment words as extra operands (#12280
@@ -831,6 +822,34 @@ describe('R8 review round: operand counting, directional artifacts, bash-authori
     'counts only real cd operands in `%s` (#R7-2)',
     (command, expectedPath) => {
       expect(across(command)).toEqual([write(expectedPath)]);
+    },
+  );
+
+  // The redirect a `cd` carries is still opened by bash, in the cwd the cd
+  // starts from, so these rows assert the full op sets: the cd operand count
+  // is unaffected AND the created/truncated file shows up as its own op
+  // (#12280 R7-2).
+  it.each([
+    [
+      'cd sub <> l ; cd .qwen ; echo {} > settings.json',
+      [
+        read('/repo/l'),
+        write('/repo/l'),
+        write('/repo/sub/.qwen/settings.json'),
+      ],
+    ],
+    [
+      'cd sub 4>log ; cd .qwen ; echo {} > settings.json',
+      [write('/repo/log'), write('/repo/sub/.qwen/settings.json')],
+    ],
+    [
+      'cd .qwen {fd}>log ; echo {} > settings.json',
+      [write('/repo/log'), write(REPO_SETTINGS)],
+    ],
+  ])(
+    'counts cd operands and keeps the cd-carried redirect op in `%s` (#R7-2)',
+    (command, expectedOps) => {
+      expect(across(command)).toEqual(expectedOps);
     },
   );
 
