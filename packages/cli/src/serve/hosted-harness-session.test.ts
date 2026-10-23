@@ -15918,6 +15918,7 @@ describe('Hosted Harness no-tool session', () => {
       'read_file',
       'write_file',
       'edit',
+      'web_fetch',
       'glob',
     ]);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
@@ -15967,6 +15968,7 @@ describe('Hosted Harness no-tool session', () => {
       'read_file',
       'write_file',
       'edit',
+      'web_fetch',
       'glob',
     ]);
     expect(state.model).toHaveBeenCalledTimes(2);
@@ -16031,6 +16033,7 @@ describe('Hosted Harness no-tool session', () => {
       'read_file',
       'write_file',
       'edit',
+      'web_fetch',
       'run_shell_command',
       'monitor',
       // H4b: a Shell-laned root Session advertises its Agent tool,
@@ -16096,6 +16099,7 @@ describe('Hosted Harness no-tool session', () => {
       'read_file',
       'write_file',
       'edit',
+      'web_fetch',
       'run_shell_command',
       'monitor',
       // H4b: a Shell-laned root Session advertises its Agent tool,

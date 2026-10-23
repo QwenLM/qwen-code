@@ -64,6 +64,7 @@ describe('Hosted Harness private contract', () => {
         'recovery-cleanup/1',
         'targeted-cancel/1',
         'event-keepalive/1',
+        'web-fetch/1',
       ],
     });
     expect(Object.isFrozen(contract)).toBe(true);

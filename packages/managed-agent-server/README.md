@@ -567,6 +567,31 @@ the tenant and writer headers are scope and fencing inputs, not a substitute
 for transport identity. Responses under the private prefix use
 `Cache-Control: no-store`.
 
+### Web fetch in Workspace Sessions
+
+The main Hosted files, shell, search and team lead profiles provide `web_fetch`
+with `url`, `prompt` and optional `format` (`auto`, `markdown`, `html` or `text`).
+The bound Runtime fetches public HTTPS content and returns normalized text and
+HTTP metadata to the conversation model. `default` and `auto-edit` require
+approval with the actual destination URL; `yolo` retains its approval bypass.
+Plan mode, snapshot read profiles and the dedicated CSI files profile do not
+admit this tool.
+
+The Runtime worker must use Node.js; other JavaScript runtimes are refused
+because they may ignore the pinned connection dispatcher.
+Every request, retry and same-host redirect checks and pins public DNS
+addresses, verifies TLS and uses a dedicated connection agent. Private and
+metadata addresses, URL credentials, plain HTTP and binary downloads are
+refused. The request does not inherit the process-wide proxy dispatcher.
+Cross-host, scheme or port redirects are returned for a new call and approval.
+Text is bounded to 16 KiB after JSON encoding with a truncation notice; no
+download or overflow file is written on the worker host. The worker does not
+make a separate model call or retain a web cache.
+
+Upgrade Runtime workers together with the Harness before relying on its
+`web-fetch/1` capability. See the [English design](../../docs/design/2026-10-23-managed-web-fetch.md)
+and [Chinese design](../../docs/design/2026-10-23-managed-web-fetch.zh-CN.md).
+
 ### Wake recovery after Harness loss
 
 With the Session Store enabled, an independent control-plane scan discovers

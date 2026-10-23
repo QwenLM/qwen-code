@@ -26,6 +26,7 @@ import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
 import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
 import { GlobTool } from '@qwen-code/qwen-code-core/tools/glob.js';
+import { WebFetchTool } from '@qwen-code/qwen-code-core/tools/web-fetch.js';
 import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ShellToolInvocation } from '@qwen-code/qwen-code-core/tools/shell.js';
@@ -239,6 +240,7 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   EditTool.Name,
   ShellTool.Name,
   GlobTool.Name,
+  WebFetchTool.Name,
 ]);
 
 /** Live background Shells one Session may hold, by the H3 design contract. */
@@ -2699,6 +2701,7 @@ export function createManagedToolSet(
         new ReadFileTool(config),
         new WriteFileTool(config),
         new EditTool(config),
+        new WebFetchTool(config, 'managed'),
         // The walk never leaves the Session, whatever the pattern spells.
         new GlobTool(config, {
           containmentRoot: directory,

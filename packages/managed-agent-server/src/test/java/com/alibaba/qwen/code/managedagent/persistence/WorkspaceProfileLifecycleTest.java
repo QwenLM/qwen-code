@@ -216,14 +216,16 @@ class WorkspaceProfileLifecycleTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"read_file", "write_file", "edit", "glob", "wrong_digest", "wrong_runtime", "wrong_harness",
+    @ValueSource(strings = {"read_file", "write_file", "edit", "glob", "web_fetch", "wrong_digest", "wrong_runtime", "wrong_harness",
             "shell", "v3", "publication", "unreferenced", "corrupt", "unsettled"})
     void shellProfileNativeFileInputsRequireOriginalIdentityAndKnownSettlement(String mode) throws Exception {
         var f = fixture();
         var binding = f.bindings.findOrCreate(new RuntimeProvisionRequest(f.scope(), f.session));
-        String tool = java.util.List.of("read_file", "write_file", "edit", "glob").contains(mode) ? mode
+        String tool = java.util.List.of("read_file", "write_file", "edit", "glob", "web_fetch").contains(mode) ? mode
                 : "shell".equals(mode) ? "run_shell_command" : "read_file";
-        String payload = f.json.writeValueAsString(Map.of("toolName", tool, "input", Map.of("file_path", "proof.txt")));
+        Map<String, String> input = "web_fetch".equals(tool)
+                ? Map.of("url", "https://example.com/docs", "prompt", "Summarize") : Map.of("file_path", "proof.txt");
+        String payload = f.json.writeValueAsString(Map.of("toolName", tool, "input", input));
         String requestDigest = "sha256:" + ("wrong_digest".equals(mode) ? "a".repeat(64)
                 : ToolPublicationContract.sha256(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
         var reference = new java.util.HashMap<String, Object>(Map.of("sessionId", "original-owner", "promptId", "turn-1",
@@ -256,7 +258,7 @@ class WorkspaceProfileLifecycleTest {
                 beans.getBeanProvider(ManagedToolResultStore.class));
         Runnable verify = () -> f.transactions.executeWithoutResult(ignored -> verifier.verifyResources(operation,
                 java.util.List.of(binding), WorkspaceToolProfiles.SHELL));
-        if (java.util.List.of("read_file", "write_file", "edit", "glob").contains(mode)) {
+        if (java.util.List.of("read_file", "write_file", "edit", "glob", "web_fetch").contains(mode)) {
             verify.run();
         } else {
             assertThatThrownBy(verify::run).isInstanceOf(ManagedAgentException.class);
