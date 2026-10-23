@@ -333,8 +333,9 @@ export function buildRunEnv(
 /**
  * The shell a POSIX command runs under: it runs the command, and when the
  * deadline's SIGTERM (or an interrupt) arrives it kills the command's whole
- * process tree before dying of that same signal. Exported for its tests;
- * `$1` is the command.
+ * process tree before dying of that same signal. (On an interrupt, bash
+ * before 5.0, which is macOS's `/bin/sh`, exits 130 instead.) Exported for
+ * its tests; `$1` is the command.
  *
  * `spawnSync` signals only its own child. A test runner's workers are that
  * child's grandchildren, so a suite the deadline killed left them reparented

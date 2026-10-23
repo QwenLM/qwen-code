@@ -243,10 +243,12 @@ describe.skipIf(process.platform === 'win32')(
       );
       const pid = await pidIn(pidFile);
       shell.kill('SIGINT');
-      const [, signal] = await new Promise<[number | null, string | null]>(
-        (res) => shell.on('exit', (code, sig) => res([code, sig])),
+      const [code, signal] = await new Promise<[number | null, string | null]>(
+        (res) => shell.on('exit', (c, sig) => res([c, sig])),
       );
-      expect(signal).toBe('SIGINT');
+      // The re-raised SIGINT kills the wrapper. bash before 5.0, which is
+      // macOS's `/bin/sh` (bash 3.2), exits 130 on it instead.
+      expect(signal ?? code).toBeOneOf(['SIGINT', 130]);
       expect(await gone(pid)).toBe(true);
     });
   },
