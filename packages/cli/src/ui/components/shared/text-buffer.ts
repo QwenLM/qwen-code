@@ -713,14 +713,14 @@ export const getLineRangeOffsets = (
   return { startOffset, endOffset };
 };
 
-export const replaceRangeInternal = (
-  state: TextBufferState,
+export const replaceRangeInternal = <T extends TextBufferGeometry>(
+  state: T,
   startRow: number,
   startCol: number,
   endRow: number,
   endCol: number,
   text: string,
-): TextBufferState => {
+): T => {
   const currentLine = (row: number) => state.lines[row] || '';
   const currentLineLen = (row: number) => cpLen(currentLine(row));
   const clamp = (value: number, min: number, max: number) =>
@@ -807,9 +807,14 @@ interface UseTextBufferProps {
   isValidPath: (path: string) => boolean;
   shellModeActive?: boolean; // Whether the text buffer is in shell mode
   preferredEditor?: EditorType;
+  pasteHistory?: {
+    capture: () => ReadonlyMap<string, string>;
+    restore: (snapshot: ReadonlyMap<string, string>) => void;
+  };
 }
 
 interface UndoHistoryEntry {
+  pasteHistory?: ReadonlyMap<string, string>;
   lines: string[];
   cursorRow: number;
   cursorCol: number;
@@ -1134,7 +1139,13 @@ function calculateVisualCursorFromLayout(
 
 // --- Start of reducer logic ---
 
+export type TextBufferGeometry = Pick<
+  TextBufferState,
+  'lines' | 'cursorRow' | 'cursorCol' | 'preferredCol'
+>;
+
 export interface TextBufferState {
+  pasteHistory?: ReadonlyMap<string, string>;
   lines: string[];
   cursorRow: number;
   cursorCol: number;
@@ -1155,6 +1166,9 @@ export const pushUndo = (currentState: TextBufferState): TextBufferState => {
     lines: [...currentState.lines],
     cursorRow: currentState.cursorRow,
     cursorCol: currentState.cursorCol,
+    ...(currentState.pasteHistory
+      ? { pasteHistory: currentState.pasteHistory }
+      : {}),
   };
   const newStack = [...currentState.undoStack, snapshot];
   if (newStack.length > historyLimit) {
@@ -1379,6 +1393,109 @@ export function getWordMovePosition(
       row: newCursorRow,
       col: newCursorCol,
     };
+  }
+}
+
+export function applyWordDeletion<T extends TextBufferGeometry>(
+  state: T,
+  direction: 'delete_word_left' | 'delete_word_right',
+  prepareEdit: (state: T) => T,
+): T {
+  const currentLine = (row: number) => state.lines[row] ?? '';
+  switch (direction) {
+    case 'delete_word_left': {
+      const { cursorRow, cursorCol } = state;
+      if (cursorCol === 0 && cursorRow === 0) return state;
+
+      const nextState = prepareEdit(state);
+      const newLines = [...nextState.lines];
+      let newCursorRow = cursorRow;
+      let newCursorCol = cursorCol;
+
+      if (newCursorCol > 0) {
+        const lineContent = currentLine(newCursorRow);
+        const arr = toCodePoints(lineContent);
+        // Try segmentation first
+        const boundaries = getWordBoundaries(lineContent, arr);
+        const startBoundary = findPrevWordStart(boundaries, newCursorCol);
+        let start: number;
+        if (startBoundary !== null) {
+          start = startBoundary;
+        } else {
+          const prevWordStart = findPrevWordStartInLine(
+            lineContent,
+            newCursorCol,
+          );
+          start = prevWordStart === null ? 0 : prevWordStart;
+        }
+        newLines[newCursorRow] =
+          cpSlice(lineContent, 0, start) + cpSlice(lineContent, newCursorCol);
+        newCursorCol = start;
+      } else {
+        // Act as a backspace
+        const prevLineContent = currentLine(cursorRow - 1);
+        const currentLineContentVal = currentLine(cursorRow);
+        const newCol = cpLen(prevLineContent);
+        newLines[cursorRow - 1] = prevLineContent + currentLineContentVal;
+        newLines.splice(cursorRow, 1);
+        newCursorRow--;
+        newCursorCol = newCol;
+      }
+
+      return {
+        ...nextState,
+        lines: newLines,
+        cursorRow: newCursorRow,
+        cursorCol: newCursorCol,
+        preferredCol: null,
+      };
+    }
+
+    case 'delete_word_right': {
+      const { cursorRow, cursorCol, lines } = state;
+      const lineContent = currentLine(cursorRow);
+      const lineLen = cpLen(lineContent);
+
+      if (cursorCol >= lineLen && cursorRow === lines.length - 1) {
+        return state;
+      }
+
+      const nextState = prepareEdit(state);
+      const newLines = [...nextState.lines];
+
+      if (cursorCol >= lineLen) {
+        // Act as a delete, joining with the next line
+        const nextLineContent = currentLine(cursorRow + 1);
+        newLines[cursorRow] = lineContent + nextLineContent;
+        newLines.splice(cursorRow + 1, 1);
+      } else {
+        const arr = toCodePoints(lineContent);
+        // Try segmentation first
+        const boundaries = getWordBoundaries(lineContent, arr);
+        const endBoundary = findNextWordEnd(boundaries, cursorCol);
+        let end: number;
+        if (endBoundary !== null) {
+          end = endBoundary;
+          // Skip over any whitespace after the word to reach next word's start
+          while (end < arr.length && isWhitespace(arr[end] ?? '')) {
+            end++;
+          }
+        } else {
+          const nextWordStart = findNextWordStartInLine(lineContent, cursorCol);
+          end = nextWordStart === null ? lineLen : nextWordStart;
+        }
+        newLines[cursorRow] =
+          cpSlice(lineContent, 0, cursorCol) + cpSlice(lineContent, end);
+      }
+
+      return {
+        ...nextState,
+        lines: newLines,
+        preferredCol: null,
+      };
+    }
+    default:
+      return state;
   }
 }
 
@@ -1676,97 +1793,9 @@ function textBufferReducerLogic(
       return state;
     }
 
-    case 'delete_word_left': {
-      const { cursorRow, cursorCol } = state;
-      if (cursorCol === 0 && cursorRow === 0) return state;
-
-      const nextState = pushUndoLocal(state);
-      const newLines = [...nextState.lines];
-      let newCursorRow = cursorRow;
-      let newCursorCol = cursorCol;
-
-      if (newCursorCol > 0) {
-        const lineContent = currentLine(newCursorRow);
-        const arr = toCodePoints(lineContent);
-        // Try segmentation first
-        const boundaries = getWordBoundaries(lineContent, arr);
-        const startBoundary = findPrevWordStart(boundaries, newCursorCol);
-        let start: number;
-        if (startBoundary !== null) {
-          start = startBoundary;
-        } else {
-          const prevWordStart = findPrevWordStartInLine(
-            lineContent,
-            newCursorCol,
-          );
-          start = prevWordStart === null ? 0 : prevWordStart;
-        }
-        newLines[newCursorRow] =
-          cpSlice(lineContent, 0, start) + cpSlice(lineContent, newCursorCol);
-        newCursorCol = start;
-      } else {
-        // Act as a backspace
-        const prevLineContent = currentLine(cursorRow - 1);
-        const currentLineContentVal = currentLine(cursorRow);
-        const newCol = cpLen(prevLineContent);
-        newLines[cursorRow - 1] = prevLineContent + currentLineContentVal;
-        newLines.splice(cursorRow, 1);
-        newCursorRow--;
-        newCursorCol = newCol;
-      }
-
-      return {
-        ...nextState,
-        lines: newLines,
-        cursorRow: newCursorRow,
-        cursorCol: newCursorCol,
-        preferredCol: null,
-      };
-    }
-
-    case 'delete_word_right': {
-      const { cursorRow, cursorCol, lines } = state;
-      const lineContent = currentLine(cursorRow);
-      const lineLen = cpLen(lineContent);
-
-      if (cursorCol >= lineLen && cursorRow === lines.length - 1) {
-        return state;
-      }
-
-      const nextState = pushUndoLocal(state);
-      const newLines = [...nextState.lines];
-
-      if (cursorCol >= lineLen) {
-        // Act as a delete, joining with the next line
-        const nextLineContent = currentLine(cursorRow + 1);
-        newLines[cursorRow] = lineContent + nextLineContent;
-        newLines.splice(cursorRow + 1, 1);
-      } else {
-        const arr = toCodePoints(lineContent);
-        // Try segmentation first
-        const boundaries = getWordBoundaries(lineContent, arr);
-        const endBoundary = findNextWordEnd(boundaries, cursorCol);
-        let end: number;
-        if (endBoundary !== null) {
-          end = endBoundary;
-          // Skip over any whitespace after the word to reach next word's start
-          while (end < arr.length && isWhitespace(arr[end] ?? '')) {
-            end++;
-          }
-        } else {
-          const nextWordStart = findNextWordStartInLine(lineContent, cursorCol);
-          end = nextWordStart === null ? lineLen : nextWordStart;
-        }
-        newLines[cursorRow] =
-          cpSlice(lineContent, 0, cursorCol) + cpSlice(lineContent, end);
-      }
-
-      return {
-        ...nextState,
-        lines: newLines,
-        preferredCol: null,
-      };
-    }
+    case 'delete_word_left':
+    case 'delete_word_right':
+      return applyWordDeletion(state, action.type, pushUndoLocal);
 
     case 'kill_line_right': {
       const { cursorRow, cursorCol, lines } = state;
@@ -1835,6 +1864,7 @@ function textBufferReducerLogic(
         lines: [...state.lines],
         cursorRow: state.cursorRow,
         cursorCol: state.cursorCol,
+        ...(state.pasteHistory ? { pasteHistory: state.pasteHistory } : {}),
       };
       return {
         ...state,
@@ -1852,6 +1882,7 @@ function textBufferReducerLogic(
         lines: [...state.lines],
         cursorRow: state.cursorRow,
         cursorCol: state.cursorCol,
+        ...(state.pasteHistory ? { pasteHistory: state.pasteHistory } : {}),
       };
       return {
         ...state,
@@ -2117,6 +2148,91 @@ function extractPathsFromSegment(
   return paths;
 }
 
+export type TextInputActions = Pick<
+  TextBuffer,
+  | 'insert'
+  | 'newline'
+  | 'move'
+  | 'deleteWordLeft'
+  | 'deleteWordRight'
+  | 'backspace'
+  | 'del'
+  | 'undo'
+  | 'redo'
+>;
+
+export function handleTextBufferInput(
+  key: Parameters<TextBuffer['handleInput']>[0],
+  {
+    insert,
+    newline,
+    move,
+    deleteWordLeft,
+    deleteWordRight,
+    backspace,
+    del,
+    undo,
+    redo,
+  }: TextInputActions,
+): void {
+  const { sequence: input } = key;
+
+  if (key.paste) {
+    // Do not do any other processing on pastes so ensure we handle them
+    // before all other cases.
+    insert(input, { paste: key.paste });
+    return;
+  }
+
+  if (
+    key.name === 'return' ||
+    input === '\r' ||
+    input === '\n' ||
+    input === '\\\r' // VSCode terminal represents shift + enter this way
+  )
+    newline();
+  else if (key.name === 'left' && !key.meta && !key.ctrl) move('left');
+  else if (key.ctrl && key.name === 'b') move('left');
+  else if (key.name === 'right' && !key.meta && !key.ctrl) move('right');
+  else if (key.ctrl && key.name === 'f') move('right');
+  else if (key.name === 'up' && !key.shift) move('up');
+  else if (key.name === 'down' && !key.shift) move('down');
+  else if ((key.ctrl || key.meta) && key.name === 'left') move('wordLeft');
+  else if (key.meta && key.name === 'b') move('wordLeft');
+  else if ((key.ctrl || key.meta) && key.name === 'right') move('wordRight');
+  else if (key.meta && key.name === 'd') deleteWordRight();
+  else if (key.meta && key.name === 'f') move('wordRight');
+  else if (key.name === 'home') move('home');
+  else if (key.ctrl && key.name === 'a') move('home');
+  else if (key.name === 'end') move('end');
+  else if (key.ctrl && key.name === 'e') move('end');
+  else if (key.ctrl && key.name === 'w') deleteWordLeft();
+  else if (
+    (key.meta || key.ctrl) &&
+    (key.name === 'backspace' || input === '\x7f')
+  )
+    deleteWordLeft();
+  else if ((key.meta || key.ctrl) && key.name === 'delete') deleteWordRight();
+  else if (
+    key.name === 'backspace' ||
+    input === '\x7f' ||
+    (key.ctrl && key.name === 'h')
+  )
+    backspace();
+  else if (key.name === 'delete' || (key.ctrl && key.name === 'd')) del();
+  else if (key.ctrl && !key.shift && key.name === 'z') undo();
+  else if (key.ctrl && key.shift && key.name === 'z') redo();
+  else if (
+    input &&
+    !key.ctrl &&
+    !key.meta &&
+    key.name !== 'tab' &&
+    input !== '\t'
+  ) {
+    insert(input, { paste: key.paste });
+  }
+}
+
 export function useTextBuffer({
   initialText = '',
   initialCursorOffset = 0,
@@ -2127,6 +2243,7 @@ export function useTextBuffer({
   isValidPath,
   shellModeActive = false,
   preferredEditor,
+  pasteHistory,
 }: UseTextBufferProps): TextBuffer {
   const initialState = useMemo((): TextBufferState => {
     const lines = initialText.split('\n');
@@ -2156,8 +2273,21 @@ export function useTextBuffer({
   const stateRef = useRef(initialState);
   const [state, setState] = useState(initialState);
 
+  const pasteHistoryRef = useRef(pasteHistory);
+  pasteHistoryRef.current = pasteHistory;
   const dispatch = useCallback((action: TextBufferAction) => {
-    stateRef.current = textBufferReducer(stateRef.current, action);
+    const history = pasteHistoryRef.current;
+    let before = stateRef.current;
+    if (history) {
+      before = { ...before, pasteHistory: new Map(history.capture()) };
+    }
+    const restoring =
+      (action.type === 'undo' && before.undoStack.length > 0) ||
+      (action.type === 'redo' && before.redoStack.length > 0);
+    stateRef.current = textBufferReducer(before, action);
+    if (restoring && history && stateRef.current.pasteHistory) {
+      history.restore(new Map(stateRef.current.pasteHistory));
+    }
     setState(stateRef.current);
   }, []);
 
@@ -2544,81 +2674,27 @@ export function useTextBuffer({
   );
 
   const handleInput = useCallback(
-    (key: {
-      name: string;
-      ctrl: boolean;
-      meta: boolean;
-      shift: boolean;
-      paste: boolean;
-      sequence: string;
-    }): void => {
-      const { sequence: input } = key;
-
-      if (key.paste) {
-        // Do not do any other processing on pastes so ensure we handle them
-        // before all other cases.
-        insert(input, { paste: key.paste });
-        return;
-      }
-
-      if (
-        key.name === 'return' ||
-        input === '\r' ||
-        input === '\n' ||
-        input === '\\\r' // VSCode terminal represents shift + enter this way
-      )
-        newline();
-      else if (key.name === 'left' && !key.meta && !key.ctrl) move('left');
-      else if (key.ctrl && key.name === 'b') move('left');
-      else if (key.name === 'right' && !key.meta && !key.ctrl) move('right');
-      else if (key.ctrl && key.name === 'f') move('right');
-      else if (key.name === 'up' && !key.shift) move('up');
-      else if (key.name === 'down' && !key.shift) move('down');
-      else if ((key.ctrl || key.meta) && key.name === 'left') move('wordLeft');
-      else if (key.meta && key.name === 'b') move('wordLeft');
-      else if ((key.ctrl || key.meta) && key.name === 'right')
-        move('wordRight');
-      else if (key.meta && key.name === 'd') deleteWordRight();
-      else if (key.meta && key.name === 'f') move('wordRight');
-      else if (key.name === 'home') move('home');
-      else if (key.ctrl && key.name === 'a') move('home');
-      else if (key.name === 'end') move('end');
-      else if (key.ctrl && key.name === 'e') move('end');
-      else if (key.ctrl && key.name === 'w') deleteWordLeft();
-      else if (
-        (key.meta || key.ctrl) &&
-        (key.name === 'backspace' || input === '\x7f')
-      )
-        deleteWordLeft();
-      else if ((key.meta || key.ctrl) && key.name === 'delete')
-        deleteWordRight();
-      else if (
-        key.name === 'backspace' ||
-        input === '\x7f' ||
-        (key.ctrl && key.name === 'h')
-      )
-        backspace();
-      else if (key.name === 'delete' || (key.ctrl && key.name === 'd')) del();
-      else if (key.ctrl && !key.shift && key.name === 'z') undo();
-      else if (key.ctrl && key.shift && key.name === 'z') redo();
-      else if (
-        input &&
-        !key.ctrl &&
-        !key.meta &&
-        key.name !== 'tab' &&
-        input !== '\t'
-      ) {
-        insert(input, { paste: key.paste });
-      }
+    (key: Parameters<TextBuffer['handleInput']>[0]): void => {
+      handleTextBufferInput(key, {
+        insert,
+        newline,
+        move,
+        deleteWordLeft,
+        deleteWordRight,
+        backspace,
+        del,
+        undo,
+        redo,
+      });
     },
     [
+      insert,
       newline,
       move,
       deleteWordLeft,
       deleteWordRight,
       backspace,
       del,
-      insert,
       undo,
       redo,
     ],

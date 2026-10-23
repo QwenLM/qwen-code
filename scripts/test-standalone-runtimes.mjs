@@ -1112,6 +1112,7 @@ if (process.argv[2] === '--ci') {
           cwd: root,
           env,
           encoding: 'utf8',
+          // This bounds the whole sequential matrix, not an individual probe.
           timeout: WORKER_TIMEOUT_MS,
           maxBuffer: 8 * 1024 * 1024,
         },

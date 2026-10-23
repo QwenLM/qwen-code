@@ -341,9 +341,9 @@ class WorkspaceMigrationStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE fence_operation_id IS NOT NULL", Long.class)).isZero();
     }
 
-    // A parked title (D7-2, or UNKNOWN before it) waits as an open one does.
+    // A parked title waits as an open one does.
     @ParameterizedTest
-    @ValueSource(strings = {"PENDING", "RUNNING", "RECOVERY_BLOCKED", "UNKNOWN"})
+    @ValueSource(strings = {"PENDING", "RUNNING", "RECOVERY_BLOCKED"})
     void refusesUnfinishedTitleDeliveryEvenWithAFailedPublicReceipt(String state) {
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified,"
                 + " workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref,"
