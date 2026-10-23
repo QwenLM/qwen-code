@@ -17,7 +17,7 @@ public final class WorkspaceToolProfiles {
     }
 
     public static boolean isPublicShell(String profile) {
-        return SHELL.equals(profile) || "hosted-workspace-shell/2".equals(profile);
+        return SHELL.equals(profile);
     }
 
     public static boolean isShellOrMcp(String profile) {
