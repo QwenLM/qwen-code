@@ -134,14 +134,16 @@ this recovery exception.
 | Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                            |
 | Tools      | In headless and local terminal model turns, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                  |
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
-| API events | `command.register` and `ui.log` calls pass through the middleware chain with host-supplied origin                                                                                       |
+| API events | `command.register`, `session.version` and `ui.log` calls pass through the middleware chain with host-supplied origin                                                                    |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
 | Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                 |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
 JSX/TSX, runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
 state/store, rendering, streaming events and hot reload are not implemented.
-Commands cannot return `context`, `exitCode` or engine references yet.
+Commands cannot return `context`, `exitCode` or engine references yet. Hooks for
+other Claude Code events load without running, as described in
+[Middleware and recovery](#middleware-and-recovery).
 
 Two Mods cannot register the same command name: the later registration rejects.
 A conflict with a Qwen built-in command still uses Qwen's command conflict policy:
@@ -151,9 +153,33 @@ command names are matched against the resulting name.
 ## Middleware and recovery
 
 Patterns select among `session.start`, `session.end`, `command.run`,
-`command.register`, `ui.log`, `tool.call` and `tool.check`. Use an exact name, a prefix such as `command.*`,
-`*`, or a single negation such as `!session.*`. Other concrete events and the
-patterns `!*` and `!!...` are rejected.
+`command.register`, `session.version`, `ui.log`, `tool.call` and `tool.check`. Use an exact name, a prefix such as `command.*`,
+`*`, or a single negation such as `!session.*`. The patterns `!*` and `!!...` are
+rejected.
+
+Claude Code 2.1.308 also defines events that Qwen Code does not run yet, such as
+`prompt.submit`, `ui.render` or `classic.Stop`. A registration for one of them,
+or for a prefix such as `prompt.*` that matches none of the events above, loads
+but never runs, so the rest of the Mod keeps working. At startup each plugin
+reports its skipped patterns once, where transcript logs appear:
+`Hooks for unsupported events will not run: prompt.submit, ui.render`. A skipped
+hook never runs, including a guard and its `.catch`. Names that Claude Code does
+not define, such as `tool.calls`, still reject initialization.
+
+To refuse such a plugin instead, set its `unsupportedEvents` to `"reject"` in user
+or system settings. Initialization then fails if the plugin registers any skipped
+pattern:
+
+```json
+{
+  "pluginConfigs": {
+    "my-guard": { "unsupportedEvents": "reject" }
+  }
+}
+```
+
+The plugin identity and settings precedence are the same as for
+[`toolDialect`](#opt-into-claude-tool-inputs); the default is `"skip"`.
 
 Matchers are partial objects. All specified fields must match; arrays are
 alternatives, nested objects match their own fields, and regular expressions
@@ -212,14 +238,31 @@ the remaining budget. Returning before an outstanding next completes cancels
 that work and waits for it to settle.
 
 `tool.check` receives `{tool, input, tool_use_id}` after native validation and
-classic input rewrites. All fields are pinned. Its next returns a declarative
-`{decision: 'allow' | 'ask' | 'deny', reason?}` without executing the tool.
-Qwen merges the answer restrictively: a Mod cannot upgrade a native deny or
-ask to allow. A Mod ask follows the current approval mode's existing decision
-flow; required human interaction and classic forced asks remain authoritative.
-This is deliberately stricter than Claude's consumer permission overrides.
-If a native PermissionRequest hook rebuilds the arguments, they are checked
-again. A Mod-authored `rule`, `hook` or `ceiling` cannot create host permissions.
+classic input rewrites, with two facts the host sets:
+
+- `isReadOnly: true` when the tool reports the call as read-only: read, search
+  and fetch tools, MCP tools whose server marks them read-only, and shell
+  commands that pass the read-only check. Read its absence as a possible write.
+- `approver`: `person` where a dialog can ask the user, `host` in a stream-json
+  session whose host answers permission requests, and absent where nobody can
+  answer.
+
+All fields are pinned; a matcher can select `isReadOnly: true`. Its next returns
+a declarative `{decision: 'allow' | 'ask' | 'deny', reason?}` without executing
+the tool. Qwen merges the answer restrictively: a Mod cannot upgrade a native
+deny or ask to allow. This is deliberately stricter than Claude's consumer
+permission overrides.
+
+An ask that a Mod makes or rewords, rather than Qwen's own ask passed up
+unchanged, carries the Mod's name as `plugin` and is the user's to answer, as a
+classic PreToolUse ask is. YOLO, AUTO_EDIT and the AUTO classifier do not approve
+it; the dialog shows the Mod's reason and hides "always allow"; approving another
+call does not approve it; and a headless run without a permission host denies
+it, giving the model the Mod's reason. A PermissionRequest hook can deny it but
+cannot answer for the user. Qwen's own ask passed up unchanged keeps the current
+approval mode's decision flow. If a native PermissionRequest hook rebuilds the
+arguments, they are checked again. A Mod-authored `rule`, `hook`, `ceiling` or
+`plugin` cannot create host permissions; the host sets `plugin`.
 
 Return `{deny: reason}` to block, or `{result: value}` to supply a JSON result
 without executing. Native next returns `{ref, result, text, isError?}`.
@@ -345,14 +388,43 @@ and `error.kind` (`throw` or `timeout`). Engine events use origin
 with tier `user`. Managed-tier `next.to`, tracing and custom namespace `lent`
 recovery are not available.
 
-API events begin at the chain head. Their input is the command specification or
-`{text, to}` log payload. Return `next(e)`, `{value}` to answer, or `{deny: reason}`
-to reject the API call. Registrations already in the event's call chain are
-skipped, including their catches. Other registrations in the same plugin remain
-eligible. This re-entry behavior follows Claude Code 2.1.301.
+API events begin at the chain head. Their input is the command specification,
+`{}` for `session.version`, or the `{text, to}` log payload. Return `next(e)`,
+`{value}` to answer, or `{deny: reason}` to reject the API call. Registrations
+already in the event's call chain are skipped, including their catches. Other
+registrations in the same plugin remain eligible. This re-entry behavior follows
+Claude Code 2.1.301.
 `ui.log` remains a void notification:
 `await $.ui.log(...)` does not wait for interceptors. The headless boundary drains
 queued notifications before returning output.
+
+`$.session.version()` resolves to the Qwen Code version and what this runtime
+supports:
+
+```json
+{
+  "version": "0.26.0",
+  "qwen": {
+    "claudeCode": "2.1.308",
+    "events": [
+      "command.register",
+      "command.run",
+      "session.end",
+      "session.start",
+      "session.version",
+      "tool.call",
+      "tool.check",
+      "ui.log"
+    ],
+    "methods": ["command.register", "session.version", "ui.log"]
+  }
+}
+```
+
+`claudeCode` is the Claude Code release whose event names are recognized,
+`events` lists the events hooks can receive and `methods` the `$` methods a Mod can
+call. A Mod can use it to choose a fallback, such as a command reply where a
+drawing hook would not run.
 
 A normal plugin layer has 10 seconds of its own time, excluding time waiting for
 cross-plugin `next` or API calls. Pending void `ui.log` notifications do not pause
@@ -377,9 +449,10 @@ There are at most 32 Mod environments, 64 registered commands, 128 registrations
 per plugin, and 4,096 root/API event chains per root call. Passing through another
 plugin does not consume an extra event. Each environment has a 64 MiB
 memory limit. Logs and message payloads are also bounded. Registration, compilation
-and configuration failures still reject initialization; ordinary hook failure
-can recover without resetting module state. Guest promise jobs run only while a
-host request is active, including its queued notification drain.
+and configuration failures still reject initialization, apart from the skipped
+hooks described above; ordinary hook failure can recover without resetting module
+state. Guest promise jobs run only while a host request is active, including its
+queued notification drain.
 
 Mods do not run in ACP, managed/SSH, sandbox or session-agent entry points in
 this version. Safe mode, bare mode and `disableAllHooks` also prevent loading.
@@ -494,5 +567,23 @@ The execution budgets described above include a 60-second startup limit for all
 worker initialization, compilation and startup hooks together. The guest memory
 limit does not cover the compiler's host memory.
 
-The author API is based on Claude Code 2.1.296 declarations and the
+Values that cross between a Mod and Qwen Code nest at most 512 levels, so walking
+them never exhausts a native stack:
+
+- A hook answer, or a value a hook passes to `next` or a `$` method, that nests
+  deeper fails like a thrown error. The hook is skipped or its `.catch` runs, and
+  the Mod keeps working.
+- A tool input that nests deeper cannot be handed to the Mod's hooks, so the call
+  is refused.
+- A native result that nests deeper than 256 levels reaches the Mod as the
+  omission notice and reference described in
+  [Tool interception](#tool-interception). Returning them unchanged keeps the
+  complete result.
+
+Own `__proto__` keys in tool inputs and results are ordinary data on both sides.
+A hook answer whose getter throws while Qwen Code reads it fails as a whole;
+Claude Code 2.1.299 drops only that key.
+
+The author API is based on Claude Code 2.1.296 declarations, with event names
+recognized from Claude Code 2.1.308, and the
 [official Mod documentation](https://code.claude.com/docs/en/plugins/mods/create).
