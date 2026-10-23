@@ -1339,6 +1339,23 @@ export async function* livePromptEvents(
             completed[index].request,
             finalResponses[index].responseParts,
             current,
+            {
+              toolCallResult: {
+                callId: completed[index].request.callId,
+                status: completed[index].status,
+                resultDisplay: completed[index].response.resultDisplay,
+                error: completed[index].response.error,
+                errorType: completed[index].response.errorType,
+                executionStatus: completed[index].response.executionStatus,
+                persistedOutputFiles:
+                  finalResponses[index].persistedOutputFiles,
+                artifacts: finalResponses[index].artifacts,
+              },
+              options: goalToolResultProvenance(
+                completed[index].request,
+                finalResponses[index].responseParts,
+              ),
+            },
           );
         }
       }

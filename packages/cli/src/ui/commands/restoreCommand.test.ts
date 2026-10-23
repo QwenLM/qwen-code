@@ -34,8 +34,10 @@ import { ToolRegistry } from '@qwen-code/qwen-code-core/tools/tool-registry.js';
 import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { computeApiTruncationIndex } from '../utils/historyMapping.js';
 import { writeToolCheckpoint } from '../opentui/tool-checkpoint.js';
+import { InteractiveModToolScheduler } from '../../services/interactive-mod-tool-scheduler.js';
 
 describe('restoreCommand', () => {
   let mockContext: CommandContext;
@@ -104,6 +106,9 @@ describe('restoreCommand', () => {
     async (mode) => {
       const file = path.join(testRootDir, 'owned.txt');
       if (mode !== 'missing') await fs.writeFile(file, 'A');
+      const other = path.join(testRootDir, 'unread.txt');
+      // Keep a distinct inode alive before the edit atomically replaces owned.txt.
+      if (mode === 'yes') await fs.writeFile(other, 'SECRET');
       const config = makeFakeConfig({
         targetDir: testRootDir,
         cwd: testRootDir,
@@ -112,6 +117,7 @@ describe('restoreCommand', () => {
         approvalMode: ApprovalMode.DEFAULT,
         fileCheckpointingEnabled: true,
         fileReadCacheDisabled: mode === 'cache disabled',
+        chatRecording: false,
         disableAllHooks: true,
         usageStatisticsEnabled: false,
         permissions: mode === 'deny' ? { deny: ['Read'] } : { ask: ['Read'] },
@@ -285,8 +291,6 @@ describe('restoreCommand', () => {
               .execute(new AbortController().signal);
             expect(edited.error).toBeUndefined();
             expect(await fs.readFile(file, 'utf8')).toBe('B');
-            const other = path.join(testRootDir, 'unread.txt');
-            await fs.writeFile(other, 'SECRET');
             const denied = await edit
               .build({
                 file_path: other,
@@ -1011,5 +1015,217 @@ describe('restoreCommand', () => {
         'test2',
       ]);
     });
+  });
+  describe('durable checkpoint admission before restore effects', () => {
+    it('does not touch file/history/read/scheduling when the real recorder admission seam rejects', async () => {
+      const file = path.join(testRootDir, 'owned.txt');
+      await fs.writeFile(file, 'CURRENT_BYTES');
+      const config = makeFakeConfig({
+        targetDir: testRootDir,
+        cwd: testRootDir,
+        trustedFolder: true,
+        interactive: true,
+        fileCheckpointingEnabled: true,
+        disableAllHooks: true,
+        usageStatisticsEnabled: false,
+      });
+      const client = new LlmClient(config);
+      const chat = new LlmChat(config);
+      vi.spyOn(client, 'getChat').mockReturnValue(chat);
+      vi.spyOn(config, 'getLlmClient').mockReturnValue(client);
+      vi.spyOn(config.storage, 'getProjectTempCheckpointsDir').mockReturnValue(
+        checkpointsDir,
+      );
+      vi.spyOn(config, 'getFileHistoryService').mockReturnValue({
+        rewind: mockRewind,
+      } as unknown as ReturnType<Config['getFileHistoryService']>);
+      const promptId = `${config.getSessionId()}########0`;
+      const args = { file_path: file, old_string: 'A', new_string: 'B' };
+      const tail: Content = {
+        role: 'model',
+        parts: [{ functionCall: { id: 'original-edit', name: 'edit', args } }],
+      };
+      const user: Content = {
+        role: 'user',
+        parts: [{ text: 'CHECKPOINT_USER' }],
+      };
+      markApiHistoryPrompt(user, promptId);
+      client.setHistory([user, tail]);
+      const checkpointApi = client.getHistoryShallow();
+      const history: HistoryItem[] = [
+        { id: 1, type: 'user', text: 'CHECKPOINT_USER', promptId },
+      ];
+      const checkpointPath = await writeToolCheckpoint({
+        directory: checkpointsDir,
+        request: { name: 'edit', args, prompt_id: promptId },
+        isCurrent: () => true,
+        snapshot: () => ({
+          history,
+          clientHistory: checkpointApi,
+          promptIds: checkpointApi.map(
+            (content) => getApiHistoryPromptId(content) ?? null,
+          ),
+        }),
+      });
+      expect(checkpointPath).toBeDefined();
+      const originalCheckpoint = await fs.readFile(checkpointPath!);
+      client.setHistory([
+        { role: 'user', parts: [{ text: 'CURRENT_LIVE_USER' }] },
+      ]);
+      const liveBefore = client.getHistoryShallow();
+      const setHistory = vi.spyOn(client, 'setHistory');
+      const assertAnchor = vi.fn(() => {
+        throw new Error('RECORDER_REFUSED_CURRENT_ANCHOR');
+      });
+      const restoreBranch = vi.fn();
+      const recorder = {
+        assertRestoreToolBranchAnchor: assertAnchor,
+        restoreToolBranch: restoreBranch,
+      } as unknown as NonNullable<
+        ReturnType<Config['getChatRecordingService']>
+      >;
+      vi.spyOn(config, 'getChatRecordingService').mockReturnValue(recorder);
+      mockContext.services.config = config;
+      const schedule = vi.spyOn(
+        InteractiveModToolScheduler.prototype,
+        'schedule',
+      );
+      const buildRead = vi.spyOn(ReadFileTool.prototype, 'build');
+      const result = await restoreCommand(config)?.action?.(
+        mockContext,
+        path.basename(checkpointPath!),
+      );
+      expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+      expect(assertAnchor).toHaveBeenCalledTimes(1);
+      expect(assertAnchor).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: config.getSessionId(),
+          originalCallId: 'original-edit',
+          name: 'edit',
+          args,
+          promptId,
+        }),
+      );
+      expect(mockRewind).not.toHaveBeenCalled();
+      expect(mockContext.ui.clearPendingState).not.toHaveBeenCalled();
+      expect(mockContext.ui.loadHistory).not.toHaveBeenCalled();
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(buildRead).not.toHaveBeenCalled();
+      expect(schedule).not.toHaveBeenCalled();
+      expect(restoreBranch).not.toHaveBeenCalled();
+      expect(client.getHistoryShallow()).toEqual(liveBefore);
+      expect(await fs.readFile(file, 'utf8')).toBe('CURRENT_BYTES');
+      expect(await fs.readFile(checkpointPath!)).toEqual(originalCheckpoint);
+    });
+
+    it('preserves legacy local tool return without inventing a pending API/recorder requirement', async () => {
+      const file = path.join(checkpointsDir, 'legacy-local.json');
+      await fs.writeFile(
+        file,
+        JSON.stringify({
+          toolCall: {
+            name: 'run_shell_command',
+            args: { command: 'printf legacy' },
+          },
+        }),
+      );
+      const recorderLookup = vi.fn(() => {
+        throw new Error('LEGACY_MUST_NOT_REQUIRE_RECORDER');
+      });
+      Object.assign(mockConfig, { getChatRecordingService: recorderLookup });
+      const schedule = vi.spyOn(
+        InteractiveModToolScheduler.prototype,
+        'schedule',
+      );
+      expect(
+        await restoreCommand(mockConfig)?.action?.(mockContext, 'legacy-local'),
+      ).toEqual({
+        type: 'tool',
+        toolName: 'run_shell_command',
+        toolArgs: { command: 'printf legacy' },
+      });
+      expect(recorderLookup).not.toHaveBeenCalled();
+      expect(mockRewind).not.toHaveBeenCalled();
+      expect(mockContext.ui.loadHistory).not.toHaveBeenCalled();
+      expect(mockSetHistory).not.toHaveBeenCalled();
+      expect(schedule).not.toHaveBeenCalled();
+    });
+  });
+  it('keeps a real pending checkpoint hot-restorable when chat recording is explicitly disabled', async () => {
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(
+      path.join(testRootDir, 'owned-home'),
+    );
+    const config = makeFakeConfig({
+      targetDir: testRootDir,
+      cwd: testRootDir,
+      trustedFolder: true,
+      interactive: true,
+      fileCheckpointingEnabled: true,
+      chatRecording: false,
+      disableAllHooks: true,
+      usageStatisticsEnabled: false,
+    });
+    const client = new LlmClient(config);
+    const chat = new LlmChat(config);
+    vi.spyOn(client, 'getChat').mockReturnValue(chat);
+    vi.spyOn(config, 'getLlmClient').mockReturnValue(client);
+    vi.spyOn(config.storage, 'getProjectTempCheckpointsDir').mockReturnValue(
+      checkpointsDir,
+    );
+    const lookup = vi.spyOn(config, 'getChatRecordingService');
+    expect(config.getChatRecordingService()).toBeUndefined();
+    lookup.mockClear();
+    const args = {
+      file_path: path.join(testRootDir, 'not-yet-created.txt'),
+      old_string: '',
+      new_string: 'LEGACY_NEW_FILE',
+    };
+    const user: Content = { role: 'user', parts: [{ text: 'PENDING_USER' }] };
+    const promptId = `${config.getSessionId()}########0`;
+    markApiHistoryPrompt(user, promptId);
+    const tail: Content = {
+      role: 'model',
+      parts: [
+        { functionCall: { id: 'original-local-tool', name: 'edit', args } },
+      ],
+    };
+    await config.getFileHistoryService().makeSnapshot(promptId);
+    client.setHistory([user, tail]);
+    const checkpointApi = client.getHistoryShallow();
+    const snapshot: HistoryItem[] = [
+      { id: 42, type: 'user', text: 'PENDING_USER', promptId },
+    ];
+    const saved = await writeToolCheckpoint({
+      directory: checkpointsDir,
+      request: { name: 'edit', args, prompt_id: promptId },
+      isCurrent: () => true,
+      snapshot: () => ({
+        history: snapshot,
+        clientHistory: checkpointApi,
+        promptIds: checkpointApi.map(
+          (content) => getApiHistoryPromptId(content) ?? null,
+        ),
+      }),
+    });
+    if (!saved) throw new Error('Missing actual checkpoint');
+    client.setHistory([
+      { role: 'user', parts: [{ text: 'LATER_LIVE_HISTORY' }] },
+    ]);
+    mockContext.services.config = config;
+    const result = await restoreCommand(config)?.action?.(
+      mockContext,
+      path.basename(saved),
+    );
+    expect(result).toMatchObject({ type: 'tool', toolName: 'edit' });
+    expect(mockContext.ui.loadHistory).toHaveBeenCalledWith(snapshot);
+    expect(client.getHistoryShallow()).toEqual(checkpointApi);
+    await expect(fs.stat(args.file_path)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    expect(
+      result && result.type === 'tool'
+        ? result.restoreResponseBinding?.durability
+        : undefined,
+    ).toBeUndefined();
   });
 });

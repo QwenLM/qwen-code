@@ -575,7 +575,8 @@ function convertToHistoryItems(
             // resumed session shows the same args row as a live one.
             args: fc.args,
             resultDisplay: undefined,
-            status: ToolCallStatus.Success, // Will be updated by tool_result
+            // Without a recorded result, completion cannot be established.
+            status: ToolCallStatus.Error,
             confirmationDetails: undefined,
           });
         }
@@ -605,7 +606,9 @@ function convertToHistoryItems(
             toolCall.status =
               rawStatus === 'error'
                 ? ToolCallStatus.Error
-                : ToolCallStatus.Success;
+                : rawStatus === 'cancelled'
+                  ? ToolCallStatus.Canceled
+                  : ToolCallStatus.Success;
             const { images, omittedImageCount } =
               collectInlineImages(responseParts);
             if (images.length > 0) {

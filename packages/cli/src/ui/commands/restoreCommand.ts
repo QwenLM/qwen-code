@@ -6,6 +6,7 @@
 
 import {
   createRestoreToolResponseBinding,
+  selectRestoreCheckpointCall,
   isRestoreToolResponseBindingCurrent,
   type RestoreToolResponseBinding,
 } from '../utils/restore-tool-response.js';
@@ -45,6 +46,7 @@ async function restoreAction(
   let loadedHistory: HistoryItem[] | undefined;
   let restoreNoticeId: number | undefined;
   let restoreResponseBinding: RestoreToolResponseBinding | undefined;
+  let restoreRecorder: ReturnType<Config['getChatRecordingService']>;
   const isCurrent = () => {
     const history = ui.history;
     const loaded = loadedHistory;
@@ -59,6 +61,8 @@ async function restoreAction(
       expectedHistory.length + (ownInvocationPublished ? 1 : 0);
     return (
       !context.abortSignal?.aborted &&
+      (!restoreRecorder ||
+        config?.getChatRecordingService() === restoreRecorder) &&
       (!restoreResponseBinding ||
         isRestoreToolResponseBindingCurrent(restoreResponseBinding)) &&
       config?.getSessionId() === sessionId &&
@@ -157,6 +161,44 @@ async function restoreAction(
       throw new Error('Checkpoint is missing a valid toolCall.');
     }
 
+    const checkpointHistory: Content[] | undefined = Array.isArray(
+      toolCallData.clientHistory,
+    )
+      ? toolCallData.clientHistory
+      : undefined;
+    if (checkpointHistory) {
+      const promptIds: unknown[] = Array.isArray(toolCallData.promptIds)
+        ? toolCallData.promptIds
+        : [];
+      checkpointHistory.forEach((content, index) =>
+        markApiHistoryPrompt(content, promptIds[index]),
+      );
+      const selected = selectRestoreCheckpointCall(
+        checkpointHistory,
+        toolCall.name,
+        toolCall.args,
+      );
+      if (selected) {
+        if (!config) throw new Error('Configuration is not available.');
+        restoreRecorder = config.getChatRecordingService();
+        if (
+          selected.promptId &&
+          toolCallData.promptId &&
+          selected.promptId !== toolCallData.promptId
+        )
+          throw new Error(
+            'Checkpoint prompt identity does not match its pending call.',
+          );
+        restoreRecorder?.assertRestoreToolBranchAnchor({
+          sessionId: sessionId!,
+          originalCallId: selected.callId,
+          name: selected.name,
+          args: selected.args,
+          promptId: selected.promptId ?? toolCallData.promptId,
+        });
+      }
+    }
+
     if (toolCallData.promptId) {
       if (!config) {
         return {
@@ -241,6 +283,18 @@ async function restoreAction(
               config,
               toolCall.name,
               toolCall.args,
+              restoreRecorder
+                ? {
+                    recorder: restoreRecorder,
+                    truncatedCount: Math.max(
+                      0,
+                      expectedHistory.length -
+                        (toolCallData.history?.length ??
+                          expectedHistory.length),
+                    ),
+                    promptId: toolCallData.promptId,
+                  }
+                : undefined,
             )
           : undefined;
       await historyInstalled;

@@ -5241,15 +5241,48 @@ export const useLlmStream = (
           toolCall.request.callId,
         );
         if (owner?.restoreResponseBinding) {
+          const [final] = await finalizeToolResponses(
+            config,
+            [
+              {
+                callId: toolCall.request.callId,
+                toolName: toolCall.request.name,
+                responseParts: toolCall.response.responseParts,
+                persistedOutputFiles: toolCall.response.persistedOutputFiles,
+                artifacts: toolCall.response.artifacts,
+              },
+            ],
+            new Map(
+              toolCall.request.prompt_id
+                ? [[toolCall.request.callId, toolCall.request.prompt_id]]
+                : [],
+            ),
+          );
           await completeRestoreToolResponse(
             owner.restoreResponseBinding,
             toolCall.request,
-            toolCall.response.responseParts,
+            final.responseParts,
             () =>
               workflowConfigRef.current === config &&
               isCurrentSession() &&
               owner.foregroundAbortController !== undefined &&
               abortControllerRef.current === owner.foregroundAbortController,
+            {
+              toolCallResult: {
+                callId: toolCall.request.callId,
+                status: toolCall.status,
+                resultDisplay: toolCall.response.resultDisplay,
+                error: toolCall.response.error,
+                errorType: toolCall.response.errorType,
+                executionStatus: toolCall.response.executionStatus,
+                persistedOutputFiles: final.persistedOutputFiles,
+                artifacts: final.artifacts,
+              },
+              options: goalToolResultProvenance(
+                toolCall.request,
+                final.responseParts,
+              ),
+            },
           );
         }
       }

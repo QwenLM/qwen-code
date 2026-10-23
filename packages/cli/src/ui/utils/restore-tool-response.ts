@@ -5,6 +5,11 @@
  */
 
 import type { Content, Part } from '@google/genai';
+import type {
+  ChatRecordingService,
+  RecordToolResultOptions,
+} from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { getLastApiHistoryPromptId } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { LlmClient } from '@qwen-code/qwen-code-core/core/client.js';
 import type { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
@@ -16,7 +21,22 @@ import {
   markApiHistoryPrompt,
 } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
 
+export interface RestoreToolResponseDurability {
+  readonly recorder: ChatRecordingService;
+  readonly truncatedCount: number;
+  readonly promptId?: string;
+}
+
+export interface RestoreToolResponseCompletion {
+  toolCallResult: Parameters<
+    ChatRecordingService['restoreToolBranch']
+  >[0]['toolCallResult'];
+  options?: RecordToolResultOptions;
+}
+
 export interface RestoreToolResponseBinding {
+  completionStarted: boolean;
+  readonly durability?: RestoreToolResponseDurability;
   readonly config: Config;
   readonly client: LlmClient;
   readonly chat: LlmChat;
@@ -33,21 +53,19 @@ export interface RestoreToolResponseBinding {
 const fingerprint = (name: string, args: unknown) =>
   getToolCallFingerprint(canonicalToolName(name), args);
 
-export function createRestoreToolResponseBinding(
-  config: Config,
+export function selectRestoreCheckpointCall(
+  history: readonly Content[],
   toolName: string,
   toolArgs: Record<string, unknown>,
-): RestoreToolResponseBinding | undefined {
-  const client = config.getLlmClient();
-  const chat = client.getChat();
-  const tail = chat.peekLastHistoryEntry();
+) {
+  const tail = history.at(-1);
   const calls =
     tail?.role === 'model'
       ? (tail.parts ?? []).flatMap((part) =>
           part.functionCall ? [part.functionCall] : [],
         )
       : [];
-  if (!tail || calls.length === 0) return;
+  if (calls.length === 0) return;
   const expected = fingerprint(toolName, toolArgs);
   const matches = calls.filter(
     (call) =>
@@ -57,31 +75,56 @@ export function createRestoreToolResponseBinding(
   if (matches.length !== 1 || !matches[0].id || !matches[0].name)
     throw new Error('Checkpoint does not identify one pending tool call.');
   const call = matches[0];
-  const id = call.id!;
-  const occurrences = client
-    .getHistoryShallow()
-    .flatMap((content) =>
-      (content.parts ?? []).filter((part) => part.functionCall?.id === id),
-    );
+  const occurrences = history.flatMap((content) =>
+    (content.parts ?? []).filter((part) => part.functionCall?.id === call.id),
+  );
   if (
     occurrences.length !== 1 ||
-    client.getHistoryFunctionResponseIds().has(id)
+    history.some((content) =>
+      content.parts?.some((part) => part.functionResponse?.id === call.id),
+    )
   )
     throw new Error(
       'Checkpoint tool call identity is already paired or ambiguous.',
     );
   return {
+    callId: call.id!,
+    name: call.name!,
+    args: toolArgs,
+    promptId:
+      getApiHistoryPromptId(tail!) ?? getLastApiHistoryPromptId(history),
+  };
+}
+
+export function createRestoreToolResponseBinding(
+  config: Config,
+  toolName: string,
+  toolArgs: Record<string, unknown>,
+  durability?: RestoreToolResponseDurability,
+): RestoreToolResponseBinding | undefined {
+  const client = config.getLlmClient();
+  const chat = client.getChat();
+  const selected = selectRestoreCheckpointCall(
+    client.getHistoryShallow(),
+    toolName,
+    toolArgs,
+  );
+  if (!selected) return;
+  const tail = chat.peekLastHistoryEntry()!;
+  return {
     config,
     client,
     chat,
+    completionStarted: false,
+    durability,
     sessionId: config.getSessionId(),
     revision: chat.getHistoryReplacementRevision(),
     tail,
     length: chat.getHistoryLength(),
-    callId: id,
-    name: call.name!,
-    fingerprint: expected,
-    promptId: getApiHistoryPromptId(tail),
+    callId: selected.callId,
+    name: selected.name,
+    fingerprint: fingerprint(toolName, toolArgs),
+    promptId: selected.promptId ?? durability?.promptId,
   };
 }
 
@@ -99,6 +142,8 @@ export function isRestoreToolResponseBindingCurrent(
   )
     return false;
   return (
+    (!binding.durability ||
+      config.getChatRecordingService() === binding.durability.recorder) &&
     config.getSessionId() === binding.sessionId &&
     config.getLlmClient() === client &&
     client.getChat() === chat &&
@@ -114,9 +159,11 @@ export async function completeRestoreToolResponse(
   execution: Pick<ToolCallRequestInfo, 'callId' | 'name' | 'args'>,
   responseParts: readonly Part[],
   isCurrent: () => boolean,
+  completion?: RestoreToolResponseCompletion,
 ): Promise<boolean> {
   const { client } = binding;
   if (
+    binding.completionStarted ||
     !isCurrent() ||
     fingerprint(execution.name, execution.args) !== binding.fingerprint ||
     !isRestoreToolResponseBindingCurrent(binding)
@@ -131,6 +178,36 @@ export async function completeRestoreToolResponse(
       canonicalToolName(binding.name)
   )
     return false;
+  binding.completionStarted = true;
+  if (binding.durability) {
+    if (!completion)
+      throw new Error('Restore completion is missing real execution metadata.');
+    const { recorder, truncatedCount } = binding.durability;
+    const survivingFileHistorySnapshots = structuredClone(
+      binding.config.getFileHistoryService().getSnapshots(),
+    );
+    const published = await recorder.restoreToolBranch({
+      sessionId: binding.sessionId,
+      originalCallId: binding.callId,
+      name: binding.name,
+      args: execution.args,
+      promptId: binding.promptId,
+      execution,
+      responseParts,
+      toolCallResult: completion.toolCallResult,
+      options: completion.options,
+      truncatedCount,
+      survivingFileHistorySnapshots,
+      isCurrent: () =>
+        isCurrent() && isRestoreToolResponseBindingCurrent(binding),
+    });
+    if (
+      !published ||
+      !isCurrent() ||
+      !isRestoreToolResponseBindingCurrent(binding)
+    )
+      return false;
+  }
   const content: Content = {
     role: 'user',
     parts: responseParts.map((part) =>
