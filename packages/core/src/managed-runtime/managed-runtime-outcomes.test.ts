@@ -128,6 +128,10 @@ async function checkpointOf(session: ManagedSession) {
 }
 
 describe('LocalManagedRuntimeOutcomes', () => {
+  // 65 paged admits and a cold reopen: ~9.5 s on a warm laptop, but the ECS
+  // pool runs several suites at once and the flat 60 s budget timed out there —
+  // #15366, #15261 and #15308 each lost their Test gate to this one test.
+  // Only the budget moves; every assertion stays identical.
   it('continues and cold-opens a paged Turn without losing the earliest receipt', async () => {
     const root = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-paged-outcomes-'),
@@ -171,7 +175,7 @@ describe('LocalManagedRuntimeOutcomes', () => {
     } finally {
       await session.close();
     }
-  }, 60_000);
+  }, 180_000);
 
   it('admits a call with its intent and an await_runtime checkpoint', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));

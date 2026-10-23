@@ -333,7 +333,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     }
 
     @Test
-    void activeReaderLeaseHoldsThenCollects() {
+    void activeReaderLeaseCapsTheRetryAtTheClaimInterval() {
         initSession();
         head(session);
         publish("segment", CONTENT, new byte[64]);
@@ -353,6 +353,24 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThat(collector.runOnce()).isTrue();
         assertThat(rows().getFirst().get("state")).isEqualTo("COLLECTED");
         assertThat(ledger().get("gc_blocker")).isNull();
+    }
+
+    @Test
+    void soonExpiringReadLeaseSchedulesItsOwnInstant() {
+        initSession();
+        head(session);
+        publish("segment", CONTENT, new byte[64]);
+        var lease = retention.read(key);
+        retire();
+        long near = ToolPublicationRetentionStore.now(jdbc) + 20_000;
+        jdbc.update("UPDATE ma_read_lease SET expires_at = ? WHERE tenant_key = ?", near,
+                ToolPublicationRetentionStore.hash(tenant));
+        assertThat(collector(true, Duration.ZERO).runOnce()).isFalse();
+        var blocked = ledger();
+        assertThat(blocked.get("gc_blocker")).isEqualTo("reader_active");
+        assertThat(((Number) blocked.get("gc_next_at")).longValue()).isEqualTo(near);
+        assertThat(rows().getFirst().get("inline_bytes")).isNotNull();
+        lease.close();
     }
 
     @org.junit.jupiter.params.ParameterizedTest
