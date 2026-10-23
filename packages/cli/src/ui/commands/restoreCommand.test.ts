@@ -22,6 +22,15 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import type { Content } from '@google/genai';
+import { LlmClient } from '@qwen-code/qwen-code-core/core/client.js';
+import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import { makeFakeConfig } from '@qwen-code/qwen-code-core/test-utils/config.js';
+import {
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
+} from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
+import { computeApiTruncationIndex } from '../utils/historyMapping.js';
+import { writeToolCheckpoint } from '../opentui/tool-checkpoint.js';
 
 describe('restoreCommand', () => {
   let mockContext: CommandContext;
@@ -463,6 +472,154 @@ describe('restoreCommand', () => {
       const installed = mockSetHistory.mock.calls[0]?.[0] as Content[];
       expect(installed).toHaveLength(1);
       expect(findApiHistoryPromptIndex(installed, 'prompt-abc123')).toBe(0);
+    });
+
+    it('joins real client Symbol identity through checkpoint JSON, restore and rewind indexing', async () => {
+      const clientConfig = makeFakeConfig({
+        targetDir: testRootDir,
+        cwd: testRootDir,
+        disableAllHooks: true,
+        usageStatisticsEnabled: false,
+      });
+      const chat = new LlmChat(clientConfig);
+      const client = new LlmClient(clientConfig);
+      // Connect the existing chat without starting a provider; setHistory and
+      // getHistoryShallow remain the real client and chat implementations.
+      vi.spyOn(client, 'getChat').mockReturnValue(chat);
+      vi.mocked(mockConfig.getLlmClient).mockReturnValue(client);
+      const firstId = 'original########0';
+      const secondId = 'original########1';
+      const api: Content[] = [
+        { role: 'user', parts: [{ text: 'same input' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'read-one',
+                name: 'read_file',
+                args: { file_path: '/owned/a' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'read-one',
+                name: 'read_file',
+                response: { output: 'A' },
+              },
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'first answer' }] },
+        { role: 'user', parts: [{ text: 'same input' }] },
+        { role: 'model', parts: [{ text: 'second answer' }] },
+      ];
+      markApiHistoryPrompt(api[0], firstId);
+      markApiHistoryPrompt(api[4], secondId);
+      const history: HistoryItem[] = [
+        {
+          id: 10,
+          type: 'user',
+          text: 'same input',
+          promptId: firstId,
+          sentToModel: true,
+        },
+        { id: 11, type: 'gemini', text: 'first answer' },
+        {
+          id: 12,
+          type: 'user',
+          text: 'same input',
+          promptId: secondId,
+          sentToModel: true,
+        },
+        { id: 13, type: 'gemini', text: 'second answer' },
+      ];
+      try {
+        client.setHistory(api);
+        const original = client.getHistoryShallow();
+        expect(getApiHistoryPromptId(original[0])).toBe(firstId);
+        expect(getApiHistoryPromptId(original[4])).toBe(secondId);
+        const checkpoint = await writeToolCheckpoint({
+          directory: checkpointsDir,
+          request: {
+            name: 'replace',
+            args: { file_path: path.join(testRootDir, 'a.ts') },
+            prompt_id: secondId,
+          },
+          isCurrent: () => true,
+          snapshot: () => {
+            const clientHistory = client.getHistoryShallow();
+            return {
+              history,
+              clientHistory,
+              promptIds: clientHistory.map(
+                (content) => getApiHistoryPromptId(content) ?? null,
+              ),
+            };
+          },
+        });
+        expect(checkpoint).toBeDefined();
+        const persisted = JSON.parse(
+          await fs.readFile(checkpoint!, 'utf8'),
+        ) as {
+          history: HistoryItem[];
+          clientHistory: Content[];
+          promptIds: Array<string | null>;
+        };
+        expect(persisted.promptIds).toEqual([
+          firstId,
+          null,
+          null,
+          null,
+          secondId,
+          null,
+        ]);
+        expect(
+          persisted.clientHistory.every(
+            (content) => getApiHistoryPromptId(content) === undefined,
+          ),
+        ).toBe(true);
+        // A positional/text fallback must not accidentally make this pass.
+        expect(
+          computeApiTruncationIndex(history, 12, persisted.clientHistory),
+        ).toBe(-1);
+        client.setHistory([]);
+        expect(
+          await restoreCommand(mockConfig)!.action!(
+            mockContext,
+            path.basename(checkpoint!, '.json'),
+          ),
+        ).toEqual({
+          type: 'tool',
+          toolName: 'replace',
+          toolArgs: { file_path: path.join(testRootDir, 'a.ts') },
+        });
+        const restored = client.getHistoryShallow();
+        expect(restored.map(getApiHistoryPromptId)).toEqual([
+          firstId,
+          undefined,
+          undefined,
+          undefined,
+          secondId,
+          undefined,
+        ]);
+        expect(findApiHistoryPromptIndex(restored, secondId)).toBe(4);
+        expect(computeApiTruncationIndex(persisted.history, 12, restored)).toBe(
+          4,
+        );
+        expect(computeApiTruncationIndex(persisted.history, 10, restored)).toBe(
+          0,
+        );
+        expect(restored).toEqual(original);
+        expect(mockSetHistory).not.toHaveBeenCalled();
+      } finally {
+        await clientConfig.shutdown({ strictResourceCleanup: true });
+      }
     });
 
     it('should restore even if only toolCall is present', async () => {
