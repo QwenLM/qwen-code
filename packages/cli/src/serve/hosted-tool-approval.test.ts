@@ -57,7 +57,7 @@ describe('Hosted tool approval settings', () => {
         (tool) => hostedApprovalAsks({ mode, timeoutMs: 1_000 }, tool, search),
       );
     expect(asked('yolo')).toEqual([]);
-    // `glob` is asked outside the `/2` search profiles, including for an
+    // `glob` is asked outside the search profiles, including for an
     // MCP-declared tool of that name; only a search profile pre-approves it.
     expect(asked('default')).toEqual([
       'write_file',

@@ -162,14 +162,19 @@ class ManagedApprovalChangeTest {
             assertCode(() -> change("actor", "blocked-" + state, "yolo", 0), "session_context_busy");
         }
         for (String code : List.of(com.alibaba.qwen.code.managedagent.session.AgentStateStore.RUNTIME_RECOVERY_BLOCKED,
-                com.alibaba.qwen.code.managedagent.session.AgentStateStore.WORKFLOW_RECOVERY_BLOCKED)) {
+                com.alibaba.qwen.code.managedagent.session.AgentStateStore.WORKFLOW_RECOVERY_BLOCKED,
+                com.alibaba.qwen.code.managedagent.session.AgentStateStore.HARNESS_RECOVERY_BLOCKED)) {
             jdbc.update("UPDATE ma_turn SET status='RUNNING', error_code=? WHERE tenant_id=?", code, tenant);
             assertCode(() -> change("actor", "blocked-" + code, "yolo", 0), "session_context_busy");
+            assertThat(jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id=? AND session_id=?",
+                    Long.class, tenant, session)).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id=?"
+                    + " AND operation='SET_APPROVAL'", Integer.class, tenant)).isZero();
         }
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1", "hosted-workspace-shell/2"})
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1"})
     void persistsPlanIndependentlyAndFreezesItWithTheTurnPolicy(String profile) throws Exception {
         when(harness.supportsPlanMode()).thenReturn(true);
         session = customSession(profile, "default");
@@ -321,7 +326,7 @@ class ManagedApprovalChangeTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1", "hosted-workspace-shell/2"})
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1"})
     void changesStoredDefinitionSessionsWithoutChangingTheirInitialIdentityOrCreationOptions(String profile) throws Exception {
         session = customSession(profile, "default");
         var initial = store.requireSession(tenant, session);
@@ -613,7 +618,7 @@ class ManagedApprovalChangeTest {
     private ManagedAgentStore store() {
         var properties = new ManagedAgentProperties();
         properties.setDefinitionToolProfiles(List.of("hosted-workspace-files/1", "hosted-workspace-shell/1",
-                "hosted-workspace-shell/2", "hosted-workspace-files/2", "hosted-workspace-read/1"));
+                "hosted-workspace-files/2", "hosted-workspace-read/1"));
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setWorkspaceShellEnabled(true);
         properties.getHarness().setApprovalMode("default");
