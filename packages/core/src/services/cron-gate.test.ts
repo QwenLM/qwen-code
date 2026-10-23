@@ -14,6 +14,7 @@ import {
   buildGatedFirePrompt,
   buildGateFailureNotice,
   createCronGateRunner,
+  gateStderrTail,
   CRON_GATE_OUTPUT_CAP_BYTES,
   CRON_GATE_STDERR_LINES,
   gateCommandError,
@@ -118,6 +119,54 @@ describe('createCronGateRunner', () => {
       }),
       { streamStdout: true },
     );
+  });
+
+  it('hands the command’s process group to the host and stops one it cannot track', async () => {
+    const groups: number[] = [];
+    await expect(
+      createCronGateRunner(makeConfig({ mode: ApprovalMode.YOLO }), {
+        onProcessGroup: (pgid) => groups.push(pgid),
+      })('./probe.sh', { signal: signal(), approvedInProcess: false }),
+    ).resolves.toMatchObject({ kind: 'output' });
+    expect(groups).toEqual([4242]);
+
+    // The shell settles once the command is stopped; the call fails with
+    // the host's error instead of answering an outcome.
+    let stopped: AbortSignal | undefined;
+    mockRuntimeShell.mockImplementation(
+      async (
+        _config: unknown,
+        _command: string,
+        _cwd: string,
+        _onOutput: unknown,
+        abort: AbortSignal,
+      ) => {
+        stopped = abort;
+        return {
+          pid: 4343,
+          result: new Promise((resolve) =>
+            abort.addEventListener('abort', () =>
+              resolve({
+                rawOutput: Buffer.alloc(0),
+                output: '',
+                exitCode: null,
+                signal: 9,
+                error: null,
+                aborted: true,
+              }),
+            ),
+          ),
+        };
+      },
+    );
+    await expect(
+      createCronGateRunner(makeConfig({ mode: ApprovalMode.YOLO }), {
+        onProcessGroup: () => {
+          throw new Error('ledger write failed');
+        },
+      })('./probe.sh', { signal: signal(), approvedInProcess: false }),
+    ).rejects.toThrow('ledger write failed');
+    expect(stopped?.aborted).toBe(true);
   });
 
   it('treats whitespace-only stdout as quiet', async () => {
@@ -460,6 +509,21 @@ describe('createCronGateRunner', () => {
 
 describe('gate fire text', () => {
   const firedAt = Date.UTC(2026, 9, 21, 5, 5, 7);
+
+  it('cuts gateStderrTail without halving a character, under a caller budget too', () => {
+    // 5 × 603 units: the cap's cut lands on the low half of a pair.
+    const stderr = Array.from(
+      { length: 5 },
+      () => `xx${'😀'.repeat(300)}`,
+    ).join('\n');
+    const tail = gateStderrTail(stderr);
+    expect(/[\uD800-\uDFFF]/u.test(tail)).toBe(false);
+    expect(tail.endsWith('😀')).toBe(true);
+    // The same under a caller's tighter budget.
+    expect(/[\uD800-\uDFFF]/u.test(gateStderrTail(stderr, 1001))).toBe(false);
+    // A short tail whose start the runner's rolling buffer cut in a pair.
+    expect(gateStderrTail('\ude00 rate limited')).toBe(' rate limited');
+  });
 
   it('keeps the prompt first and wraps the output as data', () => {
     const text = buildGatedFirePrompt(

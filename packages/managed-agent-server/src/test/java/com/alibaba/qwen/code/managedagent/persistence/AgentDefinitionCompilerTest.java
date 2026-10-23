@@ -90,6 +90,19 @@ class AgentDefinitionCompilerTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"default", "auto-edit"})
+    void removedShellProfileCannotBeEnabledByDeploymentAllowlist(String mode) {
+        assertThatThrownBy(() -> AgentDefinitionCompiler.compile(definition(
+                hostedProfile("hosted-workspace-shell/2"),
+                "{\"approval_mode\":\"" + mode + "\"}"), true, mode,
+                List.of("hosted-workspace-shell/1", "hosted-workspace-shell/2")))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("agent_definition_unsupported");
+                    assertThat(error.getDetails().get("field")).isEqualTo("tools");
+                });
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"yolo", "default", "auto-edit"})
     void definitionsCannotAcquireInternalTeamLeadEvenWhenAllowlisted(String mode) {
         assertThatThrownBy(() -> AgentDefinitionCompiler.compile(definition(
