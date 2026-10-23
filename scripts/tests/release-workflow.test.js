@@ -575,6 +575,10 @@ describe('release workflow', () => {
   });
 
   it('keeps the workflow focused on orchestration', () => {
+    // 880, raised from 870 for quality_scripts' standalone runtime cache
+    // step: the same four-line export of a host-wide cache path as ci.yml's
+    // test job — orchestration; the cache logic lives in
+    // scripts/lib/runtime-archive-cache.js.
     // 870, raised from 850 for moving publish/collect onto the opt-in
     // ecs-qwen-release-host lane and quality onto the pool its checks already
     // use: the added lines are two runs-on expressions, two anchored steps,
@@ -588,7 +592,7 @@ describe('release workflow', () => {
     // is the job that reports their failure, so its last-resort issue filing
     // is deliberately inline. Every other step stays under the per-step cap
     // below, which is the rule that actually keeps logic out of the YAML.
-    expect(workflow.split('\n').length).toBeLessThan(870);
+    expect(workflow.split('\n').length).toBeLessThan(880);
     for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
       for (const step of job.steps ?? []) {
         if (step.name === 'Restore workspace ownership' || !step.run) continue;
@@ -3054,17 +3058,55 @@ exit 0`,
     // the shared setup budget instead of inheriting the 300 s run() default.
     expect(source.match(/timeout: WORKER_TIMEOUT_MS,/g)).toHaveLength(1);
     expect(source.match(/timeout: CI_TIMEOUT_MS,/g)).toHaveLength(1);
-    // Two tar extractions in the parent and five probes in the child; the
-    // four downloads spend the same budget through the fetch signal.
-    expect(source.match(/timeout: remainingSetupMs\(\)/g)).toHaveLength(7);
-    expect(
-      source.match(/AbortSignal\.timeout\(remainingSetupMs\(\)\)/g),
-    ).toHaveLength(1);
     // spawnSync treats timeout 0 as "no timeout", so a spent setup budget
     // must fail the next phase at 1 ms rather than disarm its cap.
     expect(
       source.match(/Math\.max\(1, setupDeadline - Date\.now\(\)\)/g),
     ).toHaveLength(2);
+    // Every setup phase must spend the shared budget instead of inheriting
+    // run()'s 300 s default, so check each call inside the two setup slices.
+    // A later phase added without the budget fails here; the counts above
+    // pin the other two bindings but cannot see an omission.
+    const callFragments = (slice) => {
+      const fragments = [];
+      const pattern = /\b(?:run|fetch)\s*\(/g;
+      let match;
+      while ((match = pattern.exec(slice))) {
+        let depth = 0;
+        let end = match.index;
+        for (; end < slice.length; end++) {
+          if (slice[end] === '(') depth++;
+          else if (slice[end] === ')' && --depth === 0) {
+            end++;
+            break;
+          }
+        }
+        fragments.push(slice.slice(match.index, end));
+      }
+      return fragments;
+    };
+    const setupSlices = [];
+    let from = 0;
+    while (true) {
+      const start = source.indexOf('const setupDeadline', from);
+      if (start < 0) break;
+      const end = source.indexOf('const result = spawnSync(', start);
+      expect(end, 'setup must be followed by its spawn').toBeGreaterThan(start);
+      setupSlices.push(source.slice(start, end));
+      from = end;
+    }
+    expect(setupSlices).toHaveLength(2);
+    for (const slice of setupSlices) {
+      expect(
+        callFragments(slice).filter(
+          (call) => !call.includes('remainingSetupMs()'),
+        ),
+        'every setup call must spend the shared setup budget',
+      ).toEqual([]);
+    }
+    // The slice's fetch must be the implementation the archive fetch uses,
+    // not a helper left behind after the wiring was removed.
+    expect(setupSlices[0]).toContain('fetchImpl: fetchSetup');
     const workerMs = Number(worker[1].replaceAll('_', ''));
     const setupMs = Number(setup[1].replaceAll('_', ''));
     const spawnMs = 2 * workerMs + setupMs;
@@ -3077,9 +3119,18 @@ exit 0`,
       'outer cap must leave room for pre-worker probes and keygen',
     ).toBeGreaterThanOrEqual(60_000);
     // That margin only matters while a worker killed at its cap still names
-    // the host: ci()'s own asserts carry no message, so pin the diagnostic.
-    expect(source).toMatch(
-      /console\.log\(\s*JSON\.stringify\(\{\s*host,\s*actualExitCode:/,
+    // the host, so the diagnostic must precede the bare asserts that throw
+    // first on the failure path.
+    const workerLoop = source.slice(
+      source.indexOf('for (const [host, bin] of ['),
+    );
+    const diagnosticAt = workerLoop.indexOf('actualExitCode');
+    expect(
+      diagnosticAt,
+      'worker loop must print the host diagnostic',
+    ).toBeGreaterThanOrEqual(0);
+    expect(workerLoop.indexOf('assert.equal(result.status, 0')).toBeGreaterThan(
+      diagnosticAt,
     );
     // package.json is the only link that places this spawn inside the
     // quality_scripts job, and the budget counts vitest as running after it.
@@ -3093,7 +3144,9 @@ exit 0`,
       'node scripts/test-standalone-runtimes.mjs --ci',
     );
     // Reserve the slow-pool measurements outside the spawn: ~295 s of job
-    // setup and the ~288 s scripts suite, rounded up to 600 s.
+    // setup and the ~288 s scripts suite, rounded up to 600 s. Re-measure
+    // when scripts/tests/** gains a suite; 600 s is only valid for the suite
+    // as of this commit.
     const aroundTheSpawnSeconds = 600;
     // Parent setup and the child spawn are separate caps; both plus the
     // reserve must fit the job's declared 30-minute budget.

@@ -24,6 +24,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -604,6 +605,12 @@ public class ManagedAgentProperties implements EnvironmentAware {
     }
 
     public static class Harness {
+        private final HarnessPool pool = new HarnessPool();
+
+        public HarnessPool getPool() {
+            return pool;
+        }
+
         private boolean enabled;
         private boolean workspaceFilesEnabled;
         private boolean workspaceShellEnabled;
@@ -749,6 +756,155 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setTurnDeadline(Duration turnDeadline) {
             this.turnDeadline = turnDeadline;
+        }
+    }
+
+    public static class HarnessPool {
+        private boolean enabled;
+        private String discovery = "static";
+        private List<HarnessInstance> instances = new ArrayList<>();
+        private String keyStoreFile = "";
+        private String keyStorePasswordFile = "";
+        private String trustStoreFile = "";
+        private String trustStorePasswordFile = "";
+        private String kubernetesApiUrl = "https://kubernetes.default.svc";
+        private String kubernetesTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token";
+        private String kubernetesCaFile = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
+        private String namespace = "";
+        private String serviceName = "";
+        private String serviceUid = "";
+        private String portName = "https";
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean value) {
+            enabled = value;
+        }
+
+        public String getDiscovery() {
+            return discovery;
+        }
+
+        public void setDiscovery(String value) {
+            discovery = value;
+        }
+
+        public List<HarnessInstance> getInstances() {
+            return instances;
+        }
+
+        public void setInstances(List<HarnessInstance> value) {
+            instances = value;
+        }
+
+        public String getKeyStoreFile() {
+            return keyStoreFile;
+        }
+
+        public void setKeyStoreFile(String value) {
+            keyStoreFile = value;
+        }
+
+        public String getKeyStorePasswordFile() {
+            return keyStorePasswordFile;
+        }
+
+        public void setKeyStorePasswordFile(String value) {
+            keyStorePasswordFile = value;
+        }
+
+        public String getTrustStoreFile() {
+            return trustStoreFile;
+        }
+
+        public void setTrustStoreFile(String value) {
+            trustStoreFile = value;
+        }
+
+        public String getTrustStorePasswordFile() {
+            return trustStorePasswordFile;
+        }
+
+        public void setTrustStorePasswordFile(String value) {
+            trustStorePasswordFile = value;
+        }
+
+        public String getKubernetesApiUrl() {
+            return kubernetesApiUrl;
+        }
+
+        public void setKubernetesApiUrl(String value) {
+            kubernetesApiUrl = value;
+        }
+
+        public String getKubernetesTokenFile() {
+            return kubernetesTokenFile;
+        }
+
+        public void setKubernetesTokenFile(String value) {
+            kubernetesTokenFile = value;
+        }
+
+        public String getKubernetesCaFile() {
+            return kubernetesCaFile;
+        }
+
+        public void setKubernetesCaFile(String value) {
+            kubernetesCaFile = value;
+        }
+
+        public String getNamespace() {
+            return namespace;
+        }
+
+        public void setNamespace(String value) {
+            namespace = value;
+        }
+
+        public String getServiceName() {
+            return serviceName;
+        }
+
+        public void setServiceName(String value) {
+            serviceName = value;
+        }
+
+        public String getServiceUid() {
+            return serviceUid;
+        }
+
+        public void setServiceUid(String value) {
+            serviceUid = value;
+        }
+
+        public String getPortName() {
+            return portName;
+        }
+
+        public void setPortName(String value) {
+            portName = value;
+        }
+    }
+
+    public static class HarnessInstance {
+        private String instanceId = "";
+        private String baseUrl = "";
+        public String getInstanceId() {
+            return instanceId;
+        }
+
+        public void setInstanceId(String value) {
+            instanceId = value;
+        }
+
+        public String getBaseUrl() {
+            return baseUrl;
+        }
+
+        public void setBaseUrl(String value) {
+            baseUrl = value;
         }
     }
 
