@@ -220,6 +220,11 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'surface:AUTOMATION_RUN',
   },
+  // Managed automations carry no `gate`: a definition has a cron, a prompt
+  // and catch-up limits, so a quiet watch still spends a turn there.
+  scheduled_task_gate: NO_MANAGED_EQUIVALENT(
+    'no scheduled-task gate in Managed automations',
+  ),
   session_monitor_tool_correlation: {
     standing: 'managed',
     evidence: 'tool:monitor',
