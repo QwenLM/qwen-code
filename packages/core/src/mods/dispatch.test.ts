@@ -5,7 +5,7 @@
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { validateInput, validateResult } from './dispatch.js';
+import { jsonDepth, validateInput, validateResult } from './dispatch.js';
 import { ModRuntime } from './runtime.js';
 import type { ModLog } from './types.js';
 
@@ -701,5 +701,17 @@ describe('Mod API event shapes', () => {
     const check = () => validateInput(event, value, {});
     if (valid) expect(check).not.toThrow();
     else expect(check).toThrow();
+  });
+});
+
+describe('Mod value depth', () => {
+  it.each([
+    ['1', 0],
+    ['"[{"', 0],
+    ['{"a":"\\"[{"}', 1],
+    ['[[1],[[2]]]', 3],
+    ['{"a":{"b":[{}]}}', 4],
+  ])('counts the nesting of %s without parsing it', (json, depth) => {
+    expect(jsonDepth(json)).toBe(depth);
   });
 });

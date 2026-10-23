@@ -30,6 +30,7 @@ import {
   MOD_METHODS,
   ModBudget,
   ModTimeoutError,
+  assertModDepth,
   engineOrigin,
   isModMethod,
   record,
@@ -152,6 +153,7 @@ class Realm {
       const json = this.vm.getString(data);
       if (Buffer.byteLength(json) > MOD_MAX_BYTES)
         throw new Error('Mod API input is too large.');
+      assertModDepth(json, 'Mod API input');
       const deferred = this.vm.newPromise();
       const task = Promise.resolve().then(() =>
         hostCall(callId, method, JSON.parse(json)),
@@ -191,7 +193,9 @@ class Realm {
       if (name === 'validate' || name === 'validateResult') {
         if (!call?.live || callAbandoned(call))
           throw new Error('Mod continuation is no longer active.');
-        const value = JSON.parse(this.vm.getString(input));
+        const json = this.vm.getString(input);
+        assertModDepth(json, 'Mod value');
+        const value = JSON.parse(json);
         if (name === 'validateResult') validateResult(call.event, value);
         else validateInput(call.event, value, call.input);
         return this.vm.undefined;
@@ -251,6 +255,7 @@ class Realm {
       const json = this.vm.getString(value);
       if (Buffer.byteLength(json) > MOD_MAX_BYTES)
         throw new Error('Mod result is too large.');
+      assertModDepth(json, 'Mod result');
       return JSON.parse(json);
     } finally {
       value.dispose();

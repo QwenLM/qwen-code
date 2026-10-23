@@ -12,7 +12,12 @@ import { pathToFileURL } from 'node:url';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
-import { ModBudget, record, validateResult } from './dispatch.js';
+import {
+  ModBudget,
+  assertModDepth,
+  record,
+  validateResult,
+} from './dispatch.js';
 import type {
   ModToolCallInput,
   ModToolNext,
@@ -388,8 +393,10 @@ export class ModRuntime {
 
   private post(request: ModRequest, root: number): void {
     if (this.root?.id !== root) return;
-    if (Buffer.byteLength(JSON.stringify(request)) > MOD_MAX_BYTES + 8192)
+    const json = JSON.stringify(request);
+    if (Buffer.byteLength(json) > MOD_MAX_BYTES + 8192)
       throw new Error('Mod host message is too large.');
+    assertModDepth(json, 'Mod host message');
     this.worker.postMessage({ ...request, root, phase: this.root.phase });
   }
 
@@ -461,11 +468,13 @@ export class ModRuntime {
     if (this.failure) throw this.failure;
     if (this.pending) throw new Error('A Mod dispatch is already running.');
     const message = { ...request, facts: this.facts() };
+    const json = JSON.stringify(message);
     if (
-      Buffer.byteLength(JSON.stringify(message)) >
+      Buffer.byteLength(json) >
       (request.type === 'load' ? 32 : 1) * MOD_MAX_BYTES + 8192
     )
       throw new Error('Mod request is too large.');
+    assertModDepth(json, 'Mod request');
     let timer: ReturnType<typeof setTimeout> | undefined;
     let cancelTimer: ReturnType<typeof setTimeout> | undefined;
     let aborted = false;
