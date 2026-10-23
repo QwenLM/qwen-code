@@ -95,6 +95,13 @@ class ExternalRuntimeWorkerFaultGateTest {
                 assertSameLease(ready.getLease(), adopted.getLease());
                 assertEquals(provisions, operator.provisions, "Instance recreation must observe, not allocate");
                 assertEquals(1, operator.allocations);
+                // Session liveness is per Broker process by contract: a
+                // recreated Broker adopts the worker first, then callers
+                // re-acquire the Session. The repository dedupe reuses the
+                // READY record instead of re-driving transport.acquire.
+                var reacquired = join(broker.acquire("harness", "runtime-session", "bootstrap"));
+                assertEquals(adopted.getBindingId(), reacquired.getBindingId());
+                assertEquals(RuntimeSessionRecord.State.READY, reacquired.getState());
                 var duplicate = join(broker.createExecution("harness", "runtime-session", "write-key", write));
                 assertEquals(written.getExecutionCallId(), duplicate.getExecutionCallId());
                 assertEquals("beta\n", Files.readString(file), "Retry must not replay the write over the later edit");
