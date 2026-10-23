@@ -50,6 +50,11 @@ import {
   NativeDirectoryPickerUnavailableError,
   pickNativeDirectory,
 } from '../native-directory-picker.js';
+import {
+  GitCloneRequestError,
+  type TargetRejection,
+  type WorkspaceGitCloner,
+} from '../workspace-git-clone.js';
 
 // Upper bound on total registered workspaces (startup + dynamic). Each
 // registration allocates a full runtime (bridge, channel factory, sub-session
@@ -215,6 +220,7 @@ export interface WorkspaceManagementRouteDeps {
     signal?: AbortSignal,
   ) => Promise<string | undefined>;
   reservedWorkspaceRoots?: readonly string[];
+  workspaceGitCloner?: WorkspaceGitCloner;
 }
 
 export type { WorkspaceRemovalActivity } from '../workspace-activity.js';
@@ -265,6 +271,7 @@ export function registerWorkspaceManagementRoutes(
     runtimeRemoval,
     pickWorkspaceDirectory: pickWorkspaceDirectoryOverride,
     reservedWorkspaceRoots = [],
+    workspaceGitCloner,
   } = deps;
   const pickWorkspaceDirectory =
     pickWorkspaceDirectoryOverride ?? pickNativeDirectory;
@@ -1036,6 +1043,144 @@ export function registerWorkspaceManagementRoutes(
   );
 
   const protectExistingWorkspaceRegistration = mutate({ strict: true });
+
+  const validateGitCloneTarget = (
+    candidate: string,
+  ): TargetRejection | undefined => {
+    if (isReservedWorkspacePath(candidate)) {
+      return {
+        status: 409,
+        code: 'target_reserved',
+        message: 'Workspace path is reserved for Conversations.',
+      };
+    }
+    if (
+      managedScratchRoot &&
+      !isScratchRootCompatible(candidate, managedScratchRoot.canonicalRoot)
+    ) {
+      return {
+        status: 409,
+        code: 'scratch_root_conflict',
+        message: 'Workspace path conflicts with the managed scratch root',
+      };
+    }
+    if (conflictsWithRegisteredWorkspace(candidate)) {
+      return {
+        status: 409,
+        code: 'target_nested',
+        message: 'Workspace path nests with an existing workspace',
+      };
+    }
+    for (const cwd of inFlight.keys()) {
+      if (
+        cwd !== candidate &&
+        (isWithinRoot(candidate, cwd) || isWithinRoot(cwd, candidate))
+      ) {
+        return {
+          status: 409,
+          code: 'target_nested',
+          message: 'Workspace path nests with an existing workspace',
+        };
+      }
+    }
+    return undefined;
+  };
+
+  const startGitCloneWorkspace = async (
+    res: Response,
+    body: Record<string, unknown>,
+  ): Promise<void> => {
+    if (!workspaceGitCloner) {
+      res.status(501).json({
+        error: 'Git workspace cloning is not available',
+        code: 'git_clone_not_available',
+      });
+      return;
+    }
+    if (
+      typeof body['url'] !== 'string' ||
+      typeof body['target'] !== 'string' ||
+      Object.keys(body).some(
+        (key) => key !== 'kind' && key !== 'url' && key !== 'target',
+      )
+    ) {
+      res.status(400).json({
+        error: 'Git clone requests must be { kind: "git", url, target }',
+        code: 'invalid_workspace_request',
+      });
+      return;
+    }
+    if (sealed) {
+      sendSealed(res);
+      return;
+    }
+    operationStarted();
+    try {
+      const { jobId } = await workspaceGitCloner.start({
+        url: body['url'],
+        target: body['target'],
+        validateTarget: validateGitCloneTarget,
+      });
+      res.status(202).json({ kind: 'git-workspace-clone', jobId });
+    } catch (error) {
+      if (error instanceof GitCloneRequestError) {
+        res.status(error.status).json({
+          error: error.message,
+          code: error.code,
+        });
+        return;
+      }
+      writeStderrLine(
+        `qwen serve: git workspace clone failed to start: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      res.status(500).json({
+        error: 'Failed to start workspace clone',
+        code: 'git_clone_failed',
+      });
+    } finally {
+      operationFinished();
+    }
+  };
+
+  app.get('/workspace-git-clone-jobs/:jobId', (req: Request, res: Response) => {
+    const snapshot = workspaceGitCloner?.get(String(req.params['jobId']));
+    if (!snapshot) {
+      res.status(404).json({
+        error: 'Workspace clone job not found',
+        code: 'clone_job_not_found',
+      });
+      return;
+    }
+    res.status(200).json(snapshot);
+  });
+
+  app.delete(
+    '/workspace-git-clone-jobs/:jobId',
+    mutate(),
+    async (req: Request, res: Response) => {
+      if (!workspaceGitCloner) {
+        res.status(501).json({
+          error: 'Git workspace cloning is not available',
+          code: 'git_clone_not_available',
+        });
+        return;
+      }
+      const snapshot = await workspaceGitCloner.cancel(
+        String(req.params['jobId']),
+      );
+      if (!snapshot) {
+        res.status(404).json({
+          error: 'Workspace clone job not found',
+          code: 'clone_job_not_found',
+        });
+        return;
+      }
+      res.status(200).json(snapshot);
+    },
+  );
+
   app.post(
     '/workspaces',
     mutate(),
@@ -1050,6 +1195,10 @@ export function registerWorkspaceManagementRoutes(
     async (req: Request, res: Response) => {
       const body = safeBody(req);
       if ('kind' in body) {
+        if (body['kind'] === 'git') {
+          await startGitCloneWorkspace(res, body);
+          return;
+        }
         if (
           body['kind'] !== 'scratch' ||
           'cwd' in body ||
@@ -2207,6 +2356,7 @@ export function registerWorkspaceManagementRoutes(
     quarantineOwnedRuntime,
     async sealAndWait() {
       sealed = true;
+      await workspaceGitCloner?.sealAndWait();
       if (activeOperations === 0) return;
       await new Promise<void>((resolveIdle) => idleWaiters.add(resolveIdle));
     },
