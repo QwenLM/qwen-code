@@ -97,7 +97,7 @@ matches its own route lines.
 
 - `cd packages/cli && npx vitest run src/serve/capability-parity.test.ts`
   passes.
-- `cd packages/managed-agent-server && mvn -Dtest=ManagedSurfaceCaptureTest test`
+- `cd packages/managed-agent-server && mvn -Dtest=ManagedSurfaceCaptureTest,SurfaceRegistryGateTest,ManagedAgentApiContractTest test`
   passes.
 - Add a tag to `SERVE_CAPABILITY_REGISTRY` without a row: the TypeScript test
   run fails to compile.

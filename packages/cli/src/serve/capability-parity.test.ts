@@ -44,6 +44,11 @@ const ROUTE_METHODS: ReadonlySet<string> = new Set([
   'PATCH',
   'DELETE',
 ]);
+const SURFACES: ReadonlySet<string> = new Set([
+  'public',
+  'webshell',
+  'internal',
+]);
 
 function toolNames(
   declarations: ReadonlyArray<{ name?: string | undefined }>,
@@ -72,12 +77,20 @@ function readManagedSurfaceSet(
   const routes = new Set<string>();
   for (const line of readFileSync(file, 'utf8').split('\n')) {
     if (line === '' || line.startsWith('#')) continue;
-    const [label, method, template] = line.trim().split(' ') as [
+    const parts = line.trim().split(' ');
+    if (parts.length !== 4) throw new Error(`malformed twin line: ${line}`);
+    const [label, method, template, surface] = parts as [
+      string,
       string,
       string,
       string,
     ];
-    if (!ROUTE_METHODS.has(method)) continue;
+    if (!ROUTE_METHODS.has(method)) {
+      throw new Error(`unknown method in twin: ${line}`);
+    }
+    if (!SURFACES.has(surface)) {
+      throw new Error(`unknown surface in twin: ${line}`);
+    }
     labels.add(label);
     routes.add(template);
   }

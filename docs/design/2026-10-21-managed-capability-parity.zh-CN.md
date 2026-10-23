@@ -59,7 +59,7 @@ mvn -Dtest=ManagedSurfaceCaptureTest -Dcapability.parity.capture=true test
 ## 验收
 
 - `cd packages/cli && npx vitest run src/serve/capability-parity.test.ts` 通过。
-- `cd packages/managed-agent-server && mvn -Dtest=ManagedSurfaceCaptureTest test` 通过。
+- `cd packages/managed-agent-server && mvn -Dtest=ManagedSurfaceCaptureTest,SurfaceRegistryGateTest,ManagedAgentApiContractTest test` 通过。
 - 向 `SERVE_CAPABILITY_REGISTRY` 新增标签但不加行：TypeScript 测试编译失败。
 - 改动某 Managed 依据指向：TypeScript 测试失败并指出该标记。
 - 改动 `SurfaceRegistry` 但不重新生成：Java 测试失败。
