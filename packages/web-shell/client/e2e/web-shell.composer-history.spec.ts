@@ -139,6 +139,65 @@ test('a short single row still enters history immediately @smoke', async ({
   await expect(editor).toHaveText('short draft');
 });
 
+for (const [name, draft, wrapped] of [
+  ['short RTL', 'שלום עולם זה טקסט בעברית', false],
+  ['mixed LTR/RTL', 'abc שלום', false],
+  ['mixed RTL/LTR', 'שלום abc', false],
+  [
+    'wrapped RTL',
+    Array.from({ length: 12 }, () => 'שלום עולם זה טקסט בעברית').join(' '),
+    true,
+  ],
+] as const) {
+  test(`a ${name} draft reaches history and is restored @smoke`, async ({
+    page,
+    baseURL,
+  }) => {
+    const editor = await openSession(page, baseURL!);
+    await editor.fill(draft);
+    await expectText(editor, draft);
+    if (wrapped) {
+      await expectWrapped(editor);
+      await editor.press('ControlOrMeta+Home');
+      await editor.press('ArrowDown');
+      await expectText(editor, draft);
+      expect(await caretOffset(editor)).toBeGreaterThan(0);
+      expect(await caretOffset(editor)).toBeLessThan(draft.length);
+      await editor.press('ControlOrMeta+Home');
+      expect(await caretOffset(editor)).toBe(0);
+    }
+    await editor.press('ArrowUp');
+    await expectText(editor, history[1]!);
+    await editor.press('ArrowDown');
+    await expectText(editor, draft);
+  });
+}
+
+for (const key of ['ArrowUp', 'ArrowDown']) {
+  test(`${key} moves inside an edited recalled entry instead of paging history @smoke`, async ({
+    page,
+    baseURL,
+  }) => {
+    const editor = await openSession(page, baseURL!);
+    await editor.fill('unsent draft');
+    await editor.press('ArrowUp');
+    await expectText(editor, history[1]!);
+    await editor.pressSequentially('x');
+    const edited = `${history[1]}x`;
+    await expectText(editor, edited);
+    await expectWrapped(editor);
+    if (key === 'ArrowDown') await editor.press('ControlOrMeta+Home');
+    const before = await caretOffset(editor);
+    await editor.press(key);
+    await expectText(editor, edited);
+    const after = await caretOffset(editor);
+    expect(after).toBeGreaterThan(0);
+    expect(after).toBeLessThan(edited.length);
+    if (key === 'ArrowUp') expect(after).toBeLessThan(before);
+    else expect(after).toBeGreaterThan(before);
+  });
+}
+
 test('active selections preserve both drafts and recalled history @smoke', async ({
   page,
   baseURL,

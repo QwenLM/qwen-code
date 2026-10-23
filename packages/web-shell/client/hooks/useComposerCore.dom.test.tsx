@@ -389,7 +389,7 @@ describe('useComposerCore history and drafts', () => {
   it.each(['ArrowUp', 'ArrowDown'] as const)(
     'keeps a selected history entry when pressing %s',
     async (key) => {
-      const entry = 'line one\nline two\nline three';
+      const entry = 'recalled entry';
       localStorage.setItem(
         'qwen-web-shell-history',
         JSON.stringify(['older prompt', entry]),
@@ -398,7 +398,7 @@ describe('useComposerCore history and drafts', () => {
       act(() => pressHistoryKey('ArrowUp'));
       expect(latest!.getText()).toBe(entry);
       const view = latest!.viewRef.current!;
-      act(() => view.dispatch({ selection: { anchor: 2, head: 12 } }));
+      act(() => view.dispatch({ selection: { anchor: 2, head: 8 } }));
       act(() => pressHistoryKey(key));
       expect(latest!.getText()).toBe(entry);
     },

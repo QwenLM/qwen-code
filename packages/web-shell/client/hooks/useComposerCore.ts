@@ -1468,15 +1468,24 @@ function handleMultilineHistoryBoundary(
   if (isNavigatingHistory && doc.lines === 1) return 'history';
 
   const head = selection.head;
-  const from = view.moveToLineBoundary(selection, false).head;
-  const to = view.moveToLineBoundary(selection, true).head;
-  if (doc.lines === 1 && from === 0 && to === doc.length) return 'history';
+  const caret = view.coordsAtPos(head, selection.assoc < 0 ? -1 : 1);
+  // Bidi visual sides may lie inside the logical line; compare vertical rows.
+  const sharesRowWith = (edge: number) => {
+    if (!caret) return doc.lineAt(head).number === doc.lineAt(edge).number;
+    const bounds = view.coordsAtPos(edge);
+    return (
+      bounds !== null && caret.top < bounds.bottom && bounds.top < caret.bottom
+    );
+  };
+  const onFirstRow = sharesRowWith(0);
+  const onLastRow = sharesRowWith(doc.length);
+  if (doc.lines === 1 && onFirstRow && onLastRow) return 'history';
 
   // Let CodeMirror move between visual rows, including soft wraps. Once the
   // cursor is on the edge row, one more arrow key snaps to the true edge;
   // the next press can browse prompt history instead of feeling stuck.
   if (direction === 'up') {
-    if (from > 0) return 'editor';
+    if (!onFirstRow) return 'editor';
     if (head > 0) {
       view.dispatch({
         selection: { anchor: 0 },
@@ -1487,7 +1496,7 @@ function handleMultilineHistoryBoundary(
     return 'history';
   }
 
-  if (to < doc.length) return 'editor';
+  if (!onLastRow) return 'editor';
   if (head < doc.length) {
     view.dispatch({
       selection: { anchor: doc.length },
