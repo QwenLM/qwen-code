@@ -4,9 +4,9 @@
 
 ## 状态与源码边界
 
-**当前检查点（2026-10-23）：npm 分发 PR #14959 已合入 main `32b4234b`；#15283 仍为 Draft。** C 已通过保留原提交历史的正常 merge 整合该 main。本恢复批次进一步允许异步恢复期间精确匹配的命令自有 user-history 行，并让客户端发起的工具在本地完成，与 Ink 一致且不自动请求模型。正常 build、包含集成测试的完整 typecheck、bundle，以及八个完整受影响 CLI unit 文件均已通过（**902 案、零跳过**）。持久 H11e tool-only checkpoint 用例在同一 bundle 的 Node+Ink、Bun+Ink、严格 Bun+OpenTUI 三腿均通过：真实工具执行一次、自动模型请求为零、显式后续输入请求一次、checkpoint 不变、自然退出为 0。这些检查覆盖 shell pipes 和 tool-only 重放，不代表完整文件/history rewind、inner PTY 或安装平台验收。早期 fixture 错误与真实额外请求失败保留在调查证据中。已发布的 `0b798829` 通过专用 TUI CI；其继承的 Java reference-distribution 失败已由上游 #15305 修复。最新 main `56733c35` 的整合与最终组合安装验收仍待完成。
+**当前检查点（2026-10-23）：#14959 已合并；#15283 仍为 Draft，现已整合 main `56733c35`。** restore 接纳/自有历史行发布与工具本地完成修复均已提交。整合后的 `5cb491f5` 通过正常 build、包含集成测试的完整 typecheck、fresh bundle、382 项受影响 CLI 测试及 65 项受影响 core 测试，均零跳过。此前 902 案完整 CLI 回归和 Node+Ink/Bun+Ink/严格 OpenTUI 的 H11e 对照保留精确源码归属。H11e 在新整合的严格 OpenTUI bundle 上再次通过：工具执行一次、自动模型请求为零、显式后续请求一次、checkpoint 不变、自然退出为 0。另一个真实模型 read→edit 探针确认了剩余缺陷：Ink 在待审批时生成完整 checkpoint，OpenTUI 到达相同审批状态却未创建文件。完整 checkpoint 创建/恢复、最终组合安装产物及平台验收仍待完成，PR 尚不能正式送审。本次 main 已包含 #15305 对继承的 Java CI 问题的修复。
 
-完整本地修复已恢复到整合后的 main。剩余门禁包括正常提交检查与当前 head CI、实际 TUI 的 held-restore 取消与后继保护，以及最终 npm/standalone 安装产物和受支持平台/PTY 验收。历史源码 bundle 与终端通过保留各自产物和运行时身份。本 C 批次不改变 Bun/OpenTUI pin、默认 renderer 或记录 schema。
+已完成的审查修复保留现有 history 与 turn 所有权。剩余门禁包括完整 checkpoint producer/consumer 链、真实挂起 restore 的取消与后继保护、当前 head CI，以及最终 npm/standalone 安装产物和受支持平台/PTY 验收。历史结果继续保留对应源码与运行时身份。C 批次不改 Bun/OpenTUI pin、默认 renderer 或 recording schema。
 
 **历史 shell 修复检查点（提交 `044c1073` 前）：#15283 当时仍为 Draft，基于已提交的 `3301fee0` 加 shell 生命周期、本地键盘取消及重试文案工作变更。** 精确已提交 head 的 Linux CI 通过 no-flicker、20 个组件 validator 和三腿每腿 42 个产品用例；这些重叠执行不与历史本地总数相加。当前工作修复通过三个受影响的完整 CLI unit 文件（482 案、零跳过）；未改变的受影响 workflow 元测试文件通过 41 案。此前工作产物通过正常 build/type/bundle、Node22 + Ink 与 strict Bun + OpenTUI 的 held-shell Retry 接纳门禁，以及 Ink 英文倒计时精确文案。随后真实 OS 取消合同在 Node22 + Ink 上通过，在 strict OpenTUI 上失败：Ctrl+C 后已观察的 shell 仍存活，直到 fixture 清理时释放才结束。新增实际捕获 signal 的回归也在本地按键接线修复前失败。因此该整合迭代要求重新执行正常 build/type/bundle，并在精确同一新产物上验证真实终端取消、后继及自然退出合同。原产品失败和 fixture 未完成观察继续分别记录，不算本修复的通过结果。既有源码 bundle 与安装结果保留原产物归属；不改 runtime pin、依赖、默认 renderer 或记录 schema。
 
