@@ -6,19 +6,22 @@
 
 import express from 'express';
 import supertest from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createHostedHarnessContract,
   HOSTED_HARNESS_BOOT_ID_HEADER,
   HOSTED_HARNESS_CAPABILITY_DIGEST_ENV,
   HOSTED_HARNESS_PROTOCOL_HEADER,
   HOSTED_HARNESS_UPGRADE,
+  HOSTED_LIFECYCLE_V2_PROFILES_ENV,
   installHostedHarnessContractMiddleware,
   isHostedHarnessCapabilityDigest,
 } from './hosted-harness-contract.js';
 
 const DIGEST = `sha256:${'a'.repeat(64)}`;
 const BOOT_ID = '11111111-1111-4111-8111-111111111111';
+
+afterEach(() => vi.unstubAllEnvs());
 
 function createApp() {
   const app = express();
@@ -37,6 +40,7 @@ function createApp() {
 
 describe('Hosted Harness private contract', () => {
   it('creates a stable capability envelope', () => {
+    vi.stubEnv(HOSTED_LIFECYCLE_V2_PROFILES_ENV, undefined);
     const contract = createHostedHarnessContract(DIGEST, BOOT_ID.toUpperCase());
 
     expect(contract).toEqual({
@@ -44,7 +48,7 @@ describe('Hosted Harness private contract', () => {
       bootId: BOOT_ID,
       capabilityDigest: DIGEST,
       lifecycleProtocolVersion: 1,
-      lifecycleV2Profiles: [],
+      lifecycleV2Profiles: ['hosted-workspace-shell/1'],
       titleProtocolVersion: 1,
       features: [
         'hosted_approval_resume_v1',
@@ -89,6 +93,15 @@ describe('Hosted Harness private contract', () => {
         'hosted-workspace-mcp/1',
       ]),
     ).toThrow('once');
+  });
+
+  it('honors complete environment overrides, including explicit disablement', () => {
+    vi.stubEnv(HOSTED_LIFECYCLE_V2_PROFILES_ENV, '');
+    expect(createHostedHarnessContract(DIGEST).lifecycleV2Profiles).toEqual([]);
+    vi.stubEnv(HOSTED_LIFECYCLE_V2_PROFILES_ENV, 'hosted-workspace-mcp/1');
+    expect(createHostedHarnessContract(DIGEST).lifecycleV2Profiles).toEqual([
+      'hosted-workspace-mcp/1',
+    ]);
   });
 
   it('generates a fresh RFC UUID boot id by default', () => {
