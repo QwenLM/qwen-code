@@ -23,7 +23,9 @@ import java.io.File;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
 import java.net.ServerSocket;
+import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -646,7 +648,9 @@ public final class ManagedAgentPreflight {
     }
 
     // The Harness takes its Broker URL from its own environment file, which
-    // nothing else reconciles with the address the Broker binds.
+    // nothing else reconciles with the address the Broker binds. Only a URL
+    // that names the Broker's own plain-HTTP listener can be checked; one
+    // that names another address may reach it through a proxy.
     static Check harnessBrokerUrlCheck(String url,
             ManagedAgentProperties.RuntimeBroker broker, String file) {
         String address = broker.getHost() + ":" + broker.getPort();
@@ -658,7 +662,7 @@ public final class ManagedAgentPreflight {
                             + ", unless the Harness command line sets them");
         }
         String fix = "point QWEN_MANAGED_RUNTIME_BROKER_URL in " + file
-                + " at " + address;
+                + " at http://" + address;
         URI uri;
         try {
             uri = new URI(url);
@@ -666,36 +670,55 @@ public final class ManagedAgentPreflight {
             return new Check("broker-url", Status.FAIL,
                     "the Hosted Harness Broker URL is not a URL", fix);
         }
-        int port = uri.getPort();
-        if (port < 0) {
-            port = "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80;
-        }
-        if (uri.getHost() == null || port != broker.getPort()
-                || !reaches(uri.getHost(), broker.getHost())) {
+        String scheme = uri.getScheme() == null ? ""
+                : uri.getScheme().toLowerCase(Locale.ROOT);
+        if (uri.getHost() == null
+                || !"http".equals(scheme) && !"https".equals(scheme)) {
             return new Check("broker-url", Status.FAIL,
-                    "the Hosted Harness dials " + url
-                            + " but the Broker listens on " + address,
+                    "the Hosted Harness Broker URL is not an http or https URL",
                     fix);
         }
-        return new Check("broker-url", Status.PASS, url, null);
+        int port = uri.getPort() >= 0 ? uri.getPort()
+                : "https".equals(scheme) ? 443 : 80;
+        if (port == broker.getPort() && served(uri.getHost(), broker.getHost())) {
+            // The URL names the Broker's own socket, which speaks plain HTTP.
+            return "https".equals(scheme)
+                    ? new Check("broker-url", Status.FAIL, "the Hosted Harness"
+                            + " dials " + url + ", but the Broker serves plain"
+                            + " HTTP there, so TLS cannot connect", fix)
+                    : new Check("broker-url", Status.PASS, url, null);
+        }
+        return new Check("broker-url", Status.WARN, "the Hosted Harness dials "
+                + url + ", not the Broker's listener at " + address
+                + "; a proxy may forward it, which preflight cannot verify",
+                fix + ", unless a proxy forwards " + url + " there");
     }
 
-    // A wildcard bind accepts every address, a loopback bind every loopback
-    // address.
-    private static boolean reaches(String host, String bindHost) {
+    // Whether the Broker's socket accepts connections to this host: a
+    // specific bind serves only its own address, and a wildcard bind every
+    // address of this machine.
+    private static boolean served(String host, String bindHost) {
         try {
             InetAddress bind = InetAddress.getByName(bindHost);
             for (InetAddress address : InetAddress.getAllByName(host)) {
-                if (bind.isAnyLocalAddress() || address.equals(bind)
-                        || address.isLoopbackAddress()
-                        && bind.isLoopbackAddress()) {
+                if (bind.isAnyLocalAddress() ? isLocal(address)
+                        : address.equals(bind)) {
                     return true;
                 }
             }
-        } catch (UnknownHostException error) {
+        } catch (UnknownHostException | SecurityException unresolved) {
             return false;
         }
         return false;
+    }
+
+    private static boolean isLocal(InetAddress address) {
+        try {
+            return address.isLoopbackAddress() || address.isAnyLocalAddress()
+                    || NetworkInterface.getByInetAddress(address) != null;
+        } catch (SocketException error) {
+            return false;
+        }
     }
 
     private static Check workspaceCheck(ManagedAgentProperties properties) {

@@ -50,7 +50,7 @@ Under `--profile hosted-harness`, `EADDRINUSE` on the requested port fails start
 
 The Harness credentials file gains two optional keys. When `harness.credentials-file` is set and the file contains `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`, the control plane takes `runtime-broker.token` from it. As with the other two keys, a file that sets the key together with a direct `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN` fails startup. A file without the key leaves the direct setting in charge, so text-only deployments are unaffected. The Harness also reads `QWEN_MANAGED_RUNTIME_BROKER_URL` from the file, so both lines follow the same rules as the other two: no whitespace around the `=`, and a value of only letters, digits and `._:/+=-`. Binding is atomic: on a conflict, nothing is bound.
 
-The Broker URL in the file is a second copy of the address the Broker binds, which the control plane configures separately. Preflight therefore adds a `broker-url` row while the Broker is enabled and startup read the file. The row fails when the URL's host and port cannot reach `runtime-broker.host` and `runtime-broker.port`, and warns when the file has no Broker URL. A wildcard bind accepts any URL host, and a loopback bind any loopback host.
+The Broker URL in the file is a second copy of the address the Broker binds, which the control plane configures separately. Preflight therefore adds a `broker-url` row while the Broker is enabled and startup read the file. The row passes only when the URL names the Broker's own listener directly: `http`, `runtime-broker.port`, and a host that resolves to an address the bind serves, which is `runtime-broker.host` itself or, for a wildcard bind, any address of this machine. An `https` URL to that same listener fails, because the embedded Broker serves plain HTTP. Any other URL warns: it may be a proxy or TLS front end that forwards to the Broker, which preflight cannot verify, so it does not fail `--check`. The row also warns when the file has no Broker URL.
 
 ### Templates and documentation
 
@@ -74,7 +74,7 @@ The Broker URL in the file is a second copy of the address the Broker binds, whi
 - Java unit tests:
   - the optional Broker token key is resolved from the file; a conflict with the direct setting fails and binds nothing; an absent key leaves the direct value;
   - the Broker URL and token lines are held to the credential rules;
-  - the `broker-url` row passes a matching URL and fails a moved port or host;
+  - the `broker-url` row passes a direct `http` URL, fails `https` to the plain-HTTP listener, and warns on a moved port or host, another loopback address, a non-local address under a wildcard bind, and a TLS front end on another port;
   - the broker row's fix names the file only when startup read it;
   - Runtime workers do not inherit the token.
 - Template tests: `server.env` carries no Broker token, `harness.env` carries both variables, the template lists both commented, and the unit loads `harness.env` with no Broker arguments in `ExecStart`.

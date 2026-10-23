@@ -50,7 +50,7 @@ token 在读取后就离开了 Harness 自身的环境，因此 Harness 启动�
 
 Harness 凭据文件增加两个可选键。当设置了 `harness.credentials-file` 且文件中有 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 时，控制面从中取 `runtime-broker.token`。与另外两个键一样，文件设置了该键、同时又直接设置了 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN` 时，启动失败。文件中没有该键时仍由直接配置决定，因此纯文本部署不受影响。Harness 还会从该文件读取 `QWEN_MANAGED_RUNTIME_BROKER_URL`，因此这两行都遵循与另外两个键相同的规则：`=` 两侧不留空白，值只用字母、数字和 `._:/+=-`。绑定是原子的：发生冲突时什么都不会被绑定。
 
-文件中的 Broker URL 是 Broker 绑定地址的第二份副本，而 Broker 的绑定地址由控制面单独配置。因此，在 Broker 已开启且启动时读取了该文件的情况下，预检增加一行 `broker-url`：URL 的主机和端口无法到达 `runtime-broker.host` 和 `runtime-broker.port` 时报 FAIL，文件中没有 Broker URL 时报 WARN。通配地址绑定接受任何 URL 主机，回环地址绑定接受任何回环主机。
+文件中的 Broker URL 是 Broker 绑定地址的第二份副本，而 Broker 的绑定地址由控制面单独配置。因此，在 Broker 已开启且启动时读取了该文件的情况下，预检增加一行 `broker-url`：只有当 URL 直接指向 Broker 自己的监听时，这一行才通过：协议为 `http`，端口为 `runtime-broker.port`，主机解析出的地址由该绑定提供，即 `runtime-broker.host` 本身，通配地址绑定时则为本机的任一地址。用 `https` 指向同一个监听时报 FAIL，因为嵌入式 Broker 提供的是明文 HTTP。其他 URL 报 WARN：它可能是转发到 Broker 的代理或 TLS 前端，预检无法确认，因此不会让 `--check` 失败。文件中没有 Broker URL 时同样报 WARN。
 
 ### 模板与文档
 
@@ -74,7 +74,7 @@ Harness 凭据文件增加两个可选键。当设置了 `harness.credentials-fi
 - Java 单元测试：
   - 可选的 Broker token 键能从文件解析出来；与直接配置冲突时失败且不绑定任何值；键缺失时保留直接配置的值；
   - Broker URL 和 token 所在行同样受凭据规则约束；
-  - URL 匹配时 `broker-url` 行通过，Broker 端口或主机变更时失败；
+  - 直连的 `http` URL 时 `broker-url` 行通过，用 `https` 指向明文监听时失败；Broker 端口或主机变更、换成另一个回环地址、通配地址绑定下的非本机地址、以及其他端口上的 TLS 前端都报警告；
   - broker 行只在启动读取了该文件时，才在修复建议中提到它；
   - Runtime worker 不继承该 token。
 - 模板测试：`server.env` 不含 Broker token，`harness.env` 含两个变量，模板中两者均为注释状态，unit 加载 `harness.env` 且 `ExecStart` 不含 Broker 参数。

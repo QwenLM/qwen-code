@@ -569,32 +569,53 @@ class ManagedAgentPreflightTest {
         broker.setEnabled(true);
         assertEquals(ManagedAgentPreflight.Status.PASS,
                 urlRow(properties).status());
-        // The Broker moved through its own settings; the file still names 4182.
+        // The Broker moved through its own settings; the file still names
+        // 4182, which only a proxy could forward, so preflight warns.
         broker.setPort(4200);
         ManagedAgentPreflight.Check moved = urlRow(properties);
-        assertEquals(ManagedAgentPreflight.Status.FAIL, moved.status());
-        assertEquals("the Hosted Harness dials http://127.0.0.1:4182"
-                + " but the Broker listens on 127.0.0.1:4200", moved.detail());
+        assertEquals(ManagedAgentPreflight.Status.WARN, moved.status());
+        assertEquals("the Hosted Harness dials http://127.0.0.1:4182, not the"
+                + " Broker's listener at 127.0.0.1:4200; a proxy may forward it,"
+                + " which preflight cannot verify", moved.detail());
         assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in " + file
-                + " at 127.0.0.1:4200", moved.fix());
+                + " at http://127.0.0.1:4200, unless a proxy forwards"
+                + " http://127.0.0.1:4182 there", moved.fix());
         broker.setPort(4182);
         broker.setHost("192.0.2.7");
-        assertEquals(ManagedAgentPreflight.Status.FAIL,
+        assertEquals(ManagedAgentPreflight.Status.WARN,
                 urlRow(properties).status());
-        // A wildcard bind accepts the loopback URL.
+        // A wildcard bind serves this machine's addresses, not any address.
         broker.setHost("0.0.0.0");
         assertEquals(ManagedAgentPreflight.Status.PASS,
                 urlRow(properties).status());
+        assertEquals(ManagedAgentPreflight.Status.WARN, urlCheck(
+                "http://192.0.2.7:4182", broker).status());
         broker.setHost("127.0.0.1");
         assertEquals(ManagedAgentPreflight.Status.PASS,
-                ManagedAgentPreflight.harnessBrokerUrlCheck(
-                        "http://localhost:4182", broker, "f").status());
+                urlCheck("http://localhost:4182", broker).status());
+        // A specific bind serves its own address, not every loopback one.
+        assertEquals(ManagedAgentPreflight.Status.WARN,
+                urlCheck("http://127.0.0.2:4182", broker).status());
+        // The Broker speaks plain HTTP, so https to its own socket fails,
+        // while https to another port may be a TLS front end.
+        ManagedAgentPreflight.Check tls = urlCheck("https://127.0.0.1:4182", broker);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, tls.status());
+        assertEquals("the Hosted Harness dials https://127.0.0.1:4182, but the"
+                + " Broker serves plain HTTP there, so TLS cannot connect",
+                tls.detail());
+        assertEquals(ManagedAgentPreflight.Status.WARN,
+                urlCheck("https://127.0.0.1:8443", broker).status());
+        assertEquals(ManagedAgentPreflight.Status.WARN,
+                urlCheck("http://127.0.0.1", broker).status());
         assertEquals(ManagedAgentPreflight.Status.FAIL,
-                ManagedAgentPreflight.harnessBrokerUrlCheck(
-                        "http://127.0.0.1", broker, "f").status());
+                urlCheck("127.0.0.1:4182", broker).status());
         assertEquals(ManagedAgentPreflight.Status.FAIL,
-                ManagedAgentPreflight.harnessBrokerUrlCheck(
-                        "127.0.0.1:4182", broker, "f").status());
+                urlCheck("ftp://127.0.0.1:4182", broker).status());
+    }
+
+    private static ManagedAgentPreflight.Check urlCheck(String url,
+            ManagedAgentProperties.RuntimeBroker broker) {
+        return ManagedAgentPreflight.harnessBrokerUrlCheck(url, broker, "f");
     }
 
     private static ManagedAgentPreflight.Check urlRow(
