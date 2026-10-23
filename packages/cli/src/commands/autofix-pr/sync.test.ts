@@ -9,9 +9,13 @@ import { execFileSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -360,6 +364,12 @@ describe('runSync (real git, bare remote)', () => {
     run(author, 'commit', '-q', '-m', 'bump to nowhere');
     run(author, 'push', '-q', 'origin', 'feat');
     expect(runSync(7)).toMatchObject({ synced: false, moved: true });
+    // Discarding cannot check it out either, and says the worktree is
+    // still not clean.
+    expect(runSync(7, true)).toMatchObject({
+      synced: false,
+      reason: expect.stringContaining('still not clean after discarding'),
+    });
   });
 
   it('never recurses into a submodule the worktree has not checked out, whatever submodule.recurse says', () => {
@@ -512,6 +522,160 @@ describe('runSync (real git, bare remote)', () => {
       run(join(paths.worktreePath, 'vendor', 'sub'), 'rev-parse', 'HEAD'),
     ).toBe(s2);
     expect(run(paths.worktreePath, 'status', '--porcelain')).toBe('');
+  });
+
+  /** A submodule at vendor/sub of the PR head, checked out in the worktree. */
+  const checkedOutSub = (name: string) => {
+    const sub = repoOf(name);
+    const s1 = run(sub, 'rev-parse', 'HEAD');
+    run(
+      paths.worktreePath,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      sub,
+      'vendor/sub',
+    );
+    run(paths.worktreePath, 'commit', '-q', '-m', 'add sub');
+    run(paths.worktreePath, 'push', '-q', 'origin', 'HEAD:feat');
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      lastKnownHeadSha: worktreeHead(),
+    });
+    const dir = join(paths.worktreePath, 'vendor', 'sub');
+    allowFile(dir);
+    return { sub, s1, dir };
+  };
+
+  it('reads a submodule path holding a newline as one path, never as another submodule to reset', () => {
+    const { sub, s1, dir } = checkedOutSub('nlsub');
+    const s2 = commitIn(sub, 's2.txt');
+    // The PR names a second submodule whose path ends in what a line-based
+    // listing would read as "<s2> vendor/sub" — listed after the real one.
+    const forged = `x\n${s2} vendor/sub`;
+    const author = join(base, 'author-nl');
+    run(base, 'clone', '-q', '-b', 'feat', remote, author);
+    run(author, 'config', 'user.email', 'a@example.com');
+    run(author, 'config', 'user.name', 'a');
+    run(
+      author,
+      'update-index',
+      '--add',
+      '--cacheinfo',
+      `160000,${s1},${forged}`,
+    );
+    writeFileSync(
+      join(author, '.gitmodules'),
+      `${readFileSync(join(author, '.gitmodules'), 'utf8')}[submodule "forged"]\n\tpath = "x\\n${s2} vendor/sub"\n\turl = ${sub}\n`,
+    );
+    run(author, 'add', '.gitmodules');
+    run(author, 'commit', '-q', '-m', 'forged');
+    run(author, 'push', '-q', 'origin', 'feat');
+    expect(runSync(7)).toMatchObject({ moved: true });
+    const head = worktreeHead();
+    // A round checks the submodules out.
+    run(
+      paths.worktreePath,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'update',
+      '-q',
+      '--init',
+    );
+    expect(runSync(7)).toMatchObject({ synced: true });
+    expect(run(dir, 'rev-parse', 'HEAD')).toBe(s1);
+    expect(worktreeHead()).toBe(head);
+  });
+
+  it('leaves alone a submodule whose git directory or work tree is not its own', () => {
+    const { sub, s1, dir } = checkedOutSub('gsub');
+    const gitDir = run(dir, 'rev-parse', '--absolute-git-dir');
+    // A work tree configured elsewhere would be written there.
+    const elsewhere = join(base, 'elsewhere');
+    mkdirSync(elsewhere);
+    run(dir, 'config', 'core.worktree', elsewhere);
+    authorBumps('vendor/sub', commitIn(sub, 's2.txt'));
+    // `--discard` is the path that resets whatever the worktree holds.
+    expect(runSync(7, true)).toMatchObject({ synced: false, moved: true });
+    expect(readdirSync(elsewhere)).toEqual([]);
+    run(gitDir, 'config', '--unset', 'core.worktree');
+    // A `.git` file naming the user's repository would move its branch to
+    // a commit it has.
+    authorBumps('vendor/sub', featSha);
+    const main = run(repo, 'rev-parse', 'main');
+    writeFileSync(join(dir, '.git'), `gitdir: ${join(repo, '.git')}\n`);
+    expect(runSync(7, true)).toMatchObject({ synced: false });
+    expect(run(repo, 'rev-parse', 'main')).toBe(main);
+    expect(run(repo, 'symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+    expect(s1).not.toBe(featSha);
+  });
+
+  it('leaves alone a submodule that resolves outside the worktree', () => {
+    // Git 2.45.1 and later refuse to list it at all; older ones list it,
+    // and the helper skips it.
+    const { sub, s1, dir } = checkedOutSub('osub');
+    const gitDir = run(dir, 'rev-parse', '--absolute-git-dir');
+    const outside = join(base, 'outside-sub');
+    renameSync(dir, outside);
+    symlinkSync(outside, dir);
+    writeFileSync(join(outside, '.git'), `gitdir: ${gitDir}\n`);
+    // A round's merge moved the gitlink (a reset or checkout of the
+    // worktree would replace the symlink itself).
+    const s2 = commitIn(sub, 's2.txt');
+    run(
+      paths.worktreePath,
+      'update-index',
+      '--cacheinfo',
+      `160000,${s2},vendor/sub`,
+    );
+    run(paths.worktreePath, 'commit', '-q', '-m', 'merged bump');
+    expect(runSync(7)).toMatchObject({ synced: false, moved: false });
+    expect(run(outside, 'rev-parse', 'HEAD')).toBe(s1);
+  });
+
+  it('moves a submodule whose git directory is embedded in it', () => {
+    const sub = repoOf('esub');
+    const dir = join(paths.worktreePath, 'vendor', 'emb');
+    run(base, 'clone', '-q', sub, dir);
+    run(
+      paths.worktreePath,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      sub,
+      'vendor/emb',
+    );
+    run(paths.worktreePath, 'commit', '-q', '-m', 'add emb');
+    run(paths.worktreePath, 'push', '-q', 'origin', 'HEAD:feat');
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      lastKnownHeadSha: worktreeHead(),
+    });
+    allowFile(dir);
+    expect(statSync(join(dir, '.git')).isDirectory()).toBe(true);
+    const s2 = commitIn(sub, 's2.txt');
+    authorBumps('vendor/emb', s2);
+    expect(runSync(7)).toMatchObject({ synced: true, moved: true });
+    expect(run(dir, 'rev-parse', 'HEAD')).toBe(s2);
+  });
+
+  it('keeps the work a submodule holds when the worktree already contains the PR head', () => {
+    const { dir, s1 } = checkedOutSub('ksub');
+    writeFileSync(join(dir, 'ksub.txt'), 'changed');
+    expect(runSync(7)).toMatchObject({ synced: false, moved: false });
+    expect(readFileSync(join(dir, 'ksub.txt'), 'utf8')).toBe('changed');
+    run(dir, 'checkout', '-q', '--', 'ksub.txt');
+    const own = commitIn(dir, 'own.txt');
+    expect(runSync(7)).toMatchObject({ synced: false, moved: false });
+    expect(run(dir, 'rev-parse', 'HEAD')).toBe(own);
+    // Discarding takes it back to what the PR records.
+    expect(runSync(7, true)).toMatchObject({ synced: true });
+    expect(run(dir, 'rev-parse', 'HEAD')).toBe(s1);
   });
 
   it('with --discard does not throw on a worktree git cannot read', () => {

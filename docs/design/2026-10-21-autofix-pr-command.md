@@ -580,7 +580,8 @@ checkout is untouched), and checks the worktree as `push` does. Then:
   anything built on the old history would put back what the author removed.
   An unpushed attempt made on the old history is reported as `dropped`;
 - a head built on the known one that the worktree already contains (a round
-  merged it) is only recorded as `lastKnownHeadSha`;
+  merged it) is recorded as `lastKnownHeadSha`, and the checked-out
+  submodules are moved along as described below;
 - a worktree behind it is fast-forwarded, when it is clean;
 - a worktree with unpushed commits of a round is not touched: the answer is
   `{"synced": false, "action": "merge"}` with the head to merge (never
@@ -597,8 +598,11 @@ worktree, it moves its checked-out submodules to the commits the new head
 records the same way, fetching a commit a submodule lacks from that
 submodule's own remote (the PR's fetch does not recurse into submodules, so
 a submodule commit that cannot be fetched does not fail it). `foreach` only
-lists the checked-out submodules; the fetch, with a minute of its own and
-the protocol policy git applies to submodules, and the reset run outside it,
+lists the checked-out submodules, one NUL-terminated record each (a path
+the PR names may hold a newline, and read by lines, what follows it would
+pass for another submodule); the fetch, with a minute of its own, three for
+all the submodules of one `sync`, and the protocol policy git applies to
+submodules, and the reset run outside it,
 since a child of `foreach` would outlive a timeout that kills only the
 top-level git and go on changing the submodule after `sync` returned (a
 fetch that times out is killed; a transport process it started may linger
@@ -606,7 +610,15 @@ until its connection ends, but it only downloads objects). Submodules are
 aligned one level at a time, so a nested one gets the commit its parent
 records once the parent has moved, and also when the worktree already
 contains the PR head (a round merged it: a merge moves the gitlinks, not the
-checked-out submodules). No
+checked-out submodules). Nothing was checked for uncommitted changes on that
+last path, so there a submodule holding work of its own — uncommitted
+changes, or a HEAD the recorded commit does not contain — is left as it is.
+A listed submodule is touched only when it lies inside the worktree, is the
+top of its own repository, and keeps its git directory under its parent's
+`modules` directory (where `git submodule` puts it) or inside itself: in a
+plain directory `git -C` would find the enclosing repository, and through a
+`.git` file or a `core.worktree` naming another repository or tree, a reset
+would move that repository's branch or write to that tree. No
 reset recurses into submodules, whatever `submodule.recurse` says, and a worktree that is not clean afterwards answers
 `synced: false`, so a fix never commits a submodule back to an old commit. When the
 PR's branch cannot be read (the PR was closed, the branch deleted, the
@@ -739,6 +751,12 @@ user would verify it. `prepare` reports `authorCanPush` (the author is the
 user, or has write access to the base repository), and the skill applies the
 rule before it asks to start. A verification sandbox that holds no
 credentials would lift the restriction; it is not part of this design.
+
+The helpers check where a push goes and that it builds on the PR head, not
+what the round's commits contain: a fix that moves a submodule pointer, for
+one, is pushed like any other change. The brief tells the fix agent to stage
+only the files it changed and never to commit a gitlink change the fix does
+not need; the PR's review sees the rest.
 
 A comment is actionable when its author is:
 
@@ -894,7 +912,9 @@ Delivery plan:
    stop the watch, and a round whose work was not pushed ends with
    `sync --discard`, so the next one does not build on it. The sandbox rule of
    Section 8 is applied at the start, and each round starts with `sync`, so
-   a push or a rollback the GitHub API does not show yet is followed. The skill's `allowedTools` grant
+   a push or a rollback the GitHub API does not show yet is followed; it
+   syncs once more before it pushes, which moves along the submodules a
+   merge the fix agent made left behind. The skill's `allowedTools` grant
    reading its `.qwen/tmp` files, writing its brief and plan, and
    `cron_list` — no shell command. The permission matcher reads a leading
    `"${QWEN_CODE_CLI:-qwen}"` as an empty word, so no rule can name the

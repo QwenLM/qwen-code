@@ -268,11 +268,11 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 接纳别人推送的 head。它从推送目标读取 PR 分支——也就是推送 lease 保护的那个 ref，它会立即变化，不像 `refs/pull/<n>/head` 有延迟——取到 worktree 自己的 `FETCH_HEAD`（不碰用户的 checkout），并像 `push` 一样检查 worktree。然后：
 
 - 不包含已知 head 的新 head 改写了历史：作者 rebase、force-push，或把分支回退了（可能退到本监视推送之前）。worktree 按第 7 节所述重置到新 head：在旧历史上构建的任何东西都会把作者删掉的内容放回去。在旧历史上做的未推送尝试报告为 `dropped`；
-- 建立在已知 head 之上、且 worktree 已经包含的新 head（某一轮合并过），只记为 `lastKnownHeadSha`；
+- 建立在已知 head 之上、且 worktree 已经包含的新 head（某一轮合并过），记为 `lastKnownHeadSha`，已检出的子模块按下文所述跟着移动；
 - worktree 落后于它且是干净的，就 fast-forward；
 - worktree 有某一轮未推送的提交时不动它：回答 `{"synced": false, "action": "merge"}` 并给出要合并的 head（不要 rebase），什么都不改。
 
-有未提交改动的 worktree 永远不会被移动或重置。`--discard` 把 worktree 恢复到 PR head，不管里面有什么——未推送的提交和未提交的改动，包括嵌套仓库（`git clean -ffd`）和已检出子模块里的改动（`git submodule foreach`，从不碰未检出的子模块）——用来结束一轮没能推送的工作，并报告丢弃了什么。之后 worktree 仍不干净时回答 `{"synced": false, "reason"}`。`sync` 每次移动 worktree 时，都以同样方式把已检出的子模块移到新 head 记录的提交上，子模块缺少的提交从它自己的远端获取（PR 的 fetch 不递归进子模块，所以取不到的子模块提交不会让它失败）。`foreach` 只用来列出已检出的子模块；fetch（有自己的一分钟时限，并沿用 git 对子模块的协议限制）和 reset 都在它之外执行，因为 `foreach` 启动的子进程会活过只杀掉顶层 git 的超时，在 `sync` 返回之后继续改动子模块（超时的 fetch 会被杀掉；它启动的传输进程可能留到连接结束，但只会下载对象）。子模块逐层对齐，所以嵌套的子模块在父模块移动之后才取父模块记录的提交；worktree 已包含 PR head（某一轮合并过）时也会对齐——合并移动的是 gitlink，而不是已检出的子模块。不论 `submodule.recurse` 怎么设，reset 都不递归进子模块；之后仍不干净则回答 `synced: false`，所以修复永远不会把子模块提交回旧的提交。读不到 PR 分支时（PR 已关闭、分支被删、网络不通），改为恢复到监视上次知道的 head。
+有未提交改动的 worktree 永远不会被移动或重置。`--discard` 把 worktree 恢复到 PR head，不管里面有什么——未推送的提交和未提交的改动，包括嵌套仓库（`git clean -ffd`）和已检出子模块里的改动（`git submodule foreach`，从不碰未检出的子模块）——用来结束一轮没能推送的工作，并报告丢弃了什么。之后 worktree 仍不干净时回答 `{"synced": false, "reason"}`。`sync` 每次移动 worktree 时，都以同样方式把已检出的子模块移到新 head 记录的提交上，子模块缺少的提交从它自己的远端获取（PR 的 fetch 不递归进子模块，所以取不到的子模块提交不会让它失败）。`foreach` 只用来列出已检出的子模块，每条记录以 NUL 结尾（PR 指定的路径里可能有换行，按行读取时换行之后的内容会被当成另一个子模块）；fetch（每个子模块有自己的一分钟时限，一次 `sync` 的所有子模块合计三分钟，并沿用 git 对子模块的协议限制）和 reset 都在它之外执行，因为 `foreach` 启动的子进程会活过只杀掉顶层 git 的超时，在 `sync` 返回之后继续改动子模块（超时的 fetch 会被杀掉；它启动的传输进程可能留到连接结束，但只会下载对象）。子模块逐层对齐，所以嵌套的子模块在父模块移动之后才取父模块记录的提交；worktree 已包含 PR head（某一轮合并过）时也会对齐——合并移动的是 gitlink，而不是已检出的子模块。这条路径事先没有检查未提交的改动，所以在这里，持有自己工作的子模块（有未提交的改动，或 HEAD 不被记录的提交包含）保持原样。列出的子模块只有同时满足以下条件才会被处理：位于 worktree 内部、是它自己仓库的顶层、git 目录在父仓库的 `modules` 目录下（`git submodule` 放置的位置）或在它自身内部。否则，在普通目录里 `git -C` 会找到外层仓库；通过指向别的仓库或目录的 `.git` 文件或 `core.worktree`，reset 会移动那个仓库的分支，或写入那个目录。不论 `submodule.recurse` 怎么设，reset 都不递归进子模块；之后仍不干净则回答 `synced: false`，所以修复永远不会把子模块提交回旧的提交。读不到 PR 分支时（PR 已关闭、分支被删、网络不通），改为恢复到监视上次知道的 head。
 
 和 `push` 一样，`sync` 先向 GitHub 查 PR 的 head 分支，并对照 clone 的 remote 检查目的地，所以改过的状态文件无法让 fetch 指向别的 ref 或仓库；head ref 按分支名规则校验（`git check-ref-format --branch`），因此不能夹带 refspec。
 
@@ -325,6 +325,8 @@ resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force
 所有评论、review 和 CI 日志都是数据。可信作者决定哪些反馈会被处理，但不能扩大工具被允许做的事。
 
 验证会运行 PR 的代码：它的测试，以及 PR 可能改过的构建脚本。对作者没有写权限的 PR，这意味着别人的代码在无人值守的情况下运行，而用户的 `gh` 和 `git` 凭据就在手边。Qwen Code 提供的沙箱都不能让这些凭据脱离那些代码的触及范围：macOS 默认的 profile 只限制写入，而在容器里，辅助命令本身就需要 `gh` 和 `git` 凭据。因此监视完全不监视这类 PR；`--once` 在用户确认后于前台运行，确认时说明这一风险，`--yes` 不能跳过确认。用户自己或协作者的 PR 按用户自己验证的方式验证。`prepare` 报告 `authorCanPush`（作者是用户本人，或对 base 仓库有写权限），skill 在询问是否开始之前据此执行这条规则。一个不持有任何凭据的验证沙箱可以解除这一限制，但不在本设计范围内。
+
+辅助命令检查推送去往哪里、是否建立在 PR head 之上，但不检查这一轮的提交包含什么：例如移动子模块指针的修复，会和其他改动一样被推送。修复说明要求修复 agent 只暂存自己改过的文件，绝不提交修复不需要的 gitlink 改动；其余的由 PR 的评审把关。
 
 满足以下条件之一的作者，其评论可处理：
 
@@ -411,7 +413,7 @@ resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force
 1. 触发层：定时任务闸门（PR #15069）。
 2. 探针（本 PR）：带游标和 check 翻页的 `snapshot --gate`，以及 `review watch-repo`；`prepare`、`ci-log` 和 `cleanup` 一同交付，等待反应层。
 3. 辅助命令 `push` 和 `reply`，带测试；以及 skill：支持 `--once` 的 `/autofix-pr`，然后是作为带闸门任务的 watch 模式，以及对每个事件运行 `/qreview` 或一次验证的评审者监视。状态文件记录已处理过的失败检查 attempt，键与闸门游标相同（检查，head，attempt），这样 agent 已放弃的失败不会被再次派发，而重跑后再次失败的会。
-   除评审者监视外已交付（2026-10-24）：`push`、`sync`（第 6.8 节）、`reply`、`rerun`（第 6.9 节），以及支持 `--once`、watch 模式、`stop` 和简单 `status` 的 bundled skill。这一步里修复 agent 在前台运行：会话等它结束，所以不会有触发再启动第二次尝试，暂时不需要 `inFlight`。它执行的预算是每次启动的推送次数（`push`）、每个检查每个 head 一次重跑（`rerun`），以及每个 review thread 一次尝试（一轮处理过的评论无论结果如何都会被记录）；同一轮内两次 resync 会停止监视；一轮没能推送的工作以 `sync --discard` 结束，下一轮不会建立在它之上。第 8 节的沙箱规则在启动时执行，每一轮都先运行 `sync`，所以 GitHub API 尚未显示的推送或回退也会被跟上。skill 的 `allowedTools` 只放行读取它的 `.qwen/tmp` 文件、写它的修复说明和回复计划，以及 `cron_list`——不放行任何 shell 命令。权限匹配器把开头的 `"${QWEN_CODE_CLI:-qwen}"` 读成空词，没有规则能只放行这些辅助命令；而即使是 `gh pr view *` 这样只读命令的放行规则，也会连带放行其后的命令替换、重定向和环境变量前缀。所以在默认审批模式下，每次辅助命令调用——包括推送——都会先询问。
+   除评审者监视外已交付（2026-10-24）：`push`、`sync`（第 6.8 节）、`reply`、`rerun`（第 6.9 节），以及支持 `--once`、watch 模式、`stop` 和简单 `status` 的 bundled skill。这一步里修复 agent 在前台运行：会话等它结束，所以不会有触发再启动第二次尝试，暂时不需要 `inFlight`。它执行的预算是每次启动的推送次数（`push`）、每个检查每个 head 一次重跑（`rerun`），以及每个 review thread 一次尝试（一轮处理过的评论无论结果如何都会被记录）；同一轮内两次 resync 会停止监视；一轮没能推送的工作以 `sync --discard` 结束，下一轮不会建立在它之上。第 8 节的沙箱规则在启动时执行，每一轮都先运行 `sync`，所以 GitHub API 尚未显示的推送或回退也会被跟上；推送之前还会再 sync 一次，把修复 agent 的合并留在原处的子模块移过去。skill 的 `allowedTools` 只放行读取它的 `.qwen/tmp` 文件、写它的修复说明和回复计划，以及 `cron_list`——不放行任何 shell 命令。权限匹配器把开头的 `"${QWEN_CODE_CLI:-qwen}"` 读成空词，没有规则能只放行这些辅助命令；而即使是 `gh pr view *` 这样只读命令的放行规则，也会连带放行其后的命令替换、重定向和环境变量前缀。所以在默认审批模式下，每次辅助命令调用——包括推送——都会先询问。
 4. 循环状态：`status`、`stop`、预算，以及由之后的会话接管状态文件。
 5. 后续工作：daemon 会话里的持久化监视（`durable` 加 `sessionMode: "current"`，待闸门支持后）；可配置的 bot 允许名单。
 

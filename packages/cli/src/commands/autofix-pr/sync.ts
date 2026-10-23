@@ -21,7 +21,7 @@
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { isWithinRoot } from '../../config/path-comparison.js';
 import { sanitizedGitEnv } from '../review/lib/worktree.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -201,8 +201,10 @@ function syncLocked(
 
   if (!discard && (head === prHead || isAncestor(worktree, prHead, head))) {
     // The worktree contains the PR head already (a round merged it): a
-    // merge moves the gitlinks, not the checked-out submodules.
-    alignSubmodules(worktree);
+    // merge moves the gitlinks, not the checked-out submodules. Nothing was
+    // checked for uncommitted changes on this path, so a submodule holding
+    // work of its own is left for the check below.
+    alignSubmodules(worktree, true);
   }
   if (moved) {
     writeState(paths.statePath, { ...state, lastKnownHeadSha: prHead });
@@ -229,6 +231,15 @@ function syncLocked(
 
 /** A submodule fetch gets less than the helper's own time. */
 const SUBMODULE_FETCH_TIMEOUT_MS = 60_000;
+/** All the submodule fetches of one `sync` together. */
+const SUBMODULE_FETCH_BUDGET_MS = 180_000;
+
+interface Alignment {
+  root: string;
+  /** Leave a submodule that holds work a reset would lose. */
+  keepWork: boolean;
+  deadline: number;
+}
 
 /**
  * Moves the checked-out submodules to the commits the worktree's head
@@ -239,38 +250,61 @@ const SUBMODULE_FETCH_TIMEOUT_MS = 60_000;
  * after the helper returned. A commit a submodule lacks is fetched from its
  * own remote, under the protocol policy git applies to submodules.
  */
-function alignSubmodules(
+function alignSubmodules(repository: string, keepWork = false): void {
+  alignLevel(
+    repository,
+    {
+      root: realpathSync(repository),
+      keepWork,
+      deadline: Date.now() + SUBMODULE_FETCH_BUDGET_MS,
+    },
+    0,
+  );
+}
+
+function alignLevel(
   repository: string,
-  root = realpathSync(repository),
-  depth = 0,
+  alignment: Alignment,
+  depth: number,
 ): void {
   // One level at a time: a nested submodule's commit is the one its parent
   // records once the parent has moved, so it is listed only then.
   if (depth > 8) return;
+  // NUL-terminated: a path the PR names may hold a newline, and read by
+  // lines, what follows it would pass for another submodule.
   const listed = gitOpt(
     '-C',
     repository,
     'submodule',
     'foreach',
     '--quiet',
-    'printf "%s %s\\n" "$sha1" "$sm_path"',
+    'printf "%s %s\\0" "$sha1" "$sm_path"',
   );
   if (!listed) return;
-  for (const line of listed.split('\n')) {
-    const match = /^([0-9a-f]{40,64}) (.+)$/.exec(line);
+  const modules = gitOpt(
+    '-C',
+    repository,
+    'rev-parse',
+    '--git-path',
+    'modules',
+  );
+  let ownModules: string | null = null;
+  try {
+    if (modules !== null)
+      ownModules = realpathSync(resolve(repository, modules));
+  } catch {
+    // No submodule git directory here yet.
+  }
+  for (const record of listed.split('\0')) {
+    const match = /^([0-9a-f]{40,64}) (.+)$/s.exec(record);
     if (!match) continue;
     const [, sha, path] = match;
     const dir = join(repository, path);
-    let real: string;
-    try {
-      real = realpathSync(dir);
-    } catch {
-      continue;
-    }
-    if (real === root || !isWithinRoot(real, root)) continue;
+    if (!isOwnSubmodule(dir, alignment.root, ownModules)) continue;
     if (gitOpt('-C', dir, 'cat-file', '-e', `${sha}^{commit}`) === null) {
-      fetchSubmoduleCommit(dir, sha);
+      fetchSubmoduleCommit(dir, sha, alignment.deadline);
     }
+    if (alignment.keepWork && holdsWork(dir, sha)) continue;
     if (
       gitOpt(
         '-C',
@@ -283,8 +317,51 @@ function alignSubmodules(
       ) !== null
     ) {
       gitOpt('-C', dir, 'clean', '-ffdq');
-      alignSubmodules(dir, root, depth + 1);
+      alignLevel(dir, alignment, depth + 1);
     }
+  }
+}
+
+/**
+ * Whether `dir` is a submodule checked out inside the worktree, with a
+ * repository of its own: inside a plain directory `git -C` finds the
+ * enclosing repository, and through a `.git` file naming another one — or
+ * a `core.worktree` naming another tree — a reset would move that
+ * repository's branch, or write to that tree.
+ */
+function isOwnSubmodule(
+  dir: string,
+  root: string,
+  ownModules: string | null,
+): boolean {
+  try {
+    const real = realpathSync(dir);
+    if (real === root || !isWithinRoot(real, root)) return false;
+    const top = gitOpt('-C', dir, 'rev-parse', '--show-toplevel');
+    const gitDir = gitOpt('-C', dir, 'rev-parse', '--absolute-git-dir');
+    if (top === null || gitDir === null || realpathSync(top) !== real) {
+      return false;
+    }
+    // Where `git submodule` puts it, or embedded in the submodule itself.
+    const realGitDir = realpathSync(gitDir);
+    return (
+      isWithinRoot(realGitDir, real) ||
+      (ownModules !== null && isWithinRoot(realGitDir, ownModules))
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether a reset would lose work held in a submodule: uncommitted
+ * changes, or commits the recorded one does not contain.
+ */
+function holdsWork(dir: string, sha: string): boolean {
+  try {
+    return hasUncommittedChanges(dir) || !isAncestor(dir, 'HEAD', sha);
+  } catch {
+    return true;
   }
 }
 
@@ -297,13 +374,19 @@ function dirtyOrUnreadable(worktree: string): boolean {
   }
 }
 
-function fetchSubmoduleCommit(dir: string, sha: string): void {
+function fetchSubmoduleCommit(
+  dir: string,
+  sha: string,
+  deadline: number,
+): void {
+  const timeout = Math.min(SUBMODULE_FETCH_TIMEOUT_MS, deadline - Date.now());
+  if (timeout <= 0) return;
   try {
     execFileSync(
       'git',
       ['-C', dir, 'fetch', '--quiet', '--no-recurse-submodules', 'origin', sha],
       {
-        timeout: SUBMODULE_FETCH_TIMEOUT_MS,
+        timeout,
         killSignal: 'SIGKILL',
         stdio: 'ignore',
         // As in `git submodule` itself: transports a submodule's URL may

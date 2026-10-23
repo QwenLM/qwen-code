@@ -168,8 +168,8 @@ function remotePushesTo(
 
 /**
  * Whether the PR's author could push to the base repository: the user, or
- * someone with write access. Anyone else's code runs only sandboxed when a
- * watch verifies it (design Section 8).
+ * someone with write access. Anyone else's PR is never watched: verifying a
+ * fix runs its code with the user's credentials in reach (design Section 8).
  */
 function authorCanPush(slug: string, author: string, viewer: string): boolean {
   if (!author) return false;
