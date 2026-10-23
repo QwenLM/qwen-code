@@ -3593,6 +3593,75 @@ describe('composer draft attachment races', () => {
     );
   });
 
+  it.each(['active', 'leave', 'unmount', 'new text', 'edit undo', 'new file'])(
+    'handles allocation after removing a submitted image (%s)',
+    async (action) => {
+      const fake = createFakeIndexedDB();
+      vi.stubGlobal('indexedDB', fake.factory);
+      const onSubmit = vi.fn(() => false);
+      const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work' });
+      await flushDraftAttachments();
+      const image = { data: 'submitted image', media_type: 'image/png' };
+      const file = { name: 'sent.txt', media_type: 'text/plain', text: 'sent' };
+      const newer = { name: 'new.txt', media_type: 'text/plain', text: 'new' };
+      act(() => {
+        latest!.setText('original');
+        latest!.handle.restoreImages([image]);
+        latest!.handle.restoreFiles([file]);
+        latest!.submitText();
+      });
+      const call = onSubmit.mock.calls[0] as unknown as [
+        string,
+        unknown,
+        unknown,
+        ComposerSubmitCommit,
+        import('./useComposerCore').ComposerSubmitMetadata,
+      ];
+      await call[4].retainDraftDuringSessionCreation!(async (allocated) => {
+        act(() => {
+          latest!.removeImage(0);
+          if (action === 'new text' || action === 'edit undo')
+            latest!.setText('new draft');
+          if (action === 'edit undo') latest!.setText('original');
+          if (action === 'new file') latest!.handle.restoreFiles([newer]);
+        });
+        allocated('created-session');
+        mounted.switchSession('created-session', '/work');
+        await flushDraftAttachments();
+        expect(call[4].isCurrentDraft!({ allowSessionAssignment: true })).toBe(
+          false,
+        );
+        if (action === 'leave') mounted.switchSession('session-b', '/work');
+        if (action === 'unmount') act(() => root!.unmount());
+        act(() => call[3]());
+        await flushDraftAttachments();
+      });
+      const keepDraft = ['new text', 'edit undo', 'new file'].includes(action);
+      const text = action === 'new text' ? 'new draft' : 'original';
+      const key = getSessionDraftKey('created-session');
+      expect(localStorage.getItem(getPendingTaskDraftKey('/work'))).toBeNull();
+      expect(localStorage.getItem(key)).toBe(keepDraft ? text : null);
+      expect(fake.stores.get('attachments')?.get(key)).toEqual(
+        keepDraft
+          ? {
+              images: [],
+              files: action === 'new file' ? [file, newer] : [file],
+            }
+          : undefined,
+      );
+      if (action === 'unmount') {
+        container!.remove();
+        await mount({ sessionId: 'created-session', atWorkspaceCwd: '/work' });
+      } else mounted.switchSession('created-session', '/work');
+      await flushDraftAttachments();
+      expect(latest!.getText()).toBe(keepDraft ? text : '');
+      expect(latest!.pastedImages).toEqual([]);
+      expect(latest!.pastedFiles).toEqual(
+        keepDraft ? (action === 'new file' ? [file, newer] : [file]) : [],
+      );
+    },
+  );
+
   it('keeps a reader busy through allocation for every submission entry', async () => {
     vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
     const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(() => false);
