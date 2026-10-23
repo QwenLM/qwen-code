@@ -23,8 +23,10 @@
 # threshold together and the queue is plain sequence order.
 #
 # Source this file and call `sdk_java_lock_acquire <wait-seconds> [fast|full]`
-# (an empty tier means normal); it returns non-zero on timeout with the pinned
-# `lock not acquired within` error.
+# (an empty tier means normal); it returns non-zero on timeout. The default
+# emits the pinned `lock not acquired within` error. A caller whose step stays
+# green on a missed lock sets `SDK_JAVA_LOCK_ANNOTATION=warning` to emit the
+# same ticket attribution under `sdk-java host lock wait exhausted` instead.
 sdk_java_lock_acquire() {
   local wait_seconds="${1:?wait seconds required}"
   # Callers pass the workflow tier (`fast`, `full`, or empty); everything but
@@ -43,27 +45,33 @@ sdk_java_lock_acquire() {
   # same iteration whose timeout arm deletes it; sdk-java-workflow.test.js
   # pins the default below both acquisition budgets.
   local promote_after="${SDK_JAVA_LOCK_PROMOTE_AFTER:-1200}"
+  local annotation="${SDK_JAVA_LOCK_ANNOTATION:-error}"
   local lock="${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
   local queue="${lock}.queue"
   mkdir -p "${queue}"
-  exec 9>"${lock}"
+  exec 9>"${lock}" || return 1
 
   # Atomic sequence: fd 8 holds the counter file and flock serializes the
   # read-increment-write. A holder killed inside this millisecond window only
   # costs one sequence number, not a stuck queue.
   # Append, never truncate: opening with `>` would wipe the counter before
   # this process even takes the lock.
+  # The lock fd and the sequence lock must be real: callers invoke this
+  # function under `||`, which suspends their errexit for the whole body, so
+  # a failed open would otherwise continue as a green step that holds no lock
+  # or serializes no sequence. The `.seq` append and ticket publish fail fast
+  # for the same reason.
   exec 8>>"${queue}/.seq"
-  flock 8
+  flock 8 || return 1
   local seq
   seq=$(tail -n 1 "${queue}/.seq" 2>/dev/null)
   seq=$((${seq:-0} + 1))
-  printf '%s\n' "${seq}" >>"${queue}/.seq"
+  printf '%s\n' "${seq}" >>"${queue}/.seq" || return 1
   local ticket
   ticket=$(printf '%s/%d-%010d-%s' "${queue}" "${rank}" "${seq}" "$$")
   # Publish inside the critical section: a later arrival that sees an empty
   # queue names itself head and wins out of arrival order.
-  : >"${ticket}"
+  : >"${ticket}" || { rm -f "${ticket}" 2>/dev/null; return 1; }
   exec 8>&-
 
   local start=${SECONDS} head name pid mtime age remaining last_log=-60 blocking head_hint=0
@@ -168,7 +176,18 @@ sdk_java_lock_acquire() {
       # stays literal, so say so instead of printing `*`.
       head=$(printf '%s\n' "${queue}/"* | grep -v '/\.seq$' | sort | sed -n '1p')
       [[ -e ${head} ]] || head='(no other ticket queued)'
-      echo "::error::sdk-java host lock not acquired within $((wait_seconds / 60)) minutes as queue ticket ${seq} (${class}); head of queue is ${head##*/}"
+      local attribution="$((wait_seconds / 60)) minutes as queue ticket ${seq} (${class}); head of queue is ${head##*/}"
+      if [[ ${annotation} == 'warning' ]]; then
+        # The caller keeps the step green, so the fatal signature would be
+        # misread by the infra classifiers if a later action failed the job.
+        echo "::warning::sdk-java host lock wait exhausted after ${attribution}"
+        if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
+          printf -- '- sdk-java cache write-back skipped on %s: host lock wait exhausted after %s; host cache present at seed: %s\n' \
+            "${RUNNER_NAME:-unknown}" "${attribution}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
+        fi
+      else
+        echo "::error::sdk-java host lock not acquired within ${attribution}"
+      fi
       echo "holder of ${lock} at timeout:"
       sdk_java_lock_holder_hint "${lock}"
       return 1

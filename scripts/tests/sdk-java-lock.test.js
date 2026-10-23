@@ -6,6 +6,7 @@
 
 import { spawn } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -641,6 +642,256 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       expect(readdirSync(queueDir(home)).filter((f) => f !== '.seq')).toEqual(
         [],
       );
+    },
+  );
+
+  it(
+    'emits a non-fatal warning with its ticket attribution in warning mode',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-warn-'));
+      const held = join(home, 'held');
+      const summary = join(home, 'summary.md');
+      writeFileSync(held, '');
+      const stub = flockStub(parkedFlock(held, join(home, 'order')));
+      const result = await acquire(
+        home,
+        4,
+        stub,
+        '',
+        'normal',
+        {
+          SDK_JAVA_LOCK_ANNOTATION: 'warning',
+          GITHUB_STEP_SUMMARY: summary,
+          RUNNER_NAME: 'ecs-runner-7',
+          SDK_JAVA_M2_SEED_EXISTED: '1',
+        },
+        'fast',
+      );
+      expect(result.code).toBe(1);
+      // The ticket, class and head stay in the annotation: a non-head waiter
+      // behind a stale holder stays diagnosable without scrolling raw logs.
+      expect(result.out).toContain(
+        '::warning::sdk-java host lock wait exhausted after 0 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued)',
+      );
+      expect(result.out).not.toContain('::error::');
+      expect(result.out).not.toContain('lock not acquired within');
+      // Green jobs are invisible to the infra classifiers, so the skip is
+      // also recorded where run summaries aggregate.
+      expect(readFileSync(summary, 'utf8')).toContain(
+        '- sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted after 0 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued); host cache present at seed: 1',
+      );
+      expect(readdirSync(queueDir(home)).filter((f) => f !== '.seq')).toEqual(
+        [],
+      );
+    },
+  );
+
+  // A caller's `|| lock_status=$?` suspends its errexit for the whole helper
+  // body, so a failed queue-state mutation must return here or the caller
+  // reports a green step with no working queue.
+  it.skipIf(process.getuid?.() === 0)(
+    'returns at once when the queue cannot publish a ticket',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-ticket-denied-'));
+      const queue = queueDir(home);
+      mkdirSync(queue, { recursive: true });
+      writeFileSync(join(queue, '.seq'), '0\n');
+      chmodSync(queue, 0o500);
+      const stub = flockStub(freeFlock);
+      try {
+        const started = Date.now();
+        // Call it the way a workflow step does: `|| lock_status=$?` suspends
+        // the caller's errexit for the whole function body, so the helper's
+        // own return is the only thing that can stop the wait.
+        const child = spawn(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-eo',
+            'pipefail',
+            '-c',
+            [
+              `source "${script}"`,
+              'sdk_java_lock_acquire 30 || echo GUARD_FIRED',
+              'echo SURVIVED',
+            ].join('\n'),
+          ],
+          {
+            env: {
+              ...baseEnv,
+              HOME: home,
+              PATH: `${stub}:${process.env.PATH}`,
+            },
+          },
+        );
+        const state = { out: '' };
+        child.stdout.on('data', (d) => (state.out += d));
+        child.stderr.on('data', (d) => (state.out += d));
+        const code = await new Promise((resolve) => child.on('close', resolve));
+        expect(code).toBe(0);
+        expect(state.out).toContain('GUARD_FIRED');
+        expect(state.out).toContain('SURVIVED');
+        expect(Date.now() - started).toBeLessThan(5000);
+        expect(readdirSync(queue).filter((f) => f !== '.seq')).toEqual([]);
+      } finally {
+        chmodSync(queue, 0o700);
+      }
+    },
+  );
+
+  it(
+    'returns at once when the queue sequence cannot be appended',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-seq-denied-'));
+      const queue = queueDir(home);
+      mkdirSync(queue, { recursive: true });
+      writeFileSync(join(queue, '.seq'), '0\n');
+      const stub = flockStub(freeFlock);
+      try {
+        const started = Date.now();
+        const child = spawn(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-eo',
+            'pipefail',
+            '-c',
+            [
+              // ENOSPC after a successful open: the counter file is writable
+              // but RLIMIT_FSIZE rejects the append.
+              'trap "" XFSZ',
+              'ulimit -f 0',
+              `source "${script}"`,
+              'sdk_java_lock_acquire 30 || echo GUARD_FIRED',
+              'echo SURVIVED',
+            ].join('\n'),
+          ],
+          {
+            env: {
+              ...baseEnv,
+              HOME: home,
+              PATH: `${stub}:${process.env.PATH}`,
+            },
+          },
+        );
+        const state = { out: '' };
+        child.stdout.on('data', (d) => (state.out += d));
+        child.stderr.on('data', (d) => (state.out += d));
+        const code = await new Promise((resolve) => child.on('close', resolve));
+        expect(code).toBe(0);
+        expect(state.out).toContain('GUARD_FIRED');
+        expect(state.out).toContain('SURVIVED');
+        expect(Date.now() - started).toBeLessThan(5000);
+      } finally {
+        // Nothing to restore: RLIMIT_FSIZE was local to the child.
+      }
+    },
+  );
+
+  it(
+    'returns at once when the sequence lock cannot be taken',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-seq-flock-'));
+      const queue = queueDir(home);
+      mkdirSync(queue, { recursive: true });
+      writeFileSync(join(queue, '.seq'), '0\n');
+      const stub = flockStub(
+        '#!/bin/sh\n' +
+          'case "$*" in\n' +
+          '  8) exit 1 ;;\n' +
+          'esac\n' +
+          'exit 0\n',
+      );
+      try {
+        const started = Date.now();
+        const child = spawn(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-eo',
+            'pipefail',
+            '-c',
+            [
+              `source "${script}"`,
+              'sdk_java_lock_acquire 30 || echo GUARD_FIRED',
+              'echo SURVIVED',
+            ].join('\n'),
+          ],
+          {
+            env: {
+              ...baseEnv,
+              HOME: home,
+              PATH: `${stub}:${process.env.PATH}`,
+            },
+          },
+        );
+        const state = { out: '' };
+        child.stdout.on('data', (d) => (state.out += d));
+        child.stderr.on('data', (d) => (state.out += d));
+        const code = await new Promise((resolve) => child.on('close', resolve));
+        expect(code).toBe(0);
+        expect(state.out).toContain('GUARD_FIRED');
+        expect(state.out).toContain('SURVIVED');
+        expect(Date.now() - started).toBeLessThan(5000);
+      } finally {
+        // Nothing to restore: the stub lives under the temp HOME.
+      }
+    },
+  );
+
+  it(
+    'returns at once when the host lock file cannot be opened',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-fd-denied-'));
+      const queue = queueDir(home);
+      mkdirSync(queue, { recursive: true });
+      // A directory where the lock file belongs makes `exec 9>` fail while
+      // the queue directory itself is writable.
+      mkdirSync(join(home, '.cache', 'qwen-code-ci', 'sdk-java-tests.lock'));
+      const stub = flockStub(freeFlock);
+      try {
+        const started = Date.now();
+        const child = spawn(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-eo',
+            'pipefail',
+            '-c',
+            [
+              `source "${script}"`,
+              'sdk_java_lock_acquire 30 || echo GUARD_FIRED',
+              'echo SURVIVED',
+            ].join('\n'),
+          ],
+          {
+            env: {
+              ...baseEnv,
+              HOME: home,
+              PATH: `${stub}:${process.env.PATH}`,
+            },
+          },
+        );
+        const state = { out: '' };
+        child.stdout.on('data', (d) => (state.out += d));
+        child.stderr.on('data', (d) => (state.out += d));
+        const code = await new Promise((resolve) => child.on('close', resolve));
+        expect(code).toBe(0);
+        expect(state.out).toContain('GUARD_FIRED');
+        expect(state.out).toContain('SURVIVED');
+        expect(Date.now() - started).toBeLessThan(5000);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
     },
   );
 

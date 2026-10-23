@@ -26,9 +26,10 @@ hold at a time — no constant budget bounds the queue.
 - Goal: make the wait deterministic. A waiter's worst-case wait is the work
   ahead of it in line, not how often it has re-entered the queue.
 - Goal: preserve the current semantics elsewhere. The lock still releases
-  automatically at the step boundary; a step that fails on the lock keeps the
-  pinned infrastructure-signature error text (`lock not acquired within`) so
-  the rerun classifier in `qwen-autofix.yml` is untouched.
+  automatically at the step boundary. The helper's default (fatal) mode keeps
+  the pinned infrastructure-signature error text (`lock not acquired within`)
+  for its other callers; both steps in this workflow select its warning mode,
+  so no path here fails on the lock or leaves that signature on a green step.
 - Non-goal: reducing total occupancy. Sharding the lock by suite, capping
   registrations per host, or adding hosts are orthogonal and can follow;
   fairness makes their remaining work measurable instead of urgent. The
@@ -67,13 +68,15 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
   local after `return`. The lock stays on fd 9 in the step shell, so it
   still releases automatically at the step boundary — the helper changes
   acquisition order, not release semantics.
-- On timeout the helper prints
-  `::error::sdk-java host lock not acquired within N minutes as queue ticket S (CLASS); head of queue is H`
-  and returns 1. `CLASS` is `fast` or `normal`, as the ticket stood when it
-  gave up; `H` is the head of the queue at that moment, or
+- On timeout the helper's default mode prints
+  `::error::sdk-java host lock not acquired within N minutes as queue ticket S (CLASS); head of queue is H`;
+  the warning mode both steps select prints the same attribution as
+  `::warning::sdk-java host lock wait exhausted after N minutes ...`. Both
+  return 1. `CLASS` is `fast` or `normal`, as the ticket stood when it gave
+  up; `H` is the head of the queue at that moment, or
   `(no other ticket queued)` when this ticket was the last one. The
-  `lock not acquired within` substring is the contract the rerun classifiers
-  match.
+  `lock not acquired within` substring remains the default mode's contract,
+  which the rerun classifiers match.
 - Wait observability: a non-blocking probe runs first, and only a waiter
   that actually has to wait prints its ticket number and the remaining
   budget — before it blocks, and at most once a minute after. A blocked head
@@ -122,11 +125,13 @@ than attributing the flake to the suite.
 
 The write-back acquisition is also best-effort at both sites: a lock that
 cannot be acquired within its budget warns and skips the copy instead of
-failing a step whose suite already passed. On that path the workflow emits a
-distinct `sdk-java host lock wait exhausted` warning instead of the pinned
-`lock not acquired within` error, so a succeeding step cannot leave the
-infrastructure signature on a job where a later genuine failure would be
-misclassified; the fatal callers outside this workflow keep the substring.
+failing a step whose suite already passed. On that path the helper's warning
+mode emits a distinct `sdk-java host lock wait exhausted` warning with the
+same ticket/class/queue-head attribution and a step-summary line, instead of
+the pinned `lock not acquired within` error, so a succeeding step cannot
+leave the infrastructure signature on a job where a later genuine failure
+would be misclassified. No step in this workflow takes the fatal path; the
+substring survives for the helper's default mode and the docker-lock callers.
 The 5400 s budget and the fd 9 closures are unchanged.
 
 ### Fast-tier priority
@@ -257,12 +262,17 @@ order this section exists to prevent.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.
-- Fatal lock callers still contain the substring `lock not acquired within`
-  so `qwen-autofix.yml`'s `INFRA_FAILURE_SIGNATURES` keeps matching; the
-  best-effort write-back path emits `sdk-java host lock wait exhausted`
+- The helper's default fatal mode still emits `lock not acquired within`, so
+  `qwen-autofix.yml`'s `INFRA_FAILURE_SIGNATURES` keeps matching for the
+  docker-lock callers and any future fatal sdk-java caller; both steps here
+  select the warning mode, which emits `sdk-java host lock wait exhausted`
   instead, so a succeeding step cannot carry the infrastructure signature.
 
 ## Open questions
 
 - Whether queue depth should be published as a metric; the minute-capped wait
   line is the minimal observability landed here.
+- A starved write-back now shows as a green job with a warning (plus a step
+  summary line), not a failed check-run, and neither infra classifier reads
+  warnings on green jobs. Aggregating consecutive skips per host remains a
+  named follow-up; merging this change accepts that trade explicitly.
