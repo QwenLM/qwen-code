@@ -182,6 +182,20 @@ describe('Mod tool host operations through the real worker', () => {
     });
   });
 
+  it('keeps the depth limit when a Mod patches Map and Reflect', async () => {
+    const runtime = await create(
+      fixture(
+        `if (e.path === '/deep') { Map.prototype.get = () => 0; Map.prototype.set = () => {}; Reflect.apply = () => 0; ${deep(30_000)} return {result: v}; } return next(e);`,
+      ),
+    );
+    await expect(
+      runtime.runTool({ ...input, path: '/deep' }, native, signal()),
+    ).resolves.toEqual({ result: { output: 'native:/deep' } });
+    await expect(runtime.runTool(input, native, signal())).resolves.toEqual({
+      result: { output: 'native:/old' },
+    });
+  });
+
   it('rejects a deeply nested next argument inside the hook', async () => {
     const runtime = await create(
       fixture(

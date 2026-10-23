@@ -13,14 +13,17 @@ export const MOD_GUEST_FACTORY = String.raw`
   const parse = JSON.parse.bind(JSON);
   const stringify = JSON.stringify.bind(JSON);
   const Depths = Map;
-  // Stops before nesting deep enough to exhaust the host's native stack.
+  const { get: depthOf, set: setDepth } = Depths.prototype;
+  const apply = Reflect.apply;
+  // Stops before nesting deep enough to exhaust the host's native stack. The
+  // Map methods are held here so a Mod that patches them cannot turn it off.
   const encode = value => {
     const depths = new Depths();
     return stringify(value, function (key, item) {
       if (item !== null && typeof item === 'object') {
-        const depth = (depths.get(this) ?? 0) + 1;
+        const depth = (apply(depthOf, depths, [this]) ?? 0) + 1;
         if (depth > ${MOD_MAX_DEPTH}) throw new Error('Mod value nests deeper than ${MOD_MAX_DEPTH} levels.');
-        depths.set(item, depth);
+        apply(setDepth, depths, [item, depth]);
       }
       return item;
     });
