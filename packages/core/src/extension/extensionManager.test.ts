@@ -1690,20 +1690,28 @@ describe('extension tests', () => {
     it('signals the durable commit before deferred settings finish', async () => {
       const { manager, prepared } = await readyPrepared('settings-deferred');
       const settings = deferred();
+      const settingsStarted = deferred();
       const commitSettings = stubCommitSettings(
         prepared,
-        vi.fn(async () => await settings.promise),
+        vi.fn(async () => {
+          settingsStarted.resolve();
+          await settings.promise;
+        }),
       );
       const onCommitted = vi.fn();
 
       const committing = manager.commitPreparedExtension(prepared, onCommitted);
-      await vi.waitFor(() => expect(commitSettings).toHaveBeenCalledOnce());
-
-      expect(onCommitted).toHaveBeenCalledOnce();
-      expect(onCommitted.mock.invocationCallOrder[0]).toBeLessThan(
-        commitSettings.mock.invocationCallOrder[0]!,
-      );
-      settings.resolve();
+      try {
+        await Promise.race([settingsStarted.promise, committing]);
+        expect(commitSettings).toHaveBeenCalledOnce();
+        expect(onCommitted).toHaveBeenCalledOnce();
+        expect(onCommitted.mock.invocationCallOrder[0]).toBeLessThan(
+          commitSettings.mock.invocationCallOrder[0]!,
+        );
+      } finally {
+        settings.resolve();
+        await committing;
+      }
       await expect(committing).resolves.toMatchObject({
         identity: { name: 'settings-deferred' },
       });
