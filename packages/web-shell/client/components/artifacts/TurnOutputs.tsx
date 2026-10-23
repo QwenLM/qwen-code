@@ -488,7 +488,7 @@ function ArtifactCard({
   );
   return (
     <div className={styles.card}>
-      <div className={styles.summary}>
+      <div className={`${styles.summary} ${styles.artifactSummary}`}>
         <span className={styles.icon} aria-hidden="true">
           <ArtifactIcon artifact={artifact} className={styles.iconSvg} />
         </span>

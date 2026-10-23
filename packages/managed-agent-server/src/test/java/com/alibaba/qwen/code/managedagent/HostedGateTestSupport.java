@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
@@ -334,5 +335,21 @@ final class HostedGateTestSupport {
         var records = extensionRecords(jdbc, tenant, sessionId, domain);
         assertThat(records).as(domain + " records").hasSize(1);
         return records.getFirst();
+    }
+
+    // The Harness-private routes identify the caller by the client id its
+    // attach minted and the process generation it attached to; the connector
+    // keeps both on its private attachment ref for the Session. Null when
+    // Spring holds no attachment to it.
+    static HarnessSessionRef attachment(HarnessConnector connector,
+            String sessionId) {
+        for (Object value : ((Map<?, ?>) ReflectionTestUtils.getField(
+                connector, "attachments")).values()) {
+            if (value instanceof HarnessSessionRef ref
+                    && sessionId.equals(ref.getHarnessSessionId())) {
+                return ref;
+            }
+        }
+        return null;
     }
 }
