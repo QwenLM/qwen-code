@@ -3734,7 +3734,14 @@ export class LlmChat {
           }
         }
 
-        promptTokensForClamp = estimatePendingPromptTokens(true);
+        // Zero-count fallback ignores the conservative flag, so when nothing
+        // changed since the gate estimate (no manual-plan-exit notice), reuse
+        // it instead of paying a second full shallow-history walk.
+        promptTokensForClamp =
+          this.lastPromptTokenCount === 0 &&
+          manualPlanExitNoticeVersion === undefined
+            ? effectiveTokens
+            : estimatePendingPromptTokens(true);
 
         // Publish the acceptance snapshot for a caller-side settlement
         // carrier (see `userContentPushSnapshotKey`) immediately before the

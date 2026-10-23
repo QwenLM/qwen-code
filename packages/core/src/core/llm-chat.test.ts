@@ -5503,6 +5503,39 @@ describe('LlmChat', async () => {
       );
     });
 
+    it('keeps an aborted turn’s newly retained catalog in the next gate estimate', async () => {
+      let catalog = 'catalog A';
+      mockConfig.getAutoMemoryContext = () => catalog;
+      mockStream(
+        textStream('seeded', { promptTokenCount: 5000, totalTokenCount: 5010 }),
+      );
+      await sendDrain('seed', 'catalog-gate-abort-seed');
+      expect(chat.getLastPromptTokenCount()).toBe(5000);
+
+      catalog = 'catalog B';
+      mockStream(
+        streamThenThrow([textChunk('half')], new Error('stream blew up')),
+      );
+      const failed = await send('commit then fail', 'catalog-gate-abort-fail');
+      await expect(drain(failed)).rejects.toThrow('stream blew up');
+      // The failed turn charges nothing: ownership must survive into the next
+      // turn's gate estimate even though the flag is authoritative — re-adding
+      // the estimation conjunct at the gate must turn this red.
+      expect(chat.getLastPromptTokenCount()).toBe(5000);
+
+      const compressSpy = mockCompress(noop());
+      mockStream(textStream('silent'));
+      await sendDrain('after failure', 'catalog-gate-abort-after');
+      expect(compressSpy.mock.calls[0][1].precomputedEffectiveTokens).toBe(
+        5000 +
+          estimateContentTokens([
+            content('user', getAutoMemorySnapshot([], 'catalog B')!),
+          ]) +
+          10 +
+          estimateContentTokens([userText('after failure')]),
+      );
+    });
+
     it.each(['same catalog', 'changed catalog', 'suppressed catalog'])(
       'budgets a pending replay snapshot once with %s',
       async (mode) => {
