@@ -4101,113 +4101,131 @@ describe('runNonInteractive', () => {
       }));
     }
 
-    it('isolates enter_plan_mode from headless siblings without charging skipped calls to the budget', async () => {
-      setupMetricsMock();
-      const recordToolResult = vi.fn();
-      (
-        mockConfig as Config & {
-          getChatRecordingService: () => {
-            recordToolResult: typeof recordToolResult;
-            finalize: ReturnType<typeof vi.fn>;
-            flush: ReturnType<typeof vi.fn>;
-          };
+    it.each([
+      { loop: 'current loop', shared: false },
+      { loop: 'shared loop with Mod tool hooks', shared: true },
+    ])(
+      'isolates enter_plan_mode from headless siblings without charging skipped calls to the budget ($loop)',
+      async ({ shared }) => {
+        setupMetricsMock();
+        if (shared) {
+          Object.assign(mockConfig, { isUnifiedAgentLoopEnabled: () => true });
+          vi.spyOn(ModSession, 'create').mockReturnValue({
+            initialize: vi.fn().mockResolvedValue(undefined),
+            close: vi.fn().mockResolvedValue(undefined),
+            flushOutput: vi.fn().mockResolvedValue(undefined),
+            flushLogs: vi.fn(),
+            syncSession: vi.fn().mockResolvedValue(undefined),
+            hasToolHooks: true,
+            toolCall: () => undefined,
+          } as unknown as ModSession);
         }
-      ).getChatRecordingService = () => ({
-        recordToolResult,
-        finalize: vi.fn(),
-        flush: vi.fn().mockResolvedValue(undefined),
-      });
-      vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
-      vi.mocked(mockToolRegistry.getTool).mockImplementation(
-        (name: string) =>
-          ({
-            kind:
-              name === ToolNames.READ_FILE
-                ? Kind.Read
-                : name === ToolNames.WRITE_FILE
-                  ? Kind.Edit
-                  : Kind.Other,
-          }) as unknown as ReturnType<typeof mockToolRegistry.getTool>,
-      );
-      mockCoreExecuteToolCall.mockImplementation(
-        async (
-          _config: unknown,
-          request: { callId: string; name: string },
-        ) => ({
-          responseParts: [
-            {
-              functionResponse: {
-                id: request.callId,
-                name: request.name,
-                response: { output: 'entered plan mode' },
+        const recordToolResult = vi.fn();
+        (
+          mockConfig as Config & {
+            getChatRecordingService: () => {
+              recordToolResult: typeof recordToolResult;
+              finalize: ReturnType<typeof vi.fn>;
+              flush: ReturnType<typeof vi.fn>;
+            };
+          }
+        ).getChatRecordingService = () => ({
+          recordToolResult,
+          finalize: vi.fn(),
+          flush: vi.fn().mockResolvedValue(undefined),
+        });
+        vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
+        vi.mocked(mockToolRegistry.getTool).mockImplementation(
+          (name: string) =>
+            ({
+              kind:
+                name === ToolNames.READ_FILE
+                  ? Kind.Read
+                  : name === ToolNames.WRITE_FILE
+                    ? Kind.Edit
+                    : Kind.Other,
+            }) as unknown as ReturnType<typeof mockToolRegistry.getTool>,
+        );
+        mockCoreExecuteToolCall.mockImplementation(
+          async (
+            _config: unknown,
+            request: { callId: string; name: string },
+          ) => ({
+            responseParts: [
+              {
+                functionResponse: {
+                  id: request.callId,
+                  name: request.name,
+                  response: { output: 'entered plan mode' },
+                },
               },
-            },
-          ],
-          resultDisplay: 'entered plan mode',
-        }),
-      );
+            ],
+            resultDisplay: 'entered plan mode',
+          }),
+        );
 
-      mockLlmClient.sendMessageStream
-        .mockReturnValueOnce(
-          createStreamFromEvents([
-            ...toolCallEvents(
-              ['write-before-entry'],
-              ToolNames.WRITE_FILE,
-              'p-plan-boundary',
-            ),
-            ...toolCallEvents(
-              ['enter-plan'],
-              ToolNames.ENTER_PLAN_MODE,
-              'p-plan-boundary',
-            ),
-            ...toolCallEvents(
-              ['read-after-entry-1', 'read-after-entry-2'],
-              ToolNames.READ_FILE,
-              'p-plan-boundary',
-            ),
-          ]),
-        )
-        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+        mockLlmClient.sendMessageStream
+          .mockReturnValueOnce(
+            createStreamFromEvents([
+              ...toolCallEvents(
+                ['write-before-entry'],
+                ToolNames.WRITE_FILE,
+                'p-plan-boundary',
+              ),
+              ...toolCallEvents(
+                ['enter-plan'],
+                ToolNames.ENTER_PLAN_MODE,
+                'p-plan-boundary',
+              ),
+              ...toolCallEvents(
+                ['read-after-entry-1', 'read-after-entry-2'],
+                ToolNames.READ_FILE,
+                'p-plan-boundary',
+              ),
+            ]),
+          )
+          .mockReturnValueOnce(createStreamFromEvents(finishTurn));
 
-      await runNonInteractive(
-        mockConfig,
-        mockSettings,
-        'enter plan mode',
-        'p-plan-boundary',
-      );
+        await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'enter plan mode',
+          'p-plan-boundary',
+        );
 
-      expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
-      expect(mockCoreExecuteToolCall.mock.calls[0][1]).toMatchObject({
-        callId: 'enter-plan',
-        name: ToolNames.ENTER_PLAN_MODE,
-      });
-      const nextTurnParts = mockLlmClient.sendMessageStream.mock
-        .calls[1][0] as Part[];
-      expect(nextTurnParts.map((part) => part.functionResponse?.id)).toEqual([
-        'write-before-entry',
-        'enter-plan',
-        'read-after-entry-1',
-        'read-after-entry-2',
-      ]);
-      expect(nextTurnParts[0].functionResponse?.response).toEqual({
-        error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
-      });
-      expect(nextTurnParts[1].functionResponse?.response).toEqual({
-        output: 'entered plan mode',
-      });
-      expect(nextTurnParts[2].functionResponse?.response).toEqual({
-        error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
-      });
-      expect(nextTurnParts[3].functionResponse?.response).toEqual({
-        error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
-      });
-      expect(
-        recordToolResult.mock.calls
-          .map((call) => call[1])
-          .filter((metadata) => metadata.callId !== 'enter-plan')
-          .map((metadata) => metadata.executionStatus),
-      ).toEqual(['not_started', 'not_started', 'not_started']);
-    });
+        expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+        expect(mockCoreExecuteToolCall.mock.calls[0][1]).toMatchObject({
+          callId: 'enter-plan',
+          name: ToolNames.ENTER_PLAN_MODE,
+        });
+        const nextTurnParts = mockLlmClient.sendMessageStream.mock
+          .calls[1][0] as Part[];
+        expect(nextTurnParts.map((part) => part.functionResponse?.id)).toEqual([
+          'write-before-entry',
+          'enter-plan',
+          'read-after-entry-1',
+          'read-after-entry-2',
+        ]);
+        expect(nextTurnParts[0].functionResponse?.response).toEqual({
+          error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+        });
+        expect(nextTurnParts[1].functionResponse?.response).toEqual({
+          output: 'entered plan mode',
+        });
+        expect(nextTurnParts[2].functionResponse?.response).toEqual({
+          error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+        });
+        expect(nextTurnParts[3].functionResponse?.response).toEqual({
+          error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+        });
+        expect(
+          recordToolResult.mock.calls
+            .map((call) => call[1])
+            .filter((metadata) => metadata.callId !== 'enter-plan')
+            .map((metadata) => metadata.executionStatus),
+        ).toEqual(['not_started', 'not_started', 'not_started']);
+      },
+    );
 
     it('stamps a Goal turn’s tool results with the permit that asked for them', async () => {
       // The evidence catalog derives provenance from this stamp; without it a
@@ -7406,108 +7424,132 @@ describe('runNonInteractive', () => {
     });
   });
 
-  it('keeps notifications from different Todo work chains in separate batches', async () => {
-    setupMetricsMock();
+  it.each([false, true])(
+    'keeps notifications from different Todo work chains in separate batches (shared loop: %s)',
+    async (shared) => {
+      setupMetricsMock();
+      Object.assign(mockConfig, { isUnifiedAgentLoopEnabled: () => shared });
 
-    const firstNotificationXml =
-      '<task-notification>\n' +
-      '<task-id>mon_1</task-id>\n' +
-      '<kind>monitor</kind>\n' +
-      '<status>running</status>\n' +
-      '<summary>Monitor emitted event #1.</summary>\n' +
-      '<result>ready</result>\n' +
-      '</task-notification>';
-    const secondNotificationXml =
-      '<task-notification>\n' +
-      '<task-id>mon_2</task-id>\n' +
-      '<kind>monitor</kind>\n' +
-      '<status>running</status>\n' +
-      '<summary>Monitor emitted event #2.</summary>\n' +
-      '<result>also ready</result>\n' +
-      '</task-notification>';
+      const firstNotificationXml =
+        '<task-notification>\n' +
+        '<task-id>mon_1</task-id>\n' +
+        '<kind>monitor</kind>\n' +
+        '<status>running</status>\n' +
+        '<summary>Monitor emitted event #1.</summary>\n' +
+        '<result>ready</result>\n' +
+        '</task-notification>';
+      const secondNotificationXml =
+        '<task-notification>\n' +
+        '<task-id>mon_2</task-id>\n' +
+        '<kind>monitor</kind>\n' +
+        '<status>running</status>\n' +
+        '<summary>Monitor emitted event #2.</summary>\n' +
+        '<result>also ready</result>\n' +
+        '</task-notification>';
 
-    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
-      if (!cb) {
-        return;
-      }
-      cb('Monitor "logs" event #1: ready', firstNotificationXml, {
-        monitorId: 'mon_1',
-        toolUseId: 'tool_mon_1',
-        status: 'running',
-        eventCount: 1,
-        todoWorkChainId: 'chain-1',
+      mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+        if (!cb) {
+          return;
+        }
+        cb('Monitor "logs" event #1: ready', firstNotificationXml, {
+          monitorId: 'mon_1',
+          toolUseId: 'tool_mon_1',
+          status: 'running',
+          eventCount: 1,
+          todoWorkChainId: 'chain-1',
+        });
+        cb('Monitor "build" event #1: ready', secondNotificationXml, {
+          monitorId: 'mon_2',
+          toolUseId: 'tool_mon_2',
+          status: 'running',
+          eventCount: 1,
+          todoWorkChainId: 'chain-2',
+        });
       });
-      cb('Monitor "build" event #1: ready', secondNotificationXml, {
-        monitorId: 'mon_2',
-        toolUseId: 'tool_mon_2',
-        status: 'running',
-        eventCount: 1,
-        todoWorkChainId: 'chain-2',
-      });
-    });
-    mockLlmClient.sendMessageStream
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: LlmEventType.Content, value: 'Started.' },
-          {
-            type: LlmEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 1 },
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Started.' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
             },
-          },
-        ]),
-      )
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: LlmEventType.Content, value: 'First notification.' },
-          {
-            type: LlmEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 1 },
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'First notification.' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
             },
-          },
-        ]),
-      )
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: LlmEventType.Content, value: 'Second notification.' },
-          {
-            type: LlmEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 1 },
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Second notification.' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
             },
-          },
-        ]),
+          ]),
+        );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Watch the logs',
+        'prompt-monitor-work-chains',
       );
 
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Watch the logs',
-      'prompt-monitor-work-chains',
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+        2,
+        [{ text: firstNotificationXml }],
+        expect.any(AbortSignal),
+        'prompt-monitor-work-chains/automatic/2',
+        expect.objectContaining({
+          todoWorkChainId: 'chain-1',
+        }),
+      );
+      expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+        3,
+        [{ text: secondNotificationXml }],
+        expect.any(AbortSignal),
+        'prompt-monitor-work-chains/automatic/3',
+        expect.objectContaining({
+          todoWorkChainId: 'chain-2',
+        }),
+      );
+    },
+  );
+
+  it('ends the run at the client session turn limit on the shared loop (#15325)', async () => {
+    setupMetricsMock();
+    Object.assign(mockConfig, { isUnifiedAgentLoopEnabled: () => true });
+    mockLlmClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([{ type: LlmEventType.MaxSessionTurns }]),
     );
 
-    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
-    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
-      2,
-      [{ text: firstNotificationXml }],
-      expect.any(AbortSignal),
-      'prompt-monitor-work-chains/automatic/2',
-      expect.objectContaining({
-        todoWorkChainId: 'chain-1',
-      }),
-    );
-    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
-      3,
-      [{ text: secondNotificationXml }],
-      expect.any(AbortSignal),
-      'prompt-monitor-work-chains/automatic/3',
-      expect.objectContaining({
-        todoWorkChainId: 'chain-2',
-      }),
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Second question',
+        'prompt-client-turn-cap',
+      ),
+    ).rejects.toThrow('process.exit(53) called');
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Reached max session turns'),
     );
   });
 
