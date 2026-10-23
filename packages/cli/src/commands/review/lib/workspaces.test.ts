@@ -25,7 +25,7 @@ import {
   readWorkspaceGlobs,
   readRootPackage,
   readWorkspacePackages,
-  rootBuildFansOut,
+  rootBuildFanOutScript,
   scriptFansOut,
   type WorkspacePackage,
 } from './workspaces.js';
@@ -460,7 +460,7 @@ describe('scriptFansOut', () => {
   });
 });
 
-describe('rootBuildFansOut', () => {
+describe('rootBuildFanOutScript', () => {
   const withRoot = (files: Record<string, string>): string => {
     const root = mkdtempSync(join(tmpdir(), 'ws-'));
     for (const [rel, text] of Object.entries(files)) {
@@ -470,27 +470,60 @@ describe('rootBuildFansOut', () => {
     return root;
   };
 
-  it('follows `node <file>` into a local build script that fans out', () => {
-    // This repo's own root build: the fan-out lives in scripts/build.js.
+  it('names the local build script a `node <file>` hands off to when it fans out', () => {
+    // This repo's own root build: the fan-out lives in scripts/build.js,
+    // between a license header and comments of its own.
     const root = withRoot({
-      'scripts/build.js':
+      'scripts/build.js': [
+        '/**',
+        ' * @license',
+        ' */',
+        '// build all workspaces/packages in dependency order',
         "execSync(`corepack pnpm -r ${filter} run build`, { stdio: 'inherit' });",
+        "execSync('node scripts/generate-settings-schema.ts'); // root's own",
+      ].join('\n'),
     });
     expect(
-      rootBuildFansOut(
+      rootBuildFanOutScript(
         root,
         'cross-env NODE_OPTIONS="--max-old-space-size=6144" node scripts/build.js',
       ),
-    ).toBe(true);
+    ).toBe('scripts/build.js');
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("is false for a build script that compiles the root's own sources", () => {
+  it("is undefined for a build script that compiles the root's own sources", () => {
     const root = withRoot({
       'scripts/build.js': "execSync('tsc -p tsconfig.json');",
     });
-    expect(rootBuildFansOut(root, 'node scripts/build.js')).toBe(false);
-    expect(rootBuildFansOut(root, 'tsc -p .')).toBe(false);
+    expect(
+      rootBuildFanOutScript(root, 'node scripts/build.js'),
+    ).toBeUndefined();
+    expect(rootBuildFanOutScript(root, 'tsc -p .')).toBeUndefined();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('does not count a fan-out that only a comment mentions', () => {
+    const root = withRoot({
+      'scripts/line.js': [
+        '// was: pnpm -r run build — too slow',
+        "execSync('tsc -p tsconfig.json');",
+      ].join('\n'),
+      'scripts/block.js': [
+        '/* not `npm run build --workspaces`: one package only */',
+        "execSync('tsc -p tsconfig.json');",
+      ].join('\n'),
+      'scripts/url.js':
+        "fetch('https://example.com/x'); execSync('pnpm -r run build');",
+    });
+    expect(rootBuildFanOutScript(root, 'node scripts/line.js')).toBeUndefined();
+    expect(
+      rootBuildFanOutScript(root, 'node scripts/block.js'),
+    ).toBeUndefined();
+    // A `//` that is not a comment leaves the line alone.
+    expect(rootBuildFanOutScript(root, 'node scripts/url.js')).toBe(
+      'scripts/url.js',
+    );
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -499,12 +532,14 @@ describe('rootBuildFansOut', () => {
     const root = join(parent, 'repo');
     mkdirSync(root);
     writeFileSync(join(parent, 'outside.js'), 'pnpm -r run build');
-    expect(rootBuildFansOut(root, 'node ../outside.js')).toBe(false);
-    expect(rootBuildFansOut(root, `node ${join(parent, 'outside.js')}`)).toBe(
-      false,
-    );
-    expect(rootBuildFansOut(root, 'node scripts/missing.js')).toBe(false);
-    expect(rootBuildFansOut(root, undefined)).toBe(false);
+    expect(rootBuildFanOutScript(root, 'node ../outside.js')).toBeUndefined();
+    expect(
+      rootBuildFanOutScript(root, `node ${join(parent, 'outside.js')}`),
+    ).toBeUndefined();
+    expect(
+      rootBuildFanOutScript(root, 'node scripts/missing.js'),
+    ).toBeUndefined();
+    expect(rootBuildFanOutScript(root, undefined)).toBeUndefined();
     rmSync(parent, { recursive: true, force: true });
   });
 });

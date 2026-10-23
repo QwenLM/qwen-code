@@ -21,7 +21,7 @@ import {
   readWorkspaceGlobs,
   readWorkspacePackages,
   reverseDependencyClosure,
-  rootBuildFansOut,
+  rootBuildFanOutScript,
   scriptFansOut,
   type WorkspacePackage,
 } from './workspaces.js';
@@ -904,15 +904,34 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   const built = new Set<string>();
   const widened = new Set<string>();
   // A root build that fans out over the workspaces (`npm run build
-  // --workspaces`, or a build script that runs `pnpm -r … run build`) is an
-  // aggregator: it produces no artifacts of its own, the scoped loop already
-  // builds the members it drives, and as one bare command it is exactly the
-  // whole-monorepo build this module exists to stop running. Only a
-  // NON-fan-out root build — one that compiles the root's own sources — is
-  // worth its deadline.
+  // --workspaces`) is an aggregator: it produces no artifacts of its own, the
+  // scoped loop already builds the members it drives, and as one bare command
+  // it is exactly the whole-monorepo build this module exists to stop
+  // running. Only a NON-fan-out root build — one that compiles the root's own
+  // sources — is worth its deadline.
+  const rootBuildText = rootPkg?.scriptsText['build'];
+  // A root build that hands off to a local script which fans out (`node
+  // scripts/build.js` running `pnpm -r … run build`) is the same whole-monorepo
+  // build, but the script can do work of its own as well — generate a file
+  // the root's suite reads — and its source cannot prove otherwise. It is
+  // skipped only when nothing in the repository reads what the ROOT package
+  // makes: no root suite of its own (a fan-out root `test` runs no root
+  // suite) and no member that depends on the root. Otherwise it runs as
+  // written, and costs what it costs. Static facts, not this run's scope, so
+  // the merge-base probe skips exactly what the run skips.
+  const handOff =
+    rootPkg && !scriptFansOut(rootBuildText)
+      ? rootBuildFanOutScript(root, rootBuildText)
+      : undefined;
+  const rootOutputRead =
+    (!!rootPkg?.scripts.includes('test') &&
+      !scriptFansOut(rootPkg.scriptsText['test'])) ||
+    reverseDependencyClosure(['.'], scopeGraph).length > 1;
+  const skippedHandOff = handOff && !rootOutputRead ? handOff : undefined;
   const rootBuildRuns =
     !!rootPkg?.scripts.includes('build') &&
-    !rootBuildFansOut(root, rootPkg.scriptsText['build']);
+    !scriptFansOut(rootBuildText) &&
+    !skippedHandOff;
   // One predicate for both the loop skip and the reported set: a fan-out
   // root's build does not run — never in single-root mode, where the root is
   // the only package there is.
@@ -1263,6 +1282,18 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
     results.note = results.note
       ? `${results.note} ${partialNote}.`
       : partialNote;
+  }
+
+  // A root build skipped on the strength of the script it hands off to (see
+  // `handOff`): whatever else that script does did not run, and the agent has
+  // to know that before it reads a failure over a file only the script writes.
+  if (skippedHandOff && set.includes('.')) {
+    results.note +=
+      ` The root \`build\` did not run: it hands off to \`${skippedHandOff}\`, ` +
+      'which builds every workspace (built above, one at a time), and nothing ' +
+      'in this repository depends on the root package. Anything else that ' +
+      'script does was not run — a failure over a file only it writes is not ' +
+      'a defect in the diff.';
   }
 
   // The build and test results below are real, and the install failure is

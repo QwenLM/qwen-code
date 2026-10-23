@@ -1914,11 +1914,11 @@ describe('runBuildTest', () => {
     expect(rep.ok).toBe(true);
   });
 
-  it('skips a root BUILD that hands off to a build script fanning out with `pnpm -r`', () => {
-    // This repo's shape since the pnpm migration: the root depends on its
-    // members, and its build is `node scripts/build.js`, which runs every
-    // workspace's build. Running it after the scoped loop rebuilt the whole
-    // monorepo and spent the rest of the budget before any suite started.
+  // This repo's shape since the pnpm migration: the root depends on its
+  // members, and its build is `node scripts/build.js`, which runs every
+  // workspace's build — and may do work of its own, like the generated file
+  // `rootSuite` below reads.
+  const handOffRoot = (scripts: { test: string }): void => {
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({
@@ -1927,7 +1927,7 @@ describe('runBuildTest', () => {
         scripts: {
           build:
             'cross-env NODE_OPTIONS="--max-old-space-size=6144" node scripts/build.js',
-          test: 'exit 0',
+          ...scripts,
         },
         devDependencies: { '@x/core': '*' },
       }),
@@ -1935,7 +1935,8 @@ describe('runBuildTest', () => {
     mkdirSync(join(root, 'scripts'));
     writeFileSync(
       join(root, 'scripts', 'build.js'),
-      "execSync('corepack pnpm -r run build', { stdio: 'inherit' });\n",
+      "execSync('corepack pnpm -r run build', { stdio: 'inherit' });\n" +
+        "writeFileSync('root-artifact.json', '{}');\n",
     );
     pkg('packages/core', {
       name: '@x/core',
@@ -1948,7 +1949,11 @@ describe('runBuildTest', () => {
       });
     }
     writePlan(['packages/core/src/a.ts']);
-
+  };
+  const runRecordingKinds = (): {
+    rep: BuildTestReport;
+    calls: Array<[string, string | undefined]>;
+  } => {
     const calls: Array<[string, string | undefined]> = [];
     const rep = runBuildTest({
       plan: planPath,
@@ -1966,6 +1971,17 @@ describe('runBuildTest', () => {
         };
       },
     });
+    return { rep, calls };
+  };
+
+  it('skips a root BUILD that hands off to a script fanning out with `pnpm -r`, and says so', () => {
+    // This repo's root `test` fans out too, so no root suite reads what the
+    // root build makes. Running it after the scoped loop rebuilt the whole
+    // monorepo and spent the rest of the budget before any suite started.
+    handOffRoot({
+      test: 'cross-env NODE_OPTIONS="--max-old-space-size=3072" npm run test --workspaces --if-present',
+    });
+    const { rep, calls } = runRecordingKinds();
     expect(rep.buildSet).toEqual(['packages/core']);
     expect(calls.map(([c]) => c)).not.toContain('npm run build');
     // Builds are marked as builds — that is what hands them the heap.
@@ -1973,7 +1989,42 @@ describe('runBuildTest', () => {
       'npm run build --workspace="packages/core"',
       'build',
     ]);
+    // What else the script does did not run, and the report says so.
+    expect(rep.note).toContain(
+      'The root `build` did not run: it hands off to `scripts/build.js`',
+    );
     expect(rep.ok).toBe(true);
+  });
+
+  it('runs a hand-off root BUILD as written when the root has a suite of its own', () => {
+    // The script also writes the file the root suite reads. Skipping it
+    // would fail that suite with ENOENT — a failure the diff did not cause.
+    handOffRoot({ test: 'node -e "require(\'./root-artifact.json\')"' });
+    const { rep, calls } = runRecordingKinds();
+    const commands = calls.map(([c]) => c);
+    expect(calls).toContainEqual(['npm run build', 'build']);
+    expect(commands.indexOf('npm run build')).toBeLessThan(
+      commands.indexOf('npm test'),
+    );
+    expect(rep.buildSet).toContain('.');
+    expect(rep.note).toContain('plus the root package');
+    expect(rep.note).not.toContain('did not run');
+  });
+
+  it('runs a hand-off root BUILD as written when a member depends on the root', () => {
+    handOffRoot({ test: 'npm run test --workspaces --if-present' });
+    pkg('packages/app', {
+      name: '@x/app',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+      dependencies: { r: '*' },
+    });
+    const { rep, calls } = runRecordingKinds();
+    const commands = calls.map(([c]) => c);
+    expect(commands).toContain('npm run build');
+    expect(commands.indexOf('npm run build')).toBeLessThan(
+      commands.indexOf('npm run build --workspace="packages/app"'),
+    );
+    expect(rep.buildSet).toContain('.');
   });
 
   it('reports a build that ran out of JavaScript heap as infrastructure, not a compile error', () => {

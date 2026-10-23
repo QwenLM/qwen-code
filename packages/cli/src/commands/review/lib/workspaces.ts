@@ -261,29 +261,51 @@ export function scriptFansOut(text: unknown): boolean {
 const NODE_SCRIPT_RE = /(?:^|[\s;&|])node\s+([\w@./-]+\.[cm]?js)(?=[\s;&|]|$)/g;
 
 /**
- * Does the root's `build` fan out — in its own text, or in a local script it
- * runs with `node <file>`?
+ * The local script the root's `build` hands off to with `node <file>`, when
+ * that script fans out over the workspaces — or undefined.
  *
- * The second shape is where a monorepo's root build lives once the fan-out
- * moves into a build script (`node scripts/build.js`, which runs `pnpm -r …
- * run build`), and the script text alone cannot show it. Treating that root
- * build as one that compiles the root's own sources runs the whole-monorepo
- * build after the scoped loop has already built every member — measured on
- * this repo, it spent the rest of the whole-call budget and no suite ran. A
- * path that climbs out of the root is not followed.
+ * This is where a monorepo's root build lives once the fan-out moves into a
+ * build script (`node scripts/build.js`, which runs `pnpm -r … run build`),
+ * and the script text alone cannot show it. Run as a root build after the
+ * scoped loop has already built every member, it is the whole-monorepo build
+ * again — measured on this repo, it spent the rest of the whole-call budget
+ * and no suite ran.
+ *
+ * A match says the script fans out, NOT that fanning out is all it does: it
+ * can also generate files of its own. So this names the script rather than
+ * answering yes or no, and the caller decides whether skipping it is safe.
+ * Comments are dropped first, so a script that only mentions `pnpm -r` is not
+ * matched. A path that climbs out of the root is not followed.
  */
-export function rootBuildFansOut(root: string, text: unknown): boolean {
-  if (typeof text !== 'string') return false;
-  if (scriptFansOut(text)) return true;
+export function rootBuildFanOutScript(
+  root: string,
+  text: unknown,
+): string | undefined {
+  if (typeof text !== 'string') return undefined;
   for (const [, file] of text.matchAll(NODE_SCRIPT_RE)) {
     if (file.split('/').includes('..')) continue;
     try {
-      if (scriptFansOut(readFileSync(join(root, file), 'utf8'))) return true;
+      if (
+        scriptFansOut(withoutComments(readFileSync(join(root, file), 'utf8')))
+      )
+        return file;
     } catch {
       // Unreadable is not evidence of a fan-out: the build runs as written.
     }
   }
-  return false;
+  return undefined;
+}
+
+/**
+ * JavaScript source with its comments blanked, roughly: `/* … *\/` blocks,
+ * and `//` to the end of a line where it follows whitespace — so a URL's
+ * `https://` survives. A string that happens to hold either marker loses some
+ * text, which can only hide a fan-out, and a hidden one runs as written.
+ */
+function withoutComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|\s)\/\/.*$/gm, '$1');
 }
 
 /**
