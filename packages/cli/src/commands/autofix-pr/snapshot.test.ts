@@ -122,6 +122,12 @@ describe('buildSnapshot', () => {
     });
   });
 
+  it("carries the PR's title, the language the summary is written in", () => {
+    expect(buildSnapshot(pr({ title: '修复登录超时' }), state())).toMatchObject(
+      { title: '修复登录超时' },
+    );
+  });
+
   it('waits when nothing changed', () => {
     expect(buildSnapshot(pr(), state())).toEqual({
       action: 'wait',

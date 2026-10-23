@@ -327,8 +327,9 @@ when there are none, so the session is woken only for them:
   `UNKNOWN` keeps it. A conflict a prepared watch left for a human on the
   head (`handledConflictSha`) is not reported.
 - Comments, reviews and thread comments are reported once each, by node id,
-  with the trust rules of Section 8. The viewer's own comments are never
-  events, nor are the ones a prepared watch of the same PR has handled
+  with the trust rules of Section 8. The tool's own replies (the viewer's
+  comments ending with the reply marker) are never events, nor are the
+  ones a prepared watch of the same PR has handled
   (`handledCommentIds`, `postedCommentIds`); those the query returns are
   adopted into the cursor, so they stay quiet once `cleanup` has removed the
   state file. An untrusted comment alone is
@@ -736,11 +737,13 @@ snapshot --gate (in the gate)
        5. commit → push → reply
 ```
 
-The fix runs in a background `agent` with `working_dir` set to the worktree.
+The fix runs in an `agent` with `working_dir` set to the worktree.
 Its brief is a file listing the events, log paths, the trust rules, the user's
-extra instructions and the verification requirement. The main session stays
-usable. When the agent's completion notification arrives, the main session runs
-`push` and `reply`. If verification fails, nothing is pushed; the attempt
+extra instructions and the verification requirement. In delivery step 3 the
+agent runs in the foreground — the `agent` tool runs a `working_dir` agent
+only so, since the caller owns the worktree — and the main session runs
+`push` and `reply` when it returns; a background fix, with the main session
+usable meanwhile, is delivery step 4. If verification fails, nothing is pushed; the attempt
 counts against the budget and the failure is reported.
 
 `inFlight` records the head an attempt started on and when. Every end of an
@@ -830,7 +833,7 @@ Replies are on by default; `--no-reply` turns them off.
 - Each push gets one PR comment summarizing what it addressed: checks fixed or
   re-run, comments addressed, conflict resolved, and how it was verified.
 - Replies use the language of the comment they answer; the summary uses the
-  language of the PR description.
+  language of the PR's title, which `snapshot` reports (`title`).
 - Every body ends with `<!-- qwen-autofix-pr:v1 -->`.
 - Review threads are never resolved by the tool.
 
@@ -851,8 +854,8 @@ Replies are on by default; `--no-reply` turns them off.
   since its previous run.
 - The job ends with the process. The state file stays, owned by the session
   that wrote it, and a new session's `prepare` refuses it (Section 6.1).
-  Taking a watch over in a later session, keeping its pushes and budgets,
-  is delivery step 4; until then a restart needs `cleanup <n> --force`.
+  A later session takes the watch over, its pushes and budgets kept, with
+  `prepare --take-over` once the user agrees (Section 6.1, step 5).
   What the watch posted and handled survives in the PR's history file
   (Section 6.6), so the new watch does not answer the same comments again.
   A watch that stopped ran `cleanup` already.

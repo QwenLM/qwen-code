@@ -478,9 +478,10 @@ describe('buildGateSnapshot', () => {
     ).not.toBeNull();
   });
 
-  it('reports a trusted comment once and never the viewer’s own', () => {
-    // Replies are the viewer's: a marker in anyone else's comment is a quote
-    // and hides nothing.
+  it('reports a trusted comment once, the viewer’s own included, but never the tool’s replies', () => {
+    // Replies are the viewer's comments ending with the marker: a marker in
+    // anyone else's comment is a quote and hides nothing, and the viewer's
+    // own words — an answer to "Needs a human decision" — are a request.
     const data = pr({
       comments: {
         pageInfo: { hasPreviousPage: false },
@@ -489,6 +490,7 @@ describe('buildGateSnapshot', () => {
           comment('I2', 'me', 'OWNER'),
           comment('I3', 'bob', 'OWNER', `done\n${REPLY_MARKER}`),
           comment('I4', 'stranger'),
+          comment('I5', 'me', 'OWNER', `Fixed in abc.\n\n${REPLY_MARKER}`),
         ],
       },
     });
@@ -501,6 +503,14 @@ describe('buildGateSnapshot', () => {
         trust: 'member',
         body: 'please fix I1',
         url: 'https://github.com/o/r/pull/7#I1',
+      },
+      {
+        type: 'issue_comment',
+        id: 'I2',
+        author: 'me',
+        trust: 'owner',
+        body: 'please fix I2',
+        url: 'https://github.com/o/r/pull/7#I2',
       },
       {
         type: 'issue_comment',
@@ -517,7 +527,7 @@ describe('buildGateSnapshot', () => {
         url: 'https://github.com/o/r/pull/7#I4',
       },
     ]);
-    expect(first.cursor.reportedCommentIds).toEqual(['I1', 'I3', 'I4']);
+    expect(first.cursor.reportedCommentIds).toEqual(['I1', 'I2', 'I3', 'I4']);
     expect(buildGateSnapshot(data, first.cursor).snapshot).toBeNull();
   });
 

@@ -79,6 +79,7 @@ const PR_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
     pullRequest(number: $number) {
       state
       isDraft
+      title
       url
       headRefOid
       mergeable
@@ -217,6 +218,7 @@ interface ReviewThreads {
 export interface PrData {
   state: 'OPEN' | 'CLOSED' | 'MERGED';
   isDraft: boolean;
+  title?: string;
   url: string;
   headRefOid: string;
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
@@ -287,6 +289,8 @@ export interface Snapshot {
   action: 'stop' | 'resync' | 'fix' | 'wait';
   headSha: string;
   isDraft: boolean;
+  /** The PR's title (prepared mode): the summary is written in its language. */
+  title?: string;
   url: string;
   events: SnapshotEvent[];
   /** Connections cut at the page size; events past the cut are missing. */
@@ -599,6 +603,7 @@ export function buildSnapshot(
   const base = {
     headSha: lagging ? known : pr.headRefOid,
     isDraft: pr.isDraft,
+    ...(pr.title === undefined ? {} : { title: pr.title }),
     url: pr.url,
   };
 
@@ -787,8 +792,11 @@ export function buildGateSnapshot(
     ...next.reportedCommentIds,
     ...watch.seenCommentIds,
   ]);
+  // The viewer's own comments count as the round counts them (Section 8):
+  // the viewer is often the PR author, answering a "Needs a human decision"
+  // or asking for more; only the tool's own replies are left out.
   const isNew = (node: CommentNode) =>
-    !reportedComments.has(node.id) && node.author?.login !== cursor.viewer;
+    !reportedComments.has(node.id) && !isOwnReply(node, cursor.viewer);
   const comments = commentEvents(pr, cursor.prAuthor, isNew);
   candidates.push(...comments.events.map(withShortBodies));
   truncated.push(...comments.truncated);
