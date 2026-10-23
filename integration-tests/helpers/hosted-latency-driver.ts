@@ -61,7 +61,7 @@ const model = await startFakeOpenAIServer(({ body, requestIndex }) => {
     (body['tools'] as Array<{ function: { name: string } }>)
       .map((tool) => tool.function.name)
       .sort(),
-    ['edit', 'read_file', 'write_file'],
+    ['edit', 'read_file', 'web_fetch', 'write_file'],
   );
   const messages = body['messages'] as Array<{
     role: string;
