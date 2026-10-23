@@ -654,6 +654,8 @@ async function hostedApprovalForTurn(
       'hosted-workspace-files/1',
       'hosted-workspace-shell/1',
       'hosted-workspace-shell/2',
+      'hosted-workspace-files/3',
+      'hosted-workspace-shell/3',
     ].includes(session.toolProfile ?? '');
   return {
     settings,
@@ -7319,12 +7321,16 @@ export function registerHostedHarnessSessionRoutes(
                   'hosted-workspace-files/1',
                   'hosted-workspace-shell/1',
                   'hosted-workspace-shell/2',
+                  'hosted-workspace-files/3',
+                  'hosted-workspace-shell/3',
                 ]
               : [
                   'hosted-workspace-files/1',
                   'hosted-workspace-shell/1',
                   'hosted-workspace-files/2',
                   'hosted-workspace-shell/2',
+                  'hosted-workspace-files/3',
+                  'hosted-workspace-shell/3',
                 ]
           ).includes(session.toolProfile ?? '') ||
           (approvalSelection.revision === 0 &&

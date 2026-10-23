@@ -326,7 +326,8 @@ class ManagedApprovalChangeTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1", "hosted-workspace-shell/2"})
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1", "hosted-workspace-shell/2",
+            "hosted-workspace-files/3", "hosted-workspace-shell/3"})
     void changesStoredDefinitionSessionsWithoutChangingTheirInitialIdentityOrCreationOptions(String profile) throws Exception {
         session = customSession(profile, "default");
         var initial = store.requireSession(tenant, session);
@@ -358,6 +359,30 @@ class ManagedApprovalChangeTest {
         assertThat(definitions.pinnedContent(retained)).isEqualTo(content);
         assertThat(service.queryWebShellSessionOptions(tenant, "actor", initial.agentId()).availableApprovalModes())
                 .containsExactly("default");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted-workspace-files/3", "hosted-workspace-shell/3"})
+    void snapshotsTheApprovalSelectionOnTurnsOfTheNewProfileVersions(String profile) throws Exception {
+        session = customSession(profile, "default");
+        var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "hello"));
+        var turn = transaction().execute(status -> store.insertTurnCommand(tenant, "SUBMIT_TURN", "new-profile",
+                "digest", session, input, SubmitHarnessTurn.computePayloadDigest(input)));
+        String prompt = store.findTurn(tenant, session, turn.turnId()).orElseThrow().promptId();
+        assertThat(store.findTurnApprovalSelection(tenant, session, prompt))
+                .isEqualTo(new WebShellApprovalSelection("default", 0));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"hosted-workspace-files/1,true", "hosted-workspace-shell/2,true",
+            "hosted-workspace-files/3,false", "hosted-workspace-shell/3,false"})
+    void keepsPlanModeOnlyOnTheProfilesThatDeclareIt(String profile, boolean planMode) throws Exception {
+        session = customSession(profile, "default");
+        var stored = store.requireSession(tenant, session);
+        when(harness.supportsPlanMode()).thenReturn(true);
+        assertThat(store.supportsPlanMode(stored)).isEqualTo(planMode);
+        assertThat(service.queryWebShellSessionOptions(tenant, "actor", stored.agentId()).planModeSupported())
+                .isEqualTo(planMode);
     }
 
     @Test
@@ -618,7 +643,8 @@ class ManagedApprovalChangeTest {
     private ManagedAgentStore store() {
         var properties = new ManagedAgentProperties();
         properties.setDefinitionToolProfiles(List.of("hosted-workspace-files/1", "hosted-workspace-shell/1",
-                "hosted-workspace-shell/2", "hosted-workspace-files/2", "hosted-workspace-read/1"));
+                "hosted-workspace-shell/2", "hosted-workspace-files/2", "hosted-workspace-files/3",
+                "hosted-workspace-shell/3", "hosted-workspace-read/1"));
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setWorkspaceShellEnabled(true);
         properties.getHarness().setApprovalMode("default");

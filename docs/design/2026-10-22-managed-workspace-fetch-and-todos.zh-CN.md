@@ -100,10 +100,13 @@ team lead 是控制面内部创建的会话，read profile 属于不得写入的
   决定）。有了它才能重新提出抓取部分；它今天不是配置开关。
 - **任务清单的稳定会话身份**，让计划跨轮存活。需要 Harness 向 Worker 传递稳定的
   Hosted Session id，并决定跨 Runtime 实例时清单存在哪里。
-- **`/3` 的 Java profile 判定。** `WorkspaceToolProfiles` 是精确匹配：
-  `lifecycleProtocol("hosted-workspace-files/3")` 返回 0，`isPublicShell` 只覆盖
-  `/1` 与 `/2`，`supportsApprovalSelection` 要求恰好是 `files/1` 或公共 shell。
-  因此启用 `/3` 需要改 Java 判定，而不只是改配置。
+- **`/3` 的 Java profile 判定。** 已随本次改动交付：只改 TypeScript 会让控制面
+  与 Harness 判断不一致。`isPublicShell` 覆盖 `/3`（因此子代理抑制、字节采集、
+  shell 审批与 `workspaceShellEnabled` 杀开关都适用），`supportsApprovalSelection`
+  接纳 `files/3` 与 shell 两版，`ma_turn` 插入与轮次快照读取都点名两个 `/3`
+  profile，`isPlanModeProfile` 则在 `/3` 上保持 Plan mode 关闭，使 `/3` 与
+  Harness 的拒绝一致，而不是对外宣称一个它拒绝的开关。`lifecycleProtocol` 对
+  `/3` 仍返回 0，与它对 `/2` 的返回值相同；两个版本都不发起 Workspace 生命周期调用。
 - **把任务清单作为持久 Session 记录投影到 Web Shell 或其他客户端。**
 - **在生产 connector 中启用 `/3`。** 哪个部署固定 `/3` 属于上线决策，与 `/2`
   相同。它要求先升级所有 Worker 并排空旧实例，正如 `/2` 的 ledger 条目所记录：

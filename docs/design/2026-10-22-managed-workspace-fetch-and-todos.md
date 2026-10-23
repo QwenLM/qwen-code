@@ -128,11 +128,16 @@ read profile belongs to a snapshot child that must not write.
   turn. This needs the Harness to pass a stable hosted Session id to the
   Worker, and a decision on where that list is stored across Runtime
   instances.
-- **Java profile predicates for `/3`.** `WorkspaceToolProfiles` is exact-match:
-  `lifecycleProtocol("hosted-workspace-files/3")` returns 0, `isPublicShell`
-  covers only `/1` and `/2`, and `supportsApprovalSelection` requires exactly
-  `files/1` or a public shell. Enabling `/3` therefore needs Java predicate
-  work, not only a configuration change.
+- **Java profile predicates for `/3`.** Delivered with this change, because a
+  TypeScript-only `/3` would leave the control plane disagreeing with the
+  Harness. `isPublicShell` covers `/3` (so child-agent suppression, byte
+  capture, shell approval and the `workspaceShellEnabled` kill switch all
+  apply), `supportsApprovalSelection` admits `files/3` as well as the shell
+  profiles, the `ma_turn` insert and the turn-snapshot reader name both `/3`
+  profiles, and `isPlanModeProfile` keeps Plan mode off there so `/3` matches
+  the Harness refusal rather than advertising a toggle it rejects.
+  `lifecycleProtocol` still returns 0 for `/3`, which is what it already
+  returns for `/2`; neither version issues Workspace lifecycle calls.
 - **Projecting the task list to Web Shell or another client** as a durable
   Session record.
 - **Enabling `/3` in the production connector.** Which deployment pins `/3`
