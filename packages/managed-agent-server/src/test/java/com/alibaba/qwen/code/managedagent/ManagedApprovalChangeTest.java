@@ -378,7 +378,7 @@ class ManagedApprovalChangeTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/3"})
+    @ValueSource(strings = "hosted-workspace-files/3")
     void snapshotsTheApprovalSelectionOnTurnsOfTheNewProfileVersions(String profile) throws Exception {
         session = customSession(profile, "default");
         var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "hello"));
