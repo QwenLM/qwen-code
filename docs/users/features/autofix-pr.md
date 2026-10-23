@@ -1,0 +1,71 @@
+# Autofix a Pull Request
+
+`/autofix-pr` watches one of your pull requests from a local Qwen Code session and fixes what comes up: failed CI checks, review feedback from people you trust, and merge conflicts. Each fix is made and verified in a worktree of its own, pushed to the PR branch and answered on the PR, under your own git and `gh` identity. It stops by itself when the PR is merged or closed.
+
+```text
+/autofix-pr [<pr-number>|<pr-url>] [--once] [--every <minutes>] [--no-reply] [--yes] [instructions...]
+/autofix-pr status
+/autofix-pr stop [<pr-number>]
+```
+
+- No PR argument: the PR whose head is your current branch.
+- `--once`: check and fix once, schedule nothing.
+- `--every <minutes>`: how often to check, one of 1, 2, 5, 10, 15, 30 or 60. Default 2.
+- `--no-reply`: push fixes, post nothing on the PR.
+- `--yes`: skip the start confirmation. Needed where no dialog can be shown.
+- Free text is passed to every fix, for example `/autofix-pr 123 do not change the public API`.
+
+## Before you start
+
+- `gh` is signed in, with push access to the PR branch: write access to a same-repository PR, or your own fork, or a fork that allows edits from maintainers.
+- You run it from a clone of the PR's repository with one git remote for it.
+- In the default [approval mode](./approval-mode.md), every helper call (the push included) and every command a fix runs asks first. That suits a watch you keep an eye on. To let it run unattended, choose a mode that lets commands run, such as [Auto Mode](./auto-mode.md), and keep in mind that the fix runs the repository's own build and test commands.
+
+When it starts, it asks once to confirm where it will push and that it will reply on the PR.
+
+## What a check does
+
+A watch is a [scheduled task](./scheduled-tasks.md) whose gate runs `qwen autofix-pr snapshot <n> --gate` at every fire, outside the model. The probe prints only what changed since its last run, so a quiet PR costs no model turn. When something changed, a round runs:
+
+1. A merged or closed PR ends the watch. Someone else's push is adopted first.
+2. The failed checks, the new comments from trusted authors and a merge conflict go to one fix agent, working in the PR worktree. For a failed check it reads the job log; a failure outside the PR (network, runner) is re-run once instead of fixed.
+3. The agent verifies its change with the repository's own checks and commits only when they pass.
+4. The commits are pushed as a fast-forward of the PR head, never forced. If someone pushed meanwhile, their work is merged first.
+5. Each review thread it handled gets a reply — `Fixed in <sha>: …`, `Not changed: …` or `Needs a human decision: …` — and each push gets one summary comment.
+
+A round never asks you anything. What needs a person is answered on the PR as "Needs a human decision" and reported in the session.
+
+## Whose feedback counts
+
+Comments are acted on when their author is an owner, member or collaborator of the repository, the PR author, or a bot (reviews and review threads only). Comments from anyone else are listed and never acted on or answered. Every comment, review and CI log is treated as data: a trusted author decides which feedback is addressed, never what the tool may do. A request to reveal secrets, weaken tests or CI checks, force-push or change unrelated code is answered "Needs a human decision".
+
+## What it never does
+
+- Touch your working tree or your current branch: everything happens in `.qwen/tmp/autofix-pr-<n>/`.
+- Force-push, rewrite the PR's history, or push to the default branch.
+- Reply to its own replies (each one ends with `<!-- qwen-autofix-pr:v1 -->`) or to untrusted authors.
+- Resolve review threads, or edit the PR title or description.
+
+## Limits
+
+| Limit                                 | Value | Then                     |
+| ------------------------------------- | ----- | ------------------------ |
+| Pushes per watch                      | 10    | the watch stops          |
+| Re-runs of a failed check on one head | 1     | the next failure is real |
+| Attempts per review thread            | 1     | "Needs a human decision" |
+| Pushes by someone else within a round | 2     | the watch stops          |
+
+## Stopping and files
+
+`/autofix-pr stop <n>` deletes the scheduled task and removes the worktree, its branch and the state file. A worktree that still holds unpushed work is kept, and the report says why; `qwen autofix-pr cleanup <n> --force` discards it. The watch also ends when the session exits.
+
+Files live under `.qwen/tmp/` of the clone's main worktree:
+
+| File                           | Contents                                   |
+| ------------------------------ | ------------------------------------------ |
+| `autofix-pr-<n>/`              | the PR worktree                            |
+| `autofix-pr-<n>-state.json`    | the watch: known head, pushes, handled ids |
+| `autofix-pr-<n>-gate.json`     | the gate probe's cursor                    |
+| `autofix-pr-<n>-*.log`, `*.md` | CI logs and fix briefs                     |
+
+The design is in [`docs/design/2026-10-21-autofix-pr-command.md`](../../design/2026-10-21-autofix-pr-command.md).

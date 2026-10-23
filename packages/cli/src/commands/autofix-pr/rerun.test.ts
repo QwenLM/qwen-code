@@ -1,0 +1,180 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { PrData } from './snapshot.js';
+
+const mocks = vi.hoisted(() => ({
+  ghWithInput: vi.fn((_input: string, ..._args: string[]) => ''),
+  fetchPrData: vi.fn(),
+}));
+vi.mock('../review/lib/gh.js', () => ({
+  ghWithInput: mocks.ghWithInput,
+  setGhHost: () => {},
+  ensureAuthenticated: () => {},
+}));
+vi.mock('./snapshot.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./snapshot.js')>()),
+  fetchPrData: mocks.fetchPrData,
+}));
+
+import { runRerun } from './rerun.js';
+import {
+  autofixPrPaths,
+  readState,
+  writeState,
+  type AutofixPrState,
+} from './state.js';
+
+const HEAD = 'a'.repeat(40);
+
+function failedRun(databaseId: number, name: string, runId: number) {
+  return {
+    __typename: 'CheckRun' as const,
+    databaseId,
+    name,
+    status: 'COMPLETED',
+    conclusion: 'FAILURE',
+    detailsUrl: `https://github.com/o/r/actions/runs/${runId}/job/${databaseId}`,
+  };
+}
+
+function prData(headRefOid = HEAD): PrData {
+  return {
+    state: 'OPEN',
+    isDraft: false,
+    url: 'https://github.com/o/r/pull/7',
+    headRefOid,
+    mergeable: 'MERGEABLE',
+    commits: {
+      nodes: [
+        {
+          commit: {
+            oid: headRefOid,
+            statusCheckRollup: {
+              contexts: {
+                pageInfo: { hasNextPage: false },
+                nodes: [
+                  failedRun(5, 'Test ubuntu', 50),
+                  failedRun(6, 'Test macos', 50),
+                  failedRun(7, 'Lint', 60),
+                ],
+              },
+            },
+          },
+        },
+      ],
+    },
+    reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] },
+    reviews: { pageInfo: { hasPreviousPage: false }, nodes: [] },
+    comments: { pageInfo: { hasPreviousPage: false }, nodes: [] },
+  };
+}
+
+describe('runRerun', () => {
+  let repo: string;
+  let savedCwd: string;
+  let savedSession: string | undefined;
+  let paths: ReturnType<typeof autofixPrPaths>;
+
+  const state = () => readState(paths.statePath)!;
+
+  beforeEach(() => {
+    repo = realpathSync(mkdtempSync(join(tmpdir(), 'autofix-rerun-')));
+    execFileSync('git', ['init', '-q', '-b', 'main', repo]);
+    paths = autofixPrPaths(repo, 7);
+    mkdirSync(join(repo, '.qwen', 'tmp'), { recursive: true });
+    const initial: AutofixPrState = {
+      version: 1,
+      sessionId: 'session-a',
+      host: 'github.com',
+      owner: 'o',
+      repo: 'r',
+      prNumber: 7,
+      remote: 'origin',
+      pushTarget: 'origin',
+      headRefName: 'feat',
+      baseRefName: 'main',
+      branch: paths.branch,
+      worktreePath: paths.worktreePath,
+      viewer: 'me',
+      prAuthor: 'me',
+      lastKnownHeadSha: HEAD,
+      pushedShas: [],
+      handledCommentIds: [],
+      postedCommentIds: [],
+    };
+    writeState(paths.statePath, initial);
+    mocks.ghWithInput.mockReset();
+    mocks.fetchPrData.mockReset();
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData(),
+      viewer: 'me',
+    }));
+    savedCwd = process.cwd();
+    savedSession = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-a';
+    process.chdir(repo);
+  });
+
+  afterEach(() => {
+    process.chdir(savedCwd);
+    if (savedSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+    else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it("re-runs a run's failed jobs once and records every failed check of it", () => {
+    expect(runRerun(7, 50)).toEqual({
+      rerun: true,
+      runId: 50,
+      checks: ['Test ubuntu', 'Test macos'],
+    });
+    expect(mocks.ghWithInput).toHaveBeenCalledWith(
+      '',
+      'run',
+      'rerun',
+      '50',
+      '--failed',
+      '-R',
+      'o/r',
+    );
+    expect(state()).toMatchObject({
+      rerunChecks: [`Test ubuntu@${HEAD}`, `Test macos@${HEAD}`],
+      handledChecks: [`Test ubuntu@${HEAD}@#5`, `Test macos@${HEAD}@#6`],
+    });
+  });
+
+  it('treats the next failure of a re-run check on the same head as real', () => {
+    runRerun(7, 50);
+    expect(runRerun(7, 50)).toMatchObject({
+      rerun: false,
+      reason: expect.stringMatching(/re-run on this head already/),
+    });
+    expect(mocks.ghWithInput).toHaveBeenCalledTimes(1);
+    // Another check of another run still has its re-run.
+    expect(runRerun(7, 60)).toMatchObject({ rerun: true, checks: ['Lint'] });
+  });
+
+  it('asks for a resync when the PR head moved, and re-runs nothing', () => {
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData('b'.repeat(40)),
+      viewer: 'me',
+    }));
+    expect(runRerun(7, 50)).toMatchObject({ rerun: false, action: 'resync' });
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+  });
+
+  it('refuses a run with no failed check on the head', () => {
+    expect(() => runRerun(7, 99)).toThrow(/run 99 has no failed check/);
+    expect(() => runRerun(7, 0)).toThrow(/run id must be a positive integer/);
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+  });
+});

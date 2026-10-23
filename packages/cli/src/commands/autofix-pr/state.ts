@@ -36,6 +36,32 @@ export interface AutofixPrState {
   handledCommentIds: string[];
   /** GraphQL node ids of comments this tool posted. */
   postedCommentIds: string[];
+  // The fields below are written by `push`, `reply`, `rerun` and `sync`, and
+  // are absent from a state file no reaction has touched yet.
+  /** `<check>@<headSha>@<attempt>` of failures handled without a push (declined,
+   * left for a human, or re-run), keyed like the gate cursor's checks. */
+  handledChecks?: string[];
+  /** `<check>@<headSha>` of checks re-run once already; the next failure on
+   * that head is treated as real. */
+  rerunChecks?: string[];
+  /** Head SHA whose merge conflict was left for a human. */
+  handledConflictSha?: string | null;
+  /** Pushes made by this watch. */
+  pushCount?: number;
+  /** Head SHA the last round summary was posted for. */
+  summarizedSha?: string;
+}
+
+/** Pushes one watch may make before it stops (Section 10 of the design). */
+export const MAX_PUSHES = 10;
+
+/** Key of one failed attempt of a check on a head, as the gate cursor keys it. */
+export function checkAttemptKey(
+  check: string,
+  headSha: string,
+  attempt: string,
+): string {
+  return `${check}@${headSha}@${attempt}`;
 }
 
 /**

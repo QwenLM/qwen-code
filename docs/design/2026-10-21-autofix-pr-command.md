@@ -7,8 +7,11 @@ gate ([2026-10-21-scheduled-task-gate.md](2026-10-21-scheduled-task-gate.md),
 PR #15069) replaced the model-driven tick: the trigger layer is a `gate` on a
 scheduled task, and this command's probes — `snapshot --gate` for the author
 and `review watch-repo` for a reviewer — are implemented, together with the
-`prepare`, `ci-log` and `cleanup` helpers that wait for the reaction layer.
-Everything else is a proposal. The four product decisions in
+`prepare`, `ci-log` and `cleanup` helpers. Delivery step 3 (2026-10-24) adds
+the reaction layer: the `push`, `sync`, `reply` and `rerun` helpers and the
+bundled `/autofix-pr` skill, with `--once` and watch mode. The reviewer
+watch, the loop state of step 4 and the follow-ups of step 5 are still
+proposals. The four product decisions in
 [Resolved decisions](#11-resolved-decisions) were made on 2026-10-21; the
 fourth is revised there.
 
@@ -110,9 +113,11 @@ with unit tests; judgment stays in the skill.
   ├─ qwen autofix-pr prepare   validate PR, create pushable worktree and state file
   ├─ qwen autofix-pr snapshot  read PR state, diff against the cursor, emit events + action
   ├─ qwen autofix-pr ci-log    write the failing job's log tail to a file
-  ├─ fix                       background agent, working_dir = worktree
+  ├─ fix                       agent, working_dir = worktree
   ├─ qwen autofix-pr push      guarded push, advances the cursor
-  ├─ qwen autofix-pr reply     post replies with a marker, record their ids
+  ├─ qwen autofix-pr sync      adopt a head someone else pushed
+  ├─ qwen autofix-pr reply     post replies with a marker, record what a round handled
+  ├─ qwen autofix-pr rerun     re-run an infrastructure failure, once per check and head
   ├─ qwen autofix-pr cleanup   remove worktree, branch and state file when safe
   └─ cron_create               session-only, recurring, gate:
                                "qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host>";
@@ -132,7 +137,7 @@ worktree included:
 - worktree: `.qwen/tmp/autofix-pr-<n>/`
 - state: `.qwen/tmp/autofix-pr-<n>-state.json`
 - gate cursor: `.qwen/tmp/autofix-pr-<n>-gate.json`
-- logs and briefs: `.qwen/tmp/autofix-pr-<n>-*.{log,md}`
+- logs, briefs and reply plans: `.qwen/tmp/autofix-pr-<n>-*.{log,md,json}`
 - reviewer cursor: `.qwen/tmp/review-watch/<host>/<owner>/<repo>.json`
 
 ## 6. Helper contracts
@@ -364,20 +369,65 @@ Refuses unless all of these hold:
   rewrite);
 - the target branch is not the base repository's default branch.
 
+It asks GitHub at push time, not at `prepare`: a PR that was merged or closed
+meanwhile answers `stop`, and the default branch is read again, since it can
+be renamed while a watch runs. A watch that has used its pushes (10, Section 10) answers `stop` without asking anything. A `HEAD` equal to the known head
+has nothing to push.
+
 Then it runs
-`git push <target> HEAD:refs/heads/<headRef> --force-with-lease=refs/heads/<headRef>:<lastKnownHeadSha>`.
-Pre-push hooks run, and there is no `--force` or `--no-verify`. On success it
-records the new SHA in `pushedShas` and `lastKnownHeadSha`, counts one push,
-and clears `inFlight`. A rejected lease means someone else pushed; the result
-is `resync`, not a retry.
+`git push --porcelain <target> HEAD:refs/heads/<headRef> --force-with-lease=refs/heads/<headRef>:<lastKnownHeadSha>`
+from the worktree, with ten minutes for pre-push hooks. Hooks run, and there
+is no `--force` or `--no-verify`. On success it records the new SHA in
+`pushedShas` and `lastKnownHeadSha` and counts one push. A rejected lease
+(`[rejected] (stale info)`) means someone else pushed; the result is `resync`,
+not a retry, and nothing is recorded. Any other refusal — a hook, branch
+protection, credentials — is an error with git's last lines. The output is
+one JSON line: `{"pushed": true, "sha", "pushes", "maxPushes"}`, or
+`{"pushed": false, "action": "resync" | "stop", "reason"}`.
 
-### 6.5 `reply <pr> <plan.json>`
+### 6.5 `reply <pr> <plan.json> [--no-post]`
 
-Posts the replies in a plan the skill writes (Section 9), adds the marker to
-each body, records the returned ids in `postedCommentIds`, and moves the
-handled comment ids into `handledCommentIds`. Replies to review threads use
-`POST /repos/{owner}/{repo}/pulls/{n}/comments/{id}/replies`; the push summary
-uses an issue comment.
+Posts the replies in a plan the skill writes (Section 9) and records what the
+round handled. The plan:
+
+```json
+{
+  "replies": [
+    { "replyTo": 1001, "body": "Fixed in 3f2a1c0: ...", "handled": ["PRRC_x"] }
+  ],
+  "summary": { "body": "...", "handled": ["IC_y"] },
+  "handled": ["PRR_z"],
+  "handledChecks": ["Test ubuntu@<head>@#789"],
+  "handledConflict": false
+}
+```
+
+The helper decides what may be posted, against one fresh read of the PR
+(the prepared snapshot's rules):
+
+- A reply goes only to a thread that has, right now, a new comment from a
+  trusted author, and `handled` names comments of that thread. Untrusted
+  comments cannot be marked handled; a check key must be one a `ci_failed`
+  event reports on the head (prepared mode prints its `key`); a conflict can
+  be left for a human only while there is one. The PR must be open.
+- Every check runs before anything is posted, so a refused plan posts
+  nothing.
+- Each body gets the marker once and must fit GitHub's 65,536 characters.
+- Each posted id is written to the state file the moment it exists, with the
+  comments its reply handled. A run that fails part way leaves the rest
+  unposted and unrecorded; running the same plan again skips the replies
+  whose comments are already handled, and the summary when its comments are
+  (a summary that handles none is posted once per head, `summarizedSha`).
+- `handledChecks` and `handledConflict` record failures and a conflict the
+  round did not fix with a push, so prepared snapshots stop reporting them:
+  a failure by its attempt (a re-run that fails again is new), a conflict by
+  its head.
+- `--no-post` (the skill's `--no-reply`) records the same and posts nothing.
+
+Replies to review threads use
+`POST /repos/{owner}/{repo}/pulls/{n}/comments/{id}/replies`; the summary is an
+issue comment. Neither POST is retried: one that reached GitHub before a
+transport error would be posted twice.
 
 ### 6.6 `cleanup <pr> [--force]`
 
@@ -442,6 +492,38 @@ there are no events. Within the same 12 KiB as the author's gate, events that
 do not fit are left out and counted in `deferred`; their PRs keep their old
 head in the cursor, so the next run reports them. The skill that uses it decides what each event means:
 run `/qreview <number>`, or a verification pass, per PR.
+
+### 6.8 `sync <pr>`
+
+Adopts a head someone else pushed. It fetches `refs/pull/<n>/head` into the
+worktree's own `FETCH_HEAD` (the user's checkout is untouched), then:
+
+- a worktree at that head, or one that already contains it (a round merged
+  it), only records it as `lastKnownHeadSha`;
+- a worktree behind it is fast-forwarded, when it is clean;
+- a worktree with unpushed commits of a round, while the new head was pushed
+  on top of the known one, is not touched: the answer is
+  `{"synced": false, "action": "merge"}` with the head to merge (never
+  rebase), and nothing changes;
+- a head that does not contain the worktree's history (the author rebased or
+  force-pushed) replaces it, as Section 7 describes: the worktree is reset to
+  the new head, and an unpushed attempt made on the old history is reported
+  as `dropped`.
+
+A worktree with uncommitted changes is never moved or reset.
+
+### 6.9 `rerun <pr> <run-id>`
+
+Re-runs the failed jobs of a run the fix agent judged an infrastructure
+failure, with `gh run rerun <run-id> --failed`. Each failed check of that run
+on the head spends its one re-run (`rerunChecks`, keyed by check and head);
+a run with a check that was re-run on this head already answers
+`{"rerun": false}`, and the failure is treated as real. The attempts it
+re-ran are recorded in `handledChecks`, so the prepared snapshot does not
+dispatch them again while the re-run is going; a re-run that fails again is
+a new attempt. A head that moved since the watch last saw it answers
+`resync`, and a run with no failed check on the head is an error. The call
+is not retried, for the same reason as a reply.
 
 ## 7. One check (`tick`)
 
@@ -654,6 +736,19 @@ Delivery plan:
    failed check attempts were handled, keyed like the gate's cursor (check,
    head, attempt), so a failure the agent declined is not dispatched again,
    while a re-run that fails again is.
+   Delivered (2026-10-24) except the reviewer watch: `push`, `sync`
+   (Section 6.8), `reply`, `rerun` (Section 6.9), the bundled skill with
+   `--once`, watch mode, `stop` and a minimal `status`. In this step the fix
+   agent runs in the foreground: the session waits for it, so no fire can
+   start a second attempt and `inFlight` is not needed yet. The budgets it
+   enforces are the pushes per start (`push`), one re-run per check and head
+   (`rerun`), and one attempt per review thread (every comment a round
+   handled is recorded, whatever its outcome); two resyncs within one round
+   stop the watch. The skill's `allowedTools` grant reads of the PR and its
+   own `.qwen/tmp` files only: the permission matcher reads a leading
+   `"${QWEN_CODE_CLI:-qwen}"` as an empty word, so no rule can name the
+   helpers alone, and in the default approval mode each helper call — the
+   push included — asks first.
 4. The loop state: `status`, `stop`, budgets, and a later session taking
    over the state file.
 5. Follow-ups: durable watching in daemon sessions (`durable` with

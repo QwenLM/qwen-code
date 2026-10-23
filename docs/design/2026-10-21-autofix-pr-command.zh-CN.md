@@ -2,7 +2,7 @@
 
 [English](2026-10-21-autofix-pr-command.md) | [简体中文](2026-10-21-autofix-pr-command.zh-CN.md)
 
-状态：进行中。2026-10-21，同日在定时任务闸门（[2026-10-21-scheduled-task-gate.md](2026-10-21-scheduled-task-gate.md)，PR #15069）取代模型驱动的 tick 之后修订：触发层是定时任务上的 `gate`，本命令的探针——作者侧的 `snapshot --gate` 和评审者侧的 `review watch-repo`——已实现，与之一起实现的还有等待反应层的 `prepare`、`ci-log` 和 `cleanup` 辅助命令。其余仍是提案。[已定决策](#11-已定决策)中的四项产品决策于 2026-10-21 确定；第四项在该节中修订。
+状态：进行中。2026-10-21，同日在定时任务闸门（[2026-10-21-scheduled-task-gate.md](2026-10-21-scheduled-task-gate.md)，PR #15069）取代模型驱动的 tick 之后修订：触发层是定时任务上的 `gate`，本命令的探针——作者侧的 `snapshot --gate` 和评审者侧的 `review watch-repo`——已实现，与之一起实现的还有 `prepare`、`ci-log` 和 `cleanup` 辅助命令。交付第 3 步（2026-10-24）加上了反应层：`push`、`sync`、`reply`、`rerun` 辅助命令，以及带 `--once` 和 watch 模式的 bundled `/autofix-pr` skill。评审者监视、第 4 步的循环状态和第 5 步的后续工作仍是提案。[已定决策](#11-已定决策)中的四项产品决策于 2026-10-21 确定；第四项在该节中修订。
 
 ## 1. 问题
 
@@ -76,9 +76,11 @@ PR 提交之后，作者还得一直盯着：CI 在没测过的平台上失败�
   ├─ qwen autofix-pr prepare   validate PR, create pushable worktree and state file
   ├─ qwen autofix-pr snapshot  read PR state, diff against the cursor, emit events + action
   ├─ qwen autofix-pr ci-log    write the failing job's log tail to a file
-  ├─ fix                       background agent, working_dir = worktree
+  ├─ fix                       agent, working_dir = worktree
   ├─ qwen autofix-pr push      guarded push, advances the cursor
-  ├─ qwen autofix-pr reply     post replies with a marker, record their ids
+  ├─ qwen autofix-pr sync      adopt a head someone else pushed
+  ├─ qwen autofix-pr reply     post replies with a marker, record what a round handled
+  ├─ qwen autofix-pr rerun     re-run an infrastructure failure, once per check and head
   ├─ qwen autofix-pr cleanup   remove worktree, branch and state file when safe
   └─ cron_create               session-only, recurring, gate:
                                "qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host>";
@@ -93,7 +95,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - worktree：`.qwen/tmp/autofix-pr-<n>/`
 - 状态：`.qwen/tmp/autofix-pr-<n>-state.json`
 - 闸门游标：`.qwen/tmp/autofix-pr-<n>-gate.json`
-- 日志和修复说明：`.qwen/tmp/autofix-pr-<n>-*.{log,md}`
+- 日志、修复说明和回复计划：`.qwen/tmp/autofix-pr-<n>-*.{log,md,json}`
 - 评审者游标：`.qwen/tmp/review-watch/<host>/<owner>/<repo>.json`
 
 ## 6. 辅助命令契约
@@ -206,11 +208,36 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - `lastKnownHeadSha` 是 `HEAD` 的祖先（只允许 fast-forward，不改写历史）；
 - 目标分支不是 base 仓库的默认分支。
 
-然后执行 `git push <target> HEAD:refs/heads/<headRef> --force-with-lease=refs/heads/<headRef>:<lastKnownHeadSha>`。pre-push hook 照常运行，不使用 `--force` 或 `--no-verify`。成功后把新 SHA 记入 `pushedShas` 和 `lastKnownHeadSha`，推送计数加一，清除 `inFlight`。lease 被拒说明别人推送过，结果是 `resync`，而不是重试。
+推送时向 GitHub 现查，而不是沿用 `prepare` 时的结果：期间已合并或关闭的 PR 回答 `stop`；默认分支也重新读取，因为监视期间它可能被改名。推送次数已用完（10 次，第 10 节）的监视直接回答 `stop`，不再询问任何东西。`HEAD` 等于已知 head 时没有可推送的内容。
 
-### 6.5 `reply <pr> <plan.json>`
+然后在 worktree 里执行 `git push --porcelain <target> HEAD:refs/heads/<headRef> --force-with-lease=refs/heads/<headRef>:<lastKnownHeadSha>`，给 pre-push hook 留十分钟。hook 照常运行，不使用 `--force` 或 `--no-verify`。成功后把新 SHA 记入 `pushedShas` 和 `lastKnownHeadSha`，推送计数加一。lease 被拒（`[rejected] (stale info)`）说明别人推送过，结果是 `resync` 而不是重试，什么都不记录。其他拒绝——hook、分支保护、凭据——都是错误，附上 git 的最后几行。输出是一行 JSON：`{"pushed": true, "sha", "pushes", "maxPushes"}`，或 `{"pushed": false, "action": "resync" | "stop", "reason"}`。
 
-按 skill 写好的回复计划（第 9 节）发出回复，在每条正文末尾加上标记，把返回的 id 记入 `postedCommentIds`，并把已处理的评论 id 移到 `handledCommentIds`。回复 review thread 使用 `POST /repos/{owner}/{repo}/pulls/{n}/comments/{id}/replies`；推送总结使用 issue 评论。
+### 6.5 `reply <pr> <plan.json> [--no-post]`
+
+按 skill 写好的回复计划（第 9 节）发出回复，并记录这一轮处理了什么。计划格式：
+
+```json
+{
+  "replies": [
+    { "replyTo": 1001, "body": "Fixed in 3f2a1c0: ...", "handled": ["PRRC_x"] }
+  ],
+  "summary": { "body": "...", "handled": ["IC_y"] },
+  "handled": ["PRR_z"],
+  "handledChecks": ["Test ubuntu@<head>@#789"],
+  "handledConflict": false
+}
+```
+
+能发什么由辅助命令决定，依据是重新读一次 PR（按 prepared snapshot 的规则）：
+
+- 回复只发到此刻有可信作者新评论的 thread，`handled` 列出的必须是该 thread 的评论。不可信评论不能标记为已处理；check 键必须是 head 上某个 `ci_failed` 事件报告的（prepared 模式会输出它的 `key`）；冲突只有在确实存在时才能留给人处理。PR 必须仍处于打开状态。
+- 所有检查在发出任何内容之前完成，被拒绝的计划什么都不发。
+- 每条正文只加一次标记，且必须在 GitHub 的 65,536 字符以内。
+- 每个发出的 id 一产生就写入状态文件，连同它所回复的评论。中途失败时，其余部分不发也不记录；用同一份计划重跑，会跳过评论已处理的回复，以及评论都已处理的总结（不处理任何评论的总结每个 head 只发一次，记在 `summarizedSha`）。
+- `handledChecks` 和 `handledConflict` 记录这一轮没有靠推送修好的失败和冲突，prepared snapshot 不再报告它们：失败按 attempt 记（重跑后再次失败算新的），冲突按 head 记。
+- `--no-post`（skill 的 `--no-reply`）记录同样的内容，但不发任何东西。
+
+回复 review thread 使用 `POST /repos/{owner}/{repo}/pulls/{n}/comments/{id}/replies`；总结是一条 issue 评论。两种 POST 都不重试：在传输错误之前已到达 GitHub 的请求会发出两次。
 
 ### 6.6 `cleanup <pr> [--force]`
 
@@ -226,6 +253,21 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - 列表里没有的 PR 已关闭或合并，会从游标中移除——除非列表被 `--limit` 截断。此时列表外的 PR 可能仍然打开，游标最多保留其中 `--limit` 个，编号大的优先，因为已关闭和已合并的 PR 无法区分，不设上限就会不断累积。被挤出游标、之后又有变化的打开 PR 会以 `pr_opened` 再次出现。
 
 输出：`{ "repo": "<owner>/<repo>", "events": [...] }`，没有事件时什么都不输出。与作者侧闸门同样以 12 KiB 为限，放不下的事件被留下并计入 `deferred`；这些 PR 在游标里保留旧的 head，所以下一次运行会报告它们。使用它的 skill 决定每个事件的含义：对每个 PR 运行 `/qreview <number>` 或一次验证。
+
+### 6.8 `sync <pr>`
+
+接纳别人推送的 head。它把 `refs/pull/<n>/head` 取到 worktree 自己的 `FETCH_HEAD`（不碰用户的 checkout），然后：
+
+- worktree 就在这个 head，或已经包含它（某一轮合并过），只把它记为 `lastKnownHeadSha`；
+- worktree 落后于它且是干净的，就 fast-forward；
+- worktree 有某一轮未推送的提交，而新 head 是在已知 head 之上推送的，则不动 worktree：回答 `{"synced": false, "action": "merge"}` 并给出要合并的 head（不要 rebase），什么都不改；
+- head 不包含 worktree 的历史（作者 rebase 或 force-push 过），就按第 7 节所述替换：worktree 重置到新 head，在旧历史上做的未推送尝试报告为 `dropped`。
+
+有未提交改动的 worktree 永远不会被移动或重置。
+
+### 6.9 `rerun <pr> <run-id>`
+
+对修复 agent 判断为基础设施问题的 run，用 `gh run rerun <run-id> --failed` 重跑其失败的 job。该 run 在当前 head 上的每个失败检查都用掉自己唯一的一次重跑（`rerunChecks`，按检查和 head 记）；如果其中有检查已在这个 head 上重跑过，回答 `{"rerun": false}`，该失败按真实失败处理。被重跑的 attempt 记入 `handledChecks`，所以重跑期间 prepared snapshot 不会再派发它们；重跑后再次失败是新的 attempt。head 在监视上次看到之后移动过时回答 `resync`；head 上没有失败检查的 run 是错误。这个调用不重试，理由与回复相同。
 
 ## 7. 一轮检查（`tick`）
 
@@ -354,6 +396,7 @@ resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force
 1. 触发层：定时任务闸门（PR #15069）。
 2. 探针（本 PR）：带游标和 check 翻页的 `snapshot --gate`，以及 `review watch-repo`；`prepare`、`ci-log` 和 `cleanup` 一同交付，等待反应层。
 3. 辅助命令 `push` 和 `reply`，带测试；以及 skill：支持 `--once` 的 `/autofix-pr`，然后是作为带闸门任务的 watch 模式，以及对每个事件运行 `/qreview` 或一次验证的评审者监视。状态文件记录已处理过的失败检查 attempt，键与闸门游标相同（检查，head，attempt），这样 agent 已放弃的失败不会被再次派发，而重跑后再次失败的会。
+   除评审者监视外已交付（2026-10-24）：`push`、`sync`（第 6.8 节）、`reply`、`rerun`（第 6.9 节），以及支持 `--once`、watch 模式、`stop` 和简单 `status` 的 bundled skill。这一步里修复 agent 在前台运行：会话等它结束，所以不会有触发再启动第二次尝试，暂时不需要 `inFlight`。它执行的预算是每次启动的推送次数（`push`）、每个检查每个 head 一次重跑（`rerun`），以及每个 review thread 一次尝试（一轮处理过的评论无论结果如何都会被记录）；同一轮内两次 resync 会停止监视。skill 的 `allowedTools` 只放行读取 PR 和读写它自己的 `.qwen/tmp` 文件：权限匹配器把开头的 `"${QWEN_CODE_CLI:-qwen}"` 读成空词，没有规则能只放行这些辅助命令，所以在默认审批模式下，每次辅助命令调用——包括推送——都会先询问。
 4. 循环状态：`status`、`stop`、预算，以及由之后的会话接管状态文件。
 5. 后续工作：daemon 会话里的持久化监视（`durable` 加 `sessionMode: "current"`，待闸门支持后）；可配置的 bot 允许名单。
 

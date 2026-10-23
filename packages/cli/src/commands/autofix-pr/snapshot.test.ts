@@ -219,15 +219,56 @@ describe('buildSnapshot', () => {
         check: 'Test ubuntu',
         url: 'https://github.com/o/r/actions/runs/123/job/456',
         runId: 123,
+        key: `Test ubuntu@${HEAD}@#1`,
       },
       {
         type: 'ci_failed',
         check: 'ci/external',
         url: 'https://ci.example.com/1',
         runId: null,
+        key: `ci/external@${HEAD}@2026-10-21T00:00:06Z`,
       },
       { type: 'ci_pending', checks: ['Build', 'ci/slow'] },
     ]);
+  });
+
+  it('skips a failed attempt a round handled without a push, but not a re-run that fails again', () => {
+    const run = (databaseId: number): Contexts[number] => ({
+      __typename: 'CheckRun',
+      databaseId,
+      name: 'Test ubuntu',
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      detailsUrl: `https://github.com/o/r/actions/runs/${databaseId}/job/1`,
+    });
+    const handled = state({ handledChecks: [`Test ubuntu@${HEAD}@#5`] });
+    expect(buildSnapshot(pr({}, [run(5)]), handled)).toMatchObject({
+      action: 'wait',
+      events: [],
+    });
+    expect(buildSnapshot(pr({}, [run(5), run(6)]), handled)).toMatchObject({
+      action: 'fix',
+      events: [{ type: 'ci_failed', runId: 6, key: `Test ubuntu@${HEAD}@#6` }],
+    });
+    // The same attempt key on another head says nothing about this one.
+    const otherHead = state({
+      handledChecks: [`Test ubuntu@${'b'.repeat(40)}@#5`],
+    });
+    expect(buildSnapshot(pr({}, [run(5)]), otherHead).action).toBe('fix');
+  });
+
+  it('reports a conflict until a round leaves it for a human on this head', () => {
+    const conflicting = pr({ mergeable: 'CONFLICTING' });
+    expect(buildSnapshot(conflicting, state()).events).toEqual([
+      { type: 'conflict' },
+    ]);
+    expect(
+      buildSnapshot(conflicting, state({ handledConflictSha: HEAD })),
+    ).toMatchObject({ action: 'wait', events: [] });
+    expect(
+      buildSnapshot(conflicting, state({ handledConflictSha: 'b'.repeat(40) }))
+        .events,
+    ).toEqual([{ type: 'conflict' }]);
   });
 
   it('judges each check by its latest run only', () => {
@@ -297,6 +338,7 @@ describe('buildSnapshot', () => {
         check: 'build',
         url: 'https://ci.example.com/101',
         runId: null,
+        key: `build@${HEAD}@#101`,
       },
     ]);
     // A later run of the same app's check does replace it.

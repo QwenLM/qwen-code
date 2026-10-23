@@ -9,7 +9,7 @@
 //
 // Two modes share the reading and the trust rules:
 // - Prepared mode compares against the state file `prepare` wrote and never
-//   moves the cursor: only a later push or reply does.
+//   moves the cursor: only a later push, reply, re-run or sync does.
 // - `--gate` is the probe behind a scheduled task's gate
 //   (docs/design/2026-10-21-scheduled-task-gate.md): it needs no worktree,
 //   keeps its own cursor of what it already reported, prints only the
@@ -36,6 +36,7 @@ import {
   REPLY_MARKER,
   assertOwnedBySession,
   autofixPrPaths,
+  checkAttemptKey,
   readGateCursor,
   readState,
   repoRoot,
@@ -151,7 +152,7 @@ interface Author {
   login: string;
 }
 
-interface CommentNode {
+export interface CommentNode {
   id: string;
   databaseId?: number;
   author: Author | null;
@@ -256,6 +257,9 @@ export type SnapshotEvent =
       check: string;
       url: string | null;
       runId: number | null;
+      /** Prepared mode only: the attempt's key, which `reply` records for a
+       * failure handled without a push. */
+      key?: string;
     }
   | {
       type: 'review_thread';
@@ -309,7 +313,7 @@ const MAX_OFF_PAGE_COMMENT_IDS = 2000;
  * comments are reports (coverage, CI summaries), not requests, so they are
  * dropped rather than listed as untrusted.
  */
-function classify(
+export function classify(
   node: CommentNode,
   kind: 'review' | 'thread' | 'issue_comment',
   prAuthor: string,
@@ -372,7 +376,7 @@ function attemptOrder(ctx: CheckContext): number {
 }
 
 /** The failed checks of the head, each with the identity of its attempt. */
-function checkEvents(pr: PrData): {
+export function checkEvents(pr: PrData): {
   failed: Array<{ event: CiFailed; attempt: string }>;
   pending: string[];
   truncated: boolean;
@@ -525,7 +529,7 @@ function isActionable(event: SnapshotEvent): boolean {
  * A reply this tool posted: by the viewer, ending with the marker. Anyone
  * else's comment that carries the marker quotes a reply, and is new.
  */
-function isOwnReply(node: CommentNode, viewer: string): boolean {
+export function isOwnReply(node: CommentNode, viewer: string): boolean {
   return (
     node.author?.login === viewer && node.body.trimEnd().endsWith(REPLY_MARKER)
   );
@@ -559,10 +563,23 @@ export function buildSnapshot(pr: PrData, state: AutofixPrState): Snapshot {
   if (movedExternally) {
     events.push({ type: 'head_moved_externally', sha: pr.headRefOid });
   }
-  if (pr.mergeable === 'CONFLICTING') events.push({ type: 'conflict' });
+  // A conflict left for a human is not reported again on the same head.
+  if (
+    pr.mergeable === 'CONFLICTING' &&
+    state.handledConflictSha !== pr.headRefOid
+  ) {
+    events.push({ type: 'conflict' });
+  }
 
   const checks = checkEvents(pr);
-  events.push(...checks.failed.map((failure) => failure.event));
+  // A failure handled without a push (declined, left for a human, re-run)
+  // stays on the head, so it is skipped by its attempt; a re-run that fails
+  // again is a new attempt. `key` is what `reply` and `rerun` record.
+  const handledChecks = new Set(state.handledChecks ?? []);
+  for (const { event, attempt } of checks.failed) {
+    const key = checkAttemptKey(event.check, pr.headRefOid, attempt);
+    if (!handledChecks.has(key)) events.push({ ...event, key });
+  }
   if (checks.pending.length > 0) {
     events.push({ type: 'ci_pending', checks: checks.pending });
   }
@@ -663,7 +680,7 @@ export function buildGateSnapshot(
   const checkKeys = new Map<SnapshotEvent, string>();
   const candidates: SnapshotEvent[] = [];
   for (const { event, attempt } of checks.failed) {
-    const key = `${event.check}@${pr.headRefOid}@${attempt}`;
+    const key = checkAttemptKey(event.check, pr.headRefOid, attempt);
     if (reportedChecks.has(key)) {
       next.reportedChecks.push(key);
     } else {
