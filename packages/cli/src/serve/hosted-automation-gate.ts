@@ -129,11 +129,13 @@ export function createHostedAutomationGateRelease(
         .status(executionCallId, { reconcile: true })
         .catch(() => undefined);
     }
+    // The start stays remembered: this may be the owed release after an
+    // answer the runner gave without a receipt, and a re-drive of the same
+    // revision must still answer unknown. Only a receipt forgets it.
     await releaseDerivedSession(broker, {
       notFoundIsFinal: true,
       reconciliationIsFinal: true,
     });
-    startedCalls.delete(callId);
   };
 }
 

@@ -952,7 +952,7 @@ describe('createHostedAutomationGateRunner', () => {
     // 2 cannot acquire the Session again. The probe may have run.
     let attempt = 1;
     let prepares = 0;
-    const { probe } = await rig((path) => {
+    const { probe, release } = await rig((path) => {
       switch (path) {
         case '/executions:prepare':
           prepares++;
@@ -976,6 +976,8 @@ describe('createHostedAutomationGateRunner', () => {
       }
     });
     await expect(probe()).rejects.toBeInstanceOf(HostedAutomationGateHeld);
+    // The Session's owed release in between does not forget the start.
+    await expect(release()).resolves.toBeUndefined();
     attempt = 2;
     await expect(probe()).resolves.toMatchObject({
       kind: 'unknown',
