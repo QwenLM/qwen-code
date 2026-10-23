@@ -54,19 +54,49 @@ describe('raceLongLived', () => {
     longLived.reject(new Error('closed'));
   });
 
-  it('lets work that has already settled win, as Promise.race does', async () => {
+  it.each([
+    ['the long-lived promise', 'closed first'],
+    ['the work', 'work first'],
+  ])(
+    'lets %s win when it settles first, as Promise.race does',
+    async (_winner, order) => {
+      const longLived = deferred<never>();
+      const work = deferred<string>();
+      const closed = new Error('closed');
+      const outcomes = [
+        Promise.race([work.promise, longLived.promise]),
+        raceLongLived(work.promise, longLived.promise),
+      ].map((race) =>
+        race.then(
+          (value) => `resolved ${value}`,
+          (error: Error) => `rejected ${error.message}`,
+        ),
+      );
+      if (order === 'closed first') {
+        longLived.reject(closed);
+        work.resolve('done');
+      } else {
+        work.resolve('done');
+        longLived.reject(closed);
+      }
+      const [native, patched] = await Promise.all(outcomes);
+      expect(patched).toBe(native);
+      expect(patched).toBe(
+        order === 'closed first' ? 'rejected closed' : 'resolved done',
+      );
+    },
+  );
+
+  it('races several works against the long-lived promise', async () => {
     const longLived = deferred<never>();
-    const waiting = raceLongLived(
-      deferred<string>().promise,
+    const slow = deferred<string>();
+    const fast = deferred<string>();
+    const raced = raceLongLived(
+      [slow.promise, fast.promise],
       longLived.promise,
     );
-    const closed = new Error('closed');
-    longLived.reject(closed);
-    // The long-lived reaction has not run yet in this job.
-    await expect(
-      raceLongLived(Promise.resolve('done'), longLived.promise),
-    ).resolves.toBe('done');
-    await expect(waiting).rejects.toBe(closed);
+    fast.resolve('fast');
+    await expect(raced).resolves.toBe('fast');
   });
 
   it('passes through a failure of the work', async () => {

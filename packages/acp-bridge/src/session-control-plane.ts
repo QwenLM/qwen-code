@@ -4373,7 +4373,7 @@ export function createSessionControlPlane(
           .extMethod(PROMPT_CANCEL_METHOD, notification)
           .then((result) => ({ kind: 'result' as const, result }));
         const outcome = await raceLongLived(
-          Promise.race([
+          [
             extension,
             ...(pending.cancelForwardDeadline
               ? [
@@ -4382,7 +4382,7 @@ export function createSessionControlPlane(
                   })),
                 ]
               : []),
-          ]),
+          ],
           getTransportClosedReject(entry),
         );
         if (outcome.kind === 'deadline') return;
@@ -4401,12 +4401,12 @@ export function createSessionControlPlane(
           isNotCurrentlyGeneratingCancelError(error)
         ) {
           await raceLongLived(
-            Promise.race([
+            [
               entry.connection.cancel(notification),
               ...(pending.cancelForwardDeadline
                 ? [pending.cancelForwardDeadline]
                 : []),
-            ]),
+            ],
             getTransportClosedReject(entry),
           );
           return;
@@ -11822,7 +11822,7 @@ export function createSessionControlPlane(
                 // `promptPromise` never resolves.
                 const racedPromise = deadlinePromise
                   ? raceLongLived(
-                      Promise.race([promptPromise, deadlinePromise]),
+                      [promptPromise, deadlinePromise],
                       getTransportClosedReject(entry),
                     )
                   : raceLongLived(
@@ -15644,7 +15644,7 @@ export function createSessionControlPlane(
       let response: { sessionId: string; answer: string | null };
       try {
         response = (await raceLongLived(
-          Promise.race(races),
+          races,
           getTransportClosedReject(entry),
         )) as {
           sessionId: string;

@@ -57,9 +57,13 @@ export function channelUnavailableReject(
   channel: AcpChannel,
   context: string,
 ): Promise<never> {
-  return channelUnavailable(channel).then(() => {
+  const unavailable = channel.transportFailed
+    ? Promise.race([channel.exited, channel.transportFailed])
+    : channel.exited;
+  const reject = () => {
     throw new BridgeChannelClosedError(context);
-  });
+  };
+  return unavailable.then(reject, reject);
 }
 
 /**

@@ -115,10 +115,7 @@ export function startChannelLivenessMonitor(
         }, CHANNEL_LIVENESS_PROBE_TIMEOUT_MS);
         timer.unref();
       });
-      outcome = await raceLongLived(
-        Promise.race([response, timeout]),
-        stoppedOutcome,
-      );
+      outcome = await raceLongLived([response, timeout], stoppedOutcome);
       if (timer !== undefined) {
         clearTimeout(timer);
         timer = undefined;
