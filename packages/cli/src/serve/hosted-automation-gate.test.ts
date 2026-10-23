@@ -415,6 +415,135 @@ describe('createHostedAutomationGateRunner', () => {
     ]);
   });
 
+  describe('a later attempt that asks the Runtime about a probe it started that went UNKNOWN', () => {
+    // Attempt 1 starts the probe, its record goes UNKNOWN, the Runtime
+    // cannot say yet and the Session cannot be released. What attempt 2
+    // hears decides: only the Broker saying the record is still UNKNOWN (or
+    // fenced for good) lets it answer unknown. Its own ask may have settled
+    // the record, so a reply or a read lost after it retries the fire.
+    async function laterAttempt(
+      reconcile: Answer,
+      reread: Answer,
+      release: Answer = { body: { ...identity, released: true } },
+    ) {
+      let attempt = 1;
+      let prepares = 0;
+      const rigged = await rig((path, body) => {
+        switch (path) {
+          case '/executions:prepare':
+            prepares++;
+            if (attempt === 1) {
+              return prepares === 1
+                ? rejection(404, 'runtime_session_not_found')
+                : {
+                    body: {
+                      ...identity,
+                      executionCallId: 'gate-execution',
+                      status: { state: 'prepared' },
+                    },
+                  };
+            }
+            return prepares === 3
+              ? rejection(409, 'runtime_broker_execution_unknown')
+              : reread;
+          case '/tool-sessions:acquire':
+            return { body: acquired };
+          case '/executions/gate-execution:start':
+            return {
+              body: {
+                ...identity,
+                executionCallId: 'gate-execution',
+                status: { state: 'executing' },
+              },
+            };
+          case '/executions/gate-execution':
+            return attempt === 2 && body['reconcile'] === 'true'
+              ? reconcile
+              : rejection(409, 'runtime_broker_execution_unknown');
+          case RELEASE:
+            return attempt === 1
+              ? rejection(409, 'runtime_session_busy')
+              : release;
+          default:
+            throw new Error(`unexpected ${path}`);
+        }
+      });
+      await expect(rigged.probe()).rejects.toThrow(/was not released/);
+      attempt = 2;
+      const before = rigged.calls.length;
+      return {
+        ...rigged,
+        // Attempt 2's calls.
+        later: () => rigged.calls.slice(before).map((call) => call.path),
+      };
+    }
+    const printed = settled(
+      '{"kind":"output","stdout":"deploy pending\\n","truncated":false,"durationMs":7}',
+    );
+
+    it('retries when the answer to its ask is lost', async () => {
+      const { probe, later } = await laterAttempt('drop', { body: printed });
+      await expect(probe()).rejects.toBeInstanceOf(HostedAutomationGateHeld);
+      expect(later()).toEqual([
+        '/executions:prepare',
+        '/executions/gate-execution',
+      ]);
+    });
+
+    it('retries when the receipt its ask settled cannot be read yet', async () => {
+      const { probe, later } = await laterAttempt(
+        { body: printed },
+        rejection(503, 'runtime_store_unavailable'),
+      );
+      await expect(probe()).rejects.toBeInstanceOf(HostedAutomationGateHeld);
+      expect(later()).toEqual([
+        '/executions:prepare',
+        '/executions/gate-execution',
+        '/executions:prepare',
+      ]);
+    });
+
+    it('reads the receipt its ask settled', async () => {
+      const { probe } = await laterAttempt(
+        { body: printed },
+        { body: printed },
+      );
+      await expect(probe()).resolves.toEqual({
+        kind: 'output',
+        stdout: 'deploy pending\n',
+        truncated: false,
+        durationMs: 7,
+      });
+    });
+
+    it('answers unknown only once the Broker fenced the record for good', async () => {
+      const { probe } = await laterAttempt(
+        {
+          code: 409,
+          body: {
+            code: 'runtime_broker_execution_unknown',
+            message: 'permanently unknown',
+            details: { terminal: true },
+          },
+        },
+        { body: printed },
+      );
+      await expect(probe()).resolves.toEqual({
+        kind: 'unknown',
+        reason: "the Runtime lost the occurrence's probe before it settled",
+      });
+    });
+
+    it('keeps retrying while the Broker still holds the record UNKNOWN', async () => {
+      const { probe } = await laterAttempt(
+        rejection(409, 'runtime_broker_execution_unknown'),
+        { body: printed },
+        rejection(409, 'runtime_session_busy'),
+      );
+      await expect(probe()).rejects.toThrow(/was not released/);
+    });
+  });
+
   it('derives a Session per definition revision of the occurrence', () => {
     // A revision that changed the gate probes under fresh identities, and
     // the attempt that finds its revision stale names the old Session.

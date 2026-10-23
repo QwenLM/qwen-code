@@ -229,7 +229,11 @@ the route wires the real one:
    watched and again by each later attempt of the process that started it:
    a Tool v2 record is not refreshed otherwise, and the Broker refuses to
    release a Session whose record is UNKNOWN. A settled answer is the
-   receipt; otherwise the release fails and the fire is retried. A
+   receipt. The ask itself may settle the record, so a reply or a read that
+   goes missing after it retries the fire rather than answer `unknown`; only
+   a Broker that still holds the record UNKNOWN (the release then fails and
+   the fire is retried) or has fenced it for good (the answer is `unknown`)
+   ends the ask without a receipt. A
    reservation under the same key for another request is a
    conflict, never a second run: it answers `unknown` too. An attempt that
    started the execution and loses sight of it before it settles (a poll

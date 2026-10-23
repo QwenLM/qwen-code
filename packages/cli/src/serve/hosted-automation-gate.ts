@@ -494,8 +494,11 @@ async function afterLostWatch(
 /**
  * The receipt of an UNKNOWN probe this process started, once its original
  * Runtime is asked: the Broker leaves a Tool v2 record UNKNOWN until someone
- * asks, and refuses to release its Session meanwhile. Undefined when the
- * Runtime still cannot say; the release then fails and the fire is retried.
+ * asks, and refuses to release its Session meanwhile. Undefined only when
+ * the Broker answers that the record is still UNKNOWN, or fenced for good;
+ * the release then fails, or the answer is honestly unknown. This ask may
+ * itself settle the record, so a reply or a read that goes missing after
+ * it retries the fire: the receipt is there for the next attempt to read.
  */
 async function reconciledReceipt(
   broker: HostedWorkspaceBroker,
@@ -505,17 +508,32 @@ async function reconciledReceipt(
 ): Promise<HostedAutomationGateResult | undefined> {
   const status = await broker
     .status(executionCallId, { reconcile: true })
-    .catch(() => undefined);
-  if (status?.state !== 'settled') return undefined;
+    .catch((cause: unknown) => {
+      throw new HostedAutomationGateHeld(
+        `the Runtime was asked how the occurrence's probe ended and the answer was lost: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+      );
+    });
+  if (status?.state === 'unknown' || status?.state === 'abandoned') {
+    return undefined;
+  }
+  if (status?.state !== 'settled') {
+    throw new HostedAutomationGateHeld(
+      "the occurrence's probe has not settled after its Runtime was asked",
+    );
+  }
   const now = await reservationAnswer(broker, callId, digest).catch(
-    () => undefined,
+    () => 'held' as const,
   );
   if (
     typeof now !== 'object' ||
     now.settled === undefined ||
     now.executionCallId !== executionCallId
   ) {
-    return undefined;
+    throw new HostedAutomationGateHeld(
+      "the occurrence's probe settled, but its receipt could not be read yet",
+    );
   }
   return fromReceipt(broker, now);
 }
