@@ -7279,6 +7279,20 @@ export function WebShellSidebar({
                                               handleNewWorktreeSession(wsCwd),
                                           }
                                         : {}),
+                                      ...(ws.trusted &&
+                                      canOrganizeWorkspace(ws.cwd)
+                                        ? {
+                                            createGroup: () => {
+                                              if (ws.primary) {
+                                                handleCreateGroup();
+                                              } else {
+                                                handleCreateWorkspaceGroup(
+                                                  ws.cwd,
+                                                );
+                                              }
+                                            },
+                                          }
+                                        : {}),
                                       ...(canManage
                                         ? {
                                             openManagement: (
@@ -7317,62 +7331,37 @@ export function WebShellSidebar({
                                         }}
                                       >
                                         {ws.trusted && (
-                                          <>
-                                            {canOrganizeWorkspace(ws.cwd) && (
-                                              <button
-                                                className={
-                                                  styles.workspaceHeaderAction
-                                                }
-                                                type="button"
-                                                title={t('sidebar.groupCreate')}
-                                                aria-label={t(
-                                                  'sidebar.groupCreate',
-                                                )}
-                                                onClick={(event) => {
-                                                  event.preventDefault();
-                                                  event.stopPropagation();
-                                                  if (ws.primary) {
-                                                    handleCreateGroup();
-                                                  } else {
-                                                    handleCreateWorkspaceGroup(
-                                                      ws.cwd,
-                                                    );
-                                                  }
-                                                }}
-                                              >
-                                                <PlusIcon
-                                                  size={16}
-                                                  strokeWidth={1.2}
-                                                />
-                                              </button>
-                                            )}
-                                            <button
-                                              className={
-                                                styles.workspaceHeaderAction
-                                              }
-                                              type="button"
-                                              title={t('sidebar.newTask')}
-                                              aria-label={t('sidebar.newTask')}
-                                              onClick={(event) => {
-                                                event.preventDefault();
-                                                event.stopPropagation();
-                                                handleNewSession(wsCwd);
-                                              }}
-                                            >
-                                              <SquarePenIcon
-                                                size={16}
-                                                strokeWidth={1.2}
-                                              />
-                                            </button>
-                                          </>
+                                          <button
+                                            className={
+                                              styles.workspaceHeaderAction
+                                            }
+                                            type="button"
+                                            title={t('sidebar.newTask')}
+                                            aria-label={t('sidebar.newTask')}
+                                            onClick={(event) => {
+                                              event.preventDefault();
+                                              event.stopPropagation();
+                                              handleNewSession(wsCwd);
+                                            }}
+                                          >
+                                            <SquarePenIcon
+                                              size={16}
+                                              strokeWidth={1.2}
+                                            />
+                                          </button>
                                         )}
-                                        {/* A locked (embedded) sidebar keeps its
-                                  action area to the session controls the
-                                  host already expects. */}
-                                        {!lockedWorkspaceCwd && (
+                                        {(!lockedWorkspaceCwd ||
+                                          menuActions.createGroup) && (
                                           <WorkspaceMenu
                                             workspace={ws}
-                                            actions={menuActions}
+                                            actions={
+                                              lockedWorkspaceCwd
+                                                ? {
+                                                    createGroup:
+                                                      menuActions.createGroup,
+                                                  }
+                                                : menuActions
+                                            }
                                             overview={overview}
                                             disabled={
                                               (workspaceRemoval.submitting &&
