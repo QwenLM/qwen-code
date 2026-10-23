@@ -1750,8 +1750,8 @@ describe('hosted automation gates', () => {
           definition: { ...definition, gate: null },
         });
         const fired = await automations.fire(fireParams(2));
-        // An ungated run is written without the key.
-        expect(fired.run!).not.toHaveProperty('gateOutputRef');
+        // An ungated run carries the key as null.
+        expect(fired.run!.gateOutputRef).toBeNull();
         expect(fired.gate).toBeUndefined();
         expect(gate.calls).toHaveLength(0);
       },
@@ -1841,8 +1841,9 @@ describe('hosted automation gates', () => {
           operationId: nextOperationId(),
           definition: { gate: null },
         });
-        expect(JSON.parse(JSON.stringify(cleared.schedule))).not.toHaveProperty(
+        expect(JSON.parse(JSON.stringify(cleared.schedule))).toHaveProperty(
           'gate',
+          null,
         );
         expect(cleared.schedule.definitionRevision).toBe(3);
         await expect(

@@ -11681,7 +11681,7 @@ export function registerHostedHarnessSessionRoutes(
       catchUp: schedule.catchUp,
       catchUpLimit: schedule.catchUpLimit,
       enabled: schedule.enabled,
-      gate: schedule.gate ?? null,
+      gate: schedule.gate,
       state: schedule.run.state,
     });
     const runSummary = (run: AutomationRun) => ({

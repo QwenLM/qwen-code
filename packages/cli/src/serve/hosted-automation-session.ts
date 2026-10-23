@@ -473,7 +473,7 @@ export class HostedAutomationSession {
               catchUp: existing.catchUp,
               catchUpLimit: existing.catchUpLimit,
               enabled: existing.enabled,
-              gate: existing.gate ?? null,
+              gate: existing.gate,
             };
       const definition = assertAutomationDefinition(
         params.definition,
@@ -639,9 +639,7 @@ export class HostedAutomationSession {
       const gateOf = (
         run: AutomationRun,
       ): Pick<AutomationFireResult, 'gate'> =>
-        run.gateOutputRef === undefined
-          ? {}
-          : { gate: { outcome: 'delivered' } };
+        run.gateOutputRef === null ? {} : { gate: { outcome: 'delivered' } };
       if (existing !== undefined) {
         if (
           existing.run.execution !== 'intent' ||
@@ -708,7 +706,7 @@ export class HostedAutomationSession {
       }
       let gateOutputRef: ManagedSessionDurableRef | null = null;
       let gate: AutomationGateSummary | undefined;
-      if (schedule.gate !== undefined) {
+      if (schedule.gate !== null) {
         const result = await this.probe(
           schedule.gate,
           runId,
@@ -837,7 +835,7 @@ export class HostedAutomationSession {
     // The output the claim recorded, never a second probe: a replay after
     // a crash between the claim and this dispatch composes the same text.
     const gateOutput =
-      claim.gateOutputRef === undefined
+      claim.gateOutputRef === null
         ? null
         : decodeAutomationGateOutput(
             await this.store.resources.read(claim.gateOutputRef),

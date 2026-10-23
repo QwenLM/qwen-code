@@ -78,7 +78,7 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 
 - `managed-schedule` 第 1 版新增 `gate: string | null`，一个与 `cron` 同类的定义字段：非 null 时是有界文本（≤ 2048 UTF-8 字节，无控制字符）。它参与 `automationDefinitionDigest` 和镜像行。封闭键集、夹具模板（`gate: null`）和新用例（`gate-null`、`gate-command`、`gate-empty`、`gate-control`、`gate-number`、`gate-oversize`）在两端锚定它。命令能做什么不归记录管：Harness 在准入定义时拒绝用 `&` 把任何部分放到后台的闸门（`gateCommandError`，即本地闸门的检查），worker 工具会再查一遍。
 - `managed-automation_run` 第 1 版新增固定键 `gateOutputRef: ManagedSessionDurableRef | null`：批准了这次运行的探针所发布的输出，资源类型 `managed-automation-gate-output`，无闸门定义为 null。它跨修订固定，因为 dispatch 要读它；两端存储都像对 `promptRef` 那样在提交时把它闭合到 Session 的资源上。
-- 这两个键都是第 1 版后来新增的：之前写下的记录没有它们，两端的读取方(包括后继校验)都把缺失读作 null。写入方在值为 null 时省略该键，所以无闸门定义的记录与闸门出现之前的主机写出的完全相同；只要还没有定义带闸门，任一侧的主机都可以先升级或先回滚。存储的探针输出与回合文本一样经过清洗，这限制了它编码后的大小。
+- 这两个键出现在每条记录里，未设置时为 null：这是首发契约(#15263)的完整可空形状，只支持全新状态和一套相互匹配的 Server、Broker、Harness 构建。两端都拒绝缺少其中任一键的记录，也不读取任何更早的记录形状。存储的探针输出与回合文本一样经过清洗，这限制了它编码后的大小。
 
 ### 5.2 闸门在哪里运行
 

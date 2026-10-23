@@ -185,13 +185,12 @@ tag names defanged) and cut at 16 KiB with the cut noted.
   `managed-automation-gate-output`, null for an ungated definition. It is
   fixed across revisions because the dispatch reads it, and both stores close
   it over the Session's resources at commit time like `promptRef`.
-- Both keys are later additions to version 1: records written before them
-  have neither, and every reader on both hosts reads the absence as null (in
-  successor checks too). A writer leaves a key out while it is null, so a
-  record of an ungated definition is byte-for-byte what a host that predates
-  the gate wrote; a host of either side can therefore be upgraded or rolled
-  back first while no definition carries a gate. The stored probe output is
-  sanitized like the turn text, which bounds its encoding.
+- Both keys are in every record, null when unset: the complete nullable
+  shape of the first-release contract (#15263), which supports fresh state
+  and one matching Server, Broker and Harness build. Both hosts refuse a
+  record without either key, and no earlier record shape is read. The
+  stored probe output is sanitized like the turn text, which bounds its
+  encoding.
 
 ### 5.2 Where the gate runs
 

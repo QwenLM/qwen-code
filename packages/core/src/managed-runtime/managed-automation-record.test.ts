@@ -34,7 +34,7 @@ interface Fixture {
   start: boolean;
   /** The clause substring both validators must report on an invalid case. */
   error?: string;
-  /** Keys removed after the patch: a record written before they existed. */
+  /** Keys removed after the patch: a record missing a required key. */
   omit?: readonly string[];
 }
 const fixtures = JSON.parse(
@@ -60,8 +60,6 @@ const fixtures = JSON.parse(
     Omit<Fixture, 'patch' | 'start' | 'omit'> & {
       before: Record<string, unknown>;
       after: Record<string, unknown>;
-      omitBefore?: readonly string[];
-      omitAfter?: readonly string[];
     }
   >;
 };
@@ -210,16 +208,7 @@ describe('managed-automation-record/1 shared contract', () => {
     );
     if (fixture.valid) {
       const parsed = body.parse(candidate);
-      // A later key is kept only with a value: null or absent reads back as
-      // absent, so an ungated record is written exactly as before the gate.
-      expect(parsed.record).toEqual(
-        Object.fromEntries(
-          Object.entries(candidate).filter(
-            ([key, value]) =>
-              !(['gate', 'gateOutputRef'].includes(key) && value === null),
-          ),
-        ),
-      );
+      expect(parsed.record).toEqual(candidate);
       expect(Object.isFrozen(parsed.record)).toBe(true);
       for (const value of Object.values(
         parsed.record as Record<string, unknown>,
@@ -244,8 +233,8 @@ describe('managed-automation-record/1 shared contract', () => {
     const template = fixtures.templates[fixture.domain];
     expect(
       MANAGED_EXTENSION_RECORD_BODIES[fixture.domain]!.isSuccessor(
-        record(template, fixture.before, fixture.omitBefore),
-        record(template, fixture.after, fixture.omitAfter),
+        merge(template, fixture.before),
+        merge(template, fixture.after),
       ),
     ).toBe(fixture.valid);
   });

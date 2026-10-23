@@ -341,8 +341,8 @@ export function automationDefinitionDigest(
         definition.catchUp,
         definition.catchUpLimit,
         definition.enabled,
-        // Appended only when set, so every definition committed before
-        // gates existed keeps its digest and a no-op update stays a no-op.
+        // A gate joins the pre-image only when set: an ungated definition
+        // digests exactly as the pinned pre-image without one.
         ...(definition.gate === null ? [] : [definition.gate]),
       ]),
       'utf8',
@@ -381,10 +381,7 @@ function scheduleFields(
     catchUp: definition.catchUp,
     catchUpLimit: definition.catchUpLimit,
     enabled: definition.enabled,
-    // `undefined`, not left out: a revision spreads its predecessor first,
-    // and a cleared gate must replace the old one (the key is then dropped
-    // when the record is written).
-    gate: definition.gate ?? undefined,
+    gate: definition.gate,
   };
 }
 

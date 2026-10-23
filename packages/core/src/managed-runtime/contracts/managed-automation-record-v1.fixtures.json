@@ -1111,28 +1111,19 @@
       "start": false
     },
     {
-      "id": "schedule-pre-gate-record",
+      "id": "schedule-without-gate-key",
       "domain": "schedule",
       "patch": {},
       "omit": ["gate"],
-      "valid": true,
-      "start": true
+      "valid": false,
+      "error": "exactly",
+      "start": false
     },
     {
-      "id": "run-pre-gate-record",
+      "id": "run-without-gate-output-ref-key",
       "domain": "automation_run",
       "patch": {},
       "omit": ["gateOutputRef"],
-      "valid": true,
-      "start": true
-    },
-    {
-      "id": "schedule-pre-gate-unknown-key-still-refused",
-      "domain": "schedule",
-      "patch": {
-        "gates": null
-      },
-      "omit": ["gate"],
       "valid": false,
       "error": "exactly",
       "start": false
@@ -1568,22 +1559,11 @@
       "valid": false
     },
     {
-      "id": "schedule-pre-gate-revise",
+      "id": "schedule-gains-gate",
       "domain": "schedule",
-      "before": {},
-      "omitBefore": ["gate"],
-      "after": {
-        "definitionRevision": 2,
-        "definitionDigest": "9999999999999999999999999999999999999999999999999999999999999999",
+      "before": {
         "gate": null
       },
-      "valid": true
-    },
-    {
-      "id": "schedule-pre-gate-gains-gate",
-      "domain": "schedule",
-      "before": {},
-      "omitBefore": ["gate"],
       "after": {
         "definitionRevision": 2,
         "definitionDigest": "9999999999999999999999999999999999999999999999999999999999999999",
@@ -1592,25 +1572,11 @@
       "valid": true
     },
     {
-      "id": "run-pre-gate-to-intent",
+      "id": "run-gains-gate-output-after-claim",
       "domain": "automation_run",
-      "before": {},
-      "omitBefore": ["gateOutputRef"],
-      "after": {
-        "run": {
-          "state": "running",
-          "execution": "intent",
-          "effectId": "effect-1"
-        },
+      "before": {
         "gateOutputRef": null
       },
-      "valid": true
-    },
-    {
-      "id": "run-pre-gate-gains-output",
-      "domain": "automation_run",
-      "before": {},
-      "omitBefore": ["gateOutputRef"],
       "after": {
         "gateOutputRef": {
           "resourceId": "gate-1",

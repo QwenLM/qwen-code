@@ -113,15 +113,13 @@ class ManagedAutomationRecordContractTest {
             JsonNode template = fixtures.get("templates").get(domain);
             assertEquals(fixture.get("valid").booleanValue(),
                     ManagedExtensionProjection.RECORD_BODIES.get(domain).isSuccessor().test(
-                            omit(ManagedChildRunRecordContractTest.merge(template, fixture.get("before")),
-                                    fixture.get("omitBefore")),
-                            omit(ManagedChildRunRecordContractTest.merge(template, fixture.get("after")),
-                                    fixture.get("omitAfter"))),
+                            ManagedChildRunRecordContractTest.merge(template, fixture.get("before")),
+                            ManagedChildRunRecordContractTest.merge(template, fixture.get("after"))),
                     fixture.get("id").textValue());
         }
     }
 
-    /** Drops {@code keys}' top-level fields: a record written before they existed. */
+    /** Drops {@code keys}' top-level fields: a record missing a required key. */
     static JsonNode omit(JsonNode record, JsonNode keys) {
         if (keys != null) {
             keys.forEach(key -> ((ObjectNode) record).remove(key.textValue()));

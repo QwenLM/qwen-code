@@ -201,7 +201,7 @@ describe('automation definitions', () => {
     }
   });
 
-  it('digests a gate only when it is set, so older definitions keep theirs', () => {
+  it('digests a gate only when it is set, and writes the key either way', () => {
     const digest = automationDefinitionDigest(definition);
     expect(automationDefinitionDigest({ ...definition, gate: null })).toBe(
       digest,
@@ -214,8 +214,9 @@ describe('automation definitions', () => {
     expect(
       automationDefinitionDigest({ ...definition, gate: './other.sh' }),
     ).not.toBe(gated);
-    // An ungated definition is written without the key, as before the gate.
-    expect(JSON.parse(JSON.stringify(open()))).not.toHaveProperty('gate');
+    // The record has the complete nullable shape: an ungated definition
+    // carries the key as null.
+    expect(JSON.parse(JSON.stringify(open()))).toHaveProperty('gate', null);
     expect(
       scheduleOpenBody({
         scheduleId: 'asch_1',
