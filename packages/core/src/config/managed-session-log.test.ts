@@ -1034,7 +1034,10 @@ describe('Managed Session log recording', () => {
     });
     try {
       const authority = await LocalManagedSessionAuthority.open({
-        lease,
+        journal: LocalJsonlManagedSessionJournalStore.fromLease(
+          lease,
+          sessionKey,
+        ),
         sessionKey,
         cwd: projectDir,
         version: 'test',
