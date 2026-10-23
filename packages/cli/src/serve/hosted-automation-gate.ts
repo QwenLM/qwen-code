@@ -53,11 +53,15 @@ export type HostedAutomationGateRunner = (
 /** Probe starts remembered at most, oldest forgotten first. */
 const STARTED_CALLS_LIMIT = 1024;
 
-function rememberStart(started: Set<string>, callId: string): void {
+function rememberStart(
+  started: Map<string, string>,
+  callId: string,
+  executionCallId: string,
+): void {
   started.delete(callId);
-  started.add(callId);
+  started.set(callId, executionCallId);
   if (started.size > STARTED_CALLS_LIMIT) {
-    started.delete(started.values().next().value!);
+    started.delete(started.keys().next().value!);
   }
 }
 
@@ -124,8 +128,9 @@ export function createHostedAutomationGateRunner(
   // yet: a later attempt that cannot read the probe back may say it is
   // unknown, never that it could not start. Kept after such an answer too,
   // since the answer can be lost and the fire driven again; bounded, oldest
-  // first, for occurrences that never come back.
-  const startedCalls = new Set<string>();
+  // first, for occurrences that never come back. Each names its execution,
+  // so a later attempt can ask the Runtime about a record left UNKNOWN.
+  const startedCalls = new Map<string, string>();
   return async ({ automationRunId, definitionRevision, gate, signal }) => {
     if (!isHostedWorkspaceShellProfile(options.toolProfile())) {
       return {
@@ -164,9 +169,17 @@ export function createHostedAutomationGateRunner(
       if (answer === 'held') throw heldByAnotherAttempt();
       if (answer === 'unknown' || answer === 'superseded') {
         // The probe may have run under this Session and its outcome cannot
-        // be read back; the Session is released before the answer.
+        // be read back; the Session is released before the answer. A probe
+        // this process started is asked of its Runtime first: until then the
+        // record stays UNKNOWN, and the Broker refuses the release.
         mayHold = true;
-        result = unreadable(answer);
+        const executionCallId = startedCalls.get(callId);
+        const read =
+          answer === 'unknown' && executionCallId !== undefined
+            ? await reconciledReceipt(broker, callId, digest, executionCallId)
+            : undefined;
+        answered = read !== undefined;
+        result = read ?? unreadable(answer);
       } else {
         let prepared: Reservation | 'unknown' | 'superseded' | undefined =
           answer;
@@ -222,7 +235,11 @@ export function createHostedAutomationGateRunner(
               signal,
               () => {
                 started = true;
-                rememberStart(startedCalls, callId);
+                rememberStart(
+                  startedCalls,
+                  callId,
+                  reservation.executionCallId,
+                );
               },
             );
             answered = true;
@@ -304,11 +321,16 @@ async function settle(
   let result = prepared.settled;
   if (result === undefined) {
     onStart();
+    // A record left UNKNOWN (the Broker lost its worker's answer) is asked
+    // of the original Runtime once: a Tool v2 record is not refreshed
+    // otherwise, and the Session cannot be released while it is UNKNOWN.
     result = await broker.execute(
       prepared.executionCallId,
       payloadJson,
       signal,
       GATE_OBSERVATION_MS,
+      false,
+      true,
     );
   }
   if (result.executionStatus === 'cancelled') {
@@ -420,7 +442,13 @@ async function afterLostWatch(
       }`,
     );
   }
-  if (now === 'unknown' || now === 'superseded') return unreadable(now);
+  if (now === 'unknown') {
+    return (
+      (await reconciledReceipt(broker, callId, digest, executionCallId)) ??
+      unreadable(now)
+    );
+  }
+  if (now === 'superseded') return unreadable(now);
   if (now === undefined || now.executionCallId !== executionCallId) {
     // A Broker that restarted knows no live Session yet still holds the
     // probe's record: a later attempt acquires, which reconciles it, and
@@ -461,6 +489,35 @@ async function afterLostWatch(
     stderr: '',
     durationMs: 0,
   };
+}
+
+/**
+ * The receipt of an UNKNOWN probe this process started, once its original
+ * Runtime is asked: the Broker leaves a Tool v2 record UNKNOWN until someone
+ * asks, and refuses to release its Session meanwhile. Undefined when the
+ * Runtime still cannot say; the release then fails and the fire is retried.
+ */
+async function reconciledReceipt(
+  broker: HostedWorkspaceBroker,
+  callId: string,
+  digest: string,
+  executionCallId: string,
+): Promise<HostedAutomationGateResult | undefined> {
+  const status = await broker
+    .status(executionCallId, { reconcile: true })
+    .catch(() => undefined);
+  if (status?.state !== 'settled') return undefined;
+  const now = await reservationAnswer(broker, callId, digest).catch(
+    () => undefined,
+  );
+  if (
+    typeof now !== 'object' ||
+    now.settled === undefined ||
+    now.executionCallId !== executionCallId
+  ) {
+    return undefined;
+  }
+  return fromReceipt(broker, now);
 }
 
 function fromReceipt(

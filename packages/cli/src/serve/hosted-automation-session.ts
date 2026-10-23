@@ -810,9 +810,14 @@ export class HostedAutomationSession {
         signal: new AbortController().signal,
       })
       .then(
-        (result) => {
-          // An answer means the runner released the Session.
-          this.owedGateReleases.delete(owed);
+        async (result) => {
+          // The runner released any Session this attempt may have held; one
+          // an earlier attempt left behind is released here when this one
+          // never came to hold it (a refusal before it acquired). A release
+          // that fails retries the fire rather than settle it unreleased.
+          if (this.owedGateReleases.has(owed)) {
+            await this.releaseGateSession(automationRunId, definitionRevision);
+          }
           return result;
         },
         (cause: unknown) => {

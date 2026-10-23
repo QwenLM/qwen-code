@@ -1423,6 +1423,53 @@ describe('hosted automation gates', () => {
     );
   });
 
+  it('releases what an earlier attempt owes before a later answer settles the fire', async () => {
+    // Attempt 1 may hold the probe's Session and fails; attempt 2 answers
+    // after a refusal that came before it acquired anything, so the runner
+    // released nothing. The answer would settle the occurrence and strand
+    // attempt 1's Session: the release comes first, and a failed one retries.
+    const harness = await createHarness();
+    const released: Array<[string, number]> = [];
+    let releaseFails = true;
+    let attempt = 0;
+    await withSession(
+      harness,
+      async (automations) => {
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        await expect(automations.fire(fireParams())).rejects.toThrow(
+          HostedAutomationGateHeld,
+        );
+        await expect(automations.fire(fireParams())).rejects.toThrow(
+          HostedAutomationGateHeld,
+        );
+        expect(released).toEqual([]);
+        releaseFails = false;
+        const fired = await automations.fire(fireParams());
+        expect(fired.gate).toEqual({ outcome: 'quiet', durationMs: 5 });
+        expect(released).toEqual([[automationRunId(SCHEDULE_ID, SLOT_KEY), 1]]);
+      },
+      {
+        gate: async () => {
+          attempt++;
+          if (attempt === 1) {
+            throw new HostedAutomationGateHeld(
+              "the occurrence's Runtime Session is held by another attempt",
+            );
+          }
+          return { kind: 'quiet', durationMs: 5 };
+        },
+        releaseGate: async (id, revision) => {
+          if (releaseFails) throw new Error('Broker unavailable');
+          released.push([id, revision]);
+        },
+      },
+    );
+  });
+
   it('claims with the output, delivers it as data and replays without probing again', async () => {
     const harness = await createHarness();
     const gate = scriptedGate([

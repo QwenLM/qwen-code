@@ -310,6 +310,111 @@ describe('createHostedAutomationGateRunner', () => {
     ]);
   });
 
+  it('asks the Runtime once about a probe whose record went UNKNOWN while it was watched', async () => {
+    // The Broker lost its worker's answer: a Tool v2 record stays UNKNOWN
+    // until someone asks, and its Session cannot be released meanwhile.
+    let prepares = 0;
+    const { calls, probe } = await rig((path, body) => {
+      switch (path) {
+        case '/executions:prepare':
+          prepares++;
+          return prepares === 1
+            ? rejection(404, 'runtime_session_not_found')
+            : {
+                body: {
+                  ...identity,
+                  executionCallId: 'gate-execution',
+                  status: { state: 'prepared' },
+                },
+              };
+        case '/tool-sessions:acquire':
+          return { body: acquired };
+        case '/executions/gate-execution:start':
+          return {
+            body: {
+              ...identity,
+              executionCallId: 'gate-execution',
+              status: { state: 'executing' },
+            },
+          };
+        case '/executions/gate-execution':
+          return body['reconcile'] === 'true'
+            ? { body: settled('{"kind":"quiet","durationMs":4}') }
+            : rejection(409, 'runtime_broker_execution_unknown');
+        case RELEASE:
+          return { body: { ...identity, released: true } };
+        default:
+          throw new Error(`unexpected ${path}`);
+      }
+    });
+    await expect(probe()).resolves.toEqual({ kind: 'quiet', durationMs: 4 });
+    expect(calls.slice(-3)).toEqual([
+      { path: '/executions/gate-execution', body: expect.anything() },
+      {
+        path: '/executions/gate-execution',
+        body: expect.objectContaining({ reconcile: 'true' }),
+      },
+      { path: RELEASE, body: expect.anything() },
+    ]);
+  });
+
+  it('asks the Runtime again, on a later attempt, about a probe it started that stayed UNKNOWN', async () => {
+    // The first ask could not settle the record, so its Session could not
+    // be released; the re-driven fire asks again and reads the receipt.
+    let attempt = 1;
+    let prepares = 0;
+    const { calls, probe } = await rig((path, body) => {
+      switch (path) {
+        case '/executions:prepare':
+          prepares++;
+          if (attempt === 1) {
+            return prepares === 1
+              ? rejection(404, 'runtime_session_not_found')
+              : {
+                  body: {
+                    ...identity,
+                    executionCallId: 'gate-execution',
+                    status: { state: 'prepared' },
+                  },
+                };
+          }
+          return prepares === 3
+            ? rejection(409, 'runtime_broker_execution_unknown')
+            : { body: settled('{"kind":"quiet","durationMs":6}') };
+        case '/tool-sessions:acquire':
+          return { body: acquired };
+        case '/executions/gate-execution:start':
+          return {
+            body: {
+              ...identity,
+              executionCallId: 'gate-execution',
+              status: { state: 'executing' },
+            },
+          };
+        case '/executions/gate-execution':
+          return attempt === 2 && body['reconcile'] === 'true'
+            ? { body: settled('{"kind":"quiet","durationMs":6}') }
+            : rejection(409, 'runtime_broker_execution_unknown');
+        case RELEASE:
+          return attempt === 1
+            ? rejection(409, 'runtime_session_busy')
+            : { body: { ...identity, released: true } };
+        default:
+          throw new Error(`unexpected ${path}`);
+      }
+    });
+    await expect(probe()).rejects.toThrow(/was not released/);
+    attempt = 2;
+    const before = calls.length;
+    await expect(probe()).resolves.toEqual({ kind: 'quiet', durationMs: 6 });
+    expect(calls.slice(before).map((call) => call.path)).toEqual([
+      '/executions:prepare',
+      '/executions/gate-execution',
+      '/executions:prepare',
+      RELEASE,
+    ]);
+  });
+
   it('derives a Session per definition revision of the occurrence', () => {
     // A revision that changed the gate probes under fresh identities, and
     // the attempt that finds its revision stale names the old Session.

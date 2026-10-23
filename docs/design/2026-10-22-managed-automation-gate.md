@@ -224,7 +224,13 @@ the route wires the real one:
    the key that has not settled, a Broker fault — asked before or after the
    acquisition alike, since a Broker that restarted may know no Session yet
    still hold the key's execution. An execution the Runtime lost answers
-   `unknown`, and a reservation under the same key for another request is a
+   `unknown`. A record left UNKNOWN because the Broker lost its worker's
+   answer is asked of the original Runtime once, while the probe is
+   watched and again by each later attempt of the process that started it:
+   a Tool v2 record is not refreshed otherwise, and the Broker refuses to
+   release a Session whose record is UNKNOWN. A settled answer is the
+   receipt; otherwise the release fails and the fire is retried. A
+   reservation under the same key for another request is a
    conflict, never a second run: it answers `unknown` too. An attempt that
    started the execution and loses sight of it before it settles (a poll
    that failed, the observation window running out) reads the reservation
@@ -251,7 +257,11 @@ the route wires the real one:
    receipt. The Harness remembers which probes it started until a receipt
    answers them (a bounded set), so a later attempt that still cannot read
    one back answers `unknown`, never "could not start", however often the
-   fire is driven again. A refused acquisition is released too, since the
+   fire is driven again while the Harness keeps the Session open (a re-open
+   or a restart forgets them). An attempt that answers after an earlier
+   one of the same process ended owing a release (a refusal that came
+   before it acquired anything, so the runner released nothing) releases
+   that Session first, and a release that fails retries the fire. A refused acquisition is released too, since the
    Broker may have recorded the Session's row before the Workspace refuses it
    (also when the refusal comes back on a prepare that joined an
    acquisition still being provisioned). A
@@ -498,6 +508,17 @@ One PR, stacked on #15069 (it reuses `cron-gate.ts`):
   Broker names no execution in its conflict answers, and the Harness keeps
   no earlier revision's gate to ask for it by its request; a Broker-side
   expiry of a reservation that never started would close it.
+- An execution whose record stays UNKNOWN because its original Runtime
+  cannot say how it ended keeps its Session: the release answers busy, so
+  the fire is retried until the scanner gives up (`answer_unobtainable`)
+  and the Session stays until the Broker fences the record or the Harness
+  Session drains. A Harness that restarted no longer knows the execution's
+  id, so it cannot ask the Runtime about it at all.
+- The probe's output reaches the run as printed "at" the instant of the
+  fire that claimed it; a fire re-driven after a lost answer shows the
+  re-drive's instant, not the probe's. And the gate's status counts an
+  answer only once its occurrence is settled, in a second write: a crash
+  between the two leaves that answer uncounted, never counted twice.
 - Two releases can still miss a Session. An acquisition whose answer was
   lost and that the Broker admits only after a revision's stale fire found
   nothing to release (about 30 s of Broker stall) leaves that Session held.
