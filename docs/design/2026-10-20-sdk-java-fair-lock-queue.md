@@ -108,6 +108,18 @@ the same host as run 39771949573's fast-tier job, which waited out its
 now resolve from the job-local repository seeded from `~/.m2`, and only its
 write-back takes the lock.
 
+With the test job's suites unlocked, `sdk-java-tests.lock` no longer
+serializes any suite on any host: the only section left under it is the
+bounded write-back, and per-host suite concurrency is bounded solely by the
+number of runner registrations. #14566's "bounding hold length" therefore no
+longer covers that variable — uncapped concurrent JVM suites per host is now
+the mechanism's real bound.
+
+A write-back that cannot acquire the lock within 5400 s warns and skips the
+copy instead of failing the step. The gate result is already final at that
+point, so the warning never reaches the rerun classifiers, which inspect
+failed runs only.
+
 ### Fast-tier priority
 
 The FIFO queue bounds a waiter by its position, but it still puts a fast-tier
@@ -149,22 +161,22 @@ physical lock:
 - The promotion window bounds the overtake, not a hold. A fast ticket that
   arrived before the promotion and already parked in `flock` keeps its
   earlier kernel position, so the promoted ticket waits one more hold behind
-  it; the cost is bounded by tickets already parked, not starvation. Under a
-  single hold longer than the window every waiting normal ticket crosses the
-  threshold together, the queue is plain sequence order, and a fast ticket
+  it; the cost is bounded by tickets already parked, not starvation. Once a
+  ticket has waited past the window every waiting normal ticket has crossed
+  the threshold, the queue is plain sequence order, and a fast ticket
   arriving afterwards has nothing left to overtake.
 
 The release semantics, the 5400 s budget, and the
 `lock not acquired within` substring the rerun classifiers match are
 unchanged; the timeout line now also names the ticket's class.
 
-Priority does not bound a single hold. The same 2026-10-21 job then waited
-its last 52 minutes as head behind one hold and timed out, and full-tier
-MariaDB holds of 7426 s and 8685 s have been measured on this lock; a hold
-like that exhausts a fast head's 5400 s budget whatever the ticket order.
+Priority does not bound a single hold; the hold-scope change above does.
+The same 2026-10-21 job then waited its last 52 minutes as head behind one
+hold and timed out, and full-tier MariaDB holds of 7426 s and 8685 s were
+measured on this lock before the write-back scoped it to a 300 s copy. A hold
+like that exhausted a fast head's 5400 s budget whatever the ticket order.
 Naming the holder (a long ticketed hold, or a process that never took a
-ticket) is the diagnostic in qwen-code#15031, and bounding hold length stays
-with #14566.
+ticket) is still the diagnostic in qwen-code#15031.
 
 The head keepalive matters more with two classes. Without it, a head blocked
 past 1800 s loses its ticket to another waiter's reaper, and the next ticket
@@ -176,8 +188,10 @@ order this section exists to prevent.
 ### Why fairness over the alternatives
 
 - Shard the lock by suite: reduces queue frequency but each shard is still a
-  bare flock, and it rides on an untested assumption that concurrent suites
-  share the host safely on a pool that just OOMed a build.
+  bare flock. This change removes suite serialization entirely, so the
+  untested assumption behind this bullet — that concurrent suites share the
+  host safely on a pool that just OOMed a build — is now load-bearing for
+  every suite on the pool.
 - Cap registrations per host: needs pool topology changes outside the repo
   and leaves the same lost-place race per host.
 - Second host: at least three hosts starved simultaneously; host count is
@@ -231,8 +245,11 @@ order this section exists to prevent.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.
-- The error text still contains the substring `lock not acquired within`,
-  so `qwen-autofix.yml`'s `INFRA_FAILURE_SIGNATURES` keeps matching.
+- The helper's timeout line still contains the substring
+  `lock not acquired within`, so `qwen-autofix.yml`'s
+  `INFRA_FAILURE_SIGNATURES` keeps matching a failed acquisition. Both call
+  sites downgrade a failed acquisition to a warning and skip the write-back,
+  so that path no longer reaches the classifiers.
 
 ## Open questions
 

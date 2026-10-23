@@ -150,7 +150,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     // immutable commit, which may predate this helper; the guarded bare-lock
     // fallback keeps acquisition independent of the checkout's ref.
     expect(block).toContain('flock --wait 5400 9');
-    expect(block).toContain('::error::sdk-java host lock not acquired within');
+    expect(block).toContain(
+      '::warning::Maven cache write-back skipped: sdk-java host lock not acquired within',
+    );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
     );
@@ -172,15 +174,20 @@ describe('SDK Java self-hosted workflow guards', () => {
         'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
       );
       expect(lockAt, locked.name).toBeGreaterThan(-1);
-      expect(
-        locked.run.indexOf('cp -aln "${HOME}/.m2/repository"'),
-        locked.name,
-      ).toBeLessThan(lockAt);
-      const maven = locked.run.match(/^\s*mvn .+$/gm) ?? [];
-      expect(maven.length, locked.name).toBeGreaterThan(0);
-      for (const command of maven) {
-        expect(locked.run.indexOf(command), locked.name).toBeLessThan(lockAt);
-      }
+      const seedAt = locked.run.indexOf('cp -aln "${HOME}/.m2/repository"');
+      expect(seedAt, locked.name).toBeGreaterThan(-1);
+      expect(seedAt, locked.name).toBeLessThan(lockAt);
+      // Assert on the region below the acquisition, not on first-occurrence
+      // indices: a duplicated Maven run below the lock shares its text with
+      // the legitimate run above it, so indexOf would resolve to the wrong
+      // one. Comments are stripped because the MariaDB step's post-lock
+      // comment names mvn.
+      const belowCode = locked.run
+        .slice(lockAt)
+        .split('\n')
+        .filter((line) => !line.trim().startsWith('#'))
+        .join('\n');
+      expect(belowCode, locked.name).not.toMatch(/\bmvn\b/);
       expect(locked.run).toContain('mkdir -p "${HOME}/.m2/repository" 9>&-');
       expect(locked.run).toMatch(
         /timeout 300 find \..*-exec cp -ln --parents -t "\$\{HOME\}\/\.m2\/repository" \{\} \+ 9>&- \|\| write_back=\$\?/,
@@ -193,12 +200,29 @@ describe('SDK Java self-hosted workflow guards', () => {
     const integrationLockAt = integration.indexOf(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
-    expect(
-      integration.indexOf('-f packages/sdk-java/qwencode/pom.xml'),
-    ).toBeLessThan(integrationLockAt);
-    expect(integration.indexOf('-Pmysql-integration')).toBeLessThan(
-      integrationLockAt,
+    const integrationInstallAt = integration.indexOf(
+      '-f packages/sdk-java/qwencode/pom.xml',
     );
+    expect(integrationInstallAt).toBeGreaterThan(-1);
+    expect(integrationInstallAt).toBeLessThan(integrationLockAt);
+    expect(integration.indexOf('-Pmysql-integration')).toBeGreaterThan(-1);
+  });
+
+  it('keeps the cache write-back byte-identical across both lock sites', () => {
+    // The test job's write-back was cloned from mysql-integration's, and the
+    // wildcard pin above would not notice one copy losing -links 1 or its
+    // -prune excludes. That is the #13506 drift class: a later fix applied
+    // to only one copy republishes the whole seeded tree, or publishes the
+    // in-house fixed coordinates into the host cache the next seed reads.
+    const slices = ['test', 'mysql-integration'].map((name) => {
+      const run = parse(workflow).jobs[name].steps.find((candidate) =>
+        candidate.run?.includes('sdk-java-tests.lock'),
+      ).run;
+      const start = run.indexOf('mkdir -p "${HOME}/.m2/repository" 9>&-');
+      expect(start, name).toBeGreaterThan(-1);
+      return run.slice(start);
+    });
+    expect(slices[1]).toBe(slices[0]);
   });
 
   it.skipIf(process.platform !== 'linux')(
@@ -334,6 +358,72 @@ describe('SDK Java self-hosted workflow guards', () => {
             }
           }
           rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'skips the cache write-back when the host lock cannot be acquired',
+    () => {
+      const jobs = parse(workflow).jobs;
+      for (const name of ['test', 'mysql-integration']) {
+        const run = jobs[name].steps.find((candidate) =>
+          candidate.run?.includes('sdk-java-tests.lock'),
+        ).run;
+        const start = run.indexOf(
+          'if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then',
+        );
+        expect(start, name).toBeGreaterThan(-1);
+        const acquisitionAndWriteBack = run.slice(start);
+        for (const arm of ['helper', 'fallback']) {
+          const dir = mkdtempSync(join(tmpdir(), 'sdk-java-lock-skip-'));
+          const workspace = join(dir, 'workspace');
+          const home = join(dir, 'home');
+          const runnerTemp = join(dir, 'runner-temp');
+          const shims = join(dir, 'bin');
+          mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
+          mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
+          mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
+          mkdirSync(shims);
+          if (arm === 'helper') {
+            // Take the sourced-helper arm: the slot the slice sources is
+            // this stub, so the failing acquisition is the only behavior
+            // under test.
+            writeFileSync(
+              join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
+              'sdk_java_lock_acquire() { return 1; }\n',
+            );
+          } else {
+            writeFileSync(join(shims, 'flock'), '#!/bin/sh\nexit 1\n', {
+              mode: 0o755,
+            });
+          }
+          try {
+            const result = spawnSync(
+              'bash',
+              ['-e', '-c', acquisitionAndWriteBack],
+              {
+                encoding: 'utf8',
+                timeout: 5000,
+                env: {
+                  ...process.env,
+                  PATH: `${shims}:${process.env.PATH}`,
+                  HOME: home,
+                  RUNNER_TEMP: runnerTemp,
+                  GITHUB_WORKSPACE: workspace,
+                  TIER: 'fast',
+                },
+              },
+            );
+            expect(result.error, `${name}/${arm}`).toBeUndefined();
+            expect(result.status, `${name}/${arm}${result.stderr}`).toBe(0);
+            expect(result.stdout, `${name}/${arm}`).toContain(
+              '::warning::Maven cache write-back skipped',
+            );
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+          }
         }
       }
     },
@@ -523,8 +613,16 @@ describe('SDK Java self-hosted workflow guards', () => {
       );
     } else if (name === 'test') {
       // The self-hosted suite resolves from a job-local repository; only the
-      // cache write-back takes the host lock.
+      // cache write-back takes the host lock. Bind the suffix to the step,
+      // not just its count: moving it to another step leaves the suite on
+      // the host-shared ~/.m2 and the write-back with no delta to publish.
       expect(jobLocal?.length ?? 0).toBe(1);
+      const selfHosted = parse(workflow).jobs[name].steps.find(
+        (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
+      );
+      expect(selfHosted?.env?.MAVEN_ARGS).toContain(
+        '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
+      );
     } else if (name !== 'mysql-integration') {
       expect(jobLocal).toBeNull();
     }
@@ -1245,7 +1343,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // predate the helper, so this site must also keep the bare-lock arm.
     expect(step.run).toContain('flock --wait 5400 9');
     expect(step.run).toContain(
-      '::error::sdk-java host lock not acquired within',
+      '::warning::Maven cache write-back skipped: sdk-java host lock not acquired within',
     );
     const seconds = Number(step.run.match(/sdk_java_lock_acquire (\d+)/)?.[1]);
     // The fast tier owns the same lock: it overtakes this job only while
@@ -1255,7 +1353,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(seconds).toBe(90 * 60);
     // This site stays in the normal class: a tier argument here would put
     // full-tier MariaDB holds ahead of fast PR-feedback work.
-    expect(step.run).toContain('sdk_java_lock_acquire 5400\n');
+    expect(step.run).toContain('sdk_java_lock_acquire 5400 || {');
     // Promotion must fire strictly inside the acquisition budget; at or
     // above it the rename lands in the iteration whose timeout arm deletes
     // the ticket, and no test would see the anti-starvation arm go dead.
@@ -1294,10 +1392,11 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
     ).toBeGreaterThanOrEqual(seconds + 3 * 60 * 60 + writeBackBound + 30 * 60);
     // The sibling test job shares the same per-host lock: its ceiling must
-    // cover one full wait plus its own measured hold (the sdk-java suite plus
-    // the managed-agent H2 suite, 925 s) and ~11 minutes of setup.
+    // cover one full wait, its measured unlocked suite (the sdk-java suite
+    // plus the managed-agent H2 suite, 925 s), the bounded write-back it
+    // guards and ~11 minutes of setup.
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      seconds + 925 + 11 * 60,
+      seconds + 925 + writeBackBound + 11 * 60,
     );
   });
 

@@ -18,9 +18,9 @@
 # ahead of it (older fast or promoted ones, parked or not), never for the
 # full-tier queue still waiting in userspace. A normal ticket that waits more
 # than SDK_JAVA_LOCK_PROMOTE_AFTER seconds (default 1200) is promoted into the
-# fast class, so continuous fast traffic cannot starve the full tier; under a
-# single hold longer than that window every waiting normal ticket crosses the
-# threshold together and the queue is plain sequence order.
+# fast class, so continuous fast traffic cannot starve the full tier. A hold
+# is now the bounded write-back, so no single hold outlasts that window; a
+# queue of several holds still promotes every ticket that has waited it.
 #
 # Source this file and call `sdk_java_lock_acquire <wait-seconds> [fast|full]`
 # (an empty tier means normal); it returns non-zero on timeout with the pinned
@@ -38,10 +38,11 @@ sdk_java_lock_acquire() {
   if [[ ${class} == 'fast' ]]; then
     rank=0
   fi
-  # 1200 s leaves 4200 s of the 5400 s acquisition budget, enough for four
-  # 925 s holds. At or above the budget promotion would rename a ticket in the
-  # same iteration whose timeout arm deletes it; sdk-java-workflow.test.js
-  # pins the default below both acquisition budgets.
+  # 1200 s is four 300 s write-back holds, so a waiting normal ticket is
+  # promoted after the queue has served a handful of them. At or above the
+  # budget promotion would rename a ticket in the same iteration whose
+  # timeout arm deletes it; sdk-java-workflow.test.js pins the default below
+  # both acquisition budgets.
   local promote_after="${SDK_JAVA_LOCK_PROMOTE_AFTER:-1200}"
   local lock="${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
   local queue="${lock}.queue"
