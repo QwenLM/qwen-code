@@ -1474,6 +1474,17 @@ printf '%s\\n' '{"jobs":[]}'
     // A publish failure on attempt 1 re-enters the loop with the body already
     // written once; the assembly truncate must keep the link single.
     ['github-actions[bot]', 'PATCH', 'issues/comments/456', '', 0, true, 1],
+    // A freshly filed issue outranks a link recovered from the earlier
+    // attempt's comment, which pointed at a different issue.
+    [
+      'github-actions[bot]',
+      'PATCH',
+      'issues/comments/456',
+      'https://github.com/QwenLM/qwen-code/issues/14500',
+      0,
+      true,
+      0,
+    ],
     ['github-actions[bot]', null, null, '', 3, false, 0],
   ])(
     'upserts a %s comment via %s with %s and issue=%s after %s lookup errors (existing tracking: %s)',
@@ -1559,17 +1570,20 @@ fi
             join(tmp, 'pr-comment.md'),
             'utf8',
           );
-          if (existingTracking) {
+          const expectedTracking =
+            issueUrl ||
+            (existingTracking
+              ? 'https://github.com/QwenLM/qwen-code/issues/15240'
+              : '');
+          if (expectedTracking) {
             expect(publishedBody).toContain(
-              '[Tracking issue](https://github.com/QwenLM/qwen-code/issues/15240)',
+              `[Tracking issue](${expectedTracking})`,
             );
             expect(publishedBody.match(/\[Tracking issue\]\(/g)).toHaveLength(
               1,
             );
           } else {
-            expect(publishedBody.includes('[Tracking issue]')).toBe(
-              Boolean(issueUrl),
-            );
+            expect(publishedBody.includes('[Tracking issue]')).toBe(false);
           }
           // The emitter's line must stay the one the recovery grep accepts;
           // decorating it would silently drop the link on a suppressed rerun.
