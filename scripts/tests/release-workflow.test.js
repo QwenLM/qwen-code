@@ -244,6 +244,8 @@ describe('CUA release workflow', () => {
     );
     expect(install.run).toContain('npm install');
     expect(install.run).toContain('--ignore-scripts=false');
+    expect(job.needs).toContain('verify-browser-package');
+    expect(install.run).toContain('qwen-code-browser-use-');
     expect(install.run).toContain("throw 'Windows SDK postinstall failed'");
     expect(install.run).toContain(
       "if ((Get-AuthenticodeSignature -LiteralPath $worker).Status -ne 'Valid') {",

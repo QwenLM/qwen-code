@@ -267,7 +267,7 @@ jobs:
   # ── Windows (x86_64 + arm64) — unsigned UIAccess worker ────────────────────
   build-windows:
     name: 'windows-${{ matrix.arch }}'
-    needs: ['validate-version']
+    needs: ['validate-version', 'verify-browser-package']
     runs-on: 'windows-latest'
     permissions:
       contents: 'read'
@@ -365,6 +365,10 @@ jobs:
           Compress-Archive -Path "release/$stage" -DestinationPath "release/$stage.zip" -Force
           Compress-Archive -Path "release/$stage/qwen-cua-driver.exe","release/$stage/cua-cursor-theme.exe","release/$stage/qwen-cua-driver-uia.exe","release/$stage/cua_driver_sdk.dll","release/$stage/cua_driver_node_runtime.node","release/$stage/cua_driver_abi.h" -DestinationPath "release/$stage-binary.zip" -Force
           Get-ChildItem "release/$stage*.zip"
+      - uses: 'actions/download-artifact@v4'
+        with:
+          name: 'browser-use-npm-${{ needs.validate-version.outputs.version }}'
+          path: '${{ runner.temp }}/browser-use-package'
       - name: 'Clean-install Windows SDK from packaged payload'
         shell: 'pwsh'
         env:
@@ -385,7 +389,10 @@ jobs:
           New-Item -ItemType Directory -Path $consumer | Out-Null
           Push-Location $consumer
           try {
-            npm install (Join-Path $env:RUNNER_TEMP 'qwen-code-cua-sdk-${{ steps.version.outputs.version }}.tgz') --ignore-scripts=false --no-audit --no-fund
+            # @qwen-code/browser-use@<version> is published only by publish-browser,
+            # downstream of this job, so its tarball must be supplied locally.
+            $browserPkg = Join-Path $env:RUNNER_TEMP 'browser-use-package/qwen-code-browser-use-${{ steps.version.outputs.version }}.tgz'
+            npm install (Join-Path $env:RUNNER_TEMP 'qwen-code-cua-sdk-${{ steps.version.outputs.version }}.tgz') $browserPkg --ignore-scripts=false --no-audit --no-fund
             if ($LASTEXITCODE -ne 0) { throw 'Windows SDK postinstall failed' }
             $worker = Join-Path $env:ProgramFiles 'Qwen/CuaDriver/${{ steps.version.outputs.version }}/qwen-cua-driver-uia.exe'
             if ($env:CUA_DRIVER_USE_UIACCESS -eq '1') {
