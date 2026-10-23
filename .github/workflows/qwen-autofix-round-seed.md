@@ -1,9 +1,13 @@
-# Round seeding — `@qwen-code /takeover from N`
+# Parameterized takeover commands
 
-Operator guide for the one parameterized takeover command. For the
-implementation rationale behind each gate, see the design record:
+Operator guide for the two parameterized takeover forms — `from N` (round seed,
+below) and `for N` (round budget, further down). For the implementation
+rationale behind each gate, see the design record:
 [`qwen-autofix.md`](./qwen-autofix.md) — [af-007](./qwen-autofix.md#af-007)
-(the parser) and [af-016](./qwen-autofix.md#af-016) (the marker).
+(the parser), [af-016](./qwen-autofix.md#af-016) (the seed marker) and
+[af-159](./qwen-autofix.md#af-159) (the budget).
+
+## Round seed — `@qwen-code /takeover from N`
 
 ## The problem it solves
 
@@ -112,32 +116,92 @@ base-conflict resolution all keep flowing. Only the suggestion channel stops.
 **It does not shorten the round cap in any meaningful way.** Under takeover the
 cap is 100, so a seed of 4 leaves 96.
 
+## Round budget — `@qwen-code /takeover for N`
+
+The bounded opposite of the seed. `from N` decides how much _suggestion_ budget
+this window has; `for N` decides how many _rounds_ the loop may run at all.
+
+```
+@qwen-code /takeover for 2
+```
+
+Engages takeover and records a window round budget of 2 on the engage ack:
+
+```
+<!-- takeover-ack engaged -->
+<!-- autofix-round-budget 2 -->
+```
+
+The effective cap for this window becomes `N` (it only ever lowers the takeover
+cap of 100). When the counter reaches `N`, the loop **releases** the PR:
+
+- it posts one bilingual "budget spent — released" note, per window;
+- it removes `autofix/takeover`;
+- it does **not** apply `autofix/needs-human` and does **not** post the paused
+  "reached its round cap" notice — a finished budget leaves nothing stuck, so
+  both would be false.
+
+**Failed rounds count.** A round that errors, times out or crashes writes its
+eval marker with the next round number and a sentinel timestamp, so it consumes
+budget exactly like a productive one. That is the point: N means N attempts,
+not "N successes and however many retries it takes".
+
+**The budget is window-scoped.** It is read from the comment whose timestamp is
+the window key, so `/retry` or a bare `/takeover` opens a new window with no
+budget (unbounded takeover, as before), and a budgeted re-arm
+(`@qwen-code /takeover for 3` on an already-managed PR) starts a fresh window at
+round 0 with a 3-round budget.
+
+**Bot-authored PRs are the one exception.** They are managed without the label,
+so releasing it would hand them back to standard ten-round management and the
+budget would be a lie. They land on the existing paused path instead: paused
+notice plus `autofix/needs-human`, and the fleet shepherd's auto-release ages the
+label out. The budget still stops them at N.
+
+### Picking N
+
+| You type | Rounds the loop may run | Typical use                                         |
+| -------- | ----------------------- | --------------------------------------------------- |
+| `for 1`  | 1                       | "clear this batch of review comments, then stop"    |
+| `for 2`  | 2                       | one round plus a follow-up after CI comes back      |
+| `for 5`  | 5                       | a small, deliberately bounded engagement            |
+| `for 99` | 99                      | effectively unbounded; use bare `/takeover` instead |
+
+`for 0` is **not** accepted: a zero-round engagement is what `/takeover stop`
+already does, so it fails closed with the rest of the malformed bodies.
+
 ## Accepted and rejected forms
 
 The literal prefix must match `@qwen-code /takeover` byte-for-byte and the tail
-must be a bare 1–2 digit integer. The command has to be the very first thing in
-the comment: **no leading whitespace of any kind** — space, tab, or blank line.
+must be either `from N` or `for N` with a bare 1–2 digit integer. The command
+has to be the very first thing in the comment: **no leading whitespace of any
+kind** — space, tab, or blank line.
 The router prefilters on the _raw_ comment body with `startsWith`, so a body
 with leading whitespace never starts a job at all, and the trim
 that runs inside that job never gets the chance
 ([af-004](./qwen-autofix.md#af-004)). Trailing whitespace is harmless. Anything
-else fails closed — no label, no seed, no partial effect, and, when the router
-never started, not even a log line.
+else fails closed — no label, no seed, no budget, no partial effect, and, when
+the router never started, not even a log line.
 
-| Body                                 | Result                                      |
-| ------------------------------------ | ------------------------------------------- |
-| `@qwen-code /takeover from 4`        | engage, seed 4                              |
-| `@qwen-code /takeover from 04`       | engage, seed 4 (read as decimal, not octal) |
-| `@qwen-code /takeover from 0`        | engage, no seed — the explicit spelling     |
-| `@qwen-code /takeover`               | engage, no seed                             |
-| `@qwen-code /takeover stop`          | release                                     |
-| `@qwen-code /takeover stop from 4`   | **nothing** — neither releases nor engages  |
-| `@qwen-code /takeover from 100`      | **nothing** — 3 digits rejected             |
-| `@qwen-code /takeover  from 4`       | **nothing** — double space                  |
-| `please @qwen-code /takeover from 4` | **nothing** — must start the comment        |
-| `  @qwen-code /takeover from 4`      | **nothing** — leading spaces                |
-| blank line, then the command         | **nothing** — leading newline               |
-| `@qwen-code /takeover from 4 please` | **nothing** — must end the comment          |
+| Body                                 | Result                                          |
+| ------------------------------------ | ----------------------------------------------- |
+| `@qwen-code /takeover from 4`        | engage, seed 4                                  |
+| `@qwen-code /takeover from 04`       | engage, seed 4 (read as decimal, not octal)     |
+| `@qwen-code /takeover from 0`        | engage, no seed — the explicit spelling         |
+| `@qwen-code /takeover for 2`         | engage, 2-round budget                          |
+| `@qwen-code /takeover for 02`        | engage, 2-round budget (decimal, not octal)     |
+| `@qwen-code /takeover`               | engage, no seed, no budget                      |
+| `@qwen-code /takeover stop`          | release                                         |
+| `@qwen-code /takeover stop from 4`   | **nothing** — neither releases nor engages      |
+| `@qwen-code /takeover for 0`         | **nothing** — a zero-round engagement is `stop` |
+| `@qwen-code /takeover from 4 for 2`  | **nothing** — the two forms do not combine      |
+| `@qwen-code /takeover from 100`      | **nothing** — 3 digits rejected                 |
+| `@qwen-code /takeover for 100`       | **nothing** — 3 digits rejected                 |
+| `@qwen-code /takeover  from 4`       | **nothing** — double space                      |
+| `please @qwen-code /takeover from 4` | **nothing** — must start the comment            |
+| `  @qwen-code /takeover from 4`      | **nothing** — leading spaces                    |
+| blank line, then the command         | **nothing** — leading newline                   |
+| `@qwen-code /takeover from 4 please` | **nothing** — must end the comment              |
 
 ## Reading the result
 
