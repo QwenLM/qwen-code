@@ -7,8 +7,14 @@
 import { createHash } from 'node:crypto';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import {
+  CRON_GATE_OUTPUT_CAP_BYTES,
+  buildGatedFirePrompt,
+  gateCommandError,
+} from '../services/cron-gate.js';
+import {
   AUTOMATION_RUN_KIND,
   SCHEDULE_CATCH_UP_POLICIES,
+  SCHEDULE_GATE_MAX_BYTES,
   SCHEDULE_KIND,
   SCHEDULE_OVERLAP_POLICIES,
   SCHEDULE_SESSION_MODES,
@@ -33,6 +39,18 @@ import {
 // (packages/cli/src/serve/hosted-automation-session.ts), which serializes
 // these builders onto `commitExtensionRecord`. See
 // docs/design/2026-10-07-managed-automation-runtime.md.
+
+/**
+ * A definition's gate the shell checks refuse. The Harness answers it before
+ * anything commits, so the control plane releases the caller's idempotency
+ * key instead of burning it on a request it could not accept.
+ */
+export class AutomationGateInvalidError extends ManagedSessionRecordError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AutomationGateInvalidError';
+  }
+}
 
 export const MANAGED_AUTOMATION_LIMITS = Object.freeze({
   /** The raw prompt bound; the real budget is the final input's. */
@@ -64,6 +82,8 @@ export const AUTOMATION_INPUT_SOURCE = 'automation';
 export const AUTOMATION_RESOURCE_KINDS = Object.freeze({
   prompt: 'managed-automation-prompt',
   input: 'managed-input',
+  /** The stdout of the gate probe that admitted a run, read by its dispatch. */
+  gateOutput: 'managed-automation-gate-output',
 } as const);
 
 export const AUTOMATION_RUN_TRIGGERS = Object.freeze([
@@ -136,6 +156,8 @@ export interface AutomationDefinition {
   readonly catchUp: ScheduleCatchUpPolicy;
   readonly catchUpLimit: number | null;
   readonly enabled: boolean;
+  /** The gate command, or null for a definition that fires every slot. */
+  readonly gate: string | null;
 }
 
 function plainObject(value: unknown, label: string): Record<string, unknown> {
@@ -181,6 +203,7 @@ export function assertAutomationDefinition(
     'catchUp',
     'catchUpLimit',
     'enabled',
+    'gate',
   ];
   for (const key of Object.keys(record)) {
     if (!known.includes(key)) {
@@ -207,6 +230,31 @@ export function assertAutomationDefinition(
     SCHEDULE_CATCH_UP_POLICIES,
     'Automation definition catchUp',
   );
+  // A named gate (even null) is taken as given; an unnamed one keeps the
+  // committed definition's. The shape rule is the scheduled-task gate's:
+  // a non-empty command within the cap, with no part backgrounded.
+  const gateValue = 'gate' in record ? record['gate'] : (defaults.gate ?? null);
+  let gate: string | null = null;
+  if (gateValue !== null) {
+    const gateError = gateCommandError(gateValue);
+    if (gateError !== null) {
+      throw new AutomationGateInvalidError(
+        `Automation definition gate ${gateError}.`,
+      );
+    }
+    // The record bounds a gate in UTF-8 bytes, as the Server does; the
+    // shared check counts characters, which a multi-byte gate can stay
+    // under while the record refuses it.
+    if (
+      Buffer.byteLength((gateValue as string).trim(), 'utf8') >
+      SCHEDULE_GATE_MAX_BYTES
+    ) {
+      throw new AutomationGateInvalidError(
+        `Automation definition gate must be at most ${SCHEDULE_GATE_MAX_BYTES} UTF-8 bytes.`,
+      );
+    }
+    gate = (gateValue as string).trim();
+  }
   const definition: AutomationDefinition = {
     goal,
     cron: (record['cron'] ?? defaults.cron) as string,
@@ -232,6 +280,7 @@ export function assertAutomationDefinition(
         ? (defaults.catchUpLimit ?? null)
         : null) as number | null,
     enabled: (record['enabled'] ?? defaults.enabled ?? true) as boolean,
+    gate,
   };
   if (
     Buffer.byteLength(definition.goal, 'utf8') >
@@ -266,9 +315,19 @@ export function assertAutomationDefinition(
     automationInputBudgetBytes(definition) >
     MANAGED_AUTOMATION_LIMITS.maxInputBytes
   ) {
-    fail(
-      `Automation definition's final execution input would exceed ${MANAGED_AUTOMATION_LIMITS.maxInputBytes} bytes once wrapped; shorten the prompt.`,
-    );
+    const message = `Automation definition's final execution input would exceed ${MANAGED_AUTOMATION_LIMITS.maxInputBytes} bytes once wrapped; shorten the prompt.`;
+    // A prompt that fits without the gate's output block is refused because
+    // of the gate: a gate refusal, answered before anything commits.
+    if (
+      definition.gate !== null &&
+      automationInputBudgetBytes({ ...definition, gate: null }) <=
+        MANAGED_AUTOMATION_LIMITS.maxInputBytes
+    ) {
+      throw new AutomationGateInvalidError(
+        `${message} A gate reserves room for its output, so a gated definition's prompt must be about 32 KiB shorter.`,
+      );
+    }
+    fail(message);
   }
   return Object.freeze(definition);
 }
@@ -304,6 +363,9 @@ export function automationDefinitionDigest(
         definition.catchUp,
         definition.catchUpLimit,
         definition.enabled,
+        // A gate joins the pre-image only when set: an ungated definition
+        // digests exactly as the pinned pre-image without one.
+        ...(definition.gate === null ? [] : [definition.gate]),
       ]),
       'utf8',
     )
@@ -341,6 +403,7 @@ function scheduleFields(
     catchUp: definition.catchUp,
     catchUpLimit: definition.catchUpLimit,
     enabled: definition.enabled,
+    gate: definition.gate,
   };
 }
 
@@ -413,6 +476,8 @@ export function scheduleRetireBody(previous: Schedule): Schedule {
 export function automationRunClaimBody(params: {
   readonly schedule: Schedule;
   readonly occurrenceKey: string;
+  /** The published probe output that admitted this run; null when ungated. */
+  readonly gateOutputRef?: ManagedSessionDurableRef | null;
 }): AutomationRun {
   const runId = automationRunId(
     params.schedule.scheduleId,
@@ -429,6 +494,7 @@ export function automationRunClaimBody(params: {
     occurrenceKey: params.occurrenceKey,
     sessionMode: params.schedule.sessionMode,
     targetSessionId: params.schedule.targetSessionId,
+    gateOutputRef: params.gateOutputRef ?? null,
     run: {
       state: 'admitted',
       reason: null,
@@ -571,7 +637,65 @@ function cleanLine(value: string): string {
     .replace(/\s+/g, ' ');
 }
 
-/** The text an automation turn runs: the Legacy run framing plus the prompt. */
+/**
+ * What the gate probe printed for one run, published as a
+ * `managed-automation-gate-output` resource beside the claim so the
+ * dispatch — or its replay after a crash — composes the turn text without
+ * running the probe again.
+ */
+export interface AutomationGateOutput {
+  /** The command as the definition carried it when the probe ran. */
+  readonly gate: string;
+  readonly stdout: string;
+  /** The stdout was cut at the gate's output cap. */
+  readonly truncated: boolean;
+  readonly durationMs: number;
+}
+
+export function encodeAutomationGateOutput(
+  output: AutomationGateOutput,
+): Buffer {
+  return Buffer.from(JSON.stringify(output), 'utf8');
+}
+
+export function decodeAutomationGateOutput(
+  bytes: Buffer,
+): AutomationGateOutput {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bytes.toString('utf8'));
+  } catch {
+    fail('Automation gate output must be JSON.');
+  }
+  const record = plainObject(parsed, 'Automation gate output');
+  if (typeof record['gate'] !== 'string' || record['gate'].length === 0) {
+    fail('Automation gate output gate must be text.');
+  }
+  if (typeof record['stdout'] !== 'string') {
+    fail('Automation gate output stdout must be text.');
+  }
+  if (typeof record['truncated'] !== 'boolean') {
+    fail('Automation gate output truncated must be boolean.');
+  }
+  if (
+    !Number.isSafeInteger(record['durationMs']) ||
+    (record['durationMs'] as number) < 0
+  ) {
+    fail('Automation gate output durationMs must be a count.');
+  }
+  return Object.freeze({
+    gate: record['gate'],
+    stdout: record['stdout'],
+    truncated: record['truncated'],
+    durationMs: record['durationMs'] as number,
+  });
+}
+
+/**
+ * The text an automation turn runs: the Legacy run framing plus the prompt,
+ * followed for a gated run by the probe's output marked as data, in the
+ * scheduled-task gate's framing.
+ */
 export function automationTurnText(params: {
   readonly schedule: Pick<
     Schedule,
@@ -581,6 +705,7 @@ export function automationTurnText(params: {
   readonly trigger: AutomationRunTrigger;
   readonly firedAt: number;
   readonly prompt: string;
+  readonly gateOutput?: AutomationGateOutput | null;
 }): string {
   if (
     !Number.isSafeInteger(params.firedAt) ||
@@ -601,7 +726,23 @@ export function automationTurnText(params: {
     '',
     AUTOMATION_RUN_INSTRUCTION,
     '',
-    params.prompt,
+    params.gateOutput
+      ? buildGatedFirePrompt(
+          {
+            id: params.schedule.scheduleId,
+            cronExpr: params.schedule.cron,
+            prompt: params.prompt,
+            gate: params.gateOutput.gate,
+          },
+          {
+            kind: 'output',
+            stdout: params.gateOutput.stdout,
+            truncated: params.gateOutput.truncated,
+            durationMs: params.gateOutput.durationMs,
+          },
+          params.firedAt,
+        )
+      : params.prompt,
   ].join('\n');
 }
 
@@ -618,7 +759,7 @@ export function automationInputBudgetBytes(
   definition: Pick<
     AutomationDefinition,
     'goal' | 'cron' | 'timezone' | 'prompt'
-  >,
+  > & { readonly gate?: string | null },
 ): number {
   const scheduleId = `asch_${'0'.repeat(32)}`;
   // The latest representable instant, whose ISO text is longest.
@@ -643,6 +784,18 @@ export function automationInputBudgetBytes(
       trigger: 'scheduled',
       firedAt,
       prompt: definition.prompt,
+      // A gated fire adds the probe's output block under a full cap: the
+      // widest block the framing can produce — sanitization keeps every
+      // quote, and JSON escapes each to two bytes — so the prompt budget of
+      // a gated definition is smaller by exactly that much.
+      gateOutput: definition.gate
+        ? {
+            gate: definition.gate,
+            stdout: '"'.repeat(CRON_GATE_OUTPUT_CAP_BYTES),
+            truncated: true,
+            durationMs: Number.MAX_SAFE_INTEGER,
+          }
+        : null,
     }),
   }).byteLength;
 }
