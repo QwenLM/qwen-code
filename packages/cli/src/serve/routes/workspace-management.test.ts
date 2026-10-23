@@ -21,7 +21,7 @@ import type {
 import { tmpdir } from 'node:os';
 import { createServer, get as httpGet } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import {
   mkdir,
   mkdtemp,
@@ -3759,6 +3759,60 @@ describe('git clone target reservations', () => {
       expect(again.status).toBe(202);
       await cloner.cancel(again.body.jobId);
     } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reserves the claim before the target becomes visible to registration', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-claim-'));
+    const target = join(root, 'repo');
+    let releaseClaim!: () => void;
+    const claimHeld = new Promise<void>((resolve) => {
+      releaseClaim = resolve;
+    });
+    const cloner = createWorkspaceGitCloner({
+      runner: blockingRunner,
+      resolveClaimedTarget: async (value) => {
+        await claimHeld;
+        return value;
+      },
+    });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+        ]),
+        workspaceGitCloner: cloner,
+      });
+      const startPromise = request(app)
+        .post('/workspaces')
+        .send({
+          kind: 'git',
+          url: 'https://example.com/org/repo.git',
+          target,
+        })
+        .then((response) => response);
+
+      for (let attempt = 0; attempt < 100 && !existsSync(target); attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(existsSync(target)).toBe(true);
+
+      const registration = await request(app).post('/workspaces').send({
+        cwd: target,
+        persist: false,
+      });
+      expect(registration.status).toBe(409);
+      expect(registration.body.code).toBe('workspace_nested');
+
+      releaseClaim();
+      const started = await startPromise;
+      expect(started.status).toBe(202);
+      await cloner.cancel(started.body.jobId);
+      expect(existsSync(target)).toBe(false);
+    } finally {
+      releaseClaim?.();
       await cloner.sealAndWait().catch(() => undefined);
       await rm(root, { recursive: true, force: true });
     }

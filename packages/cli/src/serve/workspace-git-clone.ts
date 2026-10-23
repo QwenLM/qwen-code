@@ -117,6 +117,8 @@ interface ClonerOptions {
   createJobId?: () => string;
   /** Test seam for the success-path canonical path resolution. */
   resolveCwd?: (target: string) => Promise<string>;
+  /** Test seam for the claim's final canonical path resolution. */
+  resolveClaimedTarget?: (target: string) => Promise<string>;
 }
 
 function requestError(
@@ -364,6 +366,9 @@ function expandCloneTarget(raw: string): string {
 export async function claimCloneTarget(
   absoluteTarget: string,
   validateTarget?: (canonicalTarget: string) => TargetRejection | undefined,
+  reserveTarget?: (canonicalTarget: string) => void,
+  releaseTarget?: (canonicalTarget: string) => void,
+  resolveTarget: (target: string) => Promise<string> = realpath,
 ): Promise<string> {
   const parent = dirname(absoluteTarget);
   let parentStats;
@@ -399,28 +404,37 @@ export async function claimCloneTarget(
   if (rejection) {
     throw requestError(rejection.status, rejection.code, rejection.message);
   }
+  // mkdir exposes the directory to concurrent registration; the claim still
+  // awaits the existence check and the final realpath afterwards. Reserve
+  // before mkdir so registration can never admit the target in that window.
+  reserveTarget?.(target);
   try {
-    await lstat(target);
-    throw requestError(409, 'target_exists', 'Target path already exists');
-  } catch (error) {
-    if (error instanceof GitCloneRequestError) throw error;
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw requestError(
-        400,
-        'invalid_target',
-        'Target path is not accessible',
-      );
-    }
-  }
-  try {
-    await mkdir(target);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+    try {
+      await lstat(target);
       throw requestError(409, 'target_exists', 'Target path already exists');
+    } catch (error) {
+      if (error instanceof GitCloneRequestError) throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw requestError(
+          400,
+          'invalid_target',
+          'Target path is not accessible',
+        );
+      }
     }
-    throw requestError(400, 'invalid_target', 'Failed to create target path');
+    try {
+      await mkdir(target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw requestError(409, 'target_exists', 'Target path already exists');
+      }
+      throw requestError(400, 'invalid_target', 'Failed to create target path');
+    }
+    return await resolveTarget(target);
+  } catch (error) {
+    releaseTarget?.(target);
+    throw error;
   }
-  return realpath(target);
 }
 
 function abortError(): Error {
@@ -440,6 +454,8 @@ export function createWorkspaceGitCloner(
   const now = options.now ?? Date.now;
   const createJobId = options.createJobId ?? (() => randomUUID());
   const resolveCwd = options.resolveCwd ?? ((target) => realpath(target));
+  const resolveClaimedTarget =
+    options.resolveClaimedTarget ?? ((target) => realpath(target));
   const jobs = new Map<string, CloneJob>();
   let sealed = false;
 
@@ -490,11 +506,18 @@ export function createWorkspaceGitCloner(
     }
     const url = normalizeGitCloneUrl(request.url);
     const target = expandCloneTarget(request.target);
-    const claimed = await claimCloneTarget(target, request.validateTarget);
+    const claimed = await claimCloneTarget(
+      target,
+      request.validateTarget,
+      request.reserveTarget,
+      request.releaseTarget,
+      resolveClaimedTarget,
+    );
     if (sealed) {
       await rm(claimed, { recursive: true, force: true }).catch(
         () => undefined,
       );
+      request.releaseTarget?.(claimed);
       throw requestError(
         503,
         'daemon_shutting_down',
@@ -508,6 +531,7 @@ export function createWorkspaceGitCloner(
       await rm(claimed, { recursive: true, force: true }).catch(
         () => undefined,
       );
+      request.releaseTarget?.(claimed);
       throw requestError(
         409,
         'clone_limit_reached',
@@ -521,6 +545,7 @@ export function createWorkspaceGitCloner(
       await rm(claimed, { recursive: true, force: true }).catch(
         () => undefined,
       );
+      request.releaseTarget?.(claimed);
       throw requestError(
         409,
         'clone_limit_reached',
@@ -535,10 +560,8 @@ export function createWorkspaceGitCloner(
       status: 'running',
       startedAt: now(),
     };
-    // Reserve the canonical target before the job becomes visible, so an
-    // overlapping clone or registration cannot start under it while a
-    // failure/cancel cleanup could still delete the outer directory.
-    request.reserveTarget?.(claimed);
+    // The target was reserved inside claimCloneTarget, before mkdir exposed
+    // it to a concurrent registration.
     jobs.set(jobId, { snapshot, controller, settled: Promise.resolve() });
     const job = jobs.get(jobId)!;
 

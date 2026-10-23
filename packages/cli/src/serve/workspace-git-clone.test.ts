@@ -174,6 +174,42 @@ describe('claimCloneTarget', () => {
     });
     await expect(stat(target)).resolves.toBeDefined();
   });
+
+  it('reserves the target before creating it', async () => {
+    const root = await tempRoot();
+    const target = join(root, 'repo');
+    let existedWhenReserved: boolean | undefined;
+    const claimed = await claimCloneTarget(
+      target,
+      undefined,
+      () => {
+        existedWhenReserved = existsSync(target);
+      },
+      () => undefined,
+    );
+
+    expect(existedWhenReserved).toBe(false);
+    expect(claimed).toBeTruthy();
+  });
+
+  it('releases the reservation when the claim fails', async () => {
+    const root = await tempRoot();
+    const target = join(root, 'repo');
+    await writeFile(target, 'keep me');
+    const reserved: string[] = [];
+    const released: string[] = [];
+    await expect(
+      claimCloneTarget(
+        target,
+        undefined,
+        (value) => reserved.push(value),
+        (value) => released.push(value),
+      ),
+    ).rejects.toMatchObject({ code: 'target_exists' });
+
+    expect(reserved).toHaveLength(1);
+    expect(released).toEqual(reserved);
+  });
 });
 
 describe('createWorkspaceGitCloner', () => {
