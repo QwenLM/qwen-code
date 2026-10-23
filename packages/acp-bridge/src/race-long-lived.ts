@@ -4,15 +4,36 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+interface Gate {
+  resolve: (value: unknown) => void;
+  reject: (error: unknown) => void;
+}
+
 interface LongLivedState {
-  settled?: { ok: true; value: unknown } | { ok: false; error: unknown };
-  waiters: Set<{
-    resolve: (value: unknown) => void;
-    reject: (error: unknown) => void;
-  }>;
+  settled: boolean;
+  gates: Set<Gate>;
 }
 
 const states = new WeakMap<Promise<unknown>, LongLivedState>();
+
+// Kept out of `raceLongLived` so the reaction it leaves on `longLived` closes
+// over this frame only, not over the first caller's gate and result.
+function stateFor(longLived: Promise<unknown>): LongLivedState {
+  const existing = states.get(longLived);
+  if (existing) return existing;
+  const state: LongLivedState = { settled: false, gates: new Set() };
+  states.set(longLived, state);
+  const settle = (open: (gate: Gate) => void) => {
+    state.settled = true;
+    for (const gate of state.gates) open(gate);
+    state.gates.clear();
+  };
+  longLived.then(
+    (value) => settle((gate) => gate.resolve(value)),
+    (error: unknown) => settle((gate) => gate.reject(error)),
+  );
+  return state;
+}
 
 /**
  * Settles like `Promise.race([work, longLived])` without leaving anything
@@ -22,44 +43,28 @@ const states = new WeakMap<Promise<unknown>, LongLivedState>();
  * promise settles. Racing every call against a promise that lives as long
  * as a session or channel therefore keeps every finished race, and the value
  * it settled with, reachable for that whole lifetime. Here `longLived` gets
- * one reaction for its entire life. That reaction settles the calls still
- * waiting when it fires, and each call drops its waiter as soon as it
- * settles itself.
+ * one reaction for its entire life, which settles a per-call gate for each
+ * call still waiting; each call races its work against its own gate and
+ * drops the gate as soon as that race settles.
  */
 export function raceLongLived<T, L>(
   work: PromiseLike<T>,
   longLived: Promise<L>,
 ): Promise<T | L> {
-  let state = states.get(longLived);
-  if (!state) {
-    const created: LongLivedState = { waiters: new Set() };
-    states.set(longLived, created);
-    longLived.then(
-      (value) => {
-        created.settled = { ok: true, value };
-        for (const waiter of created.waiters) waiter.resolve(value);
-        created.waiters.clear();
-      },
-      (error: unknown) => {
-        created.settled = { ok: false, error };
-        for (const waiter of created.waiters) waiter.reject(error);
-        created.waiters.clear();
-      },
-    );
-    state = created;
-  }
+  const state = stateFor(longLived);
   // Reactions on a settled promise run once and are released, so the native
   // race is exact here and retains nothing.
   if (state.settled) return Promise.race([work, longLived]);
-  const { waiters } = state;
-  return new Promise<T | L>((resolve, reject) => {
-    const waiter = {
-      resolve: resolve as (value: unknown) => void,
-      reject,
-    };
-    waiters.add(waiter);
-    Promise.resolve(work)
-      .then(resolve, reject)
-      .finally(() => waiters.delete(waiter));
+  const { gates } = state;
+  let gate!: Gate;
+  const gated = new Promise<L>((resolve, reject) => {
+    gate = { resolve: resolve as (value: unknown) => void, reject };
   });
+  gates.add(gate);
+  // Racing the gate natively keeps Promise.race's tie-breaking: work that has
+  // already settled wins over a closed signal still being delivered.
+  const raced = Promise.race([work, gated]);
+  const release = () => gates.delete(gate);
+  raced.then(release, release);
+  return raced;
 }

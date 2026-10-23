@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import v8 from 'node:v8';
-import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
+import {
+  collectedAfterGc,
+  nativeRaceRetainsValues,
+} from './internal/testUtils.js';
 import { raceLongLived } from './race-long-lived.js';
 
 function deferred<T>() {
@@ -20,45 +22,51 @@ function deferred<T>() {
 }
 
 // Runs a few calls in a frame of its own, so nothing but the returned
-// WeakRef points at the last result once it returns.
+// WeakRef points at the first result once it returns. The first call is the
+// one that sets up the long-lived promise's single reaction.
 async function finishCalls(
   longLived: Promise<never>,
 ): Promise<WeakRef<object>> {
-  let finished: WeakRef<object> | undefined;
+  let first: WeakRef<object> | undefined;
   for (let call = 0; call < 3; call++) {
     const result = { call };
     expect(await raceLongLived(Promise.resolve(result), longLived)).toBe(
       result,
     );
-    finished = new WeakRef(result);
+    first ??= new WeakRef(result);
   }
-  return finished!;
+  return first!;
 }
 
 describe('raceLongLived', () => {
-  it('settles with the work and leaves its result collectable', async () => {
+  it('leaves finished results collectable while the long-lived promise is pending', async ({
+    skip,
+  }) => {
+    skip(
+      !(await nativeRaceRetainsValues()),
+      'native Promise.race does not retain finished values on this runtime',
+    );
     const longLived = deferred<never>();
     const finished = await finishCalls(longLived.promise);
-
-    // `Promise.race([work, longLived.promise])` keeps every result reachable
-    // until longLived settles on Node 22 and 24 and on the Electron runtime
-    // the VS Code companion runs the daemon on (Node 26 happens not to).
-    v8.setFlagsFromString('--expose_gc');
-    const gc = runInNewContext('gc') as () => void;
-    // deref() keeps its target alive until the current job ends, so collect
-    // in a job that has not dereferenced it.
-    const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
-    let collected = false;
-    for (let attempt = 0; attempt < 10 && !collected; attempt++) {
-      await tick();
-      gc();
-      await tick();
-      collected = finished.deref() === undefined;
-    }
-    expect(collected).toBe(true);
+    expect(await collectedAfterGc(finished)).toBe(true);
     // Settling it here keeps the long-lived promise reachable through the
     // check above, as a live session's closed signal is.
     longLived.reject(new Error('closed'));
+  });
+
+  it('lets work that has already settled win, as Promise.race does', async () => {
+    const longLived = deferred<never>();
+    const waiting = raceLongLived(
+      deferred<string>().promise,
+      longLived.promise,
+    );
+    const closed = new Error('closed');
+    longLived.reject(closed);
+    // The long-lived reaction has not run yet in this job.
+    await expect(
+      raceLongLived(Promise.resolve('done'), longLived.promise),
+    ).resolves.toBe('done');
+    await expect(waiting).rejects.toBe(closed);
   });
 
   it('passes through a failure of the work', async () => {

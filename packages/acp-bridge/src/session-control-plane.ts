@@ -200,7 +200,10 @@ import type {
   ChannelWorkExclusions,
   createChannelHarness,
 } from './channel-harness.js';
-import { channelUnavailableReject } from './channel-transport.js';
+import {
+  channelUnavailableReject,
+  raceChannelUnavailable,
+} from './channel-transport.js';
 import { raceLongLived } from './race-long-lived.js';
 import { withTimeout } from './with-timeout.js';
 import { parseBackgroundNotificationTurn } from './bridgeTypes.js';
@@ -5614,10 +5617,11 @@ export function createSessionControlPlane(
               !!worktree,
             );
             onNewSessionDispatch?.();
-            const rawNewSession = Promise.race([
+            const rawNewSession = raceChannelUnavailable(
+              ci.channel,
               ci.connection.newSession(newSessionRequest),
-              channelUnavailableReject(ci.channel, 'during newSession'),
-            ]);
+              'during newSession',
+            );
             const lifecycle: {
               phase: 'active' | 'abandoned';
               resolveSettlement?: () => void;
@@ -9067,27 +9071,6 @@ export function createSessionControlPlane(
       // so without this allow-list the tombstone would silently drop
       // them. Cleared in the matching `finally` below.
       restoreChannel.client.markRestoreInFlight(req.sessionId);
-      // Restore is a low-frequency one-shot path, so we register a
-      // fresh channel-unavailable race per call instead of going
-      // through `getTransportClosedReject` (which exists to keep
-      // sendPrompt's per-session listener count at 1 over the
-      // session's lifetime). The listener is bound to this restore's
-      // race only — once the race settles, no new awaits attach to
-      // it, so there's no listener leak across restores.
-      const transportClosed = channelUnavailableReject(
-        restoreChannel.channel,
-        `during session/${action}`,
-      );
-      // Suppress the dangling rejection if `withTimeout` wins the
-      // race below: `transportClosed` then stays pending, and a
-      // later channel-unavailable settle fires the inner `throw` with
-      // no observer attached. Node 22 logs `unhandledRejection`;
-      // under `--unhandled-rejections=throw` (common in container
-      // deployments) the daemon process crashes. The `Promise.race`
-      // path's own consumer below catches the rejection in the
-      // try/catch, so the suppressed rejection here is the
-      // race-loser case only.
-      transportClosed.catch(() => {});
       let state: BridgeSessionState;
       let replayUpdates: SessionUpdate[] = [];
       let replayPartial: true | undefined;
@@ -9190,7 +9173,11 @@ export function createSessionControlPlane(
             );
           },
         );
-        const observedRestore = Promise.race([rawRestore, transportClosed]);
+        const observedRestore = raceChannelUnavailable(
+          restoreChannel.channel,
+          rawRestore,
+          `during session/${action}`,
+        );
         state = await new Promise<BridgeSessionState>((resolve, reject) => {
           const timer = setTimeout(() => {
             if (restoreLifecycle.phase !== 'active') return;
@@ -12639,7 +12626,8 @@ export function createSessionControlPlane(
               if (!ci.harness.isDying) {
                 await harness.withWorkspaceControl(ci.harness, () =>
                   withTimeout(
-                    Promise.race([
+                    raceChannelUnavailable(
+                      ci.channel,
                       ci.connection.extMethod(
                         SERVE_CONTROL_EXT_METHODS.sessionClose,
                         {
@@ -12649,11 +12637,8 @@ export function createSessionControlPlane(
                             sessionCloseDrainBudgetMs(initTimeoutMs),
                         },
                       ),
-                      channelUnavailableReject(
-                        ci.channel,
-                        'during branchSession cleanup',
-                      ),
-                    ]),
+                      'during branchSession cleanup',
+                    ),
                     initTimeoutMs,
                     'branchSession cleanup',
                   ),
