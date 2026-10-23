@@ -859,6 +859,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     expect(record.run.delivery?.state).toBe('rejected');
   });
 
+  // The 256 real durable commands require over 1,000 filesystem syncs.
   it('enforces the per-run command budget with budget_exhausted', ({
     signal,
   }) => {
@@ -926,7 +927,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     })();
     pendingBudgetTests.push(work);
     return work;
-  }, 30_000);
+  }, 90_000);
 
   it("commits the leader's receipt against an attached run and refetches its reply", async () => {
     const lead = await leadSideSetup();

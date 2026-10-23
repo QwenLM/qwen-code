@@ -71,6 +71,26 @@ const timeoutMinutesOn = (job, ubuntuRunner) => {
   return Number(new Function(`return (${expr});`)());
 };
 
+// The smoke lane keeps the classifier's trust decision and hosted overrides
+// but picks its own architecture, so its `runs-on` cannot be compared with
+// another lane's. Evaluate the real expression the way
+// `.github/scripts/ci-runner-routing.test.mjs` does.
+const runnerOn = (job, ubuntuRunner) => {
+  const expression = String(ci.jobs[job]['runs-on'])
+    .replace(/^\$\{\{\s*/, '')
+    .replace(/\s*\}\}$/, '');
+  return new Function(
+    'needs',
+    'fromJSON',
+    'contains',
+    `return (${expression});`,
+  )(
+    { classify_pr: { outputs: { ubuntu_runner: ubuntuRunner } } },
+    JSON.parse,
+    (labels, label) => labels.includes(label),
+  );
+};
+
 it('gives the shared Linux test lane one ceiling on both pools', () => {
   // The full suite outgrew 60 minutes on hosted runners too: on 2026-10-17,
   // 17 of the 30 hosted runs that ended on their own were cancelled at 60.
@@ -101,8 +121,19 @@ it('keeps lint_and_static sized for cold-cache pool runs', () => {
   expect(timeoutMinutesOn('lint_and_static', '')).toBe(45);
 });
 
-it('routes browser gates like the shared Linux test lane, at the hosted worker count', () => {
-  expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe(ci.jobs.test['runs-on']);
+it('routes the browser smoke to ARM64 independently of the shared Linux test lane', () => {
+  // The lane keeps the classifier's trust decision and hosted overrides, but
+  // it no longer inherits the ordinary Linux fleet's architecture.
+  expect(runnerOn('web_shell_e2e_smoke', ECS_RUNNER)).toEqual([
+    'self-hosted',
+    'linux',
+    'arm64',
+  ]);
+  expect(runnerOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toEqual([
+    'ubuntu-latest',
+  ]);
+  // A missing classifier output (classify_pr skipped) is the hosted routing.
+  expect(runnerOn('web_shell_e2e_smoke', '')).toEqual(['ubuntu-latest']);
   const smoke = ci.jobs.web_shell_e2e_smoke.steps.find(
     (step) => step.name === 'Run web-shell browser smoke',
   );
