@@ -2,6 +2,10 @@
 
 [English](bun-runtime-boundary.md) | [简体中文](bun-runtime-boundary.zh-CN.md)
 
+Runtime follow-up (2026-10-23): this candidate pins npm/private and standalone-preview Bun and its runner contract to **1.4.4**. Earlier **1.3.14** execution evidence retains its original provenance; this version update does not establish new installed or platform acceptance. OpenTUI remains **0.5.10**.
+
+The normal standalone updater matrix passed 152 scenario rows on real Node 24.19 and Bun 1.4.4 hosts (76 each), with verified loopback HTTPS and synthetic unsigned CLI/version archives. Node registry dispatch uses an injected npm executor; Bun probe observability is unavailable, so zero allocations and actual npm subprocess identity are not claimed. This does not close released standalone upgrades or other platforms. That evidence predates local `a28ba265` and this proposal integrating main `949a71e2`; the final installed artifact and platform matrix require new acceptance.
+
 Status: implemented in MYWO-8 S1 (this change). Audience: S2 (Bun PTY), S3
 (runtime compat matrix), S4 (packaging), and qoder's PTY integration work.
 
@@ -84,13 +88,13 @@ bounded delivery and acceptance plan; remaining S3/S4 entries stay pending.
 
 ### Update / install identity (must stay host-Node)
 
-| Site                                                                   | Notes                                                                                                                                              |
-| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/cli/src/utils/managed-npm-update.ts`                         | runs npm's `cli.js` via `process.execPath`; npm **must** run under a Node identity, never the private bundled Bun — keep host Node resolution here |
-| `packages/cli/src/ui/handleAutoUpdate.ts`                              | picks the update command; Node-identity path                                                                                                       |
-| `packages/cli/src/serve/daemon-update-restart.ts`                      | already disabled under Bun (`process.versions['bun']`) and execve-feature-detected                                                                 |
-| `packages/cli/src/utils/installationInfo.ts`                           | defaults npm CLI path resolution to `process.execPath` (host Node)                                                                                 |
-| `scripts/build-standalone-release.js` / `create-standalone-package.js` | pin Bun 1.3.14, five targets, `manifest.json` (`runtime`, version); layout `bun/bin/bun`, `node/bin/node`                                          |
+| Site                                                                   | Notes                                                                                                          |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `packages/cli/src/utils/managed-npm-update.ts`                         | runs npm's `cli.js` via `getNpmNodePath()`; preserve the original Node identity across the private Bun handoff |
+| `packages/cli/src/ui/handleAutoUpdate.ts`                              | picks the update command; Node-identity path                                                                   |
+| `packages/cli/src/serve/daemon-update-restart.ts`                      | already disabled under Bun (`process.versions['bun']`) and execve-feature-detected                             |
+| `packages/cli/src/utils/installationInfo.ts`                           | defaults npm CLI path resolution to `getNpmNodePath()` (original Node)                                         |
+| `scripts/build-standalone-release.js` / `create-standalone-package.js` | pin Bun 1.4.4, five targets, `manifest.json` (`runtime`, version); layout `bun/bin/bun`, `node/bin/node`       |
 
 ### Complete literal call-site audit at the fixed parent
 
@@ -229,7 +233,7 @@ round-trips with explicit shutdown, `--expose-gc`, and
 `--input-type=commonjs --eval`. These are test contracts, not a claim that all
 platforms or packaged artifacts have passed. Windows skips the catchable
 SIGTERM case. An absent Bun binary skips the Bun leg; record the actual
-runtime versions and skips when reporting a run. The shipped Bun 1.3.14 pin
+runtime versions and skips when reporting a run. The shipped Bun 1.4.4 pin
 and standalone artifacts require separate packaging acceptance.
 
 This fixture does not probe `process.execve`, native PTY loading, fd-3 status
@@ -322,7 +326,7 @@ CLI unit tests cover registry selection, Node transport preservation, empty-home
 trust, archive/manifest validation, identity changes, version mismatch, smoke
 isolation, activation and rollback. The real-runtime runner is
 `npm run test:standalone:runtimes`, after building. `PINNED_NODE` and `PINNED_BUN`
-select Node 24.19.0 and Bun 1.3.14; both hosts exercise both payload interpreters
+select Node 24.19.0 and Bun 1.4.4; both hosts exercise both payload interpreters
 with verified local HTTPS. A shipped-layout fixture uses the real installation
 detector and query entry point: Bun reaches the HTTPS registry, while Node
 delegates to the npm executor. Missing or invalid bundled CLI files are rejected
