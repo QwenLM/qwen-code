@@ -151,15 +151,7 @@ function rejectWorkspaceRestrictedWrite(
   key: string,
 ): boolean {
   if (scope !== 'workspace') return false;
-  // A restricted root can be written through a nested path (a `{ section,
-  // key }` restriction is already flattened, but an object-valued root such as
-  // `verifyPr` arrives as `verifyPr.assetsRepo`). Match the root segment too,
-  // or the write persists a key the merge strips and answers 200 anyway.
-  const rootSegment = key.includes('.') ? key.slice(0, key.indexOf('.')) : key;
-  if (
-    WORKSPACE_RESTRICTED_KEYS.has(key) ||
-    WORKSPACE_RESTRICTED_KEYS.has(rootSegment)
-  ) {
+  if (WORKSPACE_RESTRICTED_KEYS.has(key)) {
     res.status(400).json({
       error: `Setting "${key}" is not honored from workspace scope; set it at user scope instead`,
       code: 'workspace_restricted_setting',

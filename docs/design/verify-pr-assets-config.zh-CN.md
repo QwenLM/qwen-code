@@ -17,7 +17,7 @@ Status: implementing with this change.
 ## 方案
 
 - 新增 `verifyPr.assetsRepo` 与 `verifyPr.assetsBranch`，只认 User / System / SystemDefaults 作用域。
-- 把 `verifyPr` 列入 workspace 受限根设置：合并期剥离 workspace 值、告警说明其被忽略，daemon 路由也拒绝对该键的 workspace 写入。
+- 把 `verifyPr` 列入 workspace 受限根设置：合并期剥离 workspace 值、告警说明其被忽略。设置路由本就不把这些键暴露给 workspace 写入，因此真正保护取值的是剥离而不是路由守卫。
 - 把 `QWEN_VERIFY_ASSETS_REPO` 与 `QWEN_VERIFY_ASSETS_BRANCH` 加入"项目 `.env` / `settings.env` 不得提供"的排除集。两者都由仓库控制，而环境加载器先于 settings 桥接执行；若不排除，仓库仍可通过自己 export 变量重定向目标。启动环境、home 作用域 `.env` 与 `verifyPr.*` 仍可设置它们。
 - 启动时 CLI 在这两个变量未被设置的前提下，把它们写入 `QWEN_VERIFY_ASSETS_REPO` / `QWEN_VERIFY_ASSETS_BRANCH`；skill 继续读它已经文档化的变量，一次性的 export 仍然优先。
 - skill 明确三级顺序——flag、变量（export / `.env` / settings）、默认值——并保持发布同意按次给出。

@@ -30,8 +30,9 @@ that never changes between rounds should be configured once.
 - Add `verifyPr.assetsRepo` and `verifyPr.assetsBranch`, honored from User,
   System, and SystemDefaults scopes.
 - List `verifyPr` as a workspace-restricted root, so the merge strips a
-  workspace value, warns that it was ignored, and the daemon route refuses a
-  workspace write to it.
+  workspace value and the warnings channel reports it ignored. The settings
+  route does not offer these keys to workspace writes in the first place, so
+  the strip is what protects the value rather than the route guard.
 - Exclude `QWEN_VERIFY_ASSETS_REPO` and `QWEN_VERIFY_ASSETS_BRANCH` from the
   variables a project `.env` or `settings.env` may supply. Both are
   repository-controlled, and the environment loader applies them before the
