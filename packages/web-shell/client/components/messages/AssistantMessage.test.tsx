@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebShellCustomizationProvider } from '../../customization';
 import { I18nProvider } from '../../i18n';
 import { getSelectedReplyContent } from '../../utils/selectionClipboard';
+import { WebShellPortalRootContext } from '../../portalRoot';
 import {
   TranscriptDocumentExpandedProvider,
   TranscriptRenderModeProvider,
@@ -515,6 +516,58 @@ describe('AssistantMessage streaming markdown', () => {
   });
 });
 
+describe('AssistantMessage footer tooltips', () => {
+  it.each([
+    [
+      'en',
+      [
+        'Copy',
+        'Copy Markdown',
+        'Satisfied',
+        'Not satisfied',
+        'New chat from here',
+      ],
+    ],
+    ['zh-CN', ['复制', '复制 Markdown', '满意', '不满意', '从此处新建对话']],
+  ] as const)(
+    'shows localized tooltips in the Web Shell portal on keyboard focus in %s',
+    async (language, labels) => {
+      const portal = document.createElement('div');
+      document.body.appendChild(portal);
+      try {
+        const container = render(
+          <WebShellPortalRootContext.Provider value={portal}>
+            <AssistantMessage
+              content="answer"
+              showFooterActions
+              showAssistantFeedback
+              showBranchAction
+              onBranchSession={vi.fn()}
+            />
+          </WebShellPortalRootContext.Provider>,
+          language,
+        );
+        expect(container.querySelector('.lucide-split')).not.toBeNull();
+        for (const label of labels) {
+          const button = container.querySelector<HTMLButtonElement>(
+            `button[aria-label="${label}"]`,
+          )!;
+          expect(button).not.toBeNull();
+          expect(button.hasAttribute('title')).toBe(false);
+          await act(async () => button.focus());
+          const tooltip = portal.querySelector('[role="tooltip"]')!;
+          expect(tooltip?.textContent).toBe(label);
+          expect(button.getAttribute('aria-describedby')).toBe(tooltip.id);
+          expect(container.querySelector('[role="tooltip"]')).toBeNull();
+          await act(async () => button.blur());
+        }
+      } finally {
+        portal.remove();
+      }
+    },
+  );
+});
+
 describe('AssistantMessage branch action', () => {
   it('disables the selected action while the branch request is pending', async () => {
     let resolveBranch!: () => void;
@@ -533,7 +586,7 @@ describe('AssistantMessage branch action', () => {
       />,
     );
     const button = container.querySelector<HTMLButtonElement>(
-      'button[title="Branch"]',
+      'button[aria-label="New chat from here"]',
     );
 
     act(() => button?.click());
@@ -560,7 +613,7 @@ describe('AssistantMessage branch action', () => {
         />,
       );
       const button = container.querySelector<HTMLButtonElement>(
-        'button[title="Branch"]',
+        'button[aria-label="New chat from here"]',
       );
 
       await act(async () => {
@@ -640,7 +693,7 @@ describe('AssistantMessage Markdown copy', () => {
           `button[aria-label="${markdownLabel}"]`,
         )!;
         expect(copy.nextElementSibling).toBe(markdown);
-        expect(markdown.title).toBe(markdownLabel);
+        expect(markdown.hasAttribute('title')).toBe(false);
         await act(async () => markdown.click());
         expect(writeText).toHaveBeenCalledWith(content);
         expect(markdown.querySelector('rect')).toBeNull();
@@ -724,7 +777,7 @@ describe('AssistantMessage copy reset timer', () => {
           <AssistantMessage content="copy me" showFooterActions />,
         );
         const button = container.querySelector<HTMLButtonElement>(
-          `button[title="${label}"]`,
+          `button[aria-label="${label}"]`,
         );
         await act(async () => {
           button?.click();
@@ -774,7 +827,7 @@ describe('AssistantMessage copy without the async Clipboard API (issue #9485)', 
           <AssistantMessage content="copy me" showFooterActions />,
         );
         const button = container.querySelector<HTMLButtonElement>(
-          `button[title="${label}"]`,
+          `button[aria-label="${label}"]`,
         );
         expect(button).not.toBeNull();
 
@@ -800,7 +853,7 @@ describe('AssistantMessage copy without the async Clipboard API (issue #9485)', 
 
 describe('AssistantMessage satisfied / not-satisfied marks', () => {
   const find = (container: HTMLElement, title: string) =>
-    container.querySelector<HTMLButtonElement>(`button[title="${title}"]`);
+    container.querySelector<HTMLButtonElement>(`button[aria-label="${title}"]`);
 
   it('offers no marks unless the host opts in', () => {
     const container = render(
@@ -993,7 +1046,9 @@ describe('AssistantMessage agent replies', () => {
     );
 
     expect(container.querySelector('button[aria-label="Copy"]')).not.toBeNull();
-    expect(container.querySelector('button[aria-label="Branch"]')).toBeNull();
+    expect(
+      container.querySelector('button[aria-label="New chat from here"]'),
+    ).toBeNull();
     expect(container.querySelector('button[aria-pressed]')).toBeNull();
     expect(container.textContent).toContain('Failed');
   });

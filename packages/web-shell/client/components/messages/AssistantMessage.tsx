@@ -7,7 +7,12 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from 'react';
-import { LightbulbIcon, ThumbsDownIcon, ThumbsUpIcon } from 'lucide-react';
+import {
+  LightbulbIcon,
+  SplitIcon,
+  ThumbsDownIcon,
+  ThumbsUpIcon,
+} from 'lucide-react';
 import { Markdown } from './Markdown';
 import { SelectionCopyMenu } from './SelectionCopyMenu';
 import { TurnSources } from '../sources/TurnSources';
@@ -38,6 +43,12 @@ import { SquadTag } from './squad-tag';
 import { AgentMessageDetails, isBlankAgentText } from './agent-message-details';
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '../ui/tooltip';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './AssistantMessage.module.css';
 
@@ -232,76 +243,108 @@ export const AssistantMessage = memo(function AssistantMessage({
         <div className={styles.customFooter}>{customFooter}</div>
       )}
       {showFooter && (
-        <div
-          className={`${styles.messageFooter}${footerAlwaysVisible ? ` ${styles.messageFooterVisible}` : ''}`}
-        >
-          {showFooterActions && (
-            <>
-              <button
-                type="button"
-                className={styles.copyButton}
-                title={t('assistant.copy')}
-                aria-label={t('assistant.copy')}
-                onClick={() => handleCopy(flashCopied)}
-              >
-                {copied ? <CheckIcon /> : <CopyIcon />}
-              </button>
-              <button
-                type="button"
-                className={styles.copyButton}
-                title={t('assistant.copyMarkdown')}
-                aria-label={t('assistant.copyMarkdown')}
-                onClick={() => handleCopy(flashMarkdownCopied)}
-              >
-                {markdownCopied ? <CheckIcon /> : <MarkdownIcon />}
-              </button>
-            </>
-          )}
-          {showFooterActions && showAssistantFeedback && (
-            <>
-              <button
-                type="button"
-                className={feedbackButtonClass('up')}
-                title={t('assistant.satisfied')}
-                aria-label={t('assistant.satisfied')}
-                aria-pressed={assistantFeedbackRating === 'up'}
-                onClick={(event) => handleFeedback('up', event)}
-              >
-                <ThumbsUpIcon />
-              </button>
-              <button
-                type="button"
-                className={feedbackButtonClass('down')}
-                title={t('assistant.dissatisfied')}
-                aria-label={t('assistant.dissatisfied')}
-                aria-pressed={assistantFeedbackRating === 'down'}
-                onClick={(event) => handleFeedback('down', event)}
-              >
-                <ThumbsDownIcon />
-              </button>
-            </>
-          )}
-          {showFooterActions && showBranchAction && onBranchSession && (
-            <button
-              type="button"
-              className={styles.copyButton}
-              title={t('assistant.branch')}
-              aria-label={t('assistant.branch')}
-              disabled={branchPending}
-              onClick={() => void handleBranch()}
-            >
-              <BranchIcon />
-            </button>
-          )}
-          {turnSources?.length ? (
-            <TurnSources sources={turnSources} onOpen={onSourceOpen} />
-          ) : null}
-          {showFooterActions && timestamp !== undefined && (
-            <span className={styles.footerTime} aria-hidden="true">
-              {formatTimestamp(timestamp)}
-            </span>
-          )}
-        </div>
+        <TooltipProvider delayDuration={300}>
+          <div
+            className={`${styles.messageFooter}${footerAlwaysVisible ? ` ${styles.messageFooterVisible}` : ''}`}
+          >
+            {showFooterActions && (
+              <>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className={styles.copyButton}
+                      aria-label={t('assistant.copy')}
+                      onClick={() => handleCopy(flashCopied)}
+                    >
+                      {copied ? <CheckIcon /> : <CopyIcon />}
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" variant="black">
+                    {t('assistant.copy')}
+                  </TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className={styles.copyButton}
+                      aria-label={t('assistant.copyMarkdown')}
+                      onClick={() => handleCopy(flashMarkdownCopied)}
+                    >
+                      {markdownCopied ? <CheckIcon /> : <MarkdownIcon />}
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" variant="black">
+                    {t('assistant.copyMarkdown')}
+                  </TooltipContent>
+                </Tooltip>
+              </>
+            )}
+            {showFooterActions && showAssistantFeedback && (
+              <>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className={feedbackButtonClass('up')}
+                      aria-label={t('assistant.satisfied')}
+                      aria-pressed={assistantFeedbackRating === 'up'}
+                      onClick={(event) => handleFeedback('up', event)}
+                    >
+                      <ThumbsUpIcon />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" variant="black">
+                    {t('assistant.satisfied')}
+                  </TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className={feedbackButtonClass('down')}
+                      aria-label={t('assistant.dissatisfied')}
+                      aria-pressed={assistantFeedbackRating === 'down'}
+                      onClick={(event) => handleFeedback('down', event)}
+                    >
+                      <ThumbsDownIcon />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" variant="black">
+                    {t('assistant.dissatisfied')}
+                  </TooltipContent>
+                </Tooltip>
+              </>
+            )}
+            {showFooterActions && showBranchAction && onBranchSession && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className={`${styles.copyButton} ${styles.branchButton}`}
+                    aria-label={t('assistant.branch')}
+                    disabled={branchPending}
+                    onClick={() => void handleBranch()}
+                  >
+                    <SplitIcon strokeWidth={1.5} aria-hidden="true" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="top" variant="black">
+                  {t('assistant.branch')}
+                </TooltipContent>
+              </Tooltip>
+            )}
+            {turnSources?.length ? (
+              <TurnSources sources={turnSources} onOpen={onSourceOpen} />
+            ) : null}
+            {showFooterActions && timestamp !== undefined && (
+              <span className={styles.footerTime} aria-hidden="true">
+                {formatTimestamp(timestamp)}
+              </span>
+            )}
+          </div>
+        </TooltipProvider>
       )}
     </div>
   );
@@ -360,32 +403,6 @@ function CheckIcon() {
         strokeLinejoin="round"
         strokeWidth="1.6"
       />
-    </svg>
-  );
-}
-
-function BranchIcon() {
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true">
-      <path
-        d="M5 3.5v5.2c0 2.1 1.7 3.8 3.8 3.8H11"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.35"
-      />
-      <path
-        d="M5 8.2h3.2c1.5 0 2.8-1.2 2.8-2.8V4"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.35"
-      />
-      <circle cx="5" cy="3.5" r="1.5" fill="currentColor" />
-      <circle cx="11" cy="4" r="1.5" fill="currentColor" />
-      <circle cx="11" cy="12.5" r="1.5" fill="currentColor" />
     </svg>
   );
 }
