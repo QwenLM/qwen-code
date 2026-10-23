@@ -394,6 +394,34 @@ async function drain<T>(gen: AsyncGenerator<T>): Promise<T[]> {
 }
 
 describe('livePromptEvents', () => {
+  it('explicit Retry reuses prepared parts without rereading mentions or rebridging media', async () => {
+    const sendMessageStream = vi.fn(function* () {
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const content = [{ text: '@owned.txt already expanded' }, imagePart];
+    await drain(
+      livePromptEvents(config, 'unused draft', undefined, {
+        promptId: 'same-id',
+        submittedPrompt: '@owned.txt',
+        humanInput: { text: 'original' },
+        retry: {
+          content,
+          modelOverride: 'skill-model',
+          inlineModelOverride: false,
+        },
+      }),
+    );
+    expect(sendMessageStream).toHaveBeenCalledExactlyOnceWith(
+      content,
+      expect.any(AbortSignal),
+      'same-id',
+      { type: SendMessageType.Retry, modelOverride: 'skill-model' },
+    );
+    expect(atMocks.calls).toHaveLength(0);
+    expect(visionMocks.run).not.toHaveBeenCalled();
+  });
+
   /** A `@path` read as the expander reports it (ink's tool_group entry). */
   const readDisplay = (
     overrides: Partial<IndividualToolCallDisplay> = {},

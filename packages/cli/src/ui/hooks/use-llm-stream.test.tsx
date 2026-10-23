@@ -52,6 +52,7 @@ import {
   runWithRuntimeContentGenerator,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
+import { FinishReason } from '@google/genai';
 import type { CommandContext } from '../commands/types.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { HistoryItem, SlashCommandProcessorResult } from '../types.js';
@@ -243,6 +244,79 @@ vi.mock('./slashCommandProcessor.js', () => ({
 
 // --- Tests for useLlmStream Hook ---
 describe('useLlmStream', () => {
+  it('does not dispatch a cancelled slash after its old logger resolves into a held successor', async () => {
+    let releaseOldLog!: () => void;
+    const oldLog = new Promise<void>((resolve) => {
+      releaseOldLog = resolve;
+    });
+    const logMessage = vi
+      .fn()
+      .mockImplementation((_sender, text) =>
+        text === '/rewind' ? oldLog : Promise.resolve(),
+      );
+    let releaseSuccessor!: () => void;
+    const heldSuccessor = new Promise<void>((resolve) => {
+      releaseSuccessor = resolve;
+    });
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield {
+          type: ServerLlmEventType.Content,
+          value: 'successor stays active',
+        };
+        await heldSuccessor;
+        yield {
+          type: ServerLlmEventType.Finished,
+          value: { reason: FinishReason.STOP, usageMetadata: undefined },
+        };
+      })(),
+    );
+    mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
+    const { result } = renderTestHook([], undefined, undefined, undefined, {
+      logMessage,
+    } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+    let oldRequest!: Promise<void>;
+    let successorRequest: Promise<void> | undefined;
+    await act(async () => {
+      oldRequest = result.current.submitQuery('/rewind');
+    });
+    await waitFor(() =>
+      expect(logMessage).toHaveBeenCalledWith(
+        MessageSenderType.USER,
+        '/rewind',
+      ),
+    );
+    act(() => result.current.cancelOngoingRequest());
+    await waitFor(() =>
+      expect(result.current.streamingState).toBe(StreamingState.Idle),
+    );
+    try {
+      await act(async () => {
+        successorRequest = result.current.submitQuery('successor prompt');
+      });
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledOnce());
+      const successorSignal = mockSendMessageStream.mock
+        .calls[0]?.[1] as AbortSignal;
+      expect(successorSignal.aborted).toBe(false);
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      await act(async () => {
+        releaseOldLog();
+        await oldRequest;
+      });
+      expect(mockHandleSlashCommand).not.toHaveBeenCalled();
+      expect(mockSendMessageStream).toHaveBeenCalledOnce();
+      expect(successorSignal.aborted).toBe(false);
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+    } finally {
+      releaseOldLog();
+      releaseSuccessor();
+      await act(async () => {
+        await oldRequest;
+        await successorRequest;
+      });
+    }
+  });
+
   let mockAddItem: Mock;
   let mockConfig: Config;
   let mockOnDebugMessage: Mock;
@@ -17656,6 +17730,95 @@ describe('useLlmStream', () => {
           24,
         ),
       );
+
+    it('keeps a held shell responding after submission preprocessing settles', async () => {
+      let finishShell!: () => void;
+      const shellDone = new Promise<void>((resolve) => {
+        finishShell = resolve;
+      });
+      const handleShellCommand = vi.fn(() => {
+        vi.mocked(useShellCommandProcessor).mock.lastCall?.[2](shellDone);
+        return true;
+      });
+      vi.mocked(useShellCommandProcessor).mockReturnValue({
+        handleShellCommand,
+        activeShellPtyId: null,
+      });
+      const { result } = renderWithShellMode(false);
+      await act(async () => {
+        await result.current.submitQuery(
+          'held shell',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: true },
+        );
+      });
+      expect(handleShellCommand).toHaveBeenCalledOnce();
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      await act(async () => {
+        finishShell();
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('does not let a cancelled shell completion clear a held successor', async () => {
+      let finishOld!: () => void;
+      let finishNew!: () => void;
+      const oldDone = new Promise<void>((resolve) => {
+        finishOld = resolve;
+      });
+      const newDone = new Promise<void>((resolve) => {
+        finishNew = resolve;
+      });
+      const handleShellCommand = vi.fn(
+        (query: PartListUnion, _signal: AbortSignal) => {
+          vi.mocked(useShellCommandProcessor).mock.lastCall?.[2](
+            query === 'old shell' ? oldDone : newDone,
+          );
+          return true;
+        },
+      );
+      vi.mocked(useShellCommandProcessor).mockReturnValue({
+        handleShellCommand,
+        activeShellPtyId: null,
+      });
+      const { result } = renderWithShellMode(false);
+      await act(async () => {
+        await result.current.submitQuery(
+          'old shell',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: true },
+        );
+      });
+      const oldSignal = handleShellCommand.mock.calls[0][1];
+      expect(oldSignal.aborted).toBe(false);
+      act(() => result.current.cancelOngoingRequest());
+      expect(oldSignal.aborted).toBe(true);
+      await act(async () => {
+        await result.current.submitQuery(
+          'new shell',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: true },
+        );
+      });
+      expect(handleShellCommand).toHaveBeenCalledTimes(2);
+      const newSignal = handleShellCommand.mock.calls[1][1];
+      await act(async () => {
+        finishOld();
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      expect(newSignal.aborted).toBe(false);
+      act(() => result.current.cancelOngoingRequest());
+      expect(newSignal.aborted).toBe(true);
+      await act(async () => {
+        finishNew();
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+    });
 
     it('routes to the shell when the entry was submitted in shell mode, even if shell mode is off at drain', async () => {
       const handleShellCommand = vi.fn().mockReturnValue(true);
