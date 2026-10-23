@@ -59,6 +59,12 @@ describe('slowHostBudgetMs', () => {
     expect(slowHostBudgetMs(10_000, 45_000)).toBe(10_000);
   });
 
+  it('keeps the fast budget when RUNNER_NAME is present but not the ecs pool', () => {
+    process.env['RUNNER_NAME'] = 'GitHub Actions 7';
+    vi.mocked(os.loadavg).mockReturnValue([2, 0, 0]);
+    expect(slowHostBudgetMs(10_000, 45_000)).toBe(10_000);
+  });
+
   it('uses the slow budget on the ecs-qwen pool', () => {
     process.env['RUNNER_NAME'] = 'ecs-qwen-runner-64c-01';
     expect(slowHostBudgetMs(10_000, 45_000)).toBe(45_000);
