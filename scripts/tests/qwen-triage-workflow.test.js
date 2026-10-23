@@ -5232,6 +5232,8 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('A published filename is spent');
     // A contents PUT cannot create the branch the first upload needs.
     expect(flat).toContain('git/refs');
+    // ...and the sha to create it from is looked up in THAT repository.
+    expect(flat).toContain('.object.sha');
     // The deliverables are the skill's, not the maintainer's list.
     expect(flat).toContain('do not ask the maintainer to restate them');
   });

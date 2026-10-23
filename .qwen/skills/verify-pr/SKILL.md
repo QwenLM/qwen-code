@@ -216,8 +216,13 @@ existing assets branches already use — and create it when absent, because the
 upload cannot: a contents PUT commits onto an existing ref and answers `422
 Branch not found` for a branch that does not exist yet. GET
 `repos/<assets-repo>/git/ref/heads/<branch>` and, only on a 404, POST
-`repos/<assets-repo>/git/refs` with `ref=refs/heads/<branch>` and the default
-branch's head sha before the first upload. Never fall back to
+`repos/<assets-repo>/git/refs` with `ref=refs/heads/<branch>` and the head sha
+of that repository's default branch — `gh api repos/<assets-repo> --jq
+.default_branch`, then `gh api
+repos/<assets-repo>/git/ref/heads/<default> --jq .object.sha` — before the
+first upload. A 404 on that second call means the assets repository has no
+commits yet: say so instead of creating the ref from a guessed sha. Never fall
+back to
 `origin` for the host: a contributor's fork is not a publishing target. A
 maintainer with a stable host sets the two variables once instead of passing
 the flags every round; the `verifyPr.assetsRepo` and `verifyPr.assetsBranch`
