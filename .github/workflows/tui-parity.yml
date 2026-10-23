@@ -208,4 +208,4 @@ jobs:
         with:
           name: 'installed-npm-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}'
           path: '${{ runner.temp }}/qwen-installed-${{ github.run_id }}-${{ github.run_attempt }}'
-          if-no-files-found: error
+          if-no-files-found: 'error'
