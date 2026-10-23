@@ -340,13 +340,14 @@ the command is proposed and checked again where it runs.
   any of this, an explicit deny rule for the gate as a `monitor` command
   refuses the call in every mode, a confirmed dialog included: the runner
   checks that deny first at every fire, so the task could only ever be
-  blocked. A gate that is a shell wrapper keeps every command inside its script:
-  anything after the script that starts another command (a newline, `;`,
-  `&`, `|`, a parenthesis, a backtick or `$(`) is refused. The rules read
-  the script and what follows as one command line, which is what `Monitor`
-  spawns; a gate runs the text as written, so the next command would run on
-  its own, and a script ending in `\`, an open quote or a here-document
-  start would hide it from the rules.
+  blocked. A gate must be the command itself, not a shell wrapper around it
+  (`bash -c '…'`, also behind env assignments): the rules read a wrapper's
+  script unquoted and rebuilt into one line, which is what `Monitor`
+  spawns, while a gate runs the text as written, and the two differ in ways
+  no rebuilding keeps up with (adjacent quotes ending the script early, a
+  separator glued to it, a trailing `\`, an open quote, a command after
+  it). A gate already runs in a shell, so the wrapper adds nothing; the
+  check is that the normalization leaves the gate exactly as written.
 - **Written by the user (Web Shell form, a hand-edited tasks file).** Trusted
   like the permission rules themselves: the file lives under the Qwen home
   next to the settings that hold those rules, and a process that can write it

@@ -28,7 +28,6 @@ import { getErrorMessage } from '../utils/errors.js';
 import {
   backgroundsAnyPart,
   normalizeMonitorCommand,
-  runsMoreAfterWrapperScript,
   runsOnlyComments,
 } from '../utils/shell-utils.js';
 import { extractCommandRules } from '../utils/shellAstParser.js';
@@ -133,13 +132,6 @@ export function gateCommandError(gate: unknown): string | null {
   if (gate.includes('\0')) {
     return 'must not contain a NUL character';
   }
-  // The permission rules read a wrapper's script and what follows it as one
-  // command line, while the gate runs what follows a separator as a
-  // command of its own: a script ending in `\`, an open quote or a
-  // here-document start would hide that command from the rules.
-  if (runsMoreAfterWrapperScript(gate)) {
-    return "must keep every command inside the shell wrapper's script";
-  }
   // A shell runs a comment as nothing: exit 0, no stdout. Explicit no-ops
   // such as `true` and `:` stay accepted.
   if (runsOnlyComments(gate)) {
@@ -147,6 +139,15 @@ export function gateCommandError(gate: unknown): string | null {
   }
   if (backgroundsAnyPart(gate)) {
     return 'must not background any part of the command with "&"';
+  }
+  // The permission rules see the gate as the Monitor normalization rebuilds
+  // it, while the gate runs as written: a shell wrapper's script unquoted
+  // and joined into one line can differ from what the shell runs (adjacent
+  // quotes, a trailing `\`, an open quote, a command after the script), so
+  // a gate must be a command the normalization leaves as it is. A gate
+  // already runs in a shell; the wrapper adds nothing.
+  if (normalizeMonitorCommand(gate).safetyCommand !== gate.trim()) {
+    return 'must be the command itself, not wrapped in a shell such as `bash -c`';
   }
   return null;
 }

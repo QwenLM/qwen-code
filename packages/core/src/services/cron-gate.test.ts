@@ -622,6 +622,34 @@ describe('gateCommandError', () => {
       '# don\'t\nbash -c "x \\" #\\" ; y &"',
       'must not background',
     ],
+    // A wrapper's script, unquoted and rebuilt into one line for the rules,
+    // can differ from what the shell runs: adjacent quotes end the script
+    // early, so the rules saw `cat` while the shell ran `touch`.
+    [
+      'a wrapper script spliced from adjacent quotes',
+      `bash -c 'cat /etc/hostname'";touch /tmp/x;"''`,
+      'not wrapped in a shell',
+    ],
+    [
+      'a command glued to the end of a wrapper script',
+      "bash -c 'echo hi';touch /tmp/x",
+      'not wrapped in a shell',
+    ],
+    [
+      'a substitution glued between quotes of a wrapper script',
+      "bash -c 'cat /etc/hostname '$(touch${IFS}/tmp/x)''",
+      'not wrapped in a shell',
+    ],
+    [
+      'a plain wrapper',
+      "bash -c './probe.sh --gate'",
+      'not wrapped in a shell',
+    ],
+    [
+      'an env-prefixed wrapper',
+      'LD_PRELOAD=/tmp/x.so bash -lc "./probe.sh"',
+      'not wrapped in a shell',
+    ],
     // The cost of reading comments too: these never background, but the
     // lexical check cannot tell.
     [
@@ -657,7 +685,7 @@ describe('gateCommandError', () => {
     [
       'a command on the line after a wrapper script',
       "bash -c 'echo probe \\'\ntouch /tmp/x",
-      'inside the shell wrapper',
+      'not wrapped in a shell',
     ],
     // Whitespace bash does not count as a blank still leaves the newline a
     // separator.
@@ -665,23 +693,23 @@ describe('gateCommandError', () => {
       (blank): [string, string, string] => [
         `a command after a wrapper script and ${JSON.stringify(blank)} then a newline`,
         `bash -c 'echo hi'${blank}\nrm -rf /tmp/x`,
-        'inside the shell wrapper',
+        'not wrapped in a shell',
       ],
     ),
     [
       'a command after a wrapper script with an open quote',
       "bash -c 'echo \"' ; rm -rf /tmp/x",
-      'inside the shell wrapper',
+      'not wrapped in a shell',
     ],
     [
       'a command chained after a wrapper script',
       "bash -c '# comment' && printf 'ready\\n'",
-      'inside the shell wrapper',
+      'not wrapped in a shell',
     ],
     [
       'a wrapper comment, a newline, then only a comment',
       "bash -c '#'\n# only a comment",
-      'inside the shell wrapper',
+      'not only a comment',
     ],
     // Words after the script are its positional parameters.
     [

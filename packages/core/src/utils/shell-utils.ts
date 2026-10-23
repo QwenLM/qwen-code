@@ -1630,24 +1630,6 @@ export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
 }
 
 /**
- * Whether `command` is a shell wrapper with more after its script than the
- * script's positional words: a separator (a newline, `;`, `&`, `|`, a
- * parenthesis, a backtick or `$(`) that starts another command. The Monitor
- * normalization reads the script and what follows it as one command line,
- * which is what Monitor itself spawns; a command run as written (a
- * scheduled-task gate) runs what follows as a command of its own, which a
- * script ending in `\`, an open quote or a here-document start can hide
- * from that reading.
- */
-export function runsMoreAfterWrapperScript(command: string): boolean {
-  const { wrapperTokens, innerArgsSuffix } = parseMonitorShellWrapper(command);
-  return (
-    wrapperTokens !== undefined &&
-    /[;&|()\n\r`]|\$\(/.test(innerArgsSuffix ?? '')
-  );
-}
-
-/**
  * Whether `command` runs nothing but comments: every line blank or a `#`
  * comment, or a shell wrapper whose script does (checked the same way, so
  * nested wrappers too) with nothing after that script. Anything after the

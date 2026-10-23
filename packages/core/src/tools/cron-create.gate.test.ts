@@ -290,10 +290,7 @@ describe('CronCreateTool gate', () => {
   );
 
   it.each([
-    "bash -c './probe.sh --gate'",
     'FOO=1 ./probe.sh',
-    'LD_PRELOAD=/tmp/x.so bash -lc "./probe.sh"',
-    "bash   -c './probe.sh'",
     '  ./probe.sh  ',
     "timeout 10 bash -c './probe.sh --gate'",
     "gh api 'repos/o/r/pulls?state=open&per_page=5'",
@@ -445,6 +442,18 @@ describe('CronCreateTool gate', () => {
       'stored task cron-old without its gate, and removing it failed (EACCES)',
     );
     expect(result.error?.message).toContain('until deleted with cron_delete');
+  });
+
+  it('refuses a gate wrapped in a shell, whose rebuilt script the rules would read', () => {
+    // Adjacent quotes end the script early: the rules would see `cat` and
+    // the shell would run `touch`.
+    expect(() =>
+      tool.build({
+        ...params,
+        gate: `bash -c 'cat /etc/hostname'";touch /tmp/x;"''`,
+      }),
+    ).toThrow('not wrapped in a shell');
+    expect(config._scheduler.list()).toHaveLength(0);
   });
 
   it('rejects a gate on a one-shot task, which a quiet gate would consume', async () => {
