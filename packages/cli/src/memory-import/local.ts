@@ -5,6 +5,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { proposeMemoryImport } from '@qwen-code/qwen-code-core/memory/import-model.js';
+import { validateAuthMethod } from '../config/auth.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
 import { getAuthTypeFromEnv } from '../utils/modelConfigUtils.js';
@@ -44,6 +45,8 @@ export async function createLocalMemoryImportService(): Promise<MemoryImportServ
     throw new Error(
       `The configured auth type is ${enforcedType}, but the current auth type is ${authType}. Please re-authenticate with the correct type.`,
     );
+  const invalid = validateAuthMethod(authType, config);
+  if (invalid) throw new Error(invalid);
   await config.refreshAuth(authType, true);
   return new MemoryImportService({
     projectRoot: config.getProjectRoot(),

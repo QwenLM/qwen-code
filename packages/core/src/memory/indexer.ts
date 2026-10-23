@@ -22,6 +22,7 @@ import {
 } from './paths.js';
 import { resolveTrustedMemoryRoot } from './trusted-memory-filesystem.js';
 import {
+  isImportedMemoryDocument,
   scanAllAutoMemoryTopicDocumentsFromRoot,
   scanAutoMemoryTopicDocuments,
   scanTeamAutoMemoryTopicDocuments,
@@ -242,12 +243,11 @@ export function buildManagedAutoMemoryIndex(
     'updatedAt' | 'lastDreamAt' | 'lastDreamSessionId'
   >,
 ): string {
-  const imported = (doc: ScannedAutoMemoryDocument) =>
-    doc.scope === 'user' && doc.relativePath.startsWith('imported/');
   const ordered = [...docs].sort(
-    (a, b) => Number(imported(a)) - Number(imported(b)),
+    (a, b) =>
+      Number(isImportedMemoryDocument(a)) - Number(isImportedMemoryDocument(b)),
   );
-  const firstImported = ordered.findIndex(imported);
+  const firstImported = ordered.findIndex(isImportedMemoryDocument);
   return assembleIndex(
     ordered.map((doc) => docIndexLine(doc)),
     firstImported < 0 ? 0 : firstImported,

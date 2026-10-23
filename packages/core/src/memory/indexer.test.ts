@@ -285,6 +285,37 @@ describe('managed auto-memory indexer', () => {
     },
   );
 
+  it('keeps native project memory ahead of imported project memory in the index', () => {
+    const doc = (
+      relativePath: string,
+      title: string,
+      mtimeMs: number,
+    ): Parameters<typeof buildManagedAutoMemoryIndex>[0][number] => ({
+      scope: 'project',
+      type: 'project',
+      filePath: `/tmp/project/${relativePath}`,
+      relativePath,
+      filename: path.basename(relativePath),
+      title,
+      description: title,
+      category: 'uncategorized',
+      keywords: [],
+      usageScenarios: [],
+      body: title,
+      mtimeMs,
+    });
+    const docs = [
+      ...Array.from({ length: 210 }, (_, index) =>
+        doc(`imported/group/${index}.md`, `Imported${index}`, 2_000 + index),
+      ),
+      doc('native.md', 'Native project memory', 1),
+    ];
+
+    const index = buildManagedAutoMemoryIndex(docs);
+
+    expect(index).toContain('native.md');
+  });
+
   it('formats a compact file-based MEMORY.md index view', () => {
     const content = buildManagedAutoMemoryIndex([
       {

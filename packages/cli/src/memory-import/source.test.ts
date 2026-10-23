@@ -85,6 +85,60 @@ describe('Codex source preview', () => {
     expect(crOnly.sections).toHaveLength(1);
     expect(crOnly.sections[0].content).toContain('Keep this fact.');
   });
+  it('normalizes setext and closed ATX headings before scope classification', () => {
+    const project = previewSource(
+      source('/home/u/b\n---------\ncwd=/home/u/b\nfact\n'),
+    );
+    expect(project.sections[0].title).toBe('/home/u/b');
+    expect(project.sections[0].suggestedScope).toBe('project');
+    expect(project.sections[0].sourceProject).toBe('/home/u/b');
+
+    const user = previewSource({
+      version: 1,
+      source: 'codex',
+      files: [
+        {
+          path: 'memory_summary.md',
+          content: 'User preferences\n----------------\nPrefer concise.\n',
+        },
+      ],
+    });
+    expect(user.sections[0].title).toBe('User preferences');
+    expect(user.sections[0].suggestedScope).toBe('user');
+
+    const closed = previewSource(source('## Foo ##\nFact.\n'));
+    expect(closed.sections[0].title).toBe('Foo');
+  });
+  it('does not treat prose after a cwd token as a project path', () => {
+    const prose = previewSource(
+      source('# Topic\ncwd=/home/u/proj: the main repo\nFact.\n'),
+    );
+    expect(prose.sections[0].suggestedScope).toBe('unassigned');
+
+    const heading = previewSource(
+      source('## /home/u/proj is the backend\nFact.\n'),
+    );
+    expect(heading.sections[0].suggestedScope).toBe('unassigned');
+  });
+  it('unifies trailing punctuation and keeps quoted paths with spaces', () => {
+    const variants = previewSource(
+      source(
+        '# A\ncwd=/home/u/proj\nA.\n# B\ncwd=/home/u/proj.\nB.\n# C\ncwd: /home/u/proj/\nC.\n',
+      ),
+    );
+    expect(variants.groups).toHaveLength(1);
+    expect(variants.sections.map((s) => s.sourceProject)).toEqual([
+      '/home/u/proj',
+      '/home/u/proj',
+      '/home/u/proj',
+    ]);
+
+    const quoted = previewSource(
+      source('# Topic\ncwd=`/home/u/my project`\nFact.\n'),
+    );
+    expect(quoted.sections[0].suggestedScope).toBe('project');
+    expect(quoted.sections[0].sourceProject).toBe('/home/u/my project');
+  });
   it('leaves unknown and conflicting scopes unassigned', () => {
     const preview = previewSource(
       source(

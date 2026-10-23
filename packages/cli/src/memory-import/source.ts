@@ -132,23 +132,60 @@ export function validateSource(value: unknown): ImportSource {
   };
 }
 const parser = unified().use(remarkParse);
+function headingTitle(raw: string): string {
+  const atx = raw.match(/^ {0,3}#{1,6}(?:[\t ]+|$)/);
+  if (atx)
+    return raw
+      .slice(atx[0].length)
+      .replace(/[\t ]+#+[\t ]*$/, '')
+      .trim();
+  // A setext heading's slice includes its underline on the next line.
+  return raw.split(/\r\n|[\r\n]/, 1)[0]!.trim();
+}
 function scopeFor(
   content: string,
   title: string,
   summary: boolean,
 ): Pick<ImportSection, 'suggestedScope' | 'sourceProject' | 'reason'> {
-  const scopes = [
-    ...content.matchAll(
-      /(?:^|[\s;(])cwd\s*[=:]\s*(?:`([^`\n]+)`|([^\r\n,;()]+))/gim,
-    ),
-  ].map((m) => (m[1] ?? m[2]).trim());
-  if (/^(?:\/|[A-Za-z]:[\\/])/.test(title.trim()))
-    scopes.push(title.trim().replace(/^`|`$/g, ''));
-  const unique = [...new Set(scopes.map((s) => s.replace(/[\\/]+$/, '')))];
+  const scopes: Array<{ value: string; quoted: boolean; prose: boolean }> = [];
+  for (const match of content.matchAll(
+    /(?:^|[\s;(])cwd\s*[=:]\s*(?:`([^`\n]+)`|([^\r\n,;()\s]+))/gim,
+  )) {
+    if (match[1] !== undefined) {
+      scopes.push({ value: match[1].trim(), quoted: true, prose: false });
+      continue;
+    }
+    const trailing = content
+      .slice(match.index + match[0].length)
+      .split(/\r\n|[\r\n]/, 1)[0]!
+      .trim();
+    scopes.push({
+      value: match[2].trim(),
+      quoted: false,
+      // The unquoted form ends at whitespace; prose after the value means the
+      // capture is not a path.
+      prose: /[^\s,;()]/.test(trailing),
+    });
+  }
+  const heading = title.trim();
+  if (/^(?:\/|[A-Za-z]:[\\/])/.test(heading))
+    scopes.push({
+      value: heading.replace(/^`|`$/g, ''),
+      quoted: false,
+      prose: false,
+    });
+  const strip = (value: string) =>
+    value.replace(/[\\/]+$/, '').replace(/[.:!?'"]+$/, '');
+  const unique = [...new Set(scopes.map((scope) => strip(scope.value)))];
   if (
     unique.length === 1 &&
     /^(?:\/|[A-Za-z]:[\\/])/.test(unique[0]) &&
-    !/[*?{}[\]\p{Cc}]|\s(?:and|or)\s|\bcwd\s*[=:]/u.test(unique[0])
+    scopes.every(
+      (scope) =>
+        !scope.prose &&
+        !/[*?{}[\]\p{Cc}]|\bcwd\s*[=:]/u.test(scope.value) &&
+        (scope.quoted || !/\s/.test(scope.value)),
+    )
   )
     return {
       suggestedScope: 'project',
@@ -229,10 +266,12 @@ export function previewSource(input: unknown): ImportPreview {
         offset: node.position!.start.offset!,
         line: node.position!.start.line,
         depth: node.depth as number,
-        title: file.content
-          .slice(node.position!.start.offset!, node.position!.end.offset!)
-          .replace(/^#+\s*/, '')
-          .trim(),
+        title: headingTitle(
+          file.content.slice(
+            node.position!.start.offset!,
+            node.position!.end.offset!,
+          ),
+        ),
         preface: file.content
           .slice(
             node.position!.start.offset!,
