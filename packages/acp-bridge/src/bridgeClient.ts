@@ -23,6 +23,7 @@ import { RequestError } from '@agentclientprotocol/sdk';
 import {
   APPROVAL_MODES,
   isValidCronTaskRoutingId,
+  MAX_CRON_GATE_CHARS,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
   SESSION_PR_URL_MAX_LENGTH,
 } from '@qwen-code/qwen-code-core';
@@ -2369,6 +2370,20 @@ export class BridgeClient implements Client {
         '`recurring` must be a boolean',
       );
     }
+    // Shape only: the daemon route validates the command itself with the
+    // same rule `cron_create` applies.
+    const gate = params['gate'];
+    if (
+      gate !== undefined &&
+      (typeof gate !== 'string' ||
+        gate.trim().length === 0 ||
+        gate.length > MAX_CRON_GATE_CHARS)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`gate\` must be a non-empty string within the ${MAX_CRON_GATE_CHARS}-character limit`,
+      );
+    }
 
     const entry = this.resolveEntry(callerSessionId);
     if (
@@ -2398,6 +2413,7 @@ export class BridgeClient implements Client {
       cron,
       prompt,
       recurring,
+      ...(gate !== undefined ? { gate } : {}),
       assertCallerPromptActive: () => {
         const currentEntry = this.resolveEntry(callerSessionId);
         if (
@@ -2424,7 +2440,11 @@ export class BridgeClient implements Client {
         'Scheduled-task host returned an invalid result',
       );
     }
-    return { id: result.id, cron: result.cron };
+    return {
+      id: result.id,
+      cron: result.cron,
+      ...(result.gate !== undefined ? { gate: result.gate } : {}),
+    };
   }
 
   private async handleLiveScreenContextCapture(

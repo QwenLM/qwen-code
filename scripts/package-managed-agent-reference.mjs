@@ -291,8 +291,10 @@ export async function createReferenceDistribution({
     /^[ \t]*process\.env\[HOSTED_LIFECYCLE_V2_PROFILES_ENV\][ \t]*\?\?[ \t]*'([^'\r\n]*)'[ \t]*$/gm,
     'Hosted lifecycle v2 profile default',
   );
-  if (lifecycleV2ProfilesDefault !== '') {
-    throw new Error('Hosted lifecycle v2 profiles must default to empty.');
+  if (lifecycleV2ProfilesDefault !== 'hosted-workspace-shell/1') {
+    throw new Error(
+      'Hosted lifecycle v2 profiles must default to canonical Shell only.',
+    );
   }
 
   const serverJar = `qwen-managed-agent-server-${serverVersion}.jar`;
