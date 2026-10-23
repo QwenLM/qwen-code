@@ -122,6 +122,18 @@ function subDialogSetting(): DaemonSettingDescriptor {
   };
 }
 
+function outputLanguageSetting(effective: string): DaemonSettingDescriptor {
+  return {
+    key: 'general.outputLanguage',
+    type: 'string',
+    label: 'Language: Model',
+    category: 'General',
+    requiresRestart: true,
+    default: 'auto',
+    values: { effective },
+  };
+}
+
 function liveEnabledSetting(): DaemonSettingDescriptor {
   return {
     key: 'experimental.liveVoice.enabled',
@@ -215,6 +227,7 @@ function renderPanel(
   overrides: Partial<{
     onSubDialog: (key: string, scope: 'workspace' | 'user') => void;
     onThemeChange: (theme: 'dark' | 'light') => void;
+    onOutputLanguageChange: (language: string) => void;
     modelManagementSectionProps: ModelManagementProps;
     initialCategory: string;
     presentation: WebShellSettingsOptions;
@@ -229,6 +242,7 @@ function renderPanel(
         initialCategory={overrides.initialCategory}
         presentation={overrides.presentation}
         onLanguageChange={noop}
+        onOutputLanguageChange={overrides.onOutputLanguageChange ?? noop}
         onThemeChange={overrides.onThemeChange ?? noop}
         onSubDialog={overrides.onSubDialog ?? noop}
         chatWidthMode="1000"
@@ -511,6 +525,69 @@ describe('SettingsMessage user-scope editing', () => {
       'tools.webSearch.maxPerSession',
       5,
     );
+  });
+
+  it('edits the model output language through the language callback, user scope only', async () => {
+    const onOutputLanguageChange = vi.fn();
+    const setValue = vi.fn();
+    const container = renderPanel(
+      makeState([outputLanguageSetting('auto')], setValue),
+      { onOutputLanguageChange },
+    );
+
+    // The language command cannot target workspace scope, so the row stays
+    // out of the Workspace tab instead of implying a write it cannot honor.
+    expect(
+      container.querySelector('input[name="general.outputLanguage"]'),
+    ).toBeNull();
+
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+    // 'auto' is the empty input, with the placeholder spelling it out.
+    expect(input?.value).toBe('');
+    expect(input?.placeholder).toBe('auto (follow input)');
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'English');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('English');
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
+  it('shows a fixed model output language and commits an empty value as auto', async () => {
+    const onOutputLanguageChange = vi.fn();
+    const container = renderPanel(
+      makeState([outputLanguageSetting('中文')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+    expect(input?.value).toBe('中文');
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, '');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('');
   });
 
   it('still persists to workspace scope on the default (Workspace) tab', async () => {

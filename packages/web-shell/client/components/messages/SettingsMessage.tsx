@@ -76,6 +76,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import {
   isItemVisible,
   isSettingVisible,
+  OUTPUT_LANGUAGE_SETTING_KEY,
   type WebShellSettingsOptions,
 } from '../../settings';
 
@@ -85,6 +86,8 @@ interface SettingsMessageProps {
   settingsState: SettingsMessageSettingsState;
   presentation?: WebShellSettingsOptions;
   onLanguageChange: (language: WebShellLanguage, scope: Scope) => void;
+  /** Applies a model output language through `/language output`. */
+  onOutputLanguageChange: (language: string) => void;
   onSubDialog: (settingKey: string, scope: Scope) => void;
   onThemeChange: (theme: WebShellTheme) => void;
   chatWidthMode: ChatWidthMode;
@@ -356,6 +359,8 @@ function SettingInput({
   disabled,
   onCommit,
   onInvalid,
+  placeholder,
+  className = 'w-[min(80px,50vw)] max-md:w-full',
 }: {
   name: string;
   label: string;
@@ -364,6 +369,8 @@ function SettingInput({
   disabled: boolean;
   onCommit: (value: unknown) => void;
   onInvalid: () => void;
+  placeholder?: string;
+  className?: string;
 }) {
   const currentValue = String(value ?? '');
   const [draft, setDraft] = useState(currentValue);
@@ -393,7 +400,8 @@ function SettingInput({
       aria-label={label}
       value={draft}
       disabled={disabled}
-      className="w-[min(80px,50vw)] max-md:w-full"
+      placeholder={placeholder}
+      className={className}
       onChange={(event) => setDraft(event.target.value)}
       onBlur={commit}
       onKeyDown={(event) => {
@@ -433,6 +441,7 @@ export function SettingsMessage({
   settingsState,
   presentation,
   onLanguageChange,
+  onOutputLanguageChange,
   onSubDialog,
   onThemeChange,
   chatWidthMode,
@@ -713,6 +722,26 @@ export function SettingsMessage({
         })),
         formatSettingLabel(setting, t),
         disabled,
+      );
+    }
+
+    if (setting.key === OUTPUT_LANGUAGE_SETTING_KEY) {
+      // Model output language is a user-level preference applied by the
+      // language command (which rewrites output-language.md and refreshes
+      // running sessions); an empty value means follow the user's input.
+      const effective = String(value ?? '').trim();
+      return (
+        <SettingInput
+          name={setting.key}
+          label={formatSettingLabel(setting, t)}
+          type="text"
+          value={effective.toLowerCase() === 'auto' ? '' : effective}
+          placeholder={t('settings.placeholder.general.outputLanguage')}
+          className="w-[min(200px,50vw)] max-md:w-full"
+          disabled={disabled}
+          onCommit={(next) => onOutputLanguageChange(String(next ?? '').trim())}
+          onInvalid={() => setMessage(t('settings.invalidNumber'))}
+        />
       );
     }
 
@@ -1016,6 +1045,17 @@ export function SettingsMessage({
                                 <LocalControlSettingsCard />
                               </div>
                             );
+                          }
+
+                          if (
+                            item.setting.key === OUTPUT_LANGUAGE_SETTING_KEY &&
+                            scope === 'workspace'
+                          ) {
+                            // The language command persists this at user
+                            // scope only; showing it under the workspace tab
+                            // would imply a workspace override that the write
+                            // path cannot honor.
+                            return null;
                           }
 
                           const setting = item.setting;

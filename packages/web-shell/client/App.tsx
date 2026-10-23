@@ -14016,6 +14016,48 @@ export function App({
     ],
   );
 
+  const handleSettingsOutputLanguageChange = useCallback(
+    (language: string) => {
+      if (sessionWriteBlocked) return;
+      const owner = { current: sessionOwnerGuard.capture() };
+      if (
+        streamingStateRef.current !== 'idle' ||
+        sessionHasActivePromptRef.current ||
+        isGoalGateBlocked()
+      ) {
+        blockCommand();
+        return;
+      }
+      // Only the language command rewrites output-language.md and refreshes
+      // running sessions; a plain settings write would leave both stale.
+      const command = `/language output ${language.trim() || 'auto'}`;
+      sendPrompt(command, undefined, undefined, { ownerRef: owner })
+        .then(() => {
+          if (!owner.current.isCurrent()) return;
+          return reloadWorkspaceSettings().catch((error: unknown) => {
+            if (!owner.current.isCurrent()) return;
+            reportError(
+              error,
+              'Failed to refresh settings after /language output',
+            );
+          });
+        })
+        .catch((error: unknown) => {
+          if (!owner.current.isCurrent()) return;
+          reportError(error, 'Failed to sync /language output command');
+        });
+    },
+    [
+      blockCommand,
+      reloadWorkspaceSettings,
+      reportError,
+      sessionWriteBlocked,
+      sendPrompt,
+      sessionOwnerGuard,
+      isGoalGateBlocked,
+    ],
+  );
+
   const handleClearScreen = useCallback(() => {
     if (streamingStateRef.current !== 'idle') {
       store.dispatch([
@@ -22523,6 +22565,9 @@ export function App({
                         embedded
                         initialCategory={settingsInitialCategory}
                         onLanguageChange={handleSettingsLanguageChange}
+                        onOutputLanguageChange={
+                          handleSettingsOutputLanguageChange
+                        }
                         onThemeChange={handleThemeChange}
                         chatWidthMode={chatWidthMode}
                         onChatWidthModeChange={handleChatWidthModeChange}
