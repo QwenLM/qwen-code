@@ -116,6 +116,7 @@ export const MANAGED_SESSION_DOMAINS = [
   'session_metadata',
   'file_history',
   'session_source',
+  'hosted_harness_release',
 ] as const;
 
 export type ManagedSessionDomain = (typeof MANAGED_SESSION_DOMAINS)[number];
