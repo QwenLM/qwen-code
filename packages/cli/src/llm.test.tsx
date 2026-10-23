@@ -1733,6 +1733,9 @@ describe('llm.tsx main function', () => {
       undefined,
       undefined,
       expect.any(Function),
+      // allowedBaseUrlsWorkspaceOnly: the bare stub carries no allowlist
+      // (and no trust), so the workspace-only exemption is false
+      false,
     );
   });
 
