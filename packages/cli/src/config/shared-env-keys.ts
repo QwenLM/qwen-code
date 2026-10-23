@@ -296,6 +296,13 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // piped, one-shot run exit as if its supervisor had gone.
   RELAUNCH_SUPERVISED_ENV,
   NPM_RUNTIME_CONTEXT,
+  // Where a `/verify-pr --publish` round publishes its evidence. A project
+  // `.env` or settings.env is repository-controlled, so letting either fill
+  // these would send a maintainer's screenshots to a fork the operator did
+  // not choose. The launch environment, a home `.env`, or the operator-scope
+  // `verifyPr.*` settings may supply them.
+  'QWEN_VERIFY_ASSETS_REPO',
+  'QWEN_VERIFY_ASSETS_BRANCH',
 ];
 
 // Windows env lookup is case-insensitive, so exact-case membership would let

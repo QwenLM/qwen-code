@@ -5212,13 +5212,24 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('`--publish` in the invocation is that request');
     // A stable host is a coordinate, so it resolves once and needs no flag.
     expect(flat).toContain(
-      'Resolve the branch as `--assets-branch`, else `$QWEN_VERIFY_ASSETS_BRANCH`, else `assets/pr<n>-validation`',
+      'the repository is `--assets-repo`, else `$QWEN_VERIFY_ASSETS_REPO`, else the resolved `--repo`',
+    );
+    expect(flat).toContain(
+      'the branch is `--assets-branch`, else `$QWEN_VERIFY_ASSETS_BRANCH`, else `assets/pr<n>-validation`',
+    );
+    // settings.json fills the same variables, from operator scopes only.
+    expect(flat).toContain(
+      'fill those same variables at startup from operator scopes only',
     );
     // Posting is consent, not a coordinate: it stays per-invocation.
-    expect(flat).toContain('Only a coordinate like this is defaultable');
+    expect(flat).toContain('Only coordinates like these are defaultable');
     expect(flat).toContain('posting stays a per-invocation request');
     // The flag is not a shortcut around the metadata rule.
     expect(flat).toContain('does not license an `origin` fallback');
+    // ...nor may the image host fall back to a contributor's fork.
+    expect(flat).toContain('Never fall back to `origin` for the host');
+    // Overwriting a published name leaves every older link on the old image.
+    expect(flat).toContain('A published filename is spent');
     // The deliverables are the skill's, not the maintainer's list.
     expect(flat).toContain('do not ask the maintainer to restate them');
   });

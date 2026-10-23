@@ -769,6 +769,23 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).toHaveBeenCalled();
   });
 
+  it('rejects a nested write under an object-valued restricted root', async () => {
+    // `verifyPr` is restricted as a whole object, and its leaves arrive as a
+    // dotted path. An exact-match guard would persist a value the merge strips
+    // and answer 200, reporting the setting as written while it never applies.
+    const { app, persistSetting } = makeApp();
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'verifyPr.assetsRepo',
+      value: 'attacker/fork',
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ code: 'workspace_restricted_setting' });
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
   it('still accepts the same key at user scope', async () => {
     // User scope honors the setting — the guard must not reach beyond
     // workspace scope, or this PR's whole enablement path dies with it.

@@ -154,6 +154,21 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   // The non-Node TLS trust-anchor vars reach the same MITM outcome as
   // NODE_EXTRA_CA_CERTS for the curl/git/openssl/python tools a session
   // shells out to; a project .env must not inject an attacker CA.
+
+  // Where a `/verify-pr --publish` round publishes its screenshots. A project
+  // `.env` or settings.env is repository-controlled, so either could redirect
+  // a maintainer's evidence to a fork the operator did not choose; only the
+  // launch env, a home `.env`, or the operator-scope `verifyPr.*` may set them.
+  it('excludes QWEN_VERIFY_ASSETS_* so a project .env cannot redirect published evidence', () => {
+    for (const key of [
+      'QWEN_VERIFY_ASSETS_REPO',
+      'QWEN_VERIFY_ASSETS_BRANCH',
+    ]) {
+      expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
+      expect(isHardcodedProjectEnvExclusion(key.toLowerCase())).toBe(true);
+    }
+  });
+
   it('excludes the non-Node TLS trust-anchor vars', () => {
     for (const key of [
       'SSL_CERT_FILE',
