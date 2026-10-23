@@ -31,6 +31,12 @@ import {
 import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
 import { tryParseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
 import {
+  CHECKPOINT_HISTORY_KIND,
+  checkpointHistoryPage,
+  checkpointStorageBody,
+  isPagedHarnessCheckpoint,
+} from './managed-checkpoint-history.js';
+import {
   HOSTED_RECOVERY_RESOURCE_KINDS,
   HOSTED_MODEL_REQUEST_BYTES,
   hostedRecoveryReferences,
@@ -72,6 +78,8 @@ export const HTTP_MANAGED_SESSION_STORE_CONTRACT = {
 const MAX_ATTACHMENT_INPUT_BYTES = 8 * 1024 * 1024;
 
 export function managedSessionInlineResourceBytes(kind: string): number {
+  if (kind === 'managed-checkpoint')
+    return MANAGED_SESSION_LIMITS.maxEventBytes;
   if (kind === 'managed-input') return MAX_ATTACHMENT_INPUT_BYTES;
   if (kind === 'managed-agent-skills') return 2 * 1024 * 1024;
   if (kind === 'hosted-model-request') return HOSTED_MODEL_REQUEST_BYTES;
@@ -569,7 +577,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
     const maxBytes = managedSessionInlineResourceBytes(safeKind);
     if (source.byteLength > maxBytes) {
       throw new ManagedSessionRecordError(
-        `resource bytes exceed the ${maxBytes}-byte inline limit; OSS storage is not enabled.`,
+        `resource bytes exceed the ${maxBytes}-byte inline limit (kind=${safeKind}, bytes=${source.byteLength}); OSS storage is not enabled.`,
       );
     }
     const bytes = Buffer.from(source);
@@ -626,8 +634,16 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       const staged = this.staged.get(ref.resourceId);
       if (staged !== undefined) {
         requireSameRef(staged.ref, ref);
-        pending.push(...collectNestedResourceRefs(ref, staged.bytes));
-      } else if (isReferenceContainer(ref.kind)) {
+        const nested = collectNestedResourceRefs(ref, staged.bytes);
+        pending.push(
+          ...(ref.kind === CHECKPOINT_HISTORY_KIND
+            ? nested.filter((child) => this.staged.has(child.resourceId))
+            : nested),
+        );
+      } else if (
+        ref.kind !== CHECKPOINT_HISTORY_KIND &&
+        isReferenceContainer(ref.kind)
+      ) {
         pending.push(...collectNestedResourceRefs(ref, await this.read(ref)));
       }
     }
@@ -1036,6 +1052,18 @@ class ManagedSessionStoreHttpClient {
         break;
       } catch (error) {
         await this.annotateWriterRefusal(error);
+        // The store replays committed commands before evaluating these atomic guards.
+        if (
+          descriptor.operation === 'manageMcp' &&
+          error instanceof ManagedSessionStoreHttpError &&
+          error.status === 409 &&
+          [
+            'unsupported_feature',
+            'turn_active',
+            'session_context_busy',
+          ].includes(error.remoteCode)
+        )
+          throw new ManagedSessionCommitRejectedError(error);
         if (
           attempt === 0 &&
           error instanceof ManagedSessionStoreHttpError &&
@@ -2639,7 +2667,11 @@ export function collectNestedResourceRefs(
       return checked;
     });
   }
+  if (ref.kind === CHECKPOINT_HISTORY_KIND)
+    return collectRefs([checkpointHistoryPage(bytes)]);
   if (ref.kind === 'managed-checkpoint') {
+    if (isPagedHarnessCheckpoint(bytes))
+      return collectRefs([checkpointStorageBody(bytes)]);
     const parsed = tryParseHarnessCheckpointV1(bytes);
     return parsed.ok ? collectRefs([parsed.checkpoint]) : [];
   }
@@ -2721,6 +2753,7 @@ function isReferenceContainer(kind: string): boolean {
     [
       'managed-definition',
       'managed-checkpoint',
+      CHECKPOINT_HISTORY_KIND,
       'managed-file_history',
       'managed-action-options',
       'managed-hook-plan',

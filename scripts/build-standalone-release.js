@@ -15,6 +15,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
+import { stageOpenTuiPackages } from './opentui-package-assets.js';
 import {
   TARGET_CLIPBOARD_PACKAGE,
   standaloneArchiveName,
@@ -143,7 +144,7 @@ async function main() {
     // Node packaging must not install them (nor fail on a missing lockfile
     // entry) at all.
     const opentuiModulesDir = flavors.includes('bun')
-      ? stageOpenTuiPackages(runtimeDir)
+      ? stageOpenTuiPackages(rootDir, runtimeDir, OPENTUI_PLATFORM_PACKAGES)
       : undefined;
 
     for (const flavor of flavors) {
@@ -336,50 +337,6 @@ function stageNativeModules(runtimeDir) {
       '--no-fund',
       ...readClipboardPackageSpecs(),
       ...readNodePtyPackageSpecs(),
-    ],
-    {
-      cwd: rootDir,
-      stdio: 'inherit',
-    },
-  );
-  return path.join(installDir, 'node_modules');
-}
-
-// Temporary OpenTUI preview: the bundled OpenTUI backend resolves its native
-// render library at runtime via `import('@opentui/core-<platform>-<arch>')`,
-// so each standalone archive must ship the matching platform package(s).
-function readOpenTuiPackageSpecs() {
-  return OPENTUI_PLATFORM_PACKAGES.map((packageName) => {
-    const version = readPnpmLockedVersion(packageName);
-    if (!version) {
-      fail(`OpenTUI platform package version is not locked for ${packageName}`);
-    }
-    return `${packageName}@${version}`;
-  });
-}
-
-function stageOpenTuiPackages(runtimeDir) {
-  const installDir = path.join(runtimeDir, 'opentui-modules');
-  fs.mkdirSync(installDir, { recursive: true });
-  console.log('Staging standalone OpenTUI native packages');
-  const npmExecPath = process.env.npm_execpath;
-  if (!npmExecPath) {
-    fail('npm_execpath is unavailable; run package:standalone:release via npm');
-  }
-  execFileSync(
-    process.execPath,
-    [
-      npmExecPath,
-      'install',
-      '--prefix',
-      installDir,
-      '--package-lock=false',
-      '--no-save',
-      '--ignore-scripts',
-      '--force',
-      '--no-audit',
-      '--no-fund',
-      ...readOpenTuiPackageSpecs(),
     ],
     {
       cwd: rootDir,
