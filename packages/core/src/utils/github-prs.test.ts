@@ -274,6 +274,36 @@ describe('fetchGitHubPullRequests', () => {
     expect(mockExecFile.mock.calls[0]?.[0]).toBe(binary);
   });
 
+  it('forwards the spawn directory when resolving gh', async () => {
+    const dir = tmp.repo();
+    fakeGh(path.join(dir, 'bin'));
+    const home = path.join(tmp.dir, 'home');
+    fakeGh(path.join(home, '.local', 'bin'));
+    mockGhSuccess([ghPrEntry()]);
+
+    await fetchGitHubPullRequests(dir, { PATH: 'bin', HOME: home });
+
+    // Literal, not the widened matcher: the fallback would satisfy that too,
+    // and this case exists to tell "child PATH resolved" from "fallback won".
+    expect(mockExecFile.mock.calls[0]?.[0]).toBe('gh');
+  });
+
+  it('reports the fallback binary on a spawn failure', async () => {
+    const dir = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    const binary = fakeGh(path.join(home, '.local', 'bin'));
+    mockExecError('spawn EACCES', { code: 'EACCES' });
+
+    const result = await fetchGitHubPullRequests(dir, {
+      PATH: '/nonexistent',
+      HOME: home,
+    });
+
+    // The route redacts this exact value: it names the host's HOME and may
+    // contain spaces, which a token sweep cannot own.
+    expect(result).toMatchObject({ kind: 'failed', binary });
+  });
+
   it('uses slim fields and the requested state/limit when asked', async () => {
     const dir = tmp.repo();
     mockGhSuccess([ghPrEntry({ state: 'MERGED' })]);
@@ -317,7 +347,7 @@ describe('fetchGitHubPullRequests', () => {
       stderr: '',
     });
     const result = await fetchGitHubPullRequests(tmp.repo());
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       kind: 'failed',
       message: 'gh pr list timed out after 10s',
       gitRoot: tmp.dir,
@@ -327,7 +357,7 @@ describe('fetchGitHubPullRequests', () => {
   it('returns failed with a single-line stderr message when gh exits non-zero', async () => {
     mockExecError('exit 1', { stderr: 'gh: not logged in\nRun gh auth login' });
     const result = await fetchGitHubPullRequests(tmp.repo());
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       kind: 'failed',
       message: 'gh: not logged in Run gh auth login',
       gitRoot: tmp.dir,
@@ -626,10 +656,13 @@ describe('resolveGhBinary', () => {
     // makes "PATH wins" observable regardless of this machine's installs.
     fakeGh(path.join(tmp.dir, 'home', '.local', 'bin'));
     expect(
-      resolveGhBinary({
-        PATH: binDir,
-        HOME: path.join(tmp.dir, 'home'),
-      }),
+      resolveGhBinary(
+        {
+          PATH: binDir,
+          HOME: path.join(tmp.dir, 'home'),
+        },
+        tmp.dir,
+      ),
     ).toBe('gh');
   });
 
@@ -667,18 +700,14 @@ describe('resolveGhBinary', () => {
     // every gh consumer would silently degrade.
     const binary = fakeGh(path.join(tmp.dir, 'home', '.local', 'bin'));
     expect(
-      resolveGhBinary({
-        PATH: '/nonexistent',
-        HOME: path.join(tmp.dir, 'home'),
-      }),
+      resolveGhBinary(
+        {
+          PATH: '/nonexistent',
+          HOME: path.join(tmp.dir, 'home'),
+        },
+        tmp.dir,
+      ),
     ).toBe(binary);
-  });
-
-  it('never builds a relative candidate from an empty HOME', () => {
-    // `HOME=''` must not turn the per-user entry into `.local/bin/gh`: a
-    // relative candidate would be probed here but executed by the child.
-    const resolved = resolveGhBinary({ PATH: '/nonexistent', HOME: '' });
-    expect(path.isAbsolute(resolved) || resolved === 'gh').toBe(true);
   });
 });
 

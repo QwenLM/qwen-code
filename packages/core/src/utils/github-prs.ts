@@ -10,9 +10,11 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { findGitRoot } from './gitUtils.js';
 import { gitEnv, gitRemoteEnv } from './git-branches.js';
+import { createDebugLogger } from './debugLogger.js';
 import type { SessionPrState } from '../services/session-pr-service.js';
 
 const execFileAsync = promisify(execFile);
+const debugLogger = createDebugLogger('GITHUB_PRS');
 
 const GH_TIMEOUT_MS = 10_000;
 const GH_MAX_BUFFER = 16 * 1024 * 1024;
@@ -68,10 +70,10 @@ const GH_FALLBACK_BINARIES = [
  * wrapper gh the spawn would have run.
  */
 export function resolveGhBinary(
-  env?: Readonly<Record<string, string | undefined>>,
-  cwd: string = process.cwd(),
+  env: Readonly<Record<string, string | undefined>>,
+  cwd: string,
 ): string {
-  const source = env ?? process.env;
+  const source = env;
   const pathValue = source['PATH'];
   if (
     pathValue &&
@@ -93,7 +95,30 @@ export function resolveGhBinary(
       : []),
     ...GH_FALLBACK_BINARIES,
   ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? 'gh';
+  const fallback = candidates.find((candidate) => existsSync(candidate));
+  if (fallback !== undefined) {
+    // Which gh ran is otherwise unobservable: version skew or a wrapper that
+    // pins GH_TOKEN changes behaviour without failing, and the operator's
+    // `gh --version` would describe a different binary.
+    debugLogger.debug('gh not on PATH; using fallback binary', {
+      binary: fallback,
+    });
+    return fallback;
+  }
+  return 'gh';
+}
+
+/**
+ * The resolved gh binary to redact from a client-visible failure: an absolute
+ * install path names the host's HOME, so it must never leave the process. The
+ * bare name carries no layout and needs no field.
+ */
+function fallbackBinaryField(
+  env: Readonly<Record<string, string | undefined>>,
+  gitRoot: string,
+): { binary?: string } {
+  const binary = resolveGhBinary(env, gitRoot);
+  return binary === 'gh' ? {} : { binary };
 }
 
 /** Display cap applied by the route after path sanitization. */
@@ -138,7 +163,18 @@ export type FetchGitHubPullRequestsResult =
   | { kind: 'ok'; pullRequests: GitHubPullRequest[] }
   | { kind: 'not_a_repo' }
   | { kind: 'cli_unavailable' }
-  | { kind: 'failed'; message: string; gitRoot: string };
+  | {
+      kind: 'failed';
+      message: string;
+      gitRoot: string;
+      /**
+       * The gh binary this failure ran. Present only when resolution fell back
+       * to an absolute install: that exact value is the one a client body must
+       * never carry (it names the host's HOME), so route layers redact it
+       * before display while the raw message stays available for the log.
+       */
+      binary?: string;
+    };
 
 // Mirrors `gh pr checks`: a cancelled/stale check blocks the merge just like a
 // failure, so it counts as failing rather than pending.
@@ -355,7 +391,12 @@ export async function fetchGitHubPullRequests(
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { kind: 'cli_unavailable' };
     }
-    return { kind: 'failed', message: ghErrorMessage(error), gitRoot };
+    return {
+      kind: 'failed',
+      message: ghErrorMessage(error),
+      gitRoot,
+      ...fallbackBinaryField(ghEnv(env), gitRoot),
+    };
   }
 
   try {
@@ -378,7 +419,13 @@ export type CreateGitHubPullRequestResult =
   | { kind: 'ok'; url: string; number: number | null }
   | { kind: 'not_a_repo' }
   | { kind: 'cli_unavailable' }
-  | { kind: 'failed'; message: string; gitRoot: string };
+  | {
+      kind: 'failed';
+      message: string;
+      gitRoot: string;
+      /** See {@link FetchGitHubPullRequestsResult} — the fallback gh binary. */
+      binary?: string;
+    };
 
 const GH_CREATE_TIMEOUT_MS = 30_000;
 
@@ -435,6 +482,7 @@ export async function createGitHubPullRequest(
       kind: 'failed',
       message: ghErrorMessage(error, 'gh pr create', GH_CREATE_TIMEOUT_MS),
       gitRoot,
+      ...fallbackBinaryField(ghEnv(env), gitRoot),
     };
   }
 
