@@ -1339,7 +1339,7 @@ describe('WebTerminalRegistry', () => {
           'written',
         );
       }
-      // Equality at the web admission ceiling is allowed; the next byte is not.
+      // Equality at the web ceiling is allowed; the next ordinary byte is not.
       expect(registry.write('terminal:shared-0', 'x'.repeat(4096))).toBe(
         'written',
       );
@@ -1347,10 +1347,25 @@ describe('WebTerminalRegistry', () => {
         processPtyBudget.totalWriteQueueBytes - DEFAULT_WRITE_QUEUE_BYTES,
       );
       expect(registry.write('terminal:shared-1', 'x')).toBe('backpressure');
-      expect(registry.write('terminal:shared-1', '\x03')).toBe('backpressure');
+      const victimPending = queues[1].pending;
+      expect(registry.write('terminal:shared-1', '\x03')).toBe('written');
+      expect(queues[1].pending).toBe(victimPending + 1);
+      expect(spawn.mock.results[1].value.write).toHaveBeenLastCalledWith(
+        Buffer.from('\x03'),
+      );
       const otherPty = { pending: 0 };
-      writeNative(otherPty, Buffer.alloc(DEFAULT_WRITE_QUEUE_BYTES));
-      expect(otherPty.pending).toBe(DEFAULT_WRITE_QUEUE_BYTES);
+      writeNative(otherPty, Buffer.alloc(DEFAULT_WRITE_QUEUE_BYTES - 1));
+      expect(otherPty.pending).toBe(DEFAULT_WRITE_QUEUE_BYTES - 1);
+      expect(sharedPending).toBe(processPtyBudget.totalWriteQueueBytes);
+      expect(registry.write('terminal:shared-1', '\x03')).toBe('backpressure');
+      expect(queues[1].pending).toBe(victimPending + 1);
+      // Recovery controls may reach equality, but never exceed the hard total.
+      sharedPending--;
+      otherPty.pending--;
+      expect(registry.write('terminal:shared-1', '\x03')).toBe('written');
+      expect(sharedPending).toBe(processPtyBudget.totalWriteQueueBytes);
+      expect(queues[1].pending).toBe(victimPending + 2);
+      expect(registry.write('terminal:shared-1', 'x')).toBe('backpressure');
       expect(backendFailures).toBe(0);
       expect(
         registry.readSnapshot('terminal:shared-1')?.failed,

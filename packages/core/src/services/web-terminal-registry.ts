@@ -681,11 +681,13 @@ export class WebTerminalRegistry {
     if (!isRecoveryControl && bytes > MAX_INPUT_FRAME_BYTES) {
       return 'backpressure';
     }
-    // Leave one native queue budget available to non-web PTYs in this process.
+    // Ordinary input leaves one native queue for other PTYs; recovery controls
+    // may use that reserve without exceeding the backend process limit.
     if (
       session.maxInputQueueBytes !== undefined &&
       getPtyBudgetStats().writeQueueBytes + bytes >
-        processPtyBudget.totalWriteQueueBytes - DEFAULT_WRITE_QUEUE_BYTES
+        processPtyBudget.totalWriteQueueBytes -
+          (isRecoveryControl ? 0 : DEFAULT_WRITE_QUEUE_BYTES)
     ) {
       return 'backpressure';
     }
