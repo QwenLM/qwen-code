@@ -118,6 +118,10 @@ import type {
   HostedPromptHookRunner,
 } from './hosted-hook-session.js';
 import type { HostedChildRunSession } from './hosted-child-run-session.js';
+import type {
+  PublicChildLaunchSnapshot,
+  PublicChildModelRoute,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
   childLaunchAdmission,
@@ -1800,6 +1804,14 @@ export class HostedWorkspaceToolTurn {
   private readonly monitors?: HostedMonitorSession;
   private readonly backgroundLane?: HostedShellTurnOptions;
   private readonly childAgents?: HostedChildAgentSession;
+  private childModelRoute?: { modelId: string; route: PublicChildModelRoute };
+  private readonly publicChildren: boolean;
+  private readonly childLaunchEnabled: () => boolean;
+  private readonly childSnapshot?: (
+    promptId: string,
+    model: string,
+    route: PublicChildModelRoute,
+  ) => Promise<PublicChildLaunchSnapshot>;
   private readonly childDepth: number;
   private readonly childWorkspaces: boolean;
   private readonly childSnapshots: boolean;
@@ -1863,6 +1875,13 @@ export class HostedWorkspaceToolTurn {
       backgroundLane?: HostedShellTurnOptions;
       childAgents?: {
         readonly funnel: HostedChildAgentSession;
+        readonly publicChildren?: boolean;
+        readonly launchEnabled?: boolean | (() => boolean);
+        readonly snapshot?: (
+          promptId: string,
+          model: string,
+          route: PublicChildModelRoute,
+        ) => Promise<PublicChildLaunchSnapshot>;
         readonly depth: number;
         /** #13753 I2: the host serves child Workspaces. */
         readonly childWorkspaces?: boolean;
@@ -1895,6 +1914,13 @@ export class HostedWorkspaceToolTurn {
     this.childAgents = this.foregroundOnly
       ? undefined
       : extras?.childAgents?.funnel;
+    this.publicChildren = extras?.childAgents?.publicChildren === true;
+    const launchEnabled = extras?.childAgents?.launchEnabled;
+    this.childLaunchEnabled =
+      typeof launchEnabled === 'function'
+        ? launchEnabled
+        : () => launchEnabled !== false;
+    this.childSnapshot = extras?.childAgents?.snapshot;
     this.childDepth = extras?.childAgents?.depth ?? 0;
     this.childWorkspaces = extras?.childAgents?.childWorkspaces === true;
     this.childSnapshots =
@@ -1947,6 +1973,10 @@ export class HostedWorkspaceToolTurn {
     return isHostedWorkspaceGlobProfile(this.profile);
   }
 
+  private get fileBackupsEnabled(): boolean {
+    return !this.mcp || this.profile === 'hosted-workspace-shell/1';
+  }
+
   /**
    * #15076: whether this Session's profile declares `todo_write`. Only the
    * `/3` profiles do; every earlier profile keeps its exact vocabulary, so
@@ -1964,9 +1994,18 @@ export class HostedWorkspaceToolTurn {
    * owns its child orchestrator (a child Session's own turn does not),
    * behind the kind gate.
    */
+  capturesChildModelRoute(): boolean {
+    return this.publicChildren;
+  }
+
+  setChildModelRoute(modelId: string, route: PublicChildModelRoute): void {
+    this.childModelRoute = { modelId, route };
+  }
+
   private agentsAdmitted(): boolean {
     return (
       this.childAgents !== undefined &&
+      this.childLaunchEnabled() &&
       (this.shell !== undefined || this.backgroundLane !== undefined) &&
       this.childDepth === 0 &&
       childAgentAdmissionsEnabled()
@@ -1976,6 +2015,7 @@ export class HostedWorkspaceToolTurn {
   /** H4e-b1: the lead's team tools ride exactly where the Agent tool does. */
   private teamsAdmitted(): boolean {
     return (
+      !this.publicChildren &&
       this.teams !== undefined &&
       this.agentsAdmitted() &&
       teamAdmissionsEnabled()
@@ -2030,7 +2070,10 @@ export class HostedWorkspaceToolTurn {
               parametersJsonSchema: schema,
             };
           }
-          return hostedWorkspaceDeclarations([tool], Boolean(this.mcp))[0];
+          return hostedWorkspaceDeclarations(
+            [tool],
+            !this.fileBackupsEnabled,
+          )[0];
         }),
       ...(this.mcp?.tools() ?? []),
       ...(skill ? [skill] : []),
@@ -2078,7 +2121,8 @@ export class HostedWorkspaceToolTurn {
       // #13803: the Workflow tool joins under the exact gate shape of the
       // Agent tool, behind its own kind reader — a child Session neither
       // advertises it nor may admit it (#13803 decision 5).
-      ...(this.childAgents !== undefined &&
+      ...(!this.publicChildren &&
+      this.childAgents !== undefined &&
       (this.shell !== undefined || this.backgroundLane !== undefined) &&
       this.childDepth === 0 &&
       childWorkflowAdmissionsEnabled()
@@ -2138,6 +2182,7 @@ export class HostedWorkspaceToolTurn {
   /** Which side of its lineage this Session's send_message addresses. */
   private sendMessageRole(): 'parent' | 'child' | undefined {
     if (
+      this.publicChildren ||
       this.messages === undefined ||
       (this.shell === undefined && this.backgroundLane === undefined) ||
       !sessionMessageAdmissionsEnabled()
@@ -2155,7 +2200,8 @@ export class HostedWorkspaceToolTurn {
    * well-formed member preamble declares them.
    */
   private async memberCommandsDeclared(): Promise<boolean> {
-    if (this.commands?.lineage === undefined) return false;
+    if (this.publicChildren || this.commands?.lineage === undefined)
+      return false;
     if (!sessionCommandAdmissionsEnabled()) return false;
     this.memberPreamble ??= await this.firstInputHasMemberPreamble();
     // b3c: the widened send_message needs the member's own name for its
@@ -2551,7 +2597,7 @@ export class HostedWorkspaceToolTurn {
         }
       }
       this.acquired = true;
-      if (!this.mcp) {
+      if (this.fileBackupsEnabled) {
         const saved = await readHostedFileHistory(this.session);
         if (saved?.pendingUndo)
           throw new Error('Hosted file history requires recovery.');
@@ -2566,7 +2612,7 @@ export class HostedWorkspaceToolTurn {
         } catch (cause) {
           // A saved continuation still needs this original runtime ID.
           if (recovering || !isHostedFileHistoryRefusal(cause)) throw cause;
-          if (!this.hooks) await this.broker.release();
+          if (!this.hooks && !this.mcp) await this.broker.release();
           this.acquired = false;
           throw new HostedFileHistoryRefusedError(
             cause.reason ?? cause.message,
@@ -3081,6 +3127,7 @@ export class HostedWorkspaceToolTurn {
     signal: AbortSignal,
   ): Promise<Part[]> {
     const plan = saved.plan;
+    if (plan.publicChildModel) this.childModelRoute = plan.publicChildModel;
     this.unanswered = plan.calls.some(
       (item) =>
         item.actionId &&
@@ -3103,21 +3150,26 @@ export class HostedWorkspaceToolTurn {
         generation: plan.runtime.generation,
         workspaceGeneration: plan.runtime.workspaceGeneration,
       };
-      await oweHostedTurnCleanup(this.session, this.promptId, this.broker);
-      this.cleanupOwed = true;
-      await this.broker.acquire({
-        runtimeBindingId: plan.runtime.bindingId,
-        generation: plan.runtime.generation,
-      });
-      this.acquired = true;
-      if (
-        !this.broker.runtime ||
-        this.broker.runtime.workspaceGeneration !==
-          plan.runtime.workspaceGeneration
-      )
-        throw new Error('Original Workspace generation changed.');
-      if (this.context?.read() === undefined)
-        await this.fetchWorkspaceContext(signal);
+      const needsRuntime = plan.calls.some(
+        (item) => item.call.name !== 'agent',
+      );
+      if (needsRuntime) {
+        await oweHostedTurnCleanup(this.session, this.promptId, this.broker);
+        this.cleanupOwed = true;
+        await this.broker.acquire({
+          runtimeBindingId: plan.runtime.bindingId,
+          generation: plan.runtime.generation,
+        });
+        this.acquired = true;
+        if (
+          !this.broker.runtime ||
+          this.broker.runtime.workspaceGeneration !==
+            plan.runtime.workspaceGeneration
+        )
+          throw new Error('Original Workspace generation changed.');
+        if (this.context?.read() === undefined)
+          await this.fetchWorkspaceContext(signal);
+      }
       const declarations = await this.declarations(signal);
       const requests: HostedPreparedRequest[] = [];
       for (const [ordinal, item] of plan.calls.entries()) {
@@ -3129,13 +3181,21 @@ export class HostedWorkspaceToolTurn {
         if (
           !isDeepStrictEqual(
             definition,
-            declarations.find((tool) => tool.name === item.call.name),
+            item.call.name === 'agent' && this.publicChildren
+              ? HOSTED_AGENT_TOOL
+              : declarations.find((tool) => tool.name === item.call.name),
           )
         )
           throw new Error('Original native tool definition changed.');
         const input = saved.inputs[ordinal];
         if (item.argsDigest !== `sha256:${managedToolDigest(input.input)}`)
           throw new Error('Original native arguments changed.');
+        if (
+          item.call.name === 'run_shell_command' &&
+          this.publication &&
+          !item.publicationId
+        )
+          throw new Error('Original Shell publication identity is missing.');
         requests.push({
           call: item.call,
           input: input.input,
@@ -3144,14 +3204,24 @@ export class HostedWorkspaceToolTurn {
           inputBytes: input.bytes,
           digest: item.requestDigest,
           argsDigest: item.argsDigest,
-          isShell: false,
+          inputDigest:
+            item.call.name === 'run_shell_command'
+              ? managedToolDigest(input.input)
+              : undefined,
+          isShell: item.call.name === 'run_shell_command',
           mcp: false,
-          publicationId: null,
-          background: false,
+          publicationId: item.publicationId ?? null,
+          background:
+            item.call.name === 'run_shell_command' &&
+            input.input['is_background'] === true,
           monitoring: false,
-          agent: false,
+          agent: item.call.name === 'agent',
           workflow: false,
-          agentBackground: true,
+          agentBackground: !(
+            item.call.args['run_in_background'] === false ||
+            (typeof item.call.args['run_in_background'] === 'string' &&
+              item.call.args['run_in_background'].toLowerCase() === 'false')
+          ),
           team: false,
           message: false,
           command: false,
@@ -3187,13 +3257,17 @@ export class HostedWorkspaceToolTurn {
       !batch ||
       batch.uncaptured ||
       !runtime ||
-      (isHostedWorkspaceShellProfile(this.profile) && !singlePlanExit) ||
+      (isHostedWorkspaceShellProfile(this.profile) &&
+        !singlePlanExit &&
+        !this.publicChildren) ||
       this.hooks ||
       this.mcp ||
       batch.requests.some(
         (request) =>
           !(
             singlePlanExit ||
+            (this.publicChildren &&
+              ['agent', 'run_shell_command'].includes(request.call.name)) ||
             ['read_file', 'write_file', 'edit', 'glob'].includes(
               request.call.name,
             )
@@ -3258,10 +3332,16 @@ export class HostedWorkspaceToolTurn {
         ),
         refusal: batch.refusals[ordinal] ?? null,
         actionId: batch.actionIds.get(ordinal) ?? null,
+        ...(this.publicChildren && request.isShell
+          ? { publicationId: request.publicationId }
+          : {}),
       });
     }
     const plan: HostedApprovalContinuation = {
       v: 1,
+      ...(this.publicChildren && this.childModelRoute
+        ? { publicChildModel: this.childModelRoute }
+        : {}),
       sessionKey: header.sessionKey,
       promptId: this.promptId,
       definitionRef: header.definitionRef,
@@ -3652,6 +3732,9 @@ export class HostedWorkspaceToolTurn {
           if (!agentAdmitted) {
             validationError =
               'Hosted child agents are unavailable on this Session profile; read work through ordinary tools instead.';
+          } else if (this.publicChildren && args['isolation'] !== undefined) {
+            validationError =
+              'Public child agents share this Workspace; isolation is unavailable.';
           } else if (unsupportedKey !== undefined) {
             validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition, without nesting: fork_*, working_dir, ${teamsOn ? '' : 'name, '}model and subagent_type belong to the legacy Agent tool.`;
           } else if (
@@ -3723,6 +3806,7 @@ export class HostedWorkspaceToolTurn {
           // #13803: the Workflow call answers the same admission shape as
           // the Agent call, behind its own kind reader.
           workflowAdmitted =
+            !this.publicChildren &&
             this.childAgents !== undefined &&
             (this.shell !== undefined || this.backgroundLane !== undefined) &&
             this.childDepth === 0 &&
@@ -3875,6 +3959,12 @@ export class HostedWorkspaceToolTurn {
               validationError =
                 'Hosted send_message requires a nonempty message.';
             } else if (
+              !memberMessageCommand &&
+              Buffer.byteLength(text, 'utf8') >
+                MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes
+            ) {
+              validationError = `Hosted send_message message exceeds ${MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes} bytes.`;
+            } else if (
               memberMessageCommand &&
               Buffer.byteLength(
                 memberMessageContent(
@@ -3969,8 +4059,8 @@ export class HostedWorkspaceToolTurn {
         }
         // The inline Session Store limit keeps rejecting exactly as main
         // does for the ordinary tools. A call that already carries its own
-        // refusal never reads its encoding, and a workflow launch is this
-        // profile's own surface: for either the limit becomes the call's
+        // refusal never reads its encoding. Workflow launches and messages
+        // are this profile's own surfaces: the limit becomes the call's
         // refusal, never a failure of the whole Turn (review D1/R2-12).
         let encoded: HostedEncodedToolInput;
         try {
@@ -3982,13 +4072,18 @@ export class HostedWorkspaceToolTurn {
             !(cause instanceof HostedToolInputInlineLimitError) ||
             (validationError === undefined &&
               call.name !== 'workflow' &&
+              call.name !== 'send_message' &&
               !hookInputs)
           )
             throw cause;
           validationError ??=
-            call.name === 'workflow'
-              ? `Hosted workflow script and args exceed the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten them and retry.`
-              : `Hosted tool input exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit).`;
+            call.name === 'send_message' && memberMessageCommand
+              ? `Hosted send_message to a member exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit) although it fits the ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes}-byte member wrapper; shorten escape-dense content and retry.`
+              : call.name === 'send_message'
+                ? `Hosted send_message exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten the message or other arguments and retry.`
+                : call.name === 'workflow'
+                  ? `Hosted workflow script and args exceed the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten them and retry.`
+                  : `Hosted tool input exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit).`;
           encoded = UNENCODED_TOOL_INPUT;
         }
         // H3: the publication evidence chain pins the canonical input
@@ -4273,7 +4368,7 @@ export class HostedWorkspaceToolTurn {
           );
     };
     const paths = requests.flatMap((request, index) =>
-      !this.mcp &&
+      this.fileBackupsEnabled &&
       refusals[index] === undefined &&
       ['write_file', 'edit'].includes(request.call.name)
         ? [request.input['file_path'] as string]
@@ -5999,6 +6094,16 @@ export class HostedWorkspaceToolTurn {
     const description = (request.call.args['description'] as string).trim();
     const prompt = request.call.args['prompt'] as string;
     const childRunId = this.childRunIdFor(request.call.callId);
+    if (!this.agentsAdmitted() && children.record(childRunId) === undefined) {
+      const refused = convertToFunctionErrorResponse(
+        request.call.name,
+        request.call.callId,
+        [],
+        HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
+      );
+      await this.commit('tool_result', refused, model);
+      return refused;
+    }
     // The v1 pin: the parent's own definition, documented by its
     // definition resource's digest (the control plane reads the pin from
     // the committed body when it stamps the child's lineage).
@@ -6056,12 +6161,21 @@ export class HostedWorkspaceToolTurn {
     // can ever answer. Translate the throw into the same refusal: an
     // over-size prompt is a model-correctable argument error, never a
     // recovery-blocked Turn.
+    const publicLaunch = this.publicChildren
+      ? ((await children.publicLaunchSnapshot(childRunId)) ??
+        (await this.childSnapshot!(
+          this.promptId,
+          this.childModelRoute?.modelId ?? model,
+          this.childModelRoute!.route,
+        )))
+      : undefined;
     let envelopeBytes: number;
     try {
       envelopeBytes = encodeChildLaunchEnvelope({
         description,
         prompt: launchPrompt,
         definition,
+        ...(publicLaunch ? { publicLaunch } : {}),
       }).byteLength;
     } catch (cause) {
       if (!(cause instanceof ManagedSessionRecordError)) throw cause;
@@ -6119,6 +6233,7 @@ export class HostedWorkspaceToolTurn {
       workspaceMode,
       workingDirectory: '.',
       executionCallId: childRunId,
+      ...(publicLaunch ? { publicLaunch } : {}),
     });
     this.agentDispatched.add(request.call.callId);
     if (!request.agentBackground) {

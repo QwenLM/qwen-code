@@ -31,6 +31,8 @@ import {
 import { ToolApproval } from '../messages/ToolApproval';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
+import { Input } from '../ui/input';
 import { createManagedMessageProjector } from './managed-session-messages';
 import {
   getManagedClientId,
@@ -62,6 +64,7 @@ import { useManagedModelChange } from './use-managed-model-change';
 import { useManagedApprovalChange } from './use-managed-approval-change';
 import { useManagedSkills } from './use-managed-skills';
 import { useManagedMcp } from './use-managed-mcp';
+import { ManagedMcpManagerPage } from './ManagedMcpManagerPage';
 import { ManagedSessionCwdControl } from './ManagedSessionCwdControl';
 import { toManagedPermissionRequest } from './managed-approval';
 import { isNonRetryableClientError } from './managed-request-error';
@@ -73,6 +76,7 @@ import { isManagedSessionRunning } from './managed-agent-provider';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
 import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
+import { ManagedChildSessionView } from './ManagedChildSessionView';
 import { useManagedTaskCancel } from './use-managed-task-cancel';
 import type {
   ManagedAgentProvider,
@@ -375,7 +379,14 @@ function ManagedSessionsContent({
     sessionId,
   );
   const skills = useManagedSkills(provider, clientId, sessionId);
-  const mcp = useManagedMcp(provider, clientId, sessionId);
+  const [mcpManagerSession, setMcpManagerSession] = useState<string>();
+  const mcp = useManagedMcp(
+    provider,
+    clientId,
+    sessionId,
+    JSON.stringify([interactive, mcpManagerSession]),
+  );
+  useEffect(() => setMcpManagerSession(undefined), [sessionId]);
   const referenceActions = useMemo(
     () =>
       fileReferences.actions || mcp
@@ -395,7 +406,21 @@ function ManagedSessionsContent({
   const [wideTasks, setWideTasks] = useState(false);
   const [taskPanelSession, setTaskPanelSession] = useState<string>();
   const taskPanelOpen = !!sessionId && taskPanelSession === sessionId;
-  const tasks = useManagedTasks(provider, clientId, sessionId, taskPanelOpen);
+  const publicChildren = detail.summary?.capabilities.childAgents === true;
+  const tasks = useManagedTasks(
+    provider,
+    clientId,
+    sessionId,
+    taskPanelOpen || publicChildren,
+  );
+  const [childView, setChildView] = useState<{
+    provider: ManagedAgentProvider;
+    clientId: string;
+    root: string;
+    child: string;
+    trigger: Element | null;
+  }>();
+  useEffect(() => setChildView(undefined), [provider, clientId, sessionId]);
   const taskSnapshots = useMemo(
     () => (tasks.task ? [...tasks.page.data, tasks.task] : tasks.page.data),
     [tasks.page.data, tasks.task],
@@ -430,6 +455,7 @@ function ManagedSessionsContent({
   const [archiveState, setArchiveState] = useState<'unarchived' | 'archived'>(
     'unarchived',
   );
+  const [titleQuery, setTitleQuery] = useState('');
   const [confirmation, setConfirmation] = useState<{
     session: ManagedAgentSessionSummary;
     action: ManagedLifecycleAction;
@@ -636,13 +662,26 @@ function ManagedSessionsContent({
     // Unknown while the summary reloads, so the shown approval is kept.
     detail.summary ? detail.summary.capabilities.actions === true : undefined,
     detail.events,
+    publicChildren,
+  );
+  const childApprovalSessions = useMemo(
+    () =>
+      new Set(
+        approvals.actions
+          .filter((action) => action.sessionId !== sessionId)
+          .map((action) => action.sessionId),
+      ),
+    [approvals.actions, sessionId],
   );
   const pendingApproval = useMemo(
     () =>
       approvals.action
-        ? toManagedPermissionRequest(approvals.action, messages)
+        ? toManagedPermissionRequest(
+            approvals.action,
+            approvals.action.sessionId === sessionId ? messages : [],
+          )
         : null,
-    [approvals.action, messages],
+    [approvals.action, messages, sessionId],
   );
   const cwd = useManagedCwdChange(
     provider,
@@ -755,6 +794,8 @@ function ManagedSessionsContent({
   // Depend on the value the request actually sends: a provider that drops
   // workspaceCwd must not refetch (and lose paged rows) on folder change.
   const listCwd = provider.acceptsWorkspaceCwd ? workspaceCwd : undefined;
+  const listTitleQuery = provider.titleSearch ? titleQuery : '';
+  const navigationSessions = listTitleQuery ? sessions : lifecycleSummaries;
   useEffect(() => {
     const abort = new AbortController();
     listLifetime.current = abort;
@@ -767,6 +808,7 @@ function ManagedSessionsContent({
         clientId,
         workspaceCwd: listCwd,
         ...(provider.lifecycle ? { archiveState } : {}),
+        ...(listTitleQuery ? { titleQuery: listTitleQuery } : {}),
         limit: 50,
         signal: abort.signal,
       })
@@ -787,7 +829,7 @@ function ManagedSessionsContent({
         if (!abort.signal.aborted) setListLoading(false);
       });
     return () => abort.abort();
-  }, [provider, clientId, listCwd, listRevision, archiveState]);
+  }, [provider, clientId, listCwd, listRevision, archiveState, listTitleQuery]);
 
   useEffect(() => {
     const current = detail.summary;
@@ -874,6 +916,7 @@ function ManagedSessionsContent({
         clientId,
         workspaceCwd: listCwd,
         ...(provider.lifecycle ? { archiveState } : {}),
+        ...(listTitleQuery ? { titleQuery: listTitleQuery } : {}),
         cursor: nextCursor,
         limit: 50,
         signal: abort.signal,
@@ -1056,6 +1099,22 @@ function ManagedSessionsContent({
   }
 
   const summary = detail.summary;
+  const mcpManagerAvailable = Boolean(
+    interactive &&
+      provider.mcpManagement &&
+      sessionId &&
+      summary?.sessionId === sessionId &&
+      summary.workspace,
+  );
+  const mcpManagerButton = mcpManagerAvailable ? (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={() => setMcpManagerSession(sessionId)}
+    >
+      {t('managed.mcp.manage')}
+    </Button>
+  ) : null;
   const { request: requestTurnCancel, busy: turnCancelBusy } = turnCancel;
   const failureMessage = summary?.failure
     ? (FAILURE_MESSAGES[summary.failure.code]?.[language === 'zh-CN' ? 1 : 0] ??
@@ -1290,11 +1349,24 @@ function ManagedSessionsContent({
           ))}
         </div>
       )}
+      {provider.titleSearch && (
+        <label className="px-2 py-1">
+          <span className="sr-only">{t('managed.titleSearch')}</span>
+          <Input
+            type="search"
+            value={titleQuery}
+            maxLength={512}
+            placeholder={t('managed.titleSearchPlaceholder')}
+            aria-label={t('managed.titleSearch')}
+            onChange={(event) => setTitleQuery(event.target.value)}
+          />
+        </label>
+      )}
       {home && provider.workspaceBinding ? (
         <ManagedWorkspaceNavigation
           provider={provider}
           clientId={clientId}
-          sessions={lifecycleSummaries.filter(
+          sessions={navigationSessions.filter(
             (session) =>
               !provider.lifecycle ||
               (archiveState === 'archived'
@@ -1393,6 +1465,25 @@ function ManagedSessionsContent({
       ref={pageRef}
       className={`flex h-full min-h-0 flex-col ${home ? '' : 'gap-3'}`}
     >
+      {mcpManagerAvailable &&
+        mcpManagerSession === sessionId &&
+        summary?.workspace && (
+          <Dialog
+            open
+            onOpenChange={(open) => !open && setMcpManagerSession(undefined)}
+          >
+            <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-5xl">
+              <DialogHeader>
+                <DialogTitle>{t('managed.mcp.manage')}</DialogTitle>
+              </DialogHeader>
+              <ManagedMcpManagerPage
+                provider={provider}
+                sessionId={summary.sessionId}
+                workspaceId={summary.workspace.workspaceId}
+              />
+            </DialogContent>
+          </Dialog>
+        )}
       {/* The uncertain-request row unmounts on the Discard click itself, so
           a persistent region announces the outcome wherever focus lands. */}
       <p role="status" className="sr-only">
@@ -1516,6 +1607,7 @@ function ManagedSessionsContent({
                         {t('sidebar.rename')}
                       </Button>
                     )}
+                    {mcpManagerButton}
                   </span>
                 }
                 workspaceName={summary.workspace?.workspaceId}
@@ -1562,6 +1654,7 @@ function ManagedSessionsContent({
                   {t('sidebar.rename')}
                 </Button>
               )}
+              {mcpManagerButton}
               {provider.tasks &&
                 (summary.capabilities.tasks === true ||
                   taskCancel.pendingTaskIds.length > 0) && (
@@ -1868,9 +1961,16 @@ function ManagedSessionsContent({
               className={home ? shellStyles.footer : 'shrink-0'}
               data-testid="managed-approval"
             >
+              {approvals.action?.sessionId !== sessionId && (
+                <p className="mb-2 text-sm font-medium">
+                  {t('managed.tasks.childApproval')} ·{' '}
+                  {approvals.action?.sessionId}
+                </p>
+              )}
               <ToolApproval
                 request={pendingApproval}
                 planExecutionMode={
+                  approvals.action?.sessionId === sessionId &&
                   approvals.action?.toolName === 'exit_plan_mode' &&
                   approvals.action.turnId === detail.summary?.activeTurnId
                     ? detail.summary?.approvalMode
@@ -2433,6 +2533,16 @@ function ManagedSessionsContent({
             key={`${provider.storageKey}:${sessionId}`}
             wide={wideTasks}
             tasks={tasks}
+            waitingSessions={childApprovalSessions}
+            onOpenChild={(child) =>
+              setChildView({
+                provider,
+                clientId,
+                root: sessionId,
+                child,
+                trigger: document.activeElement,
+              })
+            }
             cancel={taskCancel}
             canCancel={
               summary?.capabilities.tasks === true && !!provider.tasks.cancel
@@ -2452,6 +2562,26 @@ function ManagedSessionsContent({
             }}
           />
         )}
+        {childView &&
+          childView.provider === provider &&
+          childView.clientId === clientId &&
+          childView.root === sessionId && (
+            <ManagedChildSessionView
+              key={`${provider.storageKey}:${sessionId}:${childView.child}`}
+              provider={provider}
+              clientId={clientId}
+              sessionId={childView.child}
+              onClose={() => setChildView(undefined)}
+              restoreFocus={() => {
+                if (
+                  childView.trigger instanceof HTMLElement &&
+                  childView.trigger.isConnected
+                )
+                  childView.trigger.focus();
+                else taskTriggerRef.current?.focus();
+              }}
+            />
+          )}
       </div>
     </div>
   );

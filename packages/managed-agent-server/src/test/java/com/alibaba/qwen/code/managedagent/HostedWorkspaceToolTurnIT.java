@@ -32,6 +32,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashSet;
@@ -455,8 +456,7 @@ class HostedWorkspaceToolTurnIT {
                     assertThat(producers).as("Runtime producers before Broker shutdown").isNotEmpty();
                     broker.close();
                     for (ProcessHandle producer : producers) {
-                        producer.onExit().get(10, TimeUnit.SECONDS);
-                        assertThat(producer.isAlive()).as("Producer %s before retained read", producer.pid()).isFalse();
+                        HostedProcessLiveness.awaitStopped(producer, Duration.ofSeconds(10), "Producer before retained read");
                     }
                     System.out.println("HOSTED_SHELL_PRODUCERS_EXITED: " + producers.size());
                     Path readerLog = temporary.resolve("reader.log");

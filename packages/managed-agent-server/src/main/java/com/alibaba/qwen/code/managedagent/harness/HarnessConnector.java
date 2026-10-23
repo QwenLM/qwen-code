@@ -14,6 +14,8 @@ public interface HarnessConnector extends AutoCloseable {
         throw new UnsupportedOperationException("Hosted wake recovery is unavailable");
     }
 
+    default boolean supportsPublicChildAgents() { return false; }
+
     default boolean supportsApprovalSelection() { return false; }
 
     default boolean supportsLiveApprovalSelection() { return false; }
@@ -49,6 +51,20 @@ public interface HarnessConnector extends AutoCloseable {
     default boolean supportsInputAttachments() { return false; }
 
     default boolean supportsSessionSkills() { return false; }
+
+    default boolean supportsMcpManagement() { return false; }
+
+    default Map<String, Object> mcpManagement(String tenantId, String sessionId) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
+    default Map<String, Object> manageMcp(String tenantId, String sessionId, Map<String, Object> command) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
+    default Map<String, Object> mcpManagementOperation(String tenantId, String sessionId, String operationId) {
+        throw new UnsupportedOperationException("MCP management is unavailable");
+    }
 
     default boolean isWorkspaceFilesAvailable() {
         return false;

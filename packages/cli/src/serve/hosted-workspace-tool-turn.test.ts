@@ -3131,6 +3131,60 @@ it('keeps native file tools in the MCP profile on their existing shared runtime'
   expect(slot.value).toBeUndefined();
 });
 
+it('backs up ordinary file tools on the shared Shell and MCP owner without releasing it at Turn completion', async () => {
+  const slot = contextSlot();
+  const mcp = {
+    broker: { ...broker, runtimeSessionId: 'mcp:session' },
+    ensureReady: async () => undefined,
+    refresh: async () => undefined,
+    tools: () => [{ name: 'mcp_echo', description: 'Fixture MCP tool.' }],
+    toolInput: () => undefined,
+  };
+  const combined = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    { resources: session.resources, assertWritable: async () => undefined },
+    undefined,
+    undefined,
+    {
+      mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      profile: 'hosted-workspace-shell/1',
+      context: slot,
+    },
+  );
+  const declarations = await combined.declarations(
+    new AbortController().signal,
+  );
+  expect(declarations.map((tool) => tool.name)).toEqual(
+    expect.arrayContaining([
+      'read_file',
+      'write_file',
+      'edit',
+      'run_shell_command',
+      'mcp_echo',
+    ]),
+  );
+  expect(
+    declarations.find((tool) => tool.name === 'edit')?.description,
+  ).toContain('preimages are backed up');
+  await combined.execute(calls, parts, 'model', new AbortController().signal);
+  await combined.consumeResults();
+  await combined.finish();
+  expect(
+    broker.fileHistory.mock.calls.map(([operation]) => operation.action),
+  ).toEqual(['bind', 'prepare', 'snapshot']);
+  expect(await readHostedFileHistory(session)).toMatchObject({
+    pendingTurn: null,
+    pendingUndo: null,
+  });
+  expect(broker.release).not.toHaveBeenCalled();
+  expect(broker.workspaceContext).toHaveBeenCalledOnce();
+});
+
 it('executes against the declarations actually advertised before a catalog replacement', async () => {
   let name = 'mcp_old';
   const input = { toolName: 'managed_mcp_call', input: { pinned: 'original' } };
