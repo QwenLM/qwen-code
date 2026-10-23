@@ -833,6 +833,15 @@ export class ModelsConfig {
       return;
     }
 
+    // Managed endpoint allowlist (issue #12805): the UPDATE branch below
+    // would otherwise rewrite an active snapshot to an off-list endpoint
+    // with no policy check — the capture gate in
+    // detectAndCaptureRuntimeModel covers only the CREATE branch. Both
+    // branches share this predicate; no policy keeps today's behavior.
+    if (!this.isPolicyBaseUrlAllowed(baseUrl)) {
+      return;
+    }
+
     // Check if model exists in registry - if so, don't create RuntimeModelSnapshot
     if (this.modelRegistry.hasModel(currentAuthType, model, baseUrl)) {
       return;

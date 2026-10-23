@@ -1346,6 +1346,36 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
     expectHardCodedQwenCount(enabled);
   });
 
+  it('reloadModels refreshes the dropped-models record', () => {
+    // The drop record must follow the reloaded registration, or user-visible
+    // channels (advisor errors, warnings) keep naming boot-time drops for a
+    // config that no longer produced them (issue #12805).
+    const registry = new ModelRegistry(
+      { custom: [{ id: 'on', baseUrl: CORP, envKey: 'CORP_KEY' }] },
+      { custom: 'openai' },
+      [CORP],
+    );
+    expect(registry.getAllowlistDroppedModels()).toEqual([
+      { id: 'coder-model', baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL' },
+    ]);
+    registry.reloadModels(
+      {
+        custom: [
+          {
+            id: 'off',
+            baseUrl: 'https://external-llm.example/v1',
+            envKey: 'CORP_KEY',
+          },
+        ],
+      },
+      { custom: 'openai' },
+    );
+    expect(registry.getAllowlistDroppedModels()).toEqual([
+      { id: 'coder-model', baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL' },
+      { id: 'off', baseUrl: 'https://external-llm.example/v1' },
+    ]);
+  });
+
   it('matches an explicit default port as absent (URL origin semantics)', () => {
     // new URL() elides explicit default ports from the origin, so
     // https://corp.example:443/v1 is the same endpoint as https://corp.example.
@@ -1404,12 +1434,20 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
         ],
       } as ModelProvidersConfig,
       { custom: 'openai' },
-      [CORP, 'https://', '', 'not a url', 42 as unknown as string],
+      [CORP, 'https://', 'mailto:', '', 'not a url', 42 as unknown as string],
     );
     expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual(['ok']);
     expect(
       debugLoggerWarnSpy.mock.calls.some((call) =>
         String(call[0]).includes('is not a URL with a host'),
+      ),
+    ).toBe(true);
+    // 'mailto:' parses with an empty hostname — the parse-ok branch of
+    // parseUrlForMatch must reject it too, not only the throw branch
+    // that 'https://' hits (issue #12805).
+    expect(
+      debugLoggerWarnSpy.mock.calls.some((call) =>
+        String(call[0]).includes('entry "mailto:" is not a URL with a host'),
       ),
     ).toBe(true);
     expect(

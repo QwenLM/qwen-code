@@ -2351,6 +2351,41 @@ describe('loadCliConfig', () => {
       );
     });
 
+    it('rejects an allowlist-dropped model even when the current-model escape hatch would re-admit it', async () => {
+      // A dropped model that is also the current model (e.g. the persisted
+      // main model after an operator deployed a lockdown) is re-admitted by
+      // the uncaptured-runtime-model branch of
+      // checkAdvisorModelAvailability; the drop-precedence check must still
+      // fail closed, or the lockdown is silently bypassed (issue #12805).
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await expect(
+        loadCliConfig(
+          {
+            advisorModel: 'ext-model',
+            model: {
+              name: 'ext-model',
+              allowedBaseUrls: ['https://corp-llm.example/v1'],
+            },
+            modelProviders: {
+              openai: [
+                {
+                  id: 'ext-model',
+                  name: 'External Model',
+                  baseUrl: 'https://external-llm.example/v1',
+                  envKey: 'EXT_KEY',
+                },
+              ],
+            },
+          },
+          argv,
+        ),
+      ).rejects.toThrow(
+        "was excluded from the model registry by the managed allowlist 'model.allowedBaseUrls'",
+      );
+    });
+
     it('matches a qualified selector against the dropped model id', async () => {
       // The picker and /advisor persist the authType-qualified form
       // (`openai:ext-model`); the registry records the bare id it dropped —

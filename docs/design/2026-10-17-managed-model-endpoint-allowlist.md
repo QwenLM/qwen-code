@@ -14,10 +14,10 @@ Before this PR, no managed endpoint policy existed at all: outbound endpoints we
 
 Matching is URL-semantic via `new URL()`:
 
-- Scheme and host are compared case-insensitively (URL origin normalization); the path is case-sensitive.
-- An explicit default port counts as absent: `https://corp.example:443/v1` matches entry `https://corp.example`, because URL origin elides default ports. Non-default ports (`:8443`) must match exactly.
-- Path matching is a path-boundary prefix: entry `https://corp.example` matches `https://corp.example/v1` but not `https://corp.example.evil.com` (different host) and not a sibling that merely shares a string prefix. Trailing slashes are ignored.
-- Non-parseable values fall back to the legacy string comparison (trim + boundary prefix), so partially valid entries degrade to the old behavior instead of matching everything.
+- Scheme and host are compared case-insensitively; the path is case-sensitive.
+- An explicit default port counts as absent: `https://corp.example:443/v1` matches entry `https://corp.example`. Non-default ports (`:8443`) must match exactly.
+- Path matching is a path-boundary prefix: entry `https://corp.example` matches `https://corp.example/v1` but not `https://corp.example.evil.com` (different host) and not a sibling that merely shares a string prefix. Trailing slashes are ignored on both sides.
+- Both sides must parse as URLs with a host: a degenerate value (not a URL, or host-less) matches nothing, so one malformed entry can never widen the control fail-open.
 - A model without an explicit `baseUrl` is judged against its protocol default endpoint (the one the SDK would dial). An empty list blocks everything (fail closed); `undefined` means no policy.
 
 ## Enforcement points

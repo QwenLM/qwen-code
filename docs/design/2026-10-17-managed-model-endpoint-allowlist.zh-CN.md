@@ -14,17 +14,17 @@
 
 匹配基于 `new URL()` 的 URL 语义：
 
-- Scheme 和 host 不区分大小写比较（URL origin 规范化）；path 区分大小写。
-- 显式默认端口视为不存在：`https://corp.example:443/v1` 匹配条目 `https://corp.example`，因为 URL origin 会省略默认端口。非默认端口（`:8443`）必须精确匹配。
-- Path 按路径边界做前缀匹配：条目 `https://corp.example` 匹配 `https://corp.example/v1`，但不匹配 `https://corp.example.evil.com`（不同 host），也不匹配仅字符串前缀相同的兄弟路径。尾部斜杠忽略。
-- 无法解析的值回退到旧的字符串比较（trim + 边界前缀），使部分可用的条目退化为旧行为，而不是匹配一切。
+- Scheme 和 host 不区分大小写比较；path 区分大小写。
+- 显式默认端口视为不存在：`https://corp.example:443/v1` 匹配条目 `https://corp.example`。非默认端口（`:8443`）必须精确匹配。
+- Path 按路径边界做前缀匹配：条目 `https://corp.example` 匹配 `https://corp.example/v1`，但不匹配 `https://corp.example.evil.com`（不同 host），也不匹配仅字符串前缀相同的兄弟路径。尾部斜杠两侧都忽略。
+- 两侧都必须能解析为带 host 的 URL：退化值（不是 URL 或无 host）不匹配任何东西 —— 一条畸形条目绝不可能把控制放宽成 fail-open。
 - 没有显式 `baseUrl` 的模型按其协议默认端点（SDK 实际会拨向的端点）判定。空列表拦截一切（fail closed）；`undefined` 表示无策略。
 
 ## 执行点
 
 同一个谓词（`isBaseUrlAllowed`）在出站模型端点生效的每个位置执行：
 
-1. **注册** — `ModelRegistry` 在注册时丢弃白名单外的模型（选择器/`--model` 列表只提供允许的端点），并记录每个被丢弃项（`getAllowlistDroppedModels`）。
+1. **注册** — `ModelRegistry` 在注册时丢弃白名单外的模型（选择器/`--model` 列表只提供允许的端点），并记录每个被丢弃项（`getAllowlistDroppedModels`）。daemon 的模型配置列表（GET /workspace/models）读取各 scope 的原始 `modelProviders`，不受注册表过滤，因此仍可能列出白名单外的端点；设置写入路由对这些写入执行门控，因此来自 Web Shell 的白名单外 `advisorModel`/`imageModel` 选择器无法被持久化。
 2. **解析** — 当有效端点（显式 `baseUrl`，未设置时为协议默认端点）不在白名单内时，`resolveModelConfig` 抛出点名 `model.allowedBaseUrls` 的 `FatalConfigError`。这堵住了 `--model`/`--openaiBaseUrl`/env/`security.auth` 的旁路。
 3. **凭据恢复/捕获** — `ModelsConfig`（`syncAfterAuthRefresh` 的 preserve 分支、`detectAndCaptureRuntimeModel`）拒绝白名单外的端点，使已存凭据无法重新放行注册表从未注册的端点。
 4. **兄弟 `ModelsConfig` 站点** — voice 模型源、daemon voice 配置、workspace provider 状态、fast-model ACP 检查、provider 安装冲突探测都接收同一策略（`undefined` = 无策略；绝不强转为 `[]`）。

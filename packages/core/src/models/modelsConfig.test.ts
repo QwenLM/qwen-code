@@ -1712,6 +1712,35 @@ describe('ModelsConfig', () => {
       expect(snapshot?.baseUrl).toBe('https://initial.example.com/v1');
     });
 
+    it('does not rewrite an active runtime snapshot to an off-list endpoint', () => {
+      // The capture gate covers the UPDATE branch as well (issue #12805):
+      // an off-list updateCredentials must not re-point the active snapshot,
+      // and no policy keeps today's behavior (the test above pins it).
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        allowedModelBaseUrls: ['https://initial.example.com/v1'],
+      });
+      modelsConfig.updateCredentials({
+        model: 'on-list-model',
+        apiKey: 'sk-key',
+        baseUrl: 'https://initial.example.com/v1',
+      });
+      expect(modelsConfig.getActiveRuntimeModelSnapshotId()).toBe(
+        '$runtime|openai|on-list-model',
+      );
+
+      modelsConfig.updateCredentials({
+        model: 'off-list-model',
+        apiKey: 'sk-off-list',
+        baseUrl: 'https://off-list.example.com/v1',
+      });
+
+      const snapshot = modelsConfig.getActiveRuntimeModelSnapshot();
+      expect(snapshot?.modelId).toBe('on-list-model');
+      expect(snapshot?.apiKey).toBe('sk-key');
+      expect(snapshot?.baseUrl).toBe('https://initial.example.com/v1');
+    });
+
     it('should enforce per-authType snapshot limit', () => {
       const modelsConfig = new ModelsConfig({
         initialAuthType: AuthType.USE_OPENAI,

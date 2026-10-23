@@ -785,6 +785,10 @@ export class ModelRegistry {
     this.modelsByAuthType = reloaded.modelsByAuthType;
     this.providerProtocolConfig = reloaded.providerProtocolConfig;
     this.modelProvidersConfig = reloaded.modelProvidersConfig;
+    // The drop record must follow the reloaded registration, or user-visible
+    // channels (advisor errors, warnings) keep naming boot-time drops for a
+    // config that no longer produced them (issue #12805).
+    this.allowlistDroppedModels = reloaded.allowlistDroppedModels;
   }
 
   /** The raw providers config this registry was last built from. */
