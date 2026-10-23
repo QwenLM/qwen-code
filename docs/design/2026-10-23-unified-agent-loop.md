@@ -2,11 +2,11 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **Status**: proposed. This document is PR 0 and changes no code. PR 1 (headless) has not started.
+- **Status**: accepted in #15343. PR 1 (headless) is #15369.
 - **Date**: 2026-10-23, against upstream `779a4d5d0d`.
 - **Related**:
   - tracking issue #15327;
-  - the earlier proposal #8775;
+  - the earlier proposal #8775, which starts with AgentCore and headless; this design extends its goal to all seven loops, and its AgentCore step is PR 5;
   - defects found while comparing the loops: #15324, #15325, #15326;
   - [loop protection setting](2026-10-21-loop-protection-setting.md).
 
@@ -104,7 +104,7 @@ Shared agent loop (packages/core)
 LlmClient → Turn → LlmChat (unchanged)
 ```
 
-The loop is an async generator. It yields every model event unchanged, plus tool lifecycle events, so the existing surface adapters keep working. It returns a result whose stop reason the surface maps to its own outcome. Decisions the surface owns are callbacks.
+The loop is an async function. Every model event reaches the surface unchanged through a callback, so the existing surface adapters keep working, and tool results and live tool output reach it the same way. Decisions the surface owns are callbacks too. The loop returns a result whose stop reason the surface maps to its own outcome.
 
 ### Model round
 
@@ -121,15 +121,15 @@ The main-session round is `LlmClient.sendMessageStream`. AgentCore and speculati
 
 1. **Duplicates.** A call that repeats a call id is not run again. Provider replays get the duplicate response, and a repeated provider id stops the loop with `duplicate_provider_call`. This uses the existing helpers in `turn.ts` and `toolCallIdUtils.ts`.
 2. **Selection.** The surface may restrict which calls run (headless structured output). Every call that does not run still gets a response.
-3. **Plan-mode entry.** When the batch enters plan mode, its sibling calls are skipped through the existing `findPlanModeEntryBatchBoundaryIndex`.
-4. **Scheduling.** The whole batch is scheduled on one scheduler.
-   - The default is `CoreToolScheduler`. It already provides partitioning by concurrency safety, the in-flight cap, approvals, hooks, the partial-edit guard, Mod tool checks and runtime views.
+3. **Scheduling.** The whole batch is scheduled on one scheduler.
+   - The default is `CoreToolScheduler`. It already provides partitioning by concurrency safety, the in-flight cap, approvals, hooks, the partial-edit guard, Mod tool checks and runtime views. It also skips the sibling calls of a plan-mode entry; headless does that itself today only because it schedules one call at a time.
+   - Tools run under the surface's tool signal, which may differ from the loop's own: headless adds a Goal turn's signal for tools only.
    - The surface supplies the scheduler options it owns today: the approval wiring, progress output and the full-turn model callback.
    - A surface whose Mods have tool hooks passes the Mod-aware scheduler it uses today, with the same `schedule` contract, so Mod behavior does not change: Ink and OpenTUI use `InteractiveModToolScheduler`, headless a per-call Mod runner.
-5. **Launch hook.** One new `CoreToolScheduler` option, `beforeToolLaunch(call)`, runs serially in request order right before each launch, including inside a concurrent batch. Returning `false` leaves the call unexecuted. Headless needs it for:
-   - the exact `--max-tool-calls` count (tick before launch);
+4. **Launch hook.** One new `CoreToolScheduler` option, `beforeToolLaunch(call)`, runs serially in request order before each launch. In a concurrent batch it runs for every call that fits in flight before any of them starts, so a refusal takes effect before the other calls of that run begin, as in headless today. Returning `false` leaves the call unexecuted. Calls that an `exec` script makes are not asked; legacy headless does not count them either. The loop offers every call of the batch to the surface once, in request order; a call the scheduler settled without launching it (invalid arguments, a denial) is offered at its turn. Headless needs it for:
+   - the exact `--max-tool-calls` count, which ticks before each launch and counts failed calls too;
    - "the first valid `structured_output` ends the session".
-6. **Ordered results.** Results are yielded in request order as soon as every earlier call has settled. Tool progress goes through the same queue, so stream-json frames keep their current order.
+5. **Results at batch end.** Results reach the surface when the batch completes, in request order: replays first, then executed calls, skipped calls and repeated ids. Waiting for the batch lets the scheduler apply batch-level hook output and the batch output budget first, so the surface reports exactly what the model receives. Live tool output still streams as it happens.
 
 ### Continuation
 
@@ -145,6 +145,7 @@ The main-session round is `LlmClient.sendMessageStream`. AgentCore and speculati
 The result holds the stop reason, the number of rounds and the last `Turn`. The stop reasons are:
 
 - `completed`;
+- `next_round` — `maxRounds` was reached; the result carries the tool results to send;
 - `cancelled`;
 - `loop_detected`;
 - `duplicate_provider_call`;
@@ -156,6 +157,8 @@ The result holds the stop reason, the number of rounds and the last `Turn`. The 
 - `error`.
 
 The surface maps the reason. Headless maps it to exit codes and results; ACP later to `stopReason`; AgentCore to `terminateMode`.
+
+Headless runs its main loop with `maxRounds: 1`. Its preparation of each round (teammate messages, the turn cap, the send type) therefore stays where it is today, and the loop owns the round itself. A drain item runs all of its rounds in one call.
 
 ### Surface policies
 
@@ -186,24 +189,25 @@ The current loop stays as the `else` branch and is not refactored while the sett
 
 ### Headless on the shared loop (PR 1)
 
-| Headless today                                                                     | With the setting on                                                                                               |
-| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `while (true)` round loop, plus a second copy in `drainBatch`                      | one loop call per interaction; each drain item is another call with its own send type                             |
-| `limitedTurnCount` gate (exit 53)                                                  | unchanged; the client's `MaxSessionTurns` now ends with the same error result instead of a false success (#15325) |
-| `discardAbandonedAttempt` on `Retry` / `ModelFallback`                             | the loop drops the calls; the surface restarts its attempt and writes the retry frame                             |
-| `processToolCallBatch` duplicate and replay handling                               | the loop                                                                                                          |
-| `structured_output` pre-scan and first-success end                                 | surface policy: call selection plus a result callback that ends the loop                                          |
-| plan-mode-entry sibling skip                                                       | the loop                                                                                                          |
-| `executeToolCall` per call, `partitionHeadlessToolCalls`, the in-flight cap        | one scheduler per round, with the same partitioning and cap                                                       |
-| tick before launch                                                                 | `beforeToolLaunch`                                                                                                |
-| Mods with tool hooks run serially                                                  | the per-call Mod runner as the batch scheduler                                                                    |
-| ordered finalize, `finalizeToolResponses`, `recordToolResult` with Goal provenance | the loop                                                                                                          |
-| model-override precedence (inline `/model` > full-turn vision > `\0` sentinel)     | surface policy                                                                                                    |
-| teammate text merged into the tool-result turn                                     | input at the tool boundary, sent as `Teammate`                                                                    |
-| Goal `terminateTurn`                                                               | stop reason `tool_ended_turn`                                                                                     |
-| `LoopDetected` → exit 1; a repeated duplicate id → loop-detected result            | stop reasons `loop_detected`, `duplicate_provider_call`                                                           |
-| abort → `routeAbort` (55 / 130)                                                    | stop reason `cancelled`; the surface still routes the abort                                                       |
-| idle phase: next Goal, teammates, cron, background holdback, memory, final result  | unchanged, outside the loop                                                                                       |
+| Headless today                                                                     | With the setting on                                                                                         |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `while (true)` round loop, plus a second copy in `drainBatch`                      | one loop call per interaction; each drain item is another call with its own send type                       |
+| `limitedTurnCount` gate (exit 53)                                                  | unchanged; the client's `MaxSessionTurns` now ends the run the same way instead of a false success (#15325) |
+| `discardAbandonedAttempt` on `Retry` / `ModelFallback`                             | the loop drops the calls; the surface restarts its attempt and writes the retry frame                       |
+| `processToolCallBatch` duplicate and replay handling                               | the loop                                                                                                    |
+| `structured_output` pre-scan and first-success end                                 | surface policy: call selection plus a result callback that ends the loop                                    |
+| plan-mode-entry sibling skip                                                       | the scheduler, for the whole batch; the per-call Mod runner does it itself                                  |
+| `executeToolCall` per call, `partitionHeadlessToolCalls`, the in-flight cap        | one scheduler per round, with the same partitioning and cap                                                 |
+| tick before launch                                                                 | `beforeToolLaunch`                                                                                          |
+| approvals: stream-json `can_use_tool`, one call at a time                          | the same callback, for the whole batch before it runs                                                       |
+| Mods with tool hooks run serially                                                  | the per-call Mod runner as the batch scheduler                                                              |
+| ordered finalize, `finalizeToolResponses`, `recordToolResult` with Goal provenance | the loop                                                                                                    |
+| model-override precedence (inline `/model` > full-turn vision > `\0` sentinel)     | surface policy                                                                                              |
+| teammate text merged into the tool-result turn                                     | input at the tool boundary, sent as `Teammate`                                                              |
+| Goal `terminateTurn`                                                               | stop reason `tool_ended_turn`                                                                               |
+| `LoopDetected` → exit 1; a repeated duplicate id → loop-detected result            | stop reasons `loop_detected`, `duplicate_provider_call`                                                     |
+| abort → `routeAbort` (55 / 130)                                                    | stop reason `cancelled`; the surface still routes the abort                                                 |
+| idle phase: next Goal, teammates, cron, background holdback, memory, final result  | unchanged, outside the loop                                                                                 |
 
 ## Migration
 
@@ -239,13 +243,14 @@ A difference fails the scenario unless it is listed with a linked issue.
 - one tool;
 - a parallel read-only batch;
 - mixed safe and unsafe calls;
+- a Code Mode `exec` script that calls a tool;
 - approval allowed and denied (stream-json `can_use_tool`);
 - cancel during a tool;
 - a mid-stream retry and a model fallback;
 - an output-truncated edit;
 - loop detection;
 - a blocking Stop hook;
-- `--max-tool-calls` at the budget edge;
+- `--max-tool-calls` at the budget edge: a parallel batch, a sequential batch, and a call rejected before it runs;
 - `--max-session-turns` across two stream-json messages;
 - structured output with a sibling call;
 - a teammate message merged into a tool-result turn.
@@ -255,11 +260,19 @@ The suite runs in the integration job. A scheduled job also runs the whole headl
 ## Compatibility
 
 - With the setting off, no surface changes. The only shared code that changes is the scheduler's new optional `beforeToolLaunch`, which does nothing when it is not passed.
-- With the setting on, the intended differences are:
-  - the fixes for #15325 (headless);
-  - and later #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
+- With the setting on, headless differs from today in these intended ways. Most follow from scheduling a batch as one unit, as the TUI already does:
+  - a stream-json message past `--max-session-turns` ends the run at the session turn limit, as `-p` does (the error on stderr, exit code 53), instead of a success that repeats the previous answer (#15325);
+  - a batch's PreToolUse hooks and approvals (stream-json `can_use_tool`) run for all of its calls before any of them is launched, instead of one call at a time;
+  - a PostToolBatch hook fires once per batch with all of its calls, and the batch output budget applies across the batch; today each call is its own batch;
+  - telemetry follows the batch, as in the TUI: a plan-mode entry's siblings are logged as failed tool calls, also in the JSON `stats`, and a call stopped before its launch still has a tool span; with Mod tool hooks the calls are still scheduled one at a time, so neither applies;
+  - the results of a batch with several sequential calls are printed when the batch completes, instead of after each call;
+  - with PreToolUse or PermissionRequest hooks configured, a read-only shell call can run in parallel, judged by its input after the hooks ran, instead of always running alone;
+  - when a skill earlier in the batch registers a PreToolUse hook, a later call of the batch is stopped and the model has to issue it again, instead of being checked by the new hook;
+  - under `--json-schema`, a `structured_output` call that repeats a call id in the same response is answered as a duplicate instead of being run, so a valid second submission waits for the next round.
 
-  Each is listed in the parity suite.
+  The parity suite covers the common cases unchanged and asserts the first difference.
+
+- Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 
 - No setting, protocol field or file format is removed.
 
@@ -294,7 +307,7 @@ End state:
 ## Open questions
 
 - Should `model.maxSessionTurns: 0` mean "no turns" or be rejected? Today the loops disagree (#15325).
-- Should the parity suite's output comparison tolerate tool-progress frames that move relative to each other inside a concurrent batch, where the order is not deterministic today either?
+- The parity suite compares frames in order, and no scenario yet runs concurrent calls with live output, whose progress frames have no fixed order in either loop. Should such scenarios compare progress frames per call?
 
 ## Follow-up
 
