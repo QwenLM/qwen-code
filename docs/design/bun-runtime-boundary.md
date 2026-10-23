@@ -4,7 +4,7 @@
 
 Runtime follow-up (2026-10-23): this candidate pins npm/private and standalone-preview Bun and its runner contract to **1.4.4**. Earlier **1.3.14** execution evidence retains its original provenance; this version update does not establish new installed or platform acceptance. OpenTUI remains **0.5.10**.
 
-The normal standalone updater matrix passed 152 scenario rows on real Node 24.19 and Bun 1.4.4 hosts (76 each), with verified loopback HTTPS and synthetic unsigned CLI/version archives. Node registry dispatch uses an injected npm executor; Bun probe observability is unavailable, so zero allocations and actual npm subprocess identity are not claimed. This does not close released standalone upgrades or other platforms. That evidence predates local `a28ba265` and this proposal on main `249ab50d`; the final installed artifact and platform matrix require new acceptance.
+The normal standalone updater matrix passed 152 scenario rows on real Node 24.19 and Bun 1.4.4 hosts (76 each), with verified loopback HTTPS and synthetic unsigned CLI/version archives. Node registry dispatch uses an injected npm executor; Bun probe observability is unavailable, so zero allocations and actual npm subprocess identity are not claimed. This does not close released standalone upgrades or other platforms. That evidence predates local `a28ba265` and this proposal integrating main `949a71e2`; the final installed artifact and platform matrix require new acceptance.
 
 Status: implemented in MYWO-8 S1 (this change). Audience: S2 (Bun PTY), S3
 (runtime compat matrix), S4 (packaging), and qoder's PTY integration work.

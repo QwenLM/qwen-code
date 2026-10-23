@@ -2,7 +2,7 @@
 
 [English](2026-10-21-opentui-npm-distribution.md) | [简体中文](2026-10-21-opentui-npm-distribution.zh-CN.md)
 
-**已合并 [#14959](https://github.com/QwenLM/qwen-code/pull/14959) 的运行时后续批次。** 本批将 OpenTUI 统一为 Bun-only，并把 npm 私有运行时和 standalone preview 的 Bun pin 更新为 **1.4.4**，OpenTUI 保持 **0.5.10**。该更新包含上游 Brotli decoder 错误传播修复，不改变直接运行时兼容下限或默认 renderer。当前提案基于 main `249ab50d`，本次整合产物的安装与平台验收尚未执行。
+**已合并 [#14959](https://github.com/QwenLM/qwen-code/pull/14959) 的运行时后续批次。** 本批将 OpenTUI 统一为 Bun-only，并把 npm 私有运行时和 standalone preview 的 Bun pin 更新为 **1.4.4**，OpenTUI 保持 **0.5.10**。该更新包含上游 Brotli decoder 错误传播修复，不改变直接运行时兼容下限或默认 renderer。当前提案从原 `249ab50d` 基线整合 main `949a71e2`，本次整合产物的安装与平台验收尚未执行。
 
 历史证据保持其原始产物归属：main `32b4234b` 加早期运行时改动通过正常 build/typecheck/bundle、87 项 CLI 和 46 项打包/工作流测试。真实 Node 26.4.0/npm 11.17.0 pack 与自有目录 `--ignore-scripts` 安装验证了 1,355 个发布文件及执行权限，解包大小为 152,316,775 字节，低于 160 MiB。一项 macOS arm64 strict 安装版 smoke 观察到 Node launcher、同安装私有 Bun 1.4.4、原生库、一次模型 HTTP、语法分色及 `/quit` 自然退出 0。随后禁用 relaunch、缺失私有 Bun、继承 FFI flag 的 fallback/strict 六项拒绝负控通过。这些不是本次新整合产物、其他安装布局、npm 子进程身份或其他平台的验收。
 

@@ -4,7 +4,7 @@
 
 运行时后续批次（2026-10-23）：本候选将 npm 私有运行时与 standalone preview 的 Bun pin 及对应 runner 契约固定为 **1.4.4**。早期 **1.3.14** 实测证据保留原始归属；本次版本更新不代表新的安装产物或平台验收。OpenTUI 保持 **0.5.10**。
 
-正常 standalone updater 矩阵在真实 Node 24.19 与 Bun 1.4.4 宿主通过 152 个场景（各 76），使用验证证书的 loopback HTTPS 与合成无签名 CLI/版本归档。Node registry 调度采用注入 npm executor；Bun probe 不可观察，不宣称零分配或真实 npm 子进程身份。发布版 standalone 升级与其他平台仍待验收，上述证据早于本地 `a28ba265` 和本次 main `249ab50d` 提案，最终安装产物和平台矩阵仍须重新验收。
+正常 standalone updater 矩阵在真实 Node 24.19 与 Bun 1.4.4 宿主通过 152 个场景（各 76），使用验证证书的 loopback HTTPS 与合成无签名 CLI/版本归档。Node registry 调度采用注入 npm executor；Bun probe 不可观察，不宣称零分配或真实 npm 子进程身份。发布版 standalone 升级与其他平台仍待验收，上述证据早于本地 `a28ba265` 和本次整合 main `949a71e2` 的提案，最终安装产物和平台矩阵仍须重新验收。
 
 状态：MYWO-8 S1 已实现（本变更）。读者：S2（Bun PTY）、S3（运行时兼容矩阵）、S4（打包）以及 qoder 的 PTY 对接工作。
 
