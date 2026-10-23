@@ -1880,6 +1880,10 @@ export function WebShellSidebar({
         connection.status === 'connecting',
     );
   useEffect(() => {
+    if (connection.loadingTranscript || !currentSessionActive) {
+      setPendingRecentCreation(null);
+      return;
+    }
     if (
       pendingRecentCreation &&
       currentRowIdentity &&
@@ -1888,7 +1892,12 @@ export function WebShellSidebar({
       setSelectedSessionRow({ identity: currentRowIdentity, recent: true });
       setPendingRecentCreation(null);
     }
-  }, [currentRowIdentity, pendingRecentCreation]);
+  }, [
+    connection.loadingTranscript,
+    currentSessionActive,
+    currentRowIdentity,
+    pendingRecentCreation,
+  ]);
   const liveStateGroupCatalogs = useWorkspaceSessionLiveState(
     workspace.client,
     {

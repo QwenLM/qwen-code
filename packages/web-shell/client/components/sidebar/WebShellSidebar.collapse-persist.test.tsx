@@ -38,6 +38,7 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
         status: 'connected',
         error: undefined as Error | undefined,
         sessionId: null as string | null,
+        loadingTranscript: false,
         workspaceCwd: '/tmp/project',
         sessionContext: undefined as { kind: 'standalone' } | undefined,
         capabilities: undefined as
@@ -278,6 +279,7 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   connection.status = 'connected';
+  connection.loadingTranscript = false;
   connection.error = undefined;
   connection.sessionId = null;
   connection.sessionContext = undefined;
@@ -2886,6 +2888,47 @@ describe('Recent sessions shared rows', () => {
       container.querySelector('[data-testid="recent-sessions"]')?.textContent,
     ).toContain('API review');
   });
+
+  it.each(['restore', 'managed'])(
+    'clears pending Recent creation when leaving the draft through %s',
+    async (navigation) => {
+      enableRecentSessions();
+      connection.sessionId = 'session-a';
+      const onNewSession = vi.fn(() => {
+        connection.sessionId = null;
+        return true;
+      });
+      renderSidebar(false, { onNewSession });
+      await flushSidebar();
+      const recent = container.querySelector(
+        '[data-testid="recent-sessions"]',
+      )!;
+      click(
+        recent.querySelector<HTMLButtonElement>('[aria-label="New task"]')!,
+      );
+      await flushSidebar();
+      renderSidebar(false, { onNewSession });
+      await flushSidebar();
+      if (navigation === 'restore') {
+        connection.sessionId = 'session-b';
+        connection.loadingTranscript = true;
+      }
+      renderSidebar(false, {
+        onNewSession,
+        currentSessionActive: navigation !== 'managed',
+      });
+      await flushSidebar();
+      connection.sessionId = 'session-b';
+      connection.loadingTranscript = false;
+      workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+        sessions: [makeSession('session-b', { displayName: 'Restored chat' })],
+      });
+      renderSidebar(false, { onNewSession });
+      await flushSidebar();
+      expect(recent.textContent).toContain('Restored chat');
+      expect(recent.querySelector('[aria-current="page"]')).toBeNull();
+    },
+  );
 
   it('does not leave a pending Recent selection when creation is cancelled', async () => {
     enableRecentSessions();

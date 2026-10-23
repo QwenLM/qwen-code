@@ -7,6 +7,7 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
+import { SIDEBAR_SESSION_PREVIEW_LIMIT } from '../../constants/sessions';
 import {
   readWorkspaceExpanded,
   writeWorkspaceExpanded,
@@ -14,7 +15,6 @@ import {
 import styles from './WebShellSidebar.module.css';
 
 const LIMIT = 20;
-const PREVIEW = 5;
 
 export interface RecentSessionEntry {
   session: DaemonSessionSummary;
@@ -249,17 +249,19 @@ export function RecentSessions({
               {t('sidebar.noSessions')}
             </div>
           )}
-          {entries.slice(0, showAll ? LIMIT : PREVIEW).map((entry) => (
-            <Fragment
-              key={JSON.stringify([
-                entry.workspaceCwd,
-                entry.session.sessionId,
-              ])}
-            >
-              {renderSession(entry)}
-            </Fragment>
-          ))}
-          {!showAll && entries.length > PREVIEW && (
+          {entries
+            .slice(0, showAll ? LIMIT : SIDEBAR_SESSION_PREVIEW_LIMIT)
+            .map((entry) => (
+              <Fragment
+                key={JSON.stringify([
+                  entry.workspaceCwd,
+                  entry.session.sessionId,
+                ])}
+              >
+                {renderSession(entry)}
+              </Fragment>
+            ))}
+          {!showAll && entries.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
             <button
               type="button"
               className={styles.showAllSessions}
