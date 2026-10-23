@@ -172,6 +172,89 @@ describe('Skill snapshot correctness regressions', () => {
     expect(result.snapshot).toBeDefined();
   });
 
+  it('retains usable inventory and its age after an initialized error response', async () => {
+    const failed: ServeWorkspaceSkillsStatus = {
+      ...inventory([]),
+      errors: [{ kind: 'skills', status: 'error', error: 'bad manifest' }],
+    };
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce(inventory(['retained-review']))
+      .mockResolvedValue(failed);
+    const svc = service({ queryWorkspaceStatus: query });
+    const initial = await svc.getWorkspaceSkillsStatus(ctx);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await svc.getWorkspaceSkillsStatus(ctx);
+    await vi.advanceTimersByTimeAsync(500);
+    const result = await svc.getWorkspaceSkillsStatus(ctx);
+
+    expect(result.skills.map((skill) => skill.name)).toEqual([
+      'retained-review',
+    ]);
+    expect(result.errors).toBeUndefined();
+    expect(result.snapshot).toEqual({
+      observedAt: initial.snapshot!.observedAt,
+      ageMs: 1_500,
+      stale: true,
+      refreshing: false,
+    });
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([false, true])(
+    'returns unavailable after an initialized error without usable fallback (errored local provider: %s)',
+    async (withLocal) => {
+      const failed: ServeWorkspaceSkillsStatus = {
+        ...inventory([]),
+        errors: [{ kind: 'skills', status: 'error', error: 'bad manifest' }],
+      };
+      const svc = service({
+        queryWorkspaceStatus: vi.fn().mockResolvedValue(failed),
+        ...(withLocal
+          ? { workspaceSkillsStatusProvider: vi.fn().mockResolvedValue(failed) }
+          : {}),
+      });
+
+      const result = await svc.getWorkspaceSkillsStatus(ctx);
+
+      expect(result.initialized).toBe(false);
+      expect(result.errors).toEqual([
+        expect.objectContaining({ kind: 'skills', status: 'error' }),
+      ]);
+      expect(result.snapshot).toBeUndefined();
+    },
+  );
+
+  it.each([false, true])(
+    'uses local inventory after an initialized child error (requireFresh: %s)',
+    async (requireFresh) => {
+      const failed: ServeWorkspaceSkillsStatus = {
+        ...inventory([]),
+        errors: [{ kind: 'skills', status: 'error', error: 'bad manifest' }],
+      };
+      const invalidate = vi.fn();
+      const local = Object.assign(
+        vi.fn().mockResolvedValue(inventory(['local-review'])),
+        { invalidate },
+      );
+      const svc = service({
+        queryWorkspaceStatus: vi.fn().mockResolvedValue(failed),
+        workspaceSkillsStatusProvider: local,
+      });
+
+      const result = await svc.getWorkspaceSkillsStatus(ctx, { requireFresh });
+
+      expect(result.initialized).toBe(true);
+      expect(result.skills.map((skill) => skill.name)).toEqual([
+        'local-review',
+      ]);
+      expect(result.errors).toBeUndefined();
+      expect(local).toHaveBeenCalledExactlyOnceWith('/workspace');
+      expect(invalidate).toHaveBeenCalledTimes(requireFresh ? 1 : 0);
+    },
+  );
+
   it.each([2_500, 6_000])(
     'advances inventory across three warm polls with %i ms responses',
     async (delayMs) => {

@@ -361,7 +361,7 @@ export function createDaemonWorkspaceService(
       status = createIdleWorkspaceSkillsStatus(boundWorkspace);
     }
     if (
-      status.initialized ||
+      (status.initialized && !status.errors?.length) ||
       (allowRetainedSnapshot && lastWorkspaceSkillsStatus)
     ) {
       return status;
@@ -384,9 +384,8 @@ export function createDaemonWorkspaceService(
         );
       }
     }
-    return status.initialized || status.errors?.length
-      ? status
-      : unavailableWorkspaceSkillsStatus();
+    if (status.errors?.length) return { ...status, initialized: false };
+    return status.initialized ? status : unavailableWorkspaceSkillsStatus();
   };
 
   const skillsSnapshot = (): ServeWorkspaceSkillsStatus | undefined => {
@@ -424,7 +423,8 @@ export function createDaemonWorkspaceService(
           if (
             generation === workspaceSkillsGeneration &&
             sequence > publishedWorkspaceSkillsReadSequence &&
-            status.initialized
+            status.initialized &&
+            !status.errors?.length
           ) {
             lastWorkspaceSkillsStatus = status;
             lastWorkspaceSkillsStatusAt = startedAt;

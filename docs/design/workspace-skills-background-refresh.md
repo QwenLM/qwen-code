@@ -33,10 +33,11 @@ open owning workspace runtime, and a read start sequence newer than the last
 published observation. Sequence numbers, rather than wall-clock timestamps,
 prevent late results from replacing newer observations during clock rollback.
 Invalidated observations cannot publish. Only the task occupying the shared
-slot may clear it. Superseded successful cold observations can still answer
-their original callers without being cached or carrying snapshot metadata.
+slot may clear it. A superseded successful cold read returns a newer retained
+snapshot when one exists; otherwise it returns its own uncached observation
+without snapshot metadata.
 
-Successful initialized observations atomically replace the snapshot. The
+Only initialized observations without errors atomically replace the snapshot. The
 observation timestamp is the task start, conservatively including collection
 time. Replaying retained data, failing, or releasing a slot never resets it;
 a later successful publication records that observation's start time. When
@@ -50,8 +51,9 @@ the last observation is at least one second old. `refreshing` reports occupancy
 of the shared slot, excluding work that continues after slot timeout.
 The fields describe the daemon
 observation, not the age of files or a guarantee that every session is current.
-They are optional in ACP and SDK types because direct runtime/config status
-responses and older daemons do not supply this metadata.
+They are optional in ACP and SDK types: only responses carrying a retained
+daemon observation supply this metadata. For example, direct runtime/config
+status, session resource inventories, and older daemons omit it.
 
 Explicit invalidation drops known-invalid inventory, clears the throttle, and
 supersedes prior work. Successful explicit ACP preheat also invalidates the

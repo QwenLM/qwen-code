@@ -1744,9 +1744,12 @@ child was already live, so the subsequent read sees the child. Skill deletion
 and enablement identity reads bypass the snapshot and throttle, awaiting a new
 observation with local fallback.
 
-Initialized inventory responses additionally include optional observation
-metadata. Older daemons, direct config/runtime status reads, and successful
-cold observations superseded by invalidation before publication omit it:
+Inventory responses carrying a retained daemon observation additionally include
+optional snapshot metadata. Direct config/runtime status reads, session resource
+inventories, and older daemons omit it. A superseded successful cold read returns
+a newer retained snapshot when available; otherwise it returns its own uncached
+observation without this metadata. Only initialized observations without errors
+can replace the retained snapshot:
 
 ```json
 {
