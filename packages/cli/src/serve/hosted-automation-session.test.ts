@@ -1617,6 +1617,36 @@ describe('hosted automation gates', () => {
     );
   });
 
+  it('cuts the stored output back to the cap when sanitizing lengthens it', async () => {
+    // A defanged tag gains a character: 16 KiB of them would outgrow the
+    // budget the definition was admitted under.
+    const harness = await createHarness();
+    const stdout = '<result>'.repeat((16 * 1024) / 8);
+    const gate = scriptedGate([
+      { kind: 'output', stdout, truncated: false, durationMs: 3 },
+    ]);
+    await withSession(
+      harness,
+      async (automations) => {
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        const fired = await automations.fire(fireParams());
+        const stored = decodeAutomationGateOutput(
+          await harness.store.read(fired.run!.gateOutputRef!),
+        );
+        expect(Buffer.byteLength(stored.stdout, 'utf8')).toBeLessThanOrEqual(
+          16 * 1024,
+        );
+        expect(stored.truncated).toBe(true);
+        expect(stored.stdout.startsWith('<\u200Bresult>')).toBe(true);
+      },
+      { gate: gate.runner },
+    );
+  });
+
   it('keeps the newest stderr of a failed gate, sanitized and within what the control plane stores', async () => {
     // A failed gate runs no turn: the detail is the only place its reason
     // reaches, so a long, colored stderr must not push that reason out.

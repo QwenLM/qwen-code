@@ -50,6 +50,17 @@ export type HostedAutomationGateRunner = (
   request: HostedAutomationGateRequest,
 ) => Promise<HostedAutomationGateResult>;
 
+/** Probe starts remembered at most, oldest forgotten first. */
+const STARTED_CALLS_LIMIT = 1024;
+
+function rememberStart(started: Set<string>, callId: string): void {
+  started.delete(callId);
+  started.add(callId);
+  if (started.size > STARTED_CALLS_LIMIT) {
+    started.delete(started.values().next().value!);
+  }
+}
+
 /**
  * The derived call id of one occurrence's probe under one definition
  * revision; path-safe for the Broker. A revision gets its own Session and
@@ -109,9 +120,11 @@ const GATE_OBSERVATION_MS = MANAGED_AUTOMATION_GATE_TIMEOUT_MS + 40_000;
 export function createHostedAutomationGateRunner(
   options: HostedAutomationGateRunnerOptions,
 ): HostedAutomationGateRunner {
-  // Probes an attempt of this process started and no answer has settled
+  // Probes an attempt of this process started and no receipt has answered
   // yet: a later attempt that cannot read the probe back may say it is
-  // unknown, never that it could not start.
+  // unknown, never that it could not start. Kept after such an answer too,
+  // since the answer can be lost and the fire driven again; bounded, oldest
+  // first, for occurrences that never come back.
   const startedCalls = new Set<string>();
   return async ({ automationRunId, definitionRevision, gate, signal }) => {
     if (!isHostedWorkspaceShellProfile(options.toolProfile())) {
@@ -137,6 +150,9 @@ export function createHostedAutomationGateRunner(
     let unconfirmed = false;
     let replayed = false;
     let started = false;
+    // Whether the answer is the probe's own (its receipt) rather than a
+    // guess; only then is the start forgotten.
+    let answered = false;
     let result: HostedAutomationGateResult;
     try {
       // The occurrence's receipt is asked for before anything is acquired:
@@ -163,15 +179,16 @@ export function createHostedAutomationGateRunner(
           try {
             await broker.acquire();
           } catch (cause) {
-            // Only the Broker's own refusal proves nothing was acquired. A
-            // lost or unreadable answer may follow a committed acquisition,
-            // whose Session would stay a Workspace execution member with
-            // nobody left to release it.
+            // Even a refusal may leave the Session's row behind (the Broker
+            // records the acquisition before the Workspace refuses it), so
+            // the attempt releases whatever the answer. Only the Broker's own
+            // refusal proves nothing was acquired; a lost or unreadable
+            // answer may follow a committed acquisition still being admitted.
+            mayHold = true;
             if (
               !(cause instanceof HostedWorkspaceBrokerRejection) ||
               cause.status >= 500
             ) {
-              mayHold = true;
               unconfirmed = true;
             }
             throw cause;
@@ -205,9 +222,10 @@ export function createHostedAutomationGateRunner(
               signal,
               () => {
                 started = true;
-                startedCalls.add(callId);
+                rememberStart(startedCalls, callId);
               },
             );
+            answered = true;
           } catch (cause) {
             if (
               !started ||
@@ -222,6 +240,8 @@ export function createHostedAutomationGateRunner(
               reservation.executionCallId,
               cause,
             );
+            // A receipt, or a cancel that proved the probe never started.
+            answered = result.kind !== 'unknown';
           }
         }
       }
@@ -257,7 +277,7 @@ export function createHostedAutomationGateRunner(
         reconciliationIsFinal: !unconfirmed,
       });
     }
-    startedCalls.delete(callId);
+    if (answered) startedCalls.delete(callId);
     return result;
   };
 }
@@ -289,9 +309,14 @@ async function settle(
     };
   }
   if (result.executionStatus !== 'success') {
+    const message = result.error?.message ?? result.executionStatus;
     return {
       kind: 'failed',
-      detail: `could not start: ${result.error?.message ?? result.executionStatus}`,
+      // `not_started` never ran; an error may have come from a run.
+      detail:
+        result.executionStatus === 'not_started'
+          ? `could not start: ${message}`
+          : `the Runtime reported an error running it: ${message}`,
       stderr: '',
       durationMs: 0,
     };

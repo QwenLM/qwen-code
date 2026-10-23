@@ -248,9 +248,13 @@ the route wires the real one:
    tell how a started probe ended — the Broker no longer holds its Session
    live after a restart, or a cancel goes unanswered — retries instead: the
    next attempt acquires, which reconciles the record, and reads the
-   receipt. The Harness remembers which probes it started and has not
-   answered, so a later attempt that still cannot read one back answers
-   `unknown`, never "could not start". A Workspace that refuses the
+   receipt. The Harness remembers which probes it started until a receipt
+   answers them (a bounded set), so a later attempt that still cannot read
+   one back answers `unknown`, never "could not start", however often the
+   fire is driven again. A refused acquisition is released too, since the
+   Broker records the Session's row before the Workspace refuses it. A
+   receipt of an execution that ended in error reads as such, not as
+   "could not start". A Workspace that refuses the
    acquisition (`409 workspace_busy` or `workspace_unavailable`, which can
    last: a maintenance hold, a missing working directory) fails the gate
    with that reason, visible in `gate_status`, and the next slot tries
@@ -345,7 +349,9 @@ decided slot.
 A gated definition's worst-case execution input is the ungated budget plus
 the gate block under a full 16 KiB output; admission compares that against
 the 64 KiB inline resource bound, so a gated definition never commits whose
-fire could not publish its input. The prompt budget of a gated definition is
+fire could not publish its input. The stored output is cut back to the cap
+after sanitizing, which may lengthen it, so that bound holds whatever the
+sanitizer writes. The prompt budget of a gated definition is
 therefore about 16 KiB smaller.
 
 ### 5.6 Fault gates (FG11g)

@@ -604,13 +604,41 @@ describe('createHostedAutomationGateRunner', () => {
     },
   );
 
+  it('tells a receipt that ran into an error apart from one that never started', async () => {
+    const { probe } = await rig((path) =>
+      path === RELEASE
+        ? { body: { ...identity, released: true } }
+        : {
+            body: {
+              ...identity,
+              executionCallId: 'gate-execution',
+              status: {
+                state: 'settled',
+                result: {
+                  executionStatus: 'error',
+                  error: { message: 'worker crashed' },
+                },
+              },
+            },
+          },
+    );
+    await expect(probe()).resolves.toMatchObject({
+      kind: 'failed',
+      detail: 'the Runtime reported an error running it: worker crashed',
+    });
+  });
+
   it('answers failed for a Workspace that cannot admit the probe, with the reason', async () => {
     // Busy or unavailable may last (a maintenance hold, a missing cwd): a
     // visible failure per slot, not hours of retries the status never shows.
+    // The Broker records the acquisition before the Workspace refuses it:
+    // the attempt releases that row, and a row already gone counts.
     const { calls, probe } = await rig((path) =>
       path === '/executions:prepare'
         ? rejection(404, 'runtime_session_not_found')
-        : rejection(409, 'workspace_busy'),
+        : path === RELEASE
+          ? { body: { ...identity, released: true } }
+          : rejection(409, 'workspace_busy'),
     );
     await expect(probe()).resolves.toMatchObject({
       kind: 'failed',
@@ -619,6 +647,7 @@ describe('createHostedAutomationGateRunner', () => {
     expect(calls.map((call) => call.path)).toEqual([
       '/executions:prepare',
       '/tool-sessions:acquire',
+      RELEASE,
     ]);
   });
 
@@ -657,6 +686,8 @@ describe('createHostedAutomationGateRunner', () => {
           return attempt === 1
             ? { body: acquired }
             : rejection(409, 'runtime_session_conflict');
+        case RELEASE:
+          return rejection(404, 'runtime_session_not_found');
         default:
           return rejection(503, 'runtime_store_unavailable');
       }
@@ -667,6 +698,8 @@ describe('createHostedAutomationGateRunner', () => {
       kind: 'unknown',
       reason: expect.stringContaining('an earlier attempt started the probe'),
     });
+    // That answer may be lost and the fire driven again: still unknown.
+    await expect(probe()).resolves.toMatchObject({ kind: 'unknown' });
   });
 
   it.each([
@@ -738,7 +771,7 @@ describe('createHostedAutomationGateRunner', () => {
 
   it('answers failed, not unknown, when the derived Session cannot be acquired', async () => {
     const { calls, probe } = await rig((path) =>
-      path === '/executions:prepare'
+      path === '/executions:prepare' || path === RELEASE
         ? rejection(404, 'runtime_session_not_found')
         : rejection(409, 'runtime_session_not_acquirable'),
     );
@@ -752,6 +785,7 @@ describe('createHostedAutomationGateRunner', () => {
     expect(calls.map((call) => call.path)).toEqual([
       '/executions:prepare',
       '/tool-sessions:acquire',
+      RELEASE,
     ]);
   });
 

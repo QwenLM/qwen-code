@@ -47,6 +47,7 @@ import {
 } from './hosted-automation-gate.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
+  CRON_GATE_OUTPUT_CAP_BYTES,
   gateStderrTail,
   sanitizeGateOutput,
 } from '@qwen-code/qwen-code-core/services/cron-gate.js';
@@ -194,6 +195,23 @@ export class AutomationGateUnsupportedError extends Error {
     super(`Automation ${scheduleId} names a gate, but ${reason}.`);
     this.name = 'AutomationGateUnsupportedError';
   }
+}
+
+/**
+ * The probe's output as the model sees it, cut back to the output cap on a
+ * character boundary: sanitizing may lengthen it (a defanged tag gains a
+ * character), and the input budget and the resource limit assume no more
+ * than the cap.
+ */
+function sanitizedWithinCap(stdout: string): { stdout: string; cut: boolean } {
+  const sanitized = sanitizeGateOutput(stdout);
+  const bytes = Buffer.from(sanitized, 'utf8');
+  if (bytes.length <= CRON_GATE_OUTPUT_CAP_BYTES) {
+    return { stdout: sanitized, cut: false };
+  }
+  let end = CRON_GATE_OUTPUT_CAP_BYTES;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+  return { stdout: bytes.subarray(0, end).toString('utf8'), cut: true };
 }
 
 /** How long a release nobody owes may hold up the fire that asks it. */
@@ -699,12 +717,13 @@ export class HostedAutomationSession {
         if (result.kind !== 'output') {
           return { inputId, replayed: false, gate: summarizeGate(result) };
         }
+        // Stored as the model sees it: raw control bytes would only grow
+        // the resource (each escapes to six bytes) past its limit.
+        const stored = sanitizedWithinCap(result.stdout);
         const output: AutomationGateOutput = {
           gate: schedule.gate,
-          // Stored as the model sees it: raw control bytes would only grow
-          // the resource (each escapes to six bytes) past its limit.
-          stdout: sanitizeGateOutput(result.stdout),
-          truncated: result.truncated,
+          stdout: stored.stdout,
+          truncated: result.truncated || stored.cut,
           durationMs: result.durationMs,
         };
         gateOutputRef = await this.store.resources.publish(
