@@ -138,13 +138,13 @@ automation_gate_invalid`. Neither spends the caller's `Idempotency-Key`.
 
 ### 4.2 Occurrences
 
-| Gate outcome                                       | Occurrence                                                          | What happens                                               |
-| -------------------------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------- |
-| exit 0, empty stdout                               | `skipped`, reason `gate_quiet`                                      | nothing reaches the Session                                |
-| exit 0, output                                     | `fired`                                                             | the run's turn text is the prompt plus the output, as data |
-| non-zero exit, timeout, could not start            | `skipped`, reason `gate_failed`; detail in `gate_status.last_error` | nothing reaches the Session; the streak grows              |
-| the Runtime cannot say (worker replaced mid-probe) | `skipped`, reason `gate_unknown`                                    | nothing reaches the Session; the next slot probes again    |
-| blocked: no Broker, or a Hook catalog pinned       | `skipped`, reason `gate_failed`; detail in `gate_status.last_error` | a Harness without a Broker; refused at definition anyway   |
+| Gate outcome                                       | Occurrence                                                           | What happens                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------- |
+| exit 0, empty stdout                               | `skipped`, reason `gate_quiet`                                       | nothing reaches the Session                                |
+| exit 0, output                                     | `fired`                                                              | the run's turn text is the prompt plus the output, as data |
+| non-zero exit, timeout, could not start            | `skipped`, reason `gate_failed`; detail in `gate_status.last_error`  | nothing reaches the Session; the streak grows              |
+| the Runtime cannot say (worker replaced mid-probe) | `skipped`, reason `gate_unknown`                                     | nothing reaches the Session; the next slot probes again    |
+| blocked: no Broker, or a Hook catalog pinned       | `skipped`, reason `gate_blocked`; detail in `gate_status.last_error` | a Harness without a Broker; refused at definition anyway   |
 
 A manual run (`POST .../runs`) takes the same path: a quiet gate answers
 `409 automation_run_skipped` with reason `gate_quiet`, as an overlap refusal
@@ -322,7 +322,7 @@ the Broker's receipt once it settles, and the command still runs once.
 
 `AutomationScanner.fire` reads `gate` from the answer. `delivered` settles
 `fired` as today. `quiet`, `failed`, `blocked` and `unknown` settle `skipped`
-with reasons `gate_quiet`, `gate_failed`, `gate_failed` and `gate_unknown`,
+with reasons `gate_quiet`, `gate_failed`, `gate_blocked` and `gate_unknown`,
 the detail in the occurrence's ledger `last_error` (the public API shows
 the latest one as `gate_status.last_error`; `PublicAutomationRun` carries
 no detail), and never touch the journal.

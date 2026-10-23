@@ -11690,7 +11690,7 @@
           "reason": {
             "type": ["string", "null"],
             "maxLength": 64,
-            "description": "overlap, count_limit, session_not_active, revision_stale or definition_retired for a skipped policy decision; gate_quiet, gate_failed or gate_unknown for a fire the definition's gate withheld; answer_unobtainable for an unknown one; a definitive Harness refusal settles skipped carrying its own error code verbatim (invalid_automation_operation, automation_mode_disabled, automation_count_limit or automation_operation_conflict); absent otherwise."
+            "description": "overlap, count_limit, session_not_active, revision_stale or definition_retired for a skipped policy decision; gate_quiet, gate_failed, gate_blocked or gate_unknown for a fire the definition's gate withheld; answer_unobtainable for an unknown one; a definitive Harness refusal settles skipped carrying its own error code verbatim (invalid_automation_operation, automation_mode_disabled, automation_count_limit or automation_operation_conflict); absent otherwise."
           },
           "definition_revision": {
             "type": "integer",

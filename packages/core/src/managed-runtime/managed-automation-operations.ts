@@ -14,6 +14,7 @@ import {
 import {
   AUTOMATION_RUN_KIND,
   SCHEDULE_CATCH_UP_POLICIES,
+  SCHEDULE_GATE_MAX_BYTES,
   SCHEDULE_KIND,
   SCHEDULE_OVERLAP_POLICIES,
   SCHEDULE_SESSION_MODES,
@@ -239,6 +240,17 @@ export function assertAutomationDefinition(
     if (gateError !== null) {
       throw new AutomationGateInvalidError(
         `Automation definition gate ${gateError}.`,
+      );
+    }
+    // The record bounds a gate in UTF-8 bytes, as the Server does; the
+    // shared check counts characters, which a multi-byte gate can stay
+    // under while the record refuses it.
+    if (
+      Buffer.byteLength((gateValue as string).trim(), 'utf8') >
+      SCHEDULE_GATE_MAX_BYTES
+    ) {
+      throw new AutomationGateInvalidError(
+        `Automation definition gate must be at most ${SCHEDULE_GATE_MAX_BYTES} UTF-8 bytes.`,
       );
     }
     gate = (gateValue as string).trim();

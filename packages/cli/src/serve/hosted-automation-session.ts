@@ -805,6 +805,10 @@ export class HostedAutomationSession {
         automationRunId,
         definitionRevision,
         gate,
+        // Never aborted, on purpose: a fire whose relay request timed out is
+        // a lost reply, and its re-drive reads the probe's receipt, so the
+        // probe must run on rather than be cancelled; a Session that closes
+        // takes its Runtime, and the probe with it, down through the cascade.
         signal: new AbortController().signal,
       })
       .then(

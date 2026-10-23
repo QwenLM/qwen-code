@@ -190,6 +190,9 @@ describe('automation definitions', () => {
       // Refused before the definition commits, so no fire ever acquires a
       // Runtime only for the Broker to refuse the payload.
       ['echo \ud800', /gate must be valid Unicode/],
+      // Under the shared check's 2048 characters, over the record's 2048
+      // UTF-8 bytes: refused as a gate before it commits.
+      [`echo ${'中'.repeat(700)}`, /gate must be at most 2048 UTF-8 bytes/],
     ] as const) {
       expect(() => assertAutomationDefinition({ ...base, gate })).toThrow(
         message,

@@ -207,7 +207,7 @@ class AutomationScannerTest {
         clock.set(T0 + 4 * MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
         assertThat(occurrence(automation.id(), "schedule:2026-06-01T10:04:00Z")
-                .reason()).isEqualTo(AutomationScanner.REASON_GATE_FAILED);
+                .reason()).isEqualTo(AutomationScanner.REASON_GATE_BLOCKED);
         PublicAutomation failing = service.get(tenant, ACTOR, automation.id());
         assertThat(failing.gateStatus().lastOutcome()).isEqualTo("blocked");
         assertThat(failing.gateStatus().consecutiveFailures()).isEqualTo(3);

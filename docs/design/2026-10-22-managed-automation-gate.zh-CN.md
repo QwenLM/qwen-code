@@ -49,13 +49,13 @@ Managed 世界还有本地闸门没有的约束。Harness 从不自己生成进�
 
 ### 4.2 Occurrence
 
-| 闸门结果                                     | Occurrence                                                     | 发生什么                                 |
-| -------------------------------------------- | -------------------------------------------------------------- | ---------------------------------------- |
-| 退出码 0，stdout 为空                        | `skipped`，原因 `gate_quiet`                                   | 什么都不到达 Session                     |
-| 退出码 0，有输出                             | `fired`                                                        | 运行的回合文本 = 提示词 + 作为数据的输出 |
-| 非零退出、超时、无法启动                     | `skipped`，原因 `gate_failed`；细节见 `gate_status.last_error` | 什么都不到达 Session；连段增长           |
-| Runtime 无法作答（探针进行中 worker 被替换） | `skipped`，原因 `gate_unknown`                                 | 什么都不到达 Session；下个槽再探         |
-| blocked：没有 Broker，或钉了 Hook catalog    | `skipped`，原因 `gate_failed`；细节见 `gate_status.last_error` | Harness 没有 Broker；定义时本就会被拒绝  |
+| 闸门结果                                     | Occurrence                                                      | 发生什么                                 |
+| -------------------------------------------- | --------------------------------------------------------------- | ---------------------------------------- |
+| 退出码 0，stdout 为空                        | `skipped`，原因 `gate_quiet`                                    | 什么都不到达 Session                     |
+| 退出码 0，有输出                             | `fired`                                                         | 运行的回合文本 = 提示词 + 作为数据的输出 |
+| 非零退出、超时、无法启动                     | `skipped`，原因 `gate_failed`；细节见 `gate_status.last_error`  | 什么都不到达 Session；连段增长           |
+| Runtime 无法作答（探针进行中 worker 被替换） | `skipped`，原因 `gate_unknown`                                  | 什么都不到达 Session；下个槽再探         |
+| blocked：没有 Broker，或钉了 Hook catalog    | `skipped`，原因 `gate_blocked`；细节见 `gate_status.last_error` | Harness 没有 Broker；定义时本就会被拒绝  |
 
 手动运行（`POST .../runs`）走同一条路径：闸门静默时答 `409 automation_run_skipped`，原因 `gate_quiet`，与今天的 overlap 拒绝一致。
 
@@ -96,7 +96,7 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 
 ### 5.3 扫描器与账本
 
-`AutomationScanner.fire` 从应答里读 `gate`。`delivered` 照旧结算为 `fired`。`quiet`、`failed`、`blocked`、`unknown` 结算为 `skipped`，原因分别为 `gate_quiet`、`gate_failed`、`gate_failed`、`gate_unknown`，细节写入 occurrence 的账本 `last_error`（公开 API 以 `gate_status.last_error` 显示最近一条；`PublicAutomationRun` 不带细节），且不碰 journal。每次结算都在租约下把闸门状态记到定义行：`gate_last_outcome`、`gate_last_at`、`gate_quiet_since_delivery`、`gate_failures`（连续的 failed、blocked、unknown）和 `gate_last_error`，由 `PublicAutomation.gate_status` 报告。只有定义行仍处在该 occurrence 钉住的修订时状态才会更新：此后的修订已为它自己的命令重置了状态，而更早修订下的应答——定义被修订时仍在运行的探针，或修订前已认领的运行的重放投递——都不属于那条命令。水位线与租约的行为与任何已决定的槽相同。
+`AutomationScanner.fire` 从应答里读 `gate`。`delivered` 照旧结算为 `fired`。`quiet`、`failed`、`blocked`、`unknown` 结算为 `skipped`，原因分别为 `gate_quiet`、`gate_failed`、`gate_blocked`、`gate_unknown`，细节写入 occurrence 的账本 `last_error`（公开 API 以 `gate_status.last_error` 显示最近一条；`PublicAutomationRun` 不带细节），且不碰 journal。每次结算都在租约下把闸门状态记到定义行：`gate_last_outcome`、`gate_last_at`、`gate_quiet_since_delivery`、`gate_failures`（连续的 failed、blocked、unknown）和 `gate_last_error`，由 `PublicAutomation.gate_status` 报告。只有定义行仍处在该 occurrence 钉住的修订时状态才会更新：此后的修订已为它自己的命令重置了状态，而更早修订下的应答——定义被修订时仍在运行的探针，或修订前已认领的运行的重放投递——都不属于那条命令。水位线与租约的行为与任何已决定的槽相同。
 
 `ma_schedule` 增加 `gate` 列和五个状态列（写入 V1 基线 `V1__managed_schema.sql`，正式发布前就地更新）；`gate_last_at` 加入被锚定的纪元列。
 

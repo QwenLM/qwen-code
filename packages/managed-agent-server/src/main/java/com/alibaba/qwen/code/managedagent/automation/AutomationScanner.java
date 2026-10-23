@@ -56,6 +56,7 @@ public class AutomationScanner {
     /** The gate probe withheld the fire (docs/design/2026-10-22-managed-automation-gate.md). */
     public static final String REASON_GATE_QUIET = "gate_quiet";
     public static final String REASON_GATE_FAILED = "gate_failed";
+    public static final String REASON_GATE_BLOCKED = "gate_blocked";
     public static final String REASON_GATE_UNKNOWN = "gate_unknown";
     /** The fire route's refusal codes a retry can never change (R3-11). */
     private static final Set<String> DEFINITIVE_REFUSALS = Set.of(
@@ -518,6 +519,8 @@ public class AutomationScanner {
                     case AutomationLedgerStore.GATE_QUIET -> REASON_GATE_QUIET;
                     case AutomationLedgerStore.GATE_UNKNOWN ->
                         REASON_GATE_UNKNOWN;
+                    case AutomationLedgerStore.GATE_BLOCKED ->
+                        REASON_GATE_BLOCKED;
                     default -> REASON_GATE_FAILED;
                 };
                 if (store.settleOccurrence(row.tenantId(), row.scheduleId(),
