@@ -204,6 +204,7 @@ function renderSidebar(
   props: {
     onNewSession?: () => Promise<boolean> | boolean;
     onSelectCurrentSession?: () => void;
+    currentSessionActive?: boolean;
     onLoadStandaloneSession?: (sessionId: string) => void;
     onStandaloneNotice?: (message: string) => void;
     layout?: 'single' | 'rail';
@@ -223,6 +224,7 @@ function renderSidebar(
   const sidebar = (
     <WebShellSidebar
       collapsed={collapsed}
+      currentSessionActive={props.currentSessionActive}
       layout={props.layout}
       activePage={props.activePage}
       containerWidth={props.containerWidth}
@@ -2754,6 +2756,17 @@ describe('Recent sessions shared rows', () => {
       `div.${sidebarStyles.sessionRow}`,
     )!;
     click(copy);
+    await flushSidebar();
+    expect(copy.getAttribute('aria-current')).toBe('page');
+    expect(original.hasAttribute('aria-current')).toBe(false);
+    renderSidebar(false, { currentSessionActive: false });
+    await flushSidebar();
+    expect(copy.hasAttribute('aria-current')).toBe(false);
+    expect(original.hasAttribute('aria-current')).toBe(false);
+    expect(
+      copy.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!.disabled,
+    ).toBe(true);
+    renderSidebar(false, { currentSessionActive: true });
     await flushSidebar();
     expect(copy.getAttribute('aria-current')).toBe('page');
     expect(original.hasAttribute('aria-current')).toBe(false);

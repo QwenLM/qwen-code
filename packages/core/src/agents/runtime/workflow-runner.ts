@@ -535,6 +535,7 @@ export class WorkflowRunner {
             : undefined,
           reviewLimits?.subagent,
           options.refuseSubagentTools,
+          options.toolUseId,
         );
       orchestrator = new WorkflowOrchestrator(dispatch);
       const registration: WorkflowTaskRegistration = {

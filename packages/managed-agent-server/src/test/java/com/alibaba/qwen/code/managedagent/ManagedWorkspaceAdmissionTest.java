@@ -94,6 +94,56 @@ class ManagedWorkspaceAdmissionTest {
     @Autowired
     private PlatformTransactionManager transactionManager;
 
+    @Test
+    void publicChildrenKeepLaunchPolicyAndModelAfterParentChangesAndDeploymentDisable() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-public-child", "storage-public-child", WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-public-child", "actor-a", true);
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        assertThat(properties.getHarness().isWorkspaceChildAgentsEnabled()).isTrue();
+        properties.getHarness().setApprovalMode("default");
+        var enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
+        var tx = new TransactionTemplate(transactionManager);
+        var selection = new WorkspaceSelection("ws-public-child", ".");
+        var old = tx.execute(status -> enabled.insertWorkspaceSessionCommand(tenant, "actor-a", "old", "old-digest",
+                "qwen-code", null, null, List.of(), null, selection));
+        assertThat(enabled.requireSession(tenant, old.sessionId()).publicChildAgentsVersion()).isZero();
+        var parent = tx.execute(status -> enabled.insertWorkspaceSessionCommand(tenant, "actor-a", "public", "public-digest",
+                "qwen-code", null, null, List.of(), null, selection, null, true, null, true, List.of(), true));
+        assertThat(enabled.requireSession(tenant, parent.sessionId()).publicChildAgentsVersion()).isEqualTo(1);
+        var snapshot = mapper.readTree("""
+                {"version":1,"sourcePromptId":"source-1","approvalMode":"auto-edit","approvalRevision":2,
+                 "modelId":"launch-model","modelRevision":4,"skillsRef":null,
+                 "modelRoute":{"authType":"openai","endpointDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                 "providerPin":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                 "origin":{"modelId":"source-model","authType":"openai","endpointDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                 "providerPin":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+                """);
+        jdbc.update("UPDATE ma_session SET selected_approval_mode = 'yolo', approval_revision = 3 WHERE tenant_id = ? AND session_id = ?",
+                tenant, parent.sessionId());
+        properties.getHarness().setWorkspaceChildAgentsEnabled(false);
+        var disabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
+        var lineage = new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(parent.sessionId(), parent.sessionId(), "run-public", 1);
+        var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "write a file"));
+        var child = tx.execute(status -> disabled.insertPublicChildSessionCommand(tenant, parent.sessionId(), "launch", "launch-digest",
+                "child", input, "payload", lineage, snapshot));
+        assertThat(disabled.requireSession(tenant, child.sessionId()).publicChildAgentsVersion()).isEqualTo(1);
+        assertThat(disabled.requireSession(tenant, child.sessionId()).approvalMode()).isEqualTo("auto-edit");
+        var model = disabled.findTurnModelSelection(tenant, child.sessionId(), disabled.findTurn(tenant, child.sessionId(), child.turnId()).orElseThrow().promptId());
+        assertThat(model.modelId()).isEqualTo("launch-model");
+        assertThat(model.revision()).isEqualTo(1);
+        assertThat(tx.execute(status -> disabled.insertPublicChildSessionCommand(tenant, parent.sessionId(), "launch", "launch-digest",
+                "child", input, "payload", lineage, snapshot)).sessionId()).isEqualTo(child.sessionId());
+        assertThatThrownBy(() -> tx.execute(status -> disabled.insertTurnCommand(tenant, "actor-a", "new-child-turn", "digest",
+                child.sessionId(), input, "payload"))).isInstanceOf(ManagedAgentException.class);
+        var fresh = tx.execute(status -> disabled.insertWorkspaceSessionCommand(tenant, "actor-a", "disabled", "disabled-digest",
+                "qwen-code", null, null, List.of(), null, selection, null, true, null, true, List.of(), true));
+        assertThat(disabled.requireSession(tenant, fresh.sessionId()).publicChildAgentsVersion()).isZero();
+    }
+
     @ParameterizedTest
     @CsvSource({"false, yolo", "false, default", "false, auto-edit", "true, default", "true, auto-edit"})
     void internalTeamLeadPinsPrivatePolicyAndSeparatesPublicReplay(boolean shellEnabled, String mode) {
@@ -1967,6 +2017,28 @@ class ManagedWorkspaceAdmissionTest {
         // the Turn lookup for the operator even after the creator falls.
         assertRefused(() -> service.cancelTurn(tenant, "operator2",
                 "cancel-1", sessionId, "turn_missing"), "turn_not_found");
+    }
+
+    @Test
+    void compressionCapabilityAllowsResidentWorkspacesAndRequiresTheOperatorAndFrozenFacts() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        grant(tenant, "ws-a", "operator2", true);
+        grant(tenant, "ws-a", "reader", false);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.supportsContextCompression()).thenReturn(true);
+        var enabled = boundServiceWith(harness);
+        org.springframework.test.util.ReflectionTestUtils.setField(enabled, "runtimeWarmer",
+                mock(com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeWarmer.class));
+        var summary = enabled.getWebShellSession(tenant, "operator2", session);
+        assertThat(summary.capabilities().cwdChange()).isFalse();
+        assertThat(summary.capabilities().contextCompression()).isTrue();
+        assertThat(summary.compactionRevision()).isZero();
+        assertThat(enabled.getWebShellSession(tenant, "reader", session).capabilities().contextCompression()).isFalse();
+        jdbc.update("UPDATE ma_workspace_access SET role='READER' WHERE tenant_id=? AND actor_id=?", tenant,
+                "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertThat(enabled.getWebShellSession(tenant, "operator2", session).capabilities().contextCompression()).isFalse();
     }
 
     @Test

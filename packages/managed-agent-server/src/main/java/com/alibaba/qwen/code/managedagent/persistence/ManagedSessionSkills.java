@@ -20,6 +20,9 @@ public class ManagedSessionSkills {
     private final ObjectMapper json;
     private final RequestDigests digests;
     private final ManagedAgentDefinitionStore definitions;
+    @org.springframework.beans.factory.annotation.Autowired
+    @org.springframework.context.annotation.Lazy
+    private ManagedExtensionRecordStore resources;
 
     public ManagedSessionSkills(JdbcTemplate jdbc, ObjectMapper json,
             RequestDigests digests, ManagedAgentDefinitionStore definitions) {
@@ -27,6 +30,22 @@ public class ManagedSessionSkills {
         this.json = json;
         this.digests = digests;
         this.definitions = definitions;
+    }
+
+    public List<Map<String, Object>> fromLaunchReference(String tenant, String session,
+            com.fasterxml.jackson.databind.JsonNode ref) {
+        if (ref.isNull()) {
+            return null;
+        }
+        var resource = resources.readCommittedResource(tenant, session, ref);
+        if (!"managed-agent-skills".equals(resource.kind()) || resource.schemaVersion() != 1) {
+            throw conflict();
+        }
+        try {
+            return AgentDefinitionExtensions.sessionSkills(json.readValue(resource.bytes(), new TypeReference<List<Map<String, Object>>>() { }));
+        } catch (java.io.IOException error) {
+            throw conflict();
+        }
     }
 
     public List<Map<String, Object>> effective(SessionRecord session) {

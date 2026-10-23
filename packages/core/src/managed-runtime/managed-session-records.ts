@@ -127,6 +127,7 @@ export type ManagedSessionDomain = (typeof MANAGED_SESSION_DOMAINS)[number];
  */
 export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
   [
+    'config_install',
     'goal_state',
     'session_metadata',
     'file_history',
@@ -135,6 +136,7 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     'mcp_operation',
     'hook_registration',
     'hook_execution',
+    'history_maintenance',
     'schedule',
     'automation_run',
     'child_acceptance',
@@ -293,7 +295,13 @@ export function assertManagedSessionChannelAdapterEnabled(
  * list; the bodies module refuses to load over a name left here.
  */
 export const MANAGED_SESSION_ENVELOPE_DOMAINS: readonly ManagedSessionDomain[] =
-  ['goal_state', 'session_metadata', 'file_history', 'session_source'];
+  [
+    'config_install',
+    'goal_state',
+    'session_metadata',
+    'file_history',
+    'session_source',
+  ];
 
 export function assertManagedSessionDomainEnabled(
   domain: ManagedSessionDomain,
