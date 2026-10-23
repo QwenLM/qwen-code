@@ -685,22 +685,25 @@ describe('convertResponsesEventToGemini', () => {
       type: 'invalid_request',
       status: undefined,
     },
-  ])('preserves $code details for display and telemetry', (testCase) => {
-    const thrown = thrownBy(() =>
-      convertResponsesEventToGemini(
-        { event: 'error', data: testCase.data },
-        'gpt-6-astra',
-        new ResponsesStreamState(),
-      ),
-    );
-    expect(thrown).toBeInstanceOf(Error);
-    expect(thrown).toMatchObject({
-      message: `Responses API error: ${testCase.message}`,
-      code: testCase.code,
-      type: testCase.type,
-    });
-    expect((thrown as { status?: number }).status).toBe(testCase.status);
-  });
+  ])(
+    'preserves $code details for display and telemetry ($type)',
+    (testCase) => {
+      const thrown = thrownBy(() =>
+        convertResponsesEventToGemini(
+          { event: 'error', data: testCase.data },
+          'gpt-6-astra',
+          new ResponsesStreamState(),
+        ),
+      );
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown).toMatchObject({
+        message: `Responses API error: ${testCase.message}`,
+        code: testCase.code,
+        type: testCase.type,
+      });
+      expect((thrown as { status?: number }).status).toBe(testCase.status);
+    },
+  );
 
   describe('response.incomplete', () => {
     it('extracts usage and maps incomplete_details.reason to MAX_TOKENS', () => {
