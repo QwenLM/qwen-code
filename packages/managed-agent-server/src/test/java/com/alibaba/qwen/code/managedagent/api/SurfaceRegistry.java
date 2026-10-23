@@ -411,6 +411,12 @@ public enum SurfaceRegistry {
                     + "/writers:seal",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
             EnumSet.of(Capability.STORE_WRITER_SEAL)),
+    INTERNAL_WRITER_QUIESCE_OWNERSHIP(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/writers:quiesce-ownership",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_WRITER_SEAL)),
+    INTERNAL_WRITER_RELEASE_OWNERSHIP(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/writers:release-ownership",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_WRITER_SEAL)),
     INTERNAL_RECOVERY_BLOCK(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}"
                     + "/recovery:block",
