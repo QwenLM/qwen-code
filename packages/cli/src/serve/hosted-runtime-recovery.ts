@@ -118,6 +118,9 @@ import {
 /** The parked turn is not one this recovery can drive; the caller 409s. */
 export class RecoveryDeclined extends Error {}
 
+/** A temporary pool wait, distinct from a deterministic takeover decline. */
+export class HostedRecoveryQuiescingError extends Error {}
+
 /** The states a recovery report may advertise: exactly the vocabulary the
  * hosted client's validator accepts (HostedHarnessClient's
  * RUNTIME_EXECUTION_STATES). The broker's wider union folds into it at the
@@ -2254,6 +2257,7 @@ export async function recoverHostedRuntimeTurn(input: {
   promptId: string;
   brokerOptions: HostedWorkspaceBrokerOptions;
   passive: boolean;
+  canStart?: () => boolean;
   /** The evidence funnels of the interrupted-Turn settlement (#13847): a
    * model-start park whose open round holds only journal-only calls
    * answers them by what committed through these — the same shapes the
@@ -2587,6 +2591,8 @@ export async function recoverHostedRuntimeTurn(input: {
           ) as { payloadJson?: unknown };
           if (typeof stored.payloadJson !== 'string')
             throw new RecoveryDeclined();
+          if (input.canStart?.() === false)
+            throw new HostedRecoveryQuiescingError('The Harness is quiescing.');
           const result = await broker
             .execute(
               item.executionCallId,

@@ -43,6 +43,11 @@ import {
   parseHostedRecoveryResource,
 } from './hosted-recovery-records.js';
 import { MANAGED_EXTENSION_RECORD_BODIES } from './managed-extension-projection.js';
+import type {
+  HostedHarnessPlacement,
+  HostedHarnessReleaseRequest,
+  HostedHarnessReleaseReceipt,
+} from './hosted-harness-release.js';
 import {
   MANAGED_TOOL_RESULT_KINDS,
   parseToolResultManifestBytes,
@@ -152,6 +157,10 @@ export interface HttpManagedSessionStores {
   };
   assertWritable(): Promise<void>;
   stopLocal(): Promise<void>;
+  quiesceOwnership(placement: HostedHarnessPlacement): Promise<void>;
+  releaseOwnership(
+    request: HostedHarnessReleaseRequest,
+  ): Promise<HostedHarnessReleaseReceipt>;
   close(): Promise<void>;
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void;
   authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void>;
@@ -246,6 +255,8 @@ export function createHttpManagedSessionStores(
     },
     assertWritable: () => client.assertWritable(),
     stopLocal: () => client.stopLocal(),
+    quiesceOwnership: (placement) => client.quiesceOwnership(placement),
+    releaseOwnership: (request) => client.releaseOwnership(request),
     close: () => client.seal(),
     setLifecycleAuthority: (authority) =>
       client.setLifecycleAuthority(authority),
@@ -731,6 +742,11 @@ class ManagedSessionStoreHttpClient {
   private readonly fetchFn: typeof fetch;
   private grant: WriterGrant | undefined;
   private renewPromise: Promise<void> | undefined;
+  private ownershipRelease?: {
+    request: HostedHarnessReleaseRequest;
+    body: Readonly<Record<string, unknown>>;
+    receipt?: HostedHarnessReleaseReceipt;
+  };
   /**
    * The re-acquisition a lapsed lease started. Seal and local stop await it
    * so they never read the grant-less window as "never held a writer", and a
@@ -883,6 +899,8 @@ class ManagedSessionStoreHttpClient {
   }
 
   async acquireWriter(): Promise<void> {
+    if (this.ownershipRelease)
+      throw corrupt('ownership release has fenced this writer.');
     if (this.grant !== undefined || this.sealed || this.locallyStopped) {
       throw new ManagedSessionRecordError(
         'the HTTP Managed Session writer is already opened or sealed.',
@@ -1843,12 +1861,132 @@ class ManagedSessionStoreHttpClient {
     await this.acquirePromise?.catch(() => undefined);
   }
 
+  async releaseOwnership(
+    request: HostedHarnessReleaseRequest,
+  ): Promise<HostedHarnessReleaseReceipt> {
+    assertManagedSessionStableId(request.operationId, 'release operationId');
+    assertManagedSessionStableId(request.instanceId, 'release instanceId');
+    if (
+      request.bootId !== this.writerId ||
+      !Number.isSafeInteger(request.placementEpoch) ||
+      request.placementEpoch < 1
+    )
+      throw corrupt('ownership release does not match the writer.');
+    if (!this.ownershipRelease) {
+      const grant = this.requireGrant();
+      if (
+        request.commitProof.lastCommitSequence !== grant.committedSequence ||
+        request.commitProof.committedPrefixHash !== grant.lastCommitDigest
+      )
+        throw corrupt('ownership release does not match the committed head.');
+      this.stopWriterRenewal();
+      this.ownershipRelease = {
+        request: { ...request, commitProof: { ...request.commitProof } },
+        body: {
+          workspaceId: this.sessionKey.workspaceId,
+          writerId: this.writerId,
+          writerGeneration: grant.writerGeneration,
+          journalRevision: grant.journalRevision,
+          ...request,
+          commitProof: { ...request.commitProof },
+        },
+      };
+    }
+    const release = this.ownershipRelease;
+    if (
+      request.operationId !== release.request.operationId ||
+      request.instanceId !== release.request.instanceId ||
+      request.bootId !== release.request.bootId ||
+      request.placementEpoch !== release.request.placementEpoch ||
+      request.commitProof.lastCommitSequence !==
+        release.request.commitProof.lastCommitSequence ||
+      request.commitProof.committedPrefixHash !==
+        release.request.commitProof.committedPrefixHash
+    )
+      throw corrupt('ownership release identity changed.');
+    if (release.receipt) return release.receipt;
+    await this.renewPromise?.catch(() => undefined);
+    const value = asRecord(
+      await this.json('/writers:release-ownership', 'POST', release.body),
+      'ownership release receipt',
+    );
+    const proof = asRecord(value['commitProof'], 'release commit proof');
+    const receipt: HostedHarnessReleaseReceipt = {
+      format: 'qwen-hosted-harness-release/1',
+      state: 'RELEASED',
+      tenantId: string(value['tenantId'], 'tenantId'),
+      workspaceId: string(value['workspaceId'], 'workspaceId'),
+      sessionId: string(value['sessionId'], 'sessionId'),
+      operationId: string(value['operationId'], 'operationId'),
+      instanceId: string(value['instanceId'], 'instanceId'),
+      bootId: string(value['bootId'], 'bootId'),
+      placementEpoch: safeCounter(value['placementEpoch'], 'placementEpoch'),
+      writerGeneration: safeCounter(
+        value['writerGeneration'],
+        'writerGeneration',
+      ),
+      journalRevision: safeCounter(value['journalRevision'], 'journalRevision'),
+      committedSequence: safeCounter(
+        value['committedSequence'],
+        'committedSequence',
+      ),
+      commitProof: {
+        lastCommitSequence: safeCounter(
+          proof['lastCommitSequence'],
+          'lastCommitSequence',
+        ),
+        committedPrefixHash: digest(
+          proof['committedPrefixHash'],
+          'committedPrefixHash',
+        ),
+      },
+    };
+    if (
+      value['format'] !== receipt.format ||
+      value['state'] !== receipt.state ||
+      !managedSessionKeysEqual(receipt, this.sessionKey) ||
+      receipt.operationId !== request.operationId ||
+      receipt.instanceId !== request.instanceId ||
+      receipt.bootId !== request.bootId ||
+      receipt.placementEpoch !== request.placementEpoch ||
+      receipt.writerGeneration !== release.body['writerGeneration'] ||
+      receipt.journalRevision !== release.body['journalRevision'] ||
+      receipt.committedSequence !== request.commitProof.lastCommitSequence ||
+      receipt.commitProof.lastCommitSequence !==
+        request.commitProof.lastCommitSequence ||
+      receipt.commitProof.committedPrefixHash !==
+        request.commitProof.committedPrefixHash
+    )
+      throw corrupt('ownership release receipt does not match the request.');
+    release.receipt = receipt;
+    this.sealed = true;
+    this.resources.clear();
+    return receipt;
+  }
+
+  async quiesceOwnership(placement: HostedHarnessPlacement): Promise<void> {
+    const grant = this.requireGrant();
+    const response = asRecord(
+      await this.json('/writers:quiesce-ownership', 'POST', {
+        workspaceId: this.sessionKey.workspaceId,
+        writerId: this.writerId,
+        writerGeneration: grant.writerGeneration,
+        ...placement,
+      }),
+      'ownership quiesce receipt',
+    );
+    if (response['state'] !== 'QUIESCING')
+      throw corrupt('ownership quiesce was not acknowledged.');
+  }
+
   stopWriterRenewal(): void {
     this.renewalStopped = true;
     this.stopRenewal();
   }
 
   private async ensureWriter(): Promise<void> {
+    if (this.ownershipRelease)
+      throw corrupt('ownership release has fenced this writer.');
     if (this.retirementJoin)
       throw corrupt('original CSI writer admission is closed.');
     // A concurrent re-acquisition owns the grant-less window; wait for it
@@ -1889,6 +2027,10 @@ class ManagedSessionStoreHttpClient {
   }
 
   private renewWriter(): Promise<void> {
+    if (this.ownershipRelease)
+      return Promise.reject(
+        corrupt('ownership release has fenced this writer.'),
+      );
     if (this.retirementJoin)
       return Promise.reject(corrupt('original CSI writer renewal is closed.'));
     if (this.locallyStopped) {
@@ -2228,6 +2370,8 @@ class ManagedSessionStoreHttpClient {
     timeoutMs = this.requestTimeoutMs,
     accept = 'application/json',
   ): Promise<Response> {
+    if (this.ownershipRelease && path !== '/writers:release-ownership')
+      throw corrupt('ownership release has fenced this writer.');
     if (this.locallyStopped) {
       throw new ManagedSessionRecordError(
         'the HTTP Managed Session writer is locally stopped.',

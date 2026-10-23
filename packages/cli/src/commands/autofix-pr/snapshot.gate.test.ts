@@ -1,0 +1,981 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { CRON_GATE_OUTPUT_CAP_BYTES } from '@qwen-code/qwen-code-core/services/cron-gate.js';
+import { GATE_OUTPUT_BUDGET_BYTES } from '../review/lib/gate-budget.js';
+import { getGhHost, setGhHost } from '../review/lib/gh.js';
+import {
+  buildGateSnapshot,
+  fetchPrData,
+  runSnapshot,
+  type PrData,
+} from './snapshot.js';
+import {
+  REPLY_MARKER,
+  autofixPrPaths,
+  writeState,
+  type AutofixPrGateCursor,
+} from './state.js';
+
+const mockGh = vi.hoisted(() => vi.fn());
+const mocks = vi.hoisted(() => ({
+  root: '',
+  stdout: vi.fn((_line: string) => {}),
+}));
+vi.mock('../review/lib/gh.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../review/lib/gh.js')>()),
+  gh: mockGh,
+  ensureAuthenticated: () => {},
+}));
+vi.mock('./state.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./state.js')>()),
+  repoRoot: () => mocks.root,
+}));
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: mocks.stdout,
+  writeStderrLineSafe: () => {},
+}));
+
+const HEAD = 'a'.repeat(40);
+const NEXT_HEAD = 'b'.repeat(40);
+
+function cursor(
+  overrides: Partial<AutofixPrGateCursor> = {},
+): AutofixPrGateCursor {
+  return {
+    version: 1,
+    host: 'github.com',
+    owner: 'o',
+    repo: 'r',
+    prNumber: 7,
+    viewer: 'me',
+    prAuthor: 'me',
+    headSha: HEAD,
+    reportedCommentIds: [],
+    reportedChecks: [],
+    conflictSha: null,
+    stopped: null,
+    reportedTruncated: [],
+    ...overrides,
+  };
+}
+
+type Contexts = NonNullable<
+  PrData['commits']['nodes'][number]['commit']['statusCheckRollup']
+>['contexts']['nodes'];
+
+function pr(overrides: Partial<PrData> = {}, contexts: Contexts = []): PrData {
+  return {
+    state: 'OPEN',
+    isDraft: false,
+    url: 'https://github.com/o/r/pull/7',
+    headRefOid: HEAD,
+    mergeable: 'MERGEABLE',
+    author: { login: 'me' },
+    commits: {
+      nodes: [
+        {
+          commit: {
+            oid: HEAD,
+            statusCheckRollup: {
+              contexts: { pageInfo: { hasNextPage: false }, nodes: contexts },
+            },
+          },
+        },
+      ],
+    },
+    reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] },
+    reviews: { pageInfo: { hasPreviousPage: false }, nodes: [] },
+    comments: { pageInfo: { hasPreviousPage: false }, nodes: [] },
+    ...overrides,
+  };
+}
+
+function failed(name: string, attempt = 1): Contexts[number] {
+  return {
+    __typename: 'CheckRun',
+    name,
+    status: 'COMPLETED',
+    conclusion: 'FAILURE',
+    detailsUrl: `https://github.com/o/r/actions/runs/123/job/${attempt}`,
+    databaseId: attempt,
+  };
+}
+
+function thread(id: string, comments: Array<ReturnType<typeof comment>>) {
+  return {
+    id,
+    isResolved: false,
+    isOutdated: false,
+    path: 'src/a.ts',
+    line: 3,
+    root: { nodes: [{ databaseId: 1 }] },
+    comments: { pageInfo: { hasPreviousPage: false }, nodes: comments },
+  };
+}
+
+function comment(
+  id: string,
+  login: string,
+  association = 'NONE',
+  body = `please fix ${id}`,
+) {
+  return {
+    id,
+    author: { __typename: 'User', login },
+    authorAssociation: association,
+    body,
+    url: `https://github.com/o/r/pull/7#${id}`,
+  };
+}
+
+describe('buildGateSnapshot', () => {
+  it('is quiet when nothing changed and keeps the cursor', () => {
+    const before = cursor();
+    const result = buildGateSnapshot(pr(), before);
+    expect(result.snapshot).toBeNull();
+    expect(result.cursor).toEqual(before);
+  });
+
+  it('treats a pending check as nothing to report', () => {
+    const result = buildGateSnapshot(
+      pr({}, [
+        {
+          __typename: 'CheckRun',
+          name: 'Build',
+          status: 'IN_PROGRESS',
+          conclusion: null,
+          detailsUrl: null,
+          databaseId: 1,
+        },
+      ]),
+      cursor(),
+    );
+    expect(result.snapshot).toBeNull();
+  });
+
+  it('reports a failed check once per head and again after it was re-run', () => {
+    const first = buildGateSnapshot(pr({}, [failed('Test')]), cursor());
+    expect(first.snapshot).toMatchObject({
+      action: 'fix',
+      events: [{ type: 'ci_failed', check: 'Test', runId: 123 }],
+    });
+    expect(first.cursor.reportedChecks).toEqual([`Test@${HEAD}@#1`]);
+
+    // Still failing on the same head: quiet.
+    const second = buildGateSnapshot(pr({}, [failed('Test')]), first.cursor);
+    expect(second.snapshot).toBeNull();
+
+    // Re-run in progress: the failure leaves the cursor…
+    const rerun = buildGateSnapshot(
+      pr({}, [
+        failed('Test', 1),
+        {
+          __typename: 'CheckRun',
+          name: 'Test',
+          status: 'IN_PROGRESS',
+          conclusion: null,
+          detailsUrl: null,
+          databaseId: 2,
+        },
+      ]),
+      second.cursor,
+    );
+    expect(rerun.snapshot).toBeNull();
+    expect(rerun.cursor.reportedChecks).toEqual([]);
+    // …so a second failure is a new event.
+    expect(
+      buildGateSnapshot(
+        pr({}, [failed('Test', 1), failed('Test', 2)]),
+        rerun.cursor,
+      ).snapshot,
+    ).not.toBeNull();
+
+    // A new head starts over.
+    const moved = buildGateSnapshot(
+      pr({ headRefOid: NEXT_HEAD, commits: { nodes: [] } }, []),
+      second.cursor,
+    );
+    expect(moved.snapshot).toMatchObject({
+      action: 'resync',
+      events: [{ type: 'head_moved_externally', sha: NEXT_HEAD }],
+    });
+    expect(moved.cursor.headSha).toBe(NEXT_HEAD);
+  });
+
+  it('reports a re-run that failed again between two polls', () => {
+    // No poll saw the re-run in progress: the run's id tells the failures
+    // apart.
+    const first = buildGateSnapshot(pr({}, [failed('Test', 100)]), cursor());
+    expect(first.snapshot?.events).toEqual([
+      expect.objectContaining({ type: 'ci_failed', check: 'Test' }),
+    ]);
+    const again = buildGateSnapshot(
+      pr({}, [failed('Test', 100), failed('Test', 200)]),
+      first.cursor,
+    );
+    expect(again.snapshot?.events).toEqual([
+      expect.objectContaining({
+        type: 'ci_failed',
+        check: 'Test',
+        url: 'https://github.com/o/r/actions/runs/123/job/200',
+      }),
+    ]);
+    expect(again.cursor.reportedChecks).toEqual([`Test@${HEAD}@#200`]);
+    expect(
+      buildGateSnapshot(pr({}, [failed('Test', 200)]), again.cursor).snapshot,
+    ).toBeNull();
+  });
+
+  it('is quiet about a failure that a re-run turned green', () => {
+    const green: Contexts[number] = {
+      ...failed('Test', 2),
+      conclusion: 'SUCCESS',
+    } as Contexts[number];
+    expect(
+      buildGateSnapshot(pr({}, [failed('Test', 1), green]), cursor()).snapshot,
+    ).toBeNull();
+  });
+
+  it('tells two failures of a commit status apart without a URL', () => {
+    const status = (createdAt: string): Contexts[number] => ({
+      __typename: 'StatusContext',
+      context: 'ci/external',
+      state: 'FAILURE',
+      targetUrl: null,
+      createdAt,
+    });
+    const first = buildGateSnapshot(
+      pr({}, [status('2026-10-21T00:00:01Z')]),
+      cursor(),
+    );
+    expect(first.snapshot?.events).toHaveLength(1);
+    expect(
+      buildGateSnapshot(pr({}, [status('2026-10-21T00:00:01Z')]), first.cursor)
+        .snapshot,
+    ).toBeNull();
+    // Re-run and failed again between two polls: a new post.
+    expect(
+      buildGateSnapshot(pr({}, [status('2026-10-21T00:05:00Z')]), first.cursor)
+        .snapshot?.events,
+    ).toEqual([
+      { type: 'ci_failed', check: 'ci/external', url: null, runId: null },
+    ]);
+  });
+
+  it('keeps every reported id the query still returns, and bounds only the rest', () => {
+    // 21 unresolved threads of 100 reportable comments: more ids than the
+    // off-page bound, all still on the page on the next identical poll.
+    const nodes = Array.from({ length: 21 }, (_, t) =>
+      thread(
+        `T${t}`,
+        Array.from({ length: 100 }, (_, c) =>
+          comment(`T${t}C${c}`, 'alice', 'MEMBER'),
+        ),
+      ),
+    );
+    const data = pr({
+      reviewThreads: { pageInfo: { hasNextPage: false }, nodes },
+    });
+    const all = nodes.flatMap((t) => t.comments.nodes.map((c) => c.id));
+    const second = buildGateSnapshot(data, cursor({ reportedCommentIds: all }));
+    expect(second.snapshot).toBeNull();
+    expect(second.cursor.reportedCommentIds).toHaveLength(2100);
+
+    // Ids that left the page keep only their newest 2000.
+    const stale = cursor({
+      reportedCommentIds: [
+        ...Array.from({ length: 2500 }, (_, i) => `old${i}`),
+        ...all,
+      ],
+    });
+    const third = buildGateSnapshot(data, stale);
+    expect(third.cursor.reportedCommentIds).toHaveLength(2000 + 2100);
+    expect(third.cursor.reportedCommentIds[0]).toBe('old500');
+  });
+
+  it('spreads what does not fit the gate output over later runs, none twice', () => {
+    expect(GATE_OUTPUT_BUDGET_BYTES).toBeLessThan(CRON_GATE_OUTPUT_CAP_BYTES);
+    const nodes = Array.from({ length: 21 }, (_, t) =>
+      thread(
+        `T${t}`,
+        Array.from({ length: 100 }, (_, c) =>
+          comment(`T${t}C${c}`, 'alice', 'MEMBER'),
+        ),
+      ),
+    );
+    const data = pr(
+      { reviewThreads: { pageInfo: { hasNextPage: false }, nodes } },
+      [failed('Test')],
+    );
+    let current = cursor();
+    const seen: string[] = [];
+    const sizes: number[] = [];
+    let last = null as ReturnType<typeof buildGateSnapshot>['snapshot'];
+    for (let run = 0; run < 100; run++) {
+      const result = buildGateSnapshot(data, current);
+      current = result.cursor;
+      if (!result.snapshot) break;
+      last = result.snapshot;
+      sizes.push(Buffer.byteLength(JSON.stringify(result.snapshot)));
+      for (const event of result.snapshot.events) {
+        if (event.type === 'review_thread') {
+          seen.push(...event.comments.map((c) => c.id));
+        }
+      }
+      if (run === 0) {
+        // The failure goes first; the comments that do not fit wait.
+        expect(result.snapshot.events[0]).toMatchObject({ type: 'ci_failed' });
+        expect(result.snapshot.deferred).toBeGreaterThan(0);
+      }
+    }
+    expect(sizes.length).toBeGreaterThan(1);
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(GATE_OUTPUT_BUDGET_BYTES);
+    expect(last!.deferred).toBeUndefined();
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(seen).toHaveLength(2100);
+    expect(current.reportedChecks).toHaveLength(1);
+  });
+
+  it('shows one event or comment per run even when the line alone is over the budget', () => {
+    const data = pr({
+      url: `https://github.com/o/r/pull/${'7'.repeat(GATE_OUTPUT_BUDGET_BYTES)}`,
+      reviewThreads: {
+        pageInfo: { hasNextPage: false },
+        nodes: [
+          thread('T1', [
+            comment('C1', 'alice', 'MEMBER'),
+            comment('C2', 'alice', 'MEMBER'),
+          ]),
+        ],
+      },
+      comments: {
+        pageInfo: { hasPreviousPage: false },
+        nodes: [comment('I1', 'alice', 'MEMBER')],
+      },
+    });
+    const shown: Array<[string[], number | undefined]> = [];
+    let current = cursor();
+    for (let run = 0; run < 5; run++) {
+      const result = buildGateSnapshot(data, current);
+      current = result.cursor;
+      if (!result.snapshot) break;
+      shown.push([
+        result.snapshot.events.flatMap((e) =>
+          e.type === 'review_thread'
+            ? e.comments.map((c) => c.id)
+            : e.type === 'issue_comment'
+              ? [e.id]
+              : [],
+        ),
+        result.snapshot.deferred,
+      ]);
+    }
+    expect(shown).toEqual([
+      [['C1'], 2],
+      [['C2'], 1],
+      [['I1'], undefined],
+    ]);
+  });
+
+  it('cuts long bodies in the gate output, never inside a character', () => {
+    const long = 'a'.repeat(999) + '😀' + 'b'.repeat(5000);
+    const data = pr({
+      reviews: {
+        pageInfo: { hasPreviousPage: false },
+        nodes: [
+          { ...comment('R1', 'alice', 'MEMBER', long), state: 'COMMENTED' },
+        ],
+      },
+      comments: {
+        pageInfo: { hasPreviousPage: false },
+        nodes: [comment('I1', 'alice', 'MEMBER', 'short')],
+      },
+    });
+    const events = buildGateSnapshot(data, cursor()).snapshot!.events;
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'review',
+        body: 'a'.repeat(999),
+        bodyTruncated: true,
+      }),
+      expect.not.objectContaining({ bodyTruncated: expect.anything() }),
+    ]);
+  });
+
+  it('does not wake for a cut of comments or reviews, which are read newest first', () => {
+    const data = pr({
+      comments: {
+        pageInfo: { hasPreviousPage: true },
+        nodes: [comment('I1', 'alice', 'MEMBER')],
+      },
+      reviews: { pageInfo: { hasPreviousPage: true }, nodes: [] },
+    });
+    const first = buildGateSnapshot(data, cursor());
+    expect(first.snapshot).toMatchObject({
+      events: [{ type: 'issue_comment', id: 'I1' }],
+      truncated: ['reviews', 'comments'],
+    });
+    const quiet = buildGateSnapshot(
+      data,
+      cursor({ reportedCommentIds: ['I1'], reportedTruncated: [] }),
+    );
+    expect(quiet.snapshot).toBeNull();
+  });
+
+  it('does not report a dismissed review', () => {
+    const data = pr({
+      reviews: {
+        pageInfo: { hasPreviousPage: false },
+        nodes: [
+          { ...comment('R1', 'alice', 'MEMBER'), state: 'DISMISSED' },
+          { ...comment('R2', 'alice', 'MEMBER'), state: 'CHANGES_REQUESTED' },
+        ],
+      },
+    });
+    expect(buildGateSnapshot(data, cursor()).snapshot?.events).toEqual([
+      expect.objectContaining({ type: 'review', id: 'R2' }),
+    ]);
+  });
+
+  it('does not report a head move on the first run', () => {
+    const result = buildGateSnapshot(pr(), cursor({ headSha: null }));
+    expect(result.snapshot).toBeNull();
+    expect(result.cursor.headSha).toBe(HEAD);
+  });
+
+  it('reports a conflict once per head and again when it comes back', () => {
+    const first = buildGateSnapshot(pr({ mergeable: 'CONFLICTING' }), cursor());
+    expect(first.snapshot).toMatchObject({ events: [{ type: 'conflict' }] });
+    expect(
+      buildGateSnapshot(pr({ mergeable: 'CONFLICTING' }), first.cursor)
+        .snapshot,
+    ).toBeNull();
+    // Unknown keeps the mark; mergeable clears it.
+    const unknown = buildGateSnapshot(
+      pr({ mergeable: 'UNKNOWN' }),
+      first.cursor,
+    );
+    expect(unknown.cursor.conflictSha).toBe(HEAD);
+    const resolved = buildGateSnapshot(pr(), unknown.cursor);
+    expect(resolved.cursor.conflictSha).toBeNull();
+    expect(
+      buildGateSnapshot(pr({ mergeable: 'CONFLICTING' }), resolved.cursor)
+        .snapshot,
+    ).not.toBeNull();
+  });
+
+  it('reports a trusted comment once and never the viewer’s own', () => {
+    // Replies are the viewer's: a marker in anyone else's comment is a quote
+    // and hides nothing.
+    const data = pr({
+      comments: {
+        pageInfo: { hasPreviousPage: false },
+        nodes: [
+          comment('I1', 'alice', 'MEMBER'),
+          comment('I2', 'me', 'OWNER'),
+          comment('I3', 'bob', 'OWNER', `done\n${REPLY_MARKER}`),
+          comment('I4', 'stranger'),
+        ],
+      },
+    });
+    const first = buildGateSnapshot(data, cursor());
+    expect(first.snapshot?.events).toEqual([
+      {
+        type: 'issue_comment',
+        id: 'I1',
+        author: 'alice',
+        trust: 'member',
+        body: 'please fix I1',
+        url: 'https://github.com/o/r/pull/7#I1',
+      },
+      {
+        type: 'issue_comment',
+        id: 'I3',
+        author: 'bob',
+        trust: 'owner',
+        body: `done\n${REPLY_MARKER}`,
+        url: 'https://github.com/o/r/pull/7#I3',
+      },
+      {
+        type: 'untrusted_comment',
+        id: 'I4',
+        author: 'stranger',
+        url: 'https://github.com/o/r/pull/7#I4',
+      },
+    ]);
+    expect(first.cursor.reportedCommentIds).toEqual(['I1', 'I3', 'I4']);
+    expect(buildGateSnapshot(data, first.cursor).snapshot).toBeNull();
+  });
+
+  it('wakes for an untrusted comment alone, as a notice', () => {
+    const result = buildGateSnapshot(
+      pr({
+        comments: {
+          pageInfo: { hasPreviousPage: false },
+          nodes: [comment('I1', 'stranger')],
+        },
+      }),
+      cursor(),
+    );
+    expect(result.snapshot?.action).toBe('wait');
+  });
+
+  it('reports a merge once, then stays quiet, and watches a reopened PR again', () => {
+    const merged = buildGateSnapshot(pr({ state: 'MERGED' }), cursor());
+    expect(merged.snapshot).toMatchObject({
+      action: 'stop',
+      events: [{ type: 'merged' }],
+    });
+    expect(merged.cursor.stopped).toBe('merged');
+    expect(
+      buildGateSnapshot(pr({ state: 'MERGED' }), merged.cursor).snapshot,
+    ).toBeNull();
+
+    const closed = buildGateSnapshot(pr({ state: 'CLOSED' }), cursor());
+    expect(closed.snapshot).toMatchObject({
+      action: 'stop',
+      events: [{ type: 'closed' }],
+    });
+    expect(closed.cursor.stopped).toBe('closed');
+    expect(
+      buildGateSnapshot(pr({ state: 'CLOSED' }), closed.cursor).snapshot,
+    ).toBeNull();
+    const reopened = buildGateSnapshot(
+      pr({ mergeable: 'CONFLICTING' }),
+      closed.cursor,
+    );
+    expect(reopened.cursor.stopped).toBeNull();
+    expect(reopened.snapshot?.events).toEqual([{ type: 'conflict' }]);
+  });
+
+  it('flags a cut connection', () => {
+    const data = pr({}, [failed('Test')]);
+    data.commits.nodes[0].commit.statusCheckRollup!.contexts.pageInfo.hasNextPage = true;
+    expect(buildGateSnapshot(data, cursor()).snapshot?.truncated).toEqual([
+      'checks',
+    ]);
+  });
+
+  it('reports a cut once even when nothing else changed', () => {
+    // Past the last page of threads, a new request leaves no trace but the cut.
+    const data = pr();
+    data.reviewThreads.pageInfo.hasNextPage = true;
+    const first = buildGateSnapshot(data, cursor());
+    expect(first.snapshot).toMatchObject({
+      action: 'wait',
+      events: [],
+      truncated: ['reviewThreads'],
+    });
+    expect(first.cursor.reportedTruncated).toEqual(['reviewThreads']);
+    expect(buildGateSnapshot(data, first.cursor).snapshot).toBeNull();
+    // Once the cut is gone, a later one is new again.
+    const whole = buildGateSnapshot(pr(), first.cursor);
+    expect(whole.snapshot).toBeNull();
+    expect(whole.cursor.reportedTruncated).toEqual([]);
+    expect(buildGateSnapshot(data, whole.cursor).snapshot).not.toBeNull();
+  });
+
+  it('does not take a head the watch pushed for a foreign push', () => {
+    const result = buildGateSnapshot(
+      pr({ headRefOid: NEXT_HEAD, commits: { nodes: [] } }, []),
+      cursor(),
+      { knownHeads: [HEAD, NEXT_HEAD], seenCommentIds: [] },
+    );
+    expect(result.snapshot).toBeNull();
+    expect(result.cursor.headSha).toBe(NEXT_HEAD);
+
+    // A failure on the pushed head is still a fix, not a resync.
+    const data = pr({ headRefOid: NEXT_HEAD }, [failed('Test')]);
+    data.commits.nodes[0].commit.oid = NEXT_HEAD;
+    expect(
+      buildGateSnapshot(data, cursor(), {
+        knownHeads: [NEXT_HEAD],
+        seenCommentIds: [],
+      }).snapshot,
+    ).toMatchObject({ action: 'fix', events: [{ type: 'ci_failed' }] });
+  });
+
+  it('does not report comments the prepared watch already handled, nor once it is gone', () => {
+    const data = pr({
+      reviewThreads: {
+        pageInfo: { hasNextPage: false },
+        nodes: [thread('T1', [comment('C1', 'alice', 'MEMBER')])],
+      },
+    });
+    const result = buildGateSnapshot(data, cursor({ headSha: null }), {
+      knownHeads: [],
+      seenCommentIds: ['C1', 'C1', 'C9'],
+    });
+    expect(result.snapshot).toBeNull();
+    // Adopted while on the page; an id off the page cannot be an event.
+    expect(result.cursor.reportedCommentIds).toEqual(['C1']);
+    // `cleanup` removed the state; the cursor alone keeps the gate quiet.
+    expect(buildGateSnapshot(data, result.cursor)).toEqual({
+      snapshot: null,
+      cursor: result.cursor,
+    });
+  });
+});
+
+describe('fetchPrData', () => {
+  beforeEach(() => {
+    mockGh.mockReset();
+  });
+
+  function page(nodes: Contexts, next: string | null, oid = HEAD) {
+    return {
+      commits: {
+        nodes: [
+          {
+            commit: {
+              oid,
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: { hasNextPage: next !== null, endCursor: next },
+                  nodes,
+                },
+              },
+            },
+          },
+        ],
+      },
+    };
+  }
+
+  it('pages the check rollup past the first 100 contexts', () => {
+    const firstPage = {
+      ...pr(),
+      ...page([failed('A')], 'c1'),
+    };
+    mockGh
+      .mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            viewer: { login: 'me' },
+            repository: { pullRequest: firstPage },
+          },
+        }),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify({
+          data: { repository: { pullRequest: page([failed('B')], 'c2') } },
+        }),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify({
+          data: { repository: { pullRequest: page([failed('C')], null) } },
+        }),
+      );
+    const { pr: data, viewer } = fetchPrData({
+      owner: 'o',
+      repo: 'r',
+      prNumber: 7,
+    });
+    expect(viewer).toBe('me');
+    const contexts = data.commits.nodes[0]!.commit.statusCheckRollup!.contexts;
+    expect(
+      contexts.nodes.map((c) => (c.__typename === 'CheckRun' ? c.name : '')),
+    ).toEqual(['A', 'B', 'C']);
+    expect(contexts.pageInfo.hasNextPage).toBe(false);
+    expect(mockGh).toHaveBeenCalledTimes(3);
+    expect(mockGh.mock.calls[1]).toContain('after=c1');
+    expect(mockGh.mock.calls[2]).toContain('after=c2');
+  });
+
+  it('stops paging when the head moved between calls and leaves the cut flagged', () => {
+    mockGh
+      .mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            viewer: { login: 'me' },
+            repository: {
+              pullRequest: { ...pr(), ...page([failed('A')], 'c1') },
+            },
+          },
+        }),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            repository: { pullRequest: page([failed('B')], null, NEXT_HEAD) },
+          },
+        }),
+      );
+    const { pr: data } = fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 });
+    const contexts = data.commits.nodes[0]!.commit.statusCheckRollup!.contexts;
+    expect(contexts.nodes).toHaveLength(1);
+    expect(contexts.pageInfo.hasNextPage).toBe(true);
+  });
+
+  it('pages review threads past the first 100', () => {
+    const firstPage = pr({
+      reviewThreads: {
+        pageInfo: { hasNextPage: true, endCursor: 't1' },
+        nodes: [thread('T1', [comment('C1', 'alice', 'MEMBER')])],
+      },
+    });
+    mockGh
+      .mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            viewer: { login: 'me' },
+            repository: { pullRequest: firstPage },
+          },
+        }),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                reviewThreads: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [thread('T2', [comment('C2', 'alice', 'MEMBER')])],
+                },
+              },
+            },
+          },
+        }),
+      );
+    const { pr: data } = fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 });
+    expect(data.reviewThreads.nodes.map((t) => t.id)).toEqual(['T1', 'T2']);
+    expect(data.reviewThreads.pageInfo.hasNextPage).toBe(false);
+    expect(mockGh.mock.calls[1]).toContain('after=t1');
+  });
+
+  it('reads the newest 100 comments of each thread, and its root apart', () => {
+    mockGh
+      .mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            viewer: { login: 'me' },
+            repository: {
+              pullRequest: pr({
+                reviewThreads: {
+                  pageInfo: { hasNextPage: true, endCursor: 't1' },
+                  nodes: [],
+                },
+              }),
+            },
+          },
+        }),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                reviewThreads: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [],
+                },
+              },
+            },
+          },
+        }),
+      );
+    fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 });
+    // A reply past the 100th comment of a thread is the one that can be new.
+    for (const call of mockGh.mock.calls) {
+      const query = (call as string[]).find((arg) => arg.startsWith('query='));
+      expect(query).toMatch(/root: comments\(first: 1\)/);
+      expect(query).toMatch(
+        /\n\s*comments\(last: 100\) \{\s*pageInfo \{ hasPreviousPage \}/,
+      );
+      expect(query).not.toMatch(/comments\(first: 100/);
+    }
+    expect(mockGh).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails clearly when the PR does not exist', () => {
+    mockGh.mockReturnValueOnce(
+      JSON.stringify({
+        data: { viewer: { login: 'me' }, repository: { pullRequest: null } },
+      }),
+    );
+    expect(() => fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 })).toThrow(
+      'PR #7 not found in o/r',
+    );
+  });
+});
+
+describe('runSnapshot --gate', () => {
+  let savedHost: string | undefined;
+  const gatePath = () => autofixPrPaths(mocks.root, 7).gatePath;
+  const respond = (data: PrData) =>
+    mockGh.mockReturnValueOnce(
+      JSON.stringify({
+        data: { viewer: { login: 'me' }, repository: { pullRequest: data } },
+      }),
+    );
+  const withComments = (...ids: string[]) =>
+    pr({
+      comments: {
+        pageInfo: { hasPreviousPage: false },
+        nodes: ids.map((id) => comment(id, 'alice', 'MEMBER')),
+      },
+    });
+  const printedIds = () =>
+    mocks.stdout.mock.calls.map((call) =>
+      (JSON.parse(call[0]) as { events: Array<{ id?: string }> }).events.map(
+        (event) => event.id,
+      ),
+    );
+
+  beforeEach(() => {
+    mocks.root = mkdtempSync(join(tmpdir(), 'autofix-gate-'));
+    mockGh.mockReset();
+    mocks.stdout.mockReset();
+    savedHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+    setGhHost(undefined);
+  });
+
+  afterEach(() => {
+    rmSync(mocks.root, { recursive: true, force: true });
+    if (savedHost === undefined) delete process.env['GH_HOST'];
+    else process.env['GH_HOST'] = savedHost;
+    setGhHost(undefined);
+  });
+
+  it('prints each transition once and leaves the cursor alone while quiet', () => {
+    respond(withComments('I1'));
+    runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+    expect(printedIds()).toEqual([['I1']]);
+    const written = readFileSync(gatePath(), 'utf8');
+
+    // Later fires name no repository: the cursor does.
+    respond(withComments('I1'));
+    runSnapshot({ pr: 7, gate: true });
+    expect(printedIds()).toEqual([['I1']]);
+    expect(readFileSync(gatePath(), 'utf8')).toBe(written);
+
+    respond(withComments('I1', 'I2'));
+    runSnapshot({ pr: 7, gate: true });
+    respond(withComments('I1', 'I2'));
+    runSnapshot({ pr: 7, gate: true });
+    expect(printedIds()).toEqual([['I1'], ['I2']]);
+  });
+
+  it('stores the cursor before printing, so a failed print is not repeated', () => {
+    mocks.stdout.mockImplementationOnce(() => {
+      throw new Error('EPIPE');
+    });
+    respond(withComments('I1'));
+    expect(() => runSnapshot({ pr: 7, repo: 'o/r', gate: true })).toThrow(
+      'EPIPE',
+    );
+    expect(existsSync(gatePath())).toBe(true);
+    respond(withComments('I1'));
+    runSnapshot({ pr: 7, gate: true });
+    expect(mocks.stdout).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses another repository for the same PR number, but not another spelling', () => {
+    respond(withComments());
+    runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+    expect(() => runSnapshot({ pr: 7, repo: 'x/r', gate: true })).toThrow(
+      /gate on github.com\/o\/r, not github.com\/x\/r; pass --host/,
+    );
+    respond(withComments());
+    expect(() => runSnapshot({ pr: 7, repo: 'O/R', gate: true })).not.toThrow();
+  });
+
+  it('tells apart Enterprise instances on different ports', () => {
+    respond(withComments());
+    runSnapshot({ pr: 7, repo: 'o/r', host: 'ghe.corp:8443', gate: true });
+    expect(() =>
+      runSnapshot({ pr: 7, repo: 'o/r', host: 'ghe.corp:9443', gate: true }),
+    ).toThrow(/gate on ghe\.corp:8443\/o\/r, not ghe\.corp:9443\/o\/r/);
+    expect(mockGh).toHaveBeenCalledTimes(1);
+    respond(withComments());
+    runSnapshot({ pr: 7, repo: 'o/r', host: 'GHE.corp:8443', gate: true });
+    expect(mockGh).toHaveBeenCalledTimes(2);
+
+    // The default port is no port at all.
+    rmSync(gatePath());
+    respond(withComments());
+    runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+    respond(withComments());
+    expect(() =>
+      runSnapshot({ pr: 7, repo: 'o/r', host: 'github.com:443', gate: true }),
+    ).not.toThrow();
+  });
+
+  it('refuses a blank --host instead of recording an empty host', () => {
+    process.env['GH_HOST'] = 'ghe.corp';
+    expect(() =>
+      runSnapshot({ pr: 7, repo: 'o/r', host: ' ', gate: true }),
+    ).toThrow(TypeError);
+    expect(mockGh).not.toHaveBeenCalled();
+    expect(existsSync(gatePath())).toBe(false);
+  });
+
+  it('asks for --repo on a first run with nothing prepared', () => {
+    expect(() => runSnapshot({ pr: 7, gate: true })).toThrow(/pass --repo/);
+    expect(mockGh).not.toHaveBeenCalled();
+  });
+
+  it('uses what a prepared watch of the PR knows: its host, pushes and handled comments', () => {
+    const statePath = autofixPrPaths(mocks.root, 7).statePath;
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeState(statePath, {
+      version: 1,
+      sessionId: '',
+      host: 'ghe.corp',
+      owner: 'o',
+      repo: 'r',
+      prNumber: 7,
+      remote: 'origin',
+      pushTarget: 'origin',
+      headRefName: 'feat',
+      baseRefName: 'main',
+      branch: 'qwen-autofix/pr-7',
+      worktreePath: join(dirname(statePath), 'autofix-pr-7'),
+      viewer: 'me',
+      prAuthor: 'me',
+      lastKnownHeadSha: HEAD,
+      pushedShas: [NEXT_HEAD],
+      handledCommentIds: ['I1'],
+      postedCommentIds: [],
+    });
+    respond(withComments('I1'));
+    runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+    // The documented gate command carries no --host.
+    expect(getGhHost()).toBe('ghe.corp');
+    expect(mocks.stdout).not.toHaveBeenCalled();
+    const stored = JSON.parse(readFileSync(gatePath(), 'utf8'));
+    expect(stored).toMatchObject({ host: 'ghe.corp', headSha: HEAD });
+
+    // The watch's own push is not someone else's.
+    const pushed = withComments('I1');
+    pushed.headRefOid = NEXT_HEAD;
+    pushed.commits = { nodes: [] };
+    respond(pushed);
+    runSnapshot({ pr: 7, gate: true });
+    expect(mocks.stdout).not.toHaveBeenCalled();
+
+    // `cleanup` removes the state and keeps the cursor: the handled comment
+    // stays handled, and the recorded host is still the one asked.
+    rmSync(statePath);
+    setGhHost(undefined);
+    respond(pushed);
+    runSnapshot({ pr: 7, gate: true });
+    expect(mocks.stdout).not.toHaveBeenCalled();
+    expect(getGhHost()).toBe('ghe.corp');
+  });
+});
