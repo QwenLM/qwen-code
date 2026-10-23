@@ -48,9 +48,11 @@ jobs:
     # longer hold the queue is plain sequence order), while a full-tier leg
     # (the default) keeps its FIFO position among the other rank-1 tickets.
     # The ceiling is that wait plus one write-back, the 925 s suite, and
-    # ~11 minutes of uncapped setup and margin: 150. Hosted lanes never take
-    # the lock and inherit this ceiling as a bound, not as an expected
-    # duration.
+    # ~11 minutes of uncapped setup and margin: 150. The 925 s was measured
+    # while the lock admitted one suite per host; suites from different jobs
+    # can now run concurrently, and the ~1700 s of slack is their buffer.
+    # Hosted lanes never take the lock and inherit this ceiling as a bound,
+    # not as an expected duration.
     timeout-minutes: 150
     strategy:
       fail-fast: false
@@ -243,8 +245,11 @@ jobs:
           TIER: '${{ inputs.tier }}'
         run: |-
           # A read-only seed from the host-shared cache keeps the job-local
-          # repository warm without taking the lock.
-          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+          # repository warm without taking the lock. Copy the contents into
+          # the existing directory: `cp -aln SRC DEST` nests SRC inside DEST
+          # when DEST survives from an earlier job on this host.
+          mkdir -p "${RUNNER_TEMP}/m2-repo"
+          cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
           mvn --batch-mode --no-transfer-progress clean test
           if [ "${MATRIX_JAVA}" = "21" ]; then
             mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
@@ -280,7 +285,7 @@ jobs:
           mkdir -p "${HOME}/.m2/repository" 9>&-
           cd "${RUNNER_TEMP}/m2-repo"
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-server' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
@@ -321,7 +326,14 @@ jobs:
         working-directory: 'packages/managed-agent-server'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
-        run: 'mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle'
+        run: |-
+          # The ECS leg resolves the SDK from the job-local repository the
+          # self-hosted step installed it into; the hosted leg's SDK comes
+          # from the default repository the state-test step populated.
+          if [ "${RUNNER_ENVIRONMENT}" = "self-hosted" ]; then
+            export MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${RUNNER_TEMP}/m2-repo"
+          fi
+          mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle
 
       - name: 'Build release artifacts'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
@@ -754,7 +766,8 @@ jobs:
           # so it and the egress proxy keep paying off for the job-local copy.
           # The seed only reads the host cache and is best-effort, so it takes
           # no lock and cannot delay the lane.
-          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+          mkdir -p "${RUNNER_TEMP}/m2-repo"
+          cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
           # Both Maven runs resolve from the job-local copy above, so they do
           # not touch host-shared state and must not hold the per-host lock:
           # a MySQL verify can run for hours under pool contention, and the
@@ -814,7 +827,7 @@ jobs:
           mkdir -p "${HOME}/.m2/repository" 9>&-
           cd "${RUNNER_TEMP}/m2-repo"
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-server' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
@@ -1463,7 +1476,8 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
         run: |-
           # Seed from the host-shared repo (cache-restored on hosted runners).
-          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+          mkdir -p "${RUNNER_TEMP}/m2-repo"
+          cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Cache the RocketMQ distribution'
         uses: 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' # v6.1.0
@@ -1701,7 +1715,8 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
         run: |-
           # Seed from the host-shared repo (cache-restored on hosted runners).
-          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+          mkdir -p "${RUNNER_TEMP}/m2-repo"
+          cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Install libfaketime'
         # The clock-skew row moves one node's whole wall clock. A pool host

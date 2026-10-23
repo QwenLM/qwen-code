@@ -25,6 +25,9 @@ const brokerTestPattern = ['Test*', '*Test', '*Tests', '*TestCase']
   .map((pattern) => `com/alibaba/qwen/code/runtimebroker/**/${pattern}.java`)
   .join(',');
 
+const writeBackFind =
+  "timeout 300 find . \\( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-server' \\) -prune -o -type f -links 1 -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?";
+
 const workflow = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
 const job = (name) => {
   const start = workflow.indexOf(`  ${name}:`);
@@ -195,22 +198,56 @@ describe('SDK Java self-hosted workflow guards', () => {
         );
         const start = step.run.indexOf('mkdir -p "${HOME}/.m2/repository"');
         expect(start, step.name).toBeGreaterThan(-1);
-        const writeBack = step.run.slice(start);
+        // Bound the probe to the write-back stanza: an unbounded slice would
+        // execute whatever a future edit places below it and report that
+        // failure as an opaque filesystem error.
+        const writeBack = step.run
+          .slice(start)
+          .match(
+            /^mkdir -p "\$\{HOME\}\/\.m2\/repository" 9>&-[\s\S]*?cache write-back failed; the gate result above is unaffected"\n\s*fi/,
+          )?.[0];
+        expect(writeBack, step.name).toBeTruthy();
+        // Derive the children from the write-back itself: a command added
+        // without a fd 9 close must get its own survivor, or this guard
+        // stays green while a cancelled job's child keeps the host lock.
+        const builtins = new Set([
+          'cd',
+          'echo',
+          '[',
+          'test',
+          'if',
+          'then',
+          'else',
+          'elif',
+          'fi',
+        ]);
+        const shimNames = [
+          ...new Set(
+            writeBack
+              .replace(/"[^"]*"/g, '""')
+              .split(/\|\||&&|[|;\n]/)
+              .map((segment) => segment.trim())
+              .filter((segment) => !/^[A-Za-z_]\w*=/.test(segment))
+              .map((segment) => segment.match(/^([a-z][\w.-]*)/)?.[1])
+              .filter((name) => name && !builtins.has(name)),
+          ),
+        ];
+        expect(shimNames, step.name).toEqual(['mkdir', 'timeout']);
         const dir = mkdtempSync(join(tmpdir(), 'sdk-java-write-back-'));
         const shims = join(dir, 'bin');
         const home = join(dir, 'home');
         const runnerTemp = join(dir, 'runner-temp');
         const pidFile = join(dir, 'children.pid');
         mkdirSync(shims);
-        mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
         mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
         // A child that outlives the step: if it inherits fd 9, the host lock
-        // stays held after the step shell exits. `mkdir` and `timeout` are the
-        // write-back's only children, so each gets one.
-        for (const name of ['mkdir', 'timeout']) {
+        // stays held after the step shell exits. Each derived command gets
+        // one, and the mkdir shim creates the directory it stands in for.
+        for (const name of shimNames) {
           writeFileSync(
             join(shims, name),
             '#!/bin/sh\n' +
+              (name === 'mkdir' ? '/bin/mkdir -p "$@"\n' : '') +
               'sleep 30 </dev/null >/dev/null 2>&1 &\n' +
               'printf \'%s\\n\' "$!" >> "$CHILD_PID_FILE"\n' +
               'exit 0\n',
@@ -244,11 +281,14 @@ describe('SDK Java self-hosted workflow guards', () => {
           );
           expect(result.error, step.name).toBeUndefined();
           expect(result.status, step.name + result.stderr).toBe(0);
+          expect(existsSync(join(home, '.m2', 'repository')), step.name).toBe(
+            true,
+          );
           const children = readFileSync(pidFile, 'utf8')
             .trim()
             .split('\n')
             .filter(Boolean);
-          expect(children.length, step.name).toBeGreaterThanOrEqual(2);
+          expect(children.length, step.name).toBe(shimNames.length);
           // The step shell has exited. A survivor that inherited fd 9 would
           // still hold the lock; the closures are what keep it free.
           const free = spawnSync(
@@ -275,13 +315,78 @@ describe('SDK Java self-hosted workflow guards', () => {
     },
   );
 
+  it('prunes the in-house SDK coordinates at any depth in the write-back', () => {
+    const jobs = parse(workflow).jobs;
+    for (const jobName of ['test', 'mysql-integration']) {
+      const locked = jobs[jobName].steps.find((candidate) =>
+        candidate.run?.includes('sdk-java-tests.lock'),
+      );
+      const findLine = locked.run
+        .split('\n')
+        .find((line) => line.trim().startsWith('timeout 300 find'));
+      expect(findLine, locked.name).toBeTruthy();
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-prune-'));
+      const repo = join(dir, 'm2-repo');
+      const home = join(dir, 'home');
+      try {
+        for (const [path, body] of [
+          ['com/alibaba/qwencode-sdk/0.1.0-alpha/flat.jar', 'flat'],
+          [
+            'repository/com/alibaba/qwencode-sdk/0.1.0-alpha/nested.jar',
+            'nested',
+          ],
+          ['org/example/lib/kept.jar', 'kept'],
+        ]) {
+          mkdirSync(dirname(join(repo, path)), { recursive: true });
+          writeFileSync(join(repo, path), body);
+        }
+        mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
+        const result = spawnSync(
+          'bash',
+          ['-e', '-c', `cd "${repo}"\n${findLine.trim()}`],
+          {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: { ...process.env, HOME: home },
+          },
+        );
+        expect(result.status, locked.name + result.stderr).toBe(0);
+        expect(
+          existsSync(
+            join(home, '.m2', 'repository', 'org/example/lib/kept.jar'),
+          ),
+          locked.name,
+        ).toBe(true);
+        expect(
+          existsSync(
+            join(home, '.m2', 'repository', 'com/alibaba/qwencode-sdk'),
+          ),
+          locked.name,
+        ).toBe(false);
+        expect(
+          existsSync(join(home, '.m2', 'repository', 'repository')),
+          locked.name,
+        ).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
   it('runs Broker tests from the combined Server after installing the SDK on self-hosted Java 21', () => {
     const block = step(job('test'), 'Run Java SDK tests (self-hosted)');
+    const selfHosted = parse(workflow).jobs.test.steps.find(
+      (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
+    );
+    expect(selfHosted.env.MAVEN_ARGS).toContain(
+      '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
+    );
     expect(block).toContain("working-directory: 'packages/sdk-java/qwencode'");
     expect(block).toContain("MATRIX_JAVA: '${{ matrix.java }}'");
     expect(block).toContain("TIER: '${{ inputs.tier }}'");
     expect(block).toContain(
-      'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true\n' +
+      'mkdir -p "${RUNNER_TEMP}/m2-repo"\n' +
+        '          cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true\n' +
         '          mvn --batch-mode --no-transfer-progress clean test\n' +
         '          if [ "${MATRIX_JAVA}" = "21" ]; then\n' +
         '            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install\n' +
@@ -418,6 +523,15 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'checkstyle:check checkstyle:check@runtime-broker-checkstyle',
     );
+    // On the ECS leg the SDK is installed into the job-local repository by
+    // the self-hosted suite step, so Checkstyle must resolve from there; the
+    // hosted leg keeps the default repository its state-test step populated.
+    expect(block).toContain(
+      '          if [ "${RUNNER_ENVIRONMENT}" = "self-hosted" ]; then\n' +
+        '            export MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${RUNNER_TEMP}/m2-repo"\n' +
+        '          fi\n' +
+        '          mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle',
+    );
   });
 
   it.each([
@@ -453,13 +567,15 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
     if (name.startsWith('event-transport-')) {
       expect(exact).toBeNull();
+      expect(block).toContain('mkdir -p "${RUNNER_TEMP}/m2-repo"');
       expect(block).toContain(
-        'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
+        'cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/"',
       );
     } else if (name === 'test' || name === 'mysql-integration') {
       expect(jobLocal?.length).toBe(1);
+      expect(block).toContain('mkdir -p "${RUNNER_TEMP}/m2-repo"');
       expect(block).toContain(
-        'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
+        'cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/"',
       );
     } else {
       expect(jobLocal).toBeNull();
@@ -1232,7 +1348,8 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // The test job locks the same write-back. Its Maven runs resolve from
     // the same job-local repository above the acquisition, and its ceiling
     // must cover one full wait, the 925 s suite, one write-back, and ~11
-    // minutes of setup.
+    // minutes of setup. The 925 s was measured while the lock serialized
+    // suites; concurrent suites spend the ceiling's slack instead.
     const testStep = parsed.jobs.test.steps.find(
       (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
     );
@@ -1245,11 +1362,20 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
       Math.max(...testMaven.map((command) => testStep.run.indexOf(command))),
     ).toBeLessThan(testLockAt);
     expect(testStep.run).toContain('sdk_java_lock_acquire 5400 "${TIER}"');
-    expect(testStep.run).toMatch(
-      /timeout 300 find \..*-exec cp -ln --parents -t "\$\{HOME\}\/\.m2\/repository" \{\} \+ 9>&- \|\| write_back=\$\?/,
+    const testWriteBackAt = testStep.run.indexOf(
+      'mkdir -p "${HOME}/.m2/repository" 9>&-',
     );
+    expect(testWriteBackAt).toBeGreaterThan(testLockAt);
+    // This copy is the one lane that installs the fixed 0.1.0-alpha SDK, so
+    // pin it byte-identical to the MariaDB lane's literal: a partial pin let
+    // its prune and delta filter drift unnoticed.
+    expect(testStep.run).toContain(writeBackFind);
+    const testWriteBackBound = Number(
+      testStep.run.match(/timeout (\d+) find \. /)?.[1],
+    );
+    expect(testWriteBackBound).toBe(300);
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      seconds + 925 + writeBackBound + 11 * 60,
+      seconds + 925 + testWriteBackBound + 11 * 60,
     );
   });
 
@@ -1266,8 +1392,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(step?.env?.MAVEN_ARGS).toContain(
       '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
     );
+    expect(step.run).toContain('mkdir -p "${RUNNER_TEMP}/m2-repo"');
     expect(step.run).toContain(
-      'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
+      'cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/"',
     );
     // The write-back closes the host-shared ~/.m2 loop — the seed above only
     // reads that repository, so without it a pom key rotation leaves a
@@ -1284,9 +1411,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // replace a host file, so the 300 s backstop cannot leave a truncated
     // artifact in the shared cache the next seed hardlinks from.
     expect(step.run).toContain('cd "${RUNNER_TEMP}/m2-repo"');
-    expect(step.run).toContain(
-      'timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \\) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?',
-    );
+    expect(step.run).toContain(writeBackFind);
     expect(step.run).not.toMatch(/tar [^\n]*-xf/);
     expect(step.run).toContain(
       'if [ "${write_back}" -eq 124 ]; then\n  echo "::warning::Maven cache write-back stopped after 300 s;',
@@ -1298,7 +1423,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // order the phases: the write-back runs against a directory the seed has
     // not created yet if hoisted above it, and its warning arm swallows the
     // failure instead of reddening the gate.
-    const seedAt = step.run.indexOf('cp -aln "${HOME}/.m2/repository"');
+    const seedAt = step.run.indexOf('cp -aln "${HOME}/.m2/repository/."');
     const installAt = step.run.indexOf('-f packages/sdk-java/qwencode/pom.xml');
     const verifyAt = step.run.indexOf('-Pmysql-integration');
     const writeBackAt = step.run.indexOf('cd "${RUNNER_TEMP}/m2-repo"');

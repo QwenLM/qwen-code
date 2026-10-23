@@ -109,6 +109,13 @@ acquisition for its own write-back under the same 300-second backstop. Both
 lanes therefore keep the lock only for the cache copy, and the fast tier's
 90-minute budget is far above one hold.
 
+The 925 s suite figure that sizes the 150-minute ceiling was measured while
+the lock admitted one suite per host. With both lanes locking only the copy,
+different jobs can now run their suites concurrently on one host; the
+ceiling's ~1700 s of slack is the buffer for that contention, and the first
+pool runs after merge are its soak. A sustained overrun surfaces as the
+job's own timeout, not as a lock wait.
+
 ### Fast-tier priority
 
 The FIFO queue bounds a waiter by its position, but it still puts a fast-tier
@@ -177,8 +184,9 @@ order this section exists to prevent.
 ### Why fairness over the alternatives
 
 - Shard the lock by suite: reduces queue frequency but each shard is still a
-  bare flock, and it rides on an untested assumption that concurrent suites
-  share the host safely on a pool that just OOMed a build.
+  bare flock and keeps the same lost-place race per host; it also would not
+  bound the suite concurrency this change now accepts deliberately (see
+  "Hold scope").
 - Cap registrations per host: needs pool topology changes outside the repo
   and leaves the same lost-place race per host.
 - Second host: at least three hosts starved simultaneously; host count is
