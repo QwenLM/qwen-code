@@ -132,6 +132,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   let atLineStart = true;
   let terminalClosed = false;
   let promptInFlight = 0;
+  let turnActive = session.hasActivePrompt;
   let notifyTurnSettled: () => void = () => {};
   const writeText = (text: string): void => {
     const safe = sanitizeTerminalText(text);
@@ -146,6 +147,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
   };
   const renderEvent = (event: DaemonEvent): void => {
     if (event.type === 'turn_complete' || event.type === 'turn_error') {
+      turnActive = false;
       endLine();
       notifyTurnSettled();
     }
@@ -157,6 +159,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
         item.type === 'assistant.text.delta' ||
         item.type === 'thought.text.delta'
       ) {
+        turnActive = true;
         writeText(item.text);
       } else if (item.type === 'prompt.cancelled') {
         endLine();
@@ -236,9 +239,9 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
       .catch((error: unknown) => {
         if (!terminalClosed) {
           writeStderrLine(
-            `qwen attach: prompt failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+            `qwen attach: prompt failed: ${sanitizeTerminalText(
+              error instanceof Error ? error.message : String(error),
+            )}`,
           );
         }
       })
@@ -261,7 +264,7 @@ async function handleAttach(argv: AttachArgs): Promise<void> {
     process.removeListener('SIGINT', shutdown);
     rl.close();
     void iterator.return(undefined).catch(() => {});
-    if (!session.hasActivePrompt && promptInFlight === 0) {
+    if (!turnActive && promptInFlight === 0) {
       await session.detach().catch(() => {});
     }
   }
