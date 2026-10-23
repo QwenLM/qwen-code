@@ -816,6 +816,65 @@ describe('StreamJsonOutputAdapter', () => {
       expect(parsed.error?.message).toBe('Test error');
     });
 
+    it('should report the session turn limit instead of replaying the previous answer', () => {
+      // The client counts turns per session, so a stream-json session that
+      // spans several user messages trips `maxSessionTurns` before the
+      // per-call counter in nonInteractiveCli.ts. It then refuses the send
+      // and returns an empty turn: no content arrives, and a success result
+      // would carry the previous turn's text out of `lastAssistantMessage`.
+      adapter.startAssistantMessage();
+      adapter.processEvent({ type: LlmEventType.MaxSessionTurns });
+      stdoutWriteSpy.mockClear();
+
+      adapter.emitResult({
+        isError: false,
+        durationMs: 20,
+        apiDurationMs: 20,
+        numTurns: 2,
+      });
+
+      const parsed = JSON.parse(stdoutWriteSpy.mock.calls[0][0] as string);
+
+      expect(parsed.type).toBe('result');
+      expect(parsed.is_error).toBe(true);
+      expect(parsed.subtype).toBe('error_max_turns');
+      expect(parsed.error?.message).toContain('Reached max session turns');
+      // `result` is absent on the error shape, so the stale text is gone.
+      expect(parsed.result).toBeUndefined();
+    });
+
+    it('should not carry the turn-limit latch into the next turn', () => {
+      adapter.startAssistantMessage();
+      adapter.processEvent({ type: LlmEventType.MaxSessionTurns });
+      adapter.emitResult({
+        isError: false,
+        durationMs: 20,
+        apiDurationMs: 20,
+        numTurns: 2,
+      });
+
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'answer 2',
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+
+      adapter.emitResult({
+        isError: false,
+        durationMs: 30,
+        apiDurationMs: 30,
+        numTurns: 3,
+      });
+
+      const parsed = JSON.parse(stdoutWriteSpy.mock.calls[0][0] as string);
+
+      expect(parsed.is_error).toBe(false);
+      expect(parsed.subtype).toBe('success');
+      expect(parsed.result).toBe('answer 2');
+    });
+
     it('should use provided summary over extracted text', () => {
       stdoutWriteSpy.mockClear();
       adapter.emitResult({
