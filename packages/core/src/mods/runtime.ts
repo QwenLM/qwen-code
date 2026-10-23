@@ -150,6 +150,7 @@ export class ModRuntime {
     signal: AbortSignal,
     resolveTool?: ModToolResolver,
     surface: 'terminal' | null = null,
+    version = 'unknown',
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
@@ -165,7 +166,7 @@ export class ModRuntime {
     );
     try {
       const result = await runtime.request(
-        { type: 'load', plugins, cwd, surface },
+        { type: 'load', plugins, cwd, surface, version },
         signal,
         60_000,
       );

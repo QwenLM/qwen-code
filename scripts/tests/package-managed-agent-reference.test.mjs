@@ -72,7 +72,7 @@ async function fixture(root) {
       'class Latest {}',
     'packages/cli/src/serve/capabilities.ts':
       "export const SERVE_PROTOCOL_VERSION = 'v1' as const;\n",
-    'packages/cli/src/serve/broker-managed-runtime-provider.ts':
+    'packages/cli/src/serve/managed-runtime-broker-client.ts':
       'export const MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION = 2 as const;\n',
     'packages/cli/src/serve/hosted-harness-contract.ts':
       "const profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? ''\n).split(',');\n",
@@ -305,7 +305,10 @@ test('bootstrap renders matching credentials and a 32-byte key', () => {
   const secrets = generateSecrets('reference-test');
   assert.match(secrets.digest, /^sha256:[0-9a-f]{64}$/);
   assert.equal(Buffer.from(secrets.credentialKey, 'base64').length, 32);
-  assert.ok(renderHarnessEnv(secrets).includes(secrets.token));
+  const harness = renderHarnessEnv(secrets);
+  assert.ok(harness.includes(secrets.token));
+  // The control plane refuses a `;` comment, which a shell stops reading the file at.
+  assert.doesNotMatch(harness, /^\s*;/m);
   const server = renderServerEnv(
     secrets,
     '/tmp/application.yml',
@@ -575,6 +578,8 @@ test('ships the Harness credential keys the control plane reads', async () => {
     template,
     /^QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=sha256:[A-Za-z0-9._:/+=-]+$/m,
   );
+  // It refuses a `;` comment, which a shell stops reading the file at.
+  assert.doesNotMatch(template, /^\s*;/m);
 });
 
 test('rejects a stable distribution version', async () => {

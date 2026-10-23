@@ -6243,52 +6243,19 @@ class HostedHarnessClientTest {
     }
 
     @Test
-    void aPreCanonicalizationDigestStaysOnTheWireInItsOwnShape() {
-        // R3-1: a turn row persisted before computePayloadDigest
-        // canonicalized its input carries a digest over the as-built key
-        // order, and neither the stored digest nor the stored input may
-        // be rewritten. The route recomputes the digest over the received
-        // key order before any replay check, so recovery must both accept
-        // that digest and send the exact shape it covers.
-        createSessionRoute();
-        AtomicReference<String> promptBody = new AtomicReference<>();
-        server.createContext("/session/" + SESSION_ID + "/prompt",
-                exchange -> {
-                    promptBody.set(readBody(exchange));
-                    sendSessionJson(exchange, 202,
-                            "{\"promptId\":\"" + PROMPT_ID
-                                    + "\",\"lastEventId\":0,"
-                                    + "\"eventEpoch\":\""
-                                    + EVENT_EPOCH + "\"}");
-                });
+    void rejectsAPromptDigestWithNoncanonicalKeyOrder() {
         Map<String, Object> block = new LinkedHashMap<>();
         block.put("type", "text");
         block.put("text", "legacy-order");
-        List<Map<String, Object>> content = List.of(block);
-        String legacyDigest = legacyDigestOf(content);
-        // The witness discriminates only if the two shapes hash apart.
-        assertNotEquals(legacyDigest,
-                SubmitHarnessTurn.computePayloadDigest(content));
-
-        try (HostedHarnessClient client = newClient()) {
-            HarnessSessionRef session = createSession(client);
-            SubmitHarnessTurn turn = SubmitHarnessTurn.builder()
-                    .session(session)
-                    .promptId(PROMPT_ID)
-                    .addContent(block)
-                    .payloadDigest(legacyDigest)
-                    .build();
-            assertEquals(PROMPT_ID,
-                    client.submitTurn(turn).getPromptId());
-        }
-
-        assertTrue(promptBody.get().contains(
-                "\"prompt\":[{\"type\":\"text\","
-                        + "\"text\":\"legacy-order\"}]"),
-                "the wire shape must be the one the legacy digest covers: "
-                        + promptBody.get());
-        assertTrue(promptBody.get().contains(
-                "\"payloadDigest\":\"" + legacyDigest + "\""));
+        String unsortedDigest = legacyDigestOf(List.of(block));
+        assertNotEquals(unsortedDigest, SubmitHarnessTurn.computePayloadDigest(List.of(block)));
+        assertThrows(IllegalArgumentException.class, () -> SubmitHarnessTurn.builder()
+                .session(new HarnessSessionRef(SESSION_ID, CLIENT_ID, BOOT_ID,
+                        "/workspace", null, null, null))
+                .promptId(PROMPT_ID)
+                .addContent(block)
+                .payloadDigest(unsortedDigest)
+                .build());
     }
 
     // The pre-canonicalization digest shape: the as-built serialization,

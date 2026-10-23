@@ -509,7 +509,7 @@ describe('WorkspaceSessionProvider targets', () => {
         workspaceCwd: undefined,
       });
       expect(mocks.appProps.at(-1)?.['managedAgentProvider']).toMatchObject({
-        kind: 'java',
+        canCancel: true,
       });
       expect(mocks.getStandaloneSession).not.toHaveBeenCalled();
       expect(window.location.pathname).toBe(
@@ -556,7 +556,7 @@ describe('WorkspaceSessionProvider targets', () => {
     });
     expect(mocks.appProps.at(-1)).toMatchObject({
       initialSelectedWorkspaceCwd: '/work/b',
-      managedAgentProvider: expect.objectContaining({ kind: 'java' }),
+      managedAgentProvider: expect.objectContaining({ canCancel: true }),
     });
     expect(window.location.pathname).toBe('/session/session-b');
     expect(new URLSearchParams(window.location.search).get('workspace')).toBe(

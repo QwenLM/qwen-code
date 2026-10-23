@@ -793,8 +793,7 @@ export function WorkspaceBindingCreator({
         (attempt.modelId !== undefined &&
           session.modelSelection?.modelId !== attempt.modelId) ||
         (attempt.approvalMode !== undefined &&
-          (session.initialApprovalMode ?? session.approvalMode) !==
-            attempt.approvalMode) ||
+          session.initialApprovalMode !== attempt.approvalMode) ||
         ((modelPresets.length > 0 || session.agentId !== undefined) &&
           session.agentId !== attempt.agentId) ||
         !session.workspace ||
