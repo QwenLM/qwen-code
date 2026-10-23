@@ -7,6 +7,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -27,6 +28,9 @@ const brokerTestPattern = ['Test*', '*Test', '*Tests', '*TestCase']
 
 const writeBackFind =
   "timeout 300 find . \\( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-server' \\) -prune -o -type f -links 1 -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?";
+
+const seedUnlink =
+  'find "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \\( -name \'_remote.repositories\' -o -name \'maven-metadata-local.xml\' \\) -delete 2>/dev/null || true';
 
 const workflow = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
 const job = (name) => {
@@ -315,63 +319,184 @@ describe('SDK Java self-hosted workflow guards', () => {
     },
   );
 
-  it('prunes the in-house SDK coordinates at any depth in the write-back', () => {
-    const jobs = parse(workflow).jobs;
-    for (const jobName of ['test', 'mysql-integration']) {
-      const locked = jobs[jobName].steps.find((candidate) =>
-        candidate.run?.includes('sdk-java-tests.lock'),
-      );
-      const findLine = locked.run
-        .split('\n')
-        .find((line) => line.trim().startsWith('timeout 300 find'));
-      expect(findLine, locked.name).toBeTruthy();
-      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-prune-'));
-      const repo = join(dir, 'm2-repo');
-      const home = join(dir, 'home');
-      try {
-        for (const [path, body] of [
-          ['com/alibaba/qwencode-sdk/0.1.0-alpha/flat.jar', 'flat'],
-          [
-            'repository/com/alibaba/qwencode-sdk/0.1.0-alpha/nested.jar',
-            'nested',
-          ],
-          ['org/example/lib/kept.jar', 'kept'],
-        ]) {
-          mkdirSync(dirname(join(repo, path)), { recursive: true });
-          writeFileSync(join(repo, path), body);
-        }
-        mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
-        const result = spawnSync(
-          'bash',
-          ['-e', '-c', `cd "${repo}"\n${findLine.trim()}`],
-          {
-            encoding: 'utf8',
-            timeout: 5000,
-            env: { ...process.env, HOME: home },
-          },
+  it.skipIf(process.platform !== 'linux')(
+    'keeps a failed write-back cache-directory creation from reddening the gate',
+    () => {
+      const jobs = parse(workflow).jobs;
+      for (const jobName of ['test', 'mysql-integration']) {
+        const step = jobs[jobName].steps.find((candidate) =>
+          candidate.run?.includes('sdk-java-tests.lock'),
         );
-        expect(result.status, locked.name + result.stderr).toBe(0);
-        expect(
-          existsSync(
-            join(home, '.m2', 'repository', 'org/example/lib/kept.jar'),
-          ),
-          locked.name,
-        ).toBe(true);
-        expect(
-          existsSync(
-            join(home, '.m2', 'repository', 'com/alibaba/qwencode-sdk'),
-          ),
-          locked.name,
-        ).toBe(false);
-        expect(
-          existsSync(join(home, '.m2', 'repository', 'repository')),
-          locked.name,
-        ).toBe(false);
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
+        const start = step.run.indexOf('write_back=0');
+        const mkdirAt = step.run.indexOf('mkdir -p "${HOME}/.m2/repository"');
+        expect(start, step.name).toBeGreaterThan(-1);
+        expect(start, step.name).toBeLessThan(mkdirAt);
+        const writeBack = step.run
+          .slice(start)
+          .match(
+            /^write_back=0[\s\S]*?cache write-back failed; the gate result above is unaffected"\n\s*fi/,
+          )?.[0];
+        expect(writeBack, step.name).toBeTruthy();
+        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-mkdir-'));
+        const home = join(dir, 'home');
+        const runnerTemp = join(dir, 'runner-temp');
+        mkdirSync(home);
+        mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
+        // A regular file where the cache directory belongs: `mkdir -p`
+        // cannot succeed, and the step used to die before its warning arm.
+        writeFileSync(join(home, '.m2'), 'not a directory');
+        try {
+          const result = spawnSync('bash', ['-e', '-c', writeBack], {
+            encoding: 'utf8',
+            timeout: 10000,
+            env: { ...process.env, HOME: home, RUNNER_TEMP: runnerTemp },
+          });
+          expect(result.status, step.name + result.stderr).toBe(0);
+          expect(result.stdout, step.name).toContain(
+            '::warning::Maven cache write-back failed; the gate result above is unaffected',
+          );
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
       }
-    }
-  });
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'prunes the in-house SDK coordinates at any depth in the write-back',
+    () => {
+      const jobs = parse(workflow).jobs;
+      for (const jobName of ['test', 'mysql-integration']) {
+        const locked = jobs[jobName].steps.find((candidate) =>
+          candidate.run?.includes('sdk-java-tests.lock'),
+        );
+        const findLine = locked.run
+          .split('\n')
+          .find((line) => line.trim().startsWith('timeout 300 find'));
+        expect(findLine, locked.name).toBeTruthy();
+        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-prune-'));
+        const repo = join(dir, 'm2-repo');
+        const home = join(dir, 'home');
+        try {
+          for (const [path, body] of [
+            ['com/alibaba/qwencode-sdk/0.1.0-alpha/flat.jar', 'flat'],
+            [
+              'repository/com/alibaba/qwencode-sdk/0.1.0-alpha/nested.jar',
+              'nested',
+            ],
+            ['org/example/lib/kept.jar', 'kept'],
+          ]) {
+            mkdirSync(dirname(join(repo, path)), { recursive: true });
+            writeFileSync(join(repo, path), body);
+          }
+          mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
+          const result = spawnSync(
+            'bash',
+            ['-e', '-c', `cd "${repo}"\n${findLine.trim()}`],
+            {
+              encoding: 'utf8',
+              timeout: 5000,
+              env: { ...process.env, HOME: home },
+            },
+          );
+          expect(result.status, locked.name + result.stderr).toBe(0);
+          expect(
+            existsSync(
+              join(home, '.m2', 'repository', 'org/example/lib/kept.jar'),
+            ),
+            locked.name,
+          ).toBe(true);
+          expect(
+            existsSync(
+              join(home, '.m2', 'repository', 'com/alibaba/qwencode-sdk'),
+            ),
+            locked.name,
+          ).toBe(false);
+          expect(
+            existsSync(join(home, '.m2', 'repository', 'repository')),
+            locked.name,
+          ).toBe(false);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'seeds the in-house coordinates without hardlinked metadata',
+    () => {
+      // `mvn install` rewrites `_remote.repositories` and
+      // `maven-metadata-local.xml` in place, so a hardlinked seed would
+      // mutate the host cache above the lock. The seed must drop those two
+      // names from the job-local copy and leave Maven to create them fresh.
+      const seeding = Object.values(parse(workflow).jobs)
+        .flatMap((entry) => entry.steps ?? [])
+        .filter((candidate) =>
+          candidate.run?.includes(
+            'cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/"',
+          ),
+        );
+      expect(seeding).toHaveLength(4);
+      for (const candidate of seeding) {
+        const lines = candidate.run.split('\n');
+        const start = lines.findIndex(
+          (line) => line.trim() === 'mkdir -p "${RUNNER_TEMP}/m2-repo"',
+        );
+        const mvn = lines.findIndex(
+          (line, index) => index > start && /^\s*mvn /.test(line),
+        );
+        expect(start, candidate.name).toBeGreaterThan(-1);
+        expect(mvn, candidate.name).toBeGreaterThan(start);
+        const seed = lines.slice(start, mvn).join('\n');
+        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-'));
+        const home = join(dir, 'home');
+        const runnerTemp = join(dir, 'runner-temp');
+        const host = join(home, '.m2', 'repository');
+        const local = join(runnerTemp, 'm2-repo');
+        const metadata = [
+          'com/alibaba/qwencode-sdk/0.1.0-alpha/_remote.repositories',
+          'com/alibaba/qwencode-sdk/maven-metadata-local.xml',
+          'com/alibaba/qwen-managed-agent-server/0.1.0-alpha/_remote.repositories',
+          'com/alibaba/qwen-managed-agent-server/maven-metadata-local.xml',
+        ];
+        const artifacts = [
+          'com/alibaba/qwencode-sdk/0.1.0-alpha/qwencode-sdk.jar',
+          'com/alibaba/qwencode-sdk/0.1.0-alpha/qwencode-sdk.pom',
+          'org/example/lib/kept.jar',
+        ];
+        try {
+          for (const path of [...metadata, ...artifacts]) {
+            mkdirSync(dirname(join(host, path)), { recursive: true });
+            writeFileSync(join(host, path), path);
+          }
+          const result = spawnSync('bash', ['-e', '-c', seed], {
+            encoding: 'utf8',
+            timeout: 10000,
+            env: { ...process.env, HOME: home, RUNNER_TEMP: runnerTemp },
+          });
+          expect(result.status, candidate.name + result.stderr).toBe(0);
+          // Left in the job-local copy these are the host inodes, and the
+          // install rewrites them without the lock.
+          for (const path of metadata) {
+            expect(existsSync(join(local, path)), candidate.name + path).toBe(
+              false,
+            );
+            expect(readFileSync(join(host, path), 'utf8'), path).toBe(path);
+          }
+          // Everything else is still seeded and still hardlinked.
+          for (const path of artifacts) {
+            expect(existsSync(join(local, path)), candidate.name + path).toBe(
+              true,
+            );
+            expect(statSync(join(local, path)).nlink, path).toBe(2);
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+  );
 
   it('runs Broker tests from the combined Server after installing the SDK on self-hosted Java 21', () => {
     const block = step(job('test'), 'Run Java SDK tests (self-hosted)');
@@ -387,6 +512,12 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'mkdir -p "${RUNNER_TEMP}/m2-repo"\n' +
         '          cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true\n' +
+        '          # `mvn install` rewrites in-house metadata in place through the\n' +
+        "          # seed's hardlink; unlink it so only the locked write-back mutates\n" +
+        '          # the host cache (issue #15281).\n' +
+        '          ' +
+        seedUnlink +
+        '\n' +
         '          mvn --batch-mode --no-transfer-progress clean test\n' +
         '          if [ "${MATRIX_JAVA}" = "21" ]; then\n' +
         '            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install\n' +

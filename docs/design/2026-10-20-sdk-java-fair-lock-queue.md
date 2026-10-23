@@ -92,13 +92,16 @@ pool contention that verify ran for about three hours (run 39628985638 held it
 failed at 19:15 without starting Maven — the hold, not the queue order, was
 the bound.
 
-Both Maven runs already resolve from a job-local repository, so they touch no
-host-shared state. Only the cache write-back mutates `~/.m2`, so only the
-write-back takes the lock. The seed (`cp -aln`) is read-only and best-effort
-and runs before the acquisition; the Maven runs run unlocked; the write-back
-holds one acquisition, and its `mkdir` and bounded `find`/`cp` children
-drop fd 9 so a survivor cannot retain the lock. A hold now measures the copy
-instead of the suite.
+Both Maven runs already resolve from a job-local repository. The seed is
+still not fully read-only: `mvn install` rewrites the in-house coordinates'
+`_remote.repositories` and `maven-metadata-local.xml` in place through the
+hardlink, so the seed unlinks those two names from the job-local copy and
+lets Maven create fresh ones. Only the cache write-back may mutate `~/.m2`,
+so only the write-back takes the lock. The seed is best-effort and runs
+before the acquisition; the Maven runs run unlocked; the write-back holds
+one acquisition, and its `mkdir` and bounded `find`/`cp` children drop fd 9
+so a survivor cannot retain the lock. A hold now measures the copy instead
+of the suite.
 
 The push-time test job was the remaining whole-suite hold. On 2026-10-22 run
 39805834871's fast-tier Java 21 leg entered the queue as a fast ticket, became

@@ -250,6 +250,10 @@ jobs:
           # when DEST survives from an earlier job on this host.
           mkdir -p "${RUNNER_TEMP}/m2-repo"
           cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
+          # `mvn install` rewrites in-house metadata in place through the
+          # seed's hardlink; unlink it so only the locked write-back mutates
+          # the host cache (issue #15281).
+          find "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \( -name '_remote.repositories' -o -name 'maven-metadata-local.xml' \) -delete 2>/dev/null || true
           mvn --batch-mode --no-transfer-progress clean test
           if [ "${MATRIX_JAVA}" = "21" ]; then
             mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
@@ -282,9 +286,9 @@ jobs:
           fi
           # No write-back child inherits fd 9, or a cancelled job's survivor
           # would hold the host lock until it exits.
-          mkdir -p "${HOME}/.m2/repository" 9>&-
-          cd "${RUNNER_TEMP}/m2-repo"
           write_back=0
+          mkdir -p "${HOME}/.m2/repository" 9>&- || write_back=$?
+          cd "${RUNNER_TEMP}/m2-repo"
           timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-server' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
@@ -768,6 +772,10 @@ jobs:
           # no lock and cannot delay the lane.
           mkdir -p "${RUNNER_TEMP}/m2-repo"
           cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
+          # `mvn install` rewrites in-house metadata in place through the
+          # seed's hardlink; unlink it so only the locked write-back mutates
+          # the host cache (issue #15281).
+          find "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \( -name '_remote.repositories' -o -name 'maven-metadata-local.xml' \) -delete 2>/dev/null || true
           # Both Maven runs resolve from the job-local copy above, so they do
           # not touch host-shared state and must not hold the per-host lock:
           # a MySQL verify can run for hours under pool contention, and the
@@ -824,9 +832,9 @@ jobs:
           # artifact missing for the next job to re-resolve, never truncated.
           # No write-back child inherits fd 9, or a cancelled job's survivor
           # would hold the host lock until it exits.
-          mkdir -p "${HOME}/.m2/repository" 9>&-
-          cd "${RUNNER_TEMP}/m2-repo"
           write_back=0
+          mkdir -p "${HOME}/.m2/repository" 9>&- || write_back=$?
+          cd "${RUNNER_TEMP}/m2-repo"
           timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-server' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
@@ -1478,6 +1486,10 @@ jobs:
           # Seed from the host-shared repo (cache-restored on hosted runners).
           mkdir -p "${RUNNER_TEMP}/m2-repo"
           cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
+          # `mvn install` rewrites in-house metadata in place through the
+          # seed's hardlink; unlink it so only the locked write-back mutates
+          # the host cache (issue #15281).
+          find "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \( -name '_remote.repositories' -o -name 'maven-metadata-local.xml' \) -delete 2>/dev/null || true
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Cache the RocketMQ distribution'
         uses: 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' # v6.1.0
@@ -1717,6 +1729,10 @@ jobs:
           # Seed from the host-shared repo (cache-restored on hosted runners).
           mkdir -p "${RUNNER_TEMP}/m2-repo"
           cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
+          # `mvn install` rewrites in-house metadata in place through the
+          # seed's hardlink; unlink it so only the locked write-back mutates
+          # the host cache (issue #15281).
+          find "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \( -name '_remote.repositories' -o -name 'maven-metadata-local.xml' \) -delete 2>/dev/null || true
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Install libfaketime'
         # The clock-skew row moves one node's whole wall clock. A pool host
