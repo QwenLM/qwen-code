@@ -439,7 +439,7 @@ class Session {
 
   /**
    * Direct mode initialization flow
-   * Initializes config and enqueues the first user message
+   * Enqueues the first user message, then initializes config
    */
   private async initializeDirectMode(
     userMessage: CLIUserMessage,
