@@ -261,11 +261,8 @@ export async function createReferenceDistribution({
     path.join(root, 'packages/cli/src/serve/capabilities.ts'),
     'utf8',
   );
-  const brokerProvider = await readFile(
-    path.join(
-      root,
-      'packages/cli/src/serve/broker-managed-runtime-provider.ts',
-    ),
+  const brokerClient = await readFile(
+    path.join(root, 'packages/cli/src/serve/managed-runtime-broker-client.ts'),
     'utf8',
   );
   const applicationConfiguration = await readFile(
@@ -294,8 +291,10 @@ export async function createReferenceDistribution({
     /^[ \t]*process\.env\[HOSTED_LIFECYCLE_V2_PROFILES_ENV\][ \t]*\?\?[ \t]*'([^'\r\n]*)'[ \t]*$/gm,
     'Hosted lifecycle v2 profile default',
   );
-  if (lifecycleV2ProfilesDefault !== '') {
-    throw new Error('Hosted lifecycle v2 profiles must default to empty.');
+  if (lifecycleV2ProfilesDefault !== 'hosted-workspace-shell/1') {
+    throw new Error(
+      'Hosted lifecycle v2 profiles must default to canonical Shell only.',
+    );
   }
 
   const serverJar = `qwen-managed-agent-server-${serverVersion}.jar`;
@@ -340,6 +339,17 @@ export async function createReferenceDistribution({
       stage,
       `packages/managed-agent-server/distribution/systemd/${file}`,
       `systemd/${file}`,
+    );
+  }
+  for (const file of [
+    'qwen-managed-agent-bootstrap',
+    'qwen-managed-agent-bootstrap.mjs',
+  ]) {
+    await copy(
+      root,
+      stage,
+      `packages/managed-agent-server/distribution/bin/${file}`,
+      `bin/${file}`,
     );
   }
   const documentation = [
@@ -411,7 +421,7 @@ export async function createReferenceDistribution({
       ),
       managedRuntimeBrokerProtocolVersion: Number(
         match(
-          brokerProvider,
+          brokerClient,
           /MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION = (\d+)/,
           'Runtime Broker protocol version',
         ),
@@ -462,9 +472,9 @@ export async function createReferenceDistribution({
     `${rootName}/SHA256SUMS`,
     `${rootName}/bin/qwen-managed-agent-server`,
     `${rootName}/bin/qwen-managed-agent-operator-recovery`,
+    `${rootName}/bin/qwen-managed-agent-bootstrap`,
     `${rootName}/config/application.example.yml`,
-    `${rootName}/systemd/qwen-managed-agent-server.service`,
-    `${rootName}/systemd/README.md`,
+    ...systemdFiles.map((file) => `${rootName}/systemd/${file}`),
   ]) {
     if (!entries.split('\n').includes(required)) {
       throw new Error(`Archive is missing ${required}.`);

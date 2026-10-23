@@ -27,6 +27,10 @@ import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
 import { GlobTool } from '@qwen-code/qwen-code-core/tools/glob.js';
 import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
+import {
+  ManagedAutomationGateTool,
+  type ManagedAutomationGateExecution,
+} from './managed-automation-gate-tool.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ShellToolInvocation } from '@qwen-code/qwen-code-core/tools/shell.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
@@ -239,6 +243,9 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   EditTool.Name,
   ShellTool.Name,
   GlobTool.Name,
+  // The managed automation gate probe: the Harness's own execution, never
+  // a model's (docs/design/2026-10-22-managed-automation-gate.md).
+  ManagedAutomationGateTool.Name,
 ]);
 
 /** Live background Shells one Session may hold, by the H3 design contract. */
@@ -356,12 +363,14 @@ export class ManagedToolExecutor {
     close(): Promise<void>;
   };
   private closing = false;
+  private csiClosing: Promise<void> | undefined;
   private retirementId?: string;
   private providerWasUsed = false;
   private capturePreparationStarted = false;
   private historyControlOutcomeUnknown = false;
   private ledgerIntegrityFailed = false;
   private readonly pendingStarts = new Set<Promise<unknown>>();
+  private startFailureObserved = false;
   private readonly fileHistories = new Map<string, ManagedRuntimeFileHistory>();
   private readonly historyControls = new Set<string>();
 
@@ -452,6 +461,144 @@ export class ManagedToolExecutor {
     };
   }
 
+  async csiRetirementInventory(retirementId: string, sessionId: string) {
+    this.sealAdmission(retirementId);
+    const joined = await Promise.allSettled([
+      ...this.pendingStarts,
+      ...[...this.entries.values()].flatMap((entry) =>
+        entry.promise ? [entry.promise] : [],
+      ),
+      ...[...this.fileHistories.values()].map((history) =>
+        history.history.drain(),
+      ),
+    ]);
+    const drain = this.getDrainObservation(retirementId);
+    const blockers = new Set(drain.blockers);
+    if (
+      this.startFailureObserved ||
+      joined.some((result) => result.status === 'rejected')
+    )
+      blockers.add('executor_join_failed');
+    if (
+      this.capturePublisher ||
+      this.mcp ||
+      this.hooks ||
+      this.backgroundSupervisor ||
+      this.options.ledger
+    )
+      blockers.add('configured_secondary_activity');
+    if (
+      this.backgroundRegistry.hasActivity ||
+      this.monitorRegistry.hasActivity ||
+      this.mcpCalls.size ||
+      this.providerSessions.size ||
+      this.closedSessions.size
+    )
+      blockers.add('secondary_activity_present');
+    if (this.historyControls.size) blockers.add('history_control_pending');
+    const entries = [...this.entries.values()]
+      .sort((a, b) => a.reference.callId.localeCompare(b.reference.callId))
+      .map((entry) => {
+        if (
+          entry.reference.sessionId !== sessionId ||
+          entry.version !== 2 ||
+          !['read_file', 'write_file', 'edit'].includes(entry.toolName) ||
+          entry.state !== 'settled' ||
+          !entry.result ||
+          entry.input === undefined ||
+          entry.inputJson === undefined
+        )
+          blockers.add('unsupported_file_entry');
+        return {
+          version: entry.version,
+          reference: structuredClone(entry.reference),
+          toolName: entry.toolName,
+          input: structuredClone(entry.input ?? null),
+          inputJson: entry.inputJson ?? null,
+          state: entry.state,
+          lastSequence: entry.lastSequence,
+          result: structuredClone(entry.result ?? null),
+          v3Result: structuredClone(entry.v3Result ?? null),
+          v3Capture: structuredClone(entry.v3Capture ?? null),
+          acknowledgement: structuredClone(entry.acknowledgement ?? null),
+          aborted: entry.controller.signal.aborted,
+        };
+      });
+    const histories = [...this.fileHistories.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([id, history]) => ({
+        sessionId: id,
+        directory: history.directory,
+        state: history.state(),
+      }));
+    if (histories.some((history) => history.sessionId !== sessionId))
+      blockers.add('unrelated_file_history');
+    const result = {
+      ...drain,
+      workState: blockers.size ? ('BLOCKED' as const) : drain.workState,
+      blockers: [...blockers].sort(),
+      entries,
+      histories,
+      historyControls: [...this.historyControls].sort(),
+      secondary: {
+        captureConfigured: this.capturePublisher !== undefined,
+        mcpConfigured: this.mcp !== undefined,
+        hooksConfigured: this.hooks !== undefined,
+        supervisorConfigured: this.backgroundSupervisor !== undefined,
+        ledgerConfigured: this.options.ledger !== undefined,
+        providerUsed: this.providerWasUsed,
+        providerSessions: [...this.providerSessions].sort(),
+        closedSessions: [...this.closedSessions].sort(),
+        mcpCalls: this.mcpCalls.size,
+        backgroundActivity: this.backgroundRegistry.hasActivity,
+        monitorActivity: this.monitorRegistry.hasActivity,
+      },
+    };
+    if (
+      entries.length > 4096 ||
+      Buffer.byteLength(JSON.stringify(result)) > 32 * 1024 * 1024
+    )
+      throw new ManagedToolUnavailableError(
+        'CSI executor inventory exceeds its bound.',
+      );
+    return result;
+  }
+
+  closeCsiFiles(retirementId: string, sessionId: string): Promise<void> {
+    this.sealAdmission(retirementId);
+    this.csiClosing ??= (async () => {
+      const inventory = await this.csiRetirementInventory(
+        retirementId,
+        sessionId,
+      );
+      if (inventory.workState !== 'QUIESCENT')
+        throw new ManagedToolUnavailableError(
+          'Original CSI executor is blocked.',
+        );
+      this.closing = true;
+      await Promise.all([
+        ...this.pendingStarts,
+        ...[...this.entries.values()].flatMap((entry) =>
+          entry.promise ? [entry.promise] : [],
+        ),
+        ...[...this.fileHistories.values()].map((history) =>
+          history.history.drain(),
+        ),
+        this.backgroundRegistry.stopAll(5_000),
+        this.monitorRegistry.stopAll(5_000),
+      ]);
+      if (
+        this.pendingStarts.size ||
+        this.historyControls.size ||
+        this.startFailureObserved
+      )
+        throw new ManagedToolUnavailableError(
+          'Original CSI executor did not close.',
+        );
+    })();
+    return this.csiClosing;
+  }
+
   controlFileHistory(
     ownerSessionId: string,
     sessionId: string,
@@ -492,7 +639,7 @@ export class ManagedToolExecutor {
     this.assertLegacySession(sessionId);
     if (
       this.closing ||
-      this.hasActiveToolSession(sessionId) ||
+      this.hasActiveToolSession(sessionId, true) ||
       (operation.action === 'rewind' &&
         this.hooks?.hasHolds(sessionId) === true) ||
       [...this.entries.values()].some(
@@ -504,6 +651,7 @@ export class ManagedToolExecutor {
         'File history requires an idle Runtime Session.',
       );
     this.historyControls.add(sessionId);
+    this.mcp?.setFileHistoryActive(sessionId, true);
     let mutationStarted = false;
     try {
       const tools = await this.toolsFor({
@@ -539,6 +687,7 @@ export class ManagedToolExecutor {
             ownerSessionId,
             tools.directory,
             operation.state,
+            tools.retainedFileHistory,
           );
           await history.ready();
           if (!this.isAdmissionOpen)
@@ -584,6 +733,7 @@ export class ManagedToolExecutor {
       throw error;
     } finally {
       this.historyControls.delete(sessionId);
+      this.mcp?.setFileHistoryActive(sessionId, false);
     }
   }
 
@@ -1759,10 +1909,15 @@ export class ManagedToolExecutor {
     );
   }
 
-  private hasActiveToolSession(sessionId: string): boolean {
+  private hasActiveToolSession(
+    sessionId: string,
+    fileHistory = false,
+  ): boolean {
     if (this.historyControls.has(sessionId)) return true;
     return (
-      this.mcp?.hasHolds(sessionId) === true ||
+      (fileHistory
+        ? this.mcp?.hasPendingWork(sessionId)
+        : this.mcp?.hasHolds(sessionId)) === true ||
       this.provider?.hasActiveSession(sessionId) === true ||
       this.backgroundRegistry.hasHolds(sessionId) ||
       this.monitorRegistry.hasHolds(sessionId) ||
@@ -1980,7 +2135,10 @@ export class ManagedToolExecutor {
     this.pendingStarts.add(pending);
     void pending.then(
       () => this.pendingStarts.delete(pending),
-      () => this.pendingStarts.delete(pending),
+      () => {
+        this.startFailureObserved = true;
+        this.pendingStarts.delete(pending);
+      },
     );
     return pending;
   }
@@ -2185,40 +2343,53 @@ export class ManagedToolExecutor {
         return sessionIdContext.run(sessionId, () => {
           const invocation = fileInvocation ?? tool.build(params);
           invocationStarted = true;
+          const ledger = this.options.ledger;
+          const trackGroup = (pid: number) => {
+            if (!ledger) return;
+            // Before any settle step of this call can run, the group is
+            // durable for the host's sweeps: the pid leads the group.
+            shellPgid = pid;
+            try {
+              ledger.addGroup({
+                pgid: pid,
+                callId: entry.reference.callId,
+                startedAt: Date.now(),
+              });
+            } catch (error) {
+              this.ledgerIntegrityFailed = true;
+              // A group that could not get into the ledger must not
+              // outlive the failure: stop it first, then let the call
+              // fail loudly instead of settling an outcome nothing
+              // recorded.
+              signalProcessGroup(pid, 'SIGKILL');
+              void ledger.waitForGroupExit(pid, CLOSE_SWEEP_TIMEOUT_MS);
+              throw error;
+            }
+          };
           if (
             entry.toolName === ShellTool.Name &&
-            (this.options.ledger || entry.captureSink)
+            (ledger || entry.captureSink)
           ) {
-            const ledger = this.options.ledger;
             return (invocation as ShellToolInvocation).execute(
               entry.controller.signal,
               undefined,
               undefined,
-              (pid) => {
-                if (!ledger) return;
-                // Before any settle step of this call can run, the group is
-                // durable for the host's sweeps: the pid leads the group.
-                shellPgid = pid;
-                try {
-                  ledger.addGroup({
-                    pgid: pid,
-                    callId: entry.reference.callId,
-                    startedAt: Date.now(),
-                  });
-                } catch (error) {
-                  this.ledgerIntegrityFailed = true;
-                  // A group that could not get into the ledger must not
-                  // outlive the failure: stop it first, then let the call
-                  // fail loudly instead of settling an outcome nothing
-                  // recorded.
-                  signalProcessGroup(pid, 'SIGKILL');
-                  void ledger.waitForGroupExit(pid, CLOSE_SWEEP_TIMEOUT_MS);
-                  throw error;
-                }
-              },
+              trackGroup,
               undefined,
               undefined,
               entry.captureSink,
+            );
+          }
+          // A gate probe's command is a Shell's too: the same group
+          // tracking stops what it leaves behind.
+          if (entry.toolName === ManagedAutomationGateTool.Name && ledger) {
+            return (
+              invocation as unknown as ManagedAutomationGateExecution
+            ).execute(
+              entry.controller.signal,
+              undefined,
+              undefined,
+              trackGroup,
             );
           }
           return invocation.execute(entry.controller.signal);
@@ -2554,6 +2725,7 @@ export function createManagedToolSet(
           executionTimeoutMs: 5_000,
         }),
         new ShellTool(config),
+        new ManagedAutomationGateTool(config),
       ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
     ),
   };

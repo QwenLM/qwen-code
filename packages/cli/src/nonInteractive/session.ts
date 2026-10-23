@@ -39,6 +39,7 @@ import {
   isControlCancel,
 } from './types.js';
 import { createMinimalSettings } from '../config/settings.js';
+import { readHumanInputFromSdkMessage } from './sdk-human-input.js';
 import type { LoadedSettings } from '../config/settings.js';
 import {
   runNonInteractive,
@@ -504,6 +505,7 @@ class Session {
 
   private async processUserMessage(userMessage: CLIUserMessage): Promise<void> {
     const input = extractUserMessageText(userMessage);
+    const humanInput = readHumanInputFromSdkMessage(userMessage);
     if (!input) {
       debugLogger.debug('[Session] No text content in user message');
       return;
@@ -517,6 +519,7 @@ class Session {
 
     try {
       await runNonInteractive(this.config, this.settings, input, promptId, {
+        ...(humanInput ? { humanInput } : {}),
         modSession: this.modSession,
         abortController: turnAbortController,
         adapter: this.outputAdapter,
@@ -558,6 +561,7 @@ class Session {
 
     const chat = llmClient.getChat();
     const historyTail =
+      chat.getHistoryForRecovery?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
       chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
       chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
     const cancellation = getLastApiPromptCancellation(

@@ -18,7 +18,7 @@ The repository builds `qwen-managed-agent-server`, including its Runtime Broker 
 
 ## Non-goals
 
-- Enabling public Shell, v2 capability advertisement, Automation, Channels, or retention defaults.
+- Enabling public Shell execution, Automation, Channels, or retention defaults. Canonical Shell v2 capability advertisement follows the [Shell lifecycle design](2026-10-23-managed-shell-lifecycle.md).
 - Publishing a container image or choosing a long-term container registry.
 - Supporting multiple surviving Java control planes, cross-host takeover, public CSI, or a stable support tier.
 - Bundling the npm CLI or Hosted Harness into the Java archive.
@@ -30,6 +30,8 @@ The release asset is `qwen-managed-agent-reference-<version>.tar.gz`. It contain
 ```text
 bin/qwen-managed-agent-server
 bin/qwen-managed-agent-operator-recovery
+bin/qwen-managed-agent-bootstrap
+bin/qwen-managed-agent-bootstrap.mjs
 config/application.example.yml
 systemd/qwen-hosted-harness.service
 systemd/qwen-managed-agent-server.service
@@ -53,6 +55,10 @@ The launchers use bundle-relative JAR paths. When the operator creates `config/a
 
 The release also publishes a detached copy of `manifest.json` and `SHA256SUMS.txt`. The detached checksum file covers the archive and detached manifest. The in-bundle checksum file covers every payload file and `manifest.json`.
 
+## Credential bootstrap
+
+`bin/qwen-managed-agent-bootstrap` generates the shared Harness token and capability digest, the broker token and the Runtime credential key, and writes `harness.env`, `server.env` and `application.yml` with mode 0600. It refuses to overwrite without `--force` and prints paths only. The digest is an arbitrary shared identifier: the Harness echoes the configured value instead of deriving one from its capability set. The generator does not invent datasource credentials.
+
 ## Manifest contract
 
 `manifest.json` has schema version `1` and records:
@@ -62,7 +68,7 @@ The release also publishes a detached copy of `manifest.json` and `SHA256SUMS.tx
 - the exact Qwen Code version and Hosted Harness profile from the same source tree;
 - the Serve protocol, Runtime Broker protocol, public API, Java, Node.js, and Flyway migration compatibility read from the same source tree;
 - the accepted one-control-plane, trusted-Linux, embedded-Broker topology;
-- explicit `false` values for public Shell and v2 advertisement defaults;
+- explicit defaults: public Shell execution is `false`, canonical Shell v2 advertisement is `true`, and MCP lifecycle remains explicitly enabled;
 - the bundled deployment and recovery documentation paths.
 
 Packaging fails when a required artifact or compatibility source is absent or ambiguous. It does not guess a value or publish a partially described artifact.
@@ -106,7 +112,7 @@ Upgrade uses one stopped admission window on the accepted single-control-plane t
 - The bundled server and operator-recovery launchers use only bundle-relative files.
 - The exact extracted server can start and complete the reference smoke path.
 - The production workflow publishes only an immutable experimental prerelease from `main`.
-- Public Shell and v2 advertisement remain disabled by default.
+- Public Shell execution remains disabled by default; canonical Shell v2 capability advertisement is enabled by default, and MCP lifecycle requires explicit enablement.
 
 ## Follow-up work
 

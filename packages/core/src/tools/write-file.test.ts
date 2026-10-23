@@ -14,11 +14,11 @@ import {
   type Mocked,
 } from 'vitest';
 import type { WriteFileToolParams } from './write-file.js';
+import { WriteFileTool } from './write-file.js';
 import {
-  WriteFileTool,
   buildRecordArtifactReminder,
   buildWorkspaceArtifactMetadata,
-} from './write-file.js';
+} from './artifact/workspace-auto-record.js';
 import { ToolErrorType } from './tool-error.js';
 import type {
   FileDiff,
@@ -496,6 +496,17 @@ describe('WriteFileTool', () => {
       expect(result.artifacts).toBeUndefined();
     }
 
+    function expectUpdateOnly(result: ToolResult, workspacePath: string) {
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toEqual([
+        expect.objectContaining({
+          storage: 'workspace',
+          workspacePath,
+          updateOnly: true,
+        }),
+      ]);
+    }
+
     it('should return error if _getCorrectedFileContent returns an error during execute', async () => {
       const filePath = p('execute_error_file.txt');
       fs.writeFileSync(filePath, 'original', { mode: 0o000 });
@@ -580,6 +591,10 @@ describe('WriteFileTool', () => {
       ['diagram.svg', 'image'],
       ['photo.webp', 'image'],
       ['table.csv', 'file'],
+      ['query.sql', 'file'],
+      ['analysis.py', 'file'],
+      ['notes.md', 'file'],
+      ['data.json', 'file'],
       ['table.xlsx', 'document'],
       ['brief.docx', 'document'],
       ['deck.pptx', 'document'],
@@ -609,11 +624,12 @@ describe('WriteFileTool', () => {
       });
     });
 
-    it('does not record intermediate files when record_as_artifact is false', async () => {
+    it('only refreshes intermediate files when record_as_artifact is false', async () => {
       const result = await writeArtifact(p('alibaba.html'), html('Alibaba'), {
         record_as_artifact: false,
       });
-      expectNotRecorded(result, true);
+      expect(result.llmContent).toMatch(CREATED);
+      expectUpdateOnly(result, 'alibaba.html');
     });
 
     it('does not record intermediate files written under .qwen/tmp', async () => {
@@ -655,12 +671,12 @@ describe('WriteFileTool', () => {
       expectNotRecorded(result, true);
     });
 
-    it('does not record ordinary source files as artifacts', async () => {
+    it('only refreshes ordinary source files that are already artifacts', async () => {
       const result = await writeArtifact(
         p('src', 'index.ts'),
         'export const value = 1;\n',
       );
-      expectNotRecorded(result, false);
+      expectUpdateOnly(result, 'src/index.ts');
     });
 
     it('does not record files outside the workspace as artifacts', async () => {

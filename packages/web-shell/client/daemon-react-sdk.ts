@@ -333,6 +333,8 @@ export type {
   DaemonGoalList,
   /** A durable scheduled task (cron) as returned by the daemon. */
   DaemonScheduledTask,
+  /** Summary of a gated task's recent gate runs. */
+  DaemonScheduledTaskGateStatus,
   /** One recorded fire in a scheduled task's run history. */
   DaemonScheduledTaskRun,
   /** Request body for creating a scheduled task. */

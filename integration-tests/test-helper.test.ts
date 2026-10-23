@@ -28,6 +28,24 @@ describe('TestRig', () => {
       process.env['KEEP_OUTPUT'] = originalKeepOutput;
     }
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it('pins getDefaultTimeout to the CI-first environment table', () => {
+    const rig = new TestRig();
+
+    vi.stubEnv('CI', 'true');
+    vi.stubEnv('QWEN_SANDBOX', 'docker');
+    expect(rig.getDefaultTimeout()).toBe(60_000);
+
+    // The documented scripts export QWEN_SANDBOX=false, which the helper's
+    // truthiness check still treats as a container.
+    vi.stubEnv('CI', '');
+    vi.stubEnv('QWEN_SANDBOX', 'false');
+    expect(rig.getDefaultTimeout()).toBe(30_000);
+
+    vi.stubEnv('QWEN_SANDBOX', '');
+    expect(rig.getDefaultTimeout()).toBe(15_000);
   });
 
   it('resets a reused test directory during setup', async () => {

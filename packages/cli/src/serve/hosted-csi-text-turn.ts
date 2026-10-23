@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
@@ -40,6 +41,7 @@ export async function runHostedCsiTextTurn(
   text: string,
   abort: AbortController,
   resumeFromToolResults?: readonly Part[],
+  recoveredFinalOutput?: ChatRecord,
 ): Promise<ChatRecord> {
   const { managed, cwd, files } = session;
   const authority = managed.authority;
@@ -146,31 +148,48 @@ export async function runHostedCsiTextTurn(
         let result: HostedHarnessModelResult | undefined;
         let finalOutputCommitted = false;
         try {
-          result = await runHostedHarnessTextTurn({
-            sessionId,
-            cwd,
-            history,
-            prompt: text,
-            promptId,
-            signal: abort.signal,
-            modelScope,
-            textDeltas: deltas,
-            ...(resumeFromToolResults !== undefined
-              ? { resumeFromToolResults }
-              : {}),
-            ...(toolTurn
-              ? {
-                  toolTurn,
-                  completeFinalOutput: async (attempt, usage, parts, model) => {
-                    const message = messageRecord('assistant', parts, model);
-                    message.uuid = deltas.takeMessageId() ?? message.uuid;
-                    await attempt(true, usage, message);
-                    parentUuid = message.uuid;
-                    finalOutputCommitted = true;
-                  },
-                }
-              : {}),
-          });
+          if (recoveredFinalOutput) {
+            if (
+              resumeFromToolResults === undefined ||
+              !toolTurn ||
+              !isDeepStrictEqual(projected.at(-1), recoveredFinalOutput)
+            )
+              throw new HostedToolRecoveryRequiredError(
+                'Final CSI output recovery is unavailable.',
+              );
+            await toolTurn.consumeResults();
+          } else {
+            result = await runHostedHarnessTextTurn({
+              sessionId,
+              cwd,
+              history,
+              prompt: text,
+              promptId,
+              signal: abort.signal,
+              modelScope,
+              textDeltas: deltas,
+              ...(resumeFromToolResults !== undefined
+                ? { resumeFromToolResults }
+                : {}),
+              ...(toolTurn
+                ? {
+                    toolTurn,
+                    completeFinalOutput: async (
+                      attempt,
+                      usage,
+                      parts,
+                      model,
+                    ) => {
+                      const message = messageRecord('assistant', parts, model);
+                      message.uuid = deltas.takeMessageId() ?? message.uuid;
+                      await attempt(true, usage, message);
+                      parentUuid = message.uuid;
+                      finalOutputCommitted = true;
+                    },
+                  }
+                : {}),
+            });
+          }
         } catch (cause) {
           if (
             cause instanceof ManagedSessionRecordError ||

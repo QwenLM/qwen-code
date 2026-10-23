@@ -31,6 +31,12 @@ import {
 import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
 import { tryParseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
 import {
+  CHECKPOINT_HISTORY_KIND,
+  checkpointHistoryPage,
+  checkpointStorageBody,
+  isPagedHarnessCheckpoint,
+} from './managed-checkpoint-history.js';
+import {
   HOSTED_RECOVERY_RESOURCE_KINDS,
   HOSTED_MODEL_REQUEST_BYTES,
   hostedRecoveryReferences,
@@ -72,7 +78,10 @@ export const HTTP_MANAGED_SESSION_STORE_CONTRACT = {
 const MAX_ATTACHMENT_INPUT_BYTES = 8 * 1024 * 1024;
 
 export function managedSessionInlineResourceBytes(kind: string): number {
+  if (kind === 'managed-checkpoint')
+    return MANAGED_SESSION_LIMITS.maxEventBytes;
   if (kind === 'managed-input') return MAX_ATTACHMENT_INPUT_BYTES;
+  if (kind === 'managed-agent-skills') return 2 * 1024 * 1024;
   if (kind === 'hosted-model-request') return HOSTED_MODEL_REQUEST_BYTES;
   return HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
 }
@@ -118,17 +127,41 @@ export interface ManagedSessionLifecycleAuthority {
   readonly claimGeneration: number;
 }
 
+export interface CsiApplicationRetirementStatus {
+  readonly format: 'qwen-csi-application-retirement/1';
+  readonly retirementId: string;
+  readonly stage: 'SETTLING' | 'FROZEN' | 'CUT' | 'DRAINED';
+  readonly progressVersion: number;
+  readonly frozenRequestSha256: string | null;
+  readonly cutSha256: string | null;
+  readonly finalizeReceiptSha256: string | null;
+}
+
 export interface HttpManagedSessionStores {
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
   readonly publication: HttpToolPublicationOwner;
   readonly toolResultResources: DurableToolResultResourceStore;
+  readonly csiRetirement: {
+    joinWriter(): Promise<void>;
+    prepare(records: readonly unknown[]): Promise<{
+      readonly commitBodyBase64: string;
+      readonly preparedCommitSha256: string;
+    }>;
+    complete(retirementId: string): Promise<CsiApplicationRetirementStatus>;
+  };
   assertWritable(): Promise<void>;
   stopLocal(): Promise<void>;
   close(): Promise<void>;
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void;
   authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void>;
   authorizeOrdinary(kind?: 'legacy-close'): Promise<void>;
+  approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
+}
+
+export interface ManagedSessionApprovalSelection {
+  readonly mode: 'default' | 'auto-edit' | 'yolo';
+  readonly revision: number;
 }
 
 export interface HttpToolPublicationOwner {
@@ -205,6 +238,12 @@ export function createHttpManagedSessionStores(
         client.publishToolResult(kind, bytes, resourceId),
       read: (ref) => client.readResource(ref),
     },
+    csiRetirement: {
+      joinWriter: () => client.joinOriginalCsiWriter(),
+      prepare: (records) => client.prepareOriginalCsiCommit(records),
+      complete: (retirementId) =>
+        client.completeOriginalCsiRetirement(retirementId),
+    },
     assertWritable: () => client.assertWritable(),
     stopLocal: () => client.stopLocal(),
     close: () => client.seal(),
@@ -212,6 +251,7 @@ export function createHttpManagedSessionStores(
       client.setLifecycleAuthority(authority),
     authorizeLifecycle: (kind) => client.authorizeLifecycle(kind),
     authorizeOrdinary: (kind) => client.authorizeOrdinary(kind),
+    approvalSelection: () => client.approvalSelection(),
   };
 }
 
@@ -537,7 +577,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
     const maxBytes = managedSessionInlineResourceBytes(safeKind);
     if (source.byteLength > maxBytes) {
       throw new ManagedSessionRecordError(
-        `resource bytes exceed the ${maxBytes}-byte inline limit; OSS storage is not enabled.`,
+        `resource bytes exceed the ${maxBytes}-byte inline limit (kind=${safeKind}, bytes=${source.byteLength}); OSS storage is not enabled.`,
       );
     }
     const bytes = Buffer.from(source);
@@ -594,8 +634,16 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       const staged = this.staged.get(ref.resourceId);
       if (staged !== undefined) {
         requireSameRef(staged.ref, ref);
-        pending.push(...collectNestedResourceRefs(ref, staged.bytes));
-      } else if (isReferenceContainer(ref.kind)) {
+        const nested = collectNestedResourceRefs(ref, staged.bytes);
+        pending.push(
+          ...(ref.kind === CHECKPOINT_HISTORY_KIND
+            ? nested.filter((child) => this.staged.has(child.resourceId))
+            : nested),
+        );
+      } else if (
+        ref.kind !== CHECKPOINT_HISTORY_KIND &&
+        isReferenceContainer(ref.kind)
+      ) {
         pending.push(...collectNestedResourceRefs(ref, await this.read(ref)));
       }
     }
@@ -692,6 +740,13 @@ class ManagedSessionStoreHttpClient {
   private renewingAuthority?: ManagedSessionLifecycleAuthority;
   private renewTimer: NodeJS.Timeout | undefined;
   private renewalStopped = false;
+  private retirementJoin?: Promise<void>;
+  private readonly writerRenewalFailures: unknown[] = [];
+  private preparedRetirement?: {
+    recordDigest: string;
+    commitBodyBase64: string;
+    preparedCommitSha256: string;
+  };
   private sealed = false;
   private locallyStopped = false;
   private lifecycleAuthority?: ManagedSessionLifecycleAuthority;
@@ -726,6 +781,32 @@ class ManagedSessionStoreHttpClient {
       writerId: this.writerId,
       writerGeneration: this.grant!.writerGeneration,
     });
+  }
+
+  async approvalSelection(): Promise<
+    ManagedSessionApprovalSelection | undefined
+  > {
+    await this.assertWritable();
+    const value = await this.json('/approval:query', 'POST', {
+      workspaceId: this.sessionKey.workspaceId,
+      writerId: this.writerId,
+      writerGeneration: this.grant!.writerGeneration,
+    });
+    if (value === null) return undefined;
+    const selection = asRecord(value, 'approval selection');
+    if (
+      Object.keys(selection).length !== 2 ||
+      !['default', 'auto-edit', 'yolo'].includes(String(selection['mode'])) ||
+      typeof selection['mode'] !== 'string' ||
+      typeof selection['revision'] !== 'number' ||
+      !Number.isSafeInteger(selection['revision']) ||
+      selection['revision'] < 0
+    )
+      throw corrupt('approval selection is invalid.');
+    return {
+      mode: selection['mode'] as ManagedSessionApprovalSelection['mode'],
+      revision: selection['revision'],
+    };
   }
 
   async authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void> {
@@ -934,84 +1015,14 @@ class ManagedSessionStoreHttpClient {
       throw error;
     }
     const grant = this.requireGrant();
-    const recordBytes = encodeRecords(records);
-    const descriptor = describeTransaction(
-      records,
+    const {
       recordBytes,
-      grant.activationEpoch,
-      this.sessionKey,
-    );
-    if (descriptor.previousCommitDigest !== grant.lastCommitDigest) {
-      throw new ManagedSessionRecordError(
-        'the transaction does not extend the HTTP journal head.',
-      );
-    }
-    const commitResources = await this.resources.commitResources(
-      descriptor.refs,
-    );
-    const needsVersionTwo =
-      commitResources.some(
-        (resource) =>
-          HOSTED_RECOVERY_RESOURCE_KINDS.has(resource.kind) ||
-          (resource.kind === 'managed-action-options' &&
-            resource.bytesBase64 &&
-            JSON.parse(
-              Buffer.from(resource.bytesBase64, 'base64').toString('utf8'),
-            ).v === 3),
-      ) ||
-      records.some((record) => {
-        const event = (
-          record as {
-            managedSession?: {
-              kind?: string;
-              payload?: Record<string, unknown>;
-            };
-          }
-        ).managedSession;
-        return (
-          event?.kind === 'message.retracted' &&
-          event.payload?.['sourceBootId'] !== undefined
-        );
-      });
-    if (needsVersionTwo && grant.supportedStorageVersion < 2)
-      throw new ManagedSessionRecordError(
-        'Managed Session Store does not support Hosted recovery storage version 2.',
-      );
-    const publicationIds = new Set(
-      descriptor.refs.flatMap((ref) => {
-        const id = this.publicationAdmissions.get(ref.resourceId);
-        return id === undefined ? [] : [id];
-      }),
-    );
-    if (publicationIds.size > 1) {
-      throw new ManagedSessionRecordError(
-        'Transaction mixes publication admissions.',
-      );
-    }
-    const publicationId = [...publicationIds][0];
-    const commitBody = {
-      workspaceId: this.sessionKey.workspaceId,
-      writerId: this.writerId,
-      writerGeneration: grant.writerGeneration,
-      expectedJournalRevision: grant.journalRevision,
-      expectedCommittedSequence: grant.committedSequence,
-      transactionId: descriptor.transactionId,
-      operation: descriptor.operation,
-      commandId: descriptor.commandId,
-      contentDigest: descriptor.contentDigest,
-      firstSequence: descriptor.firstSequence,
-      lastSequence: descriptor.lastSequence,
-      eventCount: descriptor.eventCount,
-      eventsDigest: descriptor.eventsDigest,
-      previousCommitDigest: descriptor.previousCommitDigest,
-      commitDigest: descriptor.commitDigest,
-      activationEpoch: descriptor.activationEpoch,
-      latestCheckpointResourceId: descriptor.latestCheckpointResourceId,
-      recordCount: records.length,
-      recordBytesBase64: recordBytes.toString('base64'),
-      recordDigest: sha256(recordBytes),
-      resources: commitResources,
-    };
+      descriptor,
+      commitResources,
+      publicationId,
+      commitBody,
+      needsVersionTwo,
+    } = await this.commitBody(records, grant);
     let committed: unknown;
     // One contention budget shared by the whole commit: the guard retries
     // inside json() and publicationRequest() stop at this deadline and each
@@ -1041,11 +1052,28 @@ class ManagedSessionStoreHttpClient {
         break;
       } catch (error) {
         await this.annotateWriterRefusal(error);
+        // The store replays committed commands before evaluating these atomic guards.
+        if (
+          descriptor.operation === 'manageMcp' &&
+          error instanceof ManagedSessionStoreHttpError &&
+          error.status === 409 &&
+          [
+            'unsupported_feature',
+            'turn_active',
+            'session_context_busy',
+          ].includes(error.remoteCode)
+        )
+          throw new ManagedSessionCommitRejectedError(error);
         if (
           attempt === 0 &&
           error instanceof ManagedSessionStoreHttpError &&
           ((error.status === 409 &&
             (error.remoteCode === 'workspace_lifecycle_admission_closed' ||
+              // An ordinary write that reaches the store after a lifecycle
+              // claim was admitted is refused before anything is written.
+              // The same refusal is rollbackable under the claim below, so
+              // whether the claim was set yet must not decide the outcome.
+              error.remoteCode === 'workspace_lifecycle_claim_fenced' ||
               // The verdict/mint gate's refusal is a rollbackable
               // non-commit: the corrected retry must reach the backend
               // without the authority latching a write failure behind it.
@@ -1053,7 +1081,11 @@ class ManagedSessionStoreHttpClient {
               // So is a session message the lineage refuses: only the
               // store holds a child's lineage, so the authority could not
               // refuse it first, and the Session's log stays writable.
-              error.remoteCode === 'session_message_lineage_refused')) ||
+              error.remoteCode === 'session_message_lineage_refused' ||
+              error.remoteCode ===
+                'context_compression_authorization_revoked' ||
+              (descriptor.operation === 'contextCompression' &&
+                error.remoteCode === 'workspace_unavailable'))) ||
             (this.lifecycleAuthority &&
               (error.status === 403 ||
                 (error.status === 409 &&
@@ -1273,6 +1305,267 @@ class ManagedSessionStoreHttpClient {
       activationEpoch: head.activationEpoch,
     };
     this.scheduleRenewal();
+  }
+
+  private async commitBody(records: readonly unknown[], grant: WriterGrant) {
+    const recordBytes = encodeRecords(records);
+    const descriptor = describeTransaction(
+      records,
+      recordBytes,
+      grant.activationEpoch,
+      this.sessionKey,
+    );
+    if (descriptor.previousCommitDigest !== grant.lastCommitDigest) {
+      throw new ManagedSessionRecordError(
+        'the transaction does not extend the HTTP journal head.',
+      );
+    }
+    const commitResources = await this.resources.commitResources(
+      descriptor.refs,
+    );
+    const needsVersionTwo =
+      commitResources.some(
+        (resource) =>
+          HOSTED_RECOVERY_RESOURCE_KINDS.has(resource.kind) ||
+          (resource.kind === 'managed-action-options' &&
+            resource.bytesBase64 &&
+            JSON.parse(
+              Buffer.from(resource.bytesBase64, 'base64').toString('utf8'),
+            ).v === 3),
+      ) ||
+      records.some((record) => {
+        const event = (
+          record as {
+            managedSession?: {
+              kind?: string;
+              payload?: Record<string, unknown>;
+            };
+          }
+        ).managedSession;
+        return (
+          event?.kind === 'message.retracted' &&
+          event.payload?.['sourceBootId'] !== undefined
+        );
+      });
+    if (needsVersionTwo && grant.supportedStorageVersion < 2)
+      throw new ManagedSessionRecordError(
+        'Managed Session Store does not support Hosted recovery storage version 2.',
+      );
+    const publicationIds = new Set(
+      descriptor.refs.flatMap((ref) => {
+        const id = this.publicationAdmissions.get(ref.resourceId);
+        return id === undefined ? [] : [id];
+      }),
+    );
+    if (publicationIds.size > 1) {
+      throw new ManagedSessionRecordError(
+        'Transaction mixes publication admissions.',
+      );
+    }
+    const publicationId = [...publicationIds][0];
+    const commitBody = {
+      workspaceId: this.sessionKey.workspaceId,
+      writerId: this.writerId,
+      writerGeneration: grant.writerGeneration,
+      expectedJournalRevision: grant.journalRevision,
+      expectedCommittedSequence: grant.committedSequence,
+      transactionId: descriptor.transactionId,
+      operation: descriptor.operation,
+      commandId: descriptor.commandId,
+      contentDigest: descriptor.contentDigest,
+      firstSequence: descriptor.firstSequence,
+      lastSequence: descriptor.lastSequence,
+      eventCount: descriptor.eventCount,
+      eventsDigest: descriptor.eventsDigest,
+      previousCommitDigest: descriptor.previousCommitDigest,
+      commitDigest: descriptor.commitDigest,
+      activationEpoch: descriptor.activationEpoch,
+      latestCheckpointResourceId: descriptor.latestCheckpointResourceId,
+      recordCount: records.length,
+      recordBytesBase64: recordBytes.toString('base64'),
+      recordDigest: sha256(recordBytes),
+      resources: commitResources,
+    };
+    return {
+      recordBytes,
+      descriptor,
+      commitResources,
+      publicationId,
+      commitBody,
+      needsVersionTwo,
+    };
+  }
+
+  joinOriginalCsiWriter(): Promise<void> {
+    if (this.retirementJoin) return this.retirementJoin;
+    this.stopRenewal();
+    const renewal = this.renewPromise;
+    if (this.acquirePromise || this.pendingAppend)
+      return Promise.reject(
+        corrupt('original CSI writer has unresolved authority.'),
+      );
+    this.retirementJoin = (async () => {
+      await renewal;
+      if (this.writerRenewalFailures.length)
+        throw this.writerRenewalFailures[0];
+      const grant = this.requireGrant();
+      if (
+        grant.writerGeneration !== 1 ||
+        grant.activationEpoch !== 1 ||
+        grant.leaseUntil <= Date.now()
+      ) {
+        throw corrupt('original CSI writer cannot prepare retirement.');
+      }
+    })();
+    return this.retirementJoin;
+  }
+
+  async prepareOriginalCsiCommit(records: readonly unknown[]) {
+    if (!this.retirementJoin)
+      throw corrupt('original CSI writer has not joined.');
+    await this.retirementJoin;
+    const recordDigest = sha256(encodeRecords(records));
+    if (this.preparedRetirement) {
+      if (recordDigest !== this.preparedRetirement.recordDigest)
+        throw corrupt('original CSI preparation conflicts.');
+      const { commitBodyBase64, preparedCommitSha256 } =
+        this.preparedRetirement;
+      return { commitBodyBase64, preparedCommitSha256 };
+    }
+    const { descriptor, commitResources, publicationId, commitBody } =
+      await this.commitBody(records, this.requireGrant());
+    if (
+      descriptor.operation !== 'releaseActivation' ||
+      descriptor.eventCount !== 1 ||
+      records.length !== 2 ||
+      descriptor.latestCheckpointResourceId !== null ||
+      publicationId !== undefined ||
+      commitResources.length !== 1 ||
+      commitResources[0]!.kind !== 'managed-activation-boundary' ||
+      commitResources[0]!.bytesBase64 === undefined
+    ) {
+      throw corrupt('original CSI release preparation is invalid.');
+    }
+    const bytes = Buffer.from(JSON.stringify(commitBody), 'utf8');
+    this.preparedRetirement = {
+      recordDigest,
+      commitBodyBase64: bytes.toString('base64'),
+      preparedCommitSha256: sha256(bytes),
+    };
+    const { commitBodyBase64, preparedCommitSha256 } = this.preparedRetirement;
+    return { commitBodyBase64, preparedCommitSha256 };
+  }
+
+  async completeOriginalCsiRetirement(
+    retirementId: string,
+  ): Promise<CsiApplicationRetirementStatus> {
+    assertManagedSessionStableId(retirementId, 'retirementId');
+    const readStatus = (
+      value: unknown,
+      previous?: CsiApplicationRetirementStatus,
+    ): CsiApplicationRetirementStatus => {
+      const status = asRecord(value, 'CSI retirement status');
+      const stage = status['stage'];
+      if (
+        Object.keys(status).sort().join(',') !==
+          'cutSha256,finalizeReceiptSha256,format,frozenRequestSha256,progressVersion,retirementId,stage' ||
+        status['format'] !== 'qwen-csi-application-retirement/1' ||
+        status['retirementId'] !== retirementId ||
+        !['SETTLING', 'FROZEN', 'CUT', 'DRAINED'].includes(String(stage))
+      ) {
+        throw corrupt('original CSI retirement status conflicts.');
+      }
+      const progressVersion = safeCounter(
+        status['progressVersion'],
+        'progressVersion',
+      );
+      const frozenRequestSha256 = nullableDigest(
+        status['frozenRequestSha256'],
+        'frozenRequestSha256',
+      );
+      const cutSha256 = nullableDigest(status['cutSha256'], 'cutSha256');
+      const finalizeReceiptSha256 = nullableDigest(
+        status['finalizeReceiptSha256'],
+        'finalizeReceiptSha256',
+      );
+      if (
+        progressVersion !==
+          ['SETTLING', 'FROZEN', 'CUT', 'DRAINED'].indexOf(String(stage)) + 1 ||
+        (stage === 'SETTLING') !== (frozenRequestSha256 === null) ||
+        ['SETTLING', 'FROZEN'].includes(String(stage)) !==
+          (cutSha256 === null) ||
+        (stage === 'DRAINED') !== (finalizeReceiptSha256 !== null)
+      ) {
+        throw corrupt('original CSI retirement progress is incomplete.');
+      }
+      if (
+        previous &&
+        (progressVersion < previous.progressVersion ||
+          (previous.frozenRequestSha256 !== null &&
+            frozenRequestSha256 !== previous.frozenRequestSha256) ||
+          (previous.cutSha256 !== null && cutSha256 !== previous.cutSha256))
+      ) {
+        throw corrupt(
+          'original CSI retirement status changed its saved progress.',
+        );
+      }
+      return {
+        format: 'qwen-csi-application-retirement/1',
+        retirementId,
+        stage: stage as CsiApplicationRetirementStatus['stage'],
+        progressVersion,
+        frozenRequestSha256,
+        cutSha256,
+        finalizeReceiptSha256,
+      };
+    };
+    let status = readStatus(
+      await this.json(
+        `/csi-retirement?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&retirementId=${encodeURIComponent(retirementId)}`,
+        'GET',
+      ),
+    );
+    const identity = {
+      format: 'qwen-csi-application-retirement/1',
+      workspaceId: this.sessionKey.workspaceId,
+      retirementId,
+    };
+    if (status.stage === 'SETTLING') {
+      if (!this.preparedRetirement)
+        throw corrupt('original CSI retirement has no prepared body.');
+      status = readStatus(
+        await this.json('/csi-retirement:freeze', 'POST', {
+          ...identity,
+          commitBodyBase64: this.preparedRetirement.commitBodyBase64,
+        }),
+        status,
+      );
+      if (status.stage === 'SETTLING')
+        throw corrupt('original CSI retirement did not freeze.');
+    }
+    if (status.stage === 'FROZEN') {
+      status = readStatus(
+        await this.json('/csi-retirement:cut', 'POST', {
+          ...identity,
+          frozenRequestSha256: status.frozenRequestSha256,
+        }),
+        status,
+      );
+      if (status.stage !== 'CUT' && status.stage !== 'DRAINED')
+        throw corrupt('original CSI retirement did not commit its cut.');
+    }
+    if (status.stage === 'CUT') {
+      status = readStatus(
+        await this.json('/csi-retirement:finalize', 'POST', {
+          ...identity,
+          cutSha256: status.cutSha256,
+        }),
+        status,
+      );
+    }
+    if (status.stage !== 'DRAINED')
+      throw corrupt('original CSI retirement has not drained.');
+    return status;
   }
 
   async publicationOwner(): Promise<{
@@ -1508,6 +1801,8 @@ class ManagedSessionStoreHttpClient {
   }
 
   async seal(): Promise<void> {
+    if (this.retirementJoin)
+      throw corrupt('original CSI retirement owns the final boundary.');
     await this.acquirePromise?.catch(() => undefined);
     return this.sealGrant();
   }
@@ -1554,6 +1849,8 @@ class ManagedSessionStoreHttpClient {
   }
 
   private async ensureWriter(): Promise<void> {
+    if (this.retirementJoin)
+      throw corrupt('original CSI writer admission is closed.');
     // A concurrent re-acquisition owns the grant-less window; wait for it
     // instead of reading it as a writer that was never acquired.
     if (this.acquirePromise !== undefined)
@@ -1592,6 +1889,8 @@ class ManagedSessionStoreHttpClient {
   }
 
   private renewWriter(): Promise<void> {
+    if (this.retirementJoin)
+      return Promise.reject(corrupt('original CSI writer renewal is closed.'));
     if (this.locallyStopped) {
       return Promise.reject(
         new ManagedSessionRecordError(
@@ -1607,7 +1906,12 @@ class ManagedSessionStoreHttpClient {
           this.renewingAuthority?.claimGeneration
       )
         return this.renewPromise;
-      return this.renewPromise.then(() => this.renewWriter());
+      // That renewal answers for the authority it was sent under. An
+      // ordinary renewal that reaches the store after a lifecycle claim was
+      // admitted is fenced, and the fence says nothing about the claim now
+      // asking, so renew again under it either way.
+      const renewAgain = () => this.renewWriter();
+      return this.renewPromise.then(renewAgain, renewAgain);
     }
     const grant = this.requireGrant();
     this.renewingAuthority = this.lifecycleAuthority
@@ -1633,6 +1937,7 @@ class ManagedSessionStoreHttpClient {
       this.scheduleRenewal();
     })();
     const noted = renewal.catch(async (error: unknown) => {
+      this.writerRenewalFailures.push(error);
       // A refused renewal currently stops the timer silently; the lease
       // then expires and every later write meets the same shared 409 text.
       // Record the pairing before it is swallowed (review #14522).
@@ -1689,6 +1994,7 @@ class ManagedSessionStoreHttpClient {
       this.renewalStopped ||
       this.sealed ||
       this.locallyStopped ||
+      this.retirementJoin ||
       this.grant === undefined ||
       this.grant.leaseUntil <= Date.now()
     )
@@ -2361,7 +2667,11 @@ export function collectNestedResourceRefs(
       return checked;
     });
   }
+  if (ref.kind === CHECKPOINT_HISTORY_KIND)
+    return collectRefs([checkpointHistoryPage(bytes)]);
   if (ref.kind === 'managed-checkpoint') {
+    if (isPagedHarnessCheckpoint(bytes))
+      return collectRefs([checkpointStorageBody(bytes)]);
     const parsed = tryParseHarnessCheckpointV1(bytes);
     return parsed.ok ? collectRefs([parsed.checkpoint]) : [];
   }
@@ -2443,6 +2753,7 @@ function isReferenceContainer(kind: string): boolean {
     [
       'managed-definition',
       'managed-checkpoint',
+      CHECKPOINT_HISTORY_KIND,
       'managed-file_history',
       'managed-action-options',
       'managed-hook-plan',

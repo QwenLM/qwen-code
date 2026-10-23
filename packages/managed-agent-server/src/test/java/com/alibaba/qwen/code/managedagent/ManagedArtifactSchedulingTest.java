@@ -2,12 +2,12 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedArtifactConfiguration;
-import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
-import com.alibaba.qwen.code.managedagent.store.ManagedToolResultProjector;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.MaterializationTarget;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.support.StaticListableBeanFactory;
 import org.springframework.boot.autoconfigure.task.TaskSchedulingAutoConfiguration;
@@ -78,7 +78,7 @@ class ManagedArtifactSchedulingTest {
                 ManagedAgentProperties.class,
                 fixture::properties);
         context.registerBean(
-                com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy.class,
+                com.alibaba.qwen.code.managedagent.artifact.ManagedArtifactPolicy.class,
                 fixture::policy);
         context.registerBean(
                 "materializer", MessageMaterializer.class,
