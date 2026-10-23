@@ -138,6 +138,49 @@ For a binding without durable identity the embedding service must reconcile a
 persisted lease before reuse and own the process adoption or reprovisioning
 policy; a durable binding is reconciled and adopted by the Broker itself.
 
+## External scratch Runtime (opt-in)
+
+`ExternalRuntimeProvisioner` (kind `external-scratch`) delegates Session-exclusive
+scratch worker placement to an operator-run HTTP service, so a deployment can use
+an existing sandbox or container platform without Kubernetes, SSH or a vendor SDK
+inside this repository. It implements the scratch slice of
+[the external provider design](../../../docs/design/2026-10-23-external-runtime-provider.md);
+managed-context (registered Workspace) requests are refused.
+
+Select it with `QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER=external-scratch` plus
+`QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_URL`, `..._PROVIDER_TOKEN`,
+`..._PROVIDER_ID` and optional `..._REQUEST_TIMEOUT` / `..._STARTUP_TIMEOUT`. The
+provider URL must be HTTP(S) without credentials, query or fragment; use HTTPS
+for anything outside a trusted control plane. Workspace files and Shell must stay
+disabled, and the configured `workspace-cwd` is the worker-side path, so the
+Broker host does not need that directory. Preflight validates configuration only;
+reachability and worker identity are checked on first use.
+
+The provider implements two authenticated POST routes, `provision` and `observe`.
+`provision` is idempotent on `provisionRequestId`: the Broker persists a
+deterministic logical handle before its first call, sends it on every retry, and
+rejects a response carrying another handle. The provider must bind that handle to
+one immutable physical resource and keep the binding across its own restarts;
+neither a lost response nor a lost worker authorizes replacement under the same
+identity. `observe` is read-only and reports `RUNNING`, `STARTING` or `UNKNOWN`;
+`GONE` and unknown states fail closed. A provider `RUNNING` never establishes
+identity on its own: the Broker attests the returned origin with the existing
+bearer/lease protocol and keeps every lease, epoch and execution decision.
+
+Transient provider failures stay retryable against the same request and lease, so
+a temporary outage does not invalidate a healthy binding; endpoint or identity
+mismatch does. There is deliberately no `release` route. Release can run after an
+operation loses its CAS or fails attestation, so it cannot authorize stopping a
+worker another Broker may own. Closing a Session therefore does not stop its
+scratch worker: budget the provider's own TTL and inspect retained resources.
+
+This increment allocates, attests and recovers workers but has no tool consumer.
+A Session without a Workspace binding has no Hosted tool profile, so the model is
+offered no tools while every admitted Turn still warms that Session's Runtime.
+Each such Session holds a remote worker that runs no tool calls until its TTL
+expires. Workspace-backed remote tools require the extension described in the
+design; do not enable this provisioner for production tool use yet.
+
 ## Experimental Kubernetes scratch Runtime
 
 `KubernetesRuntimeProvisioner` implements the K1 slice of the
