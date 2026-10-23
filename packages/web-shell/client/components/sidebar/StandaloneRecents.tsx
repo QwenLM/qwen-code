@@ -25,6 +25,10 @@ import { useI18n } from '../../i18n';
 import { DialogShell } from '../dialogs/DialogShell';
 import { SessionRenameDialog } from '../dialogs/SessionRenameDialog';
 import { Button } from '../ui/button';
+import {
+  readWorkspaceExpanded,
+  writeWorkspaceExpanded,
+} from './workspaceExpansion';
 import sidebarStyles from './WebShellSidebar.module.css';
 import workspaceStyles from './WorkspaceSection.module.css';
 
@@ -135,7 +139,10 @@ export function StandaloneRecents({
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
   const [cursor, setCursor] = useState<string>();
-  const [expanded, setExpanded] = useState(true);
+  const expansionId = `standalone:${archiveState}`;
+  const [expanded, setExpanded] = useState(() =>
+    readWorkspaceExpanded(expansionId),
+  );
   const [showAll, setShowAll] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -469,7 +476,9 @@ export function StandaloneRecents({
             className={workspaceStyles.header}
             aria-expanded={expanded}
             onClick={(event) => {
-              setExpanded((value) => !value);
+              const nextExpanded = !expanded;
+              writeWorkspaceExpanded(expansionId, nextExpanded);
+              setExpanded(nextExpanded);
               if (event.detail > 0) event.currentTarget.blur();
             }}
           >

@@ -58,6 +58,7 @@ describe('StandaloneRecents', () => {
   let root: Root;
 
   beforeEach(() => {
+    window.localStorage.clear();
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     mocks.t.mockImplementation((key: string) => key);
     mocks.list.mockReset();
@@ -222,6 +223,29 @@ describe('StandaloneRecents', () => {
       archiveState: 'active',
       pageSize: 50,
     });
+  });
+
+  it('persists collapse across remounts without collapsing the archived group', async () => {
+    await render();
+    const toggle = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="standalone-active-group"] > div > button',
+      )!;
+    await act(async () => toggle().click());
+    expect(container.textContent).not.toContain('Active chat');
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    expect(toggle().getAttribute('aria-expanded')).toBe('false');
+    expect(container.textContent).not.toContain('Active chat');
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render({ archiveState: 'archived' });
+    expect(container.textContent).toContain('Archived chat');
+    expect(
+      container.querySelector('[aria-expanded]')?.getAttribute('aria-expanded'),
+    ).toBe('true');
   });
 
   it('loads only the requested archived group', async () => {
