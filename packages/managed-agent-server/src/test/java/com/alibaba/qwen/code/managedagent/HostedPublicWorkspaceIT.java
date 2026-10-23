@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
@@ -57,6 +56,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -642,9 +642,8 @@ class HostedPublicWorkspaceIT {
                         String.class, session)).containsExactly("UNKNOWN");
             });
             var connector = spring.getBean(HarnessConnector.class);
-            var attachments = (Map<?, ?>) ReflectionTestUtils.getField(connector, "attachments");
-            var attached = attachments.values().stream().map(HarnessSessionRef.class::cast)
-                    .filter(ref -> session.equals(ref.getHarnessSessionId())).findFirst().orElseThrow();
+            var attached = attachment(connector, session);
+            assertThat(attached).as("Spring's attachment to %s", session).isNotNull();
             var client = (HostedHarnessClient) ReflectionTestUtils.getField(connector, "client");
             // The third request is counted before its handler finishes; wait for the
             // producer's prompt and all receipt handlers before taking final evidence.

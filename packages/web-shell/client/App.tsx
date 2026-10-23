@@ -1668,6 +1668,7 @@ export interface WebShellProps {
    * Override the witty phrases cycled while a prompt is streaming. Receives the
    * resolved UI language; return phrases to replace the built-in defaults, an
    * empty array to hide the phrase, or `undefined`/`null` to keep the defaults.
+   * `ui.accessibility.enableLoadingPhrases: false` hides even custom phrases.
    */
   loadingPhrases?: LoadingPhrasesResolver;
   /** When provided, all toast notifications are forwarded to this callback and the built-in ToastHost is hidden. */
@@ -3529,6 +3530,13 @@ export function App({
   managedModeRef.current = managedMode;
   const [managedNavigationTarget, setManagedNavigationTarget] =
     useState<HTMLDivElement | null>(null);
+  const [managedArchivedNavigationTarget, setManagedArchivedNavigationTarget] =
+    useState<HTMLDivElement | null>(null);
+  const [managedArchivedStatus, setManagedArchivedStatus] = useState({
+    count: 0,
+    loading: false,
+    error: false,
+  });
   const [managedNavigationSearch, setManagedNavigationSearch] = useState('');
   const [managedWorkspaceId, setManagedWorkspaceId] = useState<string | null>();
   const [managedWorkspaceCreationOpen, setManagedWorkspaceCreationOpen] =
@@ -3950,8 +3958,7 @@ export function App({
     [workspace.client],
   );
   const managedCreationSkills = useMemo(() => {
-    if (managedAgentProvider?.kind !== 'java' || !skillsSourceCwd)
-      return undefined;
+    if (!managedAgentProvider || !skillsSourceCwd) return undefined;
     const sourceCwd = skillsSourceCwd;
     return {
       workspaceCwd: sourceCwd,
@@ -3979,7 +3986,7 @@ export function App({
         return snapshot.skills;
       },
     };
-  }, [managedAgentProvider?.kind, skillsSourceCwd, workspace.client]);
+  }, [managedAgentProvider, skillsSourceCwd, workspace.client]);
 
   // Multi-daemon (#13727): saved hosts stay connected read-only alongside
   // the provider that owns this App subtree; the picker and sidebar consume
@@ -13332,6 +13339,10 @@ export function App({
     workspaceSettings.find(
       (setting) => setting.key === 'ui.showResponseTokensPerSecond',
     )?.values.effective === true;
+  const enableLoadingPhrases =
+    workspaceSettings.find(
+      (setting) => setting.key === 'ui.accessibility.enableLoadingPhrases',
+    )?.values.effective !== false;
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
@@ -21952,6 +21963,14 @@ export function App({
                       <div ref={setManagedNavigationTarget} />
                     ) : undefined
                   }
+                  managedArchivedSessions={
+                    managedAgentProvider?.lifecycle
+                      ? {
+                          ...managedArchivedStatus,
+                          content: <div ref={setManagedArchivedNavigationTarget} />,
+                        }
+                      : undefined
+                  }
                   onSearchQueryChange={
                     managedAgentProvider ? setManagedNavigationSearch : undefined
                   }
@@ -22626,7 +22645,7 @@ export function App({
                         initialTab={pluginInitialTab}
                         skillsWorkspaceCwd={skillsSourceCwd}
                         onSkillsWorkspaceChange={selectSkillsWorkspace}
-                        managedSkills={managedAgentProvider?.kind === 'java'}
+                        managedSkills={managedAgentProvider !== undefined}
                         managedMcp={managedMode && managedAgentProvider ? {
                           provider: managedAgentProvider,
                           sessionId: managedSessionId,
@@ -22767,6 +22786,9 @@ export function App({
                       }
                       currentSessionSchedulingAvailable={workspace.capabilities?.features?.includes(
                         'scheduled_task_session_reuse',
+                      )}
+                      gateAvailable={workspace.capabilities?.features?.includes(
+                        'scheduled_task_gate',
                       )}
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
@@ -23145,7 +23167,6 @@ export function App({
                           returnToChat();
                         }
                       }}
-                      workspaceCwd={lockedWorkspaceCwd}
                       managedAgentProvider={managedAgentProvider}
                       creationSkills={managedCreationSkills}
                       onManageSkills={() => {
@@ -23159,6 +23180,8 @@ export function App({
                           ? managedNavigationTarget
                           : undefined
                       }
+                      archivedNavigationTarget={managedArchivedNavigationTarget}
+                      onArchivedSessionsStatusChange={setManagedArchivedStatus}
                     />
                   </WebShellCustomizationProvider>
                 </div>
@@ -23728,6 +23751,7 @@ export function App({
                         sessionHasActivePrompt ? (
                           suppressFailedPromptRetryStreaming ? null : (
                             <StreamingStatus
+                              showPhrase={enableLoadingPhrases}
                               showResponseTokensPerSecond={showResponseTokensPerSecond && !approvalOverlayActive}
                               startedAt={
                                 failedPromptRetry?.startedAt ??

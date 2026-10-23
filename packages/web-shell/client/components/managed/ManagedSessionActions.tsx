@@ -1,4 +1,4 @@
-import { MoreHorizontalIcon } from 'lucide-react';
+import { EllipsisVerticalIcon, MoreHorizontalIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { Button } from '../ui/button';
 import {
@@ -8,6 +8,7 @@ import {
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import { DialogShell } from '../dialogs/DialogShell';
+import sidebarStyles from '../sidebar/WebShellSidebar.module.css';
 import type {
   ManagedAgentSessionSummary,
   ManagedLifecycleAction,
@@ -42,6 +43,7 @@ export function managedSessionActions(
 
 export function ManagedSessionActions({
   session,
+  sidebar = false,
   lifecycle,
   exporting,
   state,
@@ -50,6 +52,7 @@ export function ManagedSessionActions({
   onConfirm,
 }: {
   session: ManagedAgentSessionSummary;
+  sidebar?: boolean;
   lifecycle: boolean;
   exporting?: boolean;
   state?: ManagedLifecycleState;
@@ -69,14 +72,25 @@ export function ManagedSessionActions({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          size="icon-sm"
-          variant="ghost"
-          aria-label={`${t('managed.sessionActions')}: ${session.title}`}
-        >
-          <MoreHorizontalIcon aria-hidden="true" />
-        </Button>
+        {sidebar ? (
+          <button
+            type="button"
+            className={sidebarStyles.sessionActionButton}
+            aria-label={`${t('managed.sessionActions')}: ${session.title}`}
+            title={t('sidebar.moreActions')}
+          >
+            <EllipsisVerticalIcon aria-hidden="true" />
+          </button>
+        ) : (
+          <Button
+            type="button"
+            size="icon-sm"
+            variant="ghost"
+            aria-label={`${t('managed.sessionActions')}: ${session.title}`}
+          >
+            <MoreHorizontalIcon aria-hidden="true" />
+          </Button>
+        )}
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="end"
