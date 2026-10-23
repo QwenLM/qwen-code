@@ -383,7 +383,8 @@ describe('SDK Java self-hosted workflow guards', () => {
     },
     {
       name: 'mysql-integration',
-      artifact: 'sdk-java-test-reports-mysql-integration-java-21',
+      artifact:
+        'sdk-java-test-reports-${{ matrix.database }}-integration-java-21',
       paths: [
         'packages/managed-agent-server/target/surefire-reports/*.txt',
         'packages/managed-agent-server/target/surefire-reports/*.dumpstream',
@@ -405,6 +406,12 @@ describe('SDK Java self-hosted workflow guards', () => {
         'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
       );
       expect(upload.with.name).toBe(artifact);
+      const legs = parse(workflow).jobs[name].strategy?.matrix?.include;
+      if (legs && legs.length > 1) {
+        // upload-artifact rejects a second upload under one name, so a
+        // multi-leg job must interpolate the matrix into its artifact name.
+        expect(artifact).toMatch(/\$\{\{\s*matrix\./);
+      }
       expect(upload.with.path.trim().split('\n')).toEqual(paths);
       expect(upload.with['if-no-files-found']).toBe('ignore');
       expect(upload.with['retention-days']).toBe(7);

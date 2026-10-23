@@ -825,7 +825,7 @@ jobs:
         if: 'failure() || cancelled()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
-          name: 'sdk-java-test-reports-mysql-integration-java-21'
+          name: 'sdk-java-test-reports-${{ matrix.database }}-integration-java-21'
           path: |
             packages/managed-agent-server/target/surefire-reports/*.txt
             packages/managed-agent-server/target/surefire-reports/*.dumpstream
