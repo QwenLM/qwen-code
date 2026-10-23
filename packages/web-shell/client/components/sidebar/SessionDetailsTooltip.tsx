@@ -38,6 +38,7 @@ interface SessionDetailsTooltipProps {
   label: string;
   time: string;
   completedUnread: boolean;
+  statusLabel?: string;
   workspaceLabel?: string;
   openOnClick?: boolean;
   ownerToken?: string;
@@ -52,6 +53,7 @@ export function SessionDetailsTooltip({
   label,
   time,
   completedUnread,
+  statusLabel,
   workspaceLabel,
   openOnClick = false,
   ownerToken,
@@ -344,7 +346,7 @@ export function SessionDetailsTooltip({
           })}
           <div className={styles.sessionDetailsRow}>
             <RadioTowerIcon aria-hidden="true" />
-            <span>{status}</span>
+            <span>{statusLabel ?? status}</span>
           </div>
           <div className={styles.sessionDetailsIdRow}>
             <span
