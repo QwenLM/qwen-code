@@ -319,6 +319,14 @@ describe('runSync (real git, bare remote)', () => {
     );
     run(paths.worktreePath, 'commit', '-q', '-m', 'add sub');
     run(paths.worktreePath, 'push', '-q', 'origin', 'HEAD:feat');
+    // Submodule commands refuse the file transport unless told otherwise;
+    // a real submodule's remote is https.
+    run(
+      join(paths.worktreePath, 'vendor', 'sub'),
+      'config',
+      'protocol.file.allow',
+      'always',
+    );
     const withSub = worktreeHead();
     writeState(paths.statePath, {
       ...readState(paths.statePath)!,
@@ -339,6 +347,19 @@ describe('runSync (real git, bare remote)', () => {
     ).toBe(s2);
     expect(run(paths.worktreePath, 'status', '--porcelain')).toBe('');
     expect(s1).not.toBe(s2);
+
+    // A bump to a commit the submodule's remote does not have cannot be
+    // checked out: the worktree is not clean, and sync says so instead of
+    // letting a fix commit the submodule back.
+    run(
+      author,
+      'update-index',
+      '--cacheinfo',
+      `160000,${'e'.repeat(40)},vendor/sub`,
+    );
+    run(author, 'commit', '-q', '-m', 'bump to nowhere');
+    run(author, 'push', '-q', 'origin', 'feat');
+    expect(runSync(7)).toMatchObject({ synced: false, moved: true });
   });
 
   it('follows only the branch GitHub names, not one an edited state file names', () => {

@@ -407,9 +407,11 @@ rejected lease (`[rejected] (stale info)`, or a remote branch that
 prints in) means someone else pushed; the result is `resync`, not a retry,
 and nothing is recorded. A push whose answer was lost — the remote already
 holds the commit — is recorded as pushed. A commit the remote held before
-the push is not the watch's — the worktree was moved onto someone else's
-push — and answers `resync`, so `sync` adopts it instead of counting it as
-a push. Any other refusal —
+the push — someone else pushed it, or an earlier push of it was never
+recorded — is not counted as this push: the answer is `resync`, `sync`
+adopts it as the known head, and the next `push` has nothing to push. The
+skill then treats the round's commits as pushed at that head, since it
+contains them. Any other refusal —
 a hook, branch protection, credentials — is an error with git's last lines.
 The output is one JSON line: `{"pushed": true, "sha", "pushes", "maxPushes"}`,
 or `{"pushed": false, "action": "resync" | "stop", "reason"}`.
@@ -506,7 +508,9 @@ same number is refused until that file is removed.
 What the watch posted and handled — `handledCommentIds`,
 `postedCommentIds`, `handledChecks`, `rerunChecks`, `handledConflictSha`,
 and the replies announced but not yet settled (`pendingPosts`) and re-runs
-deferred (`deferredRuns`) — is added to the PR's history before the state file goes,
+deferred (`deferredRuns`), which are the watch's own lists as they stand
+(they were started from the history, and what was settled since must not
+come back) — is added to the PR's history before the state file goes,
 `.qwen/tmp/autofix-pr-<n>-history-<host>+<owner>+<repo>.history.json` (one
 clone may watch PRs of one number in a fork and its upstream; `+` and `@`, in
 place of a port's `:`, occur in no name, and the suffix never matches a file
@@ -585,7 +589,9 @@ touches one that is not checked out) — to end a round whose work was not
 pushed, and reports what it dropped. A worktree that is still not clean
 afterwards answers `{"synced": false, "reason"}`. Whenever `sync` moves the
 worktree, it moves its checked-out submodules to the commits the new head
-records the same way, and a worktree that is not clean afterwards answers
+records the same way, fetching a commit a submodule lacks from that
+submodule's own remote (the PR's fetch does not recurse into submodules, so
+a submodule commit that cannot be fetched does not fail it), and a worktree that is not clean afterwards answers
 `synced: false`, so a fix never commits a submodule back to an old commit. When the
 PR's branch cannot be read (the PR was closed, the branch deleted, the
 network is down), it returns to the head the watch last knew instead.
@@ -635,9 +641,11 @@ each command in a pid namespace of its own, where pids repeat, so the
 holder's pid is checked only from the same namespace; any other lock is
 taken over once it is older than any helper runs (fifteen minutes), and
 `cleanup --force` removes it at once. Stale locks are broken one at a time,
-under an exclusive `<lock>.break` file: a lock that still holds the stale
-token there is the stale one, since no helper can replace it without
-breaking it first, so a fresh lock is never removed.
+under an exclusive `<lock>.break` file (one left by a killed helper is
+cleared once it is a minute old, either way from now); the lock is moved
+aside first — the file itself, whatever its path holds by then — removed
+only if it holds the stale token, and put back otherwise, so a fresh lock
+is never removed.
 
 ## 7. One check (`tick`)
 

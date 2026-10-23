@@ -11,6 +11,7 @@ import {
   lstatSync,
   readFileSync,
   readlinkSync,
+  renameSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -384,16 +385,11 @@ export function keepHistory(
     rerunChecks: union(earlier?.rerunChecks, state.rerunChecks),
     handledConflictSha:
       state.handledConflictSha ?? earlier?.handledConflictSha ?? null,
-    pendingPosts: [
-      ...(earlier?.pendingPosts ?? []),
-      ...(state.pendingPosts ?? []),
-    ],
-    deferredRuns: [
-      ...new Set([
-        ...(earlier?.deferredRuns ?? []),
-        ...(state.deferredRuns ?? []),
-      ]),
-    ],
+    // The watch's own lists: `prepare` started it from the history, and
+    // `reply` and `rerun` have settled what they could since. Merging the
+    // history in again would bring back what was settled.
+    pendingPosts: state.pendingPosts ?? earlier?.pendingPosts ?? [],
+    deferredRuns: state.deferredRuns ?? earlier?.deferredRuns ?? [],
   };
   atomicWriteFileSync(path, `${JSON.stringify(history, null, 2)}\n`);
   return path;
@@ -509,44 +505,59 @@ export function withWatchLock<T>(
 }
 
 /**
- * Removes a stale lock, unless another helper replaced it meanwhile: two
- * helpers that both found it stale must not both remove a lock, or the
- * second would remove the first one's fresh lock. The lock is moved aside
- * first, which only one can do, and is put back if it is not the one that
- * was judged stale.
+ * Removes a stale lock, unless another helper replaced it meanwhile. Locks
+ * are broken one at a time, under `<lock>.break`; the lock is moved aside
+ * first — the file itself, whatever its path holds by then — and removed
+ * only if it is the stale one, else put back, so a fresh lock is never
+ * removed.
  */
 export function breakStaleLock(lockPath: string, stale: string): boolean {
-  // One breaker at a time: under `<lock>.break`, a lock that still holds
-  // the stale token is the stale one, since no helper can replace it
-  // without breaking it first, and a fresh lock is never touched.
   const breaker = `${lockPath}.break`;
+  if (!takeBreaker(breaker)) return false;
   try {
-    writeFileSync(breaker, String(process.pid), { flag: 'wx' });
-  } catch {
-    // Another helper is breaking it. A breaker left by a killed helper is
-    // cleared once it is old, for the next attempt.
+    const aside = `${lockPath}.stale.${randomUUID()}`;
     try {
-      if (Date.now() - statSync(breaker).mtimeMs > 60_000) {
-        rmSync(breaker, { force: true });
-      }
-    } catch {
-      // Gone.
-    }
-    return false;
-  }
-  try {
-    let current: string;
-    try {
-      current = readFileSync(lockPath, 'utf8');
+      renameSync(lockPath, aside);
     } catch {
       return true; // Gone already: try to take it.
     }
-    if (current !== stale) return false;
-    rmSync(lockPath, { force: true });
-    return true;
+    try {
+      if (readFileSync(aside, 'utf8') === stale) return true;
+      try {
+        linkSync(aside, lockPath);
+      } catch {
+        // A helper took the free lock meanwhile; it holds it now.
+      }
+      return false;
+    } finally {
+      rmSync(aside, { force: true });
+    }
   } finally {
     rmSync(breaker, { force: true });
   }
+}
+
+/**
+ * Takes `<lock>.break`. One left by a killed helper is cleared once it is a
+ * minute old — either way from now, for a clock that is off — and taken.
+ */
+function takeBreaker(breaker: string): boolean {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      writeFileSync(breaker, String(process.pid), { flag: 'wx' });
+      return true;
+    } catch {
+      try {
+        if (Math.abs(Date.now() - statSync(breaker).mtimeMs) <= 60_000) {
+          return false;
+        }
+        rmSync(breaker, { force: true });
+      } catch {
+        // Gone: try again.
+      }
+    }
+  }
+  return false;
 }
 
 /** Creates the lock, or answers false when it exists. */

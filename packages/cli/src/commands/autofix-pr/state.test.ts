@@ -14,6 +14,7 @@ import {
   readlinkSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -128,10 +129,21 @@ describe('withWatchLock', () => {
     const stale = JSON.stringify({ pid: 1, ns: 'x', at: 0, id: 'stale' });
     writeFileSync(paths.lockPath, stale);
     // Another helper is breaking it: this one stands back.
-    writeFileSync(`${paths.lockPath}.break`, '1');
+    const breaker = `${paths.lockPath}.break`;
+    writeFileSync(breaker, '1');
     expect(breakStaleLock(paths.lockPath, stale)).toBe(false);
     expect(readFileSync(paths.lockPath, 'utf8')).toBe(stale);
-    rmSync(`${paths.lockPath}.break`);
+    // One left by a killed helper is cleared once a minute old — either
+    // way, for a clock that is off — and the lock is broken in that call.
+    const hourAgo = new Date(Date.now() - 3_600_000);
+    utimesSync(breaker, hourAgo, hourAgo);
+    expect(breakStaleLock(paths.lockPath, stale)).toBe(true);
+    expect(existsSync(paths.lockPath)).toBe(false);
+    expect(existsSync(breaker)).toBe(false);
+    writeFileSync(paths.lockPath, stale);
+    writeFileSync(breaker, '1');
+    const hourAhead = new Date(Date.now() + 3_600_000);
+    utimesSync(breaker, hourAhead, hourAhead);
     expect(breakStaleLock(paths.lockPath, stale)).toBe(true);
     expect(existsSync(paths.lockPath)).toBe(false);
     // Another helper took over meanwhile: its fresh lock is put back.
@@ -218,6 +230,23 @@ describe('history', () => {
           repo: 'release-plan',
         }),
       ).toMatch(/\.history\.json$/);
+      // The watch's own lists are kept as they are: settled intents do not
+      // come back, and repeated cycles do not pile them up.
+      const settled = {
+        ...watch('upstream', ['U1']),
+        pendingPosts: [],
+        deferredRuns: [],
+      };
+      keepHistory(paths, settled);
+      keepHistory(paths, settled);
+      expect(readHistory(upstream)).toMatchObject({
+        pendingPosts: [],
+        deferredRuns: [],
+      });
+      const again = watch('upstream', ['U1']);
+      keepHistory(paths, again);
+      keepHistory(paths, again);
+      expect(readHistory(upstream)?.pendingPosts).toHaveLength(1);
       // Spellings of one repository share a file.
       expect(
         historyPath(paths, {

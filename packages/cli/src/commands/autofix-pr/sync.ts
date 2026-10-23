@@ -78,11 +78,14 @@ function syncLocked(
         `PR #${prNumber} is ${live.state.toLowerCase()}; there is no head to follow.`,
       );
     }
+    // Submodules are fetched by `alignSubmodules`, as each one needs it: a
+    // submodule commit that cannot be fetched must not fail the PR's own.
     git(
       '-C',
       worktree,
       'fetch',
       '--quiet',
+      '--no-recurse-submodules',
       state.pushTarget,
       `refs/heads/${state.headRefName}`,
     );
@@ -174,6 +177,7 @@ function syncLocked(
       synced: false,
       headSha: prHead,
       moved,
+      ...(dropped === undefined ? {} : { dropped }),
       reason: `${worktree} is not clean after moving to ${prHead.slice(0, 12)} (a submodule git could not update?); run \`qwen autofix-pr sync ${prNumber} --discard\``,
     };
   }
@@ -200,7 +204,10 @@ function alignSubmodules(worktree: string): void {
     'foreach',
     '--quiet',
     '--recursive',
-    'git reset --hard --quiet $sha1 && git clean -ffdq',
+    // `$sha1` is the commit the superproject records (set by git); one the
+    // submodule does not have yet is fetched from its own remote first.
+    'git cat-file -e "$sha1^{commit}" 2>/dev/null || git fetch --quiet origin "$sha1"; ' +
+      'git reset --hard --quiet "$sha1" && git clean -ffdq',
   );
 }
 

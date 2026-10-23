@@ -212,7 +212,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 推送时向 GitHub 现查，而不是沿用 `prepare` 时的结果：期间已合并或关闭的 PR 回答 `stop`；默认分支也重新读取，因为监视期间它可能被改名。推送的分支和目的地按 `prepare` 的方式从 GitHub 和 clone 的 remote 重新得出，必须与状态文件记录的一致，所以改过的状态文件无法改变推送去向。状态文件里会交给 git 的值——remote、推送目标、head ref、各个 SHA——在读取时都会检查，以 `-` 开头的值会被当成选项。推送次数已用完（10 次，第 10 节）的监视直接回答 `stop`，不再询问任何东西。`HEAD` 等于已知 head 时没有可推送的内容。
 
-然后在 worktree 里执行 `git push --porcelain <target> <sha>:refs/heads/<headRef> --force-with-lease=refs/heads/<headRef>:<lastKnownHeadSha>`，给 pre-push hook 留九分钟（skill 给这次 shell 调用设置工具允许的最长超时，十分钟，所以辅助命令仍能记录结果）。`<sha>` 是通过上述检查的那个提交，而不是 `HEAD`——询问 GitHub 期间 `HEAD` 可能会动。hook 照常运行，不使用 `--force` 或 `--no-verify`。成功后把新 SHA 记入 `pushedShas` 和 `lastKnownHeadSha`，推送计数加一。lease 被拒（`[rejected] (stale info)`，或者 `git ls-remote` 看到远端分支已不在已知 head 上——不依赖 git 输出的语言）说明别人推送过，结果是 `resync` 而不是重试，什么都不记录。响应丢失但远端已经收下提交的推送，按已推送记录。推送前远端就已持有的提交不是本监视推的——worktree 被移到了别人推送的提交上——回答 `resync`，由 `sync` 接纳，而不计为一次推送。其他拒绝——hook、分支保护、凭据——都是错误，附上 git 的最后几行。输出是一行 JSON：`{"pushed": true, "sha", "pushes", "maxPushes"}`，或 `{"pushed": false, "action": "resync" | "stop", "reason"}`。
+然后在 worktree 里执行 `git push --porcelain <target> <sha>:refs/heads/<headRef> --force-with-lease=refs/heads/<headRef>:<lastKnownHeadSha>`，给 pre-push hook 留九分钟（skill 给这次 shell 调用设置工具允许的最长超时，十分钟，所以辅助命令仍能记录结果）。`<sha>` 是通过上述检查的那个提交，而不是 `HEAD`——询问 GitHub 期间 `HEAD` 可能会动。hook 照常运行，不使用 `--force` 或 `--no-verify`。成功后把新 SHA 记入 `pushedShas` 和 `lastKnownHeadSha`，推送计数加一。lease 被拒（`[rejected] (stale info)`，或者 `git ls-remote` 看到远端分支已不在已知 head 上——不依赖 git 输出的语言）说明别人推送过，结果是 `resync` 而不是重试，什么都不记录。响应丢失但远端已经收下提交的推送，按已推送记录。推送前远端就已持有的提交——别人推送的，或者之前某次推送没有被记录——不计为这一次推送：回答 `resync`，由 `sync` 接纳为已知 head，下一次 `push` 便无可推送。skill 随后把这一轮的提交视为已在该 head 上推送，因为该 head 包含它们。其他拒绝——hook、分支保护、凭据——都是错误，附上 git 的最后几行。输出是一行 JSON：`{"pushed": true, "sha", "pushes", "maxPushes"}`，或 `{"pushed": false, "action": "resync" | "stop", "reason"}`。
 
 ### 6.5 `reply <pr> <plan.json> [--no-post]`
 
@@ -250,7 +250,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 一起删除 worktree、它的分支和状态文件。worktree 有未提交的改动（包括未跟踪文件和子模块里的改动，不受 `status.showUntrackedFiles` 或子模块的 `ignore` 设置影响），或者 worktree（worktree 已被删除时则是分支）有监视已知的任何 PR head 都不包含的提交时，三者都保留，并在报告里说明原因。已知的 head 是 `lastKnownHeadSha` 和 `pushedShas`，以及——只在前两者比完仍有多出的提交时才去问——远端的 PR head（`refs/pull/<n>/head`），所以手工推送过的工作不会被拦住。worktree 路径上的目录如果不是独立的 worktree，会被保留：在它里面运行 git 会判断外层 clone。没有状态文件时没有记录的 head，因此残留的 worktree 或分支都会被保留。状态文件属于另一个会话时直接拒绝。`--force` 跳过这些检查，也会丢弃无法读取的状态文件。分支删不掉时报错，状态文件保留。在要删除的 worktree 内部运行 `cleanup` 会被拒绝。闸门游标不会被删除：它属于定时任务，而定时任务比一次监视活得久，没有游标的话下一次触发会把所有内容重新报告一遍。要停掉闸门，就删除该任务。报告里会写出保留的游标（`gateCursor`）：之后对另一个仓库同号 PR 的闸门会被拒绝，直到删除这个文件。
 
-监视发出和处理过的内容——`handledCommentIds`、`postedCommentIds`、`handledChecks`、`rerunChecks`、`handledConflictSha`，以及已登记但尚未结算的回复（`pendingPosts`）和延后的重跑（`deferredRuns`）——会在删除状态文件之前并入该 PR 的历史 `.qwen/tmp/autofix-pr-<n>-history-<host>+<owner>+<repo>.history.json`（同一个 clone 可能监视 fork 和上游里同号的 PR；`+` 和代替端口 `:` 的 `@` 不会出现在任何名字里，后缀也永远不会与 skill 可写的文件名重合），这个文件同样保留（报告里的 `history`）。`--force` 还会删除这次监视的锁，以防某个辅助命令在持锁时被杀掉。之后对同一 PR 的新监视在 `prepare` 时从它开始，所以不会再回复之前监视回复过的评论，也不会在同一 head 上把一个检查重跑两次；另一个仓库同号 PR 的历史会被忽略。
+监视发出和处理过的内容——`handledCommentIds`、`postedCommentIds`、`handledChecks`、`rerunChecks`、`handledConflictSha`，以及已登记但尚未结算的回复（`pendingPosts`）和延后的重跑（`deferredRuns`）——后两者取监视自己当前的列表（它们本就从历史开始，之后已结算的不能再回来）——会在删除状态文件之前并入该 PR 的历史 `.qwen/tmp/autofix-pr-<n>-history-<host>+<owner>+<repo>.history.json`（同一个 clone 可能监视 fork 和上游里同号的 PR；`+` 和代替端口 `:` 的 `@` 不会出现在任何名字里，后缀也永远不会与 skill 可写的文件名重合），这个文件同样保留（报告里的 `history`）。`--force` 还会删除这次监视的锁，以防某个辅助命令在持锁时被杀掉。之后对同一 PR 的新监视在 `prepare` 时从它开始，所以不会再回复之前监视回复过的评论，也不会在同一 head 上把一个检查重跑两次；另一个仓库同号 PR 的历史会被忽略。
 
 ### 6.7 `review watch-repo --repo <owner>/<repo> [--host <host>] [--limit 50] [filters]`
 
@@ -272,7 +272,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - worktree 落后于它且是干净的，就 fast-forward；
 - worktree 有某一轮未推送的提交时不动它：回答 `{"synced": false, "action": "merge"}` 并给出要合并的 head（不要 rebase），什么都不改。
 
-有未提交改动的 worktree 永远不会被移动或重置。`--discard` 把 worktree 恢复到 PR head，不管里面有什么——未推送的提交和未提交的改动，包括嵌套仓库（`git clean -ffd`）和已检出子模块里的改动（`git submodule foreach`，从不碰未检出的子模块）——用来结束一轮没能推送的工作，并报告丢弃了什么。之后 worktree 仍不干净时回答 `{"synced": false, "reason"}`。`sync` 每次移动 worktree 时，都以同样方式把已检出的子模块移到新 head 记录的提交上；之后仍不干净则回答 `synced: false`，所以修复永远不会把子模块提交回旧的提交。读不到 PR 分支时（PR 已关闭、分支被删、网络不通），改为恢复到监视上次知道的 head。
+有未提交改动的 worktree 永远不会被移动或重置。`--discard` 把 worktree 恢复到 PR head，不管里面有什么——未推送的提交和未提交的改动，包括嵌套仓库（`git clean -ffd`）和已检出子模块里的改动（`git submodule foreach`，从不碰未检出的子模块）——用来结束一轮没能推送的工作，并报告丢弃了什么。之后 worktree 仍不干净时回答 `{"synced": false, "reason"}`。`sync` 每次移动 worktree 时，都以同样方式把已检出的子模块移到新 head 记录的提交上，子模块缺少的提交从它自己的远端获取（PR 的 fetch 不递归进子模块，所以取不到的子模块提交不会让它失败）；之后仍不干净则回答 `synced: false`，所以修复永远不会把子模块提交回旧的提交。读不到 PR 分支时（PR 已关闭、分支被删、网络不通），改为恢复到监视上次知道的 head。
 
 和 `push` 一样，`sync` 先向 GitHub 查 PR 的 head 分支，并对照 clone 的 remote 检查目的地，所以改过的状态文件无法让 fetch 指向别的 ref 或仓库；head ref 按分支名规则校验（`git check-ref-format --branch`），因此不能夹带 refspec。
 
@@ -282,7 +282,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 GitHub 只在 run 结束后才能重跑它，而 `snapshot` 在 job 一失败就报告。因此仍在进行的 run 不询问 GitHub，直接回答 `{"rerun": false, "deferred": true}`，并记入 `deferredRuns`：该 run 结束时闸门会再报告一次它的失败（第 6.2 节），届时那一轮再重跑。
 
-`push`、`sync`、`reply` 和 `rerun` 在读写状态文件期间都持有这次监视的锁（`.qwen/tmp/autofix-pr-<n>.lock`）：否则模型同时发出的两个辅助命令调用会各自写回自己读到的内容，抹掉对方关于推送、回复或重跑的记录。锁以硬链接的方式整体创建（链接到一个已写好令牌的文件），并且只在仍持有自己令牌时才删除。沙箱可能让每条命令运行在独立的 pid 命名空间里，pid 会重复，所以只在同一命名空间里才检查持有者的 pid；其他锁在存在时间超过任何辅助命令的运行时长（十五分钟）后被接管，`cleanup --force` 则会立即删除它。过期锁一次只由一个辅助命令打破，在独占的 `<lock>.break` 文件保护下进行：此时锁里仍是过期令牌，它就是那个过期锁，因为不先打破它就没有辅助命令能替换它，所以新的锁永远不会被删掉。
+`push`、`sync`、`reply` 和 `rerun` 在读写状态文件期间都持有这次监视的锁（`.qwen/tmp/autofix-pr-<n>.lock`）：否则模型同时发出的两个辅助命令调用会各自写回自己读到的内容，抹掉对方关于推送、回复或重跑的记录。锁以硬链接的方式整体创建（链接到一个已写好令牌的文件），并且只在仍持有自己令牌时才删除。沙箱可能让每条命令运行在独立的 pid 命名空间里，pid 会重复，所以只在同一命名空间里才检查持有者的 pid；其他锁在存在时间超过任何辅助命令的运行时长（十五分钟）后被接管，`cleanup --force` 则会立即删除它。过期锁一次只由一个辅助命令打破，在独占的 `<lock>.break` 文件保护下进行（被杀掉的辅助命令留下的 `.break` 在一分钟后清除，不论时钟偏前还是偏后）；先把锁本身移到一边——不管那时路径上是哪个文件——只有它仍是过期令牌时才删除，否则放回原处，所以新的锁永远不会被删掉。
 
 ## 7. 一轮检查（`tick`）
 

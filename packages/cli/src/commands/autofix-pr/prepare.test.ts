@@ -420,6 +420,10 @@ describe('runPrepare (real git)', () => {
       cwd: clone,
     });
     const budgets = {
+      pendingPosts: [
+        { where: 101, handled: ['C3'], bodyHash: 'h', sha: headSha },
+      ],
+      deferredRuns: [60],
       handledChecks: [`Test@${headSha}@#5`],
       rerunChecks: [`run:1:2:push:Test@${headSha}`],
       handledConflictSha: headSha,
@@ -502,6 +506,7 @@ describe('runPrepare (real git)', () => {
       pendingPosts: [
         { where: 101, handled: ['C2'], bodyHash: 'h', sha: headSha },
       ],
+      deferredRuns: [50],
     };
     writeFileSync(
       historyPath(paths, { host: 'github.com', owner: 'o', repo: 'r' }),
@@ -515,6 +520,7 @@ describe('runPrepare (real git)', () => {
       rerunChecks: history.rerunChecks,
       handledConflictSha: headSha,
       pendingPosts: history.pendingPosts,
+      deferredRuns: [50],
     });
     // Not another repository's PR of the same number.
     execFileSync('git', ['worktree', 'remove', '--force', paths.worktreePath], {
