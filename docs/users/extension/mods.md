@@ -212,14 +212,31 @@ the remaining budget. Returning before an outstanding next completes cancels
 that work and waits for it to settle.
 
 `tool.check` receives `{tool, input, tool_use_id}` after native validation and
-classic input rewrites. All fields are pinned. Its next returns a declarative
-`{decision: 'allow' | 'ask' | 'deny', reason?}` without executing the tool.
-Qwen merges the answer restrictively: a Mod cannot upgrade a native deny or
-ask to allow. A Mod ask follows the current approval mode's existing decision
-flow; required human interaction and classic forced asks remain authoritative.
-This is deliberately stricter than Claude's consumer permission overrides.
-If a native PermissionRequest hook rebuilds the arguments, they are checked
-again. A Mod-authored `rule`, `hook` or `ceiling` cannot create host permissions.
+classic input rewrites, with two facts the host sets:
+
+- `isReadOnly: true` when the tool reports the call as read-only: read, search
+  and fetch tools, MCP tools whose server marks them read-only, and shell
+  commands that pass the read-only check. Read its absence as a possible write.
+- `approver`: `person` where a dialog can ask the user, `host` in a stream-json
+  session whose host answers permission requests, and absent where nobody can
+  answer.
+
+All fields are pinned; a matcher can select `isReadOnly: true`. Its next returns
+a declarative `{decision: 'allow' | 'ask' | 'deny', reason?}` without executing
+the tool. Qwen merges the answer restrictively: a Mod cannot upgrade a native
+deny or ask to allow. This is deliberately stricter than Claude's consumer
+permission overrides.
+
+An ask that a Mod makes or rewords, rather than Qwen's own ask passed up
+unchanged, carries the Mod's name as `plugin` and is the user's to answer, as a
+classic PreToolUse ask is. YOLO, AUTO_EDIT and the AUTO classifier do not approve
+it; the dialog shows the Mod's reason and hides "always allow"; approving another
+call does not approve it; and a headless run without a permission host denies
+it, giving the model the Mod's reason. A PermissionRequest hook can deny it but
+cannot answer for the user. Qwen's own ask passed up unchanged keeps the current
+approval mode's decision flow. If a native PermissionRequest hook rebuilds the
+arguments, they are checked again. A Mod-authored `rule`, `hook`, `ceiling` or
+`plugin` cannot create host permissions; the host sets `plugin`.
 
 Return `{deny: reason}` to block, or `{result: value}` to supply a JSON result
 without executing. Native next returns `{ref, result, text, isError?}`.
