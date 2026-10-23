@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 const stdout = vi.hoisted(() => vi.fn((_line: string) => {}));
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -103,11 +103,64 @@ describe('runCleanup (real git)', () => {
     });
   });
 
-  it('keeps the gate cursor, which belongs to the scheduled task', () => {
+  it('keeps the gate cursor, which belongs to the scheduled task, and says so', () => {
     writeFileSync(paths.gatePath, '{}');
     runCleanup(7, false);
     expect(existsSync(paths.statePath)).toBe(false);
     expect(existsSync(paths.gatePath)).toBe(true);
+    expect(lastReport()).toEqual({
+      removed: true,
+      worktreePath: paths.worktreePath,
+      gateCursor: paths.gatePath,
+    });
+  });
+
+  it('sees changes inside a submodule whatever its ignore setting says', () => {
+    const lib = realpathSync(mkdtempSync(join(tmpdir(), 'autofix-sub-')));
+    try {
+      run(lib, 'init', '-q', '-b', 'main');
+      writeFileSync(join(lib, 'a.txt'), 'a');
+      run(lib, 'add', 'a.txt');
+      run(
+        lib,
+        '-c',
+        'user.email=t@example.com',
+        '-c',
+        'user.name=t',
+        'commit',
+        '-q',
+        '-m',
+        'lib',
+      );
+      const wt = paths.worktreePath;
+      run(
+        wt,
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        lib,
+        'sub',
+      );
+      run(wt, 'commit', '-q', '-m', 'add sub');
+      writeState(paths.statePath, {
+        ...(JSON.parse(
+          readFileSync(paths.statePath, 'utf8'),
+        ) as AutofixPrState),
+        lastKnownHeadSha: run(wt, 'rev-parse', 'HEAD'),
+      });
+      run(repo, 'config', 'submodule.sub.ignore', 'all');
+      writeFileSync(join(wt, 'sub', 'a.txt'), 'edited');
+      runCleanup(7, false);
+      expect(readFileSync(join(wt, 'sub', 'a.txt'), 'utf8')).toBe('edited');
+      expect(lastReport()).toMatchObject({
+        removed: false,
+        reason: expect.stringMatching(/uncommitted changes/),
+      });
+    } finally {
+      rmSync(lib, { recursive: true, force: true });
+    }
   });
 
   it('keeps everything when the worktree has uncommitted changes', () => {
@@ -293,7 +346,7 @@ describe('runCleanup (real git)', () => {
   });
 
   it('finds the watch from another worktree of the clone', () => {
-    const other = join(repo, '..', `${repo.split('/').at(-1)}-other`);
+    const other = join(dirname(repo), `${basename(repo)}-other`);
     run(repo, 'worktree', 'add', '-q', '--detach', other);
     try {
       process.chdir(other);

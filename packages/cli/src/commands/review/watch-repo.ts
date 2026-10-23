@@ -14,10 +14,12 @@
 // not replay history.
 
 import type { CommandModule } from 'yargs';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { GATE_OUTPUT_BUDGET_BYTES, jsonBytes } from './lib/gate-budget.js';
 import { repoRoot } from './lib/git.js';
 import {
   ensureAuthenticated,
@@ -141,13 +143,16 @@ function matches(
  * touched lately, and without a bound the closed and merged ones would
  * accumulate for as long as the cursor lives. A dropped PR that resurfaces
  * reads as `pr_opened`.
+ *
+ * Events past the gate's output budget are `deferred`: their PRs keep the
+ * head the cursor had, so the next run reports them.
  */
 export function diffRepoWatch(
   prs: RepoPr[],
   cursor: WatchRepoCursor,
   filters: WatchRepoFilters,
   listCut: boolean,
-): { events: WatchRepoEvent[]; cursor: WatchRepoCursor } {
+): { events: WatchRepoEvent[]; deferred: number; cursor: WatchRepoCursor } {
   const events: WatchRepoEvent[] = [];
   const heads: WatchRepoCursor['heads'] = {};
   if (listCut) {
@@ -183,21 +188,78 @@ export function diffRepoWatch(
       reviewRequested: requestedFrom(pr, cursor.viewer),
     });
   }
-  return { events, cursor: { ...cursor, initialized: true, heads } };
+  const repo = `${cursor.owner}/${cursor.repo}`;
+  let shown = 0;
+  while (
+    shown < events.length &&
+    (shown === 0 ||
+      jsonBytes({
+        repo,
+        events: events.slice(0, shown + 1),
+        deferred: events.length,
+      }) <= GATE_OUTPUT_BUDGET_BYTES)
+  ) {
+    shown++;
+  }
+  for (const event of events.slice(shown)) {
+    const previous = cursor.heads[String(event.number)];
+    if (previous) heads[String(event.number)] = previous;
+    else delete heads[String(event.number)];
+  }
+  return {
+    events: events.slice(0, shown),
+    deferred: events.length - shown,
+    cursor: { ...cursor, initialized: true, heads },
+  };
 }
 
 /**
- * One file per repository, whatever the spelling: GitHub compares hosts,
- * owners and names without case. Each part is a directory level of its own,
- * since owners and names both admit `-`, and a host's port separator, which
- * Windows refuses in a file name, becomes `_`, which no host contains.
+ * The name a filter set gives its cursor, or null without filters. Two
+ * tasks on one repository with different filters must not share heads: a
+ * push one of them recorded without reporting it, because its filters left
+ * the PR out, would never be a transition for the other.
+ */
+function filterKey(filters: WatchRepoFilters): string | null {
+  const fold = (values: string[]) =>
+    [...new Set(values.map((value) => value.toLowerCase()))].sort();
+  const canonical = {
+    authors: fold(filters.authors),
+    labels: fold(filters.labels),
+    reviewRequested: filters.reviewRequested,
+    excludeDrafts: filters.excludeDrafts,
+    excludeBots: filters.excludeBots,
+    excludeMine: filters.excludeMine,
+  };
+  const none =
+    canonical.authors.length === 0 &&
+    canonical.labels.length === 0 &&
+    !canonical.reviewRequested &&
+    !canonical.excludeDrafts &&
+    !canonical.excludeBots &&
+    !canonical.excludeMine;
+  if (none) return null;
+  return createHash('sha256')
+    .update(JSON.stringify(canonical))
+    .digest('hex')
+    .slice(0, 12);
+}
+
+/**
+ * One file per repository and filter set, whatever the spelling: GitHub
+ * compares hosts, owners and names without case. Each part is a directory
+ * level of its own, since owners and names both admit `-`, and a host's
+ * port separator, which Windows refuses in a file name, becomes `_`, which
+ * no host contains. Filters add `@<key>` to the name; no repository name
+ * contains `@`.
  */
 export function watchRepoCursorPath(
   root: string,
   host: string,
   owner: string,
   repo: string,
+  filters?: WatchRepoFilters,
 ): string {
+  const key = filters ? filterKey(filters) : null;
   return join(
     root,
     '.qwen',
@@ -205,7 +267,7 @@ export function watchRepoCursorPath(
     'review-watch',
     normalizeGhHostForUrl(host).replace(':', '_'),
     owner.toLowerCase(),
-    `${repo.toLowerCase()}.json`,
+    `${repo.toLowerCase()}${key ? `@${key}` : ''}.json`,
   );
 }
 
@@ -236,10 +298,12 @@ export function runWatchRepo(args: WatchRepoArgs): void {
     );
   }
   const [owner, repo] = args.repo.split('/');
+  // Validates the flag (a blank one is refused, not read as no host) and
+  // the resolved host before it becomes part of a path.
+  setGhHost(args.host);
   const host = resolveGhHost(args.host) ?? 'github.com';
-  // Validates the host before it becomes part of a path.
   setGhHost(host);
-  const path = watchRepoCursorPath(repoRoot(), host, owner, repo);
+  const path = watchRepoCursorPath(repoRoot(), host, owner, repo, args);
   const existing = readWatchRepoCursor(path);
 
   ensureAuthenticated();
@@ -291,7 +355,13 @@ export function runWatchRepo(args: WatchRepoArgs): void {
     atomicWriteFileSync(path, `${JSON.stringify(result.cursor, null, 2)}\n`);
   }
   if (result.events.length > 0) {
-    writeStdoutLine(JSON.stringify({ repo: args.repo, events: result.events }));
+    writeStdoutLine(
+      JSON.stringify({
+        repo: args.repo,
+        events: result.events,
+        ...(result.deferred > 0 ? { deferred: result.deferred } : {}),
+      }),
+    );
   }
 }
 

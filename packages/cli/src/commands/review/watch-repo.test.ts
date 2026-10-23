@@ -5,9 +5,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, relative } from 'node:path';
+import yargs from 'yargs';
+import { GATE_OUTPUT_BUDGET_BYTES } from './lib/gate-budget.js';
+import { getGhHost, setGhHost } from './lib/gh.js';
 
 const mocks = vi.hoisted(() => ({
   gh: vi.fn((..._args: string[]): string => ''),
@@ -34,6 +37,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 import {
   diffRepoWatch,
   runWatchRepo,
+  watchRepoCommand,
   watchRepoCursorPath,
   type RepoPr,
   type WatchRepoCursor,
@@ -232,6 +236,25 @@ describe('watchRepoCursorPath', () => {
     expect(name('github.com:443', 'o', 'r')).toBe(name('github.com', 'o', 'r'));
   });
 
+  it('gives each filter set a file of its own, whatever its spelling', () => {
+    const at = (filters: Partial<WatchRepoFilters>) =>
+      relative(
+        '/root',
+        watchRepoCursorPath('/root', 'github.com', 'o', 'r', {
+          ...NO_FILTERS,
+          ...filters,
+        }),
+      );
+    expect(at({})).toBe(name('github.com', 'o', 'r'));
+    expect(basename(at({ labels: ['ready'] }))).toMatch(
+      /^r@[0-9a-f]{12}\.json$/,
+    );
+    expect(at({ labels: ['ready'] })).not.toBe(at({ reviewRequested: true }));
+    expect(at({ labels: ['Ready', 'b'], authors: ['Alice'] })).toBe(
+      at({ labels: ['b', 'ready', 'ready'], authors: ['alice'] }),
+    );
+  });
+
   it('keeps a port out of the file name and repositories apart', () => {
     expect(basename(name('ghe.corp:8443', 'o', 'r'))).toBe('r.json');
     expect(name('ghe.corp:8443', 'o', 'r')).not.toContain(':');
@@ -266,14 +289,179 @@ describe('runWatchRepo', () => {
       }),
     );
 
+  const printed = () =>
+    mocks.stdout.mock.calls.map(
+      (call) =>
+        JSON.parse(call[0]) as {
+          repo: string;
+          events: Array<{ type: string; number: number }>;
+          deferred?: number;
+        },
+    );
+  let savedHost: string | undefined;
+
   beforeEach(() => {
     mocks.root = mkdtempSync(join(tmpdir(), 'review-watch-'));
     mocks.gh.mockReset();
     mocks.stdout.mockReset();
+    savedHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+    setGhHost(undefined);
   });
 
   afterEach(() => {
     rmSync(mocks.root, { recursive: true, force: true });
+    if (savedHost === undefined) delete process.env['GH_HOST'];
+    else process.env['GH_HOST'] = savedHost;
+    setGhHost(undefined);
+  });
+
+  it('asks for the repository it names and prints it with the events', () => {
+    answer('me', [pr(1)], false);
+    runWatchRepo({ ...args, repo: 'O/R' });
+    expect(mocks.gh.mock.calls[0]).toEqual([
+      'api',
+      'graphql',
+      '-f',
+      expect.stringMatching(
+        /reviewRequests[\s\S]*headRefOid|headRefOid[\s\S]*reviewRequests/,
+      ),
+      '-f',
+      'owner=O',
+      '-f',
+      'name=R',
+      '-F',
+      'first=2',
+    ]);
+    answer('me', [pr(1), pr(2)], false);
+    runWatchRepo({ ...args, repo: 'O/R' });
+    expect(printed()).toEqual([
+      {
+        repo: 'O/R',
+        events: [expect.objectContaining({ type: 'pr_opened', number: 2 })],
+      },
+    ]);
+  });
+
+  it("asks the host it was given and keeps that host's cursor apart", () => {
+    answer('me', [pr(1)], false);
+    runWatchRepo({ ...args, host: 'ghe.corp:8443' });
+    expect(getGhHost()).toBe('ghe.corp:8443');
+    expect(
+      existsSync(watchRepoCursorPath(mocks.root, 'ghe.corp:8443', 'o', 'r')),
+    ).toBe(true);
+    expect(existsSync(path())).toBe(false);
+  });
+
+  it('refuses a blank --host instead of asking whatever host gh defaults to', () => {
+    process.env['GH_HOST'] = 'ghe.corp';
+    expect(() => runWatchRepo({ ...args, host: '  ' })).toThrow(TypeError);
+    expect(mocks.gh).not.toHaveBeenCalled();
+  });
+
+  it('carries PRs past the cut of the list', () => {
+    answer('me', [pr(3), pr(2)], false);
+    runWatchRepo(args);
+    answer('me', [pr(4), pr(3)], true);
+    runWatchRepo(args);
+    expect(Object.keys(onDisk().heads).sort()).toEqual(['2', '3', '4']);
+    expect(
+      printed().map((p) => p.events.map((e) => [e.type, e.number])),
+    ).toEqual([[['pr_opened', 4]]]);
+  });
+
+  it("keeps tasks with different filters from taking each other's transitions", () => {
+    const labelled = { ...args, labels: ['ready'] };
+    const requested = { ...args, reviewRequested: true };
+    answer('me', [pr(7)], false);
+    runWatchRepo(labelled);
+    answer('me', [pr(7)], false);
+    runWatchRepo(requested);
+    const pushed = pr(7, { headRefOid: 'f'.repeat(40), requested: ['me'] });
+    // The labelled task sees the push first; the PR is not labelled.
+    answer('me', [pushed], false);
+    runWatchRepo(labelled);
+    answer('me', [pushed], false);
+    runWatchRepo(requested);
+    expect(
+      printed().map((p) => p.events.map((e) => [e.type, e.number])),
+    ).toEqual([[['pr_pushed', 7]]]);
+  });
+
+  it('leaves what does not fit the gate output to the next run', () => {
+    const many = (sha: string) =>
+      Array.from({ length: 60 }, (_, i) =>
+        pr(i + 1, { title: 'x'.repeat(250), headRefOid: sha.repeat(40) }),
+      );
+    answer('me', many('a'), false);
+    runWatchRepo({ ...args, limit: 100 });
+    answer('me', many('b'), false);
+    runWatchRepo({ ...args, limit: 100 });
+    answer('me', many('b'), false);
+    runWatchRepo({ ...args, limit: 100 });
+    answer('me', many('b'), false);
+    runWatchRepo({ ...args, limit: 100 });
+    const lines = mocks.stdout.mock.calls.map((call) => call[0]);
+    for (const line of lines) {
+      expect(Buffer.byteLength(line)).toBeLessThanOrEqual(
+        GATE_OUTPUT_BUDGET_BYTES,
+      );
+    }
+    const runs = printed();
+    expect(runs.length).toBeGreaterThan(1);
+    expect(runs[0]!.deferred).toBe(60 - runs[0]!.events.length);
+    expect(runs.at(-1)!.deferred).toBeUndefined();
+    const numbers = runs.flatMap((run) => run.events.map((e) => e.number));
+    expect(numbers.sort((a, b) => a - b)).toEqual(
+      Array.from({ length: 60 }, (_, i) => i + 1),
+    );
+  });
+
+  it('reports new PRs that do not fit on a later run, as opened', () => {
+    answer('me', [], false);
+    runWatchRepo({ ...args, limit: 100 });
+    const many = Array.from({ length: 60 }, (_, i) =>
+      pr(i + 1, { title: 'x'.repeat(250) }),
+    );
+    for (let run = 0; run < 4; run++) {
+      answer('me', many, false);
+      runWatchRepo({ ...args, limit: 100 });
+    }
+    const events = printed().flatMap((run) => run.events);
+    expect(printed().length).toBeGreaterThan(1);
+    expect(new Set(events.map((e) => e.type))).toEqual(new Set(['pr_opened']));
+    expect(events.map((e) => e.number).sort((a, b) => a - b)).toEqual(
+      Array.from({ length: 60 }, (_, i) => i + 1),
+    );
+  });
+
+  it('maps the command line onto the run, filters included', async () => {
+    answer('me', [pr(1), pr(2)], false);
+    answer(
+      'me',
+      [
+        pr(1, { headRefOid: 'c'.repeat(40) }),
+        pr(2, { headRefOid: 'd'.repeat(40), requested: ['me'] }),
+      ],
+      false,
+    );
+    const run = () =>
+      yargs()
+        .command(watchRepoCommand)
+        .parseAsync([
+          'watch-repo',
+          '--repo',
+          'o/r',
+          '--limit',
+          '2',
+          '--review-requested',
+        ]);
+    await run();
+    await run();
+    expect(
+      printed().map((p) => p.events.map((e) => [e.type, e.number])),
+    ).toEqual([[['pr_pushed', 2]]]);
+    expect(mocks.gh.mock.calls[0]).toContain('first=2');
   });
 
   it('records a new viewer even when no PR changed', () => {

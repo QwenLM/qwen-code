@@ -11,7 +11,11 @@ is new since the previous look.
 ## Manual check
 
 Built CLI (`node packages/cli/dist/index.js`), `gh` authenticated, run from a
-clone of a repository with open PRs you can read.
+clone of a repository with open PRs you can read. `qwen` below is that
+build: put it on PATH under that name with a wrapper script, or write the
+`node <clone>/packages/cli/dist/index.js` form instead. An alias is not
+enough, since a scheduled gate runs in a fresh shell, and an installed
+`qwen` without these commands fails every fire of step 10.
 
 1. Run `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo>` on an open
    PR with a failing check and a comment by someone else. Expect one JSON line
@@ -52,12 +56,16 @@ per check (apps and workflows kept apart) and the reply-marker rule; `snapshot.g
 cursor rules (quiet runs, a failure once per attempt and again after a re-run
 fails, a failure re-run green, conflict marks and their clearing, the
 viewer's own comments, an untrusted comment as a notice, merge and close once
-and reopen, a new cut once, a prepared watch's pushes and handled comments,
-which stay quiet after its state is gone), the check rollup and review
-thread paging and the newest-100 read of a thread, and the command layer
-(cursor written before the output, byte-identical quiet runs, repository
-identity including a non-default port, the recorded host). `watch-repo.test.ts` pins the silent first run,
+and reopen, a new cut once and tail cuts never, dismissed reviews, a
+prepared watch's pushes and handled comments, which stay quiet after its
+state is gone, the 12 KiB output budget with deferred events reported on
+later runs and none twice, cut bodies), the check rollup and review thread
+paging and the newest-100 read of a thread, and the command layer (cursor
+written before the output, byte-identical quiet runs, repository identity
+including a non-default port, the recorded host, a blank `--host`). `watch-repo.test.ts` pins the silent first run,
 opened/pushed/ready events, quiet repeats, cursor pruning only when the list
-was cut, the cursor file name, a viewer change, and every filter.
+was cut (also through the command), the cursor file name per host and per
+filter set, a viewer change, every filter and the command line mapped onto
+them, the GraphQL arguments, the output envelope and its budget.
 `prepare.test.ts`, `cleanup.test.ts` and `ci-log.test.ts` cover the helpers
 that wait for the reaction layer.

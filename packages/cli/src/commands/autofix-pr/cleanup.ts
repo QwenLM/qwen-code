@@ -62,13 +62,16 @@ export function unsavedWork(
     if (realpathSync(top) !== realpathSync(paths.worktreePath)) {
       return `${paths.worktreePath} is not a git worktree, so git cannot tell what it holds`;
     }
-    // Explicit: `status.showUntrackedFiles=no` would hide new files.
+    // Explicit: `status.showUntrackedFiles=no` would hide new files, and an
+    // `ignore` setting for a submodule (in git config or `.gitmodules`) the
+    // changes inside it.
     const status = gitOpt(
       '-C',
       paths.worktreePath,
       'status',
       '--porcelain',
       '--untracked-files=normal',
+      '--ignore-submodules=none',
     );
     if (status === null) return `git cannot read ${paths.worktreePath}`;
     if (status !== '') return 'it has uncommitted changes';
@@ -171,8 +174,15 @@ export function runCleanup(prNumber: number, force: boolean): void {
       rmSync(path, { force: true });
     }
   }
+  // Named, so a later watch of another repository's PR of this number
+  // knows which file its gate refuses.
+  const kept = existsSync(paths.gatePath) ? { gateCursor: paths.gatePath } : {};
   writeStdoutLine(
-    JSON.stringify({ removed: true, worktreePath: paths.worktreePath }),
+    JSON.stringify({
+      removed: true,
+      worktreePath: paths.worktreePath,
+      ...kept,
+    }),
   );
 }
 

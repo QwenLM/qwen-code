@@ -516,7 +516,7 @@ describe('buildSnapshot', () => {
           pageInfo: { hasPreviousPage: false },
           nodes: [
             comment('I1', 'me', 'OWNER', {
-              body: `Fixed in abc\n${REPLY_MARKER}`,
+              body: `Fixed in abc\n${REPLY_MARKER}\n\n`,
             }),
             comment('I2', 'me', 'OWNER'),
             comment('I3', 'me', 'OWNER'),
@@ -524,6 +524,42 @@ describe('buildSnapshot', () => {
         },
       }),
       state({ postedCommentIds: ['I2'], handledCommentIds: ['I3'] }),
+    );
+    expect(snap).toMatchObject({ action: 'wait', events: [] });
+  });
+
+  it("takes the viewer's own quote of a reply for a new comment", () => {
+    // The viewer quote-replies the tool's reply and adds a request after it.
+    const quoted = `> Fixed in abc\n> ${REPLY_MARKER}\n\nstill fails`;
+    const snap = buildSnapshot(
+      pr({
+        comments: {
+          pageInfo: { hasPreviousPage: false },
+          nodes: [comment('I1', 'me', 'OWNER', { body: quoted })],
+        },
+      }),
+      state(),
+    );
+    expect(snap).toMatchObject({
+      action: 'fix',
+      events: [{ type: 'issue_comment', id: 'I1' }],
+    });
+  });
+
+  it('does not act on a dismissed review', () => {
+    const snap = buildSnapshot(
+      pr({
+        reviews: {
+          pageInfo: { hasPreviousPage: false },
+          nodes: [
+            comment('R1', 'alice', 'MEMBER', {
+              body: 'please refactor',
+              state: 'DISMISSED',
+            }),
+          ],
+        },
+      }),
+      state(),
     );
     expect(snap).toMatchObject({ action: 'wait', events: [] });
   });

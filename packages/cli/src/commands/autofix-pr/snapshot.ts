@@ -27,6 +27,10 @@ import {
   resolveGhHost,
   setGhHost,
 } from '../review/lib/gh.js';
+import {
+  GATE_OUTPUT_BUDGET_BYTES,
+  jsonBytes,
+} from '../review/lib/gate-budget.js';
 import { normalizeSegment } from '../review/lib/remote-match.js';
 import {
   REPLY_MARKER,
@@ -238,6 +242,8 @@ export interface CommentRef {
   trust: Trust;
   body: string;
   url: string;
+  /** Gate output only: the body was cut; `url` leads to the whole of it. */
+  bodyTruncated?: true;
 }
 
 export type SnapshotEvent =
@@ -278,6 +284,9 @@ export interface Snapshot {
   events: SnapshotEvent[];
   /** Connections cut at the page size; events past the cut are missing. */
   truncated: string[];
+  /** Gate output only: events left out to keep the line within the gate's
+   * output budget; the next run reports them. */
+  deferred?: number;
 }
 
 const TRUSTED_ASSOCIATIONS: Record<string, Trust> = {
@@ -289,6 +298,8 @@ const TRUSTED_ASSOCIATIONS: Record<string, Trust> = {
 const FAILED_CONCLUSIONS = new Set(['FAILURE', 'TIMED_OUT', 'STARTUP_FAILURE']);
 const FAILED_STATUSES = new Set(['FAILURE', 'ERROR']);
 const PENDING_STATUSES = new Set(['PENDING', 'EXPECTED']);
+/** Comment bodies in gate output are cut to this many characters. */
+const GATE_BODY_CHARS = 1000;
 /** Reported comment ids the query no longer returns are bounded to this
  * many; ids still on the page are always kept (see `buildGateSnapshot`). */
 const MAX_OFF_PAGE_COMMENT_IDS = 2000;
@@ -461,9 +472,11 @@ function commentEvents(
   }
 
   // A review's inline comments arrive through its threads; only a review
-  // with a body of its own says something the threads do not.
+  // with a body of its own says something the threads do not. A dismissed
+  // review was withdrawn, so it asks for nothing.
   for (const node of pr.reviews.nodes) {
-    if (node.state === 'PENDING' || !node.body.trim() || !isNew(node)) continue;
+    if (node.state === 'PENDING' || node.state === 'DISMISSED') continue;
+    if (!node.body.trim() || !isNew(node)) continue;
     const trust = classify(node, 'review', prAuthor);
     if (trust === 'ignore') continue;
     ids.push(node.id);
@@ -647,10 +660,16 @@ export function buildGateSnapshot(
   const checks = checkEvents(pr);
   const reportedChecks = new Set(next.reportedChecks);
   next.reportedChecks = [];
+  const checkKeys = new Map<SnapshotEvent, string>();
+  const candidates: SnapshotEvent[] = [];
   for (const { event, attempt } of checks.failed) {
     const key = `${event.check}@${pr.headRefOid}@${attempt}`;
-    next.reportedChecks.push(key);
-    if (!reportedChecks.has(key)) events.push(event);
+    if (reportedChecks.has(key)) {
+      next.reportedChecks.push(key);
+    } else {
+      checkKeys.set(event, key);
+      candidates.push(event);
+    }
   }
   if (checks.truncated) truncated.push('checks');
 
@@ -661,8 +680,30 @@ export function buildGateSnapshot(
   const isNew = (node: CommentNode) =>
     !reportedComments.has(node.id) && node.author?.login !== cursor.viewer;
   const comments = commentEvents(pr, cursor.prAuthor, isNew);
-  events.push(...comments.events);
+  candidates.push(...comments.events.map(withShortBodies));
   truncated.push(...comments.truncated);
+
+  // What does not fit the gate's output is not marked reported, so the next
+  // run reports it.
+  const shown = fitGateOutput(
+    (all, deferred) => ({
+      ...base,
+      action: 'resync',
+      events: all,
+      truncated,
+      deferred,
+    }),
+    events,
+    candidates,
+  );
+  events.push(...shown.events);
+  const printedIds: string[] = [];
+  for (const event of shown.events) {
+    const key = checkKeys.get(event);
+    if (key) next.reportedChecks.push(key);
+    printedIds.push(...commentIds(event));
+  }
+
   // Every reported id the query still returns stays in the cursor, however
   // many: one evicted while its comment is still on the page would be
   // reported again on the next poll, turning a quiet PR into a recurring
@@ -686,21 +727,106 @@ export function buildGateSnapshot(
     ...gone.slice(-MAX_OFF_PAGE_COMMENT_IDS),
     ...kept,
     ...adopted,
-    ...comments.ids,
+    ...printedIds,
   ];
 
-  // A cut connection may hide a transition no later poll will see, so the
-  // cut is a transition itself: reported when it appears, quiet while it
-  // lasts.
+  // A cut that hides what a later poll will not see is a transition itself:
+  // reported when it appears, quiet while it lasts. Only connections read
+  // from the front can hide something new — checks and threads past the
+  // last page; comments and reviews are read newest first, so a cut there
+  // only hides older ones, and is listed without waking the session.
   const reportedTruncated = new Set(cursor.reportedTruncated ?? []);
-  const newlyCut = truncated.some((name) => !reportedTruncated.has(name));
+  const newlyCut = truncated.some(
+    (name) => FRONT_READ.has(name) && !reportedTruncated.has(name),
+  );
   next.reportedTruncated = truncated;
 
   if (events.length === 0 && !newlyCut) {
     return { snapshot: null, cursor: next };
   }
   const action = moved ? 'resync' : events.some(isActionable) ? 'fix' : 'wait';
-  return { snapshot: { ...base, action, events, truncated }, cursor: next };
+  const snapshot: Snapshot = { ...base, action, events, truncated };
+  if (shown.deferred > 0) snapshot.deferred = shown.deferred;
+  return { snapshot, cursor: next };
+}
+
+/** Connections read from their first page, where a cut hides new items. */
+const FRONT_READ = new Set(['checks', 'reviewThreads']);
+
+/** The comment ids an event reports. */
+function commentIds(event: SnapshotEvent): string[] {
+  switch (event.type) {
+    case 'review_thread':
+      return event.comments.map((comment) => comment.id);
+    case 'review':
+    case 'issue_comment':
+    case 'untrusted_comment':
+      return [event.id];
+    default:
+      return [];
+  }
+}
+
+/** A body in gate output is cut to its first `GATE_BODY_CHARS`; the event's
+ * url leads to the whole of it. */
+function withShortBodies(event: SnapshotEvent): SnapshotEvent {
+  const cut = <T extends CommentRef>(ref: T): T => {
+    if (ref.body.length <= GATE_BODY_CHARS) return ref;
+    // Not half of a surrogate pair: the line must stay valid UTF-8.
+    const body = ref.body
+      .slice(0, GATE_BODY_CHARS)
+      .replace(/[\uD800-\uDBFF]$/, '');
+    return { ...ref, body, bodyTruncated: true };
+  };
+  if (event.type === 'review_thread') {
+    return { ...event, comments: event.comments.map(cut) };
+  }
+  if (event.type === 'review' || event.type === 'issue_comment') {
+    return cut(event);
+  }
+  return event;
+}
+
+/**
+ * The candidates that fit the gate's output after `fixed`, in order, and how
+ * many wait for the next run: the first that does not fit and every one
+ * after it. A review thread that does not fit whole shows the comments that
+ * do. The first candidate, or the first comment of its thread, shows even
+ * alone over the budget, so every run makes progress; with bodies cut, one
+ * is well within the gate's cap.
+ */
+function fitGateOutput(
+  line: (events: SnapshotEvent[], deferred: number) => unknown,
+  fixed: SnapshotEvent[],
+  candidates: SnapshotEvent[],
+): { events: SnapshotEvent[]; deferred: number } {
+  const shown: SnapshotEvent[] = [];
+  const fits = (event: SnapshotEvent) =>
+    jsonBytes(line([...fixed, ...shown, event], candidates.length)) <=
+    GATE_OUTPUT_BUDGET_BYTES;
+  for (const [index, event] of candidates.entries()) {
+    if (fits(event)) {
+      shown.push(event);
+      continue;
+    }
+    let part: SnapshotEvent | null = null;
+    if (event.type === 'review_thread' && event.comments.length > 1) {
+      for (let count = event.comments.length - 1; count > 0; count--) {
+        const head = { ...event, comments: event.comments.slice(0, count) };
+        if (fits(head) || (count === 1 && shown.length === 0)) {
+          part = head;
+          break;
+        }
+      }
+    } else if (shown.length === 0) {
+      part = event;
+    }
+    if (part) shown.push(part);
+    // A thread shown in part still waits, for the rest of its comments.
+    const left = candidates.length - index - (part === event ? 1 : 0);
+    return { events: shown, deferred: left };
+  }
+  return { events: shown, deferred: 0 };
 }
 
 export interface PrTarget {
@@ -813,6 +939,9 @@ export interface SnapshotArgs {
 }
 
 function runGate(args: SnapshotArgs): void {
+  // A blank --host is refused here: resolved, it would be '', recorded as
+  // the cursor's host, and later fires would ask whatever host `gh` defaults to.
+  setGhHost(args.host);
   const paths = autofixPrPaths(repoRoot(), args.pr);
   const existing = readGateCursor(paths.gatePath);
   const state = readState(paths.statePath);

@@ -264,8 +264,9 @@ Event rules:
   `postedCommentIds`, and it is not one of the tool's replies: a comment by
   the viewer whose body ends with the reply marker (Section 9). A marker
   anywhere else — someone quoting a reply — does not hide a comment.
-  Resolved threads, empty or pending reviews are skipped; outdated threads
-  are kept with `outdated: true`.
+  Resolved threads, empty or pending reviews, and dismissed reviews (a
+  dismissed review was withdrawn) are skipped; outdated threads are kept
+  with `outdated: true`.
 - A head SHA that differs from `lastKnownHeadSha` and is not in `pushedShas`
   is `head_moved_externally`.
 - `truncated` names the connections (`checks`, `reviewThreadComments`,
@@ -275,7 +276,8 @@ Event rules:
 Action precedence: `stop` (merged or closed) → `resync` (head moved
 externally) → `fix` (a conflict, a failed check or a trusted comment) →
 `wait`. The loop adds two more inputs: an exhausted budget means `stop`, and a
-fix in flight (`inFlight` in the state file) means `wait`.
+fix in flight (`inFlight` in the state file) means `wait`, until the attempt
+ends (Section 7).
 
 #### Gate mode (`--gate`)
 
@@ -285,8 +287,9 @@ PR's repository (or the prepared state supplies it), and its own cursor,
 `.qwen/tmp/autofix-pr-<n>-gate.json`, records what it has already reported.
 Without `--host` (or `GH_HOST`) it uses the host the PR is already watched
 on — its cursor's, or the prepared state's — before falling back to
-github.com. A cursor for another repository's PR of the same number is a
-refusal, compared as `prepare` compares state files. It prints the same
+github.com; a blank `--host` is refused. A cursor for another repository's
+PR of the same number is a refusal, compared as `prepare` compares state
+files. It prints the same
 JSON, but only the transitions since the previous run, and prints nothing
 when there are none, so the session is woken only for them:
 
@@ -306,16 +309,26 @@ when there are none, so the session is woken only for them:
   state file. An untrusted comment alone is
   reported as a notice (`wait`). The cursor keeps every reported id the query
   still returns, however many, and bounds only the ids that left the page, so
-  an identical poll is quiet.
+  an identical poll is quiet. A body is cut to its first 1,000 characters
+  (`bodyTruncated: true`); the event's `url` leads to the whole of it.
 - A head that differs from the previous run's is `head_moved_externally`
   (`resync`), unless a prepared watch of the same PR recorded or pushed it
   (`lastKnownHeadSha`, `pushedShas`); the first run records the head without
   reporting it.
 - A merge or close is reported once (`stop`); afterwards the probe is quiet,
   and a reopened PR is watched again.
-- A connection that starts being cut (`truncated`) is reported once, as
-  `wait` when nothing else happened: past the last page a new thread leaves
-  no other trace. A cut that lasts is quiet.
+- A connection read from the front that starts being cut (`checks`,
+  `reviewThreads`) is reported once, as `wait` when nothing else happened:
+  past the last page a new thread leaves no other trace. A cut that lasts is
+  quiet. Comments, reviews and thread comments are read newest first, so a
+  cut there hides only older ones: it is listed in `truncated` but wakes no
+  one.
+- The output stays within 12 KiB, under the 16 KiB the gate hands the
+  session (and cuts beyond). Events go in order — head move, conflict,
+  failures, comments — and those that do not fit, or the later comments of a
+  thread that does not fit whole, are left out, counted in `deferred` and
+  not marked reported, so the next run reports them. One event or comment
+  always goes, so every run makes progress.
 - The first run reports what is outstanding: failed checks, a conflict, and
   comments no one has handled.
 
@@ -369,8 +382,9 @@ uses an issue comment.
 ### 6.6 `cleanup <pr> [--force]`
 
 Removes the worktree, its branch and the state file together. When the
-worktree has uncommitted changes (untracked files included, whatever
-`status.showUntrackedFiles` says), or the worktree (or the branch, once the
+worktree has uncommitted changes (untracked files and changes inside
+submodules included, whatever `status.showUntrackedFiles` or a submodule's
+`ignore` setting says), or the worktree (or the branch, once the
 worktree was deleted) has commits that no PR head the watch knows of
 contains, all three are kept and the report says why. The heads it knows of
 are `lastKnownHeadSha` and `pushedShas`, and — asked only when those leave
@@ -384,7 +398,9 @@ unreadable state file. A branch that cannot be deleted is an error, and the
 state file stays. Running `cleanup` from inside the worktree it would remove
 is a refusal. The gate cursor is not removed: it belongs to the scheduled
 task, which outlives a watch, and without it the next fire would report
-everything again. Delete the task to stop the gate.
+everything again. Delete the task to stop the gate. The report names the
+kept cursor (`gateCursor`): a later gate on another repository's PR of the
+same number is refused until that file is removed.
 
 ### 6.7 `review watch-repo --repo <owner>/<repo> [--host <host>] [--limit 50] [filters]`
 
@@ -394,7 +410,11 @@ their head, draft flag, author, labels and review requests, and whether more
 open PRs exist past the limit. The cursor,
 `.qwen/tmp/review-watch/<host>/<owner>/<repo>.json` (lowercase, a port's
 `:` written as `_`, so every spelling of a repository shares one file),
-records every open PR's head and draft flag:
+records every open PR's head and draft flag. With filters the file is
+`<repo>@<key>.json`, `<key>` naming the filter set whatever its spelling or
+order: two tasks on one repository with different filters keep their own
+heads, since a push one of them recorded without reporting it would never
+be a transition for the other.
 
 - The first run records the open PRs and prints nothing.
 - Afterwards a PR that is new to the cursor is `pr_opened`, one whose head
@@ -405,8 +425,11 @@ records every open PR's head and draft flag:
   `--label <name>` (both compared without case, as GitHub does),
   `--review-requested` (the viewer is a requested reviewer; team requests do
   not count), `--exclude-drafts`, `--exclude-bots`, `--exclude-mine`. The
-  cursor follows every PR regardless, so changing a filter later does not
-  replay history.
+  cursor follows every PR regardless, and another filter set starts a cursor
+  of its own whose first run is silent, so changing a filter does not replay
+  history. Filters choose among the three transitions and are not
+  transitions themselves: a label added, or a review requested, on an
+  unchanged head prints nothing until the PR's next push.
 - A PR missing from the list was closed or merged and leaves the cursor —
   unless the list was cut at `--limit`. Then the PRs missing from it may
   still be open, and the cursor keeps up to `--limit` of them, highest
@@ -415,7 +438,9 @@ records every open PR's head and draft flag:
   again comes back as `pr_opened`.
 
 Output: `{ "repo": "<owner>/<repo>", "events": [...] }`, and nothing when
-there are no events. The skill that uses it decides what each event means:
+there are no events. Within the same 12 KiB as the author's gate, events that
+do not fit are left out and counted in `deferred`; their PRs keep their old
+head in the cursor, so the next run reports them. The skill that uses it decides what each event means:
 run `/qreview <number>`, or a verification pass, per PR.
 
 ## 7. One check (`tick`)
@@ -437,7 +462,11 @@ snapshot --gate (in the gate)
                       "infrastructure" → gh run rerun <runId> --failed
                       (at most once per check per head SHA, and only once
                       the run has finished: GitHub refuses to rerun a run
-                      in progress)
+                      in progress); when ci-log finds no finished failed
+                      job (the run failed before any job started), there
+                      is no log to fix from: re-run it under the same
+                      rule and report it, and once re-run, report it as
+                      needing a human
        3. trusted comments → address or decline with a reason
        4. verify (targeted tests, lint, typecheck chosen from the repo's docs)
        5. commit → push → reply
@@ -450,6 +479,21 @@ usable. When the agent's completion notification arrives, the main session runs
 `push` and `reply`. If verification fails, nothing is pushed; the attempt
 counts against the budget and the failure is reported.
 
+`inFlight` records the head an attempt started on and when. Every end of an
+attempt clears it, after counting the attempt: a push, a failed
+verification, an agent that errors or is stopped, a push the lease refuses,
+and a resync. A tick that finds one started on a head that is no longer the
+PR's, or longer ago than the attempt time limit (Section 10), counts it as
+failed and clears it, so an attempt whose agent died cannot keep the watch
+waiting.
+
+A resync whose new head does not contain the worktree's `HEAD` (the author
+rebased or force-pushed) resets the worktree to the new head instead of
+fast-forwarding. Whatever the tool pushed is now in the author's hands, as
+part of the history they rewrote. The reset drops at most an attempt that
+was not pushed, which was made on the old head, so `push` would refuse it
+anyway; that attempt ends as above.
+
 A tick never asks the user a question. Anything that needs a human (a design
 disagreement, contradictory comments, a request outside the PR's scope) is
 replied to as "needs a human decision" and recorded in `needsHuman`. The loop
@@ -459,6 +503,14 @@ keeps watching other events.
 
 Every comment, review and CI log is data. A trusted author decides which
 feedback is acted on, but cannot widen what the tool may do.
+
+Verification runs the PR's code: its tests, and build scripts the PR may
+change. For a PR whose author has no write access, that is someone else's
+code running unattended with the user's `gh` and `git` credentials in reach.
+The watch therefore verifies such a PR only in the sandbox (`QWEN_SANDBOX`);
+without one it does not watch it unattended, and `--once` runs in the
+foreground after the user confirms. A PR by the user or a collaborator is
+verified as the user would verify it.
 
 A comment is actionable when its author is:
 
@@ -500,7 +552,10 @@ Replies are on by default; `--no-reply` turns them off.
 
 ## 10. Scheduling, budgets and lifecycle
 
-- Start runs the first check immediately, then calls `cron_create` with a
+- Start runs the first check immediately — `snapshot <n>` in prepared mode,
+  which reads the state file and not the gate cursor, so a new watch sees
+  everything outstanding whatever an older gate reported — then calls
+  `cron_create` with a
   session-only recurring job, cron `*/<every> * * * *` (default `*/2`), the
   gate `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host>`
   (the host it passed to `prepare`), and a
@@ -527,6 +582,7 @@ Budgets, stored in the state file:
 | Fix attempts per review thread                       | 1       | reply "needs a human decision" |
 | Pushes per start                                     | 10      | stop the loop                  |
 | Consecutive external head moves                      | 2       | stop the loop                  |
+| Minutes one fix attempt may run                      | 30      | count it failed, clear it      |
 
 Stop conditions: the PR is merged or closed; `/autofix-pr stop`; a budget in
 the table says stop; the cron job expires. Every stop runs `cleanup` and

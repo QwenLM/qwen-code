@@ -14,6 +14,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { CRON_GATE_OUTPUT_CAP_BYTES } from '@qwen-code/qwen-code-core/services/cron-gate.js';
+import { GATE_OUTPUT_BUDGET_BYTES } from '../review/lib/gate-budget.js';
 import { getGhHost, setGhHost } from '../review/lib/gh.js';
 import {
   buildGateSnapshot,
@@ -288,20 +290,165 @@ describe('buildGateSnapshot', () => {
     const data = pr({
       reviewThreads: { pageInfo: { hasNextPage: false }, nodes },
     });
-    const first = buildGateSnapshot(data, cursor());
-    expect(first.snapshot?.events).toHaveLength(21);
-    expect(first.cursor.reportedCommentIds).toHaveLength(2100);
-    const second = buildGateSnapshot(data, first.cursor);
+    const all = nodes.flatMap((t) => t.comments.nodes.map((c) => c.id));
+    const second = buildGateSnapshot(data, cursor({ reportedCommentIds: all }));
     expect(second.snapshot).toBeNull();
     expect(second.cursor.reportedCommentIds).toHaveLength(2100);
 
     // Ids that left the page keep only their newest 2000.
     const stale = cursor({
-      reportedCommentIds: Array.from({ length: 2500 }, (_, i) => `old${i}`),
+      reportedCommentIds: [
+        ...Array.from({ length: 2500 }, (_, i) => `old${i}`),
+        ...all,
+      ],
     });
     const third = buildGateSnapshot(data, stale);
     expect(third.cursor.reportedCommentIds).toHaveLength(2000 + 2100);
     expect(third.cursor.reportedCommentIds[0]).toBe('old500');
+  });
+
+  it('spreads what does not fit the gate output over later runs, none twice', () => {
+    expect(GATE_OUTPUT_BUDGET_BYTES).toBeLessThan(CRON_GATE_OUTPUT_CAP_BYTES);
+    const nodes = Array.from({ length: 21 }, (_, t) =>
+      thread(
+        `T${t}`,
+        Array.from({ length: 100 }, (_, c) =>
+          comment(`T${t}C${c}`, 'alice', 'MEMBER'),
+        ),
+      ),
+    );
+    const data = pr(
+      { reviewThreads: { pageInfo: { hasNextPage: false }, nodes } },
+      [failed('Test')],
+    );
+    let current = cursor();
+    const seen: string[] = [];
+    const sizes: number[] = [];
+    let last = null as ReturnType<typeof buildGateSnapshot>['snapshot'];
+    for (let run = 0; run < 100; run++) {
+      const result = buildGateSnapshot(data, current);
+      current = result.cursor;
+      if (!result.snapshot) break;
+      last = result.snapshot;
+      sizes.push(Buffer.byteLength(JSON.stringify(result.snapshot)));
+      for (const event of result.snapshot.events) {
+        if (event.type === 'review_thread') {
+          seen.push(...event.comments.map((c) => c.id));
+        }
+      }
+      if (run === 0) {
+        // The failure goes first; the comments that do not fit wait.
+        expect(result.snapshot.events[0]).toMatchObject({ type: 'ci_failed' });
+        expect(result.snapshot.deferred).toBeGreaterThan(0);
+      }
+    }
+    expect(sizes.length).toBeGreaterThan(1);
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(GATE_OUTPUT_BUDGET_BYTES);
+    expect(last!.deferred).toBeUndefined();
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(seen).toHaveLength(2100);
+    expect(current.reportedChecks).toHaveLength(1);
+  });
+
+  it('shows one event or comment per run even when the line alone is over the budget', () => {
+    const data = pr({
+      url: `https://github.com/o/r/pull/${'7'.repeat(GATE_OUTPUT_BUDGET_BYTES)}`,
+      reviewThreads: {
+        pageInfo: { hasNextPage: false },
+        nodes: [
+          thread('T1', [
+            comment('C1', 'alice', 'MEMBER'),
+            comment('C2', 'alice', 'MEMBER'),
+          ]),
+        ],
+      },
+      comments: {
+        pageInfo: { hasPreviousPage: false },
+        nodes: [comment('I1', 'alice', 'MEMBER')],
+      },
+    });
+    const shown: Array<[string[], number | undefined]> = [];
+    let current = cursor();
+    for (let run = 0; run < 5; run++) {
+      const result = buildGateSnapshot(data, current);
+      current = result.cursor;
+      if (!result.snapshot) break;
+      shown.push([
+        result.snapshot.events.flatMap((e) =>
+          e.type === 'review_thread'
+            ? e.comments.map((c) => c.id)
+            : e.type === 'issue_comment'
+              ? [e.id]
+              : [],
+        ),
+        result.snapshot.deferred,
+      ]);
+    }
+    expect(shown).toEqual([
+      [['C1'], 2],
+      [['C2'], 1],
+      [['I1'], undefined],
+    ]);
+  });
+
+  it('cuts long bodies in the gate output, never inside a character', () => {
+    const long = 'a'.repeat(999) + '😀' + 'b'.repeat(5000);
+    const data = pr({
+      reviews: {
+        pageInfo: { hasPreviousPage: false },
+        nodes: [
+          { ...comment('R1', 'alice', 'MEMBER', long), state: 'COMMENTED' },
+        ],
+      },
+      comments: {
+        pageInfo: { hasPreviousPage: false },
+        nodes: [comment('I1', 'alice', 'MEMBER', 'short')],
+      },
+    });
+    const events = buildGateSnapshot(data, cursor()).snapshot!.events;
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'review',
+        body: 'a'.repeat(999),
+        bodyTruncated: true,
+      }),
+      expect.not.objectContaining({ bodyTruncated: expect.anything() }),
+    ]);
+  });
+
+  it('does not wake for a cut of comments or reviews, which are read newest first', () => {
+    const data = pr({
+      comments: {
+        pageInfo: { hasPreviousPage: true },
+        nodes: [comment('I1', 'alice', 'MEMBER')],
+      },
+      reviews: { pageInfo: { hasPreviousPage: true }, nodes: [] },
+    });
+    const first = buildGateSnapshot(data, cursor());
+    expect(first.snapshot).toMatchObject({
+      events: [{ type: 'issue_comment', id: 'I1' }],
+      truncated: ['reviews', 'comments'],
+    });
+    const quiet = buildGateSnapshot(
+      data,
+      cursor({ reportedCommentIds: ['I1'], reportedTruncated: [] }),
+    );
+    expect(quiet.snapshot).toBeNull();
+  });
+
+  it('does not report a dismissed review', () => {
+    const data = pr({
+      reviews: {
+        pageInfo: { hasPreviousPage: false },
+        nodes: [
+          { ...comment('R1', 'alice', 'MEMBER'), state: 'DISMISSED' },
+          { ...comment('R2', 'alice', 'MEMBER'), state: 'CHANGES_REQUESTED' },
+        ],
+      },
+    });
+    expect(buildGateSnapshot(data, cursor()).snapshot?.events).toEqual([
+      expect.objectContaining({ type: 'review', id: 'R2' }),
+    ]);
   });
 
   it('does not report a head move on the first run', () => {
@@ -767,6 +914,15 @@ describe('runSnapshot --gate', () => {
     expect(() =>
       runSnapshot({ pr: 7, repo: 'o/r', host: 'github.com:443', gate: true }),
     ).not.toThrow();
+  });
+
+  it('refuses a blank --host instead of recording an empty host', () => {
+    process.env['GH_HOST'] = 'ghe.corp';
+    expect(() =>
+      runSnapshot({ pr: 7, repo: 'o/r', host: ' ', gate: true }),
+    ).toThrow(TypeError);
+    expect(mockGh).not.toHaveBeenCalled();
+    expect(existsSync(gatePath())).toBe(false);
   });
 
   it('asks for --repo on a first run with nothing prepared', () => {

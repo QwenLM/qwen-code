@@ -170,23 +170,24 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - 评论 id 是 GraphQL node id，在评论、review 和 thread 之间都唯一。`replyTo` 是 thread 第一条评论的 `databaseId`，这是 REST 回复接口唯一接受的 id；它单独读取，所以超过 100 条评论的 thread 也能拿到。
 - 只看当前 `headRefOid` 上的检查；旧提交的汇总会被忽略。check run 在 `FAILURE`、`TIMED_OUT` 或 `STARTUP_FAILURE` 时算失败；commit status 在 `FAILURE` 或 `ERROR` 时算失败。`CANCELLED` 不算失败。`runId` 从 Actions URL 中解析，否则为 null。
 - 只有 CI 还在跑时，动作是 `wait`。CI 在跑的同时仍然可以修可信评论，因为下一次推送反正会重新触发 CI。
-- 评论 id 既不在 `handledCommentIds` 也不在 `postedCommentIds` 里、且不是工具自己的回复——即当前用户发的、正文以回复标记（第 9 节）结尾的评论——时，才算新评论。标记出现在别处（有人引用了一条回复）不会让评论被忽略。已 resolve 的 thread、空的或 pending 的 review 会被跳过；outdated 的 thread 会保留，并带上 `outdated: true`。
+- 评论 id 既不在 `handledCommentIds` 也不在 `postedCommentIds` 里、且不是工具自己的回复——即当前用户发的、正文以回复标记（第 9 节）结尾的评论——时，才算新评论。标记出现在别处（有人引用了一条回复）不会让评论被忽略。已 resolve 的 thread、空的或 pending 的 review，以及被 dismiss 的 review（它已被撤回）会被跳过；outdated 的 thread 会保留，并带上 `outdated: true`。
 - head SHA 和 `lastKnownHeadSha` 不同、且不在 `pushedShas` 里，记为 `head_moved_externally`。
 - `truncated` 列出条目数超过查询读取范围的连接（`checks`、`reviewThreadComments`、`reviewThreads`、`reviews`、`comments`）。
 
-动作优先级：`stop`（已合并或已关闭）→ `resync`（head 被别人移动）→ `fix`（冲突、失败的检查或可信评论）→ `wait`。循环会再加两个输入：预算用完时为 `stop`，修复进行中（状态文件里有 `inFlight`）时为 `wait`。
+动作优先级：`stop`（已合并或已关闭）→ `resync`（head 被别人移动）→ `fix`（冲突、失败的检查或可信评论）→ `wait`。循环会再加两个输入：预算用完时为 `stop`，修复进行中（状态文件里有 `inFlight`）时为 `wait`，直到这次尝试结束（第 7 节）。
 
 #### 闸门模式（`--gate`）
 
-`snapshot <n> --gate` 是定时任务闸门背后的那条命令。它不需要 worktree，也不需要状态文件：首次运行用 `--repo` 指定 PR 所在的仓库（或由已准备好的状态提供），它自己的游标 `.qwen/tmp/autofix-pr-<n>-gate.json` 记录已经报告过的内容。没有 `--host`（或 `GH_HOST`）时，先用该 PR 已在监视的 host——游标里的，或已准备状态里的——最后才回落到 github.com。游标属于另一个仓库的同号 PR 时直接拒绝，比较方式与 `prepare` 比较状态文件相同。它输出同样的 JSON，但只包含自上次运行以来的迁移，没有迁移时什么都不输出，因此会话只会为迁移被唤醒：
+`snapshot <n> --gate` 是定时任务闸门背后的那条命令。它不需要 worktree，也不需要状态文件：首次运行用 `--repo` 指定 PR 所在的仓库（或由已准备好的状态提供），它自己的游标 `.qwen/tmp/autofix-pr-<n>-gate.json` 记录已经报告过的内容。没有 `--host`（或 `GH_HOST`）时，先用该 PR 已在监视的 host——游标里的，或已准备状态里的——最后才回落到 github.com；空白的 `--host` 会被拒绝。游标属于另一个仓库的同号 PR 时直接拒绝，比较方式与 `prepare` 比较状态文件相同。它输出同样的 JSON，但只包含自上次运行以来的迁移，没有迁移时什么都不输出，因此会话只会为迁移被唤醒：
 
 - 失败的检查按（检查，head，attempt）报告一次：游标键带上运行 id（commit status 则是它的创建时间），所以重跑后再次失败的检查会再次报告，即使没有任何一次轮询看到它处于运行中。游标只保留仍然存在的失败，新的 head 从头开始。
 - 进行中的检查从不报告；不会出现 `ci_pending`。
 - 冲突按 head 报告一次；`mergeable` 清除标记，`UNKNOWN` 保留标记。
-- 评论、review 和 thread 评论按 node id 各报告一次，沿用第 8 节的信任规则。当前用户自己的评论永远不是事件，同一 PR 的已准备监视处理过的评论（`handledCommentIds`、`postedCommentIds`）也不是；其中查询结果里还在的会被并入游标，所以 `cleanup` 删掉状态文件之后它们仍然保持安静。只有不可信评论时作为提醒报告（`wait`）。查询结果里仍然出现的已报告 id 全部保留在游标里，不论多少；只有已经离开页面的 id 才有上限，所以内容相同的轮询是安静的。
+- 评论、review 和 thread 评论按 node id 各报告一次，沿用第 8 节的信任规则。当前用户自己的评论永远不是事件，同一 PR 的已准备监视处理过的评论（`handledCommentIds`、`postedCommentIds`）也不是；其中查询结果里还在的会被并入游标，所以 `cleanup` 删掉状态文件之后它们仍然保持安静。只有不可信评论时作为提醒报告（`wait`）。查询结果里仍然出现的已报告 id 全部保留在游标里，不论多少；只有已经离开页面的 id 才有上限，所以内容相同的轮询是安静的。正文截到前 1,000 个字符（`bodyTruncated: true`）；完整内容见事件的 `url`。
 - head 与上次运行不同时记为 `head_moved_externally`（`resync`），除非同一 PR 的已准备监视记录过或推送过它（`lastKnownHeadSha`、`pushedShas`）；首次运行只记录 head，不报告。
 - 合并或关闭报告一次（`stop`）；之后探针保持安静，重新打开的 PR 会再次被监视。
-- 某个连接开始被截断（`truncated`）时报告一次，没有其他事件时动作为 `wait`：超出最后一页的新 thread 不会留下别的痕迹。持续的截断保持安静。
+- 从头读取的连接（`checks`、`reviewThreads`）开始被截断时报告一次，没有其他事件时动作为 `wait`：超出最后一页的新 thread 不会留下别的痕迹。持续的截断保持安静。评论、review 和 thread 评论从最新的读起，那里的截断只会藏住更早的内容：它列在 `truncated` 里，但不唤醒会话。
+- 输出不超过 12 KiB，低于闸门交给会话的 16 KiB（超出部分会被闸门截掉）。事件按顺序排列——head 移动、冲突、失败、评论——放不下的事件，或放不下整体的 thread 里靠后的评论，会被留下，计入 `deferred`，且不记为已报告，所以下一次运行会报告它们。每次至少输出一个事件或一条评论，所以每次运行都有进展。
 - 首次运行报告所有尚未处理的事项：失败的检查、冲突，以及没人处理过的评论。
 
 游标在输出之前写入，所以打印之后崩溃的探针不会把同一批迁移报告两次。`ci_pending` 和安静 PR 的 `wait` 动作只存在于已准备模式。
@@ -213,18 +214,18 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 ### 6.6 `cleanup <pr> [--force]`
 
-一起删除 worktree、它的分支和状态文件。worktree 有未提交的改动（包括未跟踪文件，不受 `status.showUntrackedFiles` 影响），或者 worktree（worktree 已被删除时则是分支）有监视已知的任何 PR head 都不包含的提交时，三者都保留，并在报告里说明原因。已知的 head 是 `lastKnownHeadSha` 和 `pushedShas`，以及——只在前两者比完仍有多出的提交时才去问——远端的 PR head（`refs/pull/<n>/head`），所以手工推送过的工作不会被拦住。worktree 路径上的目录如果不是独立的 worktree，会被保留：在它里面运行 git 会判断外层 clone。没有状态文件时没有记录的 head，因此残留的 worktree 或分支都会被保留。状态文件属于另一个会话时直接拒绝。`--force` 跳过这些检查，也会丢弃无法读取的状态文件。分支删不掉时报错，状态文件保留。在要删除的 worktree 内部运行 `cleanup` 会被拒绝。闸门游标不会被删除：它属于定时任务，而定时任务比一次监视活得久，没有游标的话下一次触发会把所有内容重新报告一遍。要停掉闸门，就删除该任务。
+一起删除 worktree、它的分支和状态文件。worktree 有未提交的改动（包括未跟踪文件和子模块里的改动，不受 `status.showUntrackedFiles` 或子模块的 `ignore` 设置影响），或者 worktree（worktree 已被删除时则是分支）有监视已知的任何 PR head 都不包含的提交时，三者都保留，并在报告里说明原因。已知的 head 是 `lastKnownHeadSha` 和 `pushedShas`，以及——只在前两者比完仍有多出的提交时才去问——远端的 PR head（`refs/pull/<n>/head`），所以手工推送过的工作不会被拦住。worktree 路径上的目录如果不是独立的 worktree，会被保留：在它里面运行 git 会判断外层 clone。没有状态文件时没有记录的 head，因此残留的 worktree 或分支都会被保留。状态文件属于另一个会话时直接拒绝。`--force` 跳过这些检查，也会丢弃无法读取的状态文件。分支删不掉时报错，状态文件保留。在要删除的 worktree 内部运行 `cleanup` 会被拒绝。闸门游标不会被删除：它属于定时任务，而定时任务比一次监视活得久，没有游标的话下一次触发会把所有内容重新报告一遍。要停掉闸门，就删除该任务。报告里会写出保留的游标（`gateCursor`）：之后对另一个仓库同号 PR 的闸门会被拒绝，直到删除这个文件。
 
 ### 6.7 `review watch-repo --repo <owner>/<repo> [--host <host>] [--limit 50] [filters]`
 
-评审者的探针，有自己的闸门。一次 GraphQL 调用读取最近更新的打开 PR（`--limit`，默认 50，最多 100）及其 head、draft 标志、作者、label 和评审请求，以及上限之外是否还有打开的 PR。游标 `.qwen/tmp/review-watch/<host>/<owner>/<repo>.json`（全部小写，端口前的 `:` 写成 `_`，所以同一仓库的各种拼写共用一个文件）记录每个打开 PR 的 head 和 draft 标志：
+评审者的探针，有自己的闸门。一次 GraphQL 调用读取最近更新的打开 PR（`--limit`，默认 50，最多 100）及其 head、draft 标志、作者、label 和评审请求，以及上限之外是否还有打开的 PR。游标 `.qwen/tmp/review-watch/<host>/<owner>/<repo>.json`（全部小写，端口前的 `:` 写成 `_`，所以同一仓库的各种拼写共用一个文件）记录每个打开 PR 的 head 和 draft 标志。带过滤项时文件为 `<repo>@<key>.json`，`<key>` 代表这组过滤项，与拼写和顺序无关：同一仓库上过滤项不同的两个任务各自保存 head，因为一个任务记下却因过滤而没有报告的推送，对另一个任务永远不会再是迁移：
 
 - 首次运行记录打开的 PR，不输出任何内容。
 - 之后，游标里没有的 PR 是 `pr_opened`，head 变化的是 `pr_pushed`，原来是 draft 现在不是的是 `pr_ready`。每个事件带编号、标题、作者、URL、head SHA、base 分支、label，以及是否请求了当前用户评审。
-- 过滤项决定哪些 PR 成为事件：`--author <login>`、`--label <name>`（两者都像 GitHub 一样不区分大小写）、`--review-requested`（当前用户是被请求的评审者；team 请求不算）、`--exclude-drafts`、`--exclude-bots`、`--exclude-mine`。游标无论如何都跟踪每个 PR，所以之后更改过滤项不会重放历史。
+- 过滤项决定哪些 PR 成为事件：`--author <login>`、`--label <name>`（两者都像 GitHub 一样不区分大小写）、`--review-requested`（当前用户是被请求的评审者；team 请求不算）、`--exclude-drafts`、`--exclude-bots`、`--exclude-mine`。游标无论如何都跟踪每个 PR，换一组过滤项会使用自己的游标，其首次运行是静默的，所以更改过滤项不会重放历史。过滤项只在三种迁移中做选择，本身不是迁移：head 不变时加上 label 或请求评审不会输出任何内容，直到 PR 下一次推送。
 - 列表里没有的 PR 已关闭或合并，会从游标中移除——除非列表被 `--limit` 截断。此时列表外的 PR 可能仍然打开，游标最多保留其中 `--limit` 个，编号大的优先，因为已关闭和已合并的 PR 无法区分，不设上限就会不断累积。被挤出游标、之后又有变化的打开 PR 会以 `pr_opened` 再次出现。
 
-输出：`{ "repo": "<owner>/<repo>", "events": [...] }`，没有事件时什么都不输出。使用它的 skill 决定每个事件的含义：对每个 PR 运行 `/qreview <number>` 或一次验证。
+输出：`{ "repo": "<owner>/<repo>", "events": [...] }`，没有事件时什么都不输出。与作者侧闸门同样以 12 KiB 为限，放不下的事件被留下并计入 `deferred`；这些 PR 在游标里保留旧的 head，所以下一次运行会报告它们。使用它的 skill 决定每个事件的含义：对每个 PR 运行 `/qreview <number>` 或一次验证。
 
 ## 7. 一轮检查（`tick`）
 
@@ -244,7 +245,11 @@ snapshot --gate (in the gate)
                       "infrastructure" → gh run rerun <runId> --failed
                       (at most once per check per head SHA, and only once
                       the run has finished: GitHub refuses to rerun a run
-                      in progress)
+                      in progress); when ci-log finds no finished failed
+                      job (the run failed before any job started), there
+                      is no log to fix from: re-run it under the same
+                      rule and report it, and once re-run, report it as
+                      needing a human
        3. trusted comments → address or decline with a reason
        4. verify (targeted tests, lint, typecheck chosen from the repo's docs)
        5. commit → push → reply
@@ -252,11 +257,17 @@ snapshot --gate (in the gate)
 
 修复由后台 `agent` 完成，`working_dir` 设为 worktree。它的说明是一个文件，列出事件、日志路径、信任规则、用户追加的指示和验证要求。主会话保持可用。agent 的完成通知到达后，主会话执行 `push` 和 `reply`。验证失败时不推送；这次尝试计入预算，并报告失败原因。
 
+`inFlight` 记录一次尝试开始时的 head 和时间。尝试的每种结束方式都会在计入这次尝试之后清除它：推送、验证失败、agent 出错或被停止、推送被 lease 拒绝，以及 resync。tick 发现 `inFlight` 开始于一个已经不是 PR 当前 head 的提交，或开始时间早于尝试时限（第 10 节）时，把它记为失败并清除，所以 agent 中途死掉的尝试不会让监视一直等待。
+
+resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force-push 了），worktree 会被重置到新 head，而不是快进。工具推送过的内容此时已在作者手中，是作者改写的那段历史的一部分。重置最多丢掉一次没有推送的尝试，它基于旧的 head，`push` 本来也会拒绝它；这次尝试按上面的规则结束。
+
 一轮检查从不向用户提问。需要人来判断的情况（设计分歧、互相矛盾的评论、超出 PR 范围的要求）会回复"需要人工决定"并记入 `needsHuman`。循环继续关注其他事件。
 
 ## 8. 信任模型
 
 所有评论、review 和 CI 日志都是数据。可信作者决定哪些反馈会被处理，但不能扩大工具被允许做的事。
+
+验证会运行 PR 的代码：它的测试，以及 PR 可能改过的构建脚本。对作者没有写权限的 PR，这意味着别人的代码在无人值守的情况下运行，而用户的 `gh` 和 `git` 凭据就在手边。因此监视只在沙箱（`QWEN_SANDBOX`）里验证这类 PR；没有沙箱时不对它做无人值守的监视，`--once` 在用户确认后于前台运行。用户自己或协作者的 PR 按用户自己验证的方式验证。
 
 满足以下条件之一的作者，其评论可处理：
 
@@ -285,7 +296,7 @@ snapshot --gate (in the gate)
 
 ## 10. 调度、预算与生命周期
 
-- 启动时立即跑第一轮检查，然后调用 `cron_create` 创建会话级循环任务，cron 为 `*/<every> * * * *`（默认 `*/2`），闸门为 `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host>`（即传给 `prepare` 的 host），prompt 告诉模型如何处理闸门输出中的事件（`Run /autofix-pr tick <owner>/<repo>#<n> on the events below`）。闸门在创建任务时像 Monitor 命令一样确认一次。
+- 启动时立即跑第一轮检查——已准备模式的 `snapshot <n>`，它读状态文件而不读闸门游标，所以新的监视能看到所有未处理的事项，不论旧闸门报告过什么——然后调用 `cron_create` 创建会话级循环任务，cron 为 `*/<every> * * * *`（默认 `*/2`），闸门为 `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host>`（即传给 `prepare` 的 host），prompt 告诉模型如何处理闸门输出中的事件（`Run /autofix-pr tick <owner>/<repo>#<n> on the events below`）。闸门在创建任务时像 Monitor 命令一样确认一次。
 - 会话忙时到达的触发会在通知队列里等待；会话空闲后探针运行一次，输出自上次运行以来的全部新内容。
 - 任务随进程结束。状态文件保留，归写下它的会话所有，新会话的 `prepare` 会拒绝它（第 6.1 节）。在之后的会话里接管一次监视、并保留其已处理的评论和推送，属于交付第 4 步；在那之前，重新开始需要 `cleanup <n> --force`，这会丢掉这些历史。已经停止的监视已经运行过 `cleanup`。
 - cron 最长存活时间的设置（`QWEN_CODE_CRON_MAX_AGE_DAYS`）仍然生效。
@@ -299,6 +310,7 @@ snapshot --gate (in the gate)
 | 每个 review thread 的修复次数        | 1      | 回复"需要人工决定"       |
 | 每次启动的推送次数                   | 10     | 停止循环                 |
 | 连续被别人移动 head 的次数           | 2      | 停止循环                 |
+| 一次修复尝试可运行的分钟数           | 30     | 记为失败并清除           |
 
 停止条件：PR 已合并或关闭；执行 `/autofix-pr stop`；上表中某项预算要求停止；cron 任务过期。每次停止都会执行 `cleanup`，并输出原因、已做的推送和所有 `needsHuman` 项。
 
