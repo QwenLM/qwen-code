@@ -133,6 +133,16 @@ describe('TestRig', () => {
       .toBe(false);
   });
 
+  it('re-arms a reused rig after cleanup', async () => {
+    const rig = new TestRig();
+    await rig.setup('reused after cleanup');
+
+    await rig.cleanup();
+    await rig.setup('reused after cleanup');
+
+    await expect(rig.poll(() => true, 1_000, 10)).resolves.toBe(true);
+  });
+
   it('stops a pending readiness poll when the rig is cleaned up', async () => {
     const rig = new TestRig();
     await rig.setup('cleanup stops readiness poll');

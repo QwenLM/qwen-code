@@ -234,6 +234,8 @@ export class TestRig {
     options: { settings?: Record<string, unknown> } = {},
   ) {
     this.testName = testName;
+    // setup() re-arms a rig reused after cleanup().
+    this._closed = false;
     const sanitizedName = sanitizeTestName(testName);
     this.testDir = join(
       env['INTEGRATION_TEST_FILE_DIR']!,
