@@ -138,23 +138,32 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
             }
             long deadline = System.nanoTime() + startupTimeout.toNanos();
             long pause = 200;
-            while (System.nanoTime() < deadline) {
-                RuntimeObservation observed = observe(request, seed, saved.handle());
-                if (observed.getOutcome() == RuntimeObservation.Outcome.READY) {
-                    savePlacement(new Placement(request, seed, saved.handle(), observed.getEndpoint()));
-                    return lease(seed, observed.getEndpoint());
+            try {
+                while (System.nanoTime() < deadline) {
+                    RuntimeObservation observed = observe(request, seed, saved.handle());
+                    if (observed.getOutcome() == RuntimeObservation.Outcome.READY) {
+                        savePlacement(new Placement(request, seed, saved.handle(), observed.getEndpoint()));
+                        return lease(seed, observed.getEndpoint());
+                    }
+                    if (observed.getOutcome() != RuntimeObservation.Outcome.STARTING
+                            && observed.getOutcome() != RuntimeObservation.Outcome.UNKNOWN) {
+                        throw conflict();
+                    }
+                    try {
+                        Thread.sleep(pause);
+                    } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                        throw unavailable();
+                    }
+                    pause = Math.min(pause * 2, 2_000);
                 }
-                if (observed.getOutcome() != RuntimeObservation.Outcome.STARTING
-                        && observed.getOutcome() != RuntimeObservation.Outcome.UNKNOWN) {
-                    throw conflict();
+            } catch (RuntimeBrokerException error) {
+                // A permanent outcome frees this seed's bounded retry slot; a
+                // retryable one keeps it so the original resource stays recoverable.
+                if (!error.isRetryable()) {
+                    forgetPlacement(saved);
                 }
-                try {
-                    Thread.sleep(pause);
-                } catch (InterruptedException error) {
-                    Thread.currentThread().interrupt();
-                    throw unavailable();
-                }
-                pause = Math.min(pause * 2, 2_000);
+                throw error;
             }
             throw unavailable();
         }, executor);

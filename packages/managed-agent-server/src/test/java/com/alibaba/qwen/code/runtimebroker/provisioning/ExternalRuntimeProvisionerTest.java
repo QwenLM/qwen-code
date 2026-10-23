@@ -178,13 +178,13 @@ class ExternalRuntimeProvisionerTest {
             assertFalse(provider.isUsable(forged));
             assertFalse(provider.canRetryFailedConfirm(forged));
             api.failure = null;
-            assertEquals(lease, join(broker.warm("harness")).getLease());
+            assertSameLease(lease, join(broker.warm("harness")).getLease());
             api.state = "UNKNOWN";
             assertThrows(CompletionException.class, () -> join(broker.warm("harness")));
             assertEquals(RuntimeBindingRecord.State.READY, bindings.findById(ready.getBindingId()).getState());
             assertTrue(provider.isUsable(lease));
             api.state = "RUNNING";
-            assertEquals(lease, join(broker.warm("harness")).getLease());
+            assertSameLease(lease, join(broker.warm("harness")).getLease());
             api.endpoint = "https://replacement.example/";
             assertThrows(CompletionException.class, () -> join(broker.warm("harness")));
             assertEquals(RuntimeBindingRecord.State.LOST, bindings.findById(ready.getBindingId()).getState());
@@ -194,6 +194,14 @@ class ExternalRuntimeProvisionerTest {
         } finally {
             worker.stop(0);
         }
+    }
+
+    private static void assertSameLease(RuntimeLease expected, RuntimeLease actual) {
+        assertEquals(expected.getRuntimeInstanceId(), actual.getRuntimeInstanceId());
+        assertEquals(expected.getLeaseId(), actual.getLeaseId());
+        assertEquals(expected.getEpoch(), actual.getEpoch());
+        assertEquals(expected.getToken(), actual.getToken());
+        assertEquals(expected.getEndpoint(), actual.getEndpoint());
     }
 
     private static RuntimeBrokerService broker(ExternalRuntimeProvisioner provider,
