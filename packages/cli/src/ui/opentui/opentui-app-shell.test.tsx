@@ -2158,7 +2158,11 @@ describe('OpenTuiApp shell wiring', () => {
       type: 'info',
       text: 'Report filed.',
       historyId: history[0].id,
+      canonicalHistoryItem: history[0],
     });
+    expect(onTranscriptEvent.mock.calls[0][0].canonicalHistoryItem).toBe(
+      history[0],
+    );
   });
 
   it('routes a host clear to an empty transcript reset (U-29)', async () => {

@@ -51,6 +51,8 @@ import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import {
   foldLiveEvent,
   settleOpenTools,
+  snapshotCanonicalHistory,
+  allocateCanonicalHistoryId,
   type LiveHistoryItem,
 } from './live-session-model.js';
 import {
@@ -352,6 +354,19 @@ export function useOpenTuiLiveTurn(
         if (seq !== turnSeqRef.current || abort.signal.aborted) return;
         for await (const ev of livePromptEvents(config, prompt, abort.signal, {
           promptId,
+          checkpointHistory: {
+            allocateId: () => allocateCanonicalHistoryId(itemsRef.current),
+            snapshot: () =>
+              snapshotCanonicalHistory(
+                itemsRef.current.filter(
+                  (item) =>
+                    item.canonicalPending !== true &&
+                    !(item.kind === 'assistant' && item.streaming) &&
+                    !(item.kind === 'thinking' && !item.done) &&
+                    !(item.kind === 'tool' && !item.done),
+                ),
+              ),
+          },
           dualOutput,
           modelOverride: turnOptions?.modelOverride,
           toolCall: turnOptions?.toolCall,
@@ -448,6 +463,8 @@ export function useOpenTuiLiveTurn(
           setItems(itemsRef.current);
         } else {
           failed = true;
+          apply({ type: 'thinking-end' });
+          apply({ type: 'segment-end' });
           apply({
             type: 'error',
             text: error instanceof Error ? error.message : String(error),
@@ -457,6 +474,10 @@ export function useOpenTuiLiveTurn(
         // A stale turn must not clear a successor's controller.
         if (abortRef.current === abort) abortRef.current = null;
         if (seq === turnSeqRef.current) {
+          if (abort.signal.aborted) {
+            apply({ type: 'thinking-end' });
+            apply({ type: 'segment-end' });
+          }
           skipRetryDelayRef.current = undefined;
           if (failed && prepared && !abort.signal.aborted) {
             failedRequestRef.current = {

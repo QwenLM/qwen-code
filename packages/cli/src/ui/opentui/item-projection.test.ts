@@ -1147,12 +1147,14 @@ describe('canonical resumed tool projection', () => {
         text: 'Status\nProxy: no proxy',
         historyIsSynthetic: false,
         historyId: 7,
+        canonicalHistoryItem: canonical[0],
       },
       {
         type: 'info',
         text: 'Preparing',
         historyId: 8,
         historyDisplay: { suppressOnRestore: true },
+        canonicalHistoryItem: canonical[1],
       },
       { type: 'done' },
     ]);
@@ -1164,6 +1166,7 @@ describe('canonical resumed tool projection', () => {
         text: 'Status\nProxy: no proxy',
         historyIsSynthetic: false,
         historyId: 7,
+        canonicalHistoryItem: canonical[0],
       },
       {
         kind: 'info',
@@ -1171,6 +1174,7 @@ describe('canonical resumed tool projection', () => {
         text: 'Preparing',
         historyId: 8,
         display: { suppressOnRestore: true },
+        canonicalHistoryItem: canonical[1],
       },
     ]);
   });
@@ -1198,6 +1202,7 @@ describe('canonical resumed tool projection', () => {
         compression,
         historyId: 73,
         historyDisplay: { suppressOnRestore: true },
+        canonicalHistoryItem: item,
       },
       { type: 'done' },
     ]);
@@ -1300,6 +1305,7 @@ describe('canonical resumed tool projection', () => {
         mimeType: 'image/png',
         data: 'exact-base64',
         historyId: 41,
+        canonicalHistoryItem: history[0],
       },
     ]);
     const items = events.reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);

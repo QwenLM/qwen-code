@@ -15,6 +15,15 @@
 
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import {
+  foldLiveEvent,
+  snapshotCanonicalHistory,
+  type LiveHistoryItem,
+} from './live-session-model.js';
+
 import {
   ApprovalMode,
   MockTool,
@@ -54,6 +63,30 @@ const visionMocks = vi.hoisted(() => ({
 }));
 
 const modMocks = vi.hoisted(() => ({ get: vi.fn() }));
+const checkpointControl = vi.hoisted(() => ({
+  held: false,
+  release: null as (() => void) | null,
+  update: null as
+    | ((phase: 'resolved' | 'reentered' | 'repeated') => void)
+    | null,
+  afterWrite: null as (() => Promise<void>) | null,
+  afterMkdir: null as (() => Promise<void>) | null,
+}));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    mkdir: async (...args: Parameters<typeof actual.mkdir>) => {
+      const result = await actual.mkdir(...args);
+      await checkpointControl.afterMkdir?.();
+      return result;
+    },
+    writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
+      await actual.writeFile(...args);
+      await checkpointControl.afterWrite?.();
+    },
+  };
+});
 const schedulerControl = vi.hoisted(() => ({
   finish: null as (() => Promise<void>) | null,
 }));
@@ -85,6 +118,56 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       async schedule(
         calls: Array<{ callId: string; name?: string; args?: unknown }>,
       ): Promise<void> {
+        if (checkpointControl.held) {
+          const waiting = () =>
+            calls.map((request) => ({
+              status: 'awaiting_approval',
+              request,
+              confirmationDetails: {
+                type: 'info',
+                title: 'Edit a',
+                onConfirm: async () => {},
+              },
+            }));
+          const publish = () => this.opts.onToolCallsUpdate?.(waiting());
+          checkpointControl.update = (phase) => {
+            if (phase === 'repeated') {
+              publish();
+              return;
+            }
+            this.opts.onToolCallsUpdate?.(
+              calls.map((request) => ({ status: 'scheduled', request })),
+            );
+            if (phase === 'reentered') publish();
+          };
+          const released = new Promise<void>((resolve) => {
+            checkpointControl.release = resolve;
+          });
+          publish();
+          await released;
+          this.opts.onToolCallsUpdate?.(
+            calls.map((request) => ({ status: 'scheduled', request })),
+          );
+          await this.opts.onAllToolCallsComplete(
+            calls.map((request) => ({
+              status: 'success',
+              request,
+              response: {
+                resultDisplay: 'done',
+                responseParts: [
+                  {
+                    functionResponse: {
+                      name: request.name,
+                      id: request.callId,
+                      response: { ok: true },
+                    },
+                  },
+                ],
+              },
+            })),
+          );
+          return;
+        }
         const failure = calls.find(
           (c) => (c.args as { __scheduleFailure?: string })?.__scheduleFailure,
         )?.args as { __scheduleFailure: string } | undefined;
@@ -407,6 +490,25 @@ describe('livePromptEvents', () => {
     ...overrides,
   });
 
+  function expectMentionCanonicalSource(events: readonly OpenTuiStreamEvent[]) {
+    const cards = events.filter(
+      (event) => 'id' in event && event.id === 'client-read-1',
+    );
+    expect(cards).toHaveLength(3);
+    const source = cards[0].canonicalHistoryItem;
+    expect(source).toEqual({
+      id: expect.any(Number),
+      type: 'tool_group',
+      tools: atMocks.result.toolDisplays,
+    });
+    expect(source!.id).toBeLessThan(0);
+    for (const event of cards) {
+      expect(event.historyId).toBe(source!.id);
+      expect(event.canonicalHistoryItem).toBe(source);
+    }
+    return { historyId: source!.id, canonicalHistoryItem: source! };
+  }
+
   /** An attached image, as the composer hands it to the stream. */
   const imagePart = {
     inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
@@ -421,6 +523,11 @@ describe('livePromptEvents', () => {
     visionMocks.run.mockReset();
     modMocks.get.mockReset();
     schedulerControl.finish = null;
+    checkpointControl.held = false;
+    checkpointControl.release = null;
+    checkpointControl.update = null;
+    checkpointControl.afterWrite = null;
+    checkpointControl.afterMkdir = null;
   });
 
   it('seeds prompt ids past claims in the resumed transcript', () => {
@@ -1138,16 +1245,29 @@ describe('livePromptEvents', () => {
     });
     // ink renders the read through handleAtCommand's addItem as a tool_group;
     // here it is the same card, already settled.
+    const canonical = expectMentionCanonicalSource(events);
     expect(events).toEqual(
       expect.arrayContaining([
         {
           type: 'tool-start',
           id: 'client-read-1',
+          ...canonical,
           tool: 'Read File(s)',
           title: 'src/a.ts',
         },
-        { type: 'tool-result', id: 'client-read-1', display: 'FILE BODY' },
-        { type: 'tool-end', id: 'client-read-1', success: true, summary: 'ok' },
+        {
+          type: 'tool-result',
+          id: 'client-read-1',
+          ...canonical,
+          display: 'FILE BODY',
+        },
+        {
+          type: 'tool-end',
+          id: 'client-read-1',
+          ...canonical,
+          success: true,
+          summary: 'ok',
+        },
       ]),
     );
   });
@@ -1174,16 +1294,19 @@ describe('livePromptEvents', () => {
     );
 
     expect(sendMessageStream).not.toHaveBeenCalled();
+    const canonical = expectMentionCanonicalSource(events);
     expect(events).toEqual(
       expect.arrayContaining([
         {
           type: 'tool-result',
           id: 'client-read-1',
+          ...canonical,
           display: 'Error reading files (missing.ts): no such file',
         },
         {
           type: 'tool-end',
           id: 'client-read-1',
+          ...canonical,
           success: false,
           summary: 'error',
         },
@@ -1669,9 +1792,11 @@ describe('livePromptEvents', () => {
         ...(mixed ? valid.content : []),
       ]);
       expect(restoreSteering.mock.calls).toEqual(mixed ? [[[valid]]] : []);
+      const canonical = expectMentionCanonicalSource(events);
       expect(events).toContainEqual({
         type: 'tool-result',
         id: 'client-read-1',
+        ...canonical,
         display: 'missing.ts could not be read',
       });
       expect(events.filter((event) => event.type === 'user')).toEqual([]);
@@ -1738,16 +1863,29 @@ describe('livePromptEvents', () => {
       { text: '--- Content from src/a.ts ---\nFILE BODY' },
     ]);
     // The read the model received shows up as the settled card ink renders.
+    const canonical = expectMentionCanonicalSource(events);
     expect(events).toEqual(
       expect.arrayContaining([
         {
           type: 'tool-start',
           id: 'client-read-1',
+          ...canonical,
           tool: 'Read File(s)',
           title: 'src/a.ts',
         },
-        { type: 'tool-result', id: 'client-read-1', display: 'FILE BODY' },
-        { type: 'tool-end', id: 'client-read-1', success: true, summary: 'ok' },
+        {
+          type: 'tool-result',
+          id: 'client-read-1',
+          ...canonical,
+          display: 'FILE BODY',
+        },
+        {
+          type: 'tool-end',
+          id: 'client-read-1',
+          ...canonical,
+          success: true,
+          summary: 'ok',
+        },
       ]),
     );
   });
@@ -2178,16 +2316,19 @@ describe('livePromptEvents', () => {
     expect(restoreSteering).not.toHaveBeenCalled();
     expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
     expect(events.filter((event) => event.type === 'user')).toEqual([]);
+    const canonical = expectMentionCanonicalSource(events);
     expect(events).toEqual(
       expect.arrayContaining([
         {
           type: 'tool-result',
           id: 'client-read-1',
+          ...canonical,
           display: 'Error reading files (missing.ts): no such file',
         },
         {
           type: 'tool-end',
           id: 'client-read-1',
+          ...canonical,
           success: false,
           summary: 'error',
         },
@@ -3153,4 +3294,224 @@ describe('approval-mode helpers', () => {
     expect(selectAutoApprovals(ApprovalMode.AUTO, waiting)).toEqual([]);
     expect(selectAutoApprovals(ApprovalMode.PLAN, waiting)).toEqual([]);
   });
+});
+
+describe('live checkpoint producer and approval ownership', () => {
+  beforeEach(() => {
+    resetPromptCountForTesting();
+    atMocks.calls.length = 0;
+    atMocks.result = { processedQuery: null, shouldProceed: true };
+    atMocks.hang = null;
+    atMocks.abortAfter = null;
+    visionMocks.run.mockReset();
+    modMocks.get.mockReset();
+  });
+  const deferred = () => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  };
+
+  async function scenario(options: {
+    enabled?: boolean;
+    clientInitiated?: boolean;
+    port?: boolean;
+    boundary?: 'mkdir' | 'write';
+    invalidate?:
+      | 'approval resolved'
+      | 'same call reentered'
+      | 'session changed'
+      | 'turn changed'
+      | 'aborted';
+  }) {
+    const directory = await mkdtemp(
+      path.join(tmpdir(), 'qwen-live-checkpoint-'),
+    );
+    const abort = new AbortController();
+    let session = 'session-1';
+    let current = true;
+    const stream = oneToolBatchStream({
+      callId: 'edit-1',
+      name: 'replace',
+      args: { file_path: '/owned/a.ts', old_string: 'A', new_string: 'B' },
+      ...{
+        isClientInitiated: options.clientInitiated ?? false,
+        prompt_id: 'session-1########0',
+      },
+    });
+    const config = createFakeConfig(stream);
+    const storageRead = vi.fn(() => directory);
+    Object.assign(config, {
+      getSessionId: () => session,
+      getProjectRoot: () => directory,
+      getFileCheckpointingEnabled: () => options.enabled !== false,
+      storage: { getProjectTempCheckpointsDir: storageRead },
+    });
+    Object.assign(config.getGeminiClient(), {
+      getHistoryShallow: () => [{ role: 'user', parts: [{ text: 'edit' }] }],
+    });
+    let items: readonly LiveHistoryItem[] = [];
+    const observed: OpenTuiStreamEvent[] = [];
+    const snapshot = vi.fn(() => {
+      expect(observed.at(-1)?.type).toBe('confirm');
+      const cards = items.filter((item) => item.kind === 'tool');
+      expect(cards).toHaveLength(1);
+      expect(cards[0].canonicalHistoryItem).toMatchObject({
+        type: 'tool_group',
+        tools: [
+          {
+            args: {
+              file_path: '/owned/a.ts',
+              old_string: 'A',
+              new_string: 'B',
+            },
+          },
+        ],
+      });
+      expect(cards[0].canonicalPending).toBe(true);
+      return snapshotCanonicalHistory(
+        items.filter((item) => !item.canonicalPending),
+      );
+    });
+    const enteredWrite = deferred();
+    const releaseWrite = deferred();
+    checkpointControl.held = true;
+    const expectedWrite =
+      options.enabled !== false &&
+      !options.clientInitiated &&
+      options.port !== false;
+    if (expectedWrite) {
+      const atBoundary = async () => {
+        enteredWrite.resolve();
+        await releaseWrite.promise;
+      };
+      if (options.boundary === 'mkdir')
+        checkpointControl.afterMkdir = atBoundary;
+      else checkpointControl.afterWrite = atBoundary;
+    }
+    const gen = livePromptEvents(config, 'edit', abort.signal, {
+      isCurrentTurn: () => current,
+      ...(options.port === false
+        ? {}
+        : { checkpointHistory: { allocateId: () => -1, snapshot } }),
+    });
+    const fold = (event: OpenTuiStreamEvent) => {
+      observed.push(event);
+      items = foldLiveEvent(items, event);
+    };
+    let resumed: Promise<IteratorResult<OpenTuiStreamEvent>> | undefined;
+    try {
+      for (;;) {
+        const step = await gen.next();
+        expect(step.done).toBe(false);
+        if (step.done) throw new Error('Scheduler never reached approval');
+        fold(step.value);
+        if (step.value.type === 'confirm') break;
+      }
+      // Exactly the real for-await contract: all prior source events and
+      // confirm are folded before the generator resumes its writer.
+      resumed = gen.next();
+      if (expectedWrite) {
+        checkpointControl.update?.('repeated');
+        await Promise.race([
+          enteredWrite.promise,
+          resumed.then(() => {
+            throw new Error(
+              'Writer did not reach the actual async write boundary',
+            );
+          }),
+        ]);
+        switch (options.invalidate) {
+          case 'approval resolved':
+            checkpointControl.update?.('resolved');
+            break;
+          case 'same call reentered':
+            checkpointControl.update?.('reentered');
+            break;
+          case 'session changed':
+            session = 'session-2';
+            break;
+          case 'turn changed':
+            current = false;
+            break;
+          case 'aborted':
+            abort.abort();
+            break;
+          default:
+            break;
+        }
+        releaseWrite.resolve();
+      }
+      // A no-write route can otherwise be waiting for the next scheduler event.
+      if (!expectedWrite) checkpointControl.release?.();
+      const next = await resumed;
+      if (!next.done) fold(next.value);
+      const filesBeforeCleanup = await readdir(directory);
+      const json = filesBeforeCleanup.filter((name) => name.endsWith('.json'));
+      if (
+        options.enabled === false ||
+        options.clientInitiated ||
+        options.port === false
+      ) {
+        expect(snapshot).not.toHaveBeenCalled();
+        expect(storageRead).not.toHaveBeenCalled();
+        expect(filesBeforeCleanup).toEqual([]);
+      } else if (
+        options.invalidate &&
+        options.invalidate !== 'approval resolved'
+      ) {
+        expect(snapshot).toHaveBeenCalledOnce();
+        expect(filesBeforeCleanup).toEqual([]);
+      } else {
+        expect(snapshot).toHaveBeenCalledOnce();
+        expect(json).toHaveLength(1);
+        expect(
+          JSON.parse(await readFile(path.join(directory, json[0]), 'utf8')),
+        ).toMatchObject({
+          history: [],
+          toolCall: {
+            name: 'replace',
+            args: { old_string: 'A', new_string: 'B' },
+          },
+          promptId: 'session-1########0',
+          filePath: '/owned/a.ts',
+        });
+      }
+    } finally {
+      releaseWrite.resolve();
+      checkpointControl.afterWrite = null;
+      checkpointControl.afterMkdir = null;
+      checkpointControl.release?.();
+      // Drain/return the same generator; never start a replacement attempt.
+      if (resumed) await resumed.catch(() => {});
+      await gen.return(undefined);
+      checkpointControl.held = false;
+      checkpointControl.update = null;
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  it('captures after the actual queued tool source is folded', () =>
+    scenario({}));
+  it('does not read storage or capture when disabled', () =>
+    scenario({ enabled: false }));
+  it('does not checkpoint a client-initiated edit', () =>
+    scenario({ clientInitiated: true }));
+  it('keeps the pre-existing caller without a checkpoint port working', () =>
+    scenario({ port: false }));
+  it('retains the captured restore point when approval completes during the write', () =>
+    scenario({ invalidate: 'approval resolved' }));
+  it('does not publish when aborted while the real mkdir awaits', () =>
+    scenario({ invalidate: 'aborted', boundary: 'mkdir' }));
+  it.each([
+    'same call reentered',
+    'session changed',
+    'turn changed',
+    'aborted',
+  ] as const)(
+    'does not publish after async temporary write when %s',
+    (invalidate) => scenario({ invalidate }),
+  );
 });

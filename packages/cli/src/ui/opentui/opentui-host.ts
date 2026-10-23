@@ -44,7 +44,10 @@ import {
   coalesceFindingsHistoryItems,
   isFindingsListDisplay,
 } from '../utils/findings-coalescing.js';
-import { projectItemToStreamEvent } from './item-projection.js';
+import {
+  projectHistoryToStreamEvents,
+  projectItemToStreamEvent,
+} from './item-projection.js';
 import type {
   OpenTuiCommandHost,
   ShellConfirmationResolution,
@@ -221,8 +224,13 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
         newItem.tools.some((tool) => isFindingsListDisplay(tool.resultDisplay))
           ? coalesceFindingsHistoryItems(next)
           : next;
-      // Keep the command row's identity when its model qualification changes.
-      const event = projectItemToStreamEvent(newItem, {
+      // Coalescing changes earlier canonical tool groups as well as this row.
+      for (let index = 0; index < prev.length; index++) {
+        if (this.history[index] !== prev[index])
+          this.replaceCanonicalProjection(this.history[index]);
+      }
+      const committed = this.history[this.history.length - 1];
+      const event = projectItemToStreamEvent(committed, {
         config: this.config,
         stats: this.sessionStats,
         settings: this.settings,
@@ -232,13 +240,33 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
         this.transcript.append({
           ...event,
           historyId: id,
-          ...(newItem.display ? { historyDisplay: newItem.display } : {}),
+          canonicalHistoryItem: committed,
+          ...(committed.display ? { historyDisplay: committed.display } : {}),
+        });
+      } else {
+        this.transcript.append({
+          type: 'canonical-history',
+          historyId: id,
+          canonicalHistoryItem: committed,
         });
       }
     }
     this.notify();
     return id;
   };
+
+  private replaceCanonicalProjection(item: HistoryItem): void {
+    this.transcript.append({
+      type: 'canonical-history-replace',
+      item,
+      events: projectHistoryToStreamEvents([item], {
+        config: this.config,
+        stats: this.sessionStats,
+        settings: this.settings,
+        extensionsUpdateState: this.extensionsUpdateState,
+      }).filter((event) => event.type !== 'done'),
+    });
+  }
 
   updateItem: UseHistoryManagerReturn['updateItem'] = (id, updates) => {
     const index = this.history.findIndex((item) => item.id === id);
@@ -250,16 +278,7 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
     this.history[index] = { ...this.history[index], ...patch } as HistoryItem;
     this.history = [...this.history];
     const item = this.history[index];
-    if (item.type === 'user') {
-      this.transcript.append({
-        type: 'user',
-        historyId: id,
-        text: item.text,
-        promptId: item.promptId,
-        sentToModel: item.sentToModel,
-        ...(item.display ? { historyDisplay: item.display } : {}),
-      });
-    }
+    this.replaceCanonicalProjection(item);
     this.notify();
   };
 

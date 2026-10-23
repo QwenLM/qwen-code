@@ -29,6 +29,7 @@ import type {
   AnsiToken,
   ChatCompressionInfo,
   GoalStateCause,
+  GoalSnapshotV2,
   RetryInfo,
   ServerGeminiStreamEvent,
 } from '@qwen-code/qwen-code-core';
@@ -38,11 +39,13 @@ import type {
   ArenaAgentCardData,
   CompressionProps,
   HistoryItemBase,
+  HistoryItem,
 } from '../types.js';
 import { sanitizeSensitiveText } from '../utils/textUtils.js';
 import { AGENT_TOOL_NAMES } from '../utils/agent-tool-names.js';
 import { formatDuration, formatTokenCount } from '../utils/formatters.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
+import { allocateCanonicalHistoryId } from './live-session-model.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
 import { formatInteractiveLoopDetectedMessage } from '../../utils/loop-detected-message.js';
 import type { LoopStop } from '../../utils/loop-detected-message.js';
@@ -55,6 +58,17 @@ import type { LoopStop } from '../../utils/loop-detected-message.js';
 type OpenTuiStreamEventData =
   | Exclude<StreamEvent, { type: 'text' | 'user' }>
   | { type: 'history-expanded' }
+  | {
+      type: 'tool-history';
+      item: Extract<HistoryItem, { type: 'tool_group' }>;
+      pending: boolean;
+    }
+  | { type: 'canonical-history' }
+  | {
+      type: 'canonical-history-replace';
+      item: HistoryItem;
+      events: OpenTuiStreamEvent[];
+    }
   | (Extract<StreamEvent, { type: 'user' }> & {
       recallText?: string;
     })
@@ -194,6 +208,7 @@ type OpenTuiStreamEventData =
 
 export type OpenTuiStreamEvent = OpenTuiStreamEventData & {
   historyId?: number;
+  canonicalHistoryItem?: HistoryItem;
   historyDisplay?: HistoryItemBase['display'];
 };
 
@@ -861,6 +876,12 @@ export function createEventMapper(
           // ink redacts the echoed prompt (HistoryItemDisplay): sensitive
           // patterns masked and the text capped at 200 chars.
           text: formatUserPromptSubmitBlocked(v.reason, v.originalPrompt),
+          canonicalHistoryItem: {
+            id: allocateCanonicalHistoryId(),
+            type: 'user_prompt_submit_blocked',
+            reason: v.reason,
+            originalPrompt: v.originalPrompt,
+          },
         });
         break;
       }
@@ -868,20 +889,28 @@ export function createEventMapper(
         closeThought();
         // ink parity: the stop_hook_loop item renders via InfoMessage.
         const v = ev.value as {
+          iterationCount: number;
           reasons: string[];
           stopHookCount: number;
         };
         out.push({
           type: 'info',
           text: formatStopHookLoopText(v.stopHookCount, v.reasons),
+          canonicalHistoryItem: {
+            id: allocateCanonicalHistoryId(),
+            type: 'stop_hook_loop',
+            iterationCount: v.iterationCount,
+            reasons: v.reasons,
+            stopHookCount: v.stopHookCount,
+          },
         });
         break;
       }
       case 'goal_state': {
         closeThought();
         const v = ev as {
-          value: GoalSnapshotLike;
-          cause?: string;
+          value: GoalSnapshotV2;
+          cause?: GoalStateCause;
         };
         // ink gates on `event.cause && shouldDisplayGoalStateCause(cause)`;
         // the shared predicate keeps the exhaustive-switch guard.
@@ -891,7 +920,17 @@ export function createEventMapper(
         }
         // ink parity: addItem({type: 'goal_state', snapshot, cause}) renders
         // via GoalStatusMessage (GoalStateCard).
-        out.push({ type: 'goal', snapshot: v.value, cause });
+        out.push({
+          type: 'goal',
+          snapshot: v.value,
+          cause,
+          canonicalHistoryItem: {
+            id: allocateCanonicalHistoryId(),
+            type: 'goal_state',
+            snapshot: v.value,
+            cause,
+          },
+        });
         break;
       }
       case 'finished': {

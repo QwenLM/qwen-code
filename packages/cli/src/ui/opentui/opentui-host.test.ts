@@ -13,7 +13,13 @@ import type {
   ExtensionUpdateAction,
   ExtensionUpdateStatus,
 } from '../state/extensions.js';
-import type { ConfirmationRequest, HistoryItem } from '../types.js';
+import type {
+  ConfirmationRequest,
+  HistoryItem,
+  HistoryItemWithoutId,
+} from '../types.js';
+import { ToolCallStatus } from '../types.js';
+import { SUPERSEDED_FINDINGS_MESSAGE } from '../utils/findings-coalescing.js';
 import type { OpenTuiCommandHost } from './commands-context.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import { handleBranchSession, handleResumeSession } from './session-switch.js';
@@ -21,6 +27,7 @@ import { OpenTuiAppHost, type OpenTuiAppHostDeps } from './opentui-host.js';
 import {
   foldLiveEvent,
   rewindBoundaryHistory,
+  snapshotCanonicalHistory,
   type LiveHistoryItem,
 } from './live-session-model.js';
 
@@ -334,6 +341,7 @@ describe('OpenTuiAppHost — transcript projection (U-28/U-29)', () => {
       type: 'info',
       text: 'Done.',
       historyId: id,
+      canonicalHistoryItem: host.getHistory()[0],
     });
   });
 
@@ -351,15 +359,35 @@ describe('OpenTuiAppHost — transcript projection (U-28/U-29)', () => {
       { type: 'user', text: '/x', sentToModel: false } as never,
       1,
     );
+    const initial = transcriptAppend.mock.calls[0][0] as OpenTuiStreamEvent;
     transcriptAppend.mockClear();
     host.updateItem(id, { sentToModel: true, promptId: 'turn-1' });
     expect(transcriptAppend).toHaveBeenCalledExactlyOnceWith({
-      type: 'user',
-      historyId: id,
+      type: 'canonical-history-replace',
+      item: host.getHistory()[0],
+      events: [
+        {
+          type: 'user',
+          historyId: id,
+          canonicalHistoryItem: host.getHistory()[0],
+          text: '/x',
+          sentToModel: true,
+          promptId: 'turn-1',
+        },
+      ],
+    });
+    const updated = foldLiveEvent(
+      foldLiveEvent([], initial),
+      transcriptAppend.mock.calls[0][0] as OpenTuiStreamEvent,
+    );
+    expect(updated).toHaveLength(1);
+    expect(updated[0]).toMatchObject({
+      kind: 'user',
       text: '/x',
       sentToModel: true,
       promptId: 'turn-1',
     });
+    expect(snapshotCanonicalHistory(updated)).toEqual(host.getHistory());
     expect(host.getHistory()).toHaveLength(1);
   });
 
@@ -466,11 +494,18 @@ describe('OpenTuiAppHost — transcript projection (U-28/U-29)', () => {
     expect(transcriptClear).toHaveBeenCalledTimes(1);
   });
 
-  it('no-op kinds (tool_group, help) never append', () => {
+  it('retains zero-render kinds without adding a visible row', () => {
     const { host, transcriptAppend } = makeHost();
     host.addItem({ type: 'tool_group', tools: [] } as never, 1);
     host.addItem({ type: 'help', timestamp: new Date() } as never, 1);
-    expect(transcriptAppend).not.toHaveBeenCalled();
+    const items = transcriptAppend.mock.calls.reduce<
+      readonly LiveHistoryItem[]
+    >(
+      (history, [event]) => foldLiveEvent(history, event as OpenTuiStreamEvent),
+      [],
+    );
+    expect(items.filter((item) => !item.canonicalOnly)).toEqual([]);
+    expect(snapshotCanonicalHistory(items)).toEqual(host.getHistory());
   });
 });
 
@@ -509,4 +544,48 @@ describe('OpenTuiAppHost — satisfies the OpenTuiCommandHost surface', () => {
     expect(stats).toBeDefined();
     expect(extMap).toBeInstanceOf(Map);
   });
+});
+
+it('keeps coalesced previous findings and the committed new group in canonical snapshots', () => {
+  const { host, transcriptAppend } = makeHost();
+  let live: readonly LiveHistoryItem[] = [];
+  transcriptAppend.mockImplementation((event: OpenTuiStreamEvent) => {
+    live = foldLiveEvent(live, event);
+  });
+  const group = (id: string): HistoryItemWithoutId => ({
+    type: 'tool_group',
+    tools: [
+      {
+        callId: id,
+        name: 'report_findings',
+        description: 'Report findings',
+        status: ToolCallStatus.Success,
+        confirmationDetails: undefined,
+        resultDisplay: {
+          type: 'findings_list',
+          findings: [
+            {
+              id,
+              severity: 'Critical',
+              file: 'owned.ts',
+              summary: 'owned',
+              shortSummary: 'owned',
+              failureScenario: 'owned',
+            },
+          ],
+        },
+      },
+    ],
+  });
+  const first = host.addItem(group('first'), 1000);
+  const second = host.addItem(group('second'), 1000);
+  expect(host.getHistory().map((item) => item.id)).toEqual([first, second]);
+  expect(snapshotCanonicalHistory(live)).toEqual(host.getHistory());
+  const old = snapshotCanonicalHistory(live)[0];
+  expect(old.type === 'tool_group' && old.tools[0].resultDisplay).toBe(
+    SUPERSEDED_FINDINGS_MESSAGE,
+  );
+  expect(live.every((item) => item.canonicalHistoryItem !== undefined)).toBe(
+    true,
+  );
 });

@@ -29,6 +29,11 @@ import {
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import { appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { mapToDisplay } from '../hooks/useReactToolScheduler.js';
+import { writeToolCheckpoint } from './tool-checkpoint.js';
+import { allocateCanonicalHistoryId } from './live-session-model.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
 import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import { buildPermissionSuggestions } from '../../nonInteractive/permission-suggestions.js';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
@@ -76,9 +81,15 @@ import {
 } from './event-adapter.js';
 import { isAtCommand } from '../utils/commandUtils.js';
 import { handleAtCommand } from '../hooks/atCommandProcessor.js';
-import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
+import {
+  ToolCallStatus,
+  type HistoryItem,
+  type IndividualToolCallDisplay,
+} from '../types.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import type { OpenTuiInputSubmission } from './input-submission.js';
+
+const checkpointLogger = createDebugLogger('OPENTUI_CHECKPOINT');
 
 export interface OpenTuiSteeringSubmission extends OpenTuiInputSubmission {
   content: PartListUnion;
@@ -92,6 +103,10 @@ export interface PreparedLiveRequest {
 
 /** Options the backend passes through to the live turn. */
 export interface LivePromptOptions {
+  checkpointHistory?: {
+    snapshot: () => HistoryItem[];
+    allocateId: () => number;
+  };
   dualOutput?: DualOutputBridge | null;
   isCurrentTurn?: () => boolean;
   /** Per-turn model override (submit_prompt's modelOverride parity). */
@@ -323,6 +338,17 @@ async function expandAtMentions(
     signal,
   });
   const events = (result.toolDisplays ?? []).flatMap(atMentionCardEvents);
+  if (result.toolDisplays?.length) {
+    const source: HistoryItem = {
+      id: allocateCanonicalHistoryId(),
+      type: 'tool_group',
+      tools: result.toolDisplays,
+    };
+    for (const event of events) {
+      event.historyId = source.id;
+      event.canonicalHistoryItem = source;
+    }
+  }
   if (!result.shouldProceed || result.processedQuery === null) {
     return { parts: query, events, declined: true };
   }
@@ -700,6 +726,7 @@ export async function* livePromptEvents(
       `Timed out after ${STARTUP_CHAT_WAIT_MS}ms waiting for the startup chat to become ready`,
     );
   }
+  const sessionId = config.getSessionId();
   const current = () => options?.isCurrentTurn?.() !== false;
   const dualOutput = options?.dualOutput;
   const promptId = options?.promptId ?? nextLivePromptId(config);
@@ -1017,6 +1044,30 @@ export async function* livePromptEvents(
         }
       }
     };
+    // Approval may finish during the write; a new entrance replaces its snapshot owner.
+    const checkpointRequests = new Map<
+      string,
+      { request: ToolCallRequestInfo }
+    >();
+    const groupId = options?.checkpointHistory?.allocateId();
+    const batchId = `tool-batch-${randomUUID()}`;
+    const publishToolHistory = (calls: InteractiveToolCall[]) => {
+      if (groupId === undefined || calls.length === 0) return;
+      live.push({
+        type: 'tool-history',
+        item: {
+          ...mapToDisplay(calls, config.getProjectRoot()),
+          id: groupId,
+          batchId,
+        },
+        pending: calls.some(
+          (call) =>
+            call.status !== 'success' &&
+            call.status !== 'error' &&
+            call.status !== 'cancelled',
+        ),
+      });
+    };
     const scheduler = new InteractiveModToolScheduler({
       config,
       onNativeAttempt: (call) =>
@@ -1061,6 +1112,7 @@ export async function* livePromptEvents(
             description: invocation.getDescription(),
           });
         }
+        publishToolHistory(calls);
         // Mirror the calls still awaiting approval: one that left the state
         // (resolved, or bounced back by a PreToolUse 'ask' hook under the
         // same callId) must be able to surface its dialog again. Each
@@ -1096,6 +1148,11 @@ export async function* livePromptEvents(
           const callId = c.request.callId;
           if (waitingSeen.has(callId)) continue;
           waitingSeen.add(callId);
+          if (
+            EDIT_TOOL_NAMES.has(c.request.name) &&
+            !c.request.isClientInitiated
+          )
+            checkpointRequests.set(callId, { request: c.request });
           live.push({
             type: 'confirm',
             id: callId,
@@ -1121,6 +1178,7 @@ export async function* livePromptEvents(
         }
       },
       onAllToolCallsComplete: async (calls) => {
+        publishToolHistory(calls);
         emitPermissionTransitions(calls);
         completed = calls.filter(
           (call): call is InteractiveCompletedToolCall =>
@@ -1131,6 +1189,9 @@ export async function* livePromptEvents(
         live.close();
       },
     });
+    publishToolHistory(
+      pending.map((request) => ({ status: 'scheduled', request })),
+    );
     const scheduled = scheduler.schedule(pending as never, abort);
     void scheduled.catch((error: unknown) => {
       const cancelled =
@@ -1158,6 +1219,46 @@ export async function* livePromptEvents(
       const ev = await live.next();
       if (ev === undefined) break;
       yield ev;
+      // The consumer has now folded the preceding assistant and tool events.
+      // Capturing inside onToolCallsUpdate would read an undrained live queue.
+      if (ev.type === 'confirm') {
+        const checkpoint = checkpointRequests.get(ev.id);
+        const port = options?.checkpointHistory;
+        const directory =
+          checkpoint && port && config.getFileCheckpointingEnabled()
+            ? config.storage.getProjectTempCheckpointsDir()
+            : undefined;
+        if (checkpoint && port && directory) {
+          try {
+            await writeToolCheckpoint({
+              directory,
+              request: checkpoint.request,
+              isCurrent: () =>
+                current() &&
+                config.getSessionId() === sessionId &&
+                !abort.aborted &&
+                checkpointRequests.get(ev.id) === checkpoint,
+              snapshot: () => {
+                const history = port.snapshot();
+                const clientHistory = client.getHistoryShallow();
+                const promptIds = clientHistory.map(
+                  (content) => getApiHistoryPromptId(content) ?? null,
+                );
+                return {
+                  history,
+                  clientHistory,
+                  ...(promptIds.some(Boolean) ? { promptIds } : {}),
+                };
+              },
+            });
+          } catch (error) {
+            checkpointLogger.debug(
+              'Could not save complete tool checkpoint',
+              error,
+            );
+          }
+        }
+      }
     }
     await scheduled;
 

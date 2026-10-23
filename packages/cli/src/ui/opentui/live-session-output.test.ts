@@ -468,7 +468,7 @@ function toolHop(onContinuation?: (options: SendMessageOptions) => void) {
 }
 
 describe('logical tools and actual permission transitions', () => {
-  it('retries a failed restored-tool continuation without executing the tool again', async () => {
+  it('retries a failed model-tool continuation without executing the tool again', async () => {
     const { InteractiveModToolScheduler: RealScheduler } =
       await vi.importActual<
         typeof import('../../services/interactive-mod-tool-scheduler.js')
@@ -482,7 +482,20 @@ describe('logical tools and actual permission transitions', () => {
     );
     let attempt = 0;
     const h = setup(function* () {
-      if (++attempt === 1) throw new Error('continuation failed');
+      if (++attempt === 1) {
+        yield {
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'ordinary-tool-call',
+            name: 'owned_restore',
+            args: { owned: true },
+            isClientInitiated: false,
+            prompt_id: 'ordinary-tool',
+          },
+        };
+        return;
+      }
+      if (attempt === 2) throw new Error('continuation failed');
       yield content('retried answer');
     });
     const config = makeFakeConfig({
@@ -503,8 +516,7 @@ describe('logical tools and actual permission transitions', () => {
     const emitResult = vi.spyOn(h.bridge, 'emitToolResult');
     let prepared: PreparedLiveRequest | undefined;
     const options: LivePromptOptions = {
-      promptId: 'restored-tool',
-      toolCall: { name: 'owned_restore', args: { owned: true } },
+      promptId: 'ordinary-tool',
       dualOutput: h.bridge,
       onPreparedRequest: (request) => {
         prepared = request;
@@ -512,10 +524,14 @@ describe('logical tools and actual permission transitions', () => {
     };
     try {
       await expect(
-        drain(livePromptEvents(config, [], undefined, options)),
+        drain(
+          livePromptEvents(config, 'ordinary model prompt', undefined, options),
+        ),
       ).rejects.toThrow('continuation failed');
       expect(execute).toHaveBeenCalledExactlyOnceWith({ owned: true });
-      expect(emitUser).not.toHaveBeenCalled();
+      expect(emitUser).toHaveBeenCalledExactlyOnceWith([
+        { text: 'ordinary model prompt' },
+      ]);
       expect(emitResult).toHaveBeenCalledOnce();
       expect(prepared).toBeDefined();
       const failed = prepared!;
@@ -536,17 +552,109 @@ describe('logical tools and actual permission transitions', () => {
       expect(control.schedule).toHaveBeenCalledOnce();
       expect(execute).toHaveBeenCalledOnce();
       expect(emitResult).toHaveBeenCalledOnce();
-      expect(emitUser).toHaveBeenCalledExactlyOnceWith(failed.content);
-      expect(h.client.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(emitUser).toHaveBeenCalledTimes(2);
+      expect(emitUser).toHaveBeenLastCalledWith(failed.content);
+      expect(h.client.sendMessageStream).toHaveBeenCalledTimes(3);
+      expect(h.client.sendMessageStream.mock.calls[0][0]).toBe(
+        'ordinary model prompt',
+      );
+      expect(h.client.sendMessageStream.mock.calls[0][3]).toEqual({
+        type: SendMessageType.UserQuery,
+      });
       for (const [index, type] of [
         SendMessageType.ToolResult,
         SendMessageType.Retry,
       ].entries()) {
-        const call = h.client.sendMessageStream.mock.calls[index];
+        const call = h.client.sendMessageStream.mock.calls[index + 1];
         expect(call[0]).toBe(failed.content);
-        expect(call[2]).toBe('restored-tool');
+        expect(call[2]).toBe('ordinary-tool');
         expect(call[3]).toEqual({ type });
       }
+      const frames = await h.frames();
+      expect(users(frames)).toHaveLength(3);
+      expect(users(frames)[0].message.content).toEqual([
+        { type: 'text', text: 'ordinary model prompt' },
+      ]);
+      expect(users(frames)[1].message.content).toEqual([
+        expect.objectContaining({
+          type: 'tool_result',
+          content: 'restored-result',
+        }),
+      ]);
+      expect(users(frames)[2].message.content).toEqual([
+        { type: 'text', text: 'restored-result' },
+      ]);
+    } finally {
+      await config.shutdown({ strictResourceCleanup: true });
+    }
+  });
+
+  it('finishes a client-restored tool locally and sends only an explicit follow-up', async () => {
+    const { InteractiveModToolScheduler: RealScheduler } =
+      await vi.importActual<
+        typeof import('../../services/interactive-mod-tool-scheduler.js')
+      >('../../services/interactive-mod-tool-scheduler.js');
+    control.schedule.mockImplementation(
+      (
+        options: SchedulerOptions,
+        requests: ToolCallRequestInfo[],
+        signal: AbortSignal,
+      ) => new RealScheduler(options).schedule(requests, signal),
+    );
+    const h = setup(function* () {
+      yield content('explicit answer');
+    });
+    const config = makeFakeConfig({
+      targetDir: roots.at(-1)!,
+      cwd: roots.at(-1)!,
+      disableAllHooks: true,
+      usageStatisticsEnabled: false,
+    });
+    Object.assign(config, h.config);
+    const execute = vi.fn(async () => ({
+      llmContent: 'restored-result',
+      returnDisplay: 'restored-result',
+    }));
+    const registry = new ToolRegistry(config);
+    registry.registerTool(new MockTool({ name: 'owned_restore', execute }));
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    const emitUser = vi.spyOn(h.bridge, 'emitUserMessage');
+    const emitResult = vi.spyOn(h.bridge, 'emitToolResult');
+    const prepared = vi.fn();
+    try {
+      await drain(
+        livePromptEvents(config, [], undefined, {
+          promptId: 'restored-tool',
+          toolCall: { name: 'owned_restore', args: { owned: true } },
+          dualOutput: h.bridge,
+          onPreparedRequest: prepared,
+        }),
+      );
+      expect(execute).toHaveBeenCalledExactlyOnceWith({ owned: true });
+      expect(control.schedule).toHaveBeenCalledOnce();
+      expect(h.client.sendMessageStream).not.toHaveBeenCalled();
+      expect(prepared).not.toHaveBeenCalled();
+      expect(emitUser).not.toHaveBeenCalled();
+      expect(emitResult).toHaveBeenCalledOnce();
+      await drain(
+        livePromptEvents(config, 'explain restored result', undefined, {
+          promptId: 'explicit-followup',
+          dualOutput: h.bridge,
+        }),
+      );
+      expect(h.client.sendMessageStream).toHaveBeenCalledOnce();
+      expect(h.client.sendMessageStream.mock.calls[0][0]).toBe(
+        'explain restored result',
+      );
+      expect(h.client.sendMessageStream.mock.calls[0][3]).toEqual({
+        type: SendMessageType.UserQuery,
+      });
+      expect(execute).toHaveBeenCalledOnce();
+      expect(control.schedule).toHaveBeenCalledOnce();
+      expect(emitResult).toHaveBeenCalledOnce();
+      expect(emitUser).toHaveBeenCalledExactlyOnceWith([
+        { text: 'explain restored result' },
+      ]);
       const frames = await h.frames();
       expect(users(frames)).toHaveLength(2);
       expect(users(frames)[0].message.content).toEqual([
@@ -556,8 +664,11 @@ describe('logical tools and actual permission transitions', () => {
         }),
       ]);
       expect(users(frames)[1].message.content).toEqual([
-        { type: 'text', text: 'restored-result' },
+        { type: 'text', text: 'explain restored result' },
       ]);
+      expect(
+        assistants(frames).flatMap((frame) => frame.message.content),
+      ).toEqual([{ type: 'text', text: 'explicit answer' }]);
     } finally {
       await config.shutdown({ strictResourceCleanup: true });
     }

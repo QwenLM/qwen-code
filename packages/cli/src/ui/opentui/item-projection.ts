@@ -1358,11 +1358,14 @@ export function projectHistoryToStreamEvents(
         if (event) events.push(event);
       }
     }
+    if (!events.slice(start).some((event) => event.type !== 'done'))
+      events.push({ type: 'canonical-history' });
     for (let index = start; index < events.length; index++) {
       if (events[index].type !== 'done')
         events[index] = {
           ...events[index],
           historyId: item.id,
+          canonicalHistoryItem: item,
           ...(item.display ? { historyDisplay: item.display } : {}),
         };
     }

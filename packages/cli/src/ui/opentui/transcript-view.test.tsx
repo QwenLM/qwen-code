@@ -119,6 +119,12 @@ vi.mock('@opentui/react', () => ({ useRenderer: () => mocks.renderer }));
 
 import { OpenTuiTranscriptView } from './transcript-view.js';
 import { C } from './theme.js';
+import {
+  foldLiveEvent,
+  snapshotCanonicalHistory,
+} from './live-session-model.js';
+import { projectHistoryToStreamEvents } from './item-projection.js';
+import { ToolCallStatus, type HistoryItem } from '../types.js';
 import type {
   LiveAssistantItem,
   LiveHistoryItem,
@@ -137,6 +143,81 @@ const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
 });
 
 describe('OpenTuiTranscriptView', () => {
+  it('keeps replayed batches with the same wire call ID in distinct height slots', () => {
+    const group = (id: number, result: string): HistoryItem => ({
+      id,
+      type: 'tool_group',
+      batchId: `batch-${id}`,
+      tools: [
+        {
+          callId: 'same-wire',
+          name: 'run_shell_command',
+          description: 'owned command',
+          status: ToolCallStatus.Success,
+          resultDisplay: result,
+          confirmationDetails: undefined,
+        },
+      ],
+    });
+    const history = [
+      group(1, 'first replay result'),
+      group(2, 'second replay result'),
+    ];
+    const items = projectHistoryToStreamEvents(history, {}).reduce<
+      readonly LiveHistoryItem[]
+    >(foldLiveEvent, []);
+    const cards = items.filter((item) => item.kind === 'tool');
+    expect(cards).toHaveLength(2);
+    expect(new Set(cards.map((item) => item.renderId)).size).toBe(2);
+    expect(cards.every((item) => item.renderId !== undefined)).toBe(true);
+    expect(snapshotCanonicalHistory(items)).toEqual(history);
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const view = render(<OpenTuiTranscriptView items={items} />);
+      expect(view.container.textContent).toContain('first replay result');
+      expect(view.container.textContent).toContain('second replay result');
+      expect(
+        errors.mock.calls.filter((args) =>
+          args.some(
+            (value) => typeof value === 'string' && /same key/i.test(value),
+          ),
+        ),
+      ).toEqual([]);
+      view.unmount();
+    } finally {
+      errors.mockRestore();
+    }
+  });
+  it('keeps separate mounted tool cards when batches reuse a provider call ID', () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const view = render(
+        <OpenTuiTranscriptView
+          items={[
+            toolItem({ done: true, success: true, output: 'earlier result' }),
+            toolItem({
+              renderId: 'next-batch',
+              confirm: 'pending',
+              description: 'next approval',
+            }),
+          ]}
+          awaitingCallId="t1"
+        />,
+      );
+      expect(view.container.textContent).toContain('earlier result');
+      expect(view.container.textContent).toContain('next approval');
+      expect(
+        errors.mock.calls.filter((args) =>
+          args.some(
+            (value) => typeof value === 'string' && /same key/i.test(value),
+          ),
+        ),
+      ).toEqual([]);
+      view.unmount();
+    } finally {
+      errors.mockRestore();
+    }
+  });
   it('matches Ink retry wording while the countdown advances', () => {
     vi.useFakeTimers();
     vi.setSystemTime(100_000);

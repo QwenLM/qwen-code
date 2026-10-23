@@ -212,7 +212,7 @@ function sameWindow(a: TranscriptWindow, b: TranscriptWindow): boolean {
  *  call mints a tool card and a task card from one call id, so `id` alone is
  *  not unique among live items and two of them would share one height slot. */
 function itemKey(item: LiveHistoryItem): string {
-  return `${item.kind}:${item.id}`;
+  return `${item.kind}:${item.id}${item.kind === 'tool' && item.renderId ? `:${item.renderId}` : ''}`;
 }
 
 interface MountedNode {
@@ -468,17 +468,20 @@ export function OpenTuiTranscriptView({
   initialAnchor = 'bottom',
 }: TranscriptViewProps) {
   const visibleItems = useMemo(
-    () => items.filter(isHistoryItemVisibleAfterRestore),
+    () =>
+      items.filter(
+        (item) => !item.canonicalOnly && isHistoryItemVisibleAfterRestore(item),
+      ),
     [items],
   );
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
-  const awaitingId = visibleItems.find(
+  const awaitingItem = visibleItems.findLast(
     (item) =>
       item.kind === 'tool' &&
       item.confirm === 'pending' &&
       !item.done &&
       item.id === awaitingCallId,
-  )?.id;
+  );
   const { rootRef, nodesRef, win } = useTranscriptWindow(
     visibleItems,
     availableTerminalHeight,
@@ -523,7 +526,7 @@ export function OpenTuiTranscriptView({
                 showTimestamps={showTimestamps}
                 showToolCallDetails={showToolCallDetails}
                 mouseTracking={mouseTracking}
-                awaitingApproval={item.id === awaitingId}
+                awaitingApproval={item === awaitingItem}
               />
             </OpenTuiErrorBoundary>
           </box>
