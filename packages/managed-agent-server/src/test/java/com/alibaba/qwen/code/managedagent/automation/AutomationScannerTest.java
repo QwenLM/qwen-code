@@ -19,7 +19,10 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.NullNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -146,6 +149,226 @@ class AutomationScannerTest {
         service = new ManagedAutomationService(ledger, agentStore, workspaces,
                 connector, scanner, digests, mapper, settings, true,
                 clock::get);
+    }
+
+    private PublicAutomation defineGated(String gate) {
+        return service.create(tenant, ACTOR, "key-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true,
+                        TextNode.valueOf(gate))).body();
+    }
+
+    private AutomationLedgerStore.OccurrenceRow occurrence(String automationId,
+            String key) {
+        return ledger.findOccurrence(tenant, automationId, key).orElseThrow();
+    }
+
+    @Test
+    void aGatedDefinitionFiresOnlyWhenItsProbePrints() {
+        PublicAutomation automation = defineGated("./probe.sh --gate");
+        assertThat(automation.gate()).isEqualTo("./probe.sh --gate");
+        assertThat(automation.gateStatus()).isNull();
+        assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow()
+                .gate()).isEqualTo("./probe.sh --gate");
+
+        // Quiet: the probe ran, nothing was claimed, the slot is skipped
+        // under its own reason and the status counts it.
+        fake.gateAnswers.add("quiet");
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        String first = "schedule:2026-06-01T10:01:00Z";
+        assertThat(fake.probes).containsExactly(automation.id() + "|" + first);
+        assertThat(occurrence(automation.id(), first).outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+        assertThat(occurrence(automation.id(), first).reason())
+                .isEqualTo(AutomationScanner.REASON_GATE_QUIET);
+        PublicAutomation quiet = service.get(tenant, ACTOR, automation.id());
+        assertThat(quiet.gateStatus().lastOutcome()).isEqualTo("quiet");
+        assertThat(quiet.gateStatus().lastAt()).isEqualTo(clock.get());
+        assertThat(quiet.gateStatus().quietSinceDelivery()).isEqualTo(1);
+        assertThat(quiet.gateStatus().consecutiveFailures()).isEqualTo(0);
+        assertThat(quiet.gateStatus().lastError()).isNull();
+
+        // Failed, unknown and blocked grow one streak and keep the detail.
+        fake.gateAnswers.add("failed:exited with code 1");
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        String second = "schedule:2026-06-01T10:02:00Z";
+        assertThat(occurrence(automation.id(), second).reason())
+                .isEqualTo(AutomationScanner.REASON_GATE_FAILED);
+        assertThat(occurrence(automation.id(), second).lastError())
+                .isEqualTo("exited with code 1");
+        fake.gateAnswers.add("unknown:the Runtime did not settle");
+        clock.set(T0 + 3 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        assertThat(occurrence(automation.id(), "schedule:2026-06-01T10:03:00Z")
+                .reason()).isEqualTo(AutomationScanner.REASON_GATE_UNKNOWN);
+        fake.gateAnswers.add("blocked:the Session's tool profile declares no Shell");
+        clock.set(T0 + 4 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        assertThat(occurrence(automation.id(), "schedule:2026-06-01T10:04:00Z")
+                .reason()).isEqualTo(AutomationScanner.REASON_GATE_BLOCKED);
+        PublicAutomation failing = service.get(tenant, ACTOR, automation.id());
+        assertThat(failing.gateStatus().lastOutcome()).isEqualTo("blocked");
+        assertThat(failing.gateStatus().consecutiveFailures()).isEqualTo(3);
+        assertThat(failing.gateStatus().quietSinceDelivery()).isEqualTo(1);
+        assertThat(failing.gateStatus().lastError())
+                .isEqualTo("the Session's tool profile declares no Shell");
+
+        // Delivered: the one fire, and the status starts over.
+        clock.set(T0 + 5 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(outcomes(automation.id()).get(AutomationLedgerStore
+                .OUTCOME_FIRED)).containsExactly("schedule:2026-06-01T10:05:00Z");
+        assertThat(outcomes(automation.id()).get(AutomationLedgerStore
+                .OUTCOME_SKIPPED)).hasSize(4);
+        PublicAutomation delivered = service.get(tenant, ACTOR, automation.id());
+        assertThat(delivered.gateStatus().lastOutcome()).isEqualTo("delivered");
+        assertThat(delivered.gateStatus().quietSinceDelivery()).isEqualTo(0);
+        assertThat(delivered.gateStatus().consecutiveFailures()).isEqualTo(0);
+        assertThat(delivered.gateStatus().lastError()).isNull();
+        // Every slot asked the Harness once; only the delivery got a run.
+        assertThat(fake.probes).hasSize(5);
+        assertThat(fake.fires()).isEqualTo(5);
+    }
+
+    @Test
+    void anOutcomeOfAReplacedGateDoesNotLandOnTheNewOne() {
+        // The gate is revised while its probe runs: the old command's answer
+        // must not count on the new command's freshly reset status.
+        PublicAutomation automation = defineGated("./probe.sh");
+        fake.gateAnswers.add("failed:exited with code 1");
+        fake.beforeGateAnswer = () -> service.update(tenant, ACTOR,
+                automation.id(), "key-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(null, null, null, null, null,
+                        null, null, null, null, null,
+                        TextNode.valueOf("./other.sh")));
+        clock.set(T0 + MINUTE + 1_000);
+        scanner.tick(clock.get());
+        PublicAutomation revised = service.get(tenant, ACTOR, automation.id());
+        assertThat(revised.gate()).isEqualTo("./other.sh");
+        assertThat(revised.gateStatus()).isNull();
+    }
+
+    @Test
+    void aReplayedDeliveryOfAnEarlierRevisionDoesNotCountForTheNewGate() {
+        // The probe delivered and the claim committed, but the answer was
+        // lost; the gate is revised before the re-drive, which replays the
+        // committed run: that delivery was the old command's.
+        PublicAutomation automation = defineGated("./probe.sh");
+        fake.failAfterNextFireCommit = new DaemonException("connection lost");
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        service.update(tenant, ACTOR, automation.id(),
+                "key-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(null, null, null, null, null,
+                        null, null, null, null, null,
+                        TextNode.valueOf("./other.sh")));
+        clock.addAndGet(11_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(occurrence(automation.id(), "schedule:2026-06-01T10:01:00Z")
+                .outcome()).isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(fake.probes).hasSize(1);
+        PublicAutomation revised = service.get(tenant, ACTOR, automation.id());
+        assertThat(revised.gate()).isEqualTo("./other.sh");
+        assertThat(revised.gateStatus()).isNull();
+    }
+
+    @Test
+    void everySlotOfOneScanCountsInTheGateStatus() {
+        // One scan hands every due slot the same schedule snapshot: the
+        // counters must still move once per probe.
+        PublicAutomation automation = defineGated("./probe.sh");
+        fake.gateAnswers.add("quiet");
+        fake.gateAnswers.add("quiet");
+        fake.gateAnswers.add("quiet");
+        clock.set(T0 + 3 * MINUTE + 1_000);
+        scanner.tick(clock.get());
+        assertThat(fake.probes).hasSize(3);
+        assertThat(service.get(tenant, ACTOR, automation.id()).gateStatus()
+                .quietSinceDelivery()).isEqualTo(3);
+
+        fake.gateAnswers.add("failed:exited with code 1");
+        fake.gateAnswers.add("failed:exited with code 2");
+        clock.set(T0 + 5 * MINUTE + 1_000);
+        scanner.tick(clock.get());
+        assertThat(fake.probes).hasSize(5);
+        PublicAutomation failing = service.get(tenant, ACTOR, automation.id());
+        assertThat(failing.gateStatus().consecutiveFailures()).isEqualTo(2);
+        assertThat(failing.gateStatus().quietSinceDelivery()).isEqualTo(3);
+        assertThat(failing.gateStatus().lastError())
+                .isEqualTo("exited with code 2");
+    }
+
+    @Test
+    void aGateRevisionStartsItsStatusOverAndNullClearsIt() {
+        PublicAutomation automation = defineGated("./probe.sh");
+        fake.gateAnswers.add("quiet");
+        clock.set(T0 + MINUTE + 1_000);
+        scanner.tick(clock.get());
+        assertThat(service.get(tenant, ACTOR, automation.id()).gateStatus()
+                .quietSinceDelivery()).isEqualTo(1);
+        // Another command: the summary described the old one.
+        PublicAutomation revised = service.update(tenant, ACTOR,
+                automation.id(), "key-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(null, null, null, null, null,
+                        null, null, null, null, null,
+                        TextNode.valueOf("./other.sh"))).body();
+        assertThat(revised.definitionRevision()).isEqualTo(2);
+        assertThat(revised.gate()).isEqualTo("./other.sh");
+        assertThat(revised.gateStatus()).isNull();
+        // A revision naming no gate keeps it; null clears it.
+        PublicAutomation kept = service.update(tenant, ACTOR, automation.id(),
+                "key-" + UUID.randomUUID(), new AutomationDefinitionRequest(null,
+                        "Goal 2", null, null, null, null, null, null, null,
+                        null)).body();
+        assertThat(kept.gate()).isEqualTo("./other.sh");
+        PublicAutomation cleared = service.update(tenant, ACTOR,
+                automation.id(), "key-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(null, null, null, null, null,
+                        null, null, null, null, null, NullNode.getInstance()))
+                .body();
+        assertThat(cleared.gate()).isNull();
+        assertThat(cleared.definitionRevision()).isEqualTo(4);
+        assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow()
+                .gate()).isNull();
+        // An ungated fire never probes.
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(fake.probes).hasSize(1);
+        // The request's own bounds refuse before the relay.
+        for (JsonNode bad : List.of(TextNode.valueOf("x".repeat(2049)),
+                TextNode.valueOf("./probe.sh\u0007"), TextNode.valueOf("  "),
+                mapper.getNodeFactory().numberNode(7))) {
+            assertThatThrownBy(() -> service.update(tenant, ACTOR,
+                    automation.id(), "key-" + UUID.randomUUID(),
+                    new AutomationDefinitionRequest(null, null, null, null,
+                            null, null, null, null, null, null, bad)))
+                    .isInstanceOf(ManagedAgentException.class)
+                    .extracting(error -> ((ManagedAgentException) error).getCode())
+                    .isEqualTo("invalid_automation");
+        }
+    }
+
+    @Test
+    void aManualRunOfAQuietGateIsSkippedUnderItsReason() {
+        PublicAutomation automation = defineGated("./probe.sh");
+        fake.gateAnswers.add("quiet");
+        assertThatThrownBy(() -> service.run(tenant, ACTOR, automation.id(),
+                "manual-quiet"))
+                .isInstanceOf(ManagedAgentException.class)
+                .hasMessageContaining(AutomationScanner.REASON_GATE_QUIET);
+        assertThat(occurrence(automation.id(), "manual:manual-quiet").outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+        assertThat(occurrence(automation.id(), "manual:manual-quiet").reason())
+                .isEqualTo(AutomationScanner.REASON_GATE_QUIET);
+        // A printing probe fires the manual run like any other.
+        PublicAutomationRun run = service.run(tenant, ACTOR, automation.id(),
+                "manual-print").body();
+        assertThat(run.outcome()).isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(fake.probes).containsExactly(
+                automation.id() + "|manual:manual-quiet",
+                automation.id() + "|manual:manual-print");
     }
 
     private AutomationScanner scanner(String owner) {
@@ -1676,6 +1899,56 @@ class AutomationScannerTest {
         assertThat(ledger.findCommand(tenant, key).orElseThrow().resultJson())
                 .contains(scheduleId)
                 .doesNotContain("other");
+    }
+
+    @Test
+    void aGateTheHarnessRefusesReleasesTheClaimSoAFixedRetrySucceeds() {
+        // The server's own checks accept `sleep 5 &`; the Harness's shell
+        // checks refuse it before committing, so the key goes back.
+        String key = "gate-" + UUID.randomUUID();
+        assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true,
+                        TextNode.valueOf("sleep 5 &"))))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(error.getCode()).isEqualTo("automation_gate_invalid");
+                });
+        assertThat(ledger.findCommand(tenant, key)).isEmpty();
+        PublicAutomation fixed = service.create(tenant, ACTOR, key,
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true,
+                        TextNode.valueOf("./probe.sh"))).body();
+        assertThat(fixed.gate()).isEqualTo("./probe.sh");
+    }
+
+    @Test
+    void aGateTheSessionCannotRunReleasesTheClaim() {
+        // No Shell, or a pinned Hook catalog: the Harness refuses before it
+        // commits, so the key goes back for a retry without the gate.
+        String key = "unsupported-" + UUID.randomUUID();
+        fake.gateUnsupported = true;
+        try {
+            assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
+                    new AutomationDefinitionRequest(sessionId, "Goal",
+                            "* * * * *", "UTC", "Run it.", null, "skip", "none",
+                            null, true, TextNode.valueOf("./probe.sh"))))
+                    .isInstanceOfSatisfying(ManagedAgentException.class,
+                            error -> {
+                                assertThat(error.getStatus())
+                                        .isEqualTo(HttpStatus.CONFLICT);
+                                assertThat(error.getCode()).isEqualTo(
+                                        "automation_gate_unsupported");
+                            });
+            assertThat(ledger.findCommand(tenant, key)).isEmpty();
+            PublicAutomation ungated = service.create(tenant, ACTOR, key,
+                    new AutomationDefinitionRequest(sessionId, "Goal",
+                            "* * * * *", "UTC", "Run it.", null, "skip", "none",
+                            null, true)).body();
+            assertThat(ungated.gate()).isNull();
+        } finally {
+            fake.gateUnsupported = false;
+        }
     }
 
     @Test
