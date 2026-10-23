@@ -5054,7 +5054,7 @@ it.each(
     ),
   ),
 )(
-  'durably refuses malformed Shell Unicode before Hooks and acquisition ($publication/$version/$field/$value/last:$invalidLast)',
+  'durably refuses malformed Shell Unicode before Hooks and acquisition: %j',
   async ({ publication, version, field, value, invalidLast }) => {
     const owner = {
       owner: vi.fn(),
