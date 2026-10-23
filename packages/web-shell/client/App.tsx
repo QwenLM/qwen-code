@@ -3529,6 +3529,13 @@ export function App({
   managedModeRef.current = managedMode;
   const [managedNavigationTarget, setManagedNavigationTarget] =
     useState<HTMLDivElement | null>(null);
+  const [managedArchivedNavigationTarget, setManagedArchivedNavigationTarget] =
+    useState<HTMLDivElement | null>(null);
+  const [managedArchivedStatus, setManagedArchivedStatus] = useState({
+    count: 0,
+    loading: false,
+    error: false,
+  });
   const [managedNavigationSearch, setManagedNavigationSearch] = useState('');
   const [managedWorkspaceId, setManagedWorkspaceId] = useState<string | null>();
   const [managedWorkspaceCreationOpen, setManagedWorkspaceCreationOpen] =
@@ -21951,6 +21958,14 @@ export function App({
                       <div ref={setManagedNavigationTarget} />
                     ) : undefined
                   }
+                  managedArchivedSessions={
+                    managedAgentProvider?.lifecycle
+                      ? {
+                          ...managedArchivedStatus,
+                          content: <div ref={setManagedArchivedNavigationTarget} />,
+                        }
+                      : undefined
+                  }
                   onSearchQueryChange={
                     managedAgentProvider ? setManagedNavigationSearch : undefined
                   }
@@ -23157,6 +23172,8 @@ export function App({
                           ? managedNavigationTarget
                           : undefined
                       }
+                      archivedNavigationTarget={managedArchivedNavigationTarget}
+                      onArchivedSessionsStatusChange={setManagedArchivedStatus}
                     />
                   </WebShellCustomizationProvider>
                 </div>
