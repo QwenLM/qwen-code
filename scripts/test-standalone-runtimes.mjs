@@ -12,7 +12,15 @@ import { createHash } from 'node:crypto';
 import childProcess, { spawnSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { fetchVerifiedArchive } from './lib/runtime-archive-cache.js';
+import {
+  fetchVerifiedArchive,
+  sweepRuntimeCache,
+} from './lib/runtime-archive-cache.js';
+import {
+  BUN_VERSION,
+  NODE_VERSION,
+  RUNTIME_ARCHIVE_DIGESTS,
+} from './lib/standalone-runtime-pins.js';
 
 const script = fileURLToPath(import.meta.url);
 const repo = path.dirname(path.dirname(script));
@@ -36,7 +44,7 @@ async function worker(root, node, bun, expectedHost) {
   assert.equal(host, expectedHost);
   assert.equal(
     host === 'bun' ? process.versions.bun : process.version,
-    host === 'bun' ? '1.3.14' : 'v24.19.0',
+    host === 'bun' ? BUN_VERSION : `v${NODE_VERSION}`,
   );
   console.log(
     JSON.stringify({
@@ -933,29 +941,6 @@ async function worker(root, node, bun, expectedHost) {
   }
 }
 
-// Published digests of the pinned runtime archives: the Node v24.19.0
-// SHASUMS256.txt entry and the npm `dist.integrity` of @oven/bun-* 1.3.14.
-// Pinning them lets CI verify an archive, downloaded or cached, without first
-// fetching checksum metadata from the network.
-const RUNTIME_ARCHIVE_DIGESTS = {
-  'linux-x64': {
-    node: 'f625d97cd707df4ff96254916fbc5ff014f09c09effe5a1e0ca8f6d41a8789d4',
-    bun: 'sha512-7OVTAKvwfPmSbIV1HpdOoVVx5VRc427GuPPne93N6vk4eQBPId9nXmZDh9/zGaKPdbVjVtQSZafWQoUjx38Utw==',
-  },
-  'linux-arm64': {
-    node: 'd28c8a5bf0a808f0ed434a1dce8c54ae98f0371c0bd86ac58abc613f73e6643f',
-    bun: 'sha512-X5SsPZHs+iYO8R/efIcRtc7gT2Q2DgPfliCxEkx4cXBumwkw0c/EsHMNwH3EgGpCDaZ7IYVPhpCG/xBOQHEwZw==',
-  },
-  'darwin-x64': {
-    node: 'd1b5e999db158c62fe8f7267a4476b035d8bd93b1a605bac24a3f0dd166e3316',
-    bun: 'sha512-FFj3QdU/OhlDyZOJ8CWfN5eWLpRlT4qjZg7lMQi7jA6GuoY5ajlO1zWLP/MuHYRSbXQUvV52RejNi8DVnAp13w==',
-  },
-  'darwin-arm64': {
-    node: '8294b7aa9b03997481c06babf1e8b270c859358f27da57a11509afe537ac381d',
-    bun: 'sha512-Omj20SuiHBOUjUBIyqtkNjSUIjOtEOJwmbix/ZyFH4BaQ6OZTaaRWIR4TjHVz0yadHgli6lLTiAh1uarnvD49A==',
-  },
-};
-
 // Existing test:scripts CI invokes this mode. Provision only the two fixed
 // runtime tools; package manifests and the dependency lock remain unchanged.
 async function ci() {
@@ -971,8 +956,11 @@ async function ci() {
   // Persistent runners point this at a host-wide directory, so each archive
   // is downloaded once per host instead of on every run.
   const cacheDir = process.env.QWEN_STANDALONE_RUNTIME_CACHE;
-  const fetchArchive = (url, filename, pin) =>
-    fetchVerifiedArchive(url, filename, pin, { cacheDir });
+  const used = [];
+  const fetchArchive = (url, filename, pin) => {
+    used.push(filename);
+    return fetchVerifiedArchive(url, filename, pin, { cacheDir });
+  };
   try {
     let node = process.env.PINNED_NODE;
     let bun = process.env.PINNED_BUN;
@@ -983,10 +971,10 @@ async function ci() {
       `no pinned runtime archives for ${platform}; set PINNED_NODE and PINNED_BUN`,
     );
     if (!node) {
-      const filename = `node-v24.19.0-${process.platform}-${process.arch}.tar.gz`;
+      const filename = `node-v${NODE_VERSION}-${process.platform}-${process.arch}.tar.gz`;
       const base =
         process.env.QWEN_TEST_NODE_BASE_URL ||
-        'https://nodejs.org/dist/v24.19.0/';
+        `https://nodejs.org/dist/v${NODE_VERSION}/`;
       const source = new URL(base);
       assert.equal(source.protocol, 'https:', 'runtime source must use HTTPS');
       assert.equal(
@@ -1006,7 +994,7 @@ async function ci() {
     }
     if (!bun) {
       const name = `bun-${process.platform}-${process.arch === 'arm64' ? 'aarch64' : process.arch}`;
-      const filename = `${name}-1.3.14.tgz`;
+      const filename = `${name}-${BUN_VERSION}.tgz`;
       const bytes = await fetchArchive(
         `https://registry.npmjs.org/@oven/${name}/-/${filename}`,
         filename,
@@ -1023,6 +1011,9 @@ async function ci() {
       run('tar', ['-xzf', archive, '-C', dir]);
       bun = path.join(dir, 'package/bin/bun');
     }
+    // Only now: sweeping after the first archive would remove the second one
+    // if neither had been used for a week.
+    if (cacheDir) sweepRuntimeCache(cacheDir, used);
     const result = spawnSync(node, [script], {
       env: { ...process.env, PINNED_NODE: node, PINNED_BUN: bun },
       stdio: 'inherit',
@@ -1051,8 +1042,8 @@ if (process.argv[2] === '--ci') {
     'process.execPath',
   ]);
   const bun = run(process.env.PINNED_BUN || 'bun', ['-p', 'process.execPath']);
-  assert.equal(run(node, ['--version']), 'v24.19.0');
-  assert.equal(run(bun, ['--version']), '1.3.14');
+  assert.equal(run(node, ['--version']), `v${NODE_VERSION}`);
+  assert.equal(run(bun, ['--version']), BUN_VERSION);
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), 'standalone-runtime-test-'),
   );

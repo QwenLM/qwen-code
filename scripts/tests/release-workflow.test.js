@@ -574,6 +574,10 @@ describe('release workflow', () => {
   });
 
   it('keeps the workflow focused on orchestration', () => {
+    // 880, raised from 870 for quality_scripts' standalone runtime cache
+    // step: the same four-line export of a host-wide cache path as ci.yml's
+    // test job — orchestration; the cache logic lives in
+    // scripts/lib/runtime-archive-cache.js.
     // 870, raised from 850 for moving publish/collect onto the opt-in
     // ecs-qwen-release-host lane and quality onto the pool its checks already
     // use: the added lines are two runs-on expressions, two anchored steps,
@@ -587,7 +591,7 @@ describe('release workflow', () => {
     // is the job that reports their failure, so its last-resort issue filing
     // is deliberately inline. Every other step stays under the per-step cap
     // below, which is the rule that actually keeps logic out of the YAML.
-    expect(workflow.split('\n').length).toBeLessThan(870);
+    expect(workflow.split('\n').length).toBeLessThan(880);
     for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
       for (const step of job.steps ?? []) {
         if (step.name === 'Restore workspace ownership' || !step.run) continue;

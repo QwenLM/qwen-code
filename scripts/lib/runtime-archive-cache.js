@@ -29,12 +29,13 @@ export async function fetchVerifiedArchive(
   if (cached) {
     try {
       const bytes = fs.readFileSync(cached);
-      // A mismatching copy is replaced by the download below.
       if (digest(bytes) === expected) {
         console.log(`runtime archive reused from cache: ${cached}`);
-        sweepCache(cacheDir, filename);
+        markUsed(cached);
         return bytes;
       }
+      // Replaced by the download below.
+      console.log(`runtime archive in cache failed verification: ${cached}`);
     } catch {
       // Not cached yet, or unreadable: download it below.
     }
@@ -80,7 +81,6 @@ export async function fetchVerifiedArchive(
       fs.writeFileSync(partial, bytes);
       fs.renameSync(partial, cached);
       console.log(`runtime archive cached: ${cached}`);
-      sweepCache(cacheDir, filename);
     } catch (error) {
       try {
         fs.rmSync(partial, { force: true });
@@ -93,27 +93,43 @@ export async function fetchVerifiedArchive(
   return bytes;
 }
 
-// Archives that only other revisions pin, and partial files a killed run left
-// behind, are removed once no run has used them for a week. Each run marks its
-// own archive as used, so revisions still running keep theirs, and an
-// in-flight partial file is always newer than that.
-function sweepCache(cacheDir, filename) {
+function markUsed(file) {
   try {
     const now = new Date();
-    fs.utimesSync(path.join(cacheDir, filename), now, now);
-    for (const entry of fs.readdirSync(cacheDir)) {
+    fs.utimesSync(file, now, now);
+  } catch {
+    // The sweep below also spares the archives a run names as used.
+  }
+}
+
+/**
+ * Removes what no run has used for a week: archives that only other revisions
+ * pin, and partial files a killed run left behind. Call it once a run has
+ * fetched every archive it needs, naming them in `used`; until then, an
+ * archive the run fetches later may look just as unused. Each fetch marks its
+ * archive as used, so revisions still running keep theirs, and an in-flight
+ * partial file is always newer than a week.
+ */
+export function sweepRuntimeCache(cacheDir, used) {
+  let entries;
+  try {
+    entries = fs.readdirSync(cacheDir);
+  } catch {
+    return;
+  }
+  const now = Date.now();
+  for (const entry of entries) {
+    if (used.includes(entry)) continue;
+    try {
       const file = path.join(cacheDir, entry);
       // Another job may have removed it since the listing.
       const stats = fs.statSync(file, { throwIfNoEntry: false });
-      if (
-        entry !== filename &&
-        stats &&
-        now - stats.mtimeMs > UNUSED_ENTRY_MAX_AGE_MS
-      ) {
+      if (stats?.isFile() && now - stats.mtimeMs > UNUSED_ENTRY_MAX_AGE_MS) {
         fs.rmSync(file, { force: true });
       }
+    } catch {
+      // Sweeping only saves space; an entry it cannot remove does not stop
+      // it from removing the rest.
     }
-  } catch {
-    // Sweeping only saves space.
   }
 }

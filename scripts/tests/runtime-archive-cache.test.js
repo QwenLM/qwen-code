@@ -10,7 +10,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
-import { fetchVerifiedArchive } from '../lib/runtime-archive-cache.js';
+import {
+  fetchVerifiedArchive,
+  sweepRuntimeCache,
+} from '../lib/runtime-archive-cache.js';
+import { RUNTIME_ARCHIVE_DIGESTS } from '../lib/standalone-runtime-pins.js';
 import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
 const ARCHIVE = Buffer.from('pinned archive bytes');
@@ -77,6 +81,9 @@ describe('fetchVerifiedArchive', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(fs.readFileSync(path.join(cacheDir, FILENAME)).equals(ARCHIVE)).toBe(
       true,
+    );
+    expect(log).toHaveBeenCalledWith(
+      `runtime archive in cache failed verification: ${path.join(cacheDir, FILENAME)}`,
     );
   });
 
@@ -152,14 +159,46 @@ describe('fetchVerifiedArchive', () => {
     // Another revision's pin and a concurrent job's partial file.
     seed('runtime-other.tgz', DAY_MS);
     seed(`${FILENAME}.123.tmp`, 0);
+    // Not a cache entry: left alone, and the sweep goes on past it.
+    fs.mkdirSync(path.join(cacheDir, 'a-directory'));
+    age(path.join(cacheDir, 'a-directory'), 8 * DAY_MS);
 
     await fetchWith({ cacheDir });
+    sweepRuntimeCache(cacheDir, [FILENAME]);
 
     expect(fs.readdirSync(cacheDir).sort()).toEqual([
+      'a-directory',
       'runtime-other.tgz',
       FILENAME,
       `${FILENAME}.123.tmp`,
     ]);
+  });
+
+  it('keeps every archive a run uses when it sweeps after the last fetch', async () => {
+    const cacheDir = path.join(root, 'cache');
+    fs.mkdirSync(cacheDir);
+    const second = Buffer.from('second pinned archive bytes');
+    // Both pins are cached but unused for a week, as after a quiet week.
+    for (const [entry, bytes] of [
+      [FILENAME, ARCHIVE],
+      ['second.tgz', second],
+      ['runtime-old.tgz', WRONG],
+    ]) {
+      fs.writeFileSync(path.join(cacheDir, entry), bytes);
+      age(path.join(cacheDir, entry), 8 * DAY_MS);
+    }
+
+    await fetchWith({ cacheDir });
+    await fetchVerifiedArchive(
+      'https://example.invalid/second.tgz',
+      'second.tgz',
+      { digest: sha256, expected: sha256(second) },
+      { cacheDir, fetchImpl, sleep },
+    );
+    sweepRuntimeCache(cacheDir, [FILENAME, 'second.tgz']);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(fs.readdirSync(cacheDir).sort()).toEqual([FILENAME, 'second.tgz']);
   });
 
   it('marks a reused archive as used', async () => {
@@ -172,10 +211,38 @@ describe('fetchVerifiedArchive', () => {
     age(path.join(cacheDir, 'runtime-old.tgz'), 8 * DAY_MS);
 
     await fetchWith({ cacheDir });
+    // Even without naming it, a later sweep keeps what a run just used.
+    sweepRuntimeCache(cacheDir, []);
 
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(fs.statSync(cached).mtimeMs).toBeGreaterThan(Date.now() - DAY_MS);
     expect(fs.readdirSync(cacheDir)).toEqual([FILENAME]);
+  });
+
+  it('caches through a partial file, so a failed write leaves no cached copy', async () => {
+    const cacheDir = path.join(root, 'cache');
+    const writeFileSync = fs.writeFileSync.bind(fs);
+    const write = vi
+      .spyOn(fs, 'writeFileSync')
+      .mockImplementationOnce((file, data) => {
+        writeFileSync(file, data.subarray(0, 4));
+        throw new Error('disk full');
+      });
+    try {
+      const bytes = await fetchWith({ cacheDir });
+
+      expect(bytes.equals(ARCHIVE)).toBe(true);
+      expect(write).toHaveBeenCalledWith(
+        `${path.join(cacheDir, FILENAME)}.${process.pid}.tmp`,
+        ARCHIVE,
+      );
+    } finally {
+      write.mockRestore();
+    }
+    expect(fs.readdirSync(cacheDir)).toEqual([]);
+    expect(log).toHaveBeenCalledWith(
+      'runtime archive not cached: Error: disk full',
+    );
   });
 
   it('keeps a verified download when the cache path runs through a file', async () => {
@@ -212,23 +279,74 @@ describe('fetchVerifiedArchive', () => {
 });
 
 describe('standalone runtime cache wiring', () => {
-  it('exports the cache directory the regression reads to the test job', () => {
-    const workflow = fs.readFileSync(
-      path.join(ROOT, '.github/workflows/ci.yml'),
-      'utf8',
+  const CACHE_STEP =
+    'Configure persistent standalone runtime cache (self-hosted)';
+  const read = (file) => fs.readFileSync(path.join(ROOT, file), 'utf8');
+  const expectCacheExportedBefore = (job, consumer) => {
+    const step = getWorkflowStep(job, CACHE_STEP);
+    expect(step).toMatch(/^\s+if: .*runner\.environment == 'self-hosted'/m);
+    expect(step).toContain(
+      'cache_dir="${HOME}/.cache/qwen-code/standalone-runtimes"',
     );
-    const step = getWorkflowStep(
-      getWorkflowJob(workflow, 'test'),
-      'Configure persistent standalone runtime cache (self-hosted)',
+    expect(step).toContain(
+      'echo "QWEN_STANDALONE_RUNTIME_CACHE=${cache_dir}" >> "${GITHUB_ENV}"',
     );
-    const script = fs.readFileSync(
-      path.join(ROOT, 'scripts/test-standalone-runtimes.mjs'),
-      'utf8',
-    );
-
-    // Either side renamed alone silently turns the cache off.
-    expect(step).toContain('QWEN_STANDALONE_RUNTIME_CACHE=${cache_dir}');
     expect(step).toContain('du -sh "${cache_dir}"');
-    expect(script).toContain('process.env.QWEN_STANDALONE_RUNTIME_CACHE');
+    // $GITHUB_ENV reaches only the steps after the one that writes it.
+    getWorkflowStep(job, consumer);
+    expect(job.indexOf(`- name: '${CACHE_STEP}'`)).toBeLessThan(
+      job.indexOf(`- name: '${consumer}'`),
+    );
+  };
+
+  it('exports the cache directory before the CI tests run', () => {
+    expectCacheExportedBefore(
+      getWorkflowJob(read('.github/workflows/ci.yml'), 'test'),
+      'Run tests and generate reports',
+    );
+  });
+
+  it('exports the cache directory before the release script tests run', () => {
+    expectCacheExportedBefore(
+      getWorkflowJob(read('.github/workflows/release.yml'), 'quality_scripts'),
+      'Run Script Tests',
+    );
+  });
+
+  it('hands the exported directory to every fetch and sweeps after the last', () => {
+    const script = read('scripts/test-standalone-runtimes.mjs');
+
+    expect(script).toContain(
+      'const cacheDir = process.env.QWEN_STANDALONE_RUNTIME_CACHE;',
+    );
+    expect(script).toContain(
+      'return fetchVerifiedArchive(url, filename, pin, { cacheDir });',
+    );
+    expect(script.indexOf('sweepRuntimeCache(cacheDir, used)')).toBeGreaterThan(
+      script.lastIndexOf('await fetchArchive('),
+    );
+  });
+});
+
+describe('pinned standalone runtime archives', () => {
+  it('pins a well-formed, distinct digest of each runtime for every POSIX platform', () => {
+    expect(Object.keys(RUNTIME_ARCHIVE_DIGESTS).sort()).toEqual([
+      'darwin-arm64',
+      'darwin-x64',
+      'linux-arm64',
+      'linux-x64',
+    ]);
+    const digests = Object.values(RUNTIME_ARCHIVE_DIGESTS).flatMap(
+      ({ node, bun }) => {
+        expect(node).toMatch(/^[a-f0-9]{64}$/);
+        expect(bun).toMatch(/^sha512-[A-Za-z0-9+/]{86}==$/);
+        expect(Buffer.from(bun.slice('sha512-'.length), 'base64')).toHaveLength(
+          64,
+        );
+        return [node, bun];
+      },
+    );
+    // A row pasted over another platform's.
+    expect(new Set(digests).size).toBe(digests.length);
   });
 });
