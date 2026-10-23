@@ -4,13 +4,21 @@
 
 ## 状态与源码边界
 
-**当前检查点（2026-10-23）：#14959 已合并；#15283 仍为 Draft，现已整合 main `56733c35`。** restore 接纳/自有历史行发布与工具本地完成修复均已提交。整合后的 `5cb491f5` 通过正常 build、包含集成测试的完整 typecheck、fresh bundle、382 项受影响 CLI 测试及 65 项受影响 core 测试，均零跳过。此前 902 案完整 CLI 回归和 Node+Ink/Bun+Ink/严格 OpenTUI 的 H11e 对照保留精确源码归属。H11e 在新整合的严格 OpenTUI bundle 上再次通过：工具执行一次、自动模型请求为零、显式后续请求一次、checkpoint 不变、自然退出为 0。另一个真实模型 read→edit 探针确认了剩余缺陷：Ink 在待审批时生成完整 checkpoint，OpenTUI 到达相同审批状态却未创建文件。完整 checkpoint 创建/恢复、最终组合安装产物及平台验收仍待完成，PR 尚不能正式送审。本次 main 已包含 #15305 对继承的 Java CI 问题的修复。
+**当前源码检查点（2026-10-23）：#15283 在正常整合选定 main `3af0cf174c3e75e05d411708b4dea9088674b8f7` 后，保持 Draft，head 为 `e8fe3411aaf334590c46b12d96f4e299c1037a6e`。** 冷 journal 修复已提交为 `4aa88530e1a111d6977bb6ba7db865a354151569`（15 文件，+2,531/−106）。修复在 active 分支保留原 assistant 调用及所选工具实际重放的新结果，使废弃原始记录留在分支之外，并以真实终态重建未重放的兄弟结果；同时加入永久离线 checkpoint 热/冷恢复回归，以及位于未改动 no-flicker gate 之后的独立三腿 CI 循环。下文缺失 checkpoint 探针属于较早源码边界，不代表当前实现。#14959、#15067、#14046 均为已合并依赖，不是仍待合入的父 PR。
 
-已完成的审查修复保留现有 history 与 turn 所有权。剩余门禁包括完整 checkpoint producer/consumer 链、真实挂起 restore 的取消与后继保护、当前 head CI，以及最终 npm/standalone 安装产物和受支持平台/PTY 验收。历史结果继续保留对应源码与运行时身份。C 批次不改 Bun/OpenTUI pin、默认 renderer 或 recording schema。
+该精确 main 整合源码通过正常 build（135.242秒）、完整 typecheck（52.330秒）、lint（4.006秒）、bundle（3.460秒）、七个完整 CLI 文件共895项测试及303项 core 测试；保留10项既有 Darwin 平台跳过。bundle inventory `0b6f25bde45ba88dce8ad6b946c9636644409c6b70a7616692197c23051d179f` 覆盖1,348个文件。永久 checkpoint 用例在 Node24+Ink（91.279秒）、Bun1.3.14+Ink（91.996秒）、strict Bun1.3.14+OpenTUI（90.320秒）通过。同一 assistant 双 edit 对照在 Node+Ink（102.296秒）及 strict OpenTUI（97.201秒）通过：只重放A，冷恢复A显示成功，未重放B显示Error，wire使用既有缺失结果响应。五次运行各严格完成五次HTTP和两次自然退出0，守卫不变且无所属进程残留。这些是源码bundle结果，不代表安装产物或Bun1.4.4验收。
+
+当前 Linux parity 在进入产品矩阵前失败，原生首图校验将可见帧条件等待包在一个异步React act中。受控真实PNG复制在复制已完成后复现相同20-pass/frame23失败；分离短act后，原七次提交及PNG字节断言全部通过。后续校验修复保留20次检查和1,000ms上限，在每个act之外检查帧，不重发输入或增加帧预算。完整原生脚本已在本地通过，仍须新Linux CI确认。通用CI与no-flicker结论仍待完成。原失败均保留，PR尚未Ready。该文档/原生校验后续不改生产代码或已验证bundle。
+
+剩余验收包括尚未关闭的恢复合同、具名实测控制之外的同轮/多调用校准、最终 C+R3/Bun1.4.4/main 依赖联合安装产物、真实发布 npm/standalone 升级及支持平台/inner-PTY 门禁。先前运行时和安装结果保留其精确源码、二进制与平台范围。C 批次不切换默认 renderer，不新增 recording schema。下文历史检查点保留用于溯源，不覆盖当前边界。
+
+**`5cb491f5` 历史检查点（保留）：#14959 当时已合并；#15283 在整合 main `56733c35` 后仍为 Draft。** restore 接纳/自有历史行发布与工具本地完成修复均已提交。整合后的 `5cb491f5` 通过正常 build、包含集成测试的完整 typecheck、fresh bundle、382 项受影响 CLI 测试及 65 项受影响 core 测试，均零跳过。此前 902 案完整 CLI 回归和 Node+Ink/Bun+Ink/严格 OpenTUI 的 H11e 对照保留精确源码归属。H11e 在新整合的严格 OpenTUI bundle 上再次通过：工具执行一次、自动模型请求为零、显式后续请求一次、checkpoint 不变、自然退出为 0。另一个真实模型 read→edit 探针确认了剩余缺陷：Ink 在待审批时生成完整 checkpoint，OpenTUI 到达相同审批状态却未创建文件。完整 checkpoint 创建/恢复、最终组合安装产物及平台验收仍待完成，PR 尚不能正式送审。本次 main 已包含 #15305 对继承的 Java CI 问题的修复。
+
+在该历史检查点，已完成的审查修复保留现有 history 与 turn 所有权。当时剩余门禁包括完整 checkpoint producer/consumer 链、真实挂起 restore 的取消与后继保护、当前 head CI，以及最终 npm/standalone 安装产物和受支持平台/PTY 验收。历史结果继续保留对应源码与运行时身份。C 批次不改 Bun/OpenTUI pin、默认 renderer 或 recording schema。
 
 **历史 shell 修复检查点（提交 `044c1073` 前）：#15283 当时仍为 Draft，基于已提交的 `3301fee0` 加 shell 生命周期、本地键盘取消及重试文案工作变更。** 精确已提交 head 的 Linux CI 通过 no-flicker、20 个组件 validator 和三腿每腿 42 个产品用例；这些重叠执行不与历史本地总数相加。当前工作修复通过三个受影响的完整 CLI unit 文件（482 案、零跳过）；未改变的受影响 workflow 元测试文件通过 41 案。此前工作产物通过正常 build/type/bundle、Node22 + Ink 与 strict Bun + OpenTUI 的 held-shell Retry 接纳门禁，以及 Ink 英文倒计时精确文案。随后真实 OS 取消合同在 Node22 + Ink 上通过，在 strict OpenTUI 上失败：Ctrl+C 后已观察的 shell 仍存活，直到 fixture 清理时释放才结束。新增实际捕获 signal 的回归也在本地按键接线修复前失败。因此该整合迭代要求重新执行正常 build/type/bundle，并在精确同一新产物上验证真实终端取消、后继及自然退出合同。原产品失败和 fixture 未完成观察继续分别记录，不算本修复的通过结果。既有源码 bundle 与安装结果保留原产物归属；不改 runtime pin、依赖、默认 renderer 或记录 schema。
 
-**上一交付检查点（保留）：基于 `4d57a2d218` 加三处生产修复的会话恢复 Draft 批次。** 修后源码通过三个完整 unit 文件的 736 案及 fresh build/type/bundle 验证。最终采用 readiness helper 的持久测试结果为 **18 案通过、零跳过、24 次完成 HTTP 和 30 次自然 exit0**。六案覆盖具名 H02a/H02b 冷恢复、H01b rewind/rollback selector 与冷召回，以及 Node24 + Ink、Bun1.3.14 + Ink、strict Bun1.3.14 + OpenTUI 的 H15 quit/exit summary。这些属于源码 bundle 结果，不是完整 H01–H15 或安装产品验收。本批次及父 PR #14959 仍未合并；最终安装产物与平台门禁仍未关闭。不改生产运行时、依赖、默认 renderer 或记录 schema。
+**上一交付检查点（保留）：基于 `4d57a2d218` 加三处生产修复的会话恢复 Draft 批次。** 修后源码通过三个完整 unit 文件的 736 案及 fresh build/type/bundle 验证。最终采用 readiness helper 的持久测试结果为 **18 案通过、零跳过、24 次完成 HTTP 和 30 次自然 exit0**。六案覆盖具名 H02a/H02b 冷恢复、H01b rewind/rollback selector 与冷召回，以及 Node24 + Ink、Bun1.3.14 + Ink、strict Bun1.3.14 + OpenTUI 的 H15 quit/exit summary。这些属于源码 bundle 结果，不是完整 H01–H15 或安装产品验收。在该早期检查点，本批次及父 PR #14959 尚未合并。#14959 此后已合并并包含在当前源码中；最终安装产物与平台门禁仍未关闭。不改生产运行时、依赖、默认 renderer 或记录 schema。
 
 **早期验证检查点（保留）：** 此处证据归属本地 `6c3c63584c01cf0a5b421aa719e6ff1df8a23700` 加冻结的七文件 v4 工作补丁 `1c4f3277b4b0e7364b5e0cee706a2750db02cbade38c66e092202feb6c7d8319`，不是已提交的最终候选。Build、typecheck 已通过；25 个 CLI 完整文件共 1,514 案全部通过，无失败、跳过或 bail 未执行。Native 组件验证通过 26 个捕获帧、19 次输入和两个精确回调。新的 WIP 源码 bundle 已通过，CLI SHA 为 `53859bf54605e32e3c594c95fc6f040d6e53644bb69f79ffad467ac95d911cf1`；它不是已安装的 npm 或 standalone 产物。不新增 core API、依赖、记录 schema 或第二个历史 owner。
 
