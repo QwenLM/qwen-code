@@ -677,6 +677,8 @@ describe('serve fast path argument parsing', () => {
       (name) => name.length > 1 && !options.alias[name]?.length,
     );
     const sampleArgvByOption = new Map<string, string[]>([
+      ['managed', ['--managed']],
+      ['managed-data-dir', ['--managed-data-dir', '/tmp/qwen-managed-data']],
       ['port', ['--port', '0']],
       ['hostname', ['--hostname', '127.0.0.1']],
       ['token', ['--token', 'token']],
@@ -790,14 +792,16 @@ describe('serve fast path argument parsing', () => {
     ]);
     const expectedFallbackOptions = new Set([
       // The fast path exists to start a plain daemon without loading the full
-      // CLI. A managed Agent Host is a different mode — it enrols, polls and
-      // launches an executor — so these hand off rather than being taught to
-      // the fast path.
+      // CLI. Managed local serve and Agent Host run different process
+      // lifecycles, so these hand off rather than being taught to the fast
+      // path.
       'agent-host-allow-http',
       'agent-host-name',
       'agent-host-server',
       'agent-host-workspace-id',
       'channel',
+      'managed',
+      'managed-data-dir',
       'profile',
       'hosted-harness-capability-digest',
       'experimental-paired-engines',

@@ -530,14 +530,10 @@ class ManagedAgentWorkspaceReplayTest {
                                         .isEqualTo("workspace_unavailable")));
     }
 
-    // A receipt recorded before the recorder stamp existed reads back a
-    // NULL actor. Its recorder was never stored, so it keeps the role-gated
-    // replay it was recorded under: the non-creator recorder's retry across
-    // the rollout answers the recorded outcome instead of the creator
-    // gate's 409, as does any OPERATOR's, while the role gate above the
-    // replay still refuses a reader.
+    // Losing the recorder identity must not grant every OPERATOR access
+    // to the recorded outcome; the Session creator gate still applies.
     @Test
-    void aReceiptRecordedBeforeTheRecorderStampKeepsItsRoleGatedReplay() {
+    void unstampedReceiptsRetainTheCreatorGate() {
         freshDatabase();
         String tenant = "tenant-" + UUID.randomUUID();
         String sessionId = boundSession(tenant);
@@ -564,28 +560,49 @@ class ManagedAgentWorkspaceReplayTest {
                 tenant)).isEqualTo(3);
 
         for (String actor : List.of("actor-b", "actor-c")) {
-            transaction.executeWithoutResult(status -> {
-                var replay = service.submitTurn(tenant, actor, "submit-b",
-                        sessionId, input);
-                assertThat(replay.replayed()).isTrue();
-                assertThat(replay.turnId()).isEqualTo(turnId);
-            });
-            transaction.executeWithoutResult(status -> {
-                var replay = service.cancelTurn(tenant, actor, "cancel-b",
-                        sessionId, turnId);
-                assertThat(replay.replayed()).isTrue();
-                assertThat(replay.turnId()).isEqualTo(turnId);
-            });
-            transaction.executeWithoutResult(status -> assertThat(
-                    service.renameSession(tenant, actor, "rename-b",
-                            sessionId, "his title").replayed()).isTrue());
+            transaction.executeWithoutResult(status ->
+                    assertThatThrownBy(() -> service.submitTurn(tenant,
+                            actor, "submit-b", sessionId, input))
+                            .isInstanceOfSatisfying(ManagedAgentException.class,
+                                    error -> assertThat(error.getCode())
+                                            .isEqualTo("workspace_unavailable")));
+            transaction.executeWithoutResult(status ->
+                    assertThatThrownBy(() -> service.cancelTurn(tenant,
+                            actor, "cancel-b", sessionId, turnId))
+                            .isInstanceOfSatisfying(ManagedAgentException.class,
+                                    error -> assertThat(error.getCode())
+                                            .isEqualTo("workspace_unavailable")));
+            transaction.executeWithoutResult(status ->
+                    assertThatThrownBy(() -> service.renameSession(tenant,
+                            actor, "rename-b", sessionId, "his title"))
+                            .isInstanceOfSatisfying(ManagedAgentException.class,
+                                    error -> assertThat(error.getCode())
+                                            .isEqualTo("workspace_unavailable")));
         }
-        // A different title falls through to beginSessionRename, whose
-        // discovery gate admits the same legacy receipt: the digest
-        // comparison answers, exactly as before the stamp.
+        transaction.executeWithoutResult(status -> {
+            var replay = service.submitTurn(tenant, "actor-a", "submit-b",
+                    sessionId, input);
+            assertThat(replay.replayed()).isTrue();
+            assertThat(replay.turnId()).isEqualTo(turnId);
+        });
+        transaction.executeWithoutResult(status -> {
+            var replay = service.cancelTurn(tenant, "actor-a", "cancel-b",
+                    sessionId, turnId);
+            assertThat(replay.replayed()).isTrue();
+            assertThat(replay.turnId()).isEqualTo(turnId);
+        });
+        transaction.executeWithoutResult(status -> assertThat(
+                service.renameSession(tenant, "actor-a", "rename-b",
+                        sessionId, "his title").replayed()).isTrue());
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.renameSession(tenant,
                         "actor-c", "rename-b", sessionId, "other title"))
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error ->
+                                assertThat(error.getCode())
+                                        .isEqualTo("workspace_unavailable")));
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.renameSession(tenant,
+                        "actor-a", "rename-b", sessionId, "other title"))
                         .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                                 assertThat(error.getCode())
                                         .isEqualTo("idempotency_conflict")));
@@ -595,6 +612,11 @@ class ManagedAgentWorkspaceReplayTest {
                         .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                                 assertThat(error.getCode())
                                         .isEqualTo("session_operation_forbidden")));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn"
+                + " WHERE tenant_id = ?", Integer.class, tenant)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt"
+                + " WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ?"
+                + " AND actor_id IS NULL", Integer.class, tenant)).isEqualTo(3);
     }
 
     // The tombstone fence stands above the role and replay gates: a

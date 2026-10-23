@@ -308,12 +308,14 @@ class QwenHostedHarnessConnectorTest {
         verifyNoInteractions(execution);
     }
 
-    @Test
-    void coldRecoveryLoadsOnlyCleanupAndExplicitNewWorkPromotesTheAttachment() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void coldRecoveryLoadsOnlyCleanupAndExplicitNewWorkPromotesTheAttachment(boolean publicChildren) throws Exception {
         var session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null, null, "ACTIVE",
                 null, null, 0, 0, 0, 1, 1, null, 1,
                 new ContextBinding("tenant-a", "selected-workspace", 1, "storage", ".",
-                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "default", "hosted-workspace-files/1", null);
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "default",
+                publicChildren ? "hosted-workspace-shell/1" : "hosted-workspace-files/1", null, publicChildren ? 1 : 0);
         var sessions = sessions();
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
         var actions = mock(ManagedActionStore.class);
@@ -323,7 +325,8 @@ class QwenHostedHarnessConnectorTest {
         var capabilities = mock(HostedHarnessCapabilities.class);
         when(client.capabilities()).thenReturn(capabilities);
         when(capabilities.getBootId()).thenReturn(BOOT_ID);
-        when(capabilities.getFeatures()).thenReturn(List.of("recovery-cleanup/1"));
+        when(capabilities.getFeatures()).thenReturn(List.of("recovery-cleanup/1", "public-child-agents/1", "approval-selection/1"));
+        when(capabilities.getLifecycleV2Profiles()).thenReturn(List.of("hosted-workspace-shell/1"));
         var cleanupRef = mock(HarnessSessionRef.class);
         when(cleanupRef.getHarnessBootId()).thenReturn(BOOT_ID);
         when(cleanupRef.getApprovalMode()).thenReturn("default");
@@ -343,6 +346,9 @@ class QwenHostedHarnessConnectorTest {
         when(evidence.getPromptId()).thenReturn(SUBMIT_PROMPT_ID);
         var settings = properties();
         settings.getHarness().setWorkspaceFilesEnabled(true);
+        settings.getHarness().setWorkspaceShellEnabled(publicChildren);
+        settings.getRuntimeBroker().setChildWorkspacesEnabled(true);
+        settings.getRuntimeBroker().setChildSnapshotsEnabled(true);
         var connector = new QwenHostedHarnessConnector(settings, sessions, execution, actions);
         ReflectionTestUtils.setField(connector, "client", client);
         assertThat(connector.recheckRecoveryCleanup("tenant-a", SESSION_ID, SUBMIT_PROMPT_ID)).isTrue();
@@ -360,6 +366,9 @@ class QwenHostedHarnessConnectorTest {
         toJson.setAccessible(true);
         var cleanupLoad = (Map<?, ?>) toJson.invoke(loads.getAllValues().get(0));
         assertThat(cleanupLoad.get("recoveryCleanupPromptId")).isEqualTo(SUBMIT_PROMPT_ID);
+        assertThat(cleanupLoad.get("publicChildAgentsVersion")).isEqualTo(publicChildren ? 1 : null);
+        assertThat(cleanupLoad.containsKey("childWorkspaces")).isEqualTo(!publicChildren);
+        assertThat(cleanupLoad.containsKey("childSnapshots")).isEqualTo(!publicChildren);
         assertThat(cleanupLoad.containsKey("passiveManagedRuntimeRecovery")).isFalse();
         assertThat(cleanupLoad.containsKey("driveRuntimeRecovery")).isFalse();
         assertThat(cleanupLoad.containsKey("cancellationTakeover")).isFalse();
@@ -1012,7 +1021,6 @@ class QwenHostedHarnessConnectorTest {
     @CsvSource({"hosted-workspace-files/1,false", "hosted-workspace-files/1,true",
             "hosted-workspace-files/2,false", "hosted-workspace-files/2,true",
             "hosted-workspace-shell/1,false", "hosted-workspace-shell/1,true",
-            "hosted-workspace-shell/2,false", "hosted-workspace-shell/2,true",
             "hosted-workspace-team-lead/1,false", "hosted-workspace-team-lead/1,true",
             "hosted-workspace-mcp/1,false", "hosted-workspace-mcp/1,true"})
     void boundCreateConflictLoadsOriginalWorkspaceAndProfileAndRechecksCachedGrant(String profile, boolean publication) {
@@ -3913,8 +3921,8 @@ class QwenHostedHarnessConnectorTest {
         QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties(), sessions(),
                 mock(WorkspaceExecutionStore.class), actions, definitions, resources);
         ReflectionTestUtils.setField(connector, "client", client);
-        ReflectionTestUtils.invokeMethod(connector, "create", session, false);
-        ReflectionTestUtils.invokeMethod(connector, "load", session, false);
+        ReflectionTestUtils.invokeMethod(connector, "create", session, false, false);
+        ReflectionTestUtils.invokeMethod(connector, "load", session, false, false, false);
         ArgumentCaptor<CreateHarnessSession> creates = ArgumentCaptor.forClass(CreateHarnessSession.class);
         verify(client).createSession(creates.capture());
         ArgumentCaptor<LoadHarnessSession> loads = ArgumentCaptor.forClass(LoadHarnessSession.class);

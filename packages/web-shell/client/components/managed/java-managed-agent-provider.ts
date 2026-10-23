@@ -9,12 +9,12 @@ import {
 import {
   projectJavaAgentEvent,
   projectJavaAgentItem,
-  toTimestamp,
 } from './java-managed-agent-event-projector';
 import { managedRequestId } from './managed-session-storage';
 import { isManagedApprovalMode } from './managed-agent-provider';
 import { browserArtifactSave } from './managed-artifact-download';
 import type { ManagedArtifactSave } from './managed-tool-result-types';
+import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
 import type {
   ManagedAgentCommandOptions,
   ManagedAgentPendingAction,
@@ -26,16 +26,16 @@ import type {
   ManagedApprovalMode,
   ManagedModelContext,
   ManagedModelSelection,
+  ManagedModelPreset,
 } from './managed-agent-provider';
 
 export interface JavaManagedAgentProviderOptions
   extends JavaManagedAgentClientOptions {
   agentId?: string;
-  environmentId?: string;
   /** Include tenant and actor identity; replace this scope/provider when either changes. Token refresh alone can use getHeaders. */
   productScope?: string;
   enableWorkspaceBinding?: boolean;
-  modelPresets?: readonly { agentId: string; label: string }[];
+  modelPresets?: readonly ManagedModelPreset[];
   /** Acquire a streaming save target during the user gesture, then call openStream. */
   saveArtifact?: ManagedArtifactSave;
 }
@@ -104,6 +104,7 @@ export function createJavaManagedAgentProvider(
   async function createWorkspaceSession(
     request: {
       agentId: string;
+      modelId?: string;
       workspaceId: string;
       cwdRelative: string;
       text?: string;
@@ -119,6 +120,7 @@ export function createJavaManagedAgentProvider(
         requestId: managedRequestId(),
         idempotencyKey: command.idempotencyKey,
         agentId: request.agentId,
+        ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
         ...(request.skills?.length ? { skills: request.skills } : {}),
         // Without a title the Session list and header fall back to a UUID
         // prefix, unlike the standard shell's prompt-derived title.
@@ -151,7 +153,6 @@ export function createJavaManagedAgentProvider(
     return { sessionId: result.sessionId };
   }
   return {
-    kind: 'java',
     lifecycle: {
       submit: (kind, sessionId, command) =>
         client.lifecycleCommand(
@@ -198,7 +199,7 @@ export function createJavaManagedAgentProvider(
         client.readWorkspaceFile(request, command.signal),
     },
     canCancel: true,
-    acceptsWorkspaceCwd: false,
+    titleSearch: true,
     recovery: {
       query: (sessionId, request) =>
         client.getRecovery(sessionId, request.signal),
@@ -244,6 +245,54 @@ export function createJavaManagedAgentProvider(
     mcp: {
       list: (sessionId, request) =>
         client.getSessionMcp(sessionId, request.signal),
+    },
+    mcpManagement: {
+      storageScope: options.productScope?.trim()
+        ? storageKey(options)
+        : undefined,
+      async query(sessionId, request) {
+        return requireMcpManagementSnapshot(
+          await client.queryMcpManagement(
+            { sessionId, requestId: managedRequestId() },
+            request.signal,
+          ),
+          sessionId,
+        );
+      },
+      async submit(sessionId, command, request) {
+        const snapshot = requireMcpManagementSnapshot(
+          await client.submitMcpManagement(
+            {
+              ...command,
+              sessionId,
+              requestId: request.requestId,
+              idempotencyKey: request.idempotencyKey,
+            },
+            request.signal,
+          ),
+          sessionId,
+        );
+        if (
+          !snapshot.operation ||
+          snapshot.operation.action !== command.action ||
+          snapshot.operation.serverId !== command.serverId ||
+          snapshot.operation.revision !== command.expectedRevision + 1
+        )
+          throw new Error('Managed MCP operation identity mismatch');
+        return snapshot;
+      },
+      async operation(sessionId, operationId, request) {
+        const snapshot = requireMcpManagementSnapshot(
+          await client.getMcpManagementOperation(
+            { sessionId, operationId, requestId: managedRequestId() },
+            request.signal,
+          ),
+          sessionId,
+        );
+        if (snapshot.operation?.operationId !== operationId)
+          throw new Error('Managed MCP operation identity mismatch');
+        return snapshot;
+      },
     },
     tasks: {
       list: (sessionId, request) =>
@@ -481,13 +530,33 @@ export function createJavaManagedAgentProvider(
       : {}),
     actions: {
       async listPending(sessionId, request) {
-        // The service lists only requested Actions, newest first, so one page
-        // holds every pending one unless more than 20 wait at once.
-        const page = await client.queryActions(
-          { sessionId, limit: 20 },
-          request.signal,
-        );
-        return page.data.flatMap(toPendingAction);
+        const actions: ManagedAgentPendingAction[] = [];
+        const cursors = new Set<string>();
+        let cursor: string | undefined;
+        do {
+          const page = await client.queryActions(
+            {
+              sessionId,
+              limit: 20,
+              ...(cursor ? { cursor } : {}),
+              ...(request.includeChildren ? { includeChildren: true } : {}),
+            },
+            request.signal,
+          );
+          actions.push(...page.data.flatMap(toPendingAction));
+          cursor = page.hasMore ? (page.nextCursor ?? undefined) : undefined;
+          if (cursor && cursors.has(cursor))
+            throw new Error('Action cursor repeated');
+          if (cursor) cursors.add(cursor);
+        } while (cursor && !request.signal?.aborted);
+        return [
+          ...new Map(
+            actions.map((action) => [
+              `${action.sessionId}:${action.actionId}`,
+              action,
+            ]),
+          ).values(),
+        ];
       },
       async respond(action, optionId, command) {
         const accepted = await client.respondAction(
@@ -636,6 +705,7 @@ export function createJavaManagedAgentProvider(
             createEmpty: (
               {
                 agentId,
+                modelId,
                 workspaceId,
                 cwdRelative,
                 approvalMode,
@@ -647,6 +717,7 @@ export function createJavaManagedAgentProvider(
               createWorkspaceSession(
                 {
                   agentId,
+                  modelId,
                   workspaceId,
                   cwdRelative,
                   approvalMode,
@@ -665,6 +736,7 @@ export function createJavaManagedAgentProvider(
           cursor: request.cursor,
           limit: request.limit,
           archiveState: request.archiveState,
+          titleQuery: request.titleQuery,
         },
         request.signal,
       );
@@ -687,7 +759,7 @@ export function createJavaManagedAgentProvider(
         },
         request.signal,
       );
-      const itemEvents = (transcript.items ?? []).flatMap(projectJavaAgentItem);
+      const itemEvents = transcript.items.flatMap(projectJavaAgentItem);
       const tailEvents = transcript.events.flatMap((event) => {
         const projected = projectJavaAgentEvent(event);
         return projected ? [projected] : [];
@@ -706,8 +778,6 @@ export function createJavaManagedAgentProvider(
           requestId: managedRequestId(),
           idempotencyKey: command.idempotencyKey,
           agentId,
-          // environmentId scopes the storageKey only: the standalone Java
-          // server 400s any non-blank value with unsupported_feature.
           title: titleFor(request.text),
           input: request.input ?? [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
@@ -730,10 +800,20 @@ export function createJavaManagedAgentProvider(
         },
         command.signal,
       );
-      if (!result.turnId) {
-        throw new Error('Managed Agent submit response is missing turnId');
+      if (
+        result.sessionId !== sessionId ||
+        !result.turnId ||
+        !result.operationId
+      ) {
+        throw new Error(
+          'Managed Agent submit response is missing admission identity',
+        );
       }
-      return { sessionId: result.sessionId, turnId: result.turnId };
+      return {
+        sessionId,
+        turnId: result.turnId,
+        operationId: result.operationId,
+      };
     },
     async cancel(sessionId, turnId, command) {
       const result = await client.cancelTurn(
@@ -742,13 +822,14 @@ export function createJavaManagedAgentProvider(
           idempotencyKey: command.idempotencyKey,
           sessionId,
           turnId,
-          ...(command.admissionProfile
-            ? { admissionProfile: command.admissionProfile }
-            : {}),
         },
         command.signal,
       );
-      if (result.sessionId !== sessionId || result.turnId !== turnId) {
+      if (
+        result.sessionId !== sessionId ||
+        result.turnId !== turnId ||
+        !result.operationId
+      ) {
         throw new Error('Managed Turn cancellation identity mismatch');
       }
       return { sessionId, turnId, operationId: result.operationId };
@@ -832,11 +913,9 @@ function toSessionSummary(
     ...(session.recovery ? { recovery: session.recovery } : {}),
     title: session.title || session.sessionId,
     workspace: session.workspace,
-    createdAt: toTimestamp(session.createdAt),
-    admittedAt: toTimestamp(
-      session.activeTurn?.submittedAt ?? session.createdAt,
-    ),
-    updatedAt: toTimestamp(session.updatedAt),
+    createdAt: session.createdAt,
+    admittedAt: session.activeTurn?.submittedAt ?? session.createdAt,
+    updatedAt: session.updatedAt,
     phase,
     runtimeReady: runtimeState === 'ready',
     runtimeState,
@@ -872,9 +951,6 @@ function toSessionSummary(
         (active || recoveryBlocked) &&
         turnStatus !== 'cancelling' &&
         session.recovery?.actions.cancel !== false,
-      ...(session.capabilities?.durableOperations === true
-        ? { durableOperations: true }
-        : {}),
       ...(workspaceTurns ? { workspaceTurns: true } : {}),
       ...(session.capabilities?.cwdChange === true ? { cwdChange: true } : {}),
       ...(session.capabilities?.modelChange === true
@@ -887,6 +963,9 @@ function toSessionSummary(
         ? { approvalModeChange: true }
         : {}),
       ...(session.capabilities?.actions === true ? { actions: true } : {}),
+      ...(session.capabilities?.childAgents === true
+        ? { childAgents: true }
+        : {}),
       ...(session.capabilities?.inputAttachments === true
         ? { inputAttachments: true }
         : {}),
@@ -1065,6 +1144,22 @@ function requireTaskCancelOperation(
   return operation as ManagedTaskCancelOperation;
 }
 
+function requireMcpManagementSnapshot(
+  snapshot: ManagedMcpManagementSnapshot,
+  sessionId: string,
+): ManagedMcpManagementSnapshot {
+  if (
+    snapshot.sessionId !== sessionId ||
+    !Number.isSafeInteger(snapshot.revision) ||
+    snapshot.revision < 0 ||
+    typeof snapshot.supported !== 'boolean' ||
+    !Array.isArray(snapshot.servers) ||
+    !Array.isArray(snapshot.availableServers)
+  )
+    throw new Error('Managed MCP Session identity mismatch');
+  return snapshot;
+}
+
 function storageKey(options: JavaManagedAgentProviderOptions): string {
   const base = new URL(
     options.baseUrl,
@@ -1073,7 +1168,7 @@ function storageKey(options: JavaManagedAgentProviderOptions): string {
   base.search = '';
   base.hash = '';
   const baseKey = `${base.origin}${base.pathname.replace(/\/+$/, '')}`;
-  const scope = options.productScope ?? options.environmentId ?? 'default';
+  const scope = options.productScope ?? 'default';
   const prefix = `${baseKey}:managed:${scope}`;
   return options.enableWorkspaceBinding
     ? JSON.stringify([
