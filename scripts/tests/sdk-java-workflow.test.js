@@ -141,8 +141,8 @@ describe('SDK Java self-hosted workflow guards', () => {
     // The ticketed queue makes the wake order deterministic and the fast
     // class puts this tier's ticket ahead of waiting full-tier tickets, so
     // the pin is the sourced helper, its budget, and the tier argument. The
-    // acquisition only gates the best-effort write-back, so `env` selects
-    // the helper's non-fatal warning mode.
+    // acquisition only gates the best-effort write-back, so its timeout is
+    // rewritten to a non-fatal warning below.
     expect(block).toContain(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
@@ -151,7 +151,6 @@ describe('SDK Java self-hosted workflow guards', () => {
     // immutable commit, which may predate this helper; the guarded bare-lock
     // fallback keeps acquisition independent of the checkout's ref.
     expect(block).toContain('flock --wait 5400 9');
-    expect(block).toContain("SDK_JAVA_LOCK_ANNOTATION: 'warning'");
     expect(block).toContain('::warning::sdk-java host lock wait exhausted');
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
@@ -242,10 +241,9 @@ describe('SDK Java self-hosted workflow guards', () => {
         mkdirSync(workspace, { recursive: true });
         mkdirSync(join(home, '.cache', 'qwen-code-ci'), { recursive: true });
         if (mode.startsWith('helper')) {
-          // The stub mirrors the real helper's warning mode: a diagnostic the
-          // guard must pass through, the attributed non-fatal warning, the
-          // summary line, and a non-zero return. The success case proves the
-          // guard does not swallow an acquired lock.
+          // The stub mirrors the real helper's fatal timeout line plus a
+          // diagnostic the rewrite must pass through. The success case proves
+          // the guard does not swallow an acquired lock.
           mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
           writeFileSync(
             join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
@@ -253,8 +251,7 @@ describe('SDK Java self-hosted workflow guards', () => {
               ? 'sdk_java_lock_acquire() { return 0; }\n'
               : 'sdk_java_lock_acquire() {\n' +
                   '  echo "helper: waiting for the host lock"\n' +
-                  '  echo "::warning::sdk-java host lock wait exhausted after 90 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued)"\n' +
-                  '  printf -- "- sdk-java cache write-back skipped on %s: host lock wait exhausted; host cache present at seed: %s\\n" "${RUNNER_NAME:-unknown}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" >>"${GITHUB_STEP_SUMMARY}"\n' +
+                  '  echo "::error::sdk-java host lock not acquired within 90 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued)"\n' +
                   '  return 1\n' +
                   '}\n',
           );
@@ -299,10 +296,12 @@ echo REACHED_END`,
         } else {
           expect(result.stdout).toContain('Maven cache write-back skipped');
           if (mode.startsWith('helper')) {
-            // The helper's own diagnostic survives the guard unchanged.
+            // A non-matching helper line survives the override unchanged.
             expect(result.stdout).toContain(
               'helper: waiting for the host lock',
             );
+            // The fatal prefix becomes a warning, and the ticket, class and
+            // queue head survive for diagnosing a starved write-back.
             expect(result.stdout).toContain(
               '::warning::sdk-java host lock wait exhausted after 90 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued)',
             );
@@ -312,7 +311,9 @@ echo REACHED_END`,
             );
           }
           expect(readFileSync(summary, 'utf8')).toContain(
-            'sdk-java cache write-back skipped',
+            mode.startsWith('helper')
+              ? 'sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted after 90 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued); host cache present at seed: unknown'
+              : 'sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted in the bare-flock fallback; host cache present at seed: unknown',
           );
           // The guard must stop before the copy; a warning alone would still
           // run the write-back and hold the lock.
@@ -1678,6 +1679,12 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // above it the rename lands in the iteration whose timeout arm deletes
     // the ticket, and no test would see the anti-starvation arm go dead.
     const helper = readFileSync('.github/scripts/sdk-java-lock.sh', 'utf8');
+    // Both workflow sites match this exact emission: the fatal line must go
+    // through the echo builtin and lead with this substring, or the rewrite
+    // stops seeing it and the signature reaches a green step.
+    expect(helper).toMatch(
+      /echo "::error::sdk-java host lock not acquired within/,
+    );
     const promoteAfter = Number(
       helper.match(/SDK_JAVA_LOCK_PROMOTE_AFTER:-(\d+)/)?.[1],
     );

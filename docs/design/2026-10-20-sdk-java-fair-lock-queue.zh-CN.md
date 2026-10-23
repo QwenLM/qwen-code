@@ -24,8 +24,8 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 - 目标：让等待变得确定。一个 waiter 的最坏等待时长是排在它前面的
   工作量，而不是它重新入队的次数。
 - 目标：其余语义不变。锁仍按 step 边界自动释放。辅助脚本默认的致命模式
-  仍为它的其他调用方保留固定的基础设施签名错误文案
-  （`lock not acquired within`）；本工作流的两处 step 都选择警告模式，
+  仍以固定的基础设施签名错误文案（`lock not acquired within`）为契约；
+  本工作流的两处 step 都在辅助脚本发出该行时把它改写为非致命警告，
   因此这里没有任何路径会因锁失败，也不会把该签名留在绿色 step 上。
 - 非目标：降低总占用。按套件分片锁、限制每台宿主机注册数、加机器，
   都是正交工作，可以后续再做；有了公平性，这些工作的剩余价值才
@@ -60,13 +60,14 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
   而 trap 在 `return` 之后也看不到辅助脚本的局部变量。锁仍以 fd 9
   留在 step 的 shell 里，因此它仍会在 step 边界自动释放 —— 这个
   辅助脚本改变的是**获取顺序**，而不是释放语义。
-- 超时则按模式打印：默认的致命模式输出
-  `::error::sdk-java host lock not acquired within N minutes as queue ticket S (CLASS); head of queue is H`，
-  本工作流两处 step 选择的警告模式输出归因相同的
-  `::warning::sdk-java host lock wait exhausted after N minutes ...`。
-  两者都返回 1。`CLASS` 是放弃等待时该票所属的档位（`fast` 或
-  `normal`）；`H` 是那一刻的队首，若本票已是最后一张则为
-  `(no other ticket queued)`。重跑分类器匹配的契约仍由默认模式中的子串
+- 超时则打印
+  `::error::sdk-java host lock not acquired within N minutes as queue ticket S (CLASS); head of queue is H`
+  并返回 1。本工作流的两处 step 会就地改写这一行：把
+  `::error::...not acquired within` 前缀替换为
+  `::warning::sdk-java host lock wait exhausted after`，从而保留票据号、
+  类别与队首，同时去掉分类器签名。`CLASS` 是放弃等待时该票所属的档位
+  （`fast` 或 `normal`）；`H` 是那一刻的队首，若本票已是最后一张则为
+  `(no other ticket queued)`。重跑分类器匹配的契约仍由辅助脚本中的子串
   `lock not acquired within` 承担。
 - 可观测性：先做一次非阻塞探测，只有确实需要等待的 waiter 才会打印
   票据号与剩余预算 —— 在进入阻塞之前打印，之后最多每分钟一次。队首
@@ -107,13 +108,13 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 并发时出现抖动，应为该通道重新划定持锁范围，而不是把抖动归因于套件。
 
 两处写回取锁现在都是尽力而为：预算内拿不到锁就发出警告并跳过复制，
-而不是让一个套件已经通过的 step 失败。在这条路径上，辅助脚本的警告
-模式发出独立的 `sdk-java host lock wait exhausted` 警告，保留同样的
-票据/类别/队首归因，并向 step summary 追加一行，而不是被钉住的
-`lock not acquired within` 错误，因此成功的 step 不会把基础设施签名
-留给同一个 job 中之后真正的失败（那会被误判）。本工作流没有 step 走
-致命路径；该子串仍保留在辅助脚本的默认模式与 docker 锁调用方中。
-5400 s 预算与 fd 9 关闭逻辑不变。
+而不是让一个套件已经通过的 step 失败。在这条路径上，工作流把辅助
+脚本的致命行改写为独立的 `sdk-java host lock wait exhausted` 警告，
+保留同样的票据/类别/队首归因，并向 step summary 追加一行，而不是
+留下被钉住的 `lock not acquired within` 错误，因此成功的 step 不会把
+基础设施签名留给同一个 job 中之后真正的失败（那会被误判）。该子串
+仍保留在辅助脚本的默认模式与 docker 锁调用方中。5400 s 预算与 fd 9
+关闭逻辑不变。
 
 ### fast 档优先
 
@@ -223,11 +224,11 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   通过。
-- 辅助脚本默认的致命模式仍发出 `lock not acquired within`，因此
+- 辅助脚本仍发出 `lock not acquired within`，因此
   `qwen-autofix.yml` 的 `INFRA_FAILURE_SIGNATURES` 对 docker 锁调用方
-  和未来的致命 sdk-java 调用方保持匹配；本工作流的两处 step 都选择
-  警告模式，改为发出 `sdk-java host lock wait exhausted`，因此成功的
-  step 不会带上基础设施签名。
+  和未来的致命 sdk-java 调用方保持匹配；本工作流的两处 step 在该行
+  进入 annotation 通道之前改写为 `sdk-java host lock wait exhausted`，
+  因此成功的 step 不会带上基础设施签名。
 
 ## 未决问题
 

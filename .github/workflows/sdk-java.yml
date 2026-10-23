@@ -236,7 +236,6 @@ jobs:
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
           MATRIX_JAVA: '${{ matrix.java }}'
-          SDK_JAVA_LOCK_ANNOTATION: 'warning'
           TIER: '${{ inputs.tier }}'
         run: |-
           # Seed the job-local repository from the host cache, then resolve
@@ -277,9 +276,23 @@ jobs:
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
             # Only the write-back below is guarded, so a timeout must not
             # leave the helper's fatal lock-not-acquired signature on a step
-            # that stays green: the warning mode selected in `env` emits the
-            # same ticket attribution under `::warning::`.
+            # that stays green: the infra classifiers match that substring in
+            # any annotation of a failed job. Rewrite the prefix where the
+            # helper emits it and keep its ticket attribution; every other
+            # line passes through unchanged.
+            echo() {
+              if [[ ${1:-} == '::error::sdk-java host lock not acquired within'* ]]; then
+                local attribution="${1#'::error::sdk-java host lock not acquired within '}"
+                builtin echo "::warning::sdk-java host lock wait exhausted after ${attribution}"
+                if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+                  printf -- '- sdk-java cache write-back skipped on %s: host lock wait exhausted after %s; host cache present at seed: %s\n' "${RUNNER_NAME:-unknown}" "${attribution}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
+                fi
+              else
+                builtin echo "$@"
+              fi
+            }
             sdk_java_lock_acquire 5400 "${TIER}" || lock_status=$?
+            unset -f echo
           else
             # release-sdk-java.yml resumes an existing tag by checking out
             # that immutable commit, which may predate this helper. Fall
@@ -783,7 +796,6 @@ jobs:
           # resolve from this job's seeded copy (pinned in
           # scripts/tests/sdk-java-workflow.test.js).
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
-          SDK_JAVA_LOCK_ANNOTATION: 'warning'
         run: |-
           set -o pipefail
           # Seed from the host-shared repo (cache-restored on hosted runners)
@@ -823,9 +835,23 @@ jobs:
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
             # Only the write-back below is guarded, so a timeout must not
             # leave the helper's fatal lock-not-acquired signature on a step
-            # that stays green: the warning mode selected in `env` emits the
-            # same ticket attribution under `::warning::`.
+            # that stays green: the infra classifiers match that substring in
+            # any annotation of a failed job. Rewrite the prefix where the
+            # helper emits it and keep its ticket attribution; every other
+            # line passes through unchanged.
+            echo() {
+              if [[ ${1:-} == '::error::sdk-java host lock not acquired within'* ]]; then
+                local attribution="${1#'::error::sdk-java host lock not acquired within '}"
+                builtin echo "::warning::sdk-java host lock wait exhausted after ${attribution}"
+                if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+                  printf -- '- sdk-java cache write-back skipped on %s: host lock wait exhausted after %s; host cache present at seed: %s\n' "${RUNNER_NAME:-unknown}" "${attribution}" "${SDK_JAVA_M2_SEED_EXISTED:-unknown}" >>"${GITHUB_STEP_SUMMARY}"
+                fi
+              else
+                builtin echo "$@"
+              fi
+            }
             sdk_java_lock_acquire 5400 || lock_status=$?
+            unset -f echo
           else
             # release-sdk-java.yml resumes an existing tag by checking out
             # that immutable commit, which may predate this helper. Fall
