@@ -303,13 +303,13 @@ cat "\${RUNNER_TEMP}/pulls.json"
     const destination = jobs.analyze.steps.find(
       (step) => step.id === 'destination',
     );
-    const detect = (
-      liveAttempt,
-      overrides = {},
-      ghScript,
-      mainTip = 'tested-head',
-      newerRuns = '1',
-    ) => {
+    const detect = (liveAttempt, overrides = {}, options = {}) => {
+      const {
+        ghScript,
+        mainTip,
+        successor = 'completed success',
+        failCall = '',
+      } = options;
       const tmp = mkdtempSync(join(tmpdir(), 'java-ci-live-'));
       try {
         writeFileSync(
@@ -317,10 +317,24 @@ cat "\${RUNNER_TEMP}/pulls.json"
           ghScript ??
             `#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/calls.log"
+case '${failCall}' in
+  tip)
+    if [[ "$*" == *commits/main* ]]; then
+      printf '%s' '{"message":"Bad credentials"}'
+      exit 1
+    fi
+    ;;
+  newer-runs)
+    if [[ "$*" == *actions/workflows/*/runs* ]]; then
+      printf '%s' '{"message":"Bad credentials"}'
+      exit 1
+    fi
+    ;;
+esac
 if [[ "$*" == *commits/main* ]]; then
   printf '%s\\n' '${mainTip}'
 elif [[ "$*" == *actions/workflows/*/runs* ]]; then
-  printf '%s\\n' '${newerRuns}'
+  printf '%s\\n' '${successor}'
 else
   printf '%s\\n' "$@" > "\${RUNNER_TEMP}/lookup-args"
   printf '%s\\n' '${liveAttempt}'
@@ -378,8 +392,7 @@ fi
           HEAD_BRANCH: 'main',
           HEAD_SHA: 'old-head',
         },
-        undefined,
-        'new-head',
+        { mainTip: 'new-head' },
       );
       expect(resolved.output).toBe('superseded=true\n');
       expect(resolved.stdout).toContain('::warning::');
@@ -416,6 +429,18 @@ fi
       expect(detect('2', { RUN_ATTEMPT: '2' }).output).toBe(
         'superseded=false\n',
       );
+      // Stale-attempt supersession is independent of the tip comparison:
+      // a bare event never reaches the push arm, and the nightly schedule
+      // arm is exempt from it. Folding the attempt check inside that arm
+      // would file an issue for an already-green rerun (#14768's shape).
+      expect(detect('2').output).toBe('superseded=true\n');
+      expect(
+        detect('2', {
+          EVENT_NAME: 'schedule',
+          HEAD_BRANCH: 'main',
+          HEAD_SHA: 'old-head',
+        }).output,
+      ).toBe('superseded=true\n');
     });
     it('skips a push run when main has advanced past its head', () => {
       // Run 39777472391's push run tested 06e59666, main moved on to
@@ -430,8 +455,7 @@ fi
           HEAD_BRANCH: 'main',
           HEAD_SHA: '06e59666dfaaaa0aaf78af45bc48b0405a8e7d44',
         },
-        undefined,
-        '3d65e23cf62e00da033dccb8f60f9cfdd9c1b76e',
+        { mainTip: '3d65e23cf62e00da033dccb8f60f9cfdd9c1b76e' },
       );
       expect(resolved.output).toBe('superseded=true\n');
       expect(resolved.stdout).toContain(
@@ -458,9 +482,7 @@ fi
           HEAD_BRANCH: 'main',
           HEAD_SHA: 'old-head',
         },
-        undefined,
-        'new-head',
-        '0',
+        { mainTip: 'new-head', successor: 'none' },
       );
       expect(resolved.output).toBe('superseded=false\n');
       expect(resolved.stdout).toContain('no newer push run');
@@ -468,19 +490,10 @@ fi
         'actions/workflows/12345/runs?event=push&branch=main&head_sha=new-head&per_page=1',
       );
     });
-    it('fails open when the newer-run lookup cannot be read', () => {
-      const gh = `#!/usr/bin/env bash
-printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/calls.log"
-if [[ "$*" == *commits/main* ]]; then
-  printf '%s\\n' 'new-head'
-elif [[ "$*" == *actions/workflows/*/runs* ]]; then
-  printf '%s' '{"message":"Bad credentials"}'
-  exit 1
-else
-  printf '%s\\n' "$@" > "\${RUNNER_TEMP}/lookup-args"
-  printf '%s\\n' '1'
-fi
-`;
+    it('reports a push run whose successor cannot report its result', () => {
+      // The job gate admits only failures, so a successor that ended
+      // cancelled/timed_out/skipped never re-enters this workflow. Crediting
+      // its mere existence would drop the only report of a real regression.
       const resolved = detect(
         '1',
         {
@@ -488,12 +501,43 @@ fi
           HEAD_BRANCH: 'main',
           HEAD_SHA: 'old-head',
         },
-        gh,
+        { mainTip: 'new-head', successor: 'completed cancelled' },
+      );
+      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.stdout).toContain('completed cancelled');
+      expect(resolved.stdout).toContain('does not report');
+      expect(resolved.summary).toBe('');
+    });
+    it('skips a push run while its successor is still queued', () => {
+      // A queued or in-progress successor is a genuine deferral: its own
+      // completion event reports the result if it fails.
+      const resolved = detect(
+        '1',
+        {
+          EVENT_NAME: 'push',
+          HEAD_BRANCH: 'main',
+          HEAD_SHA: 'old-head',
+        },
+        { mainTip: 'new-head', successor: 'in_progress' },
+      );
+      expect(resolved.output).toBe('superseded=true\n');
+      expect(resolved.stdout).toContain('the newer push run owns its result');
+    });
+    it('fails open when the newer-run lookup cannot be read', () => {
+      const resolved = detect(
+        '1',
+        {
+          EVENT_NAME: 'push',
+          HEAD_BRANCH: 'main',
+          HEAD_SHA: 'old-head',
+        },
+        { mainTip: 'new-head', failCall: 'newer-runs' },
       );
       expect(resolved.output).toBe('superseded=false\n');
       expect(resolved.stdout).toContain(
         'Could not list the newer runs of workflow 12345',
       );
+      expect(resolved.calls).toContain('commits/main');
     });
     it('skips a recovery attempt when a newer run owns the tip', () => {
       // #15259 itself was filed by attempt 2: the rerun queued while main
@@ -506,8 +550,7 @@ fi
           HEAD_BRANCH: 'main',
           HEAD_SHA: 'old-head',
         },
-        undefined,
-        'new-head',
+        { mainTip: 'new-head', successor: 'completed failure' },
       );
       expect(resolved.output).toBe('superseded=true\n');
       expect(resolved.stdout).toContain('main is now new-head');
@@ -525,9 +568,7 @@ fi
           HEAD_BRANCH: 'main',
           HEAD_SHA: 'old-head',
         },
-        undefined,
-        'new-head',
-        '0',
+        { mainTip: 'new-head', successor: 'none' },
       );
       expect(resolved.output).toBe('superseded=false\n');
       expect(resolved.stdout).toContain('no newer push run');
@@ -541,8 +582,7 @@ fi
           HEAD_BRANCH: 'main',
           HEAD_SHA: 'tested-head',
         },
-        undefined,
-        'tested-head',
+        { mainTip: 'tested-head' },
       );
       expect(resolved.output).toBe('superseded=false\n');
       expect(resolved.stdout).not.toContain('::warning::');
@@ -558,8 +598,7 @@ fi
           HEAD_BRANCH: 'main',
           HEAD_SHA: 'old-head',
         },
-        undefined,
-        '',
+        { mainTip: '' },
       );
       expect(resolved.output).toBe('superseded=false\n');
     });
@@ -574,21 +613,32 @@ fi
           HEAD_BRANCH: 'main',
           HEAD_SHA: 'old-head',
         },
-        undefined,
-        'new-head',
+        { mainTip: 'new-head' },
       );
       expect(resolved.output).toBe('superseded=false\n');
       expect(resolved.calls).not.toContain('commits/main');
     });
+    it.each([['pull_request'], ['pull_request_review'], ['workflow_dispatch']])(
+      'does not compare a %s run with the tip of main',
+      (event) => {
+        // These are the other events the analyze gate admits: the Managed
+        // Agent gate's PR arms and the manual SDK Java arm. A fork PR can be
+        // opened from the contributor's own main branch, so a moved tip is a
+        // real state here and must not suppress the report.
+        const resolved = detect(
+          '1',
+          {
+            EVENT_NAME: event,
+            HEAD_BRANCH: 'main',
+            HEAD_SHA: 'old-head',
+          },
+          { mainTip: 'new-head' },
+        );
+        expect(resolved.output).toBe('superseded=false\n');
+        expect(resolved.calls).not.toContain('commits/main');
+      },
+    );
     it('fails open when the tip of main cannot be read', () => {
-      const gh = `#!/usr/bin/env bash
-if [[ "$*" == *commits/main* ]]; then
-  printf '%s' '{"message":"Bad credentials"}'
-  exit 1
-fi
-printf '%s\\n' "$@" > "\${RUNNER_TEMP}/lookup-args"
-printf '%s\\n' '1'
-`;
       const resolved = detect(
         '1',
         {
@@ -596,10 +646,11 @@ printf '%s\\n' '1'
           HEAD_BRANCH: 'main',
           HEAD_SHA: 'old-head',
         },
-        gh,
+        { mainTip: 'new-head', failCall: 'tip' },
       );
       expect(resolved.output).toBe('superseded=false\n');
       expect(resolved.stdout).toContain('Could not read the tip of main');
+      expect(resolved.calls).toContain('commits/main');
     });
     it('fails open when the event carries no head sha', () => {
       // The comparison is only meaningful with a head to compare; an empty
@@ -611,8 +662,7 @@ printf '%s\\n' '1'
           HEAD_BRANCH: 'main',
           HEAD_SHA: '',
         },
-        undefined,
-        'new-head',
+        { mainTip: 'new-head' },
       );
       expect(resolved.output).toBe('superseded=false\n');
       expect(resolved.calls).not.toContain('commits/main');
@@ -621,7 +671,7 @@ printf '%s\\n' '1'
       // Reporting on a transient read error is the safe direction: an issue
       // for a real failure beats silently dropping it.
       const gh = `#!/usr/bin/env bash\nprintf '%s' '{"message":"Bad credentials"}'\nexit 1\n`;
-      const resolved = detect('', {}, gh);
+      const resolved = detect('', {}, { ghScript: gh });
       expect(resolved.output).toBe('superseded=false\n');
       expect(resolved.stdout).toContain('::warning::');
       expect(resolved.stdout).toContain('Could not read run 39237270547');
