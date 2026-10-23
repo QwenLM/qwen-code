@@ -60,6 +60,23 @@ import {
   type ManagedToolSet,
 } from './managed-runtime-tool-executor.js';
 
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/runtimeFetchOptions.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/runtimeFetchOptions.js')
+      >();
+    return {
+      ...actual,
+      loadUndici: async () => ({
+        ...(await actual.loadUndici()),
+        fetch: globalThis.fetch,
+      }),
+    };
+  },
+);
+
 // A long-running foreground command the Shell tool admits: a bare
 // `sleep N` trips its standalone-sleep refusal long before the budget.
 const LONG_RUN = `"${process.execPath}" -e 'setInterval(()=>{},1000)'`;
@@ -2802,6 +2819,64 @@ describe('ManagedToolExecutor acknowledgement', () => {
     callId: 'call-1',
     argsDigest: createHash('sha256').update('args').digest('hex'),
   };
+
+  it('executes web_fetch as text once without a worker model or host files', async () => {
+    const root = workspace();
+    const executor = ManagedToolExecutor.forWorkspace(root, 'runtime-01');
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('<h1>Public docs</h1>', {
+        headers: { 'Content-Type': 'text/html' },
+      }),
+    );
+    const input = { url: 'https://8.8.8.8/docs', prompt: 'Summarize' };
+    try {
+      expect(executor.hasTool('web_fetch')).toBe(true);
+      const result = await executor.execute(
+        sessionReference,
+        'web_fetch',
+        input,
+      );
+      expect(result.executionStatus).toBe('success');
+      expect(result.responseParts).toEqual([
+        expect.objectContaining({
+          text: expect.stringContaining('Public docs\n==========='),
+        }),
+      ]);
+      expect(JSON.stringify(result)).not.toContain('processing failed');
+      expect(
+        await executor.execute(sessionReference, 'web_fetch', input),
+      ).toEqual(result);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fs.readdirSync(root)).toEqual(['a.txt']);
+      expect(executor.acknowledge(sessionReference)?.state).toBe(
+        'acknowledged',
+      );
+      expect(() => executor.closeSessionAdmission('session-a')).not.toThrow();
+    } finally {
+      fetch.mockRestore();
+      await executor.close();
+    }
+  });
+
+  it('blocks web_fetch to Runtime-local addresses before making a request', async () => {
+    const executor = ManagedToolExecutor.forWorkspace(
+      workspace(),
+      'runtime-01',
+    );
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    try {
+      const result = await executor.execute(sessionReference, 'web_fetch', {
+        url: 'https://169.254.169.254/latest/meta-data',
+        prompt: 'Read',
+      });
+      expect(result.executionStatus).toBe('error');
+      expect(JSON.stringify(result)).toContain('blocked address');
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      fetch.mockRestore();
+      await executor.close();
+    }
+  });
 
   it('lets a session close after its settled call is acknowledged', async () => {
     const executor = ManagedToolExecutor.forWorkspace(
