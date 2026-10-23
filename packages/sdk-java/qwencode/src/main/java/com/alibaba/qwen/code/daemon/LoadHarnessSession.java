@@ -8,6 +8,7 @@ import java.util.stream.Collectors;
 /** Input for attaching Java to an existing Hosted Harness session. */
 public final class LoadHarnessSession {
     private final String harnessSessionId;
+    private HostedHarnessPlacement harnessPlacement;
     private final ManagedSessionStoreConnection managedSessionStore;
     private final boolean passiveManagedRuntimeRecovery;
     private final String toolProfile;
@@ -76,6 +77,11 @@ public final class LoadHarnessSession {
         return this;
     }
 
+    public LoadHarnessSession withHarnessPlacement(HostedHarnessPlacement value) {
+        this.harnessPlacement = value;
+        return this;
+    }
+
     public LoadHarnessSession withAgentDefinition(Map<String, Object> value) {
         this.agentDefinition = value == null ? null : Map.copyOf(value);
         return this;
@@ -113,6 +119,7 @@ public final class LoadHarnessSession {
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
+        copy.harnessPlacement = harnessPlacement;
         copy.agentDefinition = agentDefinition;
         copy.sessionSkillsRef = sessionSkillsRef;
         copy.mcpServers = mcpServers;
@@ -135,6 +142,7 @@ public final class LoadHarnessSession {
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
+        copy.harnessPlacement = harnessPlacement;
         copy.agentDefinition = agentDefinition;
         copy.sessionSkillsRef = sessionSkillsRef;
         copy.mcpServers = mcpServers;
@@ -169,6 +177,7 @@ public final class LoadHarnessSession {
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
+        copy.harnessPlacement = harnessPlacement;
         copy.agentDefinition = agentDefinition;
         copy.sessionSkillsRef = sessionSkillsRef;
         copy.mcpServers = mcpServers;
@@ -192,6 +201,7 @@ public final class LoadHarnessSession {
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
+        copy.harnessPlacement = harnessPlacement;
         copy.agentDefinition = agentDefinition;
         copy.sessionSkillsRef = sessionSkillsRef;
         copy.mcpServers = mcpServers;
@@ -278,6 +288,9 @@ public final class LoadHarnessSession {
 
     Map<String, Object> toJson() {
         Map<String, Object> result = new LinkedHashMap<>();
+        if (harnessPlacement != null) {
+            result.put("harnessPlacement", harnessPlacement.toJson());
+        }
         if (recoveryCleanupPromptId != null) {
             result.put("recoveryCleanupPromptId", recoveryCleanupPromptId);
         }
