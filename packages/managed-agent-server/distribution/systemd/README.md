@@ -46,9 +46,9 @@ the control plane refuses to start when that file is set together with
 `QWEN_MANAGED_AGENT_HARNESS_TOKEN` or `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST`.
 Keep each credential in `harness.env` as `KEY=value` on one line, with LF line
 endings, no whitespace around the `=`, and only letters, digits and `._:/+=-`
-in the value. The control plane refuses anything else, such as a continuation
-or text after a closing quote, since systemd or a shell would read it
-differently.
+in the value, and start comments with `#`. The control plane refuses anything
+else, such as a continuation, a `;` comment or text after a closing quote,
+since systemd or a shell would read it differently.
 If the Harness reports a port other than 4170 because the
 requested one was in use, update `QWEN_MANAGED_AGENT_HARNESS_BASE_URL` in
 `server.env` before starting the control plane.
