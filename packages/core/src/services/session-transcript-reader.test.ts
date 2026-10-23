@@ -1306,6 +1306,17 @@ describe('SessionTranscriptReader', () => {
     expect(runtime?.recording.turnParentUuids).toEqual(
       turnState.turnParentUuids,
     );
+    // R15-2: the cold path must emit one title-projection state per turn
+    // boundary even when compression excludes the turn from the model read
+    // set; a short array is discarded by restoreProjectedState and the
+    // projection flag then survives a rewind with no per-turn text.
+    expect(runtime?.recording.turnTitleStates).toHaveLength(
+      runtime!.recording.turnParentUuids.length,
+    );
+    expect(runtime?.recording.turnTitleStates?.[0]).toEqual({
+      projection: false,
+      displayText: undefined,
+    });
     expect(runtime?.initialTurn).toBe(turnState.initialTurn);
     expect(runtime?.backgroundNotificationTaskIds).toEqual(
       turnState.backgroundNotificationTaskIds,
@@ -1724,6 +1735,53 @@ describe('SessionTranscriptReader', () => {
       { projection: false, displayText: undefined },
       { projection: true, displayText: '' },
     ]);
+  });
+
+  it('prunes a cold-restored compressed title projection on rewind', async () => {
+    const first: ChatRecord = {
+      ...record('u1', null, 'first prompt'),
+      systemPayload: { displayText: 'first visible', hookContext: '' },
+    };
+    const second: ChatRecord = {
+      ...record('u2', 'compression', 'second prompt'),
+      systemPayload: { displayText: 'second visible', hookContext: '' },
+    };
+    await writeRecords([
+      first,
+      record('a1', 'u1', 'answer'),
+      sys('compression', 'a1', 'chat_compression', compressedTurn()),
+      second,
+      record('a2', 'u2', 'answer'),
+    ]);
+
+    const projection = await coldProjection();
+    expect(projection?.runtime.recording.turnParentUuids).toEqual([
+      null,
+      'compression',
+    ]);
+    const config = {
+      storage: new Storage(workspaceDir),
+      getSessionId: () => sessionId,
+      getProjectRoot: () => workspaceDir,
+      getCliVersion: () => 'test',
+      getModel: () => 'test',
+      getAuthType: () => undefined,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getResumedSessionData: () => undefined,
+    } as unknown as Config;
+    const recorder = new ChatRecordingService(
+      config,
+      undefined,
+      false,
+      projection!.runtime.recording,
+    );
+    expect(recorder.hasDisplayProjectionForTitle()).toBe(true);
+    recorder.rewindRecording(0, { truncatedCount: 1 });
+
+    expect(recorder.hasDisplayProjectionForTitle()).toBe(false);
+    expect(recorder.getUserDisplayTextsForTitle()).not.toContain(
+      'second visible',
+    );
   });
 
   it('restores the last valid session approval state independently of replay', async () => {

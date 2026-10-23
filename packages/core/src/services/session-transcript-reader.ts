@@ -3481,7 +3481,9 @@ export class SessionTranscriptReader {
                 uiTelemetrySet.has(record.uuid) ||
                 fileHistorySet.has(record.uuid) ||
                 artifactSet.has(record.uuid) ||
-                record.uuid === sourcesUuid;
+                record.uuid === sourcesUuid ||
+                index.byUuid.get(record.uuid)?.turnHint.turnParentUuid !==
+                  undefined;
               if (needsDeferredDispatch) {
                 if (
                   record.uuid === index.firstRecordUuid &&
@@ -3509,7 +3511,11 @@ export class SessionTranscriptReader {
               metadataSet.has(uuid) ||
               uiTelemetrySet.has(uuid) ||
               fileHistorySet.has(uuid) ||
-              replaySet.has(uuid),
+              replaySet.has(uuid) ||
+              // Title-projection state is index-aligned with every turn
+              // boundary, so each turn's user record must be read even when
+              // a compression checkpoint removed it from the model set.
+              index.byUuid.get(uuid)?.turnHint.turnParentUuid !== undefined,
           );
           const preReadSet = new Set(preReadUuids);
           readContext.preloadedRecords = deferredPreReadRecords;

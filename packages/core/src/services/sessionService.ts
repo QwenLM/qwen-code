@@ -29,7 +29,6 @@ import {
   prepareTranscriptRecords,
 } from '../utils/transcript-records.js';
 import { projectUserTranscriptForDisplay } from '../utils/transcript-records.js';
-import { getMaxInlineMediaBytes } from '../core/inlineMediaLimit.js';
 import type {
   ChatRecord,
   FileHistorySnapshotRecordPayload,
@@ -588,38 +587,8 @@ function joinTextParts(parts: readonly unknown[]): string {
   return texts.join('\n');
 }
 
-/**
- * Maximum bytes to read from head/tail of a session file.
- * Used by readLastRecordUuid which still does its own tail read.
- */
+/** Bytes read per step of the backward walk in `readLastRecordUuid`. */
 const TAIL_READ_SIZE = 64 * 1024;
-
-/**
- * Inline media parts a single user record may journal. The writers clamp each
- * part independently (`clampInlineMediaPart` is applied per part), so a
- * multi-image prompt journals several parts at the configured decoded limit.
- * Two full-size parts is the recovery bound this ceiling covers.
- */
-const MAX_INLINE_MEDIA_PARTS_PER_RECORD = 2;
-
-/**
- * Hard ceiling on readLastRecordUuid's widening tail window. It must cover
- * the multi-part inline media records the writers journal or the
- * oversized-record recovery regresses; without it a corrupt tail with no
- * uuid-bearing line escalates into a whole-file read that re-parses every
- * line at every doubling. Each inline media part at the configured decoded
- * limit (10 MiB by default) is journaled as base64, which inflates it by
- * 4/3, plus JSON framing — so resolve the ceiling from that limit per call
- * rather than pinning it below what the writer accepts.
- */
-function maxTailWindowSize(): number {
-  const inlineMediaBase64Bytes = Math.ceil((getMaxInlineMediaBytes() * 4) / 3);
-  return Math.max(
-    4 * 1024 * 1024,
-    MAX_INLINE_MEDIA_PARTS_PER_RECORD * inlineMediaBase64Bytes +
-      2 * 1024 * 1024,
-  );
-}
 
 const readGoalStateObjective: MatchingRecordFieldReader = (record) => {
   if (typeof record !== 'object' || record === null) {
@@ -2277,8 +2246,9 @@ export class SessionService {
 
   /**
    * Reads the UUID of the last conversation record in a session JSONL file.
-   * Uses a tail-read strategy for efficiency, doubling the window from EOF
-   * when no complete record fits inside it, up to maxTailWindowSize().
+   * Walks backwards from EOF a chunk at a time, carrying the boundary-
+   * spanning line across chunks, so a record of any length is recovered and
+   * a trailing run without a uuid-bearing record is scanned to file start.
    *
    * Each physical line is routed through `jsonl.parseLineTolerant` so a
    * `}{`-glued tail line (#3606 corruption shape) still yields its records
@@ -2291,87 +2261,53 @@ export class SessionService {
     try {
       const stats = fs.statSync(filePath);
       const fileSize = stats.size;
-      const tailWindowCeiling = maxTailWindowSize();
       fd = fs.openSync(filePath, 'r');
-      // A single record can outgrow TAIL_READ_SIZE (a journaled embedded
-      // resource or a long attachment-reference list rides on the user
-      // record's line), and a window that opens inside such a record holds
-      // no complete line — returning null then makes renameSession anchor
-      // custom_title.parentUuid at null and severs the chain on resume.
-      // Double the window from EOF until a complete record fits, giving up
-      // at the ceiling rather than escalating into a whole-file re-parse.
-      let windowSize = TAIL_READ_SIZE;
-      while (true) {
-        const readStart = Math.max(0, fileSize - windowSize);
-        const readLength = Math.min(fileSize, windowSize);
-        const buffer = Buffer.alloc(readLength);
-        fs.readSync(fd, buffer, 0, readLength, readStart);
-
-        // The first split segment is partial only when the tail window
-        // truly starts in the middle of a JSONL record. If the byte right
-        // before `readStart` is `\n`, the window started on a record
-        // boundary and the first segment is a complete line — the
-        // 64-KiB-aligned case where `prev\n<exactly-64KiB-record>\n`
-        // would otherwise drop the only readable record. Peek that byte
-        // before deciding to shift.
-        let firstSegmentIsPartial = false;
-        if (readStart > 0) {
-          const peek = Buffer.alloc(1);
-          fs.readSync(fd, peek, 0, 1, readStart - 1);
-          firstSegmentIsPartial = peek[0] !== 0x0a; // 0x0a = '\n'
-        }
-
-        const tail = buffer.toString('utf-8');
-        const lines = tail.split('\n');
-
-        // Discard the first segment ONLY when it's a true partial fragment.
-        // Running tolerant recovery on a partial would surface a balanced
-        // inner `{ "uuid": ... }` object from inside the record's payload as
-        // if it were a top-level uuid — `renameSession` would then anchor
-        // `custom_title.parentUuid` at payload data and break the parent
-        // chain. Complete physical lines (including a boundary-aligned
-        // first segment) are safe to recover.
-        if (firstSegmentIsPartial) {
-          lines.shift();
-        }
-
-        // Walk physical lines bottom-up; on each line walk recovered records
-        // bottom-up too, so a `}{`-glued tail returns the *latest* record.
-        let found: string | null = null;
-        for (let i = lines.length - 1; i >= 0 && found === null; i--) {
-          const trimmed = lines[i].trim();
-          if (!trimmed) continue;
-          const records = jsonl.parseLineTolerant<ChatRecord>(
-            trimmed,
+      // Walk backwards from EOF a chunk at a time. Every byte is parsed at
+      // most once, and a record of any length — a prompt journals every
+      // clamped inline media part on one line — is recovered when the walk
+      // reaches its start. A trailing run with no uuid-bearing record keeps
+      // walking to file start instead of giving up at a guessed ceiling.
+      // Only the line crossing a chunk boundary is carried forward, as raw
+      // bytes because a multi-byte character can straddle the boundary.
+      let spanParts: Buffer[] = [];
+      let readEnd = fileSize;
+      while (readEnd > 0) {
+        const readStart = Math.max(0, readEnd - TAIL_READ_SIZE);
+        const chunk = Buffer.alloc(readEnd - readStart);
+        fs.readSync(fd, chunk, 0, chunk.length, readStart);
+        const firstNewline = chunk.indexOf(0x0a);
+        if (firstNewline >= 0) {
+          // Everything after the chunk's first newline is complete once the
+          // carried tail of the boundary-spanning line is appended.
+          const found = this.findLastConversationRecordUuid(
+            Buffer.concat([chunk.subarray(firstNewline + 1), ...spanParts]),
             filePath,
           );
-          for (let j = records.length - 1; j >= 0; j--) {
-            const record = records[j];
-            if (record.uuid && isTranscriptConversationRecord(record)) {
-              found = record.uuid;
-              break;
-            }
-          }
+          if (found !== null) return found;
+          spanParts = [chunk.subarray(0, firstNewline)];
+        } else {
+          spanParts = [chunk, ...spanParts];
         }
-        if (found !== null) {
+        if (readStart === 0) {
+          // The leading line is complete at file start.
+          const found = this.findLastConversationRecordUuid(
+            Buffer.concat(spanParts),
+            filePath,
+          );
+          if (found === null) {
+            // renameSession writes custom_title.parentUuid from this value;
+            // name the give-up so a severed chain is distinguishable from an
+            // empty file.
+            debugLogger.warn(
+              `readLastRecordUuid: no uuid-bearing record in ${filePath} ` +
+                `(fileSize=${fileSize}); caller will anchor at null`,
+            );
+          }
           return found;
         }
-        if (readStart === 0 || windowSize >= tailWindowCeiling) {
-          // renameSession writes custom_title.parentUuid from this value, so
-          // name which give-up path produced the null (window exhausted to
-          // the file start vs ceiling hit) — a severed chain is otherwise
-          // indistinguishable from an empty file.
-          debugLogger.warn(
-            `readLastRecordUuid: no uuid-bearing record in ${filePath} ` +
-              `(fileSize=${fileSize}, windowSize=${windowSize}, ` +
-              `reachedFileStart=${readStart === 0}); caller will anchor at null`,
-          );
-          return null;
-        }
-        // Clamp to the ceiling so the final probe reads exactly the bound
-        // instead of overshooting it by up to a full doubling.
-        windowSize = Math.min(windowSize * 2, tailWindowCeiling);
+        readEnd = readStart;
       }
+      return null;
     } catch (error) {
       debugLogger.warn(
         `readLastRecordUuid: failed to read ${filePath}: ${error}`,
@@ -2386,6 +2322,29 @@ export class SessionService {
         }
       }
     }
+  }
+
+  /**
+   * Returns the last uuid-bearing conversation record among complete JSONL
+   * lines, walking bottom-up so a `}{`-glued tail yields the latest record.
+   */
+  private findLastConversationRecordUuid(
+    text: Buffer,
+    filePath: string,
+  ): string | null {
+    const lines = text.toString('utf-8').split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const trimmed = lines[i].trim();
+      if (!trimmed) continue;
+      const records = jsonl.parseLineTolerant<ChatRecord>(trimmed, filePath);
+      for (let j = records.length - 1; j >= 0; j--) {
+        const record = records[j];
+        if (record.uuid && isTranscriptConversationRecord(record)) {
+          return record.uuid;
+        }
+      }
+    }
+    return null;
   }
 
   /**

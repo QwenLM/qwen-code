@@ -504,7 +504,15 @@ function applyDaemonTranscriptEvent(
           }
         }
         if (incomingFingerprint !== undefined) {
-          if (fingerprints?.[index] !== incomingFingerprint) return false;
+          const recorded = fingerprints?.[index];
+          if (recorded === undefined) {
+            // An entry admitted whole carries no fingerprint slot; its
+            // stored text still equals its wire text, so only that value can
+            // identify this echo of it.
+            if (candidate.resource.text !== incomingText) return false;
+          } else if (recorded !== incomingFingerprint) {
+            return false;
+          }
         } else if (candidate.resource.text !== incomingText) {
           return false;
         }
@@ -2626,15 +2634,19 @@ function cutSkeletonFieldToByteBudget(
   const excess = realJsonBytesOf(skeleton) - MAX_EMBEDDED_RESOURCE_BYTES;
   if (excess <= 0) return false;
   const contribution = jsonByteEncoder.encode(JSON.stringify(value)).length;
-  // Never collapse a field to the bare suffix: that is the same whole-field
-  // loss the byte arm exists to avoid, and a negative budget would wipe a
-  // uri while a display-useless mimeType keeps its bytes. The caller rotates
-  // fields and empties the text only as the final fallback.
-  const minimumTrimmedBytes = 2 + TRUNCATED_SUFFIX_ESCAPED_BYTES;
-  if (contribution - excess < minimumTrimmedBytes) return false;
+  // Never collapse a field to the bare suffix: keep at least one code unit,
+  // whose worst-case escaped width is 6 bytes. The caller rotates fields and
+  // empties the text only as the final fallback.
+  const minimumTrimmedBytes = 2 + TRUNCATED_SUFFIX_ESCAPED_BYTES + 6;
+  const absorbable = contribution - minimumTrimmedBytes;
+  if (absorbable <= 0) return false;
+  // Absorb only the share this field can give. Refusing unless one field owns
+  // the whole excess leaves the skeleton over the ceiling when two fields
+  // each own part of it; the caller re-checks and walks the rest down
+  // through the sibling field.
   skeleton.resource[field] = truncateTextToJsonByteBudget(
     value,
-    contribution - excess,
+    contribution - Math.min(excess, absorbable),
   );
   return true;
 }
@@ -2854,7 +2866,7 @@ function boundEmbeddedResource(
       const mimeTypeValue = skeleton.resource.mimeType;
       const fields: ['uri', 'mimeType'] | ['mimeType', 'uri'] =
         typeof mimeTypeValue === 'string' &&
-        mimeTypeValue.length > skeleton.resource.uri.length
+        mimeTypeValue.length >= skeleton.resource.uri.length
           ? ['mimeType', 'uri']
           : ['uri', 'mimeType'];
       clipped = cutSkeletonFieldToByteBudget(skeleton, fields[0]) || clipped;

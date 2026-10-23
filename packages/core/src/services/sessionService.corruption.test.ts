@@ -265,11 +265,11 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
     // reconstructHistory would truncate the chain on resume.
     const file = writeJsonl('big-tail.jsonl', `${giantLine('real-last')}\n`);
 
-    // The window widens until the ~160 KB line fits whole, so "real-last"
-    // IS recovered; the assertion that matters is that the nested payload
-    // trojan is never surfaced as the top-level uuid. An exact `toBe` (not
-    // `not.toBe`) also pins the widening itself: a fixed TAIL_READ_SIZE
-    // window returns null here.
+    // The backward walk reaches the ~160 KB line's start and parses it
+    // whole, so "real-last" IS recovered; the assertion that matters is that
+    // the nested payload trojan is never surfaced as the top-level uuid. An
+    // exact `toBe` (not `not.toBe`) also pins the walk itself: a fixed
+    // TAIL_READ_SIZE window returns null here.
     expect(svc.readLastRecordUuid(file)).toBe('real-last');
   });
 
@@ -316,15 +316,15 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
     const readSpy = vi.spyOn(fs, 'readSync');
     try {
       expect(svc.readLastRecordUuid(file)).toBe('boundary-final');
-      // One window read plus the 1-byte boundary peek — in that order. A
-      // bare call count cannot discriminate: with the peek guard deleted the
-      // loop doubles into a whole-file re-read, which is also two calls but
-      // whose second call reads far more than TAIL_READ_SIZE.
+      // The walk reads the final record's chunk, then exactly the preceding
+      // record to complete the boundary-spanning segment. Both reads stay at
+      // or below TAIL_READ_SIZE, and the second is the file prefix rather
+      // than a whole-file re-read.
       // readSync's mock-call tuple types as the 3-arg overload, so widen
       // before indexing the positional length argument.
       expect(readSpy.mock.calls.map((call) => (call as unknown[])[3])).toEqual([
         TAIL_READ_SIZE,
-        1,
+        Buffer.byteLength(prevRecord, 'utf8') + 1,
       ]);
     } finally {
       readSpy.mockRestore();
@@ -432,43 +432,75 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
     expect(svc.readLastRecordUuid(file)).toBe('oversized-two-inline');
   });
 
-  it('gives up at the tail-window ceiling instead of escalating to a whole-file read', () => {
-    // A post-crash garbage flood with no uuid-bearing line: without the
-    // ceiling the doubling loop re-reads and re-parses the whole file at
-    // every step, stalling renameSession on the daemon route. Shrink the
-    // per-part media limit so the mirrored ceiling stays a small file.
-    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
-    try {
-      const MAX_TAIL_WINDOW_SIZE = Math.max(
-        4 * 1024 * 1024,
-        Math.ceil((getMaxInlineMediaBytes() * 4) / 3) * 2 + 2 * 1024 * 1024,
-      );
-      const garbage = `${'y'.repeat(4096)}\n`.repeat(
-        Math.ceil(MAX_TAIL_WINDOW_SIZE / 4097) + 100,
-      );
-      const file = writeJsonl('huge-garbage-tail.jsonl', garbage);
-      expect(fs.statSync(file).size).toBeGreaterThan(MAX_TAIL_WINDOW_SIZE);
+  it('recovers a legitimate record with three inline media parts', () => {
+    // The writers clamp each inline media part independently and put no cap
+    // on the part count, so a three-image prompt is a legitimate record. A
+    // ceiling sized from a guessed part count turns it into a hard cliff:
+    // the walk must recover the record regardless of how many parts it holds.
+    const imagePart = (mimeType: string, fill: string) => ({
+      inlineData: { mimeType, data: fill.repeat(14 * 1024 * 1024) },
+    });
+    const record = {
+      ...recordFor('oversized-three-inline', 'user', null),
+      message: {
+        role: 'user',
+        parts: [
+          imagePart('image/png', 'A'),
+          imagePart('image/jpeg', 'B'),
+          imagePart('image/webp', 'C'),
+        ],
+      },
+    };
+    const line = JSON.stringify(record);
+    expect(Buffer.byteLength(line, 'utf8')).toBeGreaterThan(28 * 1024 * 1024);
+    const file = writeJsonl('oversized-three-inline.jsonl', `${line}\n`);
 
-      const readSpy = vi.spyOn(fs, 'readSync');
-      try {
-        expect(svc.readLastRecordUuid(file)).toBeNull();
-        const requestedLengths = readSpy.mock.calls.map(
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (call) => (call as any[])[3] as number,
-        );
-        expect(Math.max(...requestedLengths)).toBeLessThanOrEqual(
-          MAX_TAIL_WINDOW_SIZE,
-        );
-        // The probe must reach the ceiling before giving up — a fixed-window
-        // reader would also satisfy the length cap while never recovering the
-        // oversized records this loop exists for.
-        expect(requestedLengths).toContain(MAX_TAIL_WINDOW_SIZE);
-      } finally {
-        readSpy.mockRestore();
-      }
+    expect(svc.readLastRecordUuid(file)).toBe('oversized-three-inline');
+  });
+
+  it('gives up after one backward pass over a tail with no uuid-bearing record', () => {
+    // A post-crash garbage flood with no uuid-bearing line: the walk must
+    // visit each byte once and return null instead of re-reading and
+    // re-parsing a widening window at every step.
+    const TAIL_READ_SIZE = 64 * 1024;
+    const garbage = `${'y'.repeat(4096)}\n`.repeat(40);
+    const file = writeJsonl('huge-garbage-tail.jsonl', garbage);
+    const fileSize = fs.statSync(file).size;
+
+    const readSpy = vi.spyOn(fs, 'readSync');
+    try {
+      expect(svc.readLastRecordUuid(file)).toBeNull();
+      const requestedLengths = readSpy.mock.calls.map(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (call) => (call as any[])[3] as number,
+      );
+      expect(Math.max(...requestedLengths)).toBeLessThanOrEqual(TAIL_READ_SIZE);
+      // The chunks are disjoint and cover the file exactly once: no window
+      // is re-read as it doubles.
+      expect(requestedLengths.reduce((sum, length) => sum + length, 0)).toBe(
+        fileSize,
+      );
     } finally {
-      vi.unstubAllEnvs();
+      readSpy.mockRestore();
     }
+  });
+
+  it('returns the head uuid when the unrecoverable tail outgrows the old ceiling', () => {
+    // The pre-fix loop gave up at a ceiling derived from an inline-media
+    // part count. A corrupt tail longer than that ceiling returned null even
+    // though an earlier valid record was on disk, and renameSession anchored
+    // custom_title.parentUuid at null — severing the chain on resume.
+    const oldCeiling = Math.max(
+      4 * 1024 * 1024,
+      Math.ceil((getMaxInlineMediaBytes() * 4) / 3) * 2 + 2 * 1024 * 1024,
+    );
+    const garbage = `${'y'.repeat(4096)}\n`.repeat(
+      Math.ceil(oldCeiling / 4097) + 100,
+    );
+    const file = writeJsonl('deep-garbage-tail.jsonl', `${R1}\n${garbage}`);
+    expect(fs.statSync(file).size).toBeGreaterThan(oldCeiling);
+
+    expect(svc.readLastRecordUuid(file)).toBe('u1');
   });
 });
 

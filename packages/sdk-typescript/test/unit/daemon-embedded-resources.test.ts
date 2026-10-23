@@ -460,6 +460,45 @@ describe('daemon embedded text resources', () => {
     expect(onTruncation).toHaveBeenCalledTimes(1);
   });
 
+  it('deduplicates an identical echo of an entry admitted whole', () => {
+    // R17-1: an entry admitted whole carries no fingerprint slot. When the
+    // same echo arrives again and admission degrades it to the text-emptied
+    // minimal skeleton, comparing against the missing slot must fall back to
+    // the value match or the block gains a duplicate empty entry and a
+    // spurious truncation report.
+    const maxRetainedBytes = 1024 * 1024;
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxRetainedBytes,
+      onTruncation,
+    });
+    const intact = {
+      type: 'resource',
+      resource: {
+        uri: 'context://example/intact',
+        text: '\u754c'.repeat(60_000),
+      },
+    };
+    const echo = normalizeDaemonEvent(frame(intact))[0]!;
+    store.dispatch(echo);
+    const firstBytes = store.getSnapshot().retainedBytes;
+
+    store.dispatch(echo);
+
+    const snapshot = store.getSnapshot();
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(1);
+    expect(block.embeddedResources![0]!.resource.text).toBe(
+      '\u754c'.repeat(60_000),
+    );
+    expect(snapshot.retainedBytes).toBe(firstBytes);
+    expect(onTruncation).not.toHaveBeenCalled();
+  });
+
   it('keeps distinct same-uri payloads that both cascade-empty as separate entries', () => {
     // Both texts overflow the real-byte ceiling and are emptied by the
     // cascade, so the stored entries are byte-identical; only the
@@ -1017,7 +1056,50 @@ describe('daemon embedded text resources', () => {
     }
     expect(block.embeddedResources).toHaveLength(1);
     const retained = block.embeddedResources![0]!;
-    expect(retained.resource.text).toBe('');
+    // Both fields own part of the overflow: the text cut absorbs what it can
+    // and the field rotation spends the remainder on the uri, so neither is
+    // emptied whole and the skeleton still converges.
+    expect(retained.resource.text).toContain('[truncated]');
+    expect(retained.resource.uri).toContain('[truncated]');
+    expect(
+      new TextEncoder().encode(JSON.stringify(retained)).length,
+    ).toBeLessThanOrEqual(256 * 1024);
+    expect(onTruncation).toHaveBeenCalled();
+  });
+
+  it('converges a skeleton whose uri and mimeType each own the overflow', () => {
+    // R14-4: when both retained skeleton fields exceed the whole excess, an
+    // all-or-nothing cut refuses each in turn and the admitted resource stays
+    // over the ceiling. A cut must absorb what the field can give so the
+    // caller's next re-check and the sibling field's cut converge.
+    const maxRetainedBytes = 1024 * 1024;
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxRetainedBytes,
+      onTruncation,
+    });
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: {
+            uri: `context://example/${'\u754c'.repeat(120_000)}`,
+            mimeType: '\u754c'.repeat(120_000),
+            text: 'small',
+          },
+        }),
+      )[0]!,
+    );
+
+    const snapshot = store.getSnapshot();
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(1);
+    const retained = block.embeddedResources![0]!;
     expect(
       new TextEncoder().encode(JSON.stringify(retained)).length,
     ).toBeLessThanOrEqual(256 * 1024);
