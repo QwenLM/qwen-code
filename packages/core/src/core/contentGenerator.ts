@@ -117,10 +117,13 @@ export type ContentGeneratorConfig = {
    * you still want; `false` to never send it.
    */
   enableRequestMetadata?: boolean;
-  // Force `scope: 'global'` on Anthropic cache_control entries even when the
-  // base URL is not an Anthropic-native origin (e.g. proxy providers like
-  // Routify, OpenRouter). Requires the proxy to forward `cache_control` fields
-  // and the `prompt-caching-scope-2026-01-05` beta. See issue #6642.
+  // Opt in to `scope: 'global'` on Anthropic cache_control entries. Off by
+  // default for every base URL, `api.anthropic.com` included: the API only
+  // accepts a global breakpoint when every preceding block is globally scoped
+  // too, which a real tool list cannot satisfy within the four-breakpoint cap
+  // (issue #15039). Kept for backends whose validation differs and that
+  // forward `cache_control` plus the `prompt-caching-scope-2026-01-05` beta.
+  // See issue #6642.
   forceGlobalCacheScope?: boolean;
   /**
    * Default Anthropic `cache_control` retention for every cache anchor

@@ -42,6 +42,7 @@ const mocks = vi.hoisted(() => ({
     createSession: vi.fn(),
     submitPrompt: vi.fn(),
     cancel: vi.fn(),
+    queryCancelOperation: vi.fn(),
   },
 }));
 
@@ -173,7 +174,6 @@ function summary(
     sessionId,
     activeTurnId: 'p1',
     title: `Task ${sessionId}`,
-    workspaceCwd: '/workspace',
     createdAt: 10,
     updatedAt: 20,
     admittedAt: 10,
@@ -225,10 +225,8 @@ describe('ManagedSessionsPage', () => {
     vi.clearAllMocks();
     mocks.restoreEditorDraft.mockReturnValue('');
     provider = {
-      kind: 'java',
       storageKey: 'http://managed-test',
       canCancel: true,
-      acceptsWorkspaceCwd: false,
       ...mocks.client,
     };
     sessionStorage.clear();
@@ -267,7 +265,18 @@ describe('ManagedSessionsPage', () => {
       sessionId: 's1',
       turnId: 'p-next',
     });
-    mocks.client.cancel.mockResolvedValue({ accepted: true });
+    mocks.client.cancel.mockResolvedValue({
+      sessionId: 's1',
+      turnId: 'p1',
+      operationId: 'cancel-1',
+    });
+    mocks.client.queryCancelOperation.mockResolvedValue({
+      sessionId: 's1',
+      operationId: 'cancel-1',
+      type: 'cancel',
+      status: 'running',
+      replayed: false,
+    });
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -294,7 +303,6 @@ describe('ManagedSessionsPage', () => {
           <ManagedSessionsPage
             sessionId={sessionId}
             onSelectSession={onSelect}
-            workspaceCwd="/workspace"
             managedAgentProvider={managedAgentProvider ?? undefined}
             navigationTarget={navigationTarget}
             interactive={interactive}
@@ -305,6 +313,108 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
   }
+
+  it('opens MCP management for the exact current Session and closes it on a Session switch', async () => {
+    const query = vi.fn().mockImplementation(async (id: string) => ({
+      sessionId: id,
+      revision: 0,
+      supported: true,
+      availableServers: [],
+      servers: [],
+    }));
+    provider = {
+      ...provider,
+      mcpManagement: { query, submit: vi.fn(), operation: vi.fn() },
+    };
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        workspace: { workspaceId: `workspace-${id}`, cwdRelative: '.' },
+      }),
+    );
+    await render('s1');
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((button) => button.textContent === 'Manage MCP')!
+        .click(),
+    );
+    expect(document.querySelector('[data-managed-mcp-manager]')).not.toBeNull();
+    expect(query).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    await render('s2');
+    expect(document.querySelector('[data-managed-mcp-manager]')).toBeNull();
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((button) => button.textContent === 'Manage MCP')!
+        .click(),
+    );
+    expect(query).toHaveBeenLastCalledWith('s2', expect.anything());
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'keeps the selected unarchived session out of archived navigation (workspaceBinding=%s)',
+    async (withWorkspaceBinding) => {
+      const active = summary('s1', {
+        lifecycleStatus: 'active',
+        title: 'Unarchived selected session',
+      });
+      const archived = summary('s2', {
+        lifecycleStatus: 'archived',
+        title: 'Archived session',
+      });
+      provider = {
+        ...provider,
+        lifecycle: {
+          submit: vi.fn(),
+          unarchive: vi.fn(),
+          query: vi.fn(),
+        },
+      };
+      mocks.client.getSession.mockResolvedValue(active);
+      mocks.client.listSessions.mockImplementation(
+        async (options: { archiveState?: string }) => ({
+          sessions: options.archiveState === 'archived' ? [archived] : [active],
+        }),
+      );
+      if (withWorkspaceBinding) {
+        provider.workspaceBinding = {
+          agentId: 'agent',
+          list: vi.fn().mockResolvedValue({ data: [], supported: true }),
+          get: vi.fn(),
+          createEmpty: vi.fn(),
+        };
+      }
+      const slot = document.createElement('aside');
+      container.appendChild(slot);
+      await render(
+        's1',
+        'en',
+        provider,
+        withWorkspaceBinding ? slot : undefined,
+      );
+      const nav = (withWorkspaceBinding ? slot : container).querySelector(
+        'nav[aria-label="Managed sessions"]',
+      )!;
+      expect(nav.textContent).toContain(active.title);
+      expect(nav.textContent).not.toContain(archived.title);
+      await act(async () => {
+        [...nav.querySelectorAll('button')]
+          .find((button) => button.textContent === 'Archived')!
+          .click();
+        await flush();
+      });
+      expect(
+        mocks.client.listSessions.mock.calls.map(
+          ([options]) => options.archiveState,
+        ),
+      ).toEqual(['unarchived', 'archived']);
+      expect(nav.textContent).toContain(archived.title);
+      expect(nav.textContent).not.toContain(active.title);
+      expect(onSelect).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['closed', 'archived'])(
     'keeps %s history read only when native recovery is ready',
@@ -337,6 +447,45 @@ describe('ManagedSessionsPage', () => {
       expect(mocks.client.createSession).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    ['en', 'billing'],
+    ['zh-CN', '余额'],
+  ] as const)(
+    'explains a payment failure in %s without submitting another prompt',
+    async (language, guidance) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          phase: 'failed',
+          failure: {
+            code: 'model_payment_required',
+            message: 'model_payment_required',
+          },
+        }),
+      );
+      await render('s1', language);
+      expect(container.textContent).toContain('HTTP 402');
+      expect(container.textContent).toContain(guidance);
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it('preserves an unknown failure message rather than showing a translation key', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        phase: 'failed',
+        failure: {
+          code: 'custom_failure',
+          message: 'A product-specific failure',
+        },
+      }),
+    );
+    await render('s1');
+    expect(container.textContent).toContain('A product-specific failure');
+    expect(container.textContent).not.toContain(
+      'managed.failure.custom_failure',
+    );
+  });
 
   it('uses the shared rename dialog and synchronizes the confirmed title without submitting the composer', async () => {
     let resolve!: (value: { displayName: string }) => void;
@@ -721,6 +870,64 @@ describe('ManagedSessionsPage', () => {
     );
   });
 
+  it('retains attachment support while refreshing and applies an explicit revocation', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          inputAttachments: true,
+        },
+      }),
+    );
+    await render('s1');
+    const composer = container.querySelector('form');
+    expect(mocks.editorProps?.attachmentsEnabled).toBe(true);
+    let resolveSummary!: (value: ManagedAgentSessionSummary) => void;
+    mocks.client.getSession.mockImplementation(
+      () => new Promise((resolve) => (resolveSummary = resolve)),
+    );
+    await act(async () => {
+      [...container.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Refresh')!
+        .click();
+      await flush();
+    });
+    expect(container.querySelector('form')).toBe(composer);
+    expect(mocks.editorProps?.attachmentsEnabled).toBe(true);
+    await act(async () => {
+      resolveSummary(summary('s1'));
+      await flush();
+    });
+    expect(mocks.editorProps?.attachmentsEnabled).toBe(false);
+  });
+
+  it.each(['session', 'provider'] as const)(
+    'does not carry attachment support into a different %s while loading',
+    async (change) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          capabilities: {
+            canSend: true,
+            canCancel: false,
+            inputAttachments: true,
+          },
+        }),
+      );
+      await render('s1');
+      expect(mocks.editorProps?.attachmentsEnabled).toBe(true);
+      mocks.client.getSession.mockImplementation(() => new Promise(() => {}));
+      await render(
+        change === 'session' ? 's2' : 's1',
+        'en',
+        change === 'provider'
+          ? { ...provider, storageKey: 'other-provider' }
+          : provider,
+      );
+      expect(mocks.editorProps?.attachmentsEnabled).toBe(false);
+    },
+  );
+
   it('shows the actual model and context in the fixed composer and retains them after refresh', async () => {
     const observation = {
       modelId: 'actual-old-revision',
@@ -1077,7 +1284,7 @@ describe('ManagedSessionsPage', () => {
     expect(container.querySelector('textarea')?.value).toBe(
       'Keep my next message',
     );
-    expect(container.textContent).toContain(
+    expect(container.textContent).not.toContain(
       'subsequent tool calls in this turn',
     );
     expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
@@ -1567,6 +1774,210 @@ describe('ManagedSessionsPage', () => {
     }
   });
 
+  it.each(['completed', 'failed', 'cancelled'] as const)(
+    'retains selected status after switching and clears a background %s task without losing paged rows',
+    async (phase) => {
+      vi.useFakeTimers();
+      const bound = { workspaceId: 'ws-a', cwdRelative: '.' };
+      let first = summary('s1', { phase: 'tool_running', workspace: bound });
+      const second = summary('s2', { workspace: bound });
+      const paged = summary('s3', { workspace: bound });
+      mocks.client.getSession.mockImplementation(async (id: string) =>
+        id === 's1' ? first : second,
+      );
+      mocks.client.listSessions
+        .mockResolvedValueOnce({
+          sessions: [{ ...first, phase: 'admitted', updatedAt: 19 }, second],
+          nextCursor: 'next',
+        })
+        .mockResolvedValue({ sessions: [paged] });
+      provider.workspaceBinding = {
+        agentId: 'agent',
+        list: vi.fn().mockResolvedValue({
+          data: [
+            {
+              workspaceId: 'ws-a',
+              displayName: 'Project',
+              state: 'active',
+              canCreateSession: true,
+            },
+          ],
+          supported: true,
+        }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      };
+      const slot = document.createElement('aside');
+      document.body.appendChild(slot);
+      const row = (id: string) =>
+        slot.querySelector(`[data-managed-session-id="${id}"]`)!;
+      try {
+        await render('s1', 'en', provider, slot);
+        expect(row('s1').getAttribute('title')).toBe('Executing tool');
+        await render('s2', 'en', provider, slot);
+        expect(row('s1').getAttribute('title')).toBe('Executing tool');
+        expect(
+          row('s1').querySelector('[data-web-shell-session-running]'),
+        ).not.toBeNull();
+        await act(async () =>
+          slot
+            .querySelector<HTMLButtonElement>(
+              '[aria-label="Load more Managed sessions"]',
+            )!
+            .click(),
+        );
+        first = { ...first, phase, updatedAt: 30 };
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(3000);
+          await flush();
+        });
+        expect(
+          row('s1').querySelector('[data-web-shell-session-running]'),
+        ).toBeNull();
+        expect(row('s3')).not.toBeNull();
+        expect(mocks.client.listSessions).toHaveBeenCalledTimes(2);
+        const firstReads = mocks.client.getSession.mock.calls.filter(
+          ([id]) => id === 's1',
+        ).length;
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(6000);
+          await flush();
+        });
+        expect(
+          mocks.client.getSession.mock.calls.filter(([id]) => id === 's1'),
+        ).toHaveLength(firstReads);
+        expect(
+          mocks.client.getSession.mock.calls.some(([id]) => id === 's3'),
+        ).toBe(false);
+      } finally {
+        slot.remove();
+      }
+    },
+  );
+
+  it('discards an old background read when that session becomes selected', async () => {
+    vi.useFakeTimers();
+    const active = summary('s1', { phase: 'agent_running' });
+    const complete = { ...active, phase: 'completed' as const, updatedAt: 30 };
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [active, summary('s2')],
+    });
+    let resolve!: (value: ManagedAgentSessionSummary) => void;
+    let oldSignal: AbortSignal | undefined;
+    mocks.client.getSession.mockImplementation(
+      (id: string, options: { signal: AbortSignal }) => {
+        if (id === 's1') {
+          oldSignal = options.signal;
+          return new Promise((done) => {
+            resolve = done;
+          });
+        }
+        return Promise.resolve(summary(id));
+      },
+    );
+    await render('s2');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+      await flush();
+    });
+    expect(oldSignal?.aborted).toBe(false);
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      id === 's1' ? complete : summary(id),
+    );
+    await render('s1');
+    expect(oldSignal?.aborted).toBe(true);
+    await act(async () => {
+      resolve(active);
+      await flush();
+    });
+    const nav = container.querySelector('nav')!;
+    expect(nav.textContent).toContain('Task s1Completed');
+    expect(nav.textContent).not.toContain('Thinking / responding');
+  });
+
+  it.each([19, 20])(
+    'keeps a confirmed background phase when a late catalog has timestamp %s',
+    async (updatedAt) => {
+      vi.useFakeTimers();
+      const bound = { workspaceId: 'ws-a', cwdRelative: '.' };
+      let first = summary('s1', { phase: 'agent_running', workspace: bound });
+      const second = summary('s2', { workspace: bound });
+      let resolveList!: (value: {
+        sessions: ManagedAgentSessionSummary[];
+        nextCursor?: string;
+      }) => void;
+      mocks.client.listSessions
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveList = resolve;
+            }),
+        )
+        .mockResolvedValue({
+          sessions: [{ ...first, phase: 'created', updatedAt }],
+        });
+      mocks.client.getSession.mockImplementation(async (id: string) =>
+        id === 's1' ? first : second,
+      );
+      provider.workspaceBinding = {
+        agentId: 'agent',
+        list: vi.fn().mockResolvedValue({
+          data: [
+            {
+              workspaceId: 'ws-a',
+              displayName: 'Project',
+              state: 'active',
+              canCreateSession: true,
+            },
+          ],
+          supported: true,
+        }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      };
+      const slot = document.createElement('aside');
+      document.body.appendChild(slot);
+      const row = () => slot.querySelector('[data-managed-session-id="s1"]')!;
+      try {
+        await render('s1', 'en', provider, slot);
+        expect(
+          row().querySelector('[data-web-shell-session-running]'),
+        ).not.toBeNull();
+        await render('s2', 'en', provider, slot);
+        await act(async () => {
+          resolveList({
+            sessions: [{ ...first, phase: 'created', updatedAt }, second],
+            nextCursor: 'older',
+          });
+          await flush();
+        });
+        expect(
+          row().querySelector('[data-web-shell-session-running]'),
+        ).not.toBeNull();
+        await act(async () =>
+          slot
+            .querySelector<HTMLButtonElement>(
+              '[aria-label="Load more Managed sessions"]',
+            )!
+            .click(),
+        );
+        expect(
+          row().querySelector('[data-web-shell-session-running]'),
+        ).not.toBeNull();
+        first = { ...first, phase: 'completed', updatedAt: 30 };
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(3000);
+          await flush();
+        });
+        expect(
+          row().querySelector('[data-web-shell-session-running]'),
+        ).toBeNull();
+      } finally {
+        slot.remove();
+      }
+    },
+  );
+
   it.each([false, true])(
     'keeps hidden flat navigation separate from results with a dedicated open callback (%s)',
     async (dedicatedOpen) => {
@@ -1740,29 +2151,32 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
-  it('uses the standard composer stop action with Managed cancel authority', async () => {
-    mocks.client.getSession.mockImplementation(async () =>
-      summary('s1', {
-        phase: 'agent_running',
-        capabilities: { canSend: false, canCancel: true },
-      }),
-    );
-    await render('s1', 'en', provider, null);
-    const stop = [...container.querySelectorAll('button')].find(
-      (button) => button.textContent === 'Stop managed task',
-    );
-    expect(stop?.disabled).toBe(false);
-    await act(async () => {
-      stop!.click();
-      await flush();
-    });
-    expect(mocks.client.cancel).toHaveBeenCalledWith(
-      's1',
-      'p1',
-      expect.objectContaining({ idempotencyKey: expect.any(String) }),
-    );
-    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
-  });
+  it.each(['agent_running', 'failed'] as const)(
+    'uses the standard composer stop action with Managed cancel authority in phase %s',
+    async (phase) => {
+      mocks.client.getSession.mockImplementation(async () =>
+        summary('s1', {
+          phase,
+          capabilities: { canSend: false, canCancel: true },
+        }),
+      );
+      await render('s1', 'en', provider, null);
+      const stop = [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Stop managed task',
+      );
+      expect(stop?.disabled).toBe(false);
+      await act(async () => {
+        stop!.click();
+        await flush();
+      });
+      expect(mocks.client.cancel).toHaveBeenCalledWith(
+        's1',
+        'p1',
+        expect.objectContaining({ idempotencyKey: expect.any(String) }),
+      );
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    },
+  );
 
   it('handles Escape only for the visible Managed conversation after composition and other controls', async () => {
     mocks.client.getSession.mockImplementation(async () =>
@@ -1797,6 +2211,110 @@ describe('ManagedSessionsPage', () => {
     await escape({}, document.body);
     expect(mocks.client.cancel).toHaveBeenCalledOnce();
   });
+
+  it.each([false, true])(
+    'reads child approvals with the panel closed and preserves the parent draft with lifecycle support %s',
+    async (lifecycleEnabled) => {
+      const childId = 'child-1';
+      const childTask: ManagedTask = {
+        ...task,
+        childSessionId: childId,
+        approvalMode: 'default',
+      };
+      mocks.client.getSession.mockImplementation(async (id: string) =>
+        summary(id, {
+          capabilities:
+            id === 's1'
+              ? {
+                  canSend: true,
+                  canCancel: false,
+                  tasks: true,
+                  actions: true,
+                  childAgents: true,
+                  ...(lifecycleEnabled ? { sessionClose: true } : {}),
+                }
+              : { canSend: false, canCancel: false },
+        }),
+      );
+      mocks.client.getTranscript.mockImplementation(async (id: string) => ({
+        events: [
+          {
+            ...event(1, id === childId ? 'Child result' : 'Parent answer'),
+            sessionId: id,
+          },
+          { ...event(2, ''), sessionId: id, type: 'completed' },
+        ],
+        lastEventId: 2,
+      }));
+      const childAction = { ...pendingAction, sessionId: childId };
+      const listPending = vi.fn().mockResolvedValue([childAction]);
+      const respond = vi.fn().mockResolvedValue(undefined);
+      const lifecycle = {
+        submit: vi.fn(),
+        unarchive: vi.fn(),
+        query: vi.fn(),
+      };
+      provider = {
+        ...provider,
+        ...(lifecycleEnabled ? { lifecycle } : {}),
+        actions: { listPending, respond },
+        tasks: {
+          list: vi.fn().mockResolvedValue({
+            data: [childTask],
+            hasMore: false,
+            activeChildCount: 1,
+          }),
+          get: vi.fn().mockResolvedValue(childTask),
+          listEvents: vi.fn().mockResolvedValue({ data: [], hasMore: false }),
+        },
+      };
+      await render('s1');
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      expect(listPending).toHaveBeenCalledWith(
+        's1',
+        expect.objectContaining({ includeChildren: true }),
+      );
+      expect(container.textContent).toContain('Child Agent approval');
+      const composer = container.querySelector('textarea')!;
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )!.set!;
+      await act(async () => {
+        setter.call(composer, 'Keep the parent draft');
+        composer.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      const click = async (text: string) =>
+        act(async () => {
+          [...document.querySelectorAll('button')]
+            .find((button) => button.textContent === text)!
+            .click();
+          await flush();
+        });
+      await click('Session tasks');
+      await click('Child Agent · 01234567');
+      await click('View child Session');
+      expect(mocks.client.getTranscript).toHaveBeenCalledWith(
+        childId,
+        expect.anything(),
+      );
+      const childDialog = [
+        ...document.querySelectorAll('[role="dialog"]'),
+      ].find((dialog) =>
+        dialog.textContent?.includes('Back to parent Session'),
+      )!;
+      expect(childDialog.textContent).toContain('Child result');
+      expect(childDialog.querySelector('textarea')).toBeNull();
+      expect(container.querySelector('textarea')).toBe(composer);
+      await click('Back to parent Session');
+      await click('Close tasks');
+      expect(container.querySelector('textarea')).toBe(composer);
+      expect(composer.value).toBe('Keep the parent draft');
+      expect(container.textContent).toContain('Parent answer');
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+      expect(lifecycle.submit).not.toHaveBeenCalled();
+    },
+  );
 
   it('opens child tasks without losing drafts or history and leaves sending available during uncertain cancellation', async () => {
     mocks.client.getSession.mockImplementation(async () =>
@@ -2213,7 +2731,7 @@ describe('ManagedSessionsPage', () => {
           {
             ...event(1, ''),
             type: 'tool_requested',
-            data: { toolCallId: 'call-1', toolName, input },
+            data: { itemId: 'item-1', toolCallId: 'call-1', toolName, input },
           },
         ],
         lastEventId: 1,
@@ -2747,16 +3265,15 @@ describe('ManagedSessionsPage', () => {
       sessions: [summary('java-session')],
     });
     const provider: ManagedAgentProvider = {
-      kind: 'java',
       storageKey: 'https://java.example/agent',
       canCancel: true,
-      acceptsWorkspaceCwd: false,
       listSessions,
       getSession: vi.fn(),
       getTranscript: vi.fn(),
       createSession: vi.fn(),
       submitPrompt: vi.fn(),
       cancel: vi.fn(),
+      queryCancelOperation: vi.fn(),
       async *subscribeEvents() {
         yield* [];
       },
@@ -2765,9 +3282,7 @@ describe('ManagedSessionsPage', () => {
     await render(undefined, 'en', provider);
 
     expect(container.textContent).toContain('Task java-session');
-    expect(listSessions).toHaveBeenCalledWith(
-      expect.objectContaining({ workspaceCwd: undefined }),
-    );
+    expect(listSessions.mock.calls[0][0]).not.toHaveProperty('workspaceCwd');
     expect(mocks.useWorkspace).not.toHaveBeenCalled();
     expect(mocks.client.listSessions).not.toHaveBeenCalled();
   });
@@ -2981,7 +3496,6 @@ describe('ManagedSessionsPage', () => {
     const [first, retry] = mocks.client.createSession.mock.calls;
     expect(first?.[0]).toEqual({
       text: 'Do the work',
-      workspaceCwd: undefined,
     });
     expect(retry?.[0]).toEqual(first?.[0]);
     expect(retry?.[1].idempotencyKey).toBe(first?.[1].idempotencyKey);
@@ -3053,7 +3567,6 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.createSession).toHaveBeenCalledTimes(2);
     expect(mocks.client.createSession.mock.calls[1]?.[0]).toEqual({
       text: 'Do the other work',
-      workspaceCwd: undefined,
     });
     expect(
       mocks.client.createSession.mock.calls[1]?.[1].idempotencyKey,
@@ -3478,29 +3991,6 @@ describe('ManagedSessionsPage', () => {
         container.querySelectorAll('[role="status"], [aria-live]'),
       ).map((node) => node.textContent),
     ).toContain('Request discarded. The draft is back in the composer.');
-  });
-
-  it('does not refetch the list when a dropped workspace path changes', async () => {
-    await render('s1');
-    expect(mocks.client.listSessions).toHaveBeenCalledTimes(1);
-
-    await act(async () => {
-      root.render(
-        <I18nProvider language="en">
-          <ManagedSessionsPage
-            sessionId="s1"
-            onSelectSession={onSelect}
-            workspaceCwd="/other"
-            managedAgentProvider={provider}
-          />
-        </I18nProvider>,
-      );
-      await flush();
-    });
-
-    // The provider drops workspaceCwd from the request, so the new folder
-    // changes nothing: the fetched page (and its pagination) must survive.
-    expect(mocks.client.listSessions).toHaveBeenCalledTimes(1);
   });
 
   it('gates sending and cancels the captured Prompt without treating acceptance as terminal', async () => {
