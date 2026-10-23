@@ -27,6 +27,7 @@ import {
   mkdtemp,
   readdir,
   rm,
+  stat,
   symlink,
   writeFile,
 } from 'node:fs/promises';
@@ -3757,6 +3758,85 @@ describe('git clone target reservations', () => {
       });
       expect(again.status).toBe(202);
       await cloner.cancel(again.body.jobId);
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a clone target inside a reserved root', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-reserved-'));
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+        ]),
+        workspaceGitCloner: cloner,
+        reservedWorkspaceRoots: [root],
+      });
+      const res = await request(app)
+        .post('/workspaces')
+        .send({
+          kind: 'git',
+          url: 'https://example.com/org/repo.git',
+          target: join(root, 'repo'),
+        });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('target_reserved');
+      await expect(stat(join(root, 'repo'))).rejects.toBeDefined();
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects extra fields on a git clone request', async () => {
+    const { app } = createApp({
+      workspaceGitCloner: createWorkspaceGitCloner({ runner: blockingRunner }),
+    });
+    const res = await request(app).post('/workspaces').send({
+      kind: 'git',
+      url: 'https://example.com/org/repo.git',
+      target: '/tmp/qwen-extra-key-repo',
+      persist: true,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_workspace_request');
+  });
+
+  it('rejects persisting an existing workspace under an active clone target', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-promotion-'));
+    const outer = join(root, 'outer');
+    const child = join(outer, 'child');
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const registry = createMockRegistry([
+        makeRuntime('/Users/test', { primary: true }),
+      ]);
+      const { app } = createApp({
+        workspaceRegistry: registry,
+        workspaceGitCloner: cloner,
+        workspaceRegistrationStore: {} as unknown as WorkspaceRegistrationStore,
+      });
+      const started = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target: outer,
+      });
+      expect(started.status).toBe(202);
+
+      await mkdir(child);
+      registry.add(makeRuntime(child));
+
+      const res = await request(app).post('/workspaces').send({
+        cwd: child,
+        persist: true,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('workspace_nested');
+
+      await cloner.cancel(started.body.jobId);
     } finally {
       await cloner.sealAndWait().catch(() => undefined);
       await rm(root, { recursive: true, force: true });

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { StrictMode, act } from 'react';
+import { StrictMode, act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
@@ -1584,5 +1584,37 @@ describe('AddWorkspaceDialog', () => {
       option!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     });
     expect(gitTargetInput().value).toBe('/home/me/src/repo');
+  });
+
+  it('returns to the directory source when the clone capability disappears', async () => {
+    const controls = {
+      start: vi.fn(),
+      poll: vi.fn(),
+      cancel: vi.fn(),
+    };
+    function Harness() {
+      const [enabled, setEnabled] = useState(true);
+      return (
+        <>
+          <button type="button" onClick={() => setEnabled(false)}>
+            drop-capability
+          </button>
+          <AddWorkspaceDialog
+            onClose={vi.fn()}
+            onAdd={vi.fn()}
+            gitClone={enabled ? controls : undefined}
+          />
+        </>
+      );
+    }
+    mount(<Harness />);
+    await selectGitSource();
+    expect(document.querySelector('#add-workspace-git-url')).not.toBeNull();
+    const drop = [
+      ...document.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'drop-capability')!;
+    await act(async () => drop.click());
+    expect(document.querySelector('#add-workspace-path')).not.toBeNull();
+    expect(document.querySelector('#add-workspace-git-url')).toBeNull();
   });
 });

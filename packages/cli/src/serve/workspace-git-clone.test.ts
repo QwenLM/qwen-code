@@ -112,6 +112,7 @@ describe('normalizeGitCloneUrl', () => {
     '--upload-pack=sh',
     'ext::sh -c whoami',
     'ftp://example.com/repo.git',
+    'file://host/repo',
     'https://',
     'https://example.com/\nrepo',
     `https://example.com/${'a'.repeat(2100)}`,
@@ -448,5 +449,73 @@ describe('createWorkspaceGitCloner', () => {
     const job = await cloner.cancel(jobId);
     expect(job?.status).toBe('cancelled');
     expect(released).toEqual(reserved);
+  });
+
+  it('keeps progress monotonic when later lines report lower percentages', async () => {
+    const root = await tempRoot();
+    let reached!: () => void;
+    const reachedPromise = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let finish!: () => void;
+    const finishPromise = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const cloner = createWorkspaceGitCloner({
+      runner: {
+        async run({ onProgress }) {
+          onProgress('remote: Counting objects: 100% (100/100)');
+          onProgress('Receiving objects: 3% (3/100)');
+          reached();
+          await finishPromise;
+        },
+      },
+    });
+    const { jobId } = await cloner.start({
+      url: 'https://example.com/org/repo.git',
+      target: join(root, 'repo'),
+    });
+    await reachedPromise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(cloner.get(jobId)?.percent).toBe(100);
+    expect(cloner.get(jobId)?.message).toContain('Receiving objects');
+
+    finish();
+    const job = await waitForJob(cloner, jobId);
+    expect(job.status).toBe('succeeded');
+  });
+
+  it('ignores a percentage above 100', async () => {
+    const root = await tempRoot();
+    let reached!: () => void;
+    const reachedPromise = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let finish!: () => void;
+    const finishPromise = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const cloner = createWorkspaceGitCloner({
+      runner: {
+        async run({ onProgress }) {
+          onProgress('Receiving objects: 999% (999/100)');
+          onProgress('Receiving objects: 50% (50/100)');
+          reached();
+          await finishPromise;
+        },
+      },
+    });
+    const { jobId } = await cloner.start({
+      url: 'https://example.com/org/repo.git',
+      target: join(root, 'repo'),
+    });
+    await reachedPromise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(cloner.get(jobId)?.percent).toBe(50);
+
+    finish();
+    await waitForJob(cloner, jobId);
   });
 });

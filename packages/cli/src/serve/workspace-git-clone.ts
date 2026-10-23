@@ -556,8 +556,15 @@ export function createWorkspaceGitCloner(
           onProgress: (line) => {
             const message = sanitizeGitCloneMessage(line, url);
             const percent = parsePercent(message);
+            const current = job.snapshot.percent;
+            // git reports some phases from 0% again (remote counting, then
+            // receiving); keep the bar at the running maximum so it never
+            // jumps backwards.
+            const movesForward =
+              percent !== undefined &&
+              (current === undefined || percent >= current);
             if (message.length > 0) job.snapshot.message = message;
-            if (percent !== undefined) job.snapshot.percent = percent;
+            if (movesForward) job.snapshot.percent = percent;
           },
         });
         if (controller.signal.aborted) throw abortError();
