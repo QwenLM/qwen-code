@@ -2170,4 +2170,109 @@ describe('ModelsConfig', () => {
       expect(openaiIds(modelsConfig)).toContain('qwen3.7-max');
     });
   });
+
+  describe('managed allowlist preserve/capture gates (model.allowedBaseUrls)', () => {
+    const CORP = 'https://corp.example';
+    const OFF_LIST = 'https://off-list.example.com/v1';
+    // Manual off-list credentials + a registry whose only entry is on-list.
+    const manualOffList = (
+      allowedModelBaseUrls?: readonly string[],
+    ): ModelsConfig => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig: {
+          openai: [entry('on-list', 'On List', `${CORP}/v1`, 'OPENAI_API_KEY')],
+        },
+        allowedModelBaseUrls,
+        generationConfig: {
+          model: 'off-list-model',
+          apiKey: 'manual-key',
+          baseUrl: OFF_LIST,
+        },
+      });
+      modelsConfig.updateCredentials({
+        apiKey: 'manual-key',
+        baseUrl: OFF_LIST,
+        model: 'off-list-model',
+      });
+      return modelsConfig;
+    };
+
+    it('does not preserve manual credentials on an off-list baseUrl', () => {
+      const gc = refreshOpenAI(manualOffList([CORP]), 'off-list-model');
+
+      // The preserved baseUrl is off-list, so the refresh must fall through
+      // to the registry default instead of keeping the manual endpoint.
+      expect(gc.model).toBe('on-list');
+      expect(gc.baseUrl).toBe(`${CORP}/v1`);
+    });
+
+    it('keeps preserving off-list credentials when no allowlist is set', () => {
+      // undefined = no policy: today's behavior is unchanged.
+      const gc = refreshOpenAI(manualOffList(), 'off-list-model');
+
+      expect(gc.model).toBe('off-list-model');
+      expect(gc.baseUrl).toBe(OFF_LIST);
+    });
+
+    it('does not capture a runtime model whose baseUrl is off-list', () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        allowedModelBaseUrls: [CORP],
+        generationConfig: {
+          model: 'gpt-4-turbo',
+          apiKey: 'sk-test-key',
+          baseUrl: OFF_LIST,
+        },
+        generationConfigSources: {
+          model: { kind: 'cli', detail: '--model' },
+          apiKey: { kind: 'cli', detail: '--openaiApiKey' },
+          baseUrl: { kind: 'cli', detail: '--openaiBaseUrl' },
+        },
+      });
+
+      expect(modelsConfig.detectAndCaptureRuntimeModel()).toBeUndefined();
+      expect(modelsConfig.getActiveRuntimeModelSnapshot()).toBeUndefined();
+    });
+
+    it('still captures a runtime model whose baseUrl is on-list', () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        allowedModelBaseUrls: [CORP],
+        generationConfig: {
+          model: 'gpt-4-turbo',
+          apiKey: 'sk-test-key',
+          baseUrl: `${CORP}/v1`,
+        },
+        generationConfigSources: {
+          model: { kind: 'cli', detail: '--model' },
+          apiKey: { kind: 'cli', detail: '--openaiApiKey' },
+          baseUrl: { kind: 'cli', detail: '--openaiBaseUrl' },
+        },
+      });
+
+      expect(modelsConfig.detectAndCaptureRuntimeModel()).toBe(
+        '$runtime|openai|gpt-4-turbo',
+      );
+    });
+
+    it('delegates getAllowlistDroppedModels to the registry', () => {
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig: {
+          openai: [
+            entry('ext', 'External', 'https://external-llm.example/v1'),
+            entry('on-list', 'On List', `${CORP}/v1`),
+          ],
+        },
+        allowedModelBaseUrls: [CORP],
+      });
+
+      // The off-list provider entry plus the built-in qwen-oauth model, whose
+      // dynamic endpoint can never match an allowlist entry.
+      expect(modelsConfig.getAllowlistDroppedModels()).toEqual([
+        { id: 'coder-model', baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL' },
+        { id: 'ext', baseUrl: 'https://external-llm.example/v1' },
+      ]);
+    });
+  });
 });

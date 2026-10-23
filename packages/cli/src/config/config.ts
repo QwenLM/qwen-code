@@ -63,7 +63,10 @@ import {
   stripAnsiAndControl,
   type OutputStyleDefinition,
   validateModelProvidersConfig,
+  isBaseUrlAllowed,
+  isQwenOAuthBuiltinsPinnedEmpty,
 } from '@qwen-code/qwen-code-core';
+import { sanitizeProviderBaseUrl } from '../utils/acpModelUtils.js';
 import {
   AGENT_HOST_SESSION_SOURCE_TYPE,
   AGENT_SESSION_SOURCE_TYPE,
@@ -1281,17 +1284,71 @@ function resolveAdvisorModel(
   return trimmed;
 }
 
+/**
+ * The raw advisor selector can be endpoint-qualified (`modelId\0baseUrl`,
+ * the ACP form); the endpoint may carry userinfo credentials, which must
+ * never be interpolated into a stderr message (issue #12805).
+ */
+function formatAdvisorModelNameForDisplay(rawModel: string): string {
+  const endpointIndex = rawModel.indexOf('\0');
+  if (endpointIndex < 0) {
+    return rawModel;
+  }
+  const modelId = rawModel.slice(0, endpointIndex);
+  const endpoint = rawModel.slice(endpointIndex + 1);
+  return endpoint
+    ? `${modelId} (endpoint ${sanitizeProviderBaseUrl(endpoint)})`
+    : modelId;
+}
+
+/**
+ * When the managed endpoint allowlist (`model.allowedBaseUrls`) is why the
+ * advisor model is unavailable, say so and name the setting — the previous
+ * message never did, and it interpolated the raw selector (credentials and
+ * all) into stderr (issue #12805).
+ */
+function buildAdvisorAllowlistHint(
+  config: Config,
+  rawModel: string,
+): string | undefined {
+  const policy = config.getAllowedModelBaseUrls();
+  if (!policy) {
+    return undefined;
+  }
+  const endpointIndex = rawModel.indexOf('\0');
+  const modelId = (
+    endpointIndex < 0 ? rawModel : rawModel.slice(0, endpointIndex)
+  ).trim();
+  const endpoint =
+    endpointIndex < 0
+      ? undefined
+      : rawModel.slice(endpointIndex + 1) || undefined;
+  if (endpoint !== undefined && !isBaseUrlAllowed(endpoint, policy)) {
+    return `Model endpoint '${sanitizeProviderBaseUrl(endpoint)}' is not in the managed allowlist 'model.allowedBaseUrls'. Ask the operator to add it to the allowlist or choose a model on an allowed endpoint.`;
+  }
+  if (
+    modelId !== '' &&
+    config.getAllowlistDroppedModels().some((dropped) => dropped.id === modelId)
+  ) {
+    return `Model '${modelId}' was excluded from the model registry by the managed allowlist 'model.allowedBaseUrls'. Ask the operator to allow its endpoint or choose a model on an allowed endpoint.`;
+  }
+  return undefined;
+}
+
 function formatUnavailableAdvisorModelMessage(
   modelName: string,
   availableModelIds: string[],
+  allowlistHint: string | undefined,
 ): string {
   const availableModelsLine =
     availableModelIds.length === 0
       ? 'No models are configured.'
       : `Configured models: ${availableModelIds.join(', ')}.`;
+  const allowlistLine = allowlistHint ? `${allowlistHint}\n` : '';
   return (
     `Advisor model '${modelName}' is not configured.\n` +
     `${availableModelsLine}\n` +
+    allowlistLine +
     'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /advisor without arguments to choose from configured models.'
   );
 }
@@ -1316,8 +1373,9 @@ function validateCliAdvisorModel(
   if (!availability.available) {
     throw new FatalConfigError(
       formatUnavailableAdvisorModelMessage(
-        modelName,
+        formatAdvisorModelNameForDisplay(modelName),
         availability.availableModelIds,
+        buildAdvisorAllowlistHint(config, modelName),
       ),
     );
   }
@@ -2248,6 +2306,29 @@ export async function loadCliConfig(
     );
   }
 
+  // Managed endpoint allowlist + qwen-oauth builtins pin (issue #12805).
+  // The merge gives the system scope senior priority, so a system-defined
+  // list cannot be overridden or widened by user/workspace settings; a
+  // lower-scope list applies only when the system scope defines none
+  // (self-restriction). A non-array value is a startup error, not a silent
+  // no-policy: degenerate per-entry values are warned-and-skipped by the
+  // registry, but a mistyped list key must not start the session unmanaged.
+  const allowedModelBaseUrls = settings.model?.allowedBaseUrls;
+  if (
+    allowedModelBaseUrls !== undefined &&
+    !Array.isArray(allowedModelBaseUrls)
+  ) {
+    throw new FatalConfigError(
+      `model.allowedBaseUrls must be an array of base URL strings; got ${typeof allowedModelBaseUrls}. Remove or correct the value to start.`,
+    );
+  }
+  // Operator-scope qwen-oauth builtins pin. Workspace-scope pins are
+  // stripped from the merge, so the merged view IS the operator view.
+  const qwenOAuthBuiltinsDisabled = isQwenOAuthBuiltinsPinnedEmpty(
+    settings.modelProviders,
+    settings.providerProtocol,
+  );
+
   // Unified resolution of generation config with source attribution. Note the
   // up-front provider validation above is what classifies invalid configuration;
   // this call's own settings reads must not re-wrap a resolver
@@ -2263,6 +2344,8 @@ export async function loadCliConfig(
     settings,
     selectedAuthType,
     env: process.env as Record<string, string | undefined>,
+    allowedBaseUrls: allowedModelBaseUrls,
+    qwenOAuthBuiltinsDisabled,
   });
 
   const { model: resolvedModel } = resolvedCliConfig;
@@ -2792,6 +2875,8 @@ export async function loadCliConfig(
     includePartialMessages,
     modelProvidersConfig,
     providerProtocolConfig,
+    allowedModelBaseUrls,
+    qwenOAuthBuiltinsDisabled,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
     initialModelRegistryBaseUrl: resolvedCliConfig.registryBaseUrl,

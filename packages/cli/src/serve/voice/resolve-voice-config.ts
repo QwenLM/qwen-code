@@ -63,6 +63,9 @@ function buildModelsConfig(
     initialAuthType: resolvedCliConfig.authType,
     modelProvidersConfig: merged.modelProviders,
     providerProtocolConfig: merged.providerProtocol,
+    // Managed endpoint allowlist (issue #12805): undefined = no policy;
+    // never coerce to [].
+    allowedModelBaseUrls: merged.model?.allowedBaseUrls,
     generationConfig: resolvedCliConfig.generationConfig,
     generationConfigSources: resolvedCliConfig.sources,
   });

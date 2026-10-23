@@ -127,6 +127,151 @@ export function validateModelProvidersConfig(
   }
 }
 
+/**
+ * Whether the providers config pins the qwen-oauth model list explicitly
+ * empty — the operator signal to disable the hard-coded qwen-oauth built-ins.
+ * Resolved through the same protocol mapping as everything else, so a
+ * custom id mapped to `qwen-oauth` via `providerProtocol` with an empty list
+ * pins the built-ins exactly like the literal key does.
+ */
+export function isQwenOAuthBuiltinsPinnedEmpty(
+  modelProviders?: ModelProvidersConfig,
+  providerProtocol?: ProviderProtocolConfig,
+): boolean {
+  if (!modelProviders) return false;
+  return Object.entries(modelProviders).some(([providerId, models]) => {
+    if (!Array.isArray(models) || models.length !== 0) return false;
+    return (
+      resolveProviderProtocol(providerId, providerProtocol) ===
+      AuthType.QWEN_OAUTH
+    );
+  });
+}
+
+/**
+ * Parse a URL for allowlist comparison; undefined when the value does not
+ * parse (the caller falls back to the string comparison).
+ */
+function parseUrlForMatch(url: string): URL | undefined {
+  try {
+    return new URL(url);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Normalize a base URL for allowlist comparison (string fallback): trim
+ * whitespace and trailing slashes, then lowercase the scheme and host
+ * (hostnames are case-insensitive) while leaving the path case-sensitive.
+ * Strings without a scheme keep the previous full-lowercase behavior on
+ * both sides, so comparisons remain consistent.
+ */
+function normalizeBaseUrlForMatch(url: string): string {
+  const trimmed = url.trim().replace(/\/+$/, '');
+  const parts = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^/]+)(.*)$/.exec(trimmed);
+  if (!parts) return trimmed.toLowerCase();
+  return `${parts[1].toLowerCase()}${parts[2].toLowerCase()}${parts[3]}`;
+}
+
+/**
+ * Decide whether a single target baseUrl matches a single allowlist entry.
+ *
+ * When both sides parse as URLs, compare URL semantics: the origins must be
+ * equal (URL origins elide explicit default ports, so
+ * `https://corp.example:443` and `https://corp.example` are the same
+ * origin, while a non-default port like `:8443` is not), and the entry path
+ * must be a path-boundary prefix of the target path. When either side is
+ * not a URL, fall back to the case-normalized string comparison.
+ */
+function baseUrlMatchesEntry(target: string, entry: string): boolean {
+  const t = parseUrlForMatch(target);
+  const e = parseUrlForMatch(entry);
+  if (t && e) {
+    if (t.origin !== e.origin) return false;
+    if (t.pathname === e.pathname) return true;
+    const prefix = e.pathname.endsWith('/') ? e.pathname : `${e.pathname}/`;
+    return t.pathname.startsWith(prefix);
+  }
+  const targetNorm = normalizeBaseUrlForMatch(target);
+  if (targetNorm.length === 0) return false;
+  const allowedNorm = normalizeBaseUrlForMatch(entry);
+  if (allowedNorm.length === 0) return false;
+  return targetNorm === allowedNorm || targetNorm.startsWith(`${allowedNorm}/`);
+}
+
+/**
+ * Validate a managed endpoint allowlist (`model.allowedBaseUrls`).
+ * `undefined` means no policy and is kept as-is. A non-array value is a
+ * runtime data error (a hand-edited settings file): warn and fail closed
+ * with an empty list (every model blocked) instead of throwing an opaque
+ * TypeError out of the constructor. Entries that are not parseable URLs
+ * with a non-empty host (e.g. a template placeholder that rendered to
+ * `https://`) are rejected with a warning — one degenerate entry must not
+ * disable the control fail-open, and an all-invalid list still blocks
+ * everything rather than becoming no-policy.
+ */
+export function validateAllowedBaseUrls(
+  allowedBaseUrls: readonly string[] | undefined,
+): readonly string[] | undefined {
+  if (allowedBaseUrls === undefined) return undefined;
+  if (!Array.isArray(allowedBaseUrls)) {
+    debugLogger.warn(
+      'model.allowedBaseUrls is not an array; no model endpoint can match ' +
+        'and every model is blocked (fail closed). Fix the settings value.',
+    );
+    return [];
+  }
+  const valid: string[] = [];
+  for (const entry of allowedBaseUrls) {
+    if (typeof entry !== 'string' || entry.trim().length === 0) {
+      debugLogger.warn(
+        `model.allowedBaseUrls entry ${JSON.stringify(entry)} is not a ` +
+          'non-empty string; it is ignored.',
+      );
+      continue;
+    }
+    const url = parseUrlForMatch(entry.trim());
+    if (!url || url.hostname.length === 0) {
+      debugLogger.warn(
+        `model.allowedBaseUrls entry "${entry}" is not a URL with a host ` +
+          '(a scheme-only value like "https://" matches every endpoint); ' +
+          'it is ignored.',
+      );
+      continue;
+    }
+    valid.push(entry.trim());
+  }
+  return valid;
+}
+
+/**
+ * Decide whether a resolved model baseUrl passes a managed allowlist.
+ *
+ * A baseUrl passes when it matches an entry: same origin (explicit default
+ * ports elided, so `https://corp.example:443/v1` matches an entry
+ * `https://corp.example`) and the entry path is a path-boundary prefix of
+ * the target path (`https://corp.example` covers `https://corp.example/v1`
+ * but not `https://corp.example.evil.com`). Scheme and host compare
+ * case-insensitively; the path is case-sensitive. An empty or missing
+ * baseUrl, a non-array list, and a list with no matching entry never pass —
+ * fail closed, so a model whose endpoint the operator did not list cannot
+ * slip through.
+ */
+export function isBaseUrlAllowed(
+  baseUrl: string | undefined,
+  allowedBaseUrls: readonly string[] | undefined,
+): boolean {
+  if (typeof baseUrl !== 'string') return false;
+  if (!Array.isArray(allowedBaseUrls)) return false;
+  const target = baseUrl.trim();
+  if (target.length === 0) return false;
+  return allowedBaseUrls.some((entry) => {
+    if (typeof entry !== 'string') return false;
+    return baseUrlMatchesEntry(target, entry.trim());
+  });
+}
+
 /** Resolve the startup wire, including checks before persisting a selection. */
 export function resolveModelSelectionAuthType(
   authType: AuthType,
@@ -203,6 +348,23 @@ export class ModelRegistry {
   /** Raw providers config this registry was last built from. */
   private modelProvidersConfig?: ModelProvidersConfig;
 
+  /**
+   * Managed endpoint allowlist (`model.allowedBaseUrls`), validated in the
+   * constructor (see {@link validateAllowedBaseUrls}). `undefined` means no
+   * policy — every model registers as before. Any array, including an empty
+   * one, filters: a model registers only when its resolved baseUrl matches
+   * an entry (see {@link isBaseUrlAllowed}).
+   */
+  private allowedModelBaseUrls?: readonly string[];
+
+  /**
+   * Models the managed allowlist filter dropped at registration (id + the
+   * resolved baseUrl it was judged against). Lets callers surface a
+   * user-visible explanation — the picker and the /model list cannot name
+   * models they never contain.
+   */
+  private allowlistDroppedModels: Array<{ id: string; baseUrl: string }> = [];
+
   private getDefaultBaseUrl(authType: AuthType): string {
     switch (authType) {
       case AuthType.QWEN_OAUTH:
@@ -214,17 +376,54 @@ export class ModelRegistry {
     }
   }
 
+  /**
+   * The baseUrl a model of this authType resolves to: its explicit baseUrl
+   * or the protocol default. The single expression both the allowlist filter
+   * and the registered model use, so the URL the allowlist judges and the URL
+   * the model carries are the same value.
+   */
+  private resolveRegistryBaseUrl(
+    config: ModelConfig,
+    authType: AuthType,
+  ): string {
+    return config.baseUrl || this.getDefaultBaseUrl(authType);
+  }
+
   constructor(
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,
+    allowedModelBaseUrls?: readonly string[],
+    /**
+     * Whether the hard-coded qwen-oauth built-ins are disabled by an
+     * operator-scope pin (an explicitly empty qwen-oauth model list).
+     * `true` suppresses the built-ins; `false` keeps them even when the
+     * merged config carries a workspace-only pin (which the caller must not
+     * honor). `undefined` falls back to detecting the pin in the merged
+     * config itself (see {@link isQwenOAuthBuiltinsPinnedEmpty}).
+     */
+    qwenOAuthBuiltinsDisabled?: boolean,
   ) {
     validateModelProvidersConfig(modelProvidersConfig, providerProtocolConfig);
     this.modelsByAuthType = new Map();
     this.providerProtocolConfig = providerProtocolConfig ?? {};
     this.modelProvidersConfig = modelProvidersConfig;
+    this.allowedModelBaseUrls = validateAllowedBaseUrls(allowedModelBaseUrls);
 
-    // Always register qwen-oauth models (hard-coded, cannot be overridden)
-    this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
+    // Register the hard-coded qwen-oauth models unless an operator pins the
+    // qwen-oauth list explicitly empty — an empty list is a signal to disable
+    // the built-in provider, not "unconfigured" (a missing key keeps the
+    // built-ins, preserving today's default). Callers with scope visibility
+    // pass the explicit flag so a trusted workspace's pin does not disable
+    // the built-ins; without it the merged config decides.
+    const builtinsDisabled =
+      qwenOAuthBuiltinsDisabled ??
+      isQwenOAuthBuiltinsPinnedEmpty(
+        modelProvidersConfig,
+        providerProtocolConfig,
+      );
+    if (!builtinsDisabled) {
+      this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
+    }
 
     // Register user-configured models for other providers
     this.registerProvidersConfig(modelProvidersConfig);
@@ -265,7 +464,10 @@ export class ModelRegistry {
         continue;
       }
 
-      // qwen-oauth uses hard-coded models and cannot be overridden
+      // qwen-oauth uses hard-coded models: entries under a qwen-oauth id are
+      // never registered (the built-ins are, unless the operator pins them
+      // off — see the constructor). The loop still validates wireApi so a
+      // malformed entry fails startup instead of vanishing.
       if (protocol === AuthType.QWEN_OAUTH) {
         if (Array.isArray(models)) {
           for (const model of models) {
@@ -323,6 +525,34 @@ export class ModelRegistry {
         config,
         providerId ? this.providerProtocolConfig : undefined,
       )!;
+      // Managed endpoint allowlist: a model only registers when its resolved
+      // baseUrl (explicit, or the protocol default) is on the list. An
+      // `undefined` allowlist keeps today's behavior; an empty list blocks
+      // everything, including protocol-default endpoints. The URL judged
+      // here is the same one the registered model carries
+      // (resolveRegistryBaseUrl).
+      const resolvedBaseUrl = this.resolveRegistryBaseUrl(
+        config,
+        modelAuthType,
+      );
+      if (
+        this.allowedModelBaseUrls !== undefined &&
+        !isBaseUrlAllowed(resolvedBaseUrl, this.allowedModelBaseUrls)
+      ) {
+        // Record the drop so user-visible channels (advisor errors, skipped
+        // provider warnings) can name the cause — the picker only ever sees
+        // models that registered.
+        this.allowlistDroppedModels.push({
+          id: config.id,
+          baseUrl: resolvedBaseUrl,
+        });
+        debugLogger.warn(
+          `Model "${config.id}" for protocol "${modelAuthType}" (resolved ` +
+            `baseUrl "${resolvedBaseUrl}") is not in the ` +
+            `model.allowedBaseUrls allowlist; not registered.`,
+        );
+        continue;
+      }
       const modelMap =
         this.modelsByAuthType.get(modelAuthType) ??
         new Map<string, ResolvedModelConfig>();
@@ -464,7 +694,9 @@ export class ModelRegistry {
       ...config,
       authType,
       name: config.name || config.id,
-      baseUrl: config.baseUrl || this.getDefaultBaseUrl(authType),
+      // Same expression the allowlist filter judges (resolveRegistryBaseUrl),
+      // so the URL the policy checked and the URL the model carries are equal.
+      baseUrl: this.resolveRegistryBaseUrl(config, authType),
       ...(config.baseUrl ? { registryBaseUrl: config.baseUrl } : {}),
       generationConfig,
       capabilities: config.capabilities || {},
@@ -497,13 +729,17 @@ export class ModelRegistry {
   /**
    * Reload models from updated configuration.
    * Clears existing user-configured models and re-registers from new config.
-   * Preserves hard-coded qwen-oauth models.
+   * Preserves hard-coded qwen-oauth models unless the new config pins an
+   * explicit empty list.
    *
    * @param providerProtocolConfig - Updated provider->protocol map. `undefined`
    *   PRESERVES the existing map (so a reload carrying only modelProviders does
    *   not lose the mapping); any object value REPLACES it, so passing `{}`
    *   clears the mapping. Callers that want to preserve must omit the argument,
    *   not pass `settings.providerProtocol ?? {}`.
+   *
+   * The managed endpoint allowlist is boot-frozen (like providerProtocol): a
+   * reload always re-applies the boot-time policy and cannot widen or drop it.
    */
   reloadModels(
     modelProvidersConfig?: ModelProvidersConfig,
@@ -512,6 +748,7 @@ export class ModelRegistry {
     const reloaded = new ModelRegistry(
       modelProvidersConfig,
       providerProtocolConfig ?? this.providerProtocolConfig,
+      this.allowedModelBaseUrls,
     );
     this.modelsByAuthType = reloaded.modelsByAuthType;
     this.providerProtocolConfig = reloaded.providerProtocolConfig;
@@ -525,5 +762,14 @@ export class ModelRegistry {
 
   getProviderProtocolConfig(): ProviderProtocolConfig {
     return this.providerProtocolConfig;
+  }
+
+  /**
+   * The models the managed allowlist filter dropped at registration (id +
+   * the resolved baseUrl it was judged against); empty when no policy is in
+   * force or nothing was dropped.
+   */
+  getAllowlistDroppedModels(): Array<{ id: string; baseUrl: string }> {
+    return this.allowlistDroppedModels;
   }
 }

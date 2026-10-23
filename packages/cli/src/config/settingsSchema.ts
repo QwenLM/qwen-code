@@ -1797,6 +1797,17 @@ const SETTINGS_SCHEMA = {
           'Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.',
         showInDialog: false,
       },
+      allowedBaseUrls: {
+        type: 'array',
+        label: 'Allowed Model Base URLs',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        items: { type: 'string' },
+        description:
+          'Managed allowlist of model endpoint base URLs. When set, the list governs what the model registry registers — and therefore what the model picker and the --model list can offer: only models whose resolved baseUrl matches an entry — exactly, or under it across a path boundary (so https://corp.example also covers https://corp.example/v1, but not https://corp.example.evil.com) — register, for any provider, built-in or custom. The same predicate gates resolved model selections (including --model, --openaiBaseUrl, and the protocol default endpoint dialed when no baseUrl is set) and the credential restore/capture paths, so an off-list endpoint fails closed with an error that names this key instead of dialing. Matching is URL-semantic: scheme and host are case-insensitive, the path case-sensitive, trailing slashes are ignored, and an explicit default port counts as absent (https://corp.example:443/v1 matches https://corp.example); non-default ports must match exactly. A model without an explicit baseUrl is checked against its protocol default endpoint, so omitting that default from the list blocks such models; an empty list registers no models at all. Entries must be non-empty URL strings with a hostname; malformed entries are warned about and skipped, and a non-array value for this key is a startup error. The system scope takes precedence, and a workspace-scope list is honored only when no User, System, or SystemDefaults scope defines one — a repository cannot replace an operator-configured list. Setting this key also disables the built-in Qwen OAuth (personal Qwen login) models, whose endpoint is discovered dynamically at login and cannot be listed; the built-in Qwen OAuth models can additionally be disabled explicitly by pinning an empty model list under qwen-oauth in System, User, or SystemDefaults settings (a workspace-scope pin is ignored), and an active pin warns at load. A deployment that needs personal Qwen login should do neither. Changes take effect after restart.',
+        showInDialog: false,
+      },
       reasoningEffort: {
         type: 'enum',
         label: 'Reasoning Effort',

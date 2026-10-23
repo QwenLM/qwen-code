@@ -2296,6 +2296,95 @@ describe('loadCliConfig', () => {
     ).rejects.toThrow("Advisor model 'missing-advisor' is not configured.");
   });
 
+  it('fails closed at startup for a non-array model.allowedBaseUrls', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const err = await loadCliConfig(
+      {
+        model: {
+          allowedBaseUrls: 'https://corp-llm.example/v1' as unknown as string[],
+        },
+      },
+      argv,
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(FatalConfigError);
+    expect((err as Error).message).toMatch(
+      /model\.allowedBaseUrls must be an array of base URL strings/,
+    );
+  });
+
+  it('threads model.allowedBaseUrls into the Config getters (loadCliConfig hand-off)', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const list = ['https://corp-llm.example/v1'];
+
+    const config = await loadCliConfig(
+      { model: { allowedBaseUrls: list } },
+      argv,
+    );
+
+    // The whole point of the hand-off: the policy the CLI validated must be
+    // the one the Config (and its ModelsConfig) enforce. The built-in
+    // qwen-oauth model is dropped (its dynamic endpoint cannot be listed),
+    // which also proves the registry saw the same list.
+    expect(config.getAllowedModelBaseUrls()).toEqual(list);
+    expect(config.getModelsConfig().getAllowlistDroppedModels()).toEqual([
+      { id: 'coder-model', baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL' },
+    ]);
+  });
+
+  it('names model.allowedBaseUrls when the allowlist is why the advisor model is unavailable', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await expect(
+      loadCliConfig(
+        {
+          advisorModel: 'ext-model',
+          model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+          modelProviders: {
+            openai: [
+              {
+                id: 'ext-model',
+                name: 'External Model',
+                baseUrl: 'https://external-llm.example/v1',
+                envKey: 'EXT_KEY',
+              },
+            ],
+          },
+        },
+        argv,
+      ),
+    ).rejects.toThrow(
+      "was excluded from the model registry by the managed allowlist 'model.allowedBaseUrls'",
+    );
+  });
+
+  it('sanitizes an endpoint-qualified advisor selector before it reaches stderr', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const selector = 'ext-model\0https://user:pass@external-llm.example/v1';
+
+    let message = '';
+    try {
+      await loadCliConfig(
+        {
+          advisorModel: selector,
+          model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+        },
+        argv,
+      );
+    } catch (e) {
+      message = String((e as Error).message);
+    }
+
+    expect(message).toContain('model.allowedBaseUrls');
+    expect(message).not.toContain('user:pass@');
+    expect(message).not.toContain('\0');
+  });
+
   it('should use settings fallback models when the CLI flag is absent', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

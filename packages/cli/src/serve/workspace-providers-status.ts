@@ -107,6 +107,9 @@ function buildWorkspaceProvidersStatus(
       initialAuthType: resolvedCliConfig.authType,
       modelProvidersConfig: settings.modelProviders,
       providerProtocolConfig: settings.providerProtocol,
+      // Managed endpoint allowlist (issue #12805): undefined = no policy;
+      // never coerce to [].
+      allowedModelBaseUrls: settings.model?.allowedBaseUrls,
       generationConfig: resolvedCliConfig.generationConfig,
       generationConfigSources: resolvedCliConfig.sources,
     });

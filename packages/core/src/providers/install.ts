@@ -340,6 +340,12 @@ export async function applyProviderInstallPlan(
         ]),
       ),
       providerProtocolConfig: mapping,
+      // Managed endpoint allowlist (issue #12805): the conflict probe must
+      // judge the same models the live registry would register. undefined =
+      // no policy; never coerce to [].
+      allowedModelBaseUrls: settings.getValue('model.allowedBaseUrls') as
+        | readonly string[]
+        | undefined,
     }).getAllConfiguredModels();
     if (
       changedVoiceIds.some(

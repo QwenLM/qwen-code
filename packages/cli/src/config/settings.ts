@@ -9,9 +9,11 @@ import * as path from 'node:path';
 import { homedir } from 'node:os';
 import process from 'node:process';
 import {
+  AuthType,
   FatalConfigError,
   getErrorMessage,
   isValidAdvisorMaxUses,
+  resolveProviderProtocol,
   Storage,
   createDebugLogger,
   stripRuntimeSnapshotPrefix,
@@ -19,6 +21,8 @@ import {
 import type {
   MCPServerConfig,
   McpServerScope,
+  ModelProvidersConfig,
+  ProviderProtocolConfig,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import {
@@ -468,6 +472,49 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
       }
     }
   }
+  // The qwen-oauth pin (an empty model list for a provider id that resolves
+  // to qwen-oauth) disables the built-in Qwen OAuth (personal Qwen login)
+  // models. It is an operator decision: workspace-scope pins are stripped
+  // from the merge, so name the stripped ones and the pinning operator
+  // scope — the disable must never be silent (issue #12805).
+  const effectiveProviderProtocol = getEffectiveProviderProtocol(
+    loadedSettings.system.settings,
+    loadedSettings.systemDefaults.settings,
+    loadedSettings.user.settings,
+    loadedSettings.isTrusted ? loadedSettings.workspace.settings : undefined,
+  );
+  if (loadedSettings.isTrusted) {
+    const workspacePins = findQwenOAuthPinIds(
+      loadedSettings.workspace.settings.modelProviders,
+      effectiveProviderProtocol,
+    );
+    for (const id of workspacePins) {
+      warningSet.add(
+        `Warning: modelProviders["${id}"] = [] in workspace settings (${loadedSettings.workspace.path}) is ignored: only System, User, or SystemDefaults scope settings can disable the built-in Qwen OAuth (personal Qwen login) models with an empty model list.`,
+      );
+    }
+  }
+  for (const id of findQwenOAuthPinIds(
+    loadedSettings.merged.modelProviders,
+    effectiveProviderProtocol,
+  )) {
+    const pinningScope = [
+      { name: 'System', settings: loadedSettings.system.settings },
+      { name: 'User', settings: loadedSettings.user.settings },
+      {
+        name: 'SystemDefaults',
+        settings: loadedSettings.systemDefaults.settings,
+      },
+    ].find((scope) =>
+      findQwenOAuthPinIds(
+        scope.settings.modelProviders,
+        effectiveProviderProtocol,
+      ).includes(id),
+    );
+    warningSet.add(
+      `Warning: modelProviders["${id}"] is pinned to an empty model list in ${pinningScope?.name ?? 'operator'} scope settings, disabling the built-in Qwen OAuth (personal Qwen login) models. Remove the pin in that scope to re-enable personal Qwen login.`,
+    );
+  }
   // Core falls back to unlimited for an invalid value instead of refusing to
   // start; say so, since the user asked for a limit.
   const advisorMaxUses: unknown = loadedSettings.merged.advisorMaxUses;
@@ -573,6 +620,82 @@ function stripWorkspaceOverrides(
   );
 }
 
+/**
+ * The provider ids whose model list is an empty-array qwen-oauth pin in one
+ * scope's modelProviders, resolved through the given providerProtocol
+ * mapping — a custom id mapped to qwen-oauth counts, exactly like at
+ * registration (issue #12805: the pin must resolve through the same
+ * protocol mapping as everything else).
+ */
+function findQwenOAuthPinIds(
+  modelProviders: ModelProvidersConfig | undefined,
+  providerProtocol: ProviderProtocolConfig | undefined,
+): string[] {
+  if (!modelProviders) {
+    return [];
+  }
+  return Object.entries(modelProviders)
+    .filter(
+      ([id, models]) =>
+        Array.isArray(models) &&
+        models.length === 0 &&
+        resolveProviderProtocol(id, providerProtocol) === AuthType.QWEN_OAUTH,
+    )
+    .map(([id]) => id);
+}
+
+/**
+ * The effective providerProtocol mapping for a merge: the same per-key
+ * precedence as the full settings merge (System beats Workspace beats User
+ * beats SystemDefaults), restricted to the providerProtocol sub-objects.
+ * The qwen-oauth pin strip and its warnings resolve provider ids through
+ * this mapping, not through any single scope's partial one.
+ */
+function getEffectiveProviderProtocol(
+  system: Settings,
+  systemDefaults: Settings,
+  user: Settings,
+  workspace: Settings | undefined,
+): ProviderProtocolConfig {
+  return customDeepMerge(
+    getMergeStrategyForPath,
+    {},
+    { providerProtocol: systemDefaults.providerProtocol ?? {} },
+    { providerProtocol: user.providerProtocol ?? {} },
+    ...(workspace
+      ? [{ providerProtocol: workspace.providerProtocol ?? {} }]
+      : []),
+    { providerProtocol: system.providerProtocol ?? {} },
+  )['providerProtocol'] as ProviderProtocolConfig;
+}
+
+/**
+ * Drop workspace-scope qwen-oauth pins (an empty model list for a provider
+ * id that resolves to qwen-oauth). Disabling the built-in Qwen OAuth
+ * (personal Qwen login) models is an operator decision: only the System,
+ * User, or SystemDefaults scopes may pin. A trusted workspace must not
+ * disable personal Qwen login, and it must not replace a non-empty
+ * operator list for a mapped provider id with an empty one — per-key merge
+ * order (workspace applied after user) would let the workspace array win.
+ */
+function stripWorkspaceQwenOAuthPins(
+  workspace: Settings,
+  providerProtocol: ProviderProtocolConfig | undefined,
+): Settings {
+  const modelProviders = workspace.modelProviders;
+  if (!modelProviders) {
+    return workspace;
+  }
+  const pinnedIds = findQwenOAuthPinIds(modelProviders, providerProtocol);
+  if (pinnedIds.length === 0) {
+    return workspace;
+  }
+  const rest = Object.fromEntries(
+    Object.entries(modelProviders).filter(([id]) => !pinnedIds.includes(id)),
+  );
+  return { ...workspace, modelProviders: rest as ModelProvidersConfig };
+}
+
 type TightenOnlyEntry = (typeof WORKSPACE_TIGHTEN_ONLY_SETTINGS)[number];
 
 type TightenOnlyVerdict =
@@ -657,11 +780,18 @@ function mergeSettings(
   const safeWorkspace = isTrusted
     ? tagMcpServerScope(
         stripWorkspaceLoosenings(
-          stripWorkspaceOverrides(stripWorkspaceRestrictedSettings(workspace), [
-            systemDefaults,
-            user,
-            system,
-          ]),
+          stripWorkspaceQwenOAuthPins(
+            stripWorkspaceOverrides(
+              stripWorkspaceRestrictedSettings(workspace),
+              [systemDefaults, user, system],
+            ),
+            getEffectiveProviderProtocol(
+              system,
+              systemDefaults,
+              user,
+              workspace,
+            ),
+          ),
           { system, systemDefaults, user },
         ),
         'workspace',

@@ -151,6 +151,10 @@ export function createVoiceModelSource(
       | ModelProvidersConfig
       | undefined,
     providerProtocolConfig: settings.merged.providerProtocol,
+    // Managed endpoint allowlist (issue #12805): voice models resolve
+    // through the same registry, so the same policy governs them.
+    // undefined = no policy; never coerce to [].
+    allowedModelBaseUrls: settings.merged.model?.allowedBaseUrls,
   });
 }
 

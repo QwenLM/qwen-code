@@ -380,6 +380,7 @@ export const WORKSPACE_RESTRICTED_SETTING_KEYS: readonly string[] =
  */
 export const WORKSPACE_NON_OVERRIDING_SETTINGS = [
   { section: 'security', key: 'allowedHttpHookUrls' },
+  { section: 'model', key: 'allowedBaseUrls' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;
