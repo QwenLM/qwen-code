@@ -32,6 +32,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.IOException;
 import java.net.BindException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.URI;
@@ -46,7 +47,6 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.security.Principal;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -770,24 +770,30 @@ class HostedTeamLeadMySqlIT {
         Files.createDirectory(workspace.resolve("child"));
         // Keep initialized-root mtime distinct from birth time without relying on sleeps.
         Files.setLastModifiedTime(workspace, FileTime.fromMillis(1));
-        int harnessPort = freePort();
-        int brokerPort = freePortOtherThan(harnessPort);
+        int harnessPort;
+        int brokerPort;
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         // Held member replies must not block the lead's requests.
         modelThreads = Executors.newCachedThreadPool();
         model.setExecutor(modelThreads);
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
-        // freePort() lets a port go before its consumer binds, so a contended
-        // runner can hand the same one out again; each draw below skips the
-        // ports this boot already reserved. The harness moves to the next
-        // port instead of failing, so startHarness reports that move and the
-        // whole attempt is retried with fresh ports. A retry re-runs storage
-        // registration too, which only replays idempotently for a stable
+        // Sockets open at the same instant get distinct ports, but they are
+        // released before their consumers bind, so a contended runner can
+        // hand one out again; retry the whole attempt with fresh ports when
+        // it does. The harness moves to the next port instead of failing, so
+        // startHarness reports that move too. A retry re-runs storage
+        // registration, which only replays idempotently for a stable
         // operationId.
         String storageOperation = UUID.randomUUID().toString();
         for (int attempt = 0; ; attempt++) {
-            port = freePortOtherThan(harnessPort, brokerPort);
+            try (ServerSocket springSocket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
+                    ServerSocket harnessSocket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
+                    ServerSocket brokerSocket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
+                port = springSocket.getLocalPort();
+                harnessPort = harnessSocket.getLocalPort();
+                brokerPort = brokerSocket.getLocalPort();
+            }
             try {
                 startSpring(cli, node, decoy, workspace, harnessPort, brokerPort, storageOperation);
                 jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
@@ -808,8 +814,6 @@ class HostedTeamLeadMySqlIT {
                     throw error;
                 }
                 System.out.println("boot attempt " + attempt + " lost its ports, retrying: " + error);
-                harnessPort = freePortOtherThan(port, brokerPort);
-                brokerPort = freePortOtherThan(port, harnessPort);
             }
         }
     }
@@ -950,21 +954,6 @@ class HostedTeamLeadMySqlIT {
         return json.readTree(response.body());
     }
 
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
-    }
-
-    private static int freePortOtherThan(int... reserved) throws IOException {
-        while (true) {
-            int port = freePort();
-            if (Arrays.stream(reserved).noneMatch(taken -> taken == port)) {
-                return port;
-            }
-        }
-    }
-
     private static boolean bindConflict(Throwable error) {
         for (Throwable cause = error; cause != null; cause = cause.getCause()) {
             if (cause instanceof BindException
@@ -982,14 +971,30 @@ class HostedTeamLeadMySqlIT {
         }
     }
 
+    private void destroyHarness() throws InterruptedException {
+        if (harness == null) {
+            return;
+        }
+        harness.descendants().forEach(ProcessHandle::destroyForcibly);
+        harness.destroyForcibly();
+        harness.waitFor(10, TimeUnit.SECONDS);
+    }
+
+    private void stopSpringAndWorkers() {
+        try {
+            if (spring != null) {
+                spring.close();
+            }
+        } finally {
+            // Each Session's Broker worker is durable and outlives Spring.
+            HostedDurableWorkers.stop(temporary.resolve("broker"), json);
+        }
+    }
+
     /** Stops a failed boot attempt before retrying with fresh ports. */
     private void abortBoot() throws Exception {
         try {
-            if (harness != null) {
-                harness.descendants().forEach(ProcessHandle::destroyForcibly);
-                harness.destroyForcibly();
-                harness.waitFor(10, TimeUnit.SECONDS);
-            }
+            destroyHarness();
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
         } finally {
@@ -1004,15 +1009,11 @@ class HostedTeamLeadMySqlIT {
                 // The next attempt re-creates the rows; keep the boot error.
             }
             try {
-                if (spring != null) {
-                    spring.close();
-                }
-            } catch (RuntimeException ignored) {
-                // The retry uses a fresh context; keep the boot error.
+                stopSpringAndWorkers();
+            } finally {
+                spring = null;
+                jdbc = null;
             }
-            spring = null;
-            jdbc = null;
-            HostedDurableWorkers.stop(temporary.resolve("broker"), json);
         }
     }
 
@@ -1034,11 +1035,7 @@ class HostedTeamLeadMySqlIT {
     void stop() throws Exception {
         releases.values().forEach(CountDownLatch::countDown);
         try {
-            if (harness != null) {
-                harness.descendants().forEach(ProcessHandle::destroyForcibly);
-                harness.destroyForcibly();
-                harness.waitFor(10, TimeUnit.SECONDS);
-            }
+            destroyHarness();
         } finally {
             try {
                 if (jdbc != null) {
@@ -1046,22 +1043,15 @@ class HostedTeamLeadMySqlIT {
                 }
             } finally {
                 try {
-                    if (spring != null) {
-                        spring.close();
-                    }
+                    stopSpringAndWorkers();
                 } finally {
-                    try {
-                        // Each Session's Broker worker is durable and outlives Spring.
-                        HostedDurableWorkers.stop(temporary.resolve("broker"), json);
-                    } finally {
-                        if (model != null) {
-                            model.stop(0);
-                        }
-                        if (modelThreads != null) {
-                            modelThreads.shutdownNow();
-                        }
-                        http.close();
+                    if (model != null) {
+                        model.stop(0);
                     }
+                    if (modelThreads != null) {
+                        modelThreads.shutdownNow();
+                    }
+                    http.close();
                 }
             }
         }
