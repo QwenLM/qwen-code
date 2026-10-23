@@ -683,7 +683,8 @@ function sleep(call: ModInvocation, ms: number): Promise<void> {
     };
     const timer = setTimeout(() => settle(), Math.min(ms, 2 ** 31 - 1));
     const watch = setInterval(() => {
-      if (callAbandoned(call))
+      // A hook that timed out is no longer live while its catch recovers.
+      if (!call.live || callAbandoned(call))
         settle(new Error('Mod sleep ended with its hook.'));
     }, 5);
   });

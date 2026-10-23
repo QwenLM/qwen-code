@@ -51,7 +51,7 @@ Each method is an API event with no arguments, except `session.usage`:
 
 `session.usage` returns:
 
-- `startedAt`: when the session began, in `$.clock.now()` milliseconds. For a resumed session it is the session's first record; `/clear` starts it over.
+- `startedAt`: when the session began, in `$.clock.now()` milliseconds. For a resumed session it is the session's first record; `/clear` starts it over. A branch made with `/branch` copies its parent's records, so it keeps the parent's start, just as its `turns` include the parent's turns.
 - `context`: the main conversation's `tokens`, the model's context `window`, and `percent`, a whole number from 0 to 100. These are the figures the status line shows: the input tokens of the last response, including cached ones. Before the first response `tokens` and `percent` are 0. `percent` is absent when the window size is unknown.
 - `rateLimits`: always empty. Qwen Code reads no rate-limit windows.
 - `cost` is absent, because Qwen Code keeps no cost ledger. `args.breakdown` and `args.columns` are validated but no breakdown is computed.

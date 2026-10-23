@@ -109,7 +109,6 @@ export const MOD_GUEST_FACTORY = String.raw`
     const invoke = (name, value) => call(id, frames, name, value);
     const namespaces = {
       command: { register: spec => invoke('command.register', spec) },
-      plugin,
       session: {
         cwd: () => invoke('session.cwd', {}),
         id: () => invoke('session.id', {}),
@@ -150,6 +149,8 @@ export const MOD_GUEST_FACTORY = String.raw`
         return target[name];
       }
     });
+    // Data, not methods: it stays the frozen plain object JSON and await expect.
+    namespaces.plugin = plugin;
     return new Proxy(namespaces, { get: (target, key) => hasOwn(target, key) ? target[key] : unsupported('$.' + String(key)) });
   };
   const signalFor = run => ({

@@ -516,7 +516,8 @@ describe('ModRuntime with the real QuickJS worker', () => {
           });
         }`,
         fixture(`return {text: JSON.stringify({
-          plugin: {name: $.plugin.name, root: $.plugin.root},
+          plugin: JSON.parse(JSON.stringify($.plugin)),
+          plain: [String($.plugin), (await Promise.resolve($.plugin)).name, Object.isFrozen($.plugin)],
           id: await $.session.id(),
           cwd: await $.session.cwd(),
           root: await $.session.root(),
@@ -534,6 +535,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
     expect(JSON.parse(await runtime.runCommand('hello', '', signal()))).toEqual(
       {
         plugin: { name: 'mod-1', root: '/plugins/mod-1' },
+        plain: ['[object Object]', 'mod-1', true],
         id: 'session-1',
         cwd: '/workspace',
         root: '/workspace',

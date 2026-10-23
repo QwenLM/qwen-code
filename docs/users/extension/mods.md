@@ -516,7 +516,9 @@ declares:
 input of the main conversation's last response, including cached tokens, and
 `window` is the model's context window. `percent` is a whole number and is
 absent when the window size is unknown. `startedAt` is when the session began;
-for a resumed session it is the session's first record. Qwen Code keeps no cost
+for a resumed session it is the session's first record. A branch made with
+`/branch` copies its parent's records, so it keeps the parent's `startedAt` and
+its `turns` include the parent's turns. Qwen Code keeps no cost
 ledger, so `cost` is absent, and `rateLimits` is always empty. `breakdown` and
 `columns` are accepted, but no breakdown is computed. With chat recording turned
 off, `turns` is 0.

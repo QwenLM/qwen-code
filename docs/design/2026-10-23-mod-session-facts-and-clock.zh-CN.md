@@ -51,7 +51,7 @@ Mod 的 `$` 只提供 `command.register`、`session.version` 和 `ui.log`，调�
 
 `session.usage` 返回：
 
-- `startedAt`：会话开始的时间，单位与 `$.clock.now()` 相同，为毫秒。恢复的会话取该会话的第一条记录；`/clear` 会重新计时。
+- `startedAt`：会话开始的时间，单位与 `$.clock.now()` 相同，为毫秒。恢复的会话取该会话的第一条记录；`/clear` 会重新计时。用 `/branch` 创建的分支会复制父会话的记录，因此沿用父会话的开始时间，正如它的 `turns` 也包含父会话的回合。
 - `context`：主对话的 `tokens`、模型的上下文窗口 `window`，以及 `percent`，取值为 0 到 100 的整数。这些就是状态栏显示的数据：上一次响应的输入 token 数，包括缓存命中的部分。第一次响应之前，`tokens` 和 `percent` 为 0。窗口大小未知时没有 `percent`。
 - `rateLimits`：始终为空。Qwen Code 不读取速率限制窗口。
 - 没有 `cost`，因为 Qwen Code 不记录费用。`args.breakdown` 和 `args.columns` 会被校验，但不计算 breakdown。
