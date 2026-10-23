@@ -12723,6 +12723,7 @@ export function App({
           isGoalGateBlocked() ||
           mcpAppQueueBusyRef.current ||
           queuedShellCommandsRef.current.length > 0 ||
+          isDrainingRef.current ||
           shellSubmitInFlightRef.current
         ) {
           throw new Error(t('mcpApp.message.busy'));
