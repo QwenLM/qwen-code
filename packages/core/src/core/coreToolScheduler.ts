@@ -1201,13 +1201,13 @@ const RETRY_LOOP_STOP_DIRECTIVE =
   'instead of retrying.';
 
 /** Directive injected when a truncated file-modifying call repeats. */
-const TRUNCATION_RETRY_LOOP_DIRECTIVE =
+export const TRUNCATION_RETRY_LOOP_DIRECTIVE =
   '\n\n⚠ RETRY LOOP DETECTED: The same truncated file write has been rejected multiple times. ' +
   'STOP resending the same large content. Either split it into smaller write_file + incremental edit calls, ' +
   'or explain to the user that the content is too large to write safely in one call.';
 
 /** Directive injected when an incomplete-args file-modifying call repeats. */
-const INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE =
+export const INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE =
   '\n\n⚠ RETRY LOOP DETECTED: The same incomplete file write has been rejected multiple times. ' +
   'STOP resending the entire content in a single call. Write a skeleton first and fill in the rest with ' +
   'incremental edit calls, or explain to the user why the content cannot be written safely.';

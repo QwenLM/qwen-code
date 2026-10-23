@@ -4217,15 +4217,34 @@ describe('Session', () => {
       expect(sent).not.toContain('truncated due to max_tokens limit');
     });
 
-    it('stops the turn after repeated refused edits', async () => {
+    it('counts a cut-off response with several edits once', async () => {
       const execute = useTool(core.Kind.Edit, 'write_file');
       const calls = ['a', 'b', 'c'].map((content, i) => ({
         ...call(`call-cut-${i}`),
-        args: { file_path: '/tmp/notes.txt', content },
+        args: { file_path: `/tmp/notes-${i}.txt`, content },
       }));
+
+      const sent = await prompt(cutOff(...calls));
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(sent).toContain('truncated due to max_tokens limit');
+      expect(sent).not.toContain('RETRY LOOP DETECTED');
+    });
+
+    it('warns on the second cut-off response and stops on the third', async () => {
+      const execute = useTool(core.Kind.Edit, 'write_file');
       mockChat.sendMessageStream = vi
         .fn()
-        .mockResolvedValueOnce(createStreamWithChunks([cutOff(...calls)]))
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-1'))]),
+        )
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-2'))]),
+        )
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-3'))]),
+        )
         .mockResolvedValueOnce(createEmptyStream());
 
       await expect(
@@ -4241,10 +4260,16 @@ describe('Session', () => {
       });
 
       expect(execute).not.toHaveBeenCalled();
-      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+      const warned = JSON.stringify(
+        vi.mocked(mockChat.sendMessageStream).mock.calls[2][1].message,
+      );
+      expect(warned).toContain('RETRY LOOP DETECTED');
+      expect(warned).toContain('Another refused write stops this turn.');
+      expect(warned).not.toContain('parameter schema');
       expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
         expect.stringContaining(
-          'Stopping ACP turn after repeated tool parameter errors from write_file',
+          'Stopping ACP turn after repeated refused partial edits from write_file',
         ),
       );
     });
