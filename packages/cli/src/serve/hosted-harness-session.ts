@@ -650,11 +650,9 @@ async function hostedApprovalForTurn(
   const live =
     session.stores &&
     !session.definition?.['lineage'] &&
-    [
-      'hosted-workspace-files/1',
-      'hosted-workspace-shell/1',
-      'hosted-workspace-shell/2',
-    ].includes(session.toolProfile ?? '');
+    ['hosted-workspace-files/1', 'hosted-workspace-shell/1'].includes(
+      session.toolProfile ?? '',
+    );
   return {
     settings,
     waiters: session.waiters,
@@ -7315,16 +7313,11 @@ export function registerHostedHarnessSessionRoutes(
         (!session.approval ||
           !(
             session.agentDefinition
-              ? [
-                  'hosted-workspace-files/1',
-                  'hosted-workspace-shell/1',
-                  'hosted-workspace-shell/2',
-                ]
+              ? ['hosted-workspace-files/1', 'hosted-workspace-shell/1']
               : [
                   'hosted-workspace-files/1',
                   'hosted-workspace-shell/1',
                   'hosted-workspace-files/2',
-                  'hosted-workspace-shell/2',
                 ]
           ).includes(session.toolProfile ?? '') ||
           (approvalSelection.revision === 0 &&
@@ -7333,11 +7326,9 @@ export function registerHostedHarnessSessionRoutes(
         throw new Error('Approval selection is unavailable for this Session.');
       if (
         approvalSelection?.planMode &&
-        (![
-          'hosted-workspace-files/1',
-          'hosted-workspace-shell/1',
-          'hosted-workspace-shell/2',
-        ].includes(session.toolProfile ?? '') ||
+        (!['hosted-workspace-files/1', 'hosted-workspace-shell/1'].includes(
+          session.toolProfile ?? '',
+        ) ||
           (session.childDepth ?? 0) !== 0 ||
           session.mcp ||
           session.hooks)

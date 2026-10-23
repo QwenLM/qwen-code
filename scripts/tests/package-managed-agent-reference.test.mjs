@@ -75,7 +75,7 @@ async function fixture(root) {
     'packages/cli/src/serve/managed-runtime-broker-client.ts':
       'export const MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION = 2 as const;\n',
     'packages/cli/src/serve/hosted-harness-contract.ts':
-      "const profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? ''\n).split(',');\n",
+      "const profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-shell/1'\n).split(',');\n",
     'docs/users/managed-agent-reference-deployment.md': 'deploy\n',
     'docs/users/managed-agent-reference-deployment.zh-CN.md': '部署\n',
     'docs/users/hosted-workspace-recovery.md': 'recover\n',
@@ -123,7 +123,7 @@ test('packages an independently verifiable reference distribution', async () => 
     );
     assert.deepEqual(result.manifest.defaults, {
       publicShellEnabled: false,
-      v2CapabilityAdvertisementEnabled: false,
+      v2CapabilityAdvertisementEnabled: true,
     });
 
     await mkdir(extracted);
@@ -652,8 +652,9 @@ test('rejects stale or ambiguous safety defaults', async (context) => {
       name: 'commented lifecycle v2 default',
       file: 'packages/cli/src/serve/hosted-harness-contract.ts',
       contents:
-        "/*\nprocess.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? ''\n*/\nconst profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-shell/1'\n).split(',');\n",
-      error: /Hosted lifecycle v2 profiles must default to empty/,
+        "/*\nprocess.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-shell/1'\n*/\nconst profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? ''\n).split(',');\n",
+      error:
+        /Hosted lifecycle v2 profiles must default to canonical Shell only/,
     },
     {
       name: 'duplicate public Shell default',
