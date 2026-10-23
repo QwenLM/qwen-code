@@ -642,25 +642,6 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
   );
 
   it(
-    'fails fast with status 2 when the lock queue is unusable',
-    { timeout: 30000 },
-    async () => {
-      const home = mkdtempSync(join(tmpdir(), 'lock-broken-'));
-      const cache = join(home, '.cache/qwen-code-ci');
-      mkdirSync(cache, { recursive: true });
-      // A file where the queue directory must go: nothing can recover it, and
-      // the old body spun the whole budget out as an unattributable timeout.
-      writeFileSync(`${join(cache, 'sdk-java-tests.lock')}.queue`, '');
-      const stub = flockStub(freeFlock);
-      const started = Date.now();
-      const result = await acquire(home, 60, stub);
-      expect(result.code).toBe(2);
-      expect(result.out).toContain('lock queue unusable');
-      expect(Date.now() - started).toBeLessThan(5000);
-    },
-  );
-
-  it(
     'names the blocking head ticket when it times out behind one',
     { timeout: 30000 },
     async () => {

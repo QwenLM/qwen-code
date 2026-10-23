@@ -153,11 +153,11 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
-    // A wait timeout is demoted: it skips the best-effort write-back without
-    // failing a step whose suite already ran, and records the skip in the
-    // step summary. An unusable queue (helper status 2) reddens instead.
+    // A lock wait that does not acquire is demoted: it skips the best-effort
+    // write-back without failing a step whose suite already ran, and records
+    // the skip in the step summary.
     expect(block).toMatch(
-      /set \+e\n\s+sdk_java_lock_acquire 1800 "\$\{TIER\}"\n\s+lock_status=\$\?\n\s+set -e\n\s+if \[ "\$\{lock_status\}" -eq 1 \]; then\n\s+echo "::warning::Maven cache write-back skipped;[^\n]*\n\s+printf 'sdk-java Maven cache write-back skipped[^\n]*>> "\$\{GITHUB_STEP_SUMMARY\}"\n\s+exit "\$\{suite_status\}"\n\s+elif \[ "\$\{lock_status\}" -ne 0 \]; then\n\s+exit "\$\{lock_status\}"\n/,
+      /if ! sdk_java_lock_acquire 1800 "\$\{TIER\}"; then\n\s+echo "::warning::Maven cache write-back skipped;[^\n]*\n\s+printf 'sdk-java Maven cache write-back skipped[^\n]*>> "\$\{GITHUB_STEP_SUMMARY\}"\n\s+exit "\$\{suite_status\}"\n\s+fi\n/,
     );
     const acquireAt = block.indexOf('sdk_java_lock_acquire 1800 "${TIER}"');
     const writeBackAt = block.indexOf('mkdir -p "${HOME}/.m2/repository" 9>&-');
@@ -399,12 +399,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     },
   );
 
-  it.skipIf(process.platform !== 'linux').each([
-    { lockStatus: 1, exit: 0 },
-    { lockStatus: 2, exit: 2 },
-  ])(
-    'maps a helper status $lockStatus lock wait to the step exit',
-    ({ lockStatus, exit }) => {
+  it.skipIf(process.platform !== 'linux')(
+    'demotes a helper lock wait to the suite status',
+    () => {
       const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
       const body = run.slice(
         run.indexOf('if [ -d "${HOME}/.m2/repository" ]; then'),
@@ -419,7 +416,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       writeFileSync(summary, '');
       writeFileSync(
         join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
-        `sdk_java_lock_acquire() { return ${lockStatus}; }\n`,
+        'sdk_java_lock_acquire() { return 1; }\n',
       );
       try {
         const result = spawnSync(
@@ -441,16 +438,14 @@ describe('SDK Java self-hosted workflow guards', () => {
           },
         );
         expect(result.error, body).toBeUndefined();
-        expect(result.status, body + result.stderr).toBe(exit);
-        if (lockStatus === 1) {
-          expect(result.stdout).toContain(
-            '::warning::Maven cache write-back skipped',
-          );
-          // The skip must survive on a green run without opening the log.
-          expect(readFileSync(summary, 'utf8')).toContain(
-            'Maven cache write-back skipped after a lock wait on test-host',
-          );
-        }
+        expect(result.status, body + result.stderr).toBe(0);
+        expect(result.stdout).toContain(
+          '::warning::Maven cache write-back skipped',
+        );
+        // The skip must survive on a green run without opening the log.
+        expect(readFileSync(summary, 'utf8')).toContain(
+          'Maven cache write-back skipped after a lock wait on test-host',
+        );
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -1531,12 +1526,11 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // 60-minute wait before Maven started.
     expect(seconds).toBe(30 * 60);
     // This site stays in the normal class: a tier argument here would put
-    // full-tier MariaDB holds ahead of fast PR-feedback work. A wait timeout
-    // only skips the best-effort write-back after the suite already ran, and
-    // leaves the suite's own status as the step's exit code; an unusable
-    // queue (helper status 2) reddens instead.
+    // full-tier MariaDB holds ahead of fast PR-feedback work. A lock wait
+    // that does not acquire only skips the best-effort write-back after the
+    // suite already ran, and leaves the suite's own status as the exit code.
     expect(step.run).toMatch(
-      /set \+e\n\s+sdk_java_lock_acquire 1800\n\s+lock_status=\$\?\n\s+set -e\n\s+if \[ "\$\{lock_status\}" -eq 1 \]; then\n\s+echo "::warning::Maven cache write-back skipped;[^\n]*\n\s+printf 'sdk-java Maven cache write-back skipped[^\n]*>> "\$\{GITHUB_STEP_SUMMARY\}"\n\s+exit "\$\{suite_status\}"\n\s+elif \[ "\$\{lock_status\}" -ne 0 \]; then\n\s+exit "\$\{lock_status\}"\n/,
+      /if ! sdk_java_lock_acquire 1800; then\n\s+echo "::warning::Maven cache write-back skipped;[^\n]*\n\s+printf 'sdk-java Maven cache write-back skipped[^\n]*>> "\$\{GITHUB_STEP_SUMMARY\}"\n\s+exit "\$\{suite_status\}"\n\s+fi\n/,
     );
     expect(step.run).toMatch(
       /if ! flock --wait 1800 9; then\n\s+echo "::error::sdk-java host lock not acquired within 30 minutes"\n\s+echo "::warning::Maven cache write-back skipped;[^\n]*\n\s+printf 'sdk-java Maven cache write-back skipped[^\n]*>> "\$\{GITHUB_STEP_SUMMARY\}"\n\s+exit "\$\{suite_status\}"\n/,

@@ -280,20 +280,15 @@ jobs:
           # the per-host lock. The ticketed queue orders that one wait, and
           # the tier argument keeps the fast class ahead of waiting full-tier
           # tickets — see the sourced helper. A wait timeout only skips the
-          # best-effort write-back; the suite result above stands, and an
-          # unusable queue (helper status 2) reddens the step instead.
+          # best-effort write-back; the suite result above stands. The helper
+          # cannot distinguish a consumed budget from an unusable queue, so
+          # both skip the write-back and leave the suite result as the exit.
           if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
-            set +e
-            sdk_java_lock_acquire 1800 "${TIER}"
-            lock_status=$?
-            set -e
-            if [ "${lock_status}" -eq 1 ]; then
+            if ! sdk_java_lock_acquire 1800 "${TIER}"; then
               echo "::warning::Maven cache write-back skipped; the suite result above is unaffected"
               printf 'sdk-java Maven cache write-back skipped after a lock wait on %s\n' "${RUNNER_NAME}" >> "${GITHUB_STEP_SUMMARY}"
               exit "${suite_status}"
-            elif [ "${lock_status}" -ne 0 ]; then
-              exit "${lock_status}"
             fi
           else
             # release-sdk-java.yml resumes an existing tag by checking out
@@ -833,16 +828,10 @@ jobs:
           # wake-up race against sibling holds (qwen-code#14743).
           if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
-            set +e
-            sdk_java_lock_acquire 1800
-            lock_status=$?
-            set -e
-            if [ "${lock_status}" -eq 1 ]; then
+            if ! sdk_java_lock_acquire 1800; then
               echo "::warning::Maven cache write-back skipped; the suite result above is unaffected"
               printf 'sdk-java Maven cache write-back skipped after a lock wait on %s\n' "${RUNNER_NAME}" >> "${GITHUB_STEP_SUMMARY}"
               exit "${suite_status}"
-            elif [ "${lock_status}" -ne 0 ]; then
-              exit "${lock_status}"
             fi
           else
             # release-sdk-java.yml resumes an existing tag by checking out

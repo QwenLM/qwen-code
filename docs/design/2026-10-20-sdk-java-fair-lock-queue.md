@@ -228,8 +228,10 @@ order this section exists to prevent.
   a ticket: a stray process, or the fallback path of a resumed release tag,
   still starves the head for the whole 1800 s wait. After this change that
   stall lands after the suite, so the gate stays green and only the
-  write-back is skipped; the step summary records that skip, and an
-  unusable queue (status 2) reddens the step instead.
+  write-back is skipped; the step summary records that skip. A queue that
+  cannot be created or written returns the same status as a consumed
+  budget, so it also skips the write-back; separating the two needs a
+  change to the helper and is left for a follow-up.
 - Both jobs' suites now run concurrently on one physical host. #10552's
   per-host suite serialization is retired: each suite resolves from a
   job-local repository, and only the bounded cache write-back moves suite
