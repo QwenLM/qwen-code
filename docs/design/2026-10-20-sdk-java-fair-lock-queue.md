@@ -111,6 +111,16 @@ out warns and skips the copy instead of failing a step whose suite already
 passed; the `lock not acquired within` substring, the 5400 s budget, and the
 fd 9 closures are unchanged.
 
+A failed suite still reaches the write-back and exits with its own status, so
+a failing PR's downloads are not lost. The 925 s suite therefore no longer
+serializes against other legs on the host: the only lock-covered work in this
+job is the write-back copy. The seed is `cp -aln`, so seeded files share
+inodes with the host cache; running the suite unlocked is safe only because
+the pinned Maven replaces a local-repository file by temp-file + rename
+rather than writing in place. A resolver that writes in place would turn an
+unlocked `mvn install` into an unlocked writer of host-shared bytes, and
+nothing but `MAVEN_VERSION`'s value enforces that coupling.
+
 ### Fast-tier priority
 
 The FIFO queue bounds a waiter by its position, but it still puts a fast-tier

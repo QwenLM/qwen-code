@@ -244,16 +244,17 @@ jobs:
           # as head of the lock queue for the full 5400 s and failed before
           # Maven ran (issue #15285). The seed only reads the host cache and
           # is best-effort.
+          mvn_status=0
           cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
-          mvn --batch-mode --no-transfer-progress clean test
+          mvn --batch-mode --no-transfer-progress clean test || mvn_status=$?
           if [ "${MATRIX_JAVA}" = "21" ]; then
-            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install || mvn_status=$?
             cd ../../managed-agent-server
             # The fast tier skips mysql-integration, which owns the full H2 unit suite.
             if [ "${TIER}" = "fast" ]; then
-              mvn --batch-mode --no-transfer-progress clean test
+              mvn --batch-mode --no-transfer-progress clean test || mvn_status=$?
             else
-              mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test
+              mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test || mvn_status=$?
             fi
           fi
           # Only the cache write-back mutates host-shared state, so only it
@@ -263,15 +264,19 @@ jobs:
           # class, then oldest — retries the lock, and the fast class is
           # served first — see the sourced helper.
           lock_status=0
-          if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
+          # Probe the queue directory outside the acquisition's OR list:
+          # bash ignores errexit inside a function invoked there, so a host
+          # whose cache directory cannot be created would otherwise burn the
+          # whole 5400 s budget as if it were contention.
+          mkdir -p "${HOME}/.cache/qwen-code-ci" || lock_status=1
+          if [ "${lock_status}" -eq 0 ] && [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
             sdk_java_lock_acquire 5400 "${TIER}" || lock_status=$?
-          else
+          elif [ "${lock_status}" -eq 0 ]; then
             # release-sdk-java.yml resumes an existing tag by checking out
             # that immutable commit, which may predate this helper. Fall
             # back to the bare lock this queue replaced rather than dying
             # before the write-back and wedging the release.
-            mkdir -p "${HOME}/.cache/qwen-code-ci"
             exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
             if ! flock --wait 5400 9; then
               echo "::error::sdk-java host lock not acquired within 90 minutes"
@@ -280,7 +285,7 @@ jobs:
           fi
           if [ "${lock_status}" -ne 0 ]; then
             echo "::warning::Maven cache write-back skipped; the test result above is unaffected"
-            exit 0
+            exit "${mvn_status}"
           fi
           # The host cache may not exist on a fresh ECS host; create it
           # before publishing. Publish only this job's downloads: seeded
@@ -299,6 +304,10 @@ jobs:
           elif [ "${write_back}" -ne 0 ]; then
             echo "::warning::Maven cache write-back failed; the test result above is unaffected"
           fi
+          # Deferred so a failed suite still reaches the write-back: its
+          # downloads were already made, and dropping them makes the next
+          # leg re-pay for them.
+          exit "${mvn_status}"
 
       - name: 'Run Java SDK tests (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
