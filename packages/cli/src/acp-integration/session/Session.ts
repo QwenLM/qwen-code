@@ -15360,6 +15360,9 @@ export class Session implements SessionContext {
                 ? ToolErrorType.OUTPUT_TRUNCATED
                 : ToolErrorType.INVALID_TOOL_PARAMS,
               executionStatus: 'not_started',
+              // A model cut off on every attempt sends different partial
+              // content each time, so only this count can stop the turn.
+              recordInvalidToolParams: true,
             },
           );
         }

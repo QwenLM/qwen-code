@@ -4216,6 +4216,38 @@ describe('Session', () => {
       expect(execute).toHaveBeenCalledTimes(1);
       expect(sent).not.toContain('truncated due to max_tokens limit');
     });
+
+    it('stops the turn after repeated refused edits', async () => {
+      const execute = useTool(core.Kind.Edit, 'write_file');
+      const calls = ['a', 'b', 'c'].map((content, i) => ({
+        ...call(`call-cut-${i}`),
+        args: { file_path: '/tmp/notes.txt', content },
+      }));
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createStreamWithChunks([cutOff(...calls)]))
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'write it' }],
+        }),
+      ).rejects.toMatchObject({
+        data: {
+          code: 'LOOP_DETECTED',
+          loopType: core.LoopType.INVALID_TOOL_PARAMS_STAGNATION,
+        },
+      });
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Stopping ACP turn after repeated tool parameter errors from write_file',
+        ),
+      );
+    });
   });
 
   describe('Managed Runtime batch close', () => {
