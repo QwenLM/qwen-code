@@ -7,6 +7,10 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
+import {
+  hostsEquivalent,
+  normalizeSegment,
+} from '../review/lib/remote-match.js';
 
 export const REPLY_MARKER = '<!-- qwen-autofix-pr:v1 -->';
 
@@ -55,13 +59,16 @@ export interface AutofixPrGateCursor {
   /** GraphQL node ids of comments and reviews already reported, newest last.
    * Ids the query still returns are always kept; the rest are bounded. */
   reportedCommentIds: string[];
-  /** `<check>@<headSha>@<url>` of failures already reported on the current
-   * head; the URL names the attempt, so a re-run that fails again is new. */
+  /** `<check>@<headSha>@<attempt>` of failures already reported on the
+   * current head. The attempt is the check run's id (`#<databaseId>`) or the
+   * commit status's creation time, so a re-run that fails again is new. */
   reportedChecks: string[];
   /** Head SHA whose merge conflict was reported; null while mergeable. */
   conflictSha: string | null;
   /** Set once a merge or close was reported; the probe is quiet afterwards. */
   stopped: 'merged' | 'closed' | null;
+  /** Connections the previous run found cut; a new cut is reported once. */
+  reportedTruncated: string[];
 }
 
 export interface AutofixPrPaths {
@@ -108,7 +115,7 @@ export function readGateCursor(gatePath: string): AutofixPrGateCursor | null {
       `unsupported autofix-pr gate cursor version in ${gatePath}: ${String(parsed.version)}`,
     );
   }
-  return parsed;
+  return { ...parsed, reportedTruncated: parsed.reportedTruncated ?? [] };
 }
 
 export function writeGateCursor(
@@ -116,6 +123,22 @@ export function writeGateCursor(
   cursor: AutofixPrGateCursor,
 ): void {
   atomicWriteFileSync(gatePath, `${JSON.stringify(cursor, null, 2)}\n`);
+}
+
+/**
+ * Whether two `host/owner/repo` triples name the same repository. GitHub
+ * compares owner and repository names without case, and a host's spelling
+ * (case, port, trailing dot) does not change the instance.
+ */
+export function sameRepository(
+  a: { host: string; owner: string; repo: string },
+  b: { host: string; owner: string; repo: string },
+): boolean {
+  return (
+    hostsEquivalent(a.host, b.host) &&
+    normalizeSegment(a.owner) === normalizeSegment(b.owner) &&
+    normalizeSegment(a.repo) === normalizeSegment(b.repo)
+  );
 }
 
 export function readState(statePath: string): AutofixPrState | null {
@@ -144,7 +167,7 @@ export function requireState(
   const state = readState(statePath);
   if (!state) {
     throw new Error(
-      `PR #${prNumber} is not prepared here; run \`qwen autofix-pr prepare ${prNumber}\` first.`,
+      `PR #${prNumber} is not prepared here; run \`qwen autofix-pr prepare ${prNumber} --repo <owner>/<repo>\` first.`,
     );
   }
   return state;

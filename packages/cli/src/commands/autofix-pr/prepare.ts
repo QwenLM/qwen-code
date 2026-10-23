@@ -30,6 +30,7 @@ import {
   currentSessionId,
   readState,
   repoRoot,
+  sameRepository,
   writeState,
   type AutofixPrState,
 } from './state.js';
@@ -92,9 +93,12 @@ export function pushUrl(
   repo: string,
   protocol: string,
 ): string {
-  return protocol === 'ssh'
-    ? `git@${host}:${owner}/${repo}.git`
-    : `https://${host}/${owner}/${repo}.git`;
+  if (protocol !== 'ssh') return `https://${host}/${owner}/${repo}.git`;
+  // The scp-like form has no port: git would read `host:8443:owner/repo`
+  // as host `host` and path `8443:owner/repo`.
+  return host.includes(':')
+    ? `ssh://git@${host}/${owner}/${repo}.git`
+    : `git@${host}:${owner}/${repo}.git`;
 }
 
 function onlyRemote(
@@ -196,7 +200,7 @@ export function runPrepare(args: PrepareArgs): void {
     // State is keyed by PR number alone, and one clone can reach several
     // repositories with a PR of that number.
     const watched = `${existing.host}/${existing.owner}/${existing.repo}`;
-    if (watched !== `${host}/${args.repo}`) {
+    if (!sameRepository(existing, { host, owner, repo: repoName })) {
       throw new Error(
         `PR #${args.pr} here is a watch of ${watched}, not ${host}/${args.repo}. ` +
           `Run \`qwen autofix-pr cleanup ${args.pr}\` first.`,

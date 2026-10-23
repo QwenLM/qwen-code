@@ -114,7 +114,8 @@ with unit tests; judgment stays in the skill.
   ├─ qwen autofix-pr push      guarded push, advances the cursor
   ├─ qwen autofix-pr reply     post replies with a marker, record their ids
   ├─ qwen autofix-pr cleanup   remove worktree, branch and state file when safe
-  └─ cron_create               session-only, recurring, gate: "qwen autofix-pr snapshot --gate <n>";
+  └─ cron_create               session-only, recurring, gate:
+                               "qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host>";
                                the prompt says how to handle the events the gate printed
 
 qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marked
@@ -132,7 +133,7 @@ worktree included:
 - state: `.qwen/tmp/autofix-pr-<n>-state.json`
 - gate cursor: `.qwen/tmp/autofix-pr-<n>-gate.json`
 - logs and briefs: `.qwen/tmp/autofix-pr-<n>-*.{log,md}`
-- reviewer cursor: `.qwen/tmp/review-watch-<host>-<owner>-<repo>.json`
+- reviewer cursor: `.qwen/tmp/review-watch/<host>/<owner>/<repo>.json`
 
 ## 6. Helper contracts
 
@@ -174,16 +175,25 @@ worktree included:
 
 ### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate]`
 
-One GraphQL call reads:
+One GraphQL call, plus one per further page of checks or review threads,
+reads:
 
 - PR fields: `state`, `isDraft`, `url`, `headRefOid`, `mergeable`, the author
   and the viewer
 - the status check rollup of the head commit, paged past the first 100
   contexts (up to ten pages; a head on a busy repository carries well over
   100, and a failure on a later page must not read as all green)
-- the first 100 `reviewThreads` with their comments (`id`, `databaseId`,
+- the `reviewThreads`, paged past the first 100 (up to ten pages: threads
+  come oldest first, so a new one is on the last page), each with its first
+  comment's `databaseId` and its last 100 comments (`id`, `databaseId`,
   `author { __typename login }`, `authorAssociation`, `body`, `url`)
 - the last 100 `reviews` and the last 100 issue comments
+
+The rollup lists every run on the head: earlier attempts of a re-run job,
+and each trigger of a workflow that runs on several events. Only the latest
+run of each check counts — a check is a workflow, its trigger event and the
+job name, ordered by the run's id; a commit status is its context, ordered by
+creation time — so a failure that a re-run turned green is not reported.
 
 Without `--gate`, `snapshot` compares them with the state file `prepare`
 wrote and prints events plus one action:
@@ -235,7 +245,8 @@ Event rules:
 
 - Comment ids are GraphQL node ids, unique across comments, reviews and
   threads. `replyTo` is the `databaseId` of a thread's first comment, the only
-  id the REST replies endpoint accepts.
+  id the REST replies endpoint accepts; it is read on its own, so a thread
+  past 100 comments still has it.
 - Checks count only for the current `headRefOid`; a rollup of an older commit
   is ignored. A check run fails on `FAILURE`, `TIMED_OUT` or
   `STARTUP_FAILURE`; a commit status fails on `FAILURE` or `ERROR`.
@@ -244,9 +255,11 @@ Event rules:
 - CI that is still pending alone means `wait`. A trusted comment can still be
   fixed while CI runs, because the next push restarts CI anyway.
 - A comment is new when its id is neither in `handledCommentIds` nor in
-  `postedCommentIds`, and its body does not carry the reply marker
-  (Section 9). Resolved threads, empty or pending reviews are skipped;
-  outdated threads are kept with `outdated: true`.
+  `postedCommentIds`, and it is not one of the tool's replies: a comment by
+  the viewer whose body ends with the reply marker (Section 9). A marker
+  anywhere else — someone quoting a reply — does not hide a comment.
+  Resolved threads, empty or pending reviews are skipped; outdated threads
+  are kept with `outdated: true`.
 - A head SHA that differs from `lastKnownHeadSha` and is not in `pushedShas`
   is `head_moved_externally`.
 - `truncated` names the connections (`checks`, `reviewThreadComments`,
@@ -260,29 +273,40 @@ fix in flight (`inFlight` in the state file) means `wait`.
 
 #### Gate mode (`--gate`)
 
-`snapshot --gate` is the command behind the scheduled task's gate. It needs
-no worktree and no state file: `--repo` names the PR on the first run (or the
-prepared state supplies it), and its own cursor,
+`snapshot <n> --gate` is the command behind the scheduled task's gate. It
+needs no worktree and no state file: on the first run `--repo` names the
+PR's repository (or the prepared state supplies it), and its own cursor,
 `.qwen/tmp/autofix-pr-<n>-gate.json`, records what it has already reported.
-It prints the same JSON, but only the transitions since the previous run, and
-prints nothing when there are none, so the session is woken only for them:
+Without `--host` (or `GH_HOST`) it uses the host the PR is already watched
+on — its cursor's, or the prepared state's — before falling back to
+github.com. It prints the same JSON, but only the transitions since the
+previous run, and prints nothing when there are none, so the session is
+woken only for them:
 
 - A failed check is reported once per (check, head, attempt): the cursor key
-  carries the job URL, so a re-run that fails again is reported again even
-  when no poll saw it in progress. The cursor keeps only the failures still
-  present, and a new head starts over.
+  carries the run's id (a commit status: its creation time), so a re-run
+  that fails again is reported again even when no poll saw it in progress.
+  The cursor keeps only the failures still present, and a new head starts
+  over.
 - Pending checks are never reported; `ci_pending` does not appear.
 - A conflict is reported once per head; `mergeable` clears the mark,
   `UNKNOWN` keeps it.
 - Comments, reviews and thread comments are reported once each, by node id,
   with the trust rules of Section 8. The viewer's own comments are never
-  events. An untrusted comment alone is reported as a notice (`wait`). The
-  cursor keeps every reported id the query still returns, however many, and
-  bounds only the ids that left the page, so an identical poll is quiet.
+  events, nor are the ones a prepared watch of the same PR has handled
+  (`handledCommentIds`, `postedCommentIds`). An untrusted comment alone is
+  reported as a notice (`wait`). The cursor keeps every reported id the query
+  still returns, however many, and bounds only the ids that left the page, so
+  an identical poll is quiet.
 - A head that differs from the previous run's is `head_moved_externally`
-  (`resync`); the first run records the head without reporting it.
+  (`resync`), unless a prepared watch of the same PR recorded or pushed it
+  (`lastKnownHeadSha`, `pushedShas`); the first run records the head without
+  reporting it.
 - A merge or close is reported once (`stop`); afterwards the probe is quiet,
   and a reopened PR is watched again.
+- A connection that starts being cut (`truncated`) is reported once, as
+  `wait` when nothing else happened: past the last page a new thread leaves
+  no other trace. A cut that lasts is quiet.
 - The first run reports what is outstanding: failed checks, a conflict, and
   comments no one has handled.
 
@@ -298,7 +322,11 @@ and trimmed to the last `--lines` lines per job, with a note of how many were
 omitted, to
 `.qwen/tmp/autofix-pr-<n>-ci-<run-id>.log`, and prints the path and the job
 names. The fix agent reads that file instead of piping logs into a shell
-preview. `--lines` must be a positive integer.
+preview. `--lines` must be a positive integer. A job whose log cannot be
+read gets a `log unavailable: <reason>` line in place of its log, and the
+other jobs are still written. A run with no finished job that failed or
+timed out — its failed jobs still running, or a startup failure before any
+job — is an error, not an empty file.
 
 Each job's log comes from the REST jobs endpoint, not `gh run view
 --log-failed`: `gh run view` (with or without `--job`) refuses a run that is
@@ -332,22 +360,32 @@ uses an issue comment.
 ### 6.6 `cleanup <pr> [--force]`
 
 Removes the worktree, its branch and the state file together. When the
-worktree has uncommitted changes, or the worktree (or the branch, once the
-worktree was deleted) has commits beyond `lastKnownHeadSha`, all three are
-kept and the report says why. Without a state file there is no recorded head,
-so a leftover worktree or branch is kept. A state file owned by another
-session is a refusal. `--force` overrides these checks and also discards an
+worktree has uncommitted changes (untracked files included, whatever
+`status.showUntrackedFiles` says), or the worktree (or the branch, once the
+worktree was deleted) has commits that no PR head the watch knows of
+contains, all three are kept and the report says why. The heads it knows of
+are `lastKnownHeadSha` and `pushedShas`, and — asked only when those leave
+commits over — the PR head on the remote (`refs/pull/<n>/head`), so work
+pushed by hand is not held back. A directory at the worktree path that is
+not a worktree of its own is kept: git run inside it would judge the
+enclosing clone. Without a state file there is no recorded head, so a
+leftover worktree or branch is kept. A state file owned by another session
+is a refusal. `--force` overrides these checks and also discards an
 unreadable state file. A branch that cannot be deleted is an error, and the
 state file stays. Running `cleanup` from inside the worktree it would remove
-is a refusal.
+is a refusal. The gate cursor is not removed: it belongs to the scheduled
+task, which outlives a watch, and without it the next fire would report
+everything again. Delete the task to stop the gate.
 
 ### 6.7 `review watch-repo --repo <owner>/<repo> [--host <host>] [--limit 50] [filters]`
 
 The reviewer's probe, behind a gate of its own. One GraphQL call reads the
 most recently updated open PRs (`--limit`, default 50, at most 100) with
-their head, draft flag, author, labels and review requests. The cursor,
-`.qwen/tmp/review-watch-<host>-<owner>-<repo>.json`, records every open PR's
-head and draft flag:
+their head, draft flag, author, labels and review requests, and whether more
+open PRs exist past the limit. The cursor,
+`.qwen/tmp/review-watch/<host>/<owner>/<repo>.json` (lowercase, a port's
+`:` written as `_`, so every spelling of a repository shares one file),
+records every open PR's head and draft flag:
 
 - The first run records the open PRs and prints nothing.
 - Afterwards a PR that is new to the cursor is `pr_opened`, one whose head
@@ -355,12 +393,17 @@ head and draft flag:
   `pr_ready`. Each event carries the number, title, author, URL, head SHA,
   base branch, labels and whether the viewer's review was requested.
 - Filters decide which PRs become events: `--author <login>`,
-  `--label <name>`, `--review-requested` (the viewer is a requested reviewer;
-  team requests do not count), `--exclude-drafts`, `--exclude-bots`,
-  `--exclude-mine`. The cursor follows every PR regardless, so changing a
-  filter later does not replay history.
+  `--label <name>` (both compared without case, as GitHub does),
+  `--review-requested` (the viewer is a requested reviewer; team requests do
+  not count), `--exclude-drafts`, `--exclude-bots`, `--exclude-mine`. The
+  cursor follows every PR regardless, so changing a filter later does not
+  replay history.
 - A PR missing from the list was closed or merged and leaves the cursor —
-  unless the list was cut at `--limit`, in which case it is kept.
+  unless the list was cut at `--limit`. Then the PRs missing from it may
+  still be open, and the cursor keeps up to `--limit` of them, highest
+  numbers first, since closed and merged ones cannot be told apart and would
+  otherwise accumulate. An open PR that fell out of the cursor and changes
+  again comes back as `pr_opened`.
 
 Output: `{ "repo": "<owner>/<repo>", "events": [...] }`, and nothing when
 there are no events. The skill that uses it decides what each event means:
@@ -375,7 +418,9 @@ its events in the gate output, so a quiet check never becomes a turn.
 snapshot --gate (in the gate)
   ├─ stop     → cron_delete, cleanup, report outcome
   ├─ wait     → end the turn with no message
-  ├─ resync   → fetch, fast-forward the worktree to the new head, set cursor;
+  ├─ resync   → fetch, fast-forward the worktree to the new head, set cursor,
+  │             then handle the other events of the same output (the gate
+  │             does not report them again);
   │             two resyncs in a row → stop: "someone else is pushing to this PR"
   └─ fix
        1. conflict  → merge origin/<base> in the worktree (merge, never rebase)
@@ -416,9 +461,9 @@ A comment is actionable when its author is:
 
 Never actionable:
 
-- comments with the reply marker or with an id in `postedCommentIds`. The
-  viewer is often the PR author and therefore trusted, so without this rule the
-  tool would answer itself.
+- the tool's own replies: an id in `postedCommentIds`, or a comment by the
+  viewer that ends with the reply marker. The viewer is often the PR author
+  and therefore trusted, so without this rule the tool would answer itself.
 - comments from anyone else. They are listed in `status` and the final report,
   but never acted on or replied to.
 
@@ -448,15 +493,20 @@ Replies are on by default; `--no-reply` turns them off.
 
 - Start runs the first check immediately, then calls `cron_create` with a
   session-only recurring job, cron `*/<every> * * * *` (default `*/2`), the
-  gate `qwen autofix-pr snapshot --gate <n> --repo <owner>/<repo>`, and a
+  gate `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host>`
+  (the host it passed to `prepare`), and a
   prompt that tells the model how to handle the events in the gate output
   (`Run /autofix-pr tick <owner>/<repo>#<n> on the events below`). The gate
   is confirmed once, like a Monitor command, when the task is created.
 - Fires that arrive while the session is busy wait in the notification queue;
   the probe runs once when the session is idle and prints everything new
   since its previous run.
-- The job ends with the process. Re-running `/autofix-pr` later resumes from the
-  state file, so handled comments are not answered twice.
+- The job ends with the process. The state file stays, owned by the session
+  that wrote it, and a new session's `prepare` refuses it (Section 6.1).
+  Taking a watch over in a later session, keeping its handled comments and
+  pushes, is delivery step 4; until then a restart needs
+  `cleanup <n> --force`, which discards that history. A watch that stopped
+  ran `cleanup` already.
 - The cron maximum age setting (`QWEN_CODE_CRON_MAX_AGE_DAYS`) still applies.
 
 Budgets, stored in the state file:
@@ -474,7 +524,7 @@ the table says stop; the cron job expires. Every stop runs `cleanup` and
 prints the reason, the pushes made and any `needsHuman` items.
 
 Cost: a quiet check is one probe run — one GraphQL call, plus one per extra
-page of checks — and no model turn. Only a check with events reaches the
+page of checks or review threads — and no model turn. Only a check with events reaches the
 model, so a two-minute cadence costs nothing while the PR is quiet.
 
 ## 11. Resolved decisions
@@ -536,9 +586,11 @@ Delivery plan:
 3. Helpers `push` and `reply` with tests, and the skills: `/autofix-pr` with
    `--once`, then watch mode as a gated task, and the reviewer watch that runs
    `/qreview` or a verification pass per event. The state records which
-   failed checks were handled on which head, so a failure the agent declined
-   or reran is not dispatched again on the same head.
-4. The loop state: `status`, `stop`, budgets and resume from the state file.
+   failed check attempts were handled, keyed like the gate's cursor (check,
+   head, attempt), so a failure the agent declined is not dispatched again,
+   while a re-run that fails again is.
+4. The loop state: `status`, `stop`, budgets, and a later session taking
+   over the state file.
 5. Follow-ups: durable watching in daemon sessions (`durable` with
    `sessionMode: "current"`, once the gate supports it), and a configurable
    bot allowlist.

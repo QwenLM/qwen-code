@@ -80,7 +80,8 @@ PR 提交之后，作者还得一直盯着：CI 在没测过的平台上失败�
   ├─ qwen autofix-pr push      guarded push, advances the cursor
   ├─ qwen autofix-pr reply     post replies with a marker, record their ids
   ├─ qwen autofix-pr cleanup   remove worktree, branch and state file when safe
-  └─ cron_create               session-only, recurring, gate: "qwen autofix-pr snapshot --gate <n>";
+  └─ cron_create               session-only, recurring, gate:
+                               "qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host>";
                                the prompt says how to handle the events the gate printed
 
 qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marked
@@ -93,7 +94,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 - 状态：`.qwen/tmp/autofix-pr-<n>-state.json`
 - 闸门游标：`.qwen/tmp/autofix-pr-<n>-gate.json`
 - 日志和修复说明：`.qwen/tmp/autofix-pr-<n>-*.{log,md}`
-- 评审者游标：`.qwen/tmp/review-watch-<host>-<owner>-<repo>.json`
+- 评审者游标：`.qwen/tmp/review-watch/<host>/<owner>/<repo>.json`
 
 ## 6. 辅助命令契约
 
@@ -110,12 +111,14 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 ### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate]`
 
-一次 GraphQL 调用读取：
+一次 GraphQL 调用（检查或 review thread 每多一页再加一次）读取：
 
 - PR 字段：`state`、`isDraft`、`url`、`headRefOid`、`mergeable`、作者和当前用户
 - head 提交的 status check 汇总，翻页读到前 100 个 context 之后（最多十页；繁忙仓库上一个 head 远超 100 个，后面页上的失败绝不能被读成全绿）
-- 前 100 个 `reviewThreads` 及其评论（`id`、`databaseId`、`author { __typename login }`、`authorAssociation`、`body`、`url`）
+- `reviewThreads`，翻页读到前 100 个之后（最多十页：thread 按创建先后排列，新 thread 在最后一页），每个 thread 带第一条评论的 `databaseId` 和最后 100 条评论（`id`、`databaseId`、`author { __typename login }`、`authorAssociation`、`body`、`url`）
 - 最后 100 条 `reviews` 和最后 100 条 issue 评论
+
+汇总列出 head 上的每一次运行：被重跑的 job 的早先 attempt，以及在多个事件上触发的 workflow 的每一次触发。每个检查只看最新一次运行——检查由 workflow、触发事件和 job 名确定，按运行 id 排序；commit status 由 context 确定，按创建时间排序——所以被重跑转绿的失败不会被报告。
 
 不带 `--gate` 时，`snapshot` 把它们和 `prepare` 写下的状态文件对比，输出事件列表和一个动作：
 
@@ -164,10 +167,10 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 事件规则：
 
-- 评论 id 是 GraphQL node id，在评论、review 和 thread 之间都唯一。`replyTo` 是 thread 第一条评论的 `databaseId`，这是 REST 回复接口唯一接受的 id。
+- 评论 id 是 GraphQL node id，在评论、review 和 thread 之间都唯一。`replyTo` 是 thread 第一条评论的 `databaseId`，这是 REST 回复接口唯一接受的 id；它单独读取，所以超过 100 条评论的 thread 也能拿到。
 - 只看当前 `headRefOid` 上的检查；旧提交的汇总会被忽略。check run 在 `FAILURE`、`TIMED_OUT` 或 `STARTUP_FAILURE` 时算失败；commit status 在 `FAILURE` 或 `ERROR` 时算失败。`CANCELLED` 不算失败。`runId` 从 Actions URL 中解析，否则为 null。
 - 只有 CI 还在跑时，动作是 `wait`。CI 在跑的同时仍然可以修可信评论，因为下一次推送反正会重新触发 CI。
-- 评论 id 既不在 `handledCommentIds` 也不在 `postedCommentIds` 里、且正文不带回复标记（第 9 节）时，才算新评论。已 resolve 的 thread、空的或 pending 的 review 会被跳过；outdated 的 thread 会保留，并带上 `outdated: true`。
+- 评论 id 既不在 `handledCommentIds` 也不在 `postedCommentIds` 里、且不是工具自己的回复——即当前用户发的、正文以回复标记（第 9 节）结尾的评论——时，才算新评论。标记出现在别处（有人引用了一条回复）不会让评论被忽略。已 resolve 的 thread、空的或 pending 的 review 会被跳过；outdated 的 thread 会保留，并带上 `outdated: true`。
 - head SHA 和 `lastKnownHeadSha` 不同、且不在 `pushedShas` 里，记为 `head_moved_externally`。
 - `truncated` 列出条目数超过查询读取范围的连接（`checks`、`reviewThreadComments`、`reviewThreads`、`reviews`、`comments`）。
 
@@ -175,21 +178,22 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 #### 闸门模式（`--gate`）
 
-`snapshot --gate` 是定时任务闸门背后的那条命令。它不需要 worktree，也不需要状态文件：首次运行用 `--repo` 指定 PR（或由已准备好的状态提供），它自己的游标 `.qwen/tmp/autofix-pr-<n>-gate.json` 记录已经报告过的内容。它输出同样的 JSON，但只包含自上次运行以来的迁移，没有迁移时什么都不输出，因此会话只会为迁移被唤醒：
+`snapshot <n> --gate` 是定时任务闸门背后的那条命令。它不需要 worktree，也不需要状态文件：首次运行用 `--repo` 指定 PR 所在的仓库（或由已准备好的状态提供），它自己的游标 `.qwen/tmp/autofix-pr-<n>-gate.json` 记录已经报告过的内容。没有 `--host`（或 `GH_HOST`）时，先用该 PR 已在监视的 host——游标里的，或已准备状态里的——最后才回落到 github.com。它输出同样的 JSON，但只包含自上次运行以来的迁移，没有迁移时什么都不输出，因此会话只会为迁移被唤醒：
 
-- 失败的检查按（检查，head，attempt）报告一次：游标键带上 job URL，所以重跑后再次失败的检查会再次报告，即使没有任何一次轮询看到它处于运行中。游标只保留仍然存在的失败，新的 head 从头开始。
+- 失败的检查按（检查，head，attempt）报告一次：游标键带上运行 id（commit status 则是它的创建时间），所以重跑后再次失败的检查会再次报告，即使没有任何一次轮询看到它处于运行中。游标只保留仍然存在的失败，新的 head 从头开始。
 - 进行中的检查从不报告；不会出现 `ci_pending`。
 - 冲突按 head 报告一次；`mergeable` 清除标记，`UNKNOWN` 保留标记。
-- 评论、review 和 thread 评论按 node id 各报告一次，沿用第 8 节的信任规则。当前用户自己的评论永远不是事件。只有不可信评论时作为提醒报告（`wait`）。查询结果里仍然出现的已报告 id 全部保留在游标里，不论多少；只有已经离开页面的 id 才有上限，所以内容相同的轮询是安静的。
-- head 与上次运行不同时记为 `head_moved_externally`（`resync`）；首次运行只记录 head，不报告。
+- 评论、review 和 thread 评论按 node id 各报告一次，沿用第 8 节的信任规则。当前用户自己的评论永远不是事件，同一 PR 的已准备监视处理过的评论（`handledCommentIds`、`postedCommentIds`）也不是。只有不可信评论时作为提醒报告（`wait`）。查询结果里仍然出现的已报告 id 全部保留在游标里，不论多少；只有已经离开页面的 id 才有上限，所以内容相同的轮询是安静的。
+- head 与上次运行不同时记为 `head_moved_externally`（`resync`），除非同一 PR 的已准备监视记录过或推送过它（`lastKnownHeadSha`、`pushedShas`）；首次运行只记录 head，不报告。
 - 合并或关闭报告一次（`stop`）；之后探针保持安静，重新打开的 PR 会再次被监视。
+- 某个连接开始被截断（`truncated`）时报告一次，没有其他事件时动作为 `wait`：超出最后一页的新 thread 不会留下别的痕迹。持续的截断保持安静。
 - 首次运行报告所有尚未处理的事项：失败的检查、冲突，以及没人处理过的评论。
 
 游标在输出之前写入，所以打印之后崩溃的探针不会把同一批迁移报告两次。`ci_pending` 和安静 PR 的 `wait` 动作只存在于已准备模式。
 
 ### 6.3 `ci-log <pr> <run-id> [--lines 200]`
 
-把该 run 中已结束且失败或超时的每个 job 的日志在该 job 最后一行 `##[error]` 之后截断（之后是 post-job 清理步骤），再按 job 截取最后 `--lines` 行，并注明省略了多少行，写到 `.qwen/tmp/autofix-pr-<n>-ci-<run-id>.log`，然后输出路径和 job 名称。修复 agent 读这个文件，而不是把日志通过 shell 预览输出。`--lines` 必须是正整数。
+把该 run 中已结束且失败或超时的每个 job 的日志在该 job 最后一行 `##[error]` 之后截断（之后是 post-job 清理步骤），再按 job 截取最后 `--lines` 行，并注明省略了多少行，写到 `.qwen/tmp/autofix-pr-<n>-ci-<run-id>.log`，然后输出路径和 job 名称。修复 agent 读这个文件，而不是把日志通过 shell 预览输出。`--lines` 必须是正整数。某个 job 的日志读不到时，用一行 `log unavailable: <reason>` 代替它的日志，其他 job 照常写入。run 里没有已结束且失败或超时的 job（失败的 job 还在跑，或在任何 job 开始前就启动失败）时报错，而不是写一个空文件。
 
 每个 job 的日志通过 REST jobs 接口读取，而不是 `gh run view --log-failed`：`gh run view`（加不加 `--job` 都一样）会拒绝仍在运行的 run，而 `snapshot` 在一个 job 失败时就会报告它，这时同一 run 的其他 job 可能还在跑。
 
@@ -209,16 +213,16 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 ### 6.6 `cleanup <pr> [--force]`
 
-一起删除 worktree、它的分支和状态文件。worktree 有未提交的改动，或者 worktree（worktree 已被删除时则是分支）有超出 `lastKnownHeadSha` 的提交时，三者都保留，并在报告里说明原因。没有状态文件时没有记录的 head，因此残留的 worktree 或分支都会被保留。状态文件属于另一个会话时直接拒绝。`--force` 跳过这些检查，也会丢弃无法读取的状态文件。分支删不掉时报错，状态文件保留。在要删除的 worktree 内部运行 `cleanup` 会被拒绝。
+一起删除 worktree、它的分支和状态文件。worktree 有未提交的改动（包括未跟踪文件，不受 `status.showUntrackedFiles` 影响），或者 worktree（worktree 已被删除时则是分支）有监视已知的任何 PR head 都不包含的提交时，三者都保留，并在报告里说明原因。已知的 head 是 `lastKnownHeadSha` 和 `pushedShas`，以及——只在前两者比完仍有多出的提交时才去问——远端的 PR head（`refs/pull/<n>/head`），所以手工推送过的工作不会被拦住。worktree 路径上的目录如果不是独立的 worktree，会被保留：在它里面运行 git 会判断外层 clone。没有状态文件时没有记录的 head，因此残留的 worktree 或分支都会被保留。状态文件属于另一个会话时直接拒绝。`--force` 跳过这些检查，也会丢弃无法读取的状态文件。分支删不掉时报错，状态文件保留。在要删除的 worktree 内部运行 `cleanup` 会被拒绝。闸门游标不会被删除：它属于定时任务，而定时任务比一次监视活得久，没有游标的话下一次触发会把所有内容重新报告一遍。要停掉闸门，就删除该任务。
 
 ### 6.7 `review watch-repo --repo <owner>/<repo> [--host <host>] [--limit 50] [filters]`
 
-评审者的探针，有自己的闸门。一次 GraphQL 调用读取最近更新的打开 PR（`--limit`，默认 50，最多 100）及其 head、draft 标志、作者、label 和评审请求。游标 `.qwen/tmp/review-watch-<host>-<owner>-<repo>.json` 记录每个打开 PR 的 head 和 draft 标志：
+评审者的探针，有自己的闸门。一次 GraphQL 调用读取最近更新的打开 PR（`--limit`，默认 50，最多 100）及其 head、draft 标志、作者、label 和评审请求，以及上限之外是否还有打开的 PR。游标 `.qwen/tmp/review-watch/<host>/<owner>/<repo>.json`（全部小写，端口前的 `:` 写成 `_`，所以同一仓库的各种拼写共用一个文件）记录每个打开 PR 的 head 和 draft 标志：
 
 - 首次运行记录打开的 PR，不输出任何内容。
 - 之后，游标里没有的 PR 是 `pr_opened`，head 变化的是 `pr_pushed`，原来是 draft 现在不是的是 `pr_ready`。每个事件带编号、标题、作者、URL、head SHA、base 分支、label，以及是否请求了当前用户评审。
-- 过滤项决定哪些 PR 成为事件：`--author <login>`、`--label <name>`、`--review-requested`（当前用户是被请求的评审者；team 请求不算）、`--exclude-drafts`、`--exclude-bots`、`--exclude-mine`。游标无论如何都跟踪每个 PR，所以之后更改过滤项不会重放历史。
-- 列表里没有的 PR 已关闭或合并，会从游标中移除——除非列表被 `--limit` 截断，此时保留。
+- 过滤项决定哪些 PR 成为事件：`--author <login>`、`--label <name>`（两者都像 GitHub 一样不区分大小写）、`--review-requested`（当前用户是被请求的评审者；team 请求不算）、`--exclude-drafts`、`--exclude-bots`、`--exclude-mine`。游标无论如何都跟踪每个 PR，所以之后更改过滤项不会重放历史。
+- 列表里没有的 PR 已关闭或合并，会从游标中移除——除非列表被 `--limit` 截断。此时列表外的 PR 可能仍然打开，游标最多保留其中 `--limit` 个，编号大的优先，因为已关闭和已合并的 PR 无法区分，不设上限就会不断累积。被挤出游标、之后又有变化的打开 PR 会以 `pr_opened` 再次出现。
 
 输出：`{ "repo": "<owner>/<repo>", "events": [...] }`，没有事件时什么都不输出。使用它的 skill 决定每个事件的含义：对每个 PR 运行 `/qreview <number>` 或一次验证。
 
@@ -230,7 +234,9 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 snapshot --gate (in the gate)
   ├─ stop     → cron_delete, cleanup, report outcome
   ├─ wait     → end the turn with no message
-  ├─ resync   → fetch, fast-forward the worktree to the new head, set cursor;
+  ├─ resync   → fetch, fast-forward the worktree to the new head, set cursor,
+  │             then handle the other events of the same output (the gate
+  │             does not report them again);
   │             two resyncs in a row → stop: "someone else is pushing to this PR"
   └─ fix
        1. conflict  → merge origin/<base> in the worktree (merge, never rebase)
@@ -260,7 +266,7 @@ snapshot --gate (in the gate)
 
 永远不处理：
 
-- 带回复标记或 id 在 `postedCommentIds` 里的评论。当前用户往往就是 PR 作者，因此是可信的；没有这条规则，工具就会回复自己。
+- 工具自己的回复：id 在 `postedCommentIds` 里，或者当前用户发的、以回复标记结尾的评论。当前用户往往就是 PR 作者，因此是可信的；没有这条规则，工具就会回复自己。
 - 其他任何人的评论。它们会出现在 `status` 和最终报告里，但不会被处理，也不会被回复。
 
 即使是可处理的评论，修复说明也禁止：泄露密钥或 token；修改 CI 配置来跳过、禁用或削弱检查；删除或削弱测试来让它们通过；强推；与 PR 无关的改动。这类请求会收到"需要人工决定"的回复。
@@ -279,9 +285,9 @@ snapshot --gate (in the gate)
 
 ## 10. 调度、预算与生命周期
 
-- 启动时立即跑第一轮检查，然后调用 `cron_create` 创建会话级循环任务，cron 为 `*/<every> * * * *`（默认 `*/2`），闸门为 `qwen autofix-pr snapshot --gate <n> --repo <owner>/<repo>`，prompt 告诉模型如何处理闸门输出中的事件（`Run /autofix-pr tick <owner>/<repo>#<n> on the events below`）。闸门在创建任务时像 Monitor 命令一样确认一次。
+- 启动时立即跑第一轮检查，然后调用 `cron_create` 创建会话级循环任务，cron 为 `*/<every> * * * *`（默认 `*/2`），闸门为 `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host>`（即传给 `prepare` 的 host），prompt 告诉模型如何处理闸门输出中的事件（`Run /autofix-pr tick <owner>/<repo>#<n> on the events below`）。闸门在创建任务时像 Monitor 命令一样确认一次。
 - 会话忙时到达的触发会在通知队列里等待；会话空闲后探针运行一次，输出自上次运行以来的全部新内容。
-- 任务随进程结束。之后重新运行 `/autofix-pr` 会从状态文件继续，已处理的评论不会被回复两次。
+- 任务随进程结束。状态文件保留，归写下它的会话所有，新会话的 `prepare` 会拒绝它（第 6.1 节）。在之后的会话里接管一次监视、并保留其已处理的评论和推送，属于交付第 4 步；在那之前，重新开始需要 `cleanup <n> --force`，这会丢掉这些历史。已经停止的监视已经运行过 `cleanup`。
 - cron 最长存活时间的设置（`QWEN_CODE_CRON_MAX_AGE_DAYS`）仍然生效。
 
 预算记录在状态文件里：
@@ -296,7 +302,7 @@ snapshot --gate (in the gate)
 
 停止条件：PR 已合并或关闭；执行 `/autofix-pr stop`；上表中某项预算要求停止；cron 任务过期。每次停止都会执行 `cleanup`，并输出原因、已做的推送和所有 `needsHuman` 项。
 
-开销：一轮无事发生的检查只是一次探针运行——一次 GraphQL 调用，检查每多一页再加一次——没有模型回合。只有带事件的检查才到达模型，所以两分钟的节奏在 PR 安静时不花任何开销。
+开销：一轮无事发生的检查只是一次探针运行——一次 GraphQL 调用，检查或 review thread 每多一页再加一次——没有模型回合。只有带事件的检查才到达模型，所以两分钟的节奏在 PR 安静时不花任何开销。
 
 ## 11. 已定决策
 
@@ -335,8 +341,8 @@ snapshot --gate (in the gate)
 
 1. 触发层：定时任务闸门（PR #15069）。
 2. 探针（本 PR）：带游标和 check 翻页的 `snapshot --gate`，以及 `review watch-repo`；`prepare`、`ci-log` 和 `cleanup` 一同交付，等待反应层。
-3. 辅助命令 `push` 和 `reply`，带测试；以及 skill：支持 `--once` 的 `/autofix-pr`，然后是作为带闸门任务的 watch 模式，以及对每个事件运行 `/qreview` 或一次验证的评审者监视。状态文件记录每个 head 上已处理过的失败检查，这样 agent 已放弃或已重跑的失败不会在同一个 head 上被再次派发。
-4. 循环状态：`status`、`stop`、预算，以及从状态文件恢复。
+3. 辅助命令 `push` 和 `reply`，带测试；以及 skill：支持 `--once` 的 `/autofix-pr`，然后是作为带闸门任务的 watch 模式，以及对每个事件运行 `/qreview` 或一次验证的评审者监视。状态文件记录已处理过的失败检查 attempt，键与闸门游标相同（检查，head，attempt），这样 agent 已放弃的失败不会被再次派发，而重跑后再次失败的会。
+4. 循环状态：`status`、`stop`、预算，以及由之后的会话接管状态文件。
 5. 后续工作：daemon 会话里的持久化监视（`durable` 加 `sessionMode: "current"`，待闸门支持后）；可配置的 bot 允许名单。
 
 待定问题：

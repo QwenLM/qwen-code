@@ -46,7 +46,9 @@ export function tailPerJob(
     if (later > 0) lines = lines.slice(0, lastError + 1);
     const dropped = lines.length - limit;
     if (dropped > 0) parts.push(`${name}\t… ${dropped} earlier lines omitted`);
-    parts.push(...lines.slice(-limit).map((line) => `${name}\t${line}`));
+    // One push per line: spreading a long tail into `push` overflows the
+    // argument limit (about 110k lines).
+    for (const line of lines.slice(-limit)) parts.push(`${name}\t${line}`);
     if (later > 0) parts.push(`${name}\t… ${later} later lines omitted`);
   }
   return { text: `${parts.join('\n')}\n`, jobs: jobs.map((job) => job.name) };
@@ -102,8 +104,26 @@ export function runCiLog(prNumber: number, runId: number, limit: number): void {
         JSON.parse(line) as { id: number; name: string; conclusion: string },
     )
     .filter((job) => FAILED_JOB_CONCLUSIONS.has(job.conclusion));
+  if (failed.length === 0) {
+    // An empty file would read as "the log says nothing".
+    throw new Error(
+      `run ${runId} has no finished job that failed or timed out: its failed jobs are still running, or it failed before any job started.`,
+    );
+  }
   const { text, jobs } = tailPerJob(
-    failed.map((job) => ({ name: job.name, log: jobLog(repo, job.id) })),
+    failed.map((job) => {
+      // One log that cannot be read must not cost the others.
+      try {
+        return { name: job.name, log: jobLog(repo, job.id) };
+      } catch (err) {
+        const reason = String(
+          (err as { stderr?: unknown }).stderr || (err as Error).message,
+        )
+          .trim()
+          .split('\n')[0];
+        return { name: job.name, log: `log unavailable: ${reason}` };
+      }
+    }),
     limit,
   );
   const path = join(

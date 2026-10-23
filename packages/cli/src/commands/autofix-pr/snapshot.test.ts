@@ -97,7 +97,12 @@ function thread(
     isOutdated: extra.isOutdated ?? false,
     path: 'src/a.ts',
     line: 3,
-    comments: { pageInfo: { hasNextPage: false }, nodes: comments },
+    root: {
+      nodes: comments
+        .slice(0, 1)
+        .map(({ databaseId }) => ({ databaseId: databaseId ?? 0 })),
+    },
+    comments: { pageInfo: { hasPreviousPage: false }, nodes: comments },
   };
 }
 
@@ -168,6 +173,7 @@ describe('buildSnapshot', () => {
       pr({}, [
         {
           __typename: 'CheckRun',
+          databaseId: 1,
           name: 'Test ubuntu',
           status: 'COMPLETED',
           conclusion: 'FAILURE',
@@ -175,6 +181,7 @@ describe('buildSnapshot', () => {
         },
         {
           __typename: 'CheckRun',
+          databaseId: 2,
           name: 'Lint',
           status: 'COMPLETED',
           conclusion: 'CANCELLED',
@@ -182,6 +189,7 @@ describe('buildSnapshot', () => {
         },
         {
           __typename: 'CheckRun',
+          databaseId: 3,
           name: 'Build',
           status: 'IN_PROGRESS',
           conclusion: null,
@@ -189,12 +197,14 @@ describe('buildSnapshot', () => {
         },
         {
           __typename: 'StatusContext',
+          createdAt: '2026-10-21T00:00:06Z',
           context: 'ci/external',
           state: 'ERROR',
           targetUrl: 'https://ci.example.com/1',
         },
         {
           __typename: 'StatusContext',
+          createdAt: '2026-10-21T00:00:07Z',
           context: 'ci/slow',
           state: 'PENDING',
           targetUrl: null,
@@ -220,11 +230,72 @@ describe('buildSnapshot', () => {
     ]);
   });
 
+  it('judges each check by its latest run only', () => {
+    const run = (
+      databaseId: number,
+      conclusion: string | null,
+      workflow = 'CI',
+      event = 'pull_request',
+    ): Contexts[number] => ({
+      __typename: 'CheckRun',
+      name: 'Test ubuntu',
+      status: conclusion === null ? 'IN_PROGRESS' : 'COMPLETED',
+      conclusion,
+      detailsUrl: `https://github.com/o/r/actions/runs/${databaseId}/job/1`,
+      databaseId,
+      checkSuite: { workflowRun: { event, workflow: { name: workflow } } },
+    });
+    const failures = (contexts: Contexts) =>
+      buildSnapshot(pr({}, contexts), state())
+        .events.filter((e) => e.type === 'ci_failed')
+        .map((e) => (e.type === 'ci_failed' ? e.runId : null));
+    // A failure that a re-run turned green, in either order of the rollup.
+    expect(failures([run(1, 'FAILURE'), run(2, 'SUCCESS')])).toEqual([]);
+    expect(failures([run(2, 'SUCCESS'), run(1, 'FAILURE')])).toEqual([]);
+    // A green run that a re-run turned red.
+    expect(failures([run(1, 'SUCCESS'), run(2, 'FAILURE')])).toEqual([2]);
+    // A re-run still going: pending, not failed.
+    expect(
+      buildSnapshot(pr({}, [run(1, 'FAILURE'), run(2, null)]), state()).events,
+    ).toEqual([{ type: 'ci_pending', checks: ['Test ubuntu'] }]);
+    // The same job name in another workflow, or on another trigger, is
+    // another check.
+    expect(failures([run(1, 'FAILURE'), run(2, 'SUCCESS', 'Release')])).toEqual(
+      [1],
+    );
+    expect(
+      failures([
+        run(1, 'FAILURE'),
+        run(2, 'SKIPPED', 'CI', 'pull_request_review'),
+      ]),
+    ).toEqual([1]);
+  });
+
+  it('judges a commit status by its latest post', () => {
+    const status = (createdAt: string, state: string): Contexts[number] => ({
+      __typename: 'StatusContext',
+      context: 'ci/external',
+      state,
+      targetUrl: null,
+      createdAt,
+    });
+    expect(
+      buildSnapshot(
+        pr({}, [
+          status('2026-10-21T00:00:01Z', 'FAILURE'),
+          status('2026-10-21T00:00:02Z', 'SUCCESS'),
+        ]),
+        state(),
+      ).events,
+    ).toEqual([]);
+  });
+
   it('waits while checks are only pending', () => {
     const snap = buildSnapshot(
       pr({}, [
         {
           __typename: 'CheckRun',
+          databaseId: 4,
           name: 'Build',
           status: 'QUEUED',
           conclusion: null,
@@ -241,6 +312,7 @@ describe('buildSnapshot', () => {
     const data = pr({}, [
       {
         __typename: 'CheckRun',
+        databaseId: 5,
         name: 'Test',
         status: 'COMPLETED',
         conclusion: 'FAILURE',
@@ -363,6 +435,43 @@ describe('buildSnapshot', () => {
     expect(snap).toMatchObject({ action: 'wait', events: [] });
   });
 
+  it('takes a comment quoting a reply for a new comment', () => {
+    // GitHub's quote-reply carries the quoted body, marker included.
+    const quoted = `> Fixed in abc\n> ${REPLY_MARKER}\n\nnot fixed yet`;
+    const snap = buildSnapshot(
+      pr({
+        comments: {
+          pageInfo: { hasPreviousPage: false },
+          nodes: [
+            comment('I1', 'alice', 'MEMBER', { body: quoted }),
+            // Only the viewer posts replies, so the marker alone proves nothing.
+            comment('I2', 'bob', 'MEMBER', { body: `ok\n${REPLY_MARKER}` }),
+          ],
+        },
+      }),
+      state(),
+    );
+    expect(snap.action).toBe('fix');
+    expect(
+      snap.events.map((e) => (e.type === 'issue_comment' ? e.id : e.type)),
+    ).toEqual(['I1', 'I2']);
+  });
+
+  it('replies to the thread root even when only the newest replies were read', () => {
+    const data = pr(
+      threads(
+        thread('T1', [comment('C150', 'alice', 'MEMBER', { databaseId: 150 })]),
+      ),
+    );
+    data.reviewThreads.nodes[0].root = { nodes: [{ databaseId: 11 }] };
+    data.reviewThreads.nodes[0].comments.pageInfo.hasPreviousPage = true;
+    const snap = buildSnapshot(data, state());
+    expect(snap.events).toMatchObject([
+      { type: 'review_thread', replyTo: 11, comments: [{ id: 'C150' }] },
+    ]);
+    expect(snap.truncated).toEqual(['reviewThreadComments']);
+  });
+
   it('never answers itself: marker, posted ids and handled ids are skipped', () => {
     const snap = buildSnapshot(
       pr({
@@ -437,7 +546,7 @@ describe('buildSnapshot', () => {
       thread('T2', [comment('C2', 'alice', 'MEMBER')]),
     ];
     for (const node of data.reviewThreads.nodes) {
-      node.comments.pageInfo.hasNextPage = true;
+      node.comments.pageInfo.hasPreviousPage = true;
     }
     data.reviews.pageInfo.hasPreviousPage = true;
     data.comments.pageInfo.hasPreviousPage = true;

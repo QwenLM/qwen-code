@@ -5,7 +5,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -77,6 +83,15 @@ describe('tailPerJob', () => {
       text: 'test\tok\n',
       jobs: ['test'],
     });
+  });
+
+  it('keeps a tail longer than the engine takes as arguments', () => {
+    const log = Array.from({ length: 200_000 }, (_, i) => `line ${i}`).join(
+      '\n',
+    );
+    const { text } = tailPerJob([{ name: 'test', log }], 200_000);
+    expect(text.endsWith('test\tline 199999\n')).toBe(true);
+    expect(text.split('\n')).toHaveLength(200_001);
   });
 });
 
@@ -151,5 +166,43 @@ describe('runCiLog', () => {
     ]);
     const { path } = JSON.parse(mocks.stdout.mock.calls[0][0]);
     expect(readFileSync(path, 'utf8')).toBe('Test\tboom\n');
+  });
+
+  it('keeps the other logs when one cannot be read', () => {
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args.includes('--paginate')) {
+        return [
+          '{"id":2,"name":"Test","conclusion":"failure"}',
+          '{"id":3,"name":"E2E","conclusion":"failure"}',
+        ].join('\n');
+      }
+      if (args.at(-1)!.includes('jobs/3/')) {
+        throw Object.assign(new Error('gh failed'), {
+          stderr: 'HTTP 404: Not Found\n',
+        });
+      }
+      return 'boom';
+    });
+    runCiLog(7, 456, 200);
+    const { path, jobs } = JSON.parse(mocks.stdout.mock.calls[0][0]);
+    expect(jobs).toEqual(['Test', 'E2E']);
+    expect(readFileSync(path, 'utf8')).toBe(
+      'Test\tboom\nE2E\tlog unavailable: HTTP 404: Not Found\n',
+    );
+  });
+
+  it('refuses a run with no finished failed job instead of writing an empty log', () => {
+    mocks.gh.mockImplementation((...args: string[]) =>
+      args.includes('--paginate')
+        ? '{"id":1,"name":"Lint","conclusion":"success"}'
+        : '',
+    );
+    expect(() => runCiLog(7, 456, 200)).toThrow(
+      /run 456 has no finished job that failed or timed out/,
+    );
+    expect(mocks.stdout).not.toHaveBeenCalled();
+    expect(
+      existsSync(join(mocks.root, '.qwen', 'tmp', 'autofix-pr-7-ci-456.log')),
+    ).toBe(false);
   });
 });

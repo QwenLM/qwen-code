@@ -27,6 +27,7 @@ import {
   resolveGhHost,
   setGhHost,
 } from '../review/lib/gh.js';
+import { normalizeSegment } from '../review/lib/remote-match.js';
 import {
   REPLY_MARKER,
   assertOwnedBySession,
@@ -35,6 +36,7 @@ import {
   readState,
   repoRoot,
   requireState,
+  sameRepository,
   writeGateCursor,
   type AutofixPrGateCursor,
   type AutofixPrState,
@@ -42,8 +44,27 @@ import {
 
 const CHECK_CONTEXT_FIELDS = `nodes {
   __typename
-  ... on CheckRun { name status conclusion detailsUrl }
-  ... on StatusContext { context state targetUrl }
+  ... on CheckRun {
+    name status conclusion detailsUrl databaseId
+    checkSuite { workflowRun { event workflow { name } } }
+  }
+  ... on StatusContext { context state targetUrl createdAt }
+}`;
+
+// `last: 100`: a thread's newest replies are the ones that can be new; the
+// root stays reachable for `replyTo`.
+const REVIEW_THREAD_FIELDS = `pageInfo { hasNextPage endCursor }
+nodes {
+  id
+  isResolved
+  isOutdated
+  path
+  line
+  root: comments(first: 1) { nodes { databaseId } }
+  comments(last: 100) {
+    pageInfo { hasPreviousPage }
+    nodes { id databaseId author { __typename login } authorAssociation body url }
+  }
 }`;
 
 const PR_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
@@ -70,18 +91,7 @@ const PR_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
         }
       }
       reviewThreads(first: 100) {
-        pageInfo { hasNextPage }
-        nodes {
-          id
-          isResolved
-          isOutdated
-          path
-          line
-          comments(first: 100) {
-            pageInfo { hasNextPage }
-            nodes { id databaseId author { __typename login } authorAssociation body url }
-          }
-        }
+        ${REVIEW_THREAD_FIELDS}
       }
       reviews(last: 100) {
         pageInfo { hasPreviousPage }
@@ -117,7 +127,20 @@ const CHECKS_PAGE_QUERY = `query($owner: String!, $name: String!, $number: Int!,
   }
 }`;
 
+// Threads come oldest first, so a new one on a PR past 100 threads is on a
+// later page.
+const THREADS_PAGE_QUERY = `query($owner: String!, $name: String!, $number: Int!, $after: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $after) {
+        ${REVIEW_THREAD_FIELDS}
+      }
+    }
+  }
+}`;
+
 const MAX_CHECK_PAGES = 10;
+const MAX_THREAD_PAGES = 10;
 
 interface Author {
   __typename: string;
@@ -141,12 +164,21 @@ type CheckContext =
       status: string;
       conclusion: string | null;
       detailsUrl: string | null;
+      /** Grows with every run, so it orders the attempts of one check. */
+      databaseId: number;
+      checkSuite?: {
+        workflowRun: {
+          event: string;
+          workflow: { name: string } | null;
+        } | null;
+      } | null;
     }
   | {
       __typename: 'StatusContext';
       context: string;
       state: string;
       targetUrl: string | null;
+      createdAt: string;
     };
 
 interface CheckRollup {
@@ -154,6 +186,23 @@ interface CheckRollup {
     pageInfo: { hasNextPage: boolean; endCursor?: string | null };
     nodes: CheckContext[];
   };
+}
+
+interface ReviewThreads {
+  pageInfo: { hasNextPage: boolean; endCursor?: string | null };
+  nodes: Array<{
+    id: string;
+    isResolved: boolean;
+    isOutdated: boolean;
+    path: string;
+    line: number | null;
+    root: { nodes: Array<{ databaseId: number }> };
+    // `last: 100`: what is cut is the oldest replies.
+    comments: {
+      pageInfo: { hasPreviousPage: boolean };
+      nodes: CommentNode[];
+    };
+  }>;
 }
 
 export interface PrData {
@@ -168,20 +217,7 @@ export interface PrData {
       commit: { oid: string; statusCheckRollup: CheckRollup | null };
     }>;
   };
-  reviewThreads: {
-    pageInfo: { hasNextPage: boolean };
-    nodes: Array<{
-      id: string;
-      isResolved: boolean;
-      isOutdated: boolean;
-      path: string;
-      line: number | null;
-      comments: {
-        pageInfo: { hasNextPage: boolean };
-        nodes: CommentNode[];
-      };
-    }>;
-  };
+  reviewThreads: ReviewThreads;
   // `last: 100`: what is cut is the oldest entries.
   reviews: {
     pageInfo: { hasPreviousPage: boolean };
@@ -282,42 +318,78 @@ function runIdFrom(url: string | null): number | null {
   return match ? Number(match[1]) : null;
 }
 
+type CiFailed = Extract<SnapshotEvent, { type: 'ci_failed' }>;
+
+/**
+ * The rollup lists every run on the head: earlier attempts of a re-run job,
+ * and each trigger of a workflow that runs on several events. Only the
+ * latest run of a check says whether it is failing now; a failure that a
+ * re-run turned green is history.
+ */
+function latestContexts(nodes: CheckContext[]): CheckContext[] {
+  const latest = new Map<string, CheckContext>();
+  for (const ctx of nodes) {
+    const run =
+      ctx.__typename === 'CheckRun' ? ctx.checkSuite?.workflowRun : null;
+    const key =
+      ctx.__typename === 'CheckRun'
+        ? `run\0${run?.workflow?.name ?? ''}\0${run?.event ?? ''}\0${ctx.name}`
+        : `status\0${ctx.context}`;
+    const seen = latest.get(key);
+    if (!seen || attemptOrder(ctx) > attemptOrder(seen)) latest.set(key, ctx);
+  }
+  return [...latest.values()];
+}
+
+function attemptOrder(ctx: CheckContext): number {
+  return ctx.__typename === 'CheckRun'
+    ? ctx.databaseId
+    : Date.parse(ctx.createdAt);
+}
+
+/** The failed checks of the head, each with the identity of its attempt. */
 function checkEvents(pr: PrData): {
-  events: SnapshotEvent[];
+  failed: Array<{ event: CiFailed; attempt: string }>;
+  pending: string[];
   truncated: boolean;
 } {
   const commit = pr.commits.nodes[0]?.commit;
   // A rollup for any other commit describes a head that is already gone.
   if (!commit || commit.oid !== pr.headRefOid || !commit.statusCheckRollup) {
-    return { events: [], truncated: false };
+    return { failed: [], pending: [], truncated: false };
   }
   const { contexts } = commit.statusCheckRollup;
-  const events: SnapshotEvent[] = [];
+  const failed: Array<{ event: CiFailed; attempt: string }> = [];
   const pending: string[] = [];
-  for (const ctx of contexts.nodes) {
+  for (const ctx of latestContexts(contexts.nodes)) {
     if (ctx.__typename === 'CheckRun') {
       if (ctx.status !== 'COMPLETED') pending.push(ctx.name);
       else if (ctx.conclusion && FAILED_CONCLUSIONS.has(ctx.conclusion)) {
-        events.push({
-          type: 'ci_failed',
-          check: ctx.name,
-          url: ctx.detailsUrl,
-          runId: runIdFrom(ctx.detailsUrl),
+        failed.push({
+          event: {
+            type: 'ci_failed',
+            check: ctx.name,
+            url: ctx.detailsUrl,
+            runId: runIdFrom(ctx.detailsUrl),
+          },
+          attempt: `#${ctx.databaseId}`,
         });
       }
     } else if (PENDING_STATUSES.has(ctx.state)) {
       pending.push(ctx.context);
     } else if (FAILED_STATUSES.has(ctx.state)) {
-      events.push({
-        type: 'ci_failed',
-        check: ctx.context,
-        url: ctx.targetUrl,
-        runId: runIdFrom(ctx.targetUrl),
+      failed.push({
+        event: {
+          type: 'ci_failed',
+          check: ctx.context,
+          url: ctx.targetUrl,
+          runId: runIdFrom(ctx.targetUrl),
+        },
+        attempt: ctx.createdAt,
       });
     }
   }
-  if (pending.length > 0) events.push({ type: 'ci_pending', checks: pending });
-  return { events, truncated: contexts.pageInfo.hasNextPage };
+  return { failed, pending, truncated: contexts.pageInfo.hasNextPage };
 }
 
 /**
@@ -350,7 +422,7 @@ function commentEvents(
   for (const thread of pr.reviewThreads.nodes) {
     if (thread.isResolved) continue;
     if (
-      thread.comments.pageInfo.hasNextPage &&
+      thread.comments.pageInfo.hasPreviousPage &&
       !truncated.includes('reviewThreadComments')
     ) {
       truncated.push('reviewThreadComments');
@@ -367,7 +439,7 @@ function commentEvents(
     events.push({
       type: 'review_thread',
       threadId: thread.id,
-      replyTo: thread.comments.nodes[0]?.databaseId ?? null,
+      replyTo: thread.root.nodes[0]?.databaseId ?? null,
       path: thread.path,
       line: thread.line,
       outdated: thread.isOutdated,
@@ -423,10 +495,20 @@ function isActionable(event: SnapshotEvent): boolean {
   );
 }
 
+/**
+ * A reply this tool posted: by the viewer, ending with the marker. Anyone
+ * else's comment that carries the marker quotes a reply, and is new.
+ */
+function isOwnReply(node: CommentNode, viewer: string): boolean {
+  return (
+    node.author?.login === viewer && node.body.trimEnd().endsWith(REPLY_MARKER)
+  );
+}
+
 export function buildSnapshot(pr: PrData, state: AutofixPrState): Snapshot {
   const seen = new Set([...state.handledCommentIds, ...state.postedCommentIds]);
   const isNew = (node: CommentNode) =>
-    !seen.has(node.id) && !node.body.includes(REPLY_MARKER);
+    !seen.has(node.id) && !isOwnReply(node, state.viewer);
 
   const events: SnapshotEvent[] = [];
   const truncated: string[] = [];
@@ -454,7 +536,10 @@ export function buildSnapshot(pr: PrData, state: AutofixPrState): Snapshot {
   if (pr.mergeable === 'CONFLICTING') events.push({ type: 'conflict' });
 
   const checks = checkEvents(pr);
-  events.push(...checks.events);
+  events.push(...checks.failed.map((failure) => failure.event));
+  if (checks.pending.length > 0) {
+    events.push({ type: 'ci_pending', checks: checks.pending });
+  }
   if (checks.truncated) truncated.push('checks');
 
   const comments = commentEvents(pr, state.prAuthor, isNew);
@@ -470,15 +555,27 @@ export function buildSnapshot(pr: PrData, state: AutofixPrState): Snapshot {
 }
 
 /**
+ * What a prepared watch of the same PR already knows, so the gate does not
+ * report it again: the heads it recorded or pushed, and the comments it
+ * handled or posted.
+ */
+export interface GateWatch {
+  knownHeads: string[];
+  seenCommentIds: string[];
+}
+
+/**
  * The gate probe: compares the PR with what the cursor already reported and
  * returns only the transitions, or `null` when there are none, together with
  * the cursor to store. Pending checks are never a transition; a failure
- * counts once per head; a conflict counts once per head; the viewer's own
- * comments are never events; a merge or close is reported once.
+ * counts once per attempt; a conflict counts once per head; the viewer's own
+ * comments are never events; a merge or close is reported once; a connection
+ * that starts being cut is reported once.
  */
 export function buildGateSnapshot(
   pr: PrData,
   cursor: AutofixPrGateCursor,
+  watch: GateWatch = { knownHeads: [], seenCommentIds: [] },
 ): { snapshot: Snapshot | null; cursor: AutofixPrGateCursor } {
   const next: AutofixPrGateCursor = {
     ...cursor,
@@ -511,7 +608,12 @@ export function buildGateSnapshot(
   const events: SnapshotEvent[] = [];
   const truncated: string[] = [];
 
-  const moved = next.headSha !== null && next.headSha !== pr.headRefOid;
+  // A head the watch pushed itself, or already moved its worktree to, is
+  // not someone else's push.
+  const moved =
+    next.headSha !== null &&
+    next.headSha !== pr.headRefOid &&
+    !watch.knownHeads.includes(pr.headRefOid);
   if (moved) events.push({ type: 'head_moved_externally', sha: pr.headRefOid });
   next.headSha = pr.headRefOid;
 
@@ -524,26 +626,27 @@ export function buildGateSnapshot(
     next.conflictSha = null;
   }
 
-  // A failure is reported once per (check, head, attempt): the key carries
-  // the job URL, which a re-run changes, so a re-run that fails again
-  // between two polls is still new. The cursor keeps only the failures still
-  // present, so a check that goes green and fails later is new as well.
+  // A failure is reported once per (check, head, attempt): every run has an
+  // id of its own (a commit status, its creation time), so a re-run that
+  // fails again between two polls is still new. The cursor keeps only the
+  // failures still present, so a check that goes green and fails later is
+  // new as well.
   const checks = checkEvents(pr);
   const reportedChecks = new Set(next.reportedChecks);
   next.reportedChecks = [];
-  for (const event of checks.events) {
-    if (event.type !== 'ci_failed') continue;
-    const key = `${event.check}@${pr.headRefOid}@${event.url ?? ''}`;
+  for (const { event, attempt } of checks.failed) {
+    const key = `${event.check}@${pr.headRefOid}@${attempt}`;
     next.reportedChecks.push(key);
     if (!reportedChecks.has(key)) events.push(event);
   }
   if (checks.truncated) truncated.push('checks');
 
-  const reportedComments = new Set(next.reportedCommentIds);
+  const reportedComments = new Set([
+    ...next.reportedCommentIds,
+    ...watch.seenCommentIds,
+  ]);
   const isNew = (node: CommentNode) =>
-    !reportedComments.has(node.id) &&
-    !node.body.includes(REPLY_MARKER) &&
-    node.author?.login !== cursor.viewer;
+    !reportedComments.has(node.id) && node.author?.login !== cursor.viewer;
   const comments = commentEvents(pr, cursor.prAuthor, isNew);
   events.push(...comments.events);
   truncated.push(...comments.truncated);
@@ -564,7 +667,16 @@ export function buildGateSnapshot(
     ...comments.ids,
   ];
 
-  if (events.length === 0) return { snapshot: null, cursor: next };
+  // A cut connection may hide a transition no later poll will see, so the
+  // cut is a transition itself: reported when it appears, quiet while it
+  // lasts.
+  const reportedTruncated = new Set(cursor.reportedTruncated ?? []);
+  const newlyCut = truncated.some((name) => !reportedTruncated.has(name));
+  next.reportedTruncated = truncated;
+
+  if (events.length === 0 && !newlyCut) {
+    return { snapshot: null, cursor: next };
+  }
   const action = moved ? 'resync' : events.some(isActionable) ? 'fix' : 'wait';
   return { snapshot: { ...base, action, events, truncated }, cursor: next };
 }
@@ -644,6 +756,30 @@ export function fetchPrData(target: PrTarget): { pr: PrData; viewer: string } {
     rollup.contexts.nodes.push(...more.statusCheckRollup.contexts.nodes);
     rollup.contexts.pageInfo = more.statusCheckRollup.contexts.pageInfo;
   }
+  const threads = pr.reviewThreads;
+  for (
+    let page = 1;
+    threads.pageInfo.hasNextPage &&
+    threads.pageInfo.endCursor &&
+    page < MAX_THREAD_PAGES;
+    page++
+  ) {
+    const more = (
+      graphql(THREADS_PAGE_QUERY, target, [
+        '-f',
+        `after=${threads.pageInfo.endCursor}`,
+      ]) as {
+        data: {
+          repository: {
+            pullRequest: { reviewThreads: ReviewThreads } | null;
+          } | null;
+        };
+      }
+    ).data.repository?.pullRequest?.reviewThreads;
+    if (!more) break;
+    threads.nodes.push(...more.nodes);
+    threads.pageInfo = more.pageInfo;
+  }
   return { pr, viewer: data.data.viewer.login };
 }
 
@@ -657,15 +793,25 @@ export interface SnapshotArgs {
 function runGate(args: SnapshotArgs): void {
   const paths = autofixPrPaths(repoRoot(), args.pr);
   const existing = readGateCursor(paths.gatePath);
+  const state = readState(paths.statePath);
   let target: { host: string; owner: string; repo: string };
   if (args.repo) {
     if (!isOwnerRepo(args.repo)) {
       throw new TypeError(`--repo must be <owner>/<repo>, got ${args.repo}`);
     }
     const [owner, repo] = args.repo.split('/');
-    target = { host: resolveGhHost(args.host) ?? 'github.com', owner, repo };
+    // Without --host or GH_HOST, the host this PR is already watched on: a
+    // gate on an Enterprise host must not fall back to github.com.
+    const recorded = [existing, state].find(
+      (known) =>
+        known &&
+        normalizeSegment(known.owner) === normalizeSegment(owner) &&
+        normalizeSegment(known.repo) === normalizeSegment(repo),
+    );
+    const host = resolveGhHost(args.host) ?? recorded?.host ?? 'github.com';
+    target = { host, owner, repo };
   } else {
-    const known = existing ?? readState(paths.statePath);
+    const known = existing ?? state;
     if (!known) {
       throw new Error(
         `PR #${args.pr} has no gate cursor and is not prepared here; pass --repo <owner>/<repo> on the first run.`,
@@ -673,17 +819,28 @@ function runGate(args: SnapshotArgs): void {
     }
     target = { host: known.host, owner: known.owner, repo: known.repo };
   }
-  if (existing) {
+  if (existing && !sameRepository(existing, target)) {
     // The cursor is keyed by PR number alone, and one clone can reach
     // several repositories with a PR of that number.
     const watched = `${existing.host}/${existing.owner}/${existing.repo}`;
     const wanted = `${target.host}/${target.owner}/${target.repo}`;
-    if (watched !== wanted) {
-      throw new Error(
-        `PR #${args.pr} here is a gate on ${watched}, not ${wanted}; remove ${paths.gatePath} to watch the other one.`,
-      );
-    }
+    throw new Error(
+      `PR #${args.pr} here is a gate on ${watched}, not ${wanted}; pass --host if the host differs, or remove ${paths.gatePath} to watch the other one.`,
+    );
   }
+  // A watch prepared for this PR already knows its own pushes and the
+  // comments it handled; a state file for another repository's PR of the
+  // same number says nothing about this one.
+  const watch: GateWatch =
+    state && sameRepository(state, target)
+      ? {
+          knownHeads: [state.lastKnownHeadSha, ...state.pushedShas],
+          seenCommentIds: [
+            ...state.handledCommentIds,
+            ...state.postedCommentIds,
+          ],
+        }
+      : { knownHeads: [], seenCommentIds: [] };
 
   setGhHost(target.host);
   ensureAuthenticated();
@@ -698,11 +855,12 @@ function runGate(args: SnapshotArgs): void {
       reportedChecks: [],
       conflictSha: null,
       stopped: null,
+      reportedTruncated: [],
     }),
     viewer,
     prAuthor: pr.author?.login ?? existing?.prAuthor ?? '',
   };
-  const result = buildGateSnapshot(pr, cursor);
+  const result = buildGateSnapshot(pr, cursor, watch);
   // The cursor lands before the output: a probe that prints and then dies
   // would otherwise report the same transitions on the next fire.
   if (JSON.stringify(result.cursor) !== JSON.stringify(existing)) {
@@ -745,7 +903,8 @@ export const snapshotCommand: CommandModule = {
       })
       .option('host', {
         type: 'string',
-        describe: 'GitHub host (default: GH_HOST or github.com)',
+        describe:
+          'GitHub host (default: GH_HOST, else with --gate the host the PR is already watched on, else github.com)',
       })
       .option('gate', {
         type: 'boolean',

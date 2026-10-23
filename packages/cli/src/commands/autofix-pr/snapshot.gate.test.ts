@@ -4,14 +4,47 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildGateSnapshot, fetchPrData, type PrData } from './snapshot.js';
-import { REPLY_MARKER, type AutofixPrGateCursor } from './state.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { getGhHost, setGhHost } from '../review/lib/gh.js';
+import {
+  buildGateSnapshot,
+  fetchPrData,
+  runSnapshot,
+  type PrData,
+} from './snapshot.js';
+import {
+  REPLY_MARKER,
+  autofixPrPaths,
+  writeState,
+  type AutofixPrGateCursor,
+} from './state.js';
 
 const mockGh = vi.hoisted(() => vi.fn());
+const mocks = vi.hoisted(() => ({
+  root: '',
+  stdout: vi.fn((_line: string) => {}),
+}));
 vi.mock('../review/lib/gh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../review/lib/gh.js')>()),
   gh: mockGh,
+  ensureAuthenticated: () => {},
+}));
+vi.mock('./state.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./state.js')>()),
+  repoRoot: () => mocks.root,
+}));
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: mocks.stdout,
+  writeStderrLineSafe: () => {},
 }));
 
 const HEAD = 'a'.repeat(40);
@@ -33,6 +66,7 @@ function cursor(
     reportedChecks: [],
     conflictSha: null,
     stopped: null,
+    reportedTruncated: [],
     ...overrides,
   };
 }
@@ -68,13 +102,14 @@ function pr(overrides: Partial<PrData> = {}, contexts: Contexts = []): PrData {
   };
 }
 
-function failed(name: string, job = name): Contexts[number] {
+function failed(name: string, attempt = 1): Contexts[number] {
   return {
     __typename: 'CheckRun',
     name,
     status: 'COMPLETED',
     conclusion: 'FAILURE',
-    detailsUrl: `https://github.com/o/r/actions/runs/123/job/${job}`,
+    detailsUrl: `https://github.com/o/r/actions/runs/123/job/${attempt}`,
+    databaseId: attempt,
   };
 }
 
@@ -85,7 +120,8 @@ function thread(id: string, comments: Array<ReturnType<typeof comment>>) {
     isOutdated: false,
     path: 'src/a.ts',
     line: 3,
-    comments: { pageInfo: { hasNextPage: false }, nodes: comments },
+    root: { nodes: [{ databaseId: 1 }] },
+    comments: { pageInfo: { hasPreviousPage: false }, nodes: comments },
   };
 }
 
@@ -121,6 +157,7 @@ describe('buildGateSnapshot', () => {
           status: 'IN_PROGRESS',
           conclusion: null,
           detailsUrl: null,
+          databaseId: 1,
         },
       ]),
       cursor(),
@@ -134,9 +171,7 @@ describe('buildGateSnapshot', () => {
       action: 'fix',
       events: [{ type: 'ci_failed', check: 'Test', runId: 123 }],
     });
-    expect(first.cursor.reportedChecks).toEqual([
-      `Test@${HEAD}@https://github.com/o/r/actions/runs/123/job/Test`,
-    ]);
+    expect(first.cursor.reportedChecks).toEqual([`Test@${HEAD}@#1`]);
 
     // Still failing on the same head: quiet.
     const second = buildGateSnapshot(pr({}, [failed('Test')]), first.cursor);
@@ -145,12 +180,14 @@ describe('buildGateSnapshot', () => {
     // Re-run in progress: the failure leaves the cursor…
     const rerun = buildGateSnapshot(
       pr({}, [
+        failed('Test', 1),
         {
           __typename: 'CheckRun',
           name: 'Test',
           status: 'IN_PROGRESS',
           conclusion: null,
           detailsUrl: null,
+          databaseId: 2,
         },
       ]),
       second.cursor,
@@ -159,7 +196,10 @@ describe('buildGateSnapshot', () => {
     expect(rerun.cursor.reportedChecks).toEqual([]);
     // …so a second failure is a new event.
     expect(
-      buildGateSnapshot(pr({}, [failed('Test')]), rerun.cursor).snapshot,
+      buildGateSnapshot(
+        pr({}, [failed('Test', 1), failed('Test', 2)]),
+        rerun.cursor,
+      ).snapshot,
     ).not.toBeNull();
 
     // A new head starts over.
@@ -175,14 +215,14 @@ describe('buildGateSnapshot', () => {
   });
 
   it('reports a re-run that failed again between two polls', () => {
-    // No poll saw the re-run in progress: the attempt's job URL tells the
-    // failures apart.
-    const first = buildGateSnapshot(pr({}, [failed('Test', '100')]), cursor());
+    // No poll saw the re-run in progress: the run's id tells the failures
+    // apart.
+    const first = buildGateSnapshot(pr({}, [failed('Test', 100)]), cursor());
     expect(first.snapshot?.events).toEqual([
       expect.objectContaining({ type: 'ci_failed', check: 'Test' }),
     ]);
     const again = buildGateSnapshot(
-      pr({}, [failed('Test', '200')]),
+      pr({}, [failed('Test', 100), failed('Test', 200)]),
       first.cursor,
     );
     expect(again.snapshot?.events).toEqual([
@@ -192,12 +232,46 @@ describe('buildGateSnapshot', () => {
         url: 'https://github.com/o/r/actions/runs/123/job/200',
       }),
     ]);
-    expect(again.cursor.reportedChecks).toEqual([
-      `Test@${HEAD}@https://github.com/o/r/actions/runs/123/job/200`,
-    ]);
+    expect(again.cursor.reportedChecks).toEqual([`Test@${HEAD}@#200`]);
     expect(
-      buildGateSnapshot(pr({}, [failed('Test', '200')]), again.cursor).snapshot,
+      buildGateSnapshot(pr({}, [failed('Test', 200)]), again.cursor).snapshot,
     ).toBeNull();
+  });
+
+  it('is quiet about a failure that a re-run turned green', () => {
+    const green: Contexts[number] = {
+      ...failed('Test', 2),
+      conclusion: 'SUCCESS',
+    } as Contexts[number];
+    expect(
+      buildGateSnapshot(pr({}, [failed('Test', 1), green]), cursor()).snapshot,
+    ).toBeNull();
+  });
+
+  it('tells two failures of a commit status apart without a URL', () => {
+    const status = (createdAt: string): Contexts[number] => ({
+      __typename: 'StatusContext',
+      context: 'ci/external',
+      state: 'FAILURE',
+      targetUrl: null,
+      createdAt,
+    });
+    const first = buildGateSnapshot(
+      pr({}, [status('2026-10-21T00:00:01Z')]),
+      cursor(),
+    );
+    expect(first.snapshot?.events).toHaveLength(1);
+    expect(
+      buildGateSnapshot(pr({}, [status('2026-10-21T00:00:01Z')]), first.cursor)
+        .snapshot,
+    ).toBeNull();
+    // Re-run and failed again between two polls: a new post.
+    expect(
+      buildGateSnapshot(pr({}, [status('2026-10-21T00:05:00Z')]), first.cursor)
+        .snapshot?.events,
+    ).toEqual([
+      { type: 'ci_failed', check: 'ci/external', url: null, runId: null },
+    ]);
   });
 
   it('keeps every reported id the query still returns, and bounds only the rest', () => {
@@ -258,6 +332,8 @@ describe('buildGateSnapshot', () => {
   });
 
   it('reports a trusted comment once and never the viewer’s own', () => {
+    // Replies are the viewer's: a marker in anyone else's comment is a quote
+    // and hides nothing.
     const data = pr({
       comments: {
         pageInfo: { hasPreviousPage: false },
@@ -280,13 +356,21 @@ describe('buildGateSnapshot', () => {
         url: 'https://github.com/o/r/pull/7#I1',
       },
       {
+        type: 'issue_comment',
+        id: 'I3',
+        author: 'bob',
+        trust: 'owner',
+        body: `done\n${REPLY_MARKER}`,
+        url: 'https://github.com/o/r/pull/7#I3',
+      },
+      {
         type: 'untrusted_comment',
         id: 'I4',
         author: 'stranger',
         url: 'https://github.com/o/r/pull/7#I4',
       },
     ]);
-    expect(first.cursor.reportedCommentIds).toEqual(['I1', 'I4']);
+    expect(first.cursor.reportedCommentIds).toEqual(['I1', 'I3', 'I4']);
     expect(buildGateSnapshot(data, first.cursor).snapshot).toBeNull();
   });
 
@@ -315,6 +399,14 @@ describe('buildGateSnapshot', () => {
     ).toBeNull();
 
     const closed = buildGateSnapshot(pr({ state: 'CLOSED' }), cursor());
+    expect(closed.snapshot).toMatchObject({
+      action: 'stop',
+      events: [{ type: 'closed' }],
+    });
+    expect(closed.cursor.stopped).toBe('closed');
+    expect(
+      buildGateSnapshot(pr({ state: 'CLOSED' }), closed.cursor).snapshot,
+    ).toBeNull();
     const reopened = buildGateSnapshot(
       pr({ mergeable: 'CONFLICTING' }),
       closed.cursor,
@@ -329,6 +421,59 @@ describe('buildGateSnapshot', () => {
     expect(buildGateSnapshot(data, cursor()).snapshot?.truncated).toEqual([
       'checks',
     ]);
+  });
+
+  it('reports a cut once even when nothing else changed', () => {
+    // Past the last page of threads, a new request leaves no trace but the cut.
+    const data = pr();
+    data.reviewThreads.pageInfo.hasNextPage = true;
+    const first = buildGateSnapshot(data, cursor());
+    expect(first.snapshot).toMatchObject({
+      action: 'wait',
+      events: [],
+      truncated: ['reviewThreads'],
+    });
+    expect(first.cursor.reportedTruncated).toEqual(['reviewThreads']);
+    expect(buildGateSnapshot(data, first.cursor).snapshot).toBeNull();
+    // Once the cut is gone, a later one is new again.
+    const whole = buildGateSnapshot(pr(), first.cursor);
+    expect(whole.snapshot).toBeNull();
+    expect(whole.cursor.reportedTruncated).toEqual([]);
+    expect(buildGateSnapshot(data, whole.cursor).snapshot).not.toBeNull();
+  });
+
+  it('does not take a head the watch pushed for a foreign push', () => {
+    const result = buildGateSnapshot(
+      pr({ headRefOid: NEXT_HEAD, commits: { nodes: [] } }, []),
+      cursor(),
+      { knownHeads: [HEAD, NEXT_HEAD], seenCommentIds: [] },
+    );
+    expect(result.snapshot).toBeNull();
+    expect(result.cursor.headSha).toBe(NEXT_HEAD);
+
+    // A failure on the pushed head is still a fix, not a resync.
+    const data = pr({ headRefOid: NEXT_HEAD }, [failed('Test')]);
+    data.commits.nodes[0].commit.oid = NEXT_HEAD;
+    expect(
+      buildGateSnapshot(data, cursor(), {
+        knownHeads: [NEXT_HEAD],
+        seenCommentIds: [],
+      }).snapshot,
+    ).toMatchObject({ action: 'fix', events: [{ type: 'ci_failed' }] });
+  });
+
+  it('does not report comments the prepared watch already handled', () => {
+    const data = pr({
+      reviewThreads: {
+        pageInfo: { hasNextPage: false },
+        nodes: [thread('T1', [comment('C1', 'alice', 'MEMBER')])],
+      },
+    });
+    const result = buildGateSnapshot(data, cursor({ headSha: null }), {
+      knownHeads: [],
+      seenCommentIds: ['C1'],
+    });
+    expect(result.snapshot).toBeNull();
   });
 });
 
@@ -422,6 +567,42 @@ describe('fetchPrData', () => {
     expect(contexts.pageInfo.hasNextPage).toBe(true);
   });
 
+  it('pages review threads past the first 100', () => {
+    const firstPage = pr({
+      reviewThreads: {
+        pageInfo: { hasNextPage: true, endCursor: 't1' },
+        nodes: [thread('T1', [comment('C1', 'alice', 'MEMBER')])],
+      },
+    });
+    mockGh
+      .mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            viewer: { login: 'me' },
+            repository: { pullRequest: firstPage },
+          },
+        }),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                reviewThreads: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [thread('T2', [comment('C2', 'alice', 'MEMBER')])],
+                },
+              },
+            },
+          },
+        }),
+      );
+    const { pr: data } = fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 });
+    expect(data.reviewThreads.nodes.map((t) => t.id)).toEqual(['T1', 'T2']);
+    expect(data.reviewThreads.pageInfo.hasNextPage).toBe(false);
+    expect(mockGh.mock.calls[1]).toContain('after=t1');
+  });
+
   it('fails clearly when the PR does not exist', () => {
     mockGh.mockReturnValueOnce(
       JSON.stringify({
@@ -431,5 +612,133 @@ describe('fetchPrData', () => {
     expect(() => fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 })).toThrow(
       'PR #7 not found in o/r',
     );
+  });
+});
+
+describe('runSnapshot --gate', () => {
+  let savedHost: string | undefined;
+  const gatePath = () => autofixPrPaths(mocks.root, 7).gatePath;
+  const respond = (data: PrData) =>
+    mockGh.mockReturnValueOnce(
+      JSON.stringify({
+        data: { viewer: { login: 'me' }, repository: { pullRequest: data } },
+      }),
+    );
+  const withComments = (...ids: string[]) =>
+    pr({
+      comments: {
+        pageInfo: { hasPreviousPage: false },
+        nodes: ids.map((id) => comment(id, 'alice', 'MEMBER')),
+      },
+    });
+  const printedIds = () =>
+    mocks.stdout.mock.calls.map((call) =>
+      (JSON.parse(call[0]) as { events: Array<{ id?: string }> }).events.map(
+        (event) => event.id,
+      ),
+    );
+
+  beforeEach(() => {
+    mocks.root = mkdtempSync(join(tmpdir(), 'autofix-gate-'));
+    mockGh.mockReset();
+    mocks.stdout.mockReset();
+    savedHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+    setGhHost(undefined);
+  });
+
+  afterEach(() => {
+    rmSync(mocks.root, { recursive: true, force: true });
+    if (savedHost === undefined) delete process.env['GH_HOST'];
+    else process.env['GH_HOST'] = savedHost;
+    setGhHost(undefined);
+  });
+
+  it('prints each transition once and leaves the cursor alone while quiet', () => {
+    respond(withComments('I1'));
+    runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+    expect(printedIds()).toEqual([['I1']]);
+    const written = readFileSync(gatePath(), 'utf8');
+
+    // Later fires name no repository: the cursor does.
+    respond(withComments('I1'));
+    runSnapshot({ pr: 7, gate: true });
+    expect(printedIds()).toEqual([['I1']]);
+    expect(readFileSync(gatePath(), 'utf8')).toBe(written);
+
+    respond(withComments('I1', 'I2'));
+    runSnapshot({ pr: 7, gate: true });
+    respond(withComments('I1', 'I2'));
+    runSnapshot({ pr: 7, gate: true });
+    expect(printedIds()).toEqual([['I1'], ['I2']]);
+  });
+
+  it('stores the cursor before printing, so a failed print is not repeated', () => {
+    mocks.stdout.mockImplementationOnce(() => {
+      throw new Error('EPIPE');
+    });
+    respond(withComments('I1'));
+    expect(() => runSnapshot({ pr: 7, repo: 'o/r', gate: true })).toThrow(
+      'EPIPE',
+    );
+    expect(existsSync(gatePath())).toBe(true);
+    respond(withComments('I1'));
+    runSnapshot({ pr: 7, gate: true });
+    expect(mocks.stdout).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses another repository for the same PR number, but not another spelling', () => {
+    respond(withComments());
+    runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+    expect(() => runSnapshot({ pr: 7, repo: 'x/r', gate: true })).toThrow(
+      /gate on github.com\/o\/r, not github.com\/x\/r; pass --host/,
+    );
+    respond(withComments());
+    expect(() => runSnapshot({ pr: 7, repo: 'O/R', gate: true })).not.toThrow();
+  });
+
+  it('asks for --repo on a first run with nothing prepared', () => {
+    expect(() => runSnapshot({ pr: 7, gate: true })).toThrow(/pass --repo/);
+    expect(mockGh).not.toHaveBeenCalled();
+  });
+
+  it('uses what a prepared watch of the PR knows: its host, pushes and handled comments', () => {
+    const statePath = autofixPrPaths(mocks.root, 7).statePath;
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeState(statePath, {
+      version: 1,
+      sessionId: '',
+      host: 'ghe.corp',
+      owner: 'o',
+      repo: 'r',
+      prNumber: 7,
+      remote: 'origin',
+      pushTarget: 'origin',
+      headRefName: 'feat',
+      baseRefName: 'main',
+      branch: 'qwen-autofix/pr-7',
+      worktreePath: join(dirname(statePath), 'autofix-pr-7'),
+      viewer: 'me',
+      prAuthor: 'me',
+      lastKnownHeadSha: HEAD,
+      pushedShas: [NEXT_HEAD],
+      handledCommentIds: ['I1'],
+      postedCommentIds: [],
+    });
+    respond(withComments('I1'));
+    runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+    // The documented gate command carries no --host.
+    expect(getGhHost()).toBe('ghe.corp');
+    expect(mocks.stdout).not.toHaveBeenCalled();
+    const stored = JSON.parse(readFileSync(gatePath(), 'utf8'));
+    expect(stored).toMatchObject({ host: 'ghe.corp', headSha: HEAD });
+
+    // The watch's own push is not someone else's.
+    const pushed = withComments('I1');
+    pushed.headRefOid = NEXT_HEAD;
+    pushed.commits = { nodes: [] };
+    respond(pushed);
+    runSnapshot({ pr: 7, gate: true });
+    expect(mocks.stdout).not.toHaveBeenCalled();
   });
 });

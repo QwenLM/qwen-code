@@ -10,6 +10,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -102,6 +103,13 @@ describe('runCleanup (real git)', () => {
     });
   });
 
+  it('keeps the gate cursor, which belongs to the scheduled task', () => {
+    writeFileSync(paths.gatePath, '{}');
+    runCleanup(7, false);
+    expect(existsSync(paths.statePath)).toBe(false);
+    expect(existsSync(paths.gatePath)).toBe(true);
+  });
+
   it('keeps everything when the worktree has uncommitted changes', () => {
     writeFileSync(join(paths.worktreePath, 'wip.txt'), 'wip');
     runCleanup(7, false);
@@ -137,6 +145,63 @@ describe('runCleanup (real git)', () => {
         /branch qwen-autofix\/pr-7 has 1 commit\(s\) the PR does not have/,
       ),
     });
+  });
+
+  it('sees untracked files whatever status.showUntrackedFiles says', () => {
+    run(repo, 'config', 'status.showUntrackedFiles', 'no');
+    writeFileSync(join(paths.worktreePath, 'wip.txt'), 'wip');
+    runCleanup(7, false);
+    expect(existsSync(join(paths.worktreePath, 'wip.txt'))).toBe(true);
+    expect(lastReport()).toMatchObject({
+      removed: false,
+      reason: expect.stringMatching(/uncommitted changes/),
+    });
+  });
+
+  it('counts commits already on the PR head as saved', () => {
+    const remote = realpathSync(mkdtempSync(join(tmpdir(), 'autofix-remote-')));
+    try {
+      run(remote, 'init', '-q', '--bare');
+      run(repo, 'remote', 'add', 'origin', remote);
+      run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'fix');
+      // Pushed without the push helper: the recorded head never moved.
+      run(paths.worktreePath, 'push', '-q', 'origin', 'HEAD:refs/pull/7/head');
+      runCleanup(7, false);
+      expect(lastReport()).toEqual({
+        removed: true,
+        worktreePath: paths.worktreePath,
+      });
+      expect(branchExists()).toBe(false);
+    } finally {
+      rmSync(remote, { recursive: true, force: true });
+    }
+  });
+
+  it('counts commits the watch pushed as saved', () => {
+    run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'fix');
+    const state = JSON.parse(readFileSync(paths.statePath, 'utf8'));
+    writeState(paths.statePath, {
+      ...state,
+      pushedShas: [run(paths.worktreePath, 'rev-parse', 'HEAD')],
+    });
+    runCleanup(7, false);
+    expect(lastReport()).toMatchObject({ removed: true });
+  });
+
+  it('judges a leftover directory that is not a worktree as unknown, not as the clone', () => {
+    // An interrupted `prepare` can leave a plain directory; git run inside
+    // it would find the (clean) enclosing clone.
+    run(repo, 'worktree', 'remove', '--force', paths.worktreePath);
+    mkdirSync(paths.worktreePath);
+    writeFileSync(join(paths.worktreePath, 'notes.txt'), 'keep me');
+    runCleanup(7, false);
+    expect(existsSync(join(paths.worktreePath, 'notes.txt'))).toBe(true);
+    expect(lastReport()).toMatchObject({
+      removed: false,
+      reason: expect.stringMatching(/is not a git worktree/),
+    });
+    runCleanup(7, true);
+    expect(existsSync(paths.worktreePath)).toBe(false);
   });
 
   it('discards unpushed work with --force', () => {

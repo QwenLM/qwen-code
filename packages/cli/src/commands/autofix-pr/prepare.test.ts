@@ -10,7 +10,15 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -152,6 +160,15 @@ describe('pushUrl', () => {
       'https://github.com/o/r.git',
     );
   });
+
+  it('keeps a port, which the scp-like ssh form cannot carry', () => {
+    expect(pushUrl('ghe.corp:8443', 'o', 'r', 'ssh')).toBe(
+      'ssh://git@ghe.corp:8443/o/r.git',
+    );
+    expect(pushUrl('ghe.corp:8443', 'o', 'r', 'https')).toBe(
+      'https://ghe.corp:8443/o/r.git',
+    );
+  });
 });
 
 describe('runPrepare (real git)', () => {
@@ -160,6 +177,7 @@ describe('runPrepare (real git)', () => {
   let headSha: string;
   let savedCwd: string;
   let savedSession: string | undefined;
+  let savedHost: string | undefined;
 
   const run = (cwd: string, ...args: string[]) =>
     execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -201,6 +219,9 @@ describe('runPrepare (real git)', () => {
     savedCwd = process.cwd();
     savedSession = process.env['QWEN_CODE_SESSION_ID'];
     process.env['QWEN_CODE_SESSION_ID'] = 'session-a';
+    // `runPrepare` without a host falls back to an exported GH_HOST.
+    savedHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
     process.chdir(clone);
   });
 
@@ -208,6 +229,8 @@ describe('runPrepare (real git)', () => {
     process.chdir(savedCwd);
     if (savedSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
     else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
+    if (savedHost === undefined) delete process.env['GH_HOST'];
+    else process.env['GH_HOST'] = savedHost;
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -355,6 +378,21 @@ describe('runPrepare (real git)', () => {
     process.chdir(autofixPrPaths(clone, 7).worktreePath);
     runPrepare({ pr: 7, repo: 'o/r' });
     expect(lastReport()).toMatchObject({ resumed: true, headSha });
+  });
+
+  it('resumes whatever the spelling of the repository', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    runPrepare({ pr: 7, repo: 'O/R', host: 'GitHub.com' });
+    expect(lastReport()).toMatchObject({ resumed: true, headSha });
+  });
+
+  it('refuses to create the worktree through a symlinked .qwen', () => {
+    const elsewhere = join(dir, 'elsewhere');
+    mkdirSync(elsewhere);
+    symlinkSync(elsewhere, join(clone, '.qwen'));
+    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(/is a symlink/);
+    expect(readdirSync(elsewhere)).toEqual([]);
+    expect(run(clone, 'branch', '--list', 'qwen-autofix/pr-7')).toBe('');
   });
 
   it("refuses to resume another repository's PR of the same number", () => {

@@ -23,6 +23,7 @@ import {
   ensureAuthenticated,
   gh,
   isOwnerRepo,
+  normalizeGhHostForUrl,
   resolveGhHost,
   setGhHost,
 } from './lib/gh.js';
@@ -31,6 +32,7 @@ const PRS_QUERY = `query($owner: String!, $name: String!, $first: Int!) {
   viewer { login }
   repository(owner: $owner, name: $name) {
     pullRequests(first: $first, states: OPEN, orderBy: { field: UPDATED_AT, direction: DESC }) {
+      pageInfo { hasNextPage }
       nodes {
         number
         title
@@ -113,12 +115,15 @@ function matches(
   viewer: string,
   filters: WatchRepoFilters,
 ): boolean {
+  // Logins and label names are case-insensitive on GitHub.
+  const fold = (value: string) => value.toLowerCase();
   const author = pr.author?.login ?? '';
-  const labels = pr.labels.nodes.map((label) => label.name);
+  const labels = pr.labels.nodes.map((label) => fold(label.name));
   return (
-    (filters.authors.length === 0 || filters.authors.includes(author)) &&
+    (filters.authors.length === 0 ||
+      filters.authors.some((login) => fold(login) === fold(author))) &&
     (filters.labels.length === 0 ||
-      filters.labels.some((label) => labels.includes(label))) &&
+      filters.labels.some((label) => labels.includes(fold(label)))) &&
     (!filters.reviewRequested || requestedFrom(pr, viewer)) &&
     (!filters.excludeDrafts || !pr.isDraft) &&
     (!filters.excludeBots || pr.author?.__typename !== 'Bot') &&
@@ -127,9 +132,9 @@ function matches(
 }
 
 /**
- * Compares the open PRs with the cursor. `listFull` means the query may
- * have cut the list, so a number that is missing may still be open and is
- * carried; otherwise missing numbers were closed or merged and are dropped.
+ * Compares the open PRs with the cursor. `listCut` means the query cut the
+ * list, so a number that is missing may still be open and is carried;
+ * otherwise missing numbers were closed or merged and are dropped.
  *
  * Carried numbers are bounded to one more page, highest numbers first:
  * the list is ordered by last update, so a PR off the page is one nobody
@@ -141,11 +146,11 @@ export function diffRepoWatch(
   prs: RepoPr[],
   cursor: WatchRepoCursor,
   filters: WatchRepoFilters,
-  listFull: boolean,
+  listCut: boolean,
 ): { events: WatchRepoEvent[]; cursor: WatchRepoCursor } {
   const events: WatchRepoEvent[] = [];
   const heads: WatchRepoCursor['heads'] = {};
-  if (listFull) {
+  if (listCut) {
     const onPage = new Set(prs.map((pr) => String(pr.number)));
     const carried = Object.keys(cursor.heads)
       .filter((number) => !onPage.has(number))
@@ -181,6 +186,12 @@ export function diffRepoWatch(
   return { events, cursor: { ...cursor, initialized: true, heads } };
 }
 
+/**
+ * One file per repository, whatever the spelling: GitHub compares hosts,
+ * owners and names without case. Each part is a directory level of its own,
+ * since owners and names both admit `-`, and a host's port separator, which
+ * Windows refuses in a file name, becomes `_`, which no host contains.
+ */
 export function watchRepoCursorPath(
   root: string,
   host: string,
@@ -191,7 +202,10 @@ export function watchRepoCursorPath(
     root,
     '.qwen',
     'tmp',
-    `review-watch-${host}-${owner}-${repo}.json`,
+    'review-watch',
+    normalizeGhHostForUrl(host).replace(':', '_'),
+    owner.toLowerCase(),
+    `${repo.toLowerCase()}.json`,
   );
 }
 
@@ -223,10 +237,11 @@ export function runWatchRepo(args: WatchRepoArgs): void {
   }
   const [owner, repo] = args.repo.split('/');
   const host = resolveGhHost(args.host) ?? 'github.com';
+  // Validates the host before it becomes part of a path.
+  setGhHost(host);
   const path = watchRepoCursorPath(repoRoot(), host, owner, repo);
   const existing = readWatchRepoCursor(path);
 
-  setGhHost(host);
   ensureAuthenticated();
   const data = JSON.parse(
     gh(
@@ -244,24 +259,31 @@ export function runWatchRepo(args: WatchRepoArgs): void {
   ) as {
     data: {
       viewer: { login: string };
-      repository: { pullRequests: { nodes: RepoPr[] } } | null;
+      repository: {
+        pullRequests: {
+          pageInfo: { hasNextPage: boolean };
+          nodes: RepoPr[];
+        };
+      } | null;
     };
   };
   if (!data.data.repository) {
     throw new Error(`repository ${args.repo} not found on ${host}`);
   }
-  const prs = data.data.repository.pullRequests.nodes;
-  const cursor: WatchRepoCursor = existing ?? {
-    version: 1,
-    host,
-    owner,
-    repo,
+  const { pageInfo, nodes: prs } = data.data.repository.pullRequests;
+  // A copy: `existing` is what the write below compares with.
+  const cursor: WatchRepoCursor = {
+    ...(existing ?? {
+      version: 1,
+      host,
+      owner,
+      repo,
+      initialized: false,
+      heads: {},
+    }),
     viewer: data.data.viewer.login,
-    initialized: false,
-    heads: {},
   };
-  cursor.viewer = data.data.viewer.login;
-  const result = diffRepoWatch(prs, cursor, args, prs.length >= args.limit);
+  const result = diffRepoWatch(prs, cursor, args, pageInfo.hasNextPage);
   // The cursor lands before the output, so a probe that prints and then dies
   // cannot report the same transitions again on the next fire.
   if (JSON.stringify(result.cursor) !== JSON.stringify(existing)) {

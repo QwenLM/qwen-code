@@ -24,23 +24,58 @@ import {
 } from './state.js';
 
 /**
+ * The PR head on the remote, when it is reachable and its commit is here.
+ * Work pushed from the worktree without the push helper is already on the
+ * PR, although the recorded head never moved.
+ */
+function livePrHead(state: AutofixPrState, prNumber: number): string | null {
+  const line = gitOpt('ls-remote', state.remote, `refs/pull/${prNumber}/head`);
+  const sha = line?.split(/\s/)[0] ?? '';
+  if (!/^[0-9a-f]{40,64}$/.test(sha)) return null;
+  return gitOpt('cat-file', '-e', `${sha}^{commit}`) === null ? null : sha;
+}
+
+/**
  * Why the watch must be kept, or null when nothing would be lost. Commits are
  * looked for on the worktree's HEAD, or on the branch once the worktree is
- * gone; without the recorded PR head they cannot be ruled out.
+ * gone, and count when no PR head the watch knows of contains them: the
+ * recorded and pushed heads, then — only if those leave commits over, since
+ * it asks the remote — `liveHead`. Without a recorded head they cannot be
+ * ruled out.
  */
 export function unsavedWork(
   paths: AutofixPrPaths,
-  lastKnownHeadSha: string | null,
+  prHeads: string[] | null,
+  liveHead: () => string | null = () => null,
 ): string | null {
   const hasWorktree = existsSync(paths.worktreePath);
   if (hasWorktree) {
-    const status = gitOpt('-C', paths.worktreePath, 'status', '--porcelain');
+    // Inside a directory that is not a worktree of its own, git finds the
+    // enclosing clone and would judge that instead.
+    const top = gitOpt(
+      '-C',
+      paths.worktreePath,
+      'rev-parse',
+      '--show-toplevel',
+    );
+    if (top === null) return `git cannot read ${paths.worktreePath}`;
+    if (realpathSync(top) !== realpathSync(paths.worktreePath)) {
+      return `${paths.worktreePath} is not a git worktree, so git cannot tell what it holds`;
+    }
+    // Explicit: `status.showUntrackedFiles=no` would hide new files.
+    const status = gitOpt(
+      '-C',
+      paths.worktreePath,
+      'status',
+      '--porcelain',
+      '--untracked-files=normal',
+    );
     if (status === null) return `git cannot read ${paths.worktreePath}`;
     if (status !== '') return 'it has uncommitted changes';
   }
   const hasBranch = refExists(`refs/heads/${paths.branch}`);
   if (!hasWorktree && !hasBranch) return null;
-  if (lastKnownHeadSha === null) {
+  if (prHeads === null) {
     const where = hasWorktree ? paths.worktreePath : `branch ${paths.branch}`;
     return `${where} may hold commits and no PR head is recorded to compare it with`;
   }
@@ -60,8 +95,13 @@ export function unsavedWork(
       ['rev-list', '--count', `refs/heads/${paths.branch}`],
     ]);
   }
+  let live: string | null | undefined;
   for (const [where, args] of compared) {
-    const ahead = gitOpt(...args, '--not', lastKnownHeadSha);
+    let ahead = gitOpt(...args, '--not', ...prHeads);
+    if (ahead !== null && ahead !== '0') {
+      live ??= liveHead();
+      if (live !== null) ahead = gitOpt(...args, '--not', ...prHeads, live);
+    }
     if (ahead === null) return `git cannot compare ${where} with the PR head`;
     if (ahead !== '0') {
       return `${where} has ${ahead} commit(s) the PR does not have`;
@@ -92,7 +132,11 @@ export function runCleanup(prNumber: number, force: boolean): void {
   if (state && !force) assertOwnedBySession(state);
 
   if (!force) {
-    const reason = unsavedWork(paths, state?.lastKnownHeadSha ?? null);
+    const reason = unsavedWork(
+      paths,
+      state ? [state.lastKnownHeadSha, ...state.pushedShas] : null,
+      () => (state ? livePrHead(state, prNumber) : null),
+    );
     if (reason) {
       writeStdoutLine(
         JSON.stringify({
@@ -117,11 +161,15 @@ export function runCleanup(prNumber: number, force: boolean): void {
     git('branch', '-D', paths.branch);
   }
   // The state file and everything else this PR's watch wrote beside it (CI
-  // logs, briefs).
+  // logs, briefs). The gate cursor belongs to the scheduled task, which
+  // outlives a watch and would report everything again without it.
   const tmp = dirname(paths.statePath);
   const prefix = `autofix-pr-${prNumber}-`;
   for (const name of existsSync(tmp) ? readdirSync(tmp) : []) {
-    if (name.startsWith(prefix)) rmSync(join(tmp, name), { force: true });
+    const path = join(tmp, name);
+    if (name.startsWith(prefix) && path !== paths.gatePath) {
+      rmSync(path, { force: true });
+    }
   }
   writeStdoutLine(
     JSON.stringify({ removed: true, worktreePath: paths.worktreePath }),

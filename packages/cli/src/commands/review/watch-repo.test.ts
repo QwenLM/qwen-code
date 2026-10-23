@@ -4,9 +4,37 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join, relative } from 'node:path';
+
+const mocks = vi.hoisted(() => ({
+  gh: vi.fn((..._args: string[]): string => ''),
+  root: '',
+  stdout: vi.fn((_line: string) => {}),
+}));
+
+vi.mock('./lib/gh.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./lib/gh.js')>()),
+  gh: mocks.gh,
+  ensureAuthenticated: () => {},
+}));
+
+vi.mock('./lib/git.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./lib/git.js')>()),
+  repoRoot: () => mocks.root,
+}));
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: mocks.stdout,
+  writeStderrLineSafe: () => {},
+}));
+
 import {
   diffRepoWatch,
+  runWatchRepo,
+  watchRepoCursorPath,
   type RepoPr,
   type WatchRepoCursor,
   type WatchRepoFilters,
@@ -179,6 +207,9 @@ describe('diffRepoWatch', () => {
     expect(run({ labels: ['area/cli'] })).toEqual([4]);
     expect(run({ reviewRequested: true })).toEqual([5]);
     expect(run({ authors: ['bob'] })).toEqual([6]);
+    // Logins and labels compare without case, as on GitHub.
+    expect(run({ authors: ['Bob'] })).toEqual([6]);
+    expect(run({ labels: ['Area/CLI'] })).toEqual([4]);
     // Every PR is in the cursor even when the filters hid it.
     const filtered = diffRepoWatch(
       prs,
@@ -187,5 +218,93 @@ describe('diffRepoWatch', () => {
       false,
     );
     expect(Object.keys(filtered.cursor.heads)).toHaveLength(6);
+  });
+});
+
+describe('watchRepoCursorPath', () => {
+  const name = (host: string, owner: string, repo: string) =>
+    relative('/root', watchRepoCursorPath('/root', host, owner, repo));
+
+  it('gives every spelling of one repository the same file', () => {
+    expect(name('GHE.Corp', 'Acme', 'Web')).toBe(
+      name('ghe.corp', 'acme', 'web'),
+    );
+    expect(name('github.com:443', 'o', 'r')).toBe(name('github.com', 'o', 'r'));
+  });
+
+  it('keeps a port out of the file name and repositories apart', () => {
+    expect(basename(name('ghe.corp:8443', 'o', 'r'))).toBe('r.json');
+    expect(name('ghe.corp:8443', 'o', 'r')).not.toContain(':');
+    expect(name('ghe.corp:8443', 'o', 'r')).not.toBe(
+      name('ghe.corp', 'o', 'r'),
+    );
+    expect(name('github.com', 'acme', 'web-api')).not.toBe(
+      name('github.com', 'acme-web', 'api'),
+    );
+  });
+});
+
+describe('runWatchRepo', () => {
+  const args = {
+    ...NO_FILTERS,
+    repo: 'o/r',
+    host: 'github.com',
+    limit: 2,
+  };
+  const path = () => watchRepoCursorPath(mocks.root, 'github.com', 'o', 'r');
+  const onDisk = () =>
+    JSON.parse(readFileSync(path(), 'utf8')) as WatchRepoCursor;
+  const answer = (viewer: string, prs: RepoPr[], hasNextPage: boolean) =>
+    mocks.gh.mockReturnValueOnce(
+      JSON.stringify({
+        data: {
+          viewer: { login: viewer },
+          repository: {
+            pullRequests: { pageInfo: { hasNextPage }, nodes: prs },
+          },
+        },
+      }),
+    );
+
+  beforeEach(() => {
+    mocks.root = mkdtempSync(join(tmpdir(), 'review-watch-'));
+    mocks.gh.mockReset();
+    mocks.stdout.mockReset();
+  });
+
+  afterEach(() => {
+    rmSync(mocks.root, { recursive: true, force: true });
+  });
+
+  it('records a new viewer even when no PR changed', () => {
+    answer('me', [pr(1)], false);
+    runWatchRepo(args);
+    answer('other', [pr(1)], false);
+    runWatchRepo(args);
+    expect(onDisk().viewer).toBe('other');
+    expect(mocks.stdout).not.toHaveBeenCalled();
+  });
+
+  it('drops a closed PR when exactly --limit PRs are open and none is cut', () => {
+    answer('me', [pr(1), pr(2)], false);
+    runWatchRepo(args);
+    expect(Object.keys(onDisk().heads)).toEqual(['1', '2']);
+
+    // #2 closed, #3 opened: still two PRs, the whole list.
+    answer('me', [pr(1), pr(3)], false);
+    runWatchRepo(args);
+    expect(Object.keys(onDisk().heads)).toEqual(['1', '3']);
+    // #2 reopened: new to the cursor again.
+    answer('me', [pr(2), pr(3)], false);
+    runWatchRepo(args);
+    const printed = mocks.stdout.mock.calls.map(
+      (call) =>
+        JSON.parse(call[0]) as {
+          events: Array<{ type: string; number: number }>;
+        },
+    );
+    expect(printed.at(-1)!.events.map((e) => [e.type, e.number])).toEqual([
+      ['pr_opened', 2],
+    ]);
   });
 });
