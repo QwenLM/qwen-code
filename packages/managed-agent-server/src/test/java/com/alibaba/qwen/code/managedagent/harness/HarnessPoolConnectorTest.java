@@ -1,13 +1,23 @@
 package com.alibaba.qwen.code.managedagent.harness;
 
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.DaemonTransportException;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.persistence.HarnessPlacementStore;
 import com.alibaba.qwen.code.managedagent.persistence.HarnessPlacementStore.Placement;
+import com.alibaba.qwen.code.managedagent.security.WriterCredentialPolicy;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
+import org.springframework.http.HttpStatus;
 
 import java.net.URI;
 import java.util.List;
@@ -26,6 +36,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -97,6 +108,193 @@ class HarnessPoolConnectorTest {
             assertThatThrownBy(() -> pool.createOrLoad("tenant", "new", false))
                     .hasMessageContaining("No compatible Harness owner");
             verify(placements, never()).assign(anyString(), anyString(), anyString(), anyString());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"QUIESCING", "DRAINED"})
+    void observedDrainMovesANeverAcquiredPlacementThroughTheStore(String state) {
+        var settings = settings();
+        var placements = mock(HarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        var b = endpoint("b", 4102);
+        var leafA = leaf();
+        var leafB = leaf();
+        var clientA = client("a");
+        var clientB = client("b");
+        var first = new Placement("tenant", "session", "workspace", "a", clientA.capabilities().getBootId(), 1, "ACTIVE");
+        var successor = new Placement("tenant", "session", "workspace", "b", clientB.capabilities().getBootId(), 2, "ACTIVE");
+        var saved = new AtomicReference<>(first);
+        when(placements.get("tenant", "session")).thenAnswer(call -> saved.get());
+        when(placements.hasUnreleasedOwnership(first.instanceId(), first.bootId())).thenReturn(true);
+        when(placements.takeover("tenant", "session", first, "b", successor.bootId())).thenAnswer(call -> {
+            saved.set(successor);
+            return successor;
+        });
+        var quiescing = mock(DaemonHttpException.class);
+        when(quiescing.getStatusCode()).thenReturn(409);
+        when(quiescing.getErrorCode()).thenReturn("hosted_harness_quiescing");
+        when(leafA.createOrLoad("tenant", "session", false)).thenThrow(quiescing);
+        try (var pool = new HarnessPoolConnector(settings, placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(a, b), true),
+                endpoint -> endpoint.instanceId().equals("a") ? leafA : leafB, null, null,
+                endpoint -> endpoint.instanceId().equals("a") ? clientA : clientB)) {
+            pool.refresh();
+            assertThatThrownBy(() -> pool.createOrLoad("tenant", "session", false)).isSameAs(quiescing);
+            when(clientA.readInstance()).thenReturn(Map.of("state", state));
+            pool.refresh();
+            for (int retry = 0; retry < 6; retry++) {
+                pool.createOrLoad("tenant", "session", false);
+            }
+            assertThat(saved.get()).isEqualTo(successor);
+            verify(placements).takeover("tenant", "session", first, "b", successor.bootId());
+            verify(placements, never()).assign(anyString(), anyString(), anyString(), anyString());
+            verify(leafA).createOrLoad("tenant", "session", false);
+            verify(leafB, times(6)).createOrLoad("tenant", "session", false);
+            var routed = ArgumentCaptor.forClass(QwenHostedHarnessConnector.PoolCall.class);
+            verify(leafB, times(6)).withPlacement(routed.capture(), any());
+            assertThat(routed.getAllValues()).allSatisfy(call -> {
+                assertThat(call.placement().getInstanceId()).isEqualTo("b");
+                assertThat(call.placement().getBootId()).isEqualTo(successor.bootId());
+                assertThat(call.placement().getPlacementEpoch()).isEqualTo(2);
+                new WriterCredentialPolicy(settings).requirePlacement("tenant", "workspace", "session",
+                        "b", successor.bootId(), 2, call.writerToken());
+            });
+        }
+    }
+
+    @Test
+    void explicitDrainChangesPlacementEligibilityBeforeTheNextRefresh() {
+        var placements = mock(HarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        var b = endpoint("b", 4102);
+        var leafA = leaf();
+        var leafB = leaf();
+        var clientA = client("a");
+        var clientB = client("b");
+        var first = new Placement("tenant", "session", "workspace", "a", clientA.capabilities().getBootId(), 1, "ACTIVE");
+        var successor = new Placement("tenant", "session", "workspace", "b", clientB.capabilities().getBootId(), 2, "ACTIVE");
+        when(placements.get("tenant", "session")).thenReturn(first);
+        when(placements.takeover("tenant", "session", first, "b", successor.bootId())).thenReturn(successor);
+        String operation = UUID.randomUUID().toString();
+        when(clientA.drainInstance(operation)).thenReturn(Map.of("state", "DRAINED"));
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(a, b), true),
+                endpoint -> endpoint.instanceId().equals("a") ? leafA : leafB, null, null,
+                endpoint -> endpoint.instanceId().equals("a") ? clientA : clientB)) {
+            pool.refresh();
+            pool.drainInstance("a", operation);
+            pool.createOrLoad("tenant", "session", false);
+            verify(placements).takeover("tenant", "session", first, "b", successor.bootId());
+            verify(leafA, never()).createOrLoad(anyString(), anyString(), eq(false));
+            verify(leafB).createOrLoad("tenant", "session", false);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"ACTIVE,true,harness_owner_still_live,true", "ACTIVE,true,harness_placement_changed,false",
+            "QUIESCING,true,harness_owner_still_live,false", "ACTIVE,false,harness_owner_still_live,false"})
+    void onlyAReachableActiveLiveOwnerKeepsItsCompletionCallsDuringDrain(
+            String state, boolean reachable, String code, boolean keepsOwner) {
+        var placements = mock(HarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        var b = endpoint("b", 4102);
+        var leafA = leaf();
+        var leafB = leaf();
+        var clientA = client("a");
+        var clientB = client("b");
+        var owner = new Placement("tenant", "session", "workspace", "a", clientA.capabilities().getBootId(), 1, state);
+        when(placements.get("tenant", "session")).thenReturn(owner);
+        when(placements.hasUnreleasedOwnership(owner.instanceId(), owner.bootId())).thenReturn(true);
+        var refusal = new ManagedAgentException(HttpStatus.CONFLICT, code, "Writer fence refused takeover");
+        when(placements.takeover("tenant", "session", owner, "b", clientB.capabilities().getBootId())).thenThrow(refusal);
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(a, b), true),
+                endpoint -> endpoint.instanceId().equals("a") ? leafA : leafB, null, null,
+                endpoint -> endpoint.instanceId().equals("a") ? clientA : clientB)) {
+            pool.refresh();
+            if (reachable) {
+                when(clientA.readInstance()).thenReturn(Map.of("state", "QUIESCING"));
+            } else {
+                when(clientA.readInstance()).thenThrow(mock(DaemonTransportException.class));
+            }
+            pool.refresh();
+            if (keepsOwner) {
+                var response = JsonNodeFactory.instance.objectNode();
+                pool.stream("tenant", "session", 0, "cursor");
+                pool.resolveAction("tenant", "session", "action", response);
+                pool.cancel("tenant", "session");
+                verify(leafA).stream("tenant", "session", 0, "cursor");
+                verify(leafA).resolveAction("tenant", "session", "action", response);
+                verify(leafA).cancel("tenant", "session");
+                var routed = ArgumentCaptor.forClass(QwenHostedHarnessConnector.PoolCall.class);
+                verify(leafA, times(3)).withPlacement(routed.capture(), any());
+                assertThat(routed.getAllValues()).allSatisfy(call -> {
+                    assertThat(call.placement().getInstanceId()).isEqualTo("a");
+                    assertThat(call.placement().getBootId()).isEqualTo(owner.bootId());
+                    assertThat(call.placement().getPlacementEpoch()).isEqualTo(owner.epoch());
+                });
+            } else {
+                assertThatThrownBy(() -> pool.stream("tenant", "session", 0, "cursor")).isSameAs(refusal);
+                verify(leafA, never()).stream(anyString(), anyString(), eq(0L), anyString());
+            }
+            verify(leafB, never()).stream(anyString(), anyString(), eq(0L), anyString());
+            verify(leafB, never()).resolveAction(anyString(), anyString(), anyString(), any());
+            verify(leafB, never()).cancel(anyString(), anyString());
+            verify(placements, never()).assign(anyString(), anyString(), anyString(), anyString());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void aKnownUnreachableOwnerWaitsForCapacityWithoutFurtherRpcs(boolean refreshFailure) {
+        var placements = mock(HarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        var b = endpoint("b", 4102);
+        var leafA = leaf();
+        var leafB = leaf();
+        var clientA = client("a");
+        var clientB = client("b");
+        var first = new Placement("tenant", "session", "workspace", "a", clientA.capabilities().getBootId(), 1, "ACTIVE");
+        var successor = new Placement("tenant", "session", "workspace", "b", clientB.capabilities().getBootId(), 2, "ACTIVE");
+        var saved = new AtomicReference<>(first);
+        var snapshot = new AtomicReference<>(new HarnessDiscovery.Snapshot(List.of(a), true));
+        when(placements.get("tenant", "session")).thenAnswer(call -> saved.get());
+        when(placements.hasUnreleasedOwnership(first.instanceId(), first.bootId())).thenReturn(true);
+        when(placements.takeover("tenant", "session", first, "b", successor.bootId())).thenAnswer(call -> {
+            saved.set(successor);
+            return successor;
+        });
+        var transport = mock(DaemonTransportException.class);
+        try (var pool = new HarnessPoolConnector(settings(), placements, snapshot::get,
+                endpoint -> endpoint.instanceId().equals("a") ? leafA : leafB, null, null,
+                endpoint -> endpoint.instanceId().equals("a") ? clientA : clientB)) {
+            pool.refresh();
+            if (refreshFailure) {
+                when(clientA.readInstance()).thenThrow(transport);
+                pool.refresh();
+            } else {
+                when(leafA.createOrLoad("tenant", "session", false)).thenThrow(transport);
+                assertThatThrownBy(() -> pool.createOrLoad("tenant", "session", false)).isSameAs(transport);
+            }
+            for (int retry = 0; retry < 6; retry++) {
+                assertThatThrownBy(() -> pool.createOrLoad("tenant", "session", false))
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                            assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                            assertThat(error.getCode()).isEqualTo("harness_pool_unavailable");
+                        });
+            }
+            assertThat(saved.get()).isEqualTo(first);
+            verify(leafA, times(refreshFailure ? 0 : 1)).createOrLoad("tenant", "session", false);
+            verify(placements, never()).assign(anyString(), anyString(), anyString(), anyString());
+            verify(placements, never()).takeover(anyString(), anyString(), any(), anyString(), anyString());
+            when(clientA.readInstance()).thenThrow(transport);
+            snapshot.set(new HarnessDiscovery.Snapshot(List.of(a, b), true));
+            pool.refresh();
+            pool.createOrLoad("tenant", "session", false);
+            assertThat(saved.get()).isEqualTo(successor);
+            verify(placements).takeover("tenant", "session", first, "b", successor.bootId());
+            verify(leafB).createOrLoad("tenant", "session", false);
         }
     }
 

@@ -67,6 +67,7 @@ public class HarnessPoolConnector implements HarnessConnector {
         private final HostedHarnessClient client;
         private final QwenHostedHarnessConnector connector;
         private volatile boolean reachable;
+        private volatile boolean quiescing;
         Member(HarnessDiscovery.Endpoint endpoint, HostedHarnessClient client, QwenHostedHarnessConnector connector) {
             this.endpoint = endpoint;
             this.client = client;
@@ -202,8 +203,9 @@ public class HarnessPoolConnector implements HarnessConnector {
                     contract = negotiated;
                 }
                 var status = member.client.readInstance();
+                member.quiescing = !endpoint.accepting() || !"ACCEPTING".equals(status.get("state"));
                 member.reachable = true;
-                if (endpoint.accepting() && "ACCEPTING".equals(status.get("state"))) {
+                if (!member.quiescing) {
                     ready.add(member);
                 }
             } catch (RuntimeException unavailable) {
@@ -246,22 +248,34 @@ public class HarnessPoolConnector implements HarnessConnector {
         }
         Placement placement = placements.get(tenant, session);
         Member member = placement == null ? null : members.get(new Owner(placement.instanceId(), placement.bootId()));
-        if (mayAcquire && (placement == null || member == null || !member.reachable || !"ACTIVE".equals(placement.state()))) {
-            List<Member> candidates = accepting;
+        boolean quiescingOwner = member != null && member.reachable && member.quiescing && "ACTIVE".equals(placement.state());
+        if (mayAcquire && (placement == null || member == null || !member.reachable
+                || quiescingOwner || !"ACTIVE".equals(placement.state()))) {
+            List<Member> candidates = accepting.stream()
+                    .filter(value -> value.reachable && !value.quiescing).toList();
             if (candidates.isEmpty()) {
-                if (member == null) {
+                if (member == null || !member.reachable) {
                     throw unavailable();
                 }
             } else {
                 Member candidate = candidates.get(Math.floorMod(next.getAndIncrement(), candidates.size()));
-                if (operation == null) {
-                    placement = placement == null
-                            ? placements.assign(tenant, session, candidate.endpoint.instanceId(), candidate.owner().bootId())
-                            : placements.takeover(tenant, session, placement, candidate.endpoint.instanceId(), candidate.owner().bootId());
-                } else {
-                    placement = placement == null
-                            ? placements.assignForLifecycle(operation, candidate.endpoint.instanceId(), candidate.owner().bootId())
-                            : placements.takeoverForLifecycle(operation, placement, candidate.endpoint.instanceId(), candidate.owner().bootId());
+                try {
+                    if (operation == null) {
+                        placement = placement == null
+                                ? placements.assign(tenant, session, candidate.endpoint.instanceId(), candidate.owner().bootId())
+                                : placements.takeover(tenant, session, placement, candidate.endpoint.instanceId(), candidate.owner().bootId());
+                    } else {
+                        placement = placement == null
+                                ? placements.assignForLifecycle(operation, candidate.endpoint.instanceId(), candidate.owner().bootId())
+                                : placements.takeoverForLifecycle(operation, placement, candidate.endpoint.instanceId(), candidate.owner().bootId());
+                    }
+                } catch (ManagedAgentException refusal) {
+                    if (!quiescingOwner || !member.reachable || refusal.getStatus() != HttpStatus.CONFLICT
+                            || !"harness_owner_still_live".equals(refusal.getCode())) {
+                        throw refusal;
+                    }
+                    // Keep completion RPCs on the live owner while its SQL fence
+                    // refuses a handoff; its process gate still rejects new work.
                 }
                 member = members.get(new Owner(placement.instanceId(), placement.bootId()));
             }
@@ -396,6 +410,7 @@ public class HarnessPoolConnector implements HarnessConnector {
         Member member = members.values().stream().filter(value -> value.endpoint.instanceId().equals(instance)
                 && value.reachable).findFirst().orElseThrow(HarnessPoolConnector::unavailable);
         var receipt = member.client.drainInstance(operationId);
+        member.quiescing = true;
         accepting = accepting.stream().filter(value -> value != member).toList();
         return receipt;
     }

@@ -182,6 +182,8 @@ Harness 镜像需要专用 launcher、挂载 Secret 读取、探针 helper 和 p
 
 关闭/删除恢复使用携带规范 lifecycle operation 的独立归属路径。该路径先核验 Session pending 状态、operation kind/version、当前 claim owner/generation/expiry 和 journal lifecycle fence，再执行同样的 writer 过期或释放证明检查。普通归属仍只允许 `ACTIVE` Session。Turn 和 lifecycle 派发将 pool 容量、归属交接和进程 quiesce 等待排除在执行重试预算外；配置与凭证失败保留原有处理。
 
+路由器按观测到的 instance/boot 记录准入资格，也记录成功发起的 drain 意图。如果原实例在首次获取 writer 前停止接纳，接受新工作的继任者仍必须通过既有 SQL takeover 校验才能获得归属。如果这次额外交接尝试明确返回 `409 harness_owner_still_live`，且原实例仍可达、SQL placement 仍为 `ACTIVE`，收尾、审批和取消调用继续携带原 descriptor 与 grant 访问原实例；进程准入仍拒绝新开工。其他拒绝不会回退。如果所有者已确认不可达且没有合格继任者，则在再次 RPC 前返回 `503 harness_pool_unavailable`，保留归属而不扣减执行重试预算。仅有发现不确定性，不会将缓存中仍可达的原所有者标为 quiescing 或不可达。
+
 客户端回收区分业务终态 Session 与活动归属。关闭、归档或删除的根记录，仅在 SQL 证明仍有 active 且租约有效的 writer 时保留旧客户端；pending lifecycle 的根仍保留。这避免普通业务关闭只 seal writer、不产生归属释放回执时，在滚动更新中持续积累旧 boot 客户端。Lifecycle writer 校验在 claim/head 查询前显式锁住 Session 根。
 
 Pool 模式要求 HMAC binding key 和显式实例身份。`qwp1` grant 绑定 scope、owner digest 和 placement epoch；凭证认证不会在 tenant guard 前查询 SQL，变更路径在锁住 root 后重新校验当前归属，再获取 head。V18 使本地旧行保持 `UNASSIGNED`。首版 pool 拒绝已有私有 CSI 配置，CSI closure inventory 也明确要求未分配归属。

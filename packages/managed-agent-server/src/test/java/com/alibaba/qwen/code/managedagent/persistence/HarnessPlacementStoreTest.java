@@ -109,6 +109,23 @@ public class HarnessPlacementStoreTest {
     }
 
     @Test
+    void neverAcquiredPlacementCanMoveAndRejectsTheOriginalGrant() {
+        var first = tx.execute(status -> placements.assign(TENANT, SESSION, "pod-a", "boot-a"));
+        String originalToken = token(first);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, TENANT, SESSION)).isZero();
+        var successor = tx.execute(status -> placements.takeover(TENANT, SESSION, first, "pod-b", "boot-b"));
+        assertThat(successor.epoch()).isEqualTo(2);
+        assertThat(placements.get(TENANT, SESSION)).isEqualTo(successor);
+        assertThatThrownBy(() -> tx.execute(status -> store.acquireWriter(TENANT, SESSION, originalToken,
+                new ManagedSessionStoreModels.AcquireWriterRequest(WORKSPACE, "boot-a", 60_000L))))
+                .isInstanceOf(ManagedAgentException.class).extracting("code").isEqualTo("writer_credential_invalid");
+        var acquired = tx.execute(status -> store.acquireWriter(TENANT, SESSION, token(successor),
+                new ManagedSessionStoreModels.AcquireWriterRequest(WORKSPACE, "boot-b", 60_000L)));
+        assertThat(acquired.writerGeneration()).isPositive();
+    }
+
+    @Test
     void placementIsStickyAndAFormerOwnerCannotReacquireAfterExpiry() {
         var first = tx.execute(status -> placements.assign(TENANT, SESSION, "pod-a", "boot-a"));
         var repeated = tx.execute(status -> placements.assign(TENANT, SESSION, "pod-b", "boot-b"));
