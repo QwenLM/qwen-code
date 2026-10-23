@@ -110,9 +110,19 @@ function rerunLocked(
       reason: `run ${runId} is still in progress; the gate reports its failures again once it has ended`,
     };
   }
+  const attempts = failed.map(({ event, attempt }) =>
+    checkAttemptKey(event.check, pr.headRefOid, attempt),
+  );
+  // Recorded before GitHub is asked, so a re-run whose answer is lost is
+  // not asked for twice: at most once, never twice.
+  writeState(paths.statePath, {
+    ...state,
+    rerunChecks: [...already, ...rerunKeys],
+    handledChecks: [...(state.handledChecks ?? []), ...attempts],
+    deferredRuns: (state.deferredRuns ?? []).filter((id) => id !== runId),
+  });
   // `--failed` re-runs every failed job of the run, so every failed check
-  // of it spends its re-run. Not retried: a re-run that reached GitHub
-  // before a transport error would be asked for twice.
+  // of it spends its re-run. Not retried, for the same reason.
   ghWithInput(
     '',
     'run',
@@ -122,15 +132,6 @@ function rerunLocked(
     '-R',
     `${state.owner}/${state.repo}`,
   );
-  const attempts = failed.map(({ event, attempt }) =>
-    checkAttemptKey(event.check, pr.headRefOid, attempt),
-  );
-  writeState(paths.statePath, {
-    ...state,
-    rerunChecks: [...already, ...rerunKeys],
-    handledChecks: [...(state.handledChecks ?? []), ...attempts],
-    deferredRuns: (state.deferredRuns ?? []).filter((id) => id !== runId),
-  });
   return { rerun: true, runId, checks };
 }
 

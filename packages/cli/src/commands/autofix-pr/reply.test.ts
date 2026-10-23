@@ -272,25 +272,76 @@ describe('runReply', () => {
     expect(state().handledChecks).toBeUndefined();
   });
 
-  it('after a push, ignores failures of the old head instead of refusing the plan', () => {
+  it('after a push, judges the plan by the head the watch pushed, even while the API lags', () => {
     const pushed = 'b'.repeat(40);
+    // `push` recorded the new head; the API still shows the old one.
+    writeState(paths.statePath, {
+      ...state(),
+      lastKnownHeadSha: pushed,
+      pushedShas: [pushed],
+      summarizedSha: HEAD,
+    });
     mocks.fetchPrData.mockImplementation(() => ({
-      pr: prData({ headRefOid: pushed, mergeable: 'UNKNOWN' }),
+      pr: prData({ mergeable: 'UNKNOWN' }),
       viewer: 'me',
     }));
     const outcome = reply({
       replies: [{ replyTo: 101, body: 'Fixed in bbb.', handled: ['PRRC_101'] }],
+      summary: { body: 'Pushed bbb.' },
       handledChecks: [`Test@${HEAD}@#5`],
       handledConflict: true,
     });
-    expect(outcome).toMatchObject({ handledChecks: 0, ignoredChecks: 1 });
-    expect(posts()).toHaveLength(1);
+    // The old head's failure is history; the push's summary is due.
+    expect(outcome).toMatchObject({
+      handledChecks: 0,
+      ignoredChecks: 1,
+      summarySkipped: false,
+    });
+    expect(posts().map((p) => p.path)).toEqual([
+      'repos/o/r/pulls/7/comments/101/replies',
+      'repos/o/r/issues/7/comments',
+    ]);
     // GitHub reports UNKNOWN until it has recomputed the merge: the
-    // conflict left for a human is recorded against the new head.
+    // conflict left for a human is recorded against the pushed head.
     expect(state()).toMatchObject({
       handledChecks: [],
       handledConflictSha: pushed,
+      summarizedSha: pushed,
     });
+  });
+
+  it('adopts an unrecorded reply only when it is the same reply', () => {
+    // Round 1 answered A1; its POST landed after A2 arrived, answer lost.
+    const r1 = {
+      ...comment('PRRC_150', 'me', 'OWNER'),
+      body: `Fixed in abc: renamed x\n\n${REPLY_MARKER}`,
+    };
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        reviewThreads: {
+          pageInfo: { hasNextPage: false },
+          nodes: [
+            thread('T1', [
+              comment('PRRC_101', 'alice', 'COLLABORATOR'),
+              comment('PRRC_102', 'alice', 'COLLABORATOR'),
+              r1,
+            ]),
+          ],
+        },
+      }),
+      viewer: 'me',
+    }));
+    const outcome = reply({
+      replies: [
+        {
+          replyTo: 101,
+          body: 'Fixed in def: renamed x and y',
+          handled: ['PRRC_101', 'PRRC_102'],
+        },
+      ],
+    });
+    expect(outcome).toMatchObject({ adopted: 0 });
+    expect(posts()).toHaveLength(1);
   });
 
   it('records a conflict left for a human unless the head merges cleanly', () => {

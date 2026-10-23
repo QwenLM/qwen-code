@@ -268,6 +268,39 @@ describe('runSync (real git, bare remote)', () => {
     expect(run(paths.worktreePath, 'status', '--porcelain')).toBe('');
   });
 
+  it('with --discard also returns submodules to the commits the PR records', () => {
+    // A submodule the PR records, checked out and changed by a round.
+    const sub = join(base, 'sub');
+    run(base, 'init', '-q', '-b', 'main', sub);
+    run(sub, 'config', 'user.email', 't@example.com');
+    run(sub, 'config', 'user.name', 't');
+    commitIn(sub, 's.txt');
+    run(
+      paths.worktreePath,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      sub,
+      'vendor/sub',
+    );
+    run(paths.worktreePath, 'commit', '-q', '-m', 'add sub');
+    run(paths.worktreePath, 'push', '-q', 'origin', 'HEAD:feat');
+    const withSub = worktreeHead();
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      lastKnownHeadSha: withSub,
+    });
+    const inSub = join(paths.worktreePath, 'vendor', 'sub');
+    writeFileSync(join(inSub, 's.txt'), 'changed');
+    writeFileSync(join(inSub, 'new.txt'), 'new');
+    commitIn(inSub, 'more.txt');
+    expect(run(paths.worktreePath, 'status', '--porcelain')).not.toBe('');
+    expect(runSync(7, true)).toMatchObject({ synced: true, headSha: withSub });
+    expect(run(paths.worktreePath, 'status', '--porcelain')).toBe('');
+  });
+
   it('follows only the branch GitHub names, not one an edited state file names', () => {
     run(repo, 'branch', 'release', 'main');
     const release = run(repo, 'rev-parse', 'release');

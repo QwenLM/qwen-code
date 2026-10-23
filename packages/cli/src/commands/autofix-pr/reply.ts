@@ -241,6 +241,7 @@ function actionable(snapshot: Snapshot): {
 function unrecordedReply(
   nodes: CommentNode[],
   handled: string[],
+  body: string,
   viewer: string,
   posted: Set<string>,
 ): CommentNode | null {
@@ -251,10 +252,21 @@ function unrecordedReply(
     return null;
   }
   return (
-    nodes
-      .slice(last + 1)
-      .find((node) => isOwnReply(node, viewer) && !posted.has(node.id)) ?? null
+    nodes.slice(last + 1).find(
+      (node) =>
+        isOwnReply(node, viewer) &&
+        !posted.has(node.id) &&
+        // The same reply, not one written for other comments: a round
+        // that answered one comment must not count as the answer to a
+        // comment posted while it ran.
+        sameBody(node.body, body),
+    ) ?? null
   );
+}
+
+function sameBody(a: string, b: string): boolean {
+  const normal = (text: string) => text.replace(/\r\n/g, '\n').trimEnd();
+  return normal(a) === normal(b);
 }
 
 function threadComments(pr: PrData, replyTo: number): CommentNode[] {
@@ -314,6 +326,9 @@ function replyLocked(
     );
   }
   const offer = actionable(buildSnapshot(pr, state));
+  // The head the watch knows — `sync` and `push` read it from the branch —
+  // rather than the API's, which can lag a push by some seconds.
+  const head = state.lastKnownHeadSha;
   const handledBefore = new Set(state.handledCommentIds);
   const done = new Set(handledBefore);
 
@@ -359,7 +374,7 @@ function replyLocked(
   const currentChecks: string[] = [];
   let ignoredChecks = 0;
   for (const key of new Set(plan.handledChecks)) {
-    if (keyHead(key) !== pr.headRefOid) {
+    if (keyHead(key) !== head) {
       ignoredChecks += 1;
       continue;
     }
@@ -406,6 +421,7 @@ function replyLocked(
     const earlier = unrecordedReply(
       threadComments(pr, reply.replyTo),
       reply.handled,
+      reply.body,
       state.viewer,
       new Set(state.postedCommentIds),
     );
@@ -435,7 +451,7 @@ function replyLocked(
     summary !== null &&
     (summary.handled && summary.handled.length > 0
       ? summary.handled.some((id) => !handledBefore.has(id))
-      : state.summarizedSha !== pr.headRefOid);
+      : state.summarizedSha !== head);
   if (summary && summaryDue) {
     // Its comments are recorded with it, so a retry after a later failure
     // finds it posted. `--no-post` records the same, posting nothing.
@@ -446,6 +462,7 @@ function replyLocked(
         ? unrecordedReply(
             pr.comments.nodes,
             summary.handled ?? [],
+            summary.body,
             state.viewer,
             new Set(state.postedCommentIds),
           )
@@ -464,7 +481,7 @@ function replyLocked(
         ...state.handledCommentIds,
         ...addHandled(summary.handled ?? []),
       ],
-      summarizedSha: pr.headRefOid,
+      summarizedSha: head,
     });
     if (posted && !earlier) outcome.posted.push({ kind: 'summary', ...posted });
   } else if (summary) {
@@ -482,7 +499,7 @@ function replyLocked(
     // the merge, so a conflict left for a human is recorded unless the
     // head is known to merge cleanly.
     ...(plan.handledConflict && pr.mergeable !== 'MERGEABLE'
-      ? { handledConflictSha: pr.headRefOid }
+      ? { handledConflictSha: head }
       : {}),
   });
   return outcome;

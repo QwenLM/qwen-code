@@ -233,6 +233,20 @@ describe('runPush (real git, bare remote)', () => {
     );
   });
 
+  it('records a push the remote took although its answer was lost', () => {
+    // The remote dies right after the ref update commits.
+    const hook = join(remote, 'hooks', 'reference-transaction');
+    writeFileSync(
+      hook,
+      '#!/bin/sh\n[ "$1" = committed ] && kill -9 $PPID\nexit 0\n',
+    );
+    chmodSync(hook, 0o755);
+    const fix = commitIn(paths.worktreePath, 'fix.txt');
+    expect(runPush(7)).toMatchObject({ pushed: true, sha: fix, pushes: 1 });
+    expect(remoteFeat()).toBe(fix);
+    expect(state()).toMatchObject({ lastKnownHeadSha: fix, pushedShas: [fix] });
+  });
+
   it('never pushes to the default branch, asked at push time', () => {
     commitIn(paths.worktreePath, 'fix.txt');
     defaultBranch = 'feat';

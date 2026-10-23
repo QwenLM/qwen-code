@@ -207,7 +207,12 @@ publish a check of the same name publish two checks: a branch rule can
 require it from either, so one's success does not clear the other's failure.
 
 Without `--gate`, `snapshot` compares them with the state file `prepare`
-wrote and prints events plus one action:
+wrote and prints events plus one action. The API can lag a push by some
+seconds, so when its head differs from the one the watch knows, `snapshot`
+asks the branch itself (`git ls-remote`): a branch still at the known head
+means the API has not caught up — not a push by someone else — and the
+snapshot leaves out that stale head's checks and merge state, keeps the
+comments, and says `lagging: true`.
 
 ```json
 {
@@ -391,14 +396,17 @@ used its pushes (10, Section 10) answers `stop` without asking anything. A
 
 Then it runs
 `git push --porcelain <target> <sha>:refs/heads/<headRef> --force-with-lease=refs/heads/<headRef>:<lastKnownHeadSha>`
-from the worktree, with ten minutes for pre-push hooks. `<sha>` is the commit
+from the worktree, with nine minutes for pre-push hooks (the skill gives the
+shell call the tool's longest timeout, ten, so the helper still records the
+outcome). `<sha>` is the commit
 the checks above passed, not `HEAD`, which could move while GitHub is asked.
 Hooks run, and there is no `--force` or `--no-verify`. On success it records
 the new SHA in `pushedShas` and `lastKnownHeadSha` and counts one push. A
 rejected lease (`[rejected] (stale info)`, or a remote branch that
 `git ls-remote` no longer finds at the known head, whatever language git
 prints in) means someone else pushed; the result is `resync`, not a retry,
-and nothing is recorded. Any other refusal —
+and nothing is recorded. A push whose answer was lost — the remote already
+holds the commit — is recorded as pushed. Any other refusal —
 a hook, branch protection, credentials — is an error with git's last lines.
 The output is one JSON line: `{"pushed": true, "sha", "pushes", "maxPushes"}`,
 or `{"pushed": false, "action": "resync" | "stop", "reason"}`.
@@ -428,6 +436,8 @@ The helper decides what may be posted, against one fresh read of the PR
   comments cannot be marked handled; a check key must be one a `ci_failed`
   event reports on the head (prepared mode prints its `key`); a conflict can
   be left for a human only while there is one. The PR must be open.
+- The head the plan is judged by is the one the watch knows (`sync` and
+  `push` read it from the branch), not the API's, which can lag a push.
 - A failure key of another head — the round pushed past it — is ignored and
   counted in `ignoredChecks`: prepared snapshots read only the current head.
   `handledConflict` is recorded against the head unless GitHub reports it as
@@ -436,9 +446,10 @@ The helper decides what may be posted, against one fresh read of the PR
 - A plan with two replies to one thread, or one comment id twice, is refused.
 - Every check runs before anything is posted, so a refused plan posts
   nothing.
-- A reply of the tool's that already follows the comments a reply answers,
-  and is not recorded — a POST that reached GitHub although its answer was
-  lost — is recorded instead of posted again (`adopted`). The same holds for
+- A reply of the tool's with the same body that already follows the
+  comments a reply answers, and is not recorded — a POST that reached GitHub
+  although its answer was lost — is recorded instead of posted again
+  (`adopted`). A reply written for other comments is never taken for it. The same holds for
   a summary that answers conversation comments; reviews sit on another list
   with no shared order, so a summary answering only reviews, or nothing, has
   no such check.
@@ -486,9 +497,12 @@ kept cursor (`gateCursor`): a later gate on another repository's PR of the
 same number is refused until that file is removed.
 
 What the watch posted and handled — `handledCommentIds`,
-`postedCommentIds`, `handledChecks`, `rerunChecks` — is added to
-`.qwen/tmp/autofix-pr-<n>-history.json` before the state file goes, and that
-file is kept as well (`history` in the report). A later watch of the same
+`postedCommentIds`, `handledChecks`, `rerunChecks`, `handledConflictSha` —
+is added to the PR's history before the state file goes,
+`.qwen/tmp/autofix-pr-<n>-history-<host>_<owner>_<repo>.json` (one clone may
+watch PRs of one number in a fork and its upstream), and that file is kept
+as well (`history` in the report). `--force` also removes the watch's lock,
+in case a helper was killed holding it. A later watch of the same
 PR's `prepare` starts from it, so it does not answer the comments an earlier
 watch answered, nor re-run a check twice on one head; a history of another
 repository's PR of the same number is ignored.
@@ -555,7 +569,8 @@ checkout is untouched), and checks the worktree as `push` does. Then:
 
 A worktree with uncommitted changes is never moved or reset. `--discard`
 returns the worktree to the PR head whatever it holds — unpushed commits and
-uncommitted changes, nested repositories included (`git clean -ffd`) — to
+uncommitted changes, nested repositories (`git clean -ffd`) and changes in
+submodules included — to
 end a round whose work was not pushed, and reports what it dropped. When the
 PR's branch cannot be read (the PR was closed, the branch deleted, the
 network is down), it returns to the head the watch last knew instead.
@@ -581,8 +596,10 @@ a run with a check that was re-run on this head already answers
 re-ran are recorded in `handledChecks`, so the prepared snapshot does not
 dispatch them again while the re-run is going; a re-run that fails again is
 a new attempt. A head that moved since the watch last saw it answers
-`resync`, and a run with no failed check on the head is an error. The call
-is not retried, for the same reason as a reply.
+`resync`, and a run with no failed check on the head is an error. The re-run
+is recorded before GitHub is asked and the call is not retried, so a re-run
+whose answer was lost is not asked for a second time: at most once, never
+twice.
 
 GitHub re-runs a run only once it has ended, while `snapshot` reports a
 failed job as soon as it fails. A run still in progress therefore answers
@@ -594,7 +611,12 @@ ended (Section 6.2), and the round then re-runs it.
 (`.qwen/tmp/autofix-pr-<n>.lock`) while they read and write the state file:
 two helper calls the model issues at once would otherwise each write back
 what they read, undoing the other's record of a push, a reply or a re-run.
-A lock whose process is gone is taken over.
+The lock is created whole, as a hard link to a file already holding its
+token, and removed only while it still holds that token. A sandbox may run
+each command in a pid namespace of its own, where pids repeat, so the
+holder's pid is checked only from the same namespace; any other lock is
+taken over once it is older than any helper runs (fifteen minutes), and
+`cleanup --force` removes it at once.
 
 ## 7. One check (`tick`)
 

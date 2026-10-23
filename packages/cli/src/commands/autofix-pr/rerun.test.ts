@@ -232,6 +232,16 @@ describe('runRerun', () => {
     expect(state()).toMatchObject({ deferredRuns: [] });
   });
 
+  it('counts a re-run before asking GitHub, so a lost answer is not re-run twice', () => {
+    mocks.ghWithInput.mockImplementationOnce(() => {
+      throw new Error('HTTP 502');
+    });
+    expect(() => runRerun(7, 50)).toThrow(/HTTP 502/);
+    expect(state().rerunChecks).toHaveLength(2);
+    expect(runRerun(7, 50)).toMatchObject({ rerun: false });
+    expect(mocks.ghWithInput).toHaveBeenCalledTimes(1);
+  });
+
   it('asks for a resync when the PR head moved, and re-runs nothing', () => {
     mocks.fetchPrData.mockImplementation(() => ({
       pr: prData('b'.repeat(40)),

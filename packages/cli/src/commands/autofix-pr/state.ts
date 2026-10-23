@@ -4,15 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import {
-  closeSync,
   existsSync,
-  openSync,
+  linkSync,
+  lstatSync,
   readFileSync,
+  readlinkSync,
+  rmSync,
   unlinkSync,
-  writeSync,
+  writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import {
   HOSTNAME_RE,
@@ -82,6 +85,7 @@ export interface AutofixPrHistory {
   postedCommentIds: string[];
   handledChecks: string[];
   rerunChecks: string[];
+  handledConflictSha?: string | null;
 }
 
 /** Pushes one watch may make before it stops (Section 10 of the design). */
@@ -132,8 +136,6 @@ export interface AutofixPrPaths {
   statePath: string;
   /** `snapshot --gate` cursor; separate from the state file on purpose. */
   gatePath: string;
-  /** Kept by `cleanup`, like the gate cursor. */
-  historyPath: string;
   /** Held while a helper reads and writes the state file. */
   lockPath: string;
   branch: string;
@@ -161,7 +163,6 @@ export function autofixPrPaths(root: string, prNumber: number): AutofixPrPaths {
     worktreePath: join(tmp, `autofix-pr-${prNumber}`),
     statePath: join(tmp, `autofix-pr-${prNumber}-state.json`),
     gatePath: join(tmp, `autofix-pr-${prNumber}-gate.json`),
-    historyPath: join(tmp, `autofix-pr-${prNumber}-history.json`),
     // Not `autofix-pr-<n>-…`: cleanup's sweep of the watch's files must not
     // take a lock another helper holds.
     lockPath: join(tmp, `autofix-pr-${prNumber}.lock`),
@@ -293,28 +294,53 @@ export function writeState(statePath: string, state: AutofixPrState): void {
   atomicWriteFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
 }
 
-export function readHistory(historyPath: string): AutofixPrHistory | null {
-  if (!existsSync(historyPath)) return null;
-  const parsed = JSON.parse(
-    readFileSync(historyPath, 'utf8'),
-  ) as AutofixPrHistory;
+/**
+ * Where the history of a PR of one repository is kept. One clone can watch
+ * PRs of the same number in several repositories (a fork and its upstream),
+ * so the file is named after the repository as well.
+ */
+export function historyPath(
+  paths: AutofixPrPaths,
+  repository: { host: string; owner: string; repo: string },
+): string {
+  const slug = [
+    normalizeGhHostForUrl(repository.host),
+    normalizeSegment(repository.owner),
+    normalizeSegment(repository.repo),
+  ]
+    .join('_')
+    .replace(/[^a-z0-9._-]/g, '_');
+  return join(dirname(paths.statePath), `${historyPrefix(paths)}${slug}.json`);
+}
+
+/** Every history file of the PR's number starts with this. */
+export function historyPrefix(paths: AutofixPrPaths): string {
+  return basename(paths.statePath).replace(/-state\.json$/, '-history-');
+}
+
+export function readHistory(path: string): AutofixPrHistory | null {
+  if (!existsSync(path)) return null;
+  const parsed = JSON.parse(readFileSync(path, 'utf8')) as AutofixPrHistory;
   if (parsed.version !== 1) {
     throw new Error(
-      `unsupported autofix-pr history version in ${historyPath}: ${String(parsed.version)}`,
+      `unsupported autofix-pr history version in ${path}: ${String(parsed.version)}`,
     );
   }
   return parsed;
 }
 
-/** Adds what a watch's state posted and handled to the PR's history. */
-export function keepHistory(historyPath: string, state: AutofixPrState): void {
+/** Adds what a watch's state posted and handled to its PR's history. */
+export function keepHistory(
+  paths: AutofixPrPaths,
+  state: AutofixPrState,
+): string {
+  const path = historyPath(paths, state);
   let earlier: AutofixPrHistory | null = null;
   try {
-    earlier = readHistory(historyPath);
+    earlier = readHistory(path);
   } catch {
     // An unreadable history is replaced rather than blocking cleanup.
   }
-  const same = earlier && sameRepository(earlier, state) ? earlier : null;
   const union = (a: string[] | undefined, b: string[] | undefined) => [
     ...new Set([...(a ?? []), ...(b ?? [])]),
   ];
@@ -324,54 +350,141 @@ export function keepHistory(historyPath: string, state: AutofixPrState): void {
     owner: state.owner,
     repo: state.repo,
     prNumber: state.prNumber,
-    handledCommentIds: union(same?.handledCommentIds, state.handledCommentIds),
-    postedCommentIds: union(same?.postedCommentIds, state.postedCommentIds),
-    handledChecks: union(same?.handledChecks, state.handledChecks),
-    rerunChecks: union(same?.rerunChecks, state.rerunChecks),
+    handledCommentIds: union(
+      earlier?.handledCommentIds,
+      state.handledCommentIds,
+    ),
+    postedCommentIds: union(earlier?.postedCommentIds, state.postedCommentIds),
+    handledChecks: union(earlier?.handledChecks, state.handledChecks),
+    rerunChecks: union(earlier?.rerunChecks, state.rerunChecks),
+    handledConflictSha:
+      state.handledConflictSha ?? earlier?.handledConflictSha ?? null,
   };
-  atomicWriteFileSync(historyPath, `${JSON.stringify(history, null, 2)}\n`);
+  atomicWriteFileSync(path, `${JSON.stringify(history, null, 2)}\n`);
+  return path;
+}
+
+/**
+ * Longer than any helper may run (a push waits up to nine minutes for its
+ * hooks, inside the shell tool's ten), so a lock this old is left over.
+ */
+const LOCK_STALE_MS = 15 * 60_000;
+
+interface LockToken {
+  pid: number;
+  /** The pid namespace: a pid means something only inside its own. */
+  ns: string | null;
+  at: number;
+  id: string;
+}
+
+function pidNamespace(): string | null {
+  try {
+    return readlinkSync('/proc/self/ns/pid');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a lock was left by a helper that is gone. A sandbox may run each
+ * command in a pid namespace of its own, where pids repeat and pid 1 is
+ * always alive, so the holder's pid is asked only from the same namespace;
+ * otherwise a lock is stale once it is older than any helper runs.
+ */
+function lockIsStale(raw: string, mtimeMs: number): boolean {
+  let token: LockToken | null = null;
+  try {
+    token = JSON.parse(raw) as LockToken;
+  } catch {
+    // Unreadable: judged by its age alone.
+  }
+  const at = typeof token?.at === 'number' ? token.at : mtimeMs;
+  if (Date.now() - at > LOCK_STALE_MS) return true;
+  if (!token || token.ns !== pidNamespace()) return false;
+  return !processAlive(token.pid);
 }
 
 /**
  * Runs `fn` holding the watch's lock, so two helpers never read and write
  * the state file at once (the model may issue tool calls in parallel): the
  * second would write back what it read and undo the first one's record of
- * a push, a reply or a re-run. A lock whose holder is gone is taken over.
+ * a push, a reply or a re-run. The lock appears whole, through a hard link
+ * of a file already written, and is removed only while it is still ours.
  */
 export function withWatchLock<T>(
   paths: AutofixPrPaths,
   prNumber: number,
   fn: () => T,
 ): T {
-  let fd: number | null = null;
-  for (let attempt = 0; attempt < 2 && fd === null; attempt += 1) {
-    try {
-      fd = openSync(paths.lockPath, 'wx');
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      const holder = Number(readFileSync(paths.lockPath, 'utf8').trim());
-      if (attempt === 0 && !processAlive(holder)) {
-        unlinkSync(paths.lockPath);
+  const lockPath = paths.lockPath;
+  const token = JSON.stringify({
+    pid: process.pid,
+    ns: pidNamespace(),
+    at: Date.now(),
+    id: randomUUID(),
+  } satisfies LockToken);
+  const pending = `${lockPath}.${randomUUID()}`;
+  writeFileSync(pending, token, { flag: 'wx' });
+  try {
+    for (let attempt = 0; ; attempt += 1) {
+      if (takeLock(pending, lockPath, token)) break;
+      let stat;
+      try {
+        stat = lstatSync(lockPath);
+      } catch {
+        continue; // Released meanwhile.
+      }
+      if (stat.isSymbolicLink()) {
+        unlinkSync(lockPath);
+        continue;
+      }
+      if (!stat.isFile()) {
+        throw new Error(
+          `${lockPath} is not a lock file; remove it, or run \`qwen autofix-pr cleanup ${prNumber} --force\`.`,
+        );
+      }
+      if (
+        attempt === 0 &&
+        lockIsStale(readFileSync(lockPath, 'utf8'), stat.mtimeMs)
+      ) {
+        unlinkSync(lockPath);
         continue;
       }
       throw new Error(
-        `another autofix-pr helper is working on PR #${prNumber} (process ${Number.isInteger(holder) ? holder : 'unknown'}); run one at a time.`,
+        `another autofix-pr helper is working on PR #${prNumber}; run one at a time (a lock left by a helper that was killed expires after ${LOCK_STALE_MS / 60_000} minutes, or \`qwen autofix-pr cleanup ${prNumber} --force\` removes it).`,
       );
     }
-  }
-  if (fd === null) {
-    throw new Error(`could not take the lock ${paths.lockPath}`);
+  } finally {
+    rmSync(pending, { force: true });
   }
   try {
-    writeSync(fd, String(process.pid));
-    closeSync(fd);
     return fn();
   } finally {
     try {
-      unlinkSync(paths.lockPath);
+      if (readFileSync(lockPath, 'utf8') === token) unlinkSync(lockPath);
     } catch {
       // Already gone.
     }
+  }
+}
+
+/** Creates the lock, or answers false when it exists. */
+function takeLock(pending: string, lockPath: string, token: string): boolean {
+  try {
+    linkSync(pending, lockPath);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+  }
+  // No hard links on this file system: an exclusive create is still
+  // exclusive, though its content lands a moment later.
+  try {
+    writeFileSync(lockPath, token, { flag: 'wx' });
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    throw err;
   }
 }
 

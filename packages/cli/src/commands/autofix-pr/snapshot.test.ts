@@ -257,6 +257,44 @@ describe('buildSnapshot', () => {
     expect(buildSnapshot(pr({}, [run(5)]), otherHead).action).toBe('fix');
   });
 
+  it('reads an API that has not caught up with the branch as lag, not a push', () => {
+    const pushed = 'b'.repeat(40);
+    const failing: Contexts[number] = {
+      __typename: 'CheckRun',
+      databaseId: 5,
+      name: 'Test',
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      detailsUrl: 'https://github.com/o/r/actions/runs/5/job/1',
+    };
+    // The watch pushed (or synced to) `pushed`; the API still shows HEAD.
+    const watch = state({ lastKnownHeadSha: pushed, pushedShas: [pushed] });
+    const stale = pr(
+      {
+        mergeable: 'CONFLICTING',
+        comments: {
+          pageInfo: { hasPreviousPage: false },
+          nodes: [comment('IC_1', 'bob', 'MEMBER')],
+        },
+      },
+      [failing],
+    );
+    expect(buildSnapshot(stale, watch, pushed)).toMatchObject({
+      action: 'fix',
+      headSha: pushed,
+      lagging: true,
+      events: [{ type: 'issue_comment', id: 'IC_1' }],
+    });
+    // The branch did move since: someone else pushed.
+    expect(buildSnapshot(stale, watch, 'c'.repeat(40)).action).toBe('resync');
+    // Even back to a head the watch once pushed: the author rolled back.
+    const rolledBack = state({
+      lastKnownHeadSha: pushed,
+      pushedShas: [HEAD, pushed],
+    });
+    expect(buildSnapshot(pr(), rolledBack, HEAD).action).toBe('resync');
+  });
+
   it('reports a conflict until a round leaves it for a human on this head', () => {
     const conflicting = pr({ mergeable: 'CONFLICTING' });
     expect(buildSnapshot(conflicting, state()).events).toEqual([

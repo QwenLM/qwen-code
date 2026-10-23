@@ -17,6 +17,7 @@ import { git, gitOpt, refExists, releaseWorktree } from '../review/lib/git.js';
 import {
   assertOwnedBySession,
   autofixPrPaths,
+  historyPrefix,
   keepHistory,
   readState,
   repoRoot,
@@ -166,7 +167,9 @@ export function runCleanup(prNumber: number, force: boolean): void {
   }
   // What the watch posted and handled outlives it, so a later watch of the
   // PR does not answer the same comments again.
-  if (state) keepHistory(paths.historyPath, state);
+  const history = state ? keepHistory(paths, state) : null;
+  // A lock a killed helper left behind would otherwise outlive the watch.
+  if (force) rmSync(paths.lockPath, { force: true, recursive: true });
   // The state file and everything else this PR's watch wrote beside it (CI
   // logs, briefs). The gate cursor belongs to the scheduled task, which
   // outlives a watch and would report everything again without it.
@@ -177,7 +180,7 @@ export function runCleanup(prNumber: number, force: boolean): void {
     if (
       name.startsWith(prefix) &&
       path !== paths.gatePath &&
-      path !== paths.historyPath
+      !name.startsWith(historyPrefix(paths))
     ) {
       rmSync(path, { force: true });
     }
@@ -186,7 +189,7 @@ export function runCleanup(prNumber: number, force: boolean): void {
   // knows which file its gate refuses.
   const kept = {
     ...(existsSync(paths.gatePath) ? { gateCursor: paths.gatePath } : {}),
-    ...(existsSync(paths.historyPath) ? { history: paths.historyPath } : {}),
+    ...(history ? { history } : {}),
   };
   writeStdoutLine(
     JSON.stringify({

@@ -116,10 +116,33 @@ function syncLocked(
   let discardedChanges = false;
   if (discard) {
     discardedChanges = hasUncommittedChanges(worktree);
-    git('-C', worktree, 'reset', '--hard', '--quiet', prHead);
+    // Submodules a round checked out or changed go back to the commits the
+    // PR records; a reset that cannot reach them still resets the rest.
+    if (
+      gitOpt(
+        '-C',
+        worktree,
+        'reset',
+        '--hard',
+        '--quiet',
+        '--recurse-submodules',
+        prHead,
+      ) === null
+    ) {
+      git('-C', worktree, 'reset', '--hard', '--quiet', prHead);
+    }
     // `-ff`: an untracked nested repository would survive one `-f`, and
     // keep the worktree from ever being clean again.
     git('-C', worktree, 'clean', '-ffdq');
+    gitOpt(
+      '-C',
+      worktree,
+      'submodule',
+      'foreach',
+      '--quiet',
+      '--recursive',
+      'git reset --hard --quiet && git clean -ffdq',
+    );
     if (own > 0) dropped = own;
   } else if (!isAncestor(worktree, known, prHead)) {
     // The author rewrote the history the watch knew.

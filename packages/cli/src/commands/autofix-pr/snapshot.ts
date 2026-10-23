@@ -31,6 +31,7 @@ import {
   GATE_OUTPUT_BUDGET_BYTES,
   jsonBytes,
 } from '../review/lib/gate-budget.js';
+import { gitOpt } from '../review/lib/git.js';
 import { normalizeSegment } from '../review/lib/remote-match.js';
 import {
   REPLY_MARKER,
@@ -293,6 +294,9 @@ export interface Snapshot {
   /** Gate output only: events left out to keep the line within the gate's
    * output budget; the next run reports them. */
   deferred?: number;
+  /** Prepared mode: the API has not caught up with the branch yet, so this
+   * snapshot carries no checks or conflict; a later one will. */
+  lagging?: true;
 }
 
 const TRUSTED_ASSOCIATIONS: Record<string, Trust> = {
@@ -559,15 +563,34 @@ export function isOwnReply(node: CommentNode, viewer: string): boolean {
   );
 }
 
-export function buildSnapshot(pr: PrData, state: AutofixPrState): Snapshot {
+/**
+ * `branchHead` is the PR branch's commit as the remote reports it now, read
+ * when the API's head differs from the one the watch knows. The API can lag
+ * a push by some seconds: while the branch still stands at the known head,
+ * the API's head is stale, not someone else's push, and its checks and
+ * merge state describe that stale head, so they are left out until it
+ * catches up (`lagging`). Without it, a head the watch pushed itself is
+ * taken for the same lag.
+ */
+export function buildSnapshot(
+  pr: PrData,
+  state: AutofixPrState,
+  branchHead?: string | null,
+): Snapshot {
   const seen = new Set([...state.handledCommentIds, ...state.postedCommentIds]);
   const isNew = (node: CommentNode) =>
     !seen.has(node.id) && !isOwnReply(node, state.viewer);
 
+  const known = state.lastKnownHeadSha;
+  const lagging =
+    pr.state === 'OPEN' &&
+    pr.headRefOid !== known &&
+    branchHead !== undefined &&
+    branchHead === known;
   const events: SnapshotEvent[] = [];
   const truncated: string[] = [];
   const base = {
-    headSha: pr.headRefOid,
+    headSha: lagging ? known : pr.headRefOid,
     isDraft: pr.isDraft,
     url: pr.url,
   };
@@ -582,20 +605,24 @@ export function buildSnapshot(pr: PrData, state: AutofixPrState): Snapshot {
   }
 
   const movedExternally =
-    pr.headRefOid !== state.lastKnownHeadSha &&
-    !state.pushedShas.includes(pr.headRefOid);
+    !lagging &&
+    pr.headRefOid !== known &&
+    (branchHead !== undefined || !state.pushedShas.includes(pr.headRefOid));
   if (movedExternally) {
     events.push({ type: 'head_moved_externally', sha: pr.headRefOid });
   }
   // A conflict left for a human is not reported again on the same head.
   if (
+    !lagging &&
     pr.mergeable === 'CONFLICTING' &&
     state.handledConflictSha !== pr.headRefOid
   ) {
     events.push({ type: 'conflict' });
   }
 
-  const checks = checkEvents(pr);
+  const checks = lagging
+    ? { failed: [], pending: [], truncated: false }
+    : checkEvents(pr);
   // A failure handled without a push (declined, left for a human, re-run)
   // stays on the head, so it is skipped by its attempt; a re-run that fails
   // again is a new attempt. `key` is what `reply` and `rerun` record.
@@ -618,7 +645,13 @@ export function buildSnapshot(pr: PrData, state: AutofixPrState): Snapshot {
     : events.some(isActionable)
       ? 'fix'
       : 'wait';
-  return { ...base, action, events, truncated };
+  return {
+    ...base,
+    action,
+    events,
+    truncated,
+    ...(lagging ? { lagging: true as const } : {}),
+  };
 }
 
 /**
@@ -1099,7 +1132,19 @@ export function runSnapshot(args: SnapshotArgs): void {
   assertOwnedBySession(state);
   setGhHost(state.host);
   ensureAuthenticated();
-  writeStdoutLine(JSON.stringify(buildSnapshot(fetchPrData(state).pr, state)));
+  const { pr } = fetchPrData(state);
+  // Asked only when the API disagrees with the watch: whether the branch
+  // moved, or the API has yet to see the head `sync` or `push` recorded.
+  let branchHead: string | null | undefined;
+  if (pr.state === 'OPEN' && pr.headRefOid !== state.lastKnownHeadSha) {
+    const line = gitOpt(
+      'ls-remote',
+      state.pushTarget,
+      `refs/heads/${state.headRefName}`,
+    );
+    branchHead = line === null ? undefined : line.split(/\s/)[0] || null;
+  }
+  writeStdoutLine(JSON.stringify(buildSnapshot(pr, state, branchHead)));
 }
 
 export const snapshotCommand: CommandModule = {

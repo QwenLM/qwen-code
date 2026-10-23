@@ -33,8 +33,12 @@ import {
   requireWorktree,
 } from './worktree.js';
 
-/** Pre-push hooks may run a test suite; the 2-minute git default is short. */
-const PUSH_TIMEOUT_MS = 10 * 60_000;
+/**
+ * Pre-push hooks may run a test suite; the 2-minute git default is short.
+ * Nine minutes ends the push inside the shell tool's longest timeout (ten),
+ * so the helper still records what happened.
+ */
+const PUSH_TIMEOUT_MS = 9 * 60_000;
 
 interface LivePr {
   state: 'OPEN' | 'CLOSED' | 'MERGED';
@@ -118,6 +122,19 @@ export function remoteHeadMoved(
   headRef: string,
   known: string,
 ): boolean {
+  const remote = remoteHead(worktreePath, target, headRef);
+  return remote !== undefined && remote !== known;
+}
+
+/**
+ * The branch's commit on the remote: `null` when the branch is gone,
+ * `undefined` when the remote could not be asked.
+ */
+function remoteHead(
+  worktreePath: string,
+  target: string,
+  headRef: string,
+): string | null | undefined {
   const line = gitOpt(
     '-C',
     worktreePath,
@@ -125,8 +142,8 @@ export function remoteHeadMoved(
     target,
     `refs/heads/${headRef}`,
   );
-  if (line === null) return false;
-  return (line.split(/\s/)[0] ?? '') !== known;
+  if (line === null) return undefined;
+  return line.split(/\s/)[0] || null;
 }
 
 function pushRef(
@@ -242,7 +259,12 @@ function pushLocked(paths: AutofixPrPaths, prNumber: number): PushOutcome {
     state.headRefName,
     known,
   );
-  if (!result.ok) {
+  // A push whose answer was lost (the connection dropped after the remote
+  // took it) is a push: the remote already holds the commit.
+  const landed =
+    !result.ok &&
+    remoteHead(worktree, state.pushTarget, state.headRefName) === head;
+  if (!result.ok && !landed) {
     // The porcelain summary is one witness; asking the remote is the other,
     // and does not depend on the language git prints in.
     if (

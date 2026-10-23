@@ -69,7 +69,7 @@ import {
   runPrepare,
   type PrView,
 } from './prepare.js';
-import { autofixPrPaths, readState, writeState } from './state.js';
+import { autofixPrPaths, historyPath, readState, writeState } from './state.js';
 
 function prView(overrides: Partial<PrView> = {}): PrView {
   return {
@@ -482,7 +482,12 @@ describe('runPrepare (real git)', () => {
 
   it('starts a new watch from what earlier watches of the PR posted and handled', () => {
     const paths = autofixPrPaths(clone, 7);
-    mkdirSync(dirname(paths.historyPath), { recursive: true });
+    mkdirSync(
+      dirname(
+        historyPath(paths, { host: 'github.com', owner: 'o', repo: 'r' }),
+      ),
+      { recursive: true },
+    );
     const history = {
       version: 1,
       host: 'github.com',
@@ -493,14 +498,19 @@ describe('runPrepare (real git)', () => {
       postedCommentIds: ['P1'],
       handledChecks: [`Test@${headSha}@#5`],
       rerunChecks: [`run:1:2:push:Test@${headSha}`],
+      handledConflictSha: headSha,
     };
-    writeFileSync(paths.historyPath, JSON.stringify(history));
+    writeFileSync(
+      historyPath(paths, { host: 'github.com', owner: 'o', repo: 'r' }),
+      JSON.stringify(history),
+    );
     runPrepare({ pr: 7, repo: 'o/r' });
     expect(readState(paths.statePath)).toMatchObject({
       handledCommentIds: ['C1'],
       postedCommentIds: ['P1'],
       handledChecks: history.handledChecks,
       rerunChecks: history.rerunChecks,
+      handledConflictSha: headSha,
     });
     // Not another repository's PR of the same number.
     execFileSync('git', ['worktree', 'remove', '--force', paths.worktreePath], {
@@ -509,7 +519,7 @@ describe('runPrepare (real git)', () => {
     execFileSync('git', ['branch', '-D', paths.branch], { cwd: clone });
     rmSync(paths.statePath);
     writeFileSync(
-      paths.historyPath,
+      historyPath(paths, { host: 'github.com', owner: 'o', repo: 'r' }),
       JSON.stringify({ ...history, owner: 'elsewhere' }),
     );
     runPrepare({ pr: 7, repo: 'o/r' });

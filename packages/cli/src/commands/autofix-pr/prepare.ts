@@ -28,6 +28,7 @@ import {
   assertOwnedBySession,
   autofixPrPaths,
   currentSessionId,
+  historyPath,
   readHistory,
   readState,
   repoRoot,
@@ -316,7 +317,7 @@ export function runPrepare(args: PrepareArgs): void {
 
   let history: AutofixPrHistory | null = null;
   try {
-    history = readHistory(paths.historyPath);
+    history = readHistory(historyPath(paths, { host, owner, repo: repoName }));
   } catch {
     // An unreadable history is ignored; cleanup replaces it.
   }
@@ -352,6 +353,7 @@ export function runPrepare(args: PrepareArgs): void {
       ? {
           handledChecks: history.handledChecks,
           rerunChecks: history.rerunChecks,
+          handledConflictSha: history.handledConflictSha ?? null,
         }
       : {}),
     ...(existing
