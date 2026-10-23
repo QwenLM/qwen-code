@@ -181,6 +181,13 @@ Each such Session holds a remote worker that runs no tool calls until its TTL
 expires. Workspace-backed remote tools require the extension described in the
 design; do not enable this provisioner for production tool use yet.
 
+Placement retry state is bounded at 1024 retained seeds per Broker process and is
+never evicted: a provider-conflict outcome frees its own entry, but a merely
+idle or closed Session keeps holding one, and at capacity new seeds fail with the
+retryable `runtime_external_capacity`. Plan a Broker restart or a capacity change
+before that many distinct Sessions, and budget provider-side resource retention
+separately.
+
 ## Experimental Kubernetes scratch Runtime
 
 `KubernetesRuntimeProvisioner` implements the K1 slice of the
