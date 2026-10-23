@@ -40,6 +40,7 @@ import {
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import type {
   CommittedExtensionOperation,
+  LocalManagedSessionAuthority,
   ManagedSessionActor,
   ManagedSessionCommand,
   ManagedSessionInputRequest,
@@ -66,6 +67,7 @@ import { wakeHasPriorAttempt } from './hosted-monitor-wake.js';
 export interface HostedAutomationStore {
   readonly authority: {
     readonly committedSequence: number;
+    appendExecutionEvent: LocalManagedSessionAuthority['appendExecutionEvent'];
     eventsInSequenceRange(
       from: number,
       to: number,
@@ -241,6 +243,63 @@ export class HostedAutomationSession {
       automationRunId,
     );
     return existing ? parseAutomationRunRecord(existing.record) : undefined;
+  }
+
+  cancelRequested(turnId: string): boolean {
+    return this.store.authority
+      .eventsInSequenceRange(1, this.store.authority.committedSequence)
+      .some(
+        (event) =>
+          event.kind === 'cancel.requested' &&
+          (event.payload['target'] as { turnId?: unknown } | undefined)
+            ?.turnId === turnId,
+      );
+  }
+
+  requestCancel(runId: string): Promise<AutomationRun> {
+    return this.serial(async () => {
+      const turnId = automationInputId(runId);
+      await this.settleRunUnserialized(turnId);
+      const run = this.run(runId);
+      if (run === undefined) throw new AutomationNotFoundError(runId);
+      if (isTerminalRunState(run.run.state)) return run;
+      if (run.run.execution === 'intent') {
+        const cancelled = automationRunSettleBody(run, 'cancelled', false);
+        await this.commitRun(
+          cancelled,
+          this.revisionOf(runId) + 1,
+          'settleRun',
+        );
+        return cancelled;
+      }
+      if (!this.cancelRequested(turnId)) {
+        const commandId = `automation-cancel:${runId}`;
+        await this.store.authority.appendExecutionEvent(
+          {
+            operation: 'requestCancel',
+            commandId,
+            contentDigest: digest(turnId),
+            sessionKey: this.key,
+          },
+          (sequence) => ({
+            v: 1,
+            sequence,
+            eventId: commandId,
+            sessionKey: this.key,
+            kind: 'cancel.requested',
+            occurredAt: Date.now(),
+            payload: {
+              requestId: commandId,
+              target: { turnId },
+              reason: 'user',
+              requestedBy: 'hosted',
+            },
+          }),
+          TRUSTED,
+        );
+      }
+      return run;
+    });
   }
 
   runs(): AutomationRun[] {

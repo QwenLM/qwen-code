@@ -46,7 +46,25 @@ describe('Hosted Harness private contract', () => {
       lifecycleProtocolVersion: 1,
       lifecycleV2Profiles: [],
       titleProtocolVersion: 1,
-      features: ['hosted_approval_resume_v1', 'hosted_model_round_recovery_v1'],
+      features: [
+        'hosted_approval_resume_v1',
+        'hosted_model_round_recovery_v1',
+        'model-selection/1',
+        'context-compression/1',
+        'public-child-agents/1',
+        'approval-selection/1',
+        'live-approval-selection/1',
+        'agent-definition-approval-selection/1',
+        'plan-mode/1',
+        'input-attachments/1',
+        'session-skills/1',
+        'session-skills/2',
+        'workspace-shell-mcp/1',
+        'session-mcp-management/1',
+        'recovery-cleanup/1',
+        'targeted-cancel/1',
+        'event-keepalive/1',
+      ],
     });
     expect(Object.isFrozen(contract)).toBe(true);
     expect(Object.isFrozen(contract.protocolVersions)).toBe(true);

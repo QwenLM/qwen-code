@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ModRuntime } from './runtime.js';
 import type { ModLog, ModOptions } from './types.js';
+import type { ModToolNext } from './tool-events.js';
 
 const signal = () => new AbortController().signal;
 const fixture = (
@@ -46,6 +47,23 @@ describe('ModRuntime with the real QuickJS worker', () => {
     runtimes.push(runtime);
     return runtime;
   };
+  const createTerminal = async (sources = [fixture()]) => {
+    const runtime = await ModRuntime.createGroup(
+      sources.map((source, index) => ({
+        id: `mod-${index}`,
+        name: `mod-${index}`,
+        source: { root: '/fixture', entry: '/fixture/mod.js', source },
+        options: {},
+      })),
+      '/workspace',
+      (log) => logs.push(log),
+      signal(),
+      undefined,
+      'terminal',
+    );
+    runtimes.push(runtime);
+    return runtime;
+  };
 
   afterEach(async () => {
     await Promise.all(runtimes.splice(0).map((runtime) => runtime.dispose()));
@@ -69,6 +87,176 @@ describe('ModRuntime with the real QuickJS worker', () => {
       'end:clear:old:old',
       'end:other:new:new',
     ]);
+  });
+
+  it('uses terminal identity and current presentation while allowing argument middleware', async () => {
+    const runtime = await createTerminal([
+      `export function register(on) {
+        on('command.run', ($, e, next) => next({...e, args:'changed:' + e.args}));
+      }`,
+      fixture('return {text: JSON.stringify(e)};'),
+    ]);
+    expect(logs).toEqual([
+      { to: 'transcript', text: 'start:hello:terminal:true' },
+    ]);
+    for (const presentation of [
+      { isFullscreen: false, columns: 81 },
+      { isFullscreen: true, columns: 144 },
+    ]) {
+      expect(
+        JSON.parse(
+          await runtime.runCommand('hello', 'input', signal(), presentation),
+        ),
+      ).toEqual({
+        command: 'hello',
+        args: 'changed:input',
+        origin: { kind: 'composer' },
+        presentation,
+      });
+    }
+    await runtime.end('old', 'clear', signal());
+    expect(
+      await runtime.runCommand('hello', 'after-clear', signal()),
+    ).toContain('changed:after-clear');
+    expect(logs.filter((log) => log.text.startsWith('start:'))).toHaveLength(1);
+  });
+
+  it('preserves headless identity and presentation defaults', async () => {
+    const runtime = await create(fixture('return {text: JSON.stringify(e)};'));
+    expect(
+      JSON.parse(
+        await runtime.runCommand('hello', 'headless', signal(), {
+          isFullscreen: true,
+          columns: 144,
+        }),
+      ),
+    ).toEqual({
+      command: 'hello',
+      args: 'headless',
+      origin: { kind: 'sdk' },
+      presentation: { isFullscreen: false, columns: 80 },
+    });
+    expect(logs).toEqual([
+      { to: 'transcript', text: 'start:hello:null:false' },
+    ]);
+  });
+
+  it.each(['surface:null', 'isInteractive:false'])(
+    'pins terminal startup identity: %s',
+    async (change) => {
+      const runtime = await createTerminal([
+        `export function register(on) {
+          on('session.start', ($, e, next) => next({...e, ${change}}));
+        }`,
+        fixture(),
+      ]);
+      expect(logs).toContainEqual({
+        to: 'debug',
+        text: expect.stringContaining('pinned event fields'),
+      });
+      expect(logs).toContainEqual({
+        to: 'transcript',
+        text: 'start:hello:terminal:true',
+      });
+      expect(await runtime.runCommand('hello', '', signal())).toBe('1:');
+    },
+  );
+
+  it.each([
+    "origin:{kind:'sdk'}",
+    'presentation:{isFullscreen:false,columns:80}',
+  ])('pins terminal command identity and presentation: %s', async (change) => {
+    const runtime = await createTerminal([
+      `export function register(on) {
+        on('command.run', ($, e, next) => next({...e, ${change}}));
+      }`,
+      fixture('return {text: JSON.stringify(e)};'),
+    ]);
+    expect(
+      JSON.parse(
+        await runtime.runCommand('hello', '', signal(), {
+          isFullscreen: true,
+          columns: 144,
+        }),
+      ),
+    ).toEqual({
+      command: 'hello',
+      args: '',
+      origin: { kind: 'composer' },
+      presentation: { isFullscreen: true, columns: 144 },
+    });
+    expect(logs).toContainEqual({
+      to: 'debug',
+      text: expect.stringContaining('pinned event fields'),
+    });
+  });
+
+  it.each([
+    'tool.call',
+    'tool.check',
+    'tool.*',
+    '*',
+    '!session.*',
+    '!tool.call',
+  ])(
+    'dispatches terminal %s subscriptions through the real worker',
+    async (pattern) => {
+      const runtime = await createTerminal([
+        `export function register(on) {
+          on('${pattern}', ($, e, next) => {
+            $.ui.log('observed:' + ('input' in e ? 'check' : 'call'));
+            return next(e);
+          });
+        }`,
+        fixture(),
+      ]);
+      expect(runtime.hasToolHooks).toBe(true);
+      expect(logs.map((log) => log.text).join('\n')).not.toContain(
+        'not supported',
+      );
+      logs.length = 0;
+      const next = vi.fn<ModToolNext>(async (changed, active, check) => ({
+        result: await check(
+          {
+            tool: changed.tool,
+            input: { path: changed['path'] },
+            tool_use_id: changed.tool_use_id,
+          },
+          { decision: 'allow' },
+          active,
+        ),
+      }));
+      await expect(
+        runtime.runTool(
+          { tool: 'write_file', tool_use_id: 'call-1', path: '/unused' },
+          next,
+          signal(),
+        ),
+      ).resolves.toEqual({ result: { decision: 'allow' } });
+      expect(next).toHaveBeenCalledOnce();
+      const events = logs.map((log) => log.text);
+      expect(events.includes('observed:call')).toBe(
+        pattern !== 'tool.check' && pattern !== '!tool.call',
+      );
+      // The registration handling tool.call is an ancestor of its nested check.
+      expect(events.includes('observed:check')).toBe(
+        pattern === 'tool.check' || pattern === '!tool.call',
+      );
+    },
+  );
+
+  it('does not warn for terminal patterns that exclude tool events', async () => {
+    const runtime = await createTerminal([
+      `export function register(on) {
+        on('!tool.*', ($, e, next) => next(e));
+      }`,
+      fixture(),
+    ]);
+    expect(runtime.hasToolHooks).toBe(false);
+    expect(logs).toEqual([
+      { to: 'transcript', text: 'start:hello:terminal:true' },
+    ]);
+    expect(await runtime.runCommand('hello', '', signal())).toBe('1:');
   });
 
   it('isolates globals and state between plugins without Node capabilities', async () => {
@@ -134,6 +322,124 @@ describe('ModRuntime with the real QuickJS worker', () => {
     expect(await runtime.runCommand('hello', '', signal())).toBe('');
   });
 
+  it('skips hooks for known Claude Code events it does not run and reports them once', async () => {
+    const runtime = await create(`export function register(on) {
+      on('prompt.edit', ($, e, next) => next(e));
+      on('prompt.edit', {key:'enter'}, ($, e, next) => next(e)).catch(() => ({}));
+      on('prompt.*', ($, e, next) => next(e));
+      on('!prompt.change', async ($, e, next) => {
+        if (e.command === 'hello') $.ui.log('negated:' + next.event);
+        return next(e);
+      });
+      on('classic.Stop', ($, e, next) => next(e));
+      on('ui.render', {component:'Spinner'}, ($, e, next) => next(e));
+      on('session.start', async ($, e, next) => {
+        await $.command.register({name:'hello',description:'Hello'});
+        return next(e);
+      });
+      on('command.run', {command:'hello'}, () => ({text:'still works'}));
+    }`);
+    expect(logs).toEqual([
+      {
+        to: 'transcript',
+        text: 'Hooks for unsupported events will not run: classic.Stop, prompt.*, prompt.edit, ui.render',
+      },
+    ]);
+    expect(await runtime.runCommand('hello', '', signal())).toBe('still works');
+    expect(logs.at(-1)).toEqual({
+      to: 'transcript',
+      text: 'negated:command.run',
+    });
+  });
+
+  it('fails initialization for skipped hooks when the plugin opts in', async () => {
+    await expect(
+      ModRuntime.createGroup(
+        [
+          {
+            id: 'strict',
+            name: 'strict',
+            options: {},
+            unsupportedEvents: 'reject',
+            source: {
+              root: '/fixture',
+              entry: '/fixture/mod.js',
+              source: `export function register(on) {
+                on('turn.start', ($, e, next) => next(e));
+                on('prompt.submit', ($, e, next) => next(e));
+                on('session.start', ($, e, next) => next(e));
+              }`,
+            },
+          },
+        ],
+        '/workspace',
+        (log) => logs.push(log),
+        signal(),
+      ),
+    ).rejects.toThrow(
+      'Mod strict: Mod events not supported: prompt.submit, turn.start',
+    );
+    expect(logs).toEqual([]);
+  });
+
+  it('answers $.session.version through the API middleware chain', async () => {
+    const versionFixture = fixture(
+      'return {text: JSON.stringify(await $.session.version())};',
+    );
+    const runtime = await ModRuntime.createGroup(
+      [
+        `export function register(on) {
+          on('session.version', async ($, e, next) => {
+            const answer = await next(e);
+            if (next.origin.plugin !== 'mod-1') throw new Error('origin');
+            return {value: {...answer.value, version: answer.value.version + '+wrapped'}};
+          });
+        }`,
+        versionFixture,
+      ].map((source, index) => ({
+        id: `mod-${index}`,
+        name: `mod-${index}`,
+        source: { root: '/fixture', entry: '/fixture/mod.js', source },
+        options: {},
+      })),
+      '/workspace',
+      (log) => logs.push(log),
+      signal(),
+      undefined,
+      null,
+      '1.2.3',
+    );
+    runtimes.push(runtime);
+    expect(JSON.parse(await runtime.runCommand('hello', '', signal()))).toEqual(
+      {
+        version: '1.2.3+wrapped',
+        qwen: {
+          claudeCode: '2.1.308',
+          events: [
+            'command.register',
+            'command.run',
+            'session.end',
+            'session.start',
+            'session.version',
+            'tool.call',
+            'tool.check',
+            'ui.log',
+          ],
+          methods: ['command.register', 'session.version', 'ui.log'],
+        },
+      },
+    );
+    const denied = await createTerminal([
+      `export function register(on) {
+        on('session.version', () => ({deny: 'hidden'}));
+      }`,
+      fixture(
+        'try { await $.session.version(); return {text:"answered"}; } catch (error) { return {text:String(error)}; }',
+      ),
+    ]);
+    expect(await denied.runCommand('hello', '', signal())).toContain('hidden');
+  });
+
   it.each([
     ['missing export', 'export const other = 1;', /export register/],
     [
@@ -145,6 +451,26 @@ describe('ModRuntime with the real QuickJS worker', () => {
       'unknown event',
       "export function register(on) { on('model.request', () => ({})); }",
       /event not supported/,
+    ],
+    [
+      'misspelled event',
+      "export function register(on) { on('tool.calls', () => ({})); }",
+      /event not supported: tool\.calls/,
+    ],
+    [
+      'unknown namespace',
+      "export function register(on) { on('models.*', () => ({})); }",
+      /event not supported: models\.\*/,
+    ],
+    [
+      'unknown classic event',
+      "export function register(on) { on('classic.BeforeRun', () => ({})); }",
+      /event not supported: classic\.BeforeRun/,
+    ],
+    [
+      'negated unknown event',
+      "export function register(on) { on('!tool.calls', () => ({})); }",
+      /event not supported: !tool\.calls/,
     ],
   ])(
     'rejects %s without leaving a usable failed runtime',

@@ -167,10 +167,10 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('emits scope:"global" on the system text when useGlobalCacheScope is set', () => {
-      // Anthropic-native + caching enabled → the generator passes
-      // `useGlobalCacheScope: true` and the system prefix joins cross-session
-      // caching under the `prompt-caching-scope-2026-01-05` beta. Other
-      // backends pass false (or omit) and get the per-session shape above.
+      // Caching on plus an explicit `forceGlobalCacheScope` opt-in → the
+      // generator passes `useGlobalCacheScope: true`, and the system prefix
+      // joins cross-session caching under the scope beta. Without the opt-in
+      // every backend gets the per-session shape above.
       expect(systemOf('sys', { useGlobalCacheScope: true })).toEqual([
         txt('sys', GLOBAL),
       ]);
@@ -243,6 +243,31 @@ describe('AnthropicContentConverter', () => {
       expect(messages).toEqual([
         assistant(think('internal', 'sig'), txt('visible')),
       ]);
+    });
+
+    it('fills an empty signature for a thought part without thoughtSignature when fillUnsignedThinkingSignature is set', () => {
+      // Cross-provider history where the upstream generator set `thought:
+      // true` without a signature used to replay as a `thinking` block with
+      // no `signature` field at all, which strict Anthropic-compatible
+      // backends (SGLang, llama.cpp, vLLM) reject with HTTP 400. With the
+      // option on, it must replay as an empty signature instead.
+      // https://github.com/QwenLM/qwen-code/issues/11772
+      const { messages } = convert(
+        [content('model', thought('internal'), { text: 'visible' })],
+        { fillUnsignedThinkingSignature: true },
+      );
+      expect(messages).toEqual([
+        assistant(think('internal', ''), txt('visible')),
+      ]);
+    });
+
+    it('leaves a thought part without thoughtSignature unsigned when fillUnsignedThinkingSignature is off', () => {
+      // The fill is opt-in per provider quadrant; without the option the
+      // block keeps its original (unsigned) shape.
+      const { messages } = convert([
+        content('model', thought('internal'), { text: 'visible' }),
+      ]);
+      expect(messages).toEqual([assistant(think('internal'), txt('visible'))]);
     });
 
     it('converts functionCall parts from model role into tool_use blocks', () => {
@@ -1570,9 +1595,9 @@ describe('AnthropicContentConverter', () => {
 
     it('emits scope:"global" on the last tool when useGlobalCacheScope is set', async () => {
       // Mirror of the system-block scope test: cross-session caching for
-      // tools (the largest, slowest-changing prefix) only fires for
-      // Anthropic-native baseURLs. The generator latches the predicate
-      // once per request and forwards the same value here.
+      // tools (the largest, slowest-changing prefix) only fires under an
+      // explicit `forceGlobalCacheScope` opt-in. The generator latches the
+      // predicate once per request and forwards the same value here.
       const result = await converter.convertLlmToolsToAnthropic(
         toolsOf(weather()),
         { useGlobalCacheScope: true },
@@ -1909,8 +1934,8 @@ describe('AnthropicContentConverter', () => {
 
       it('honors useGlobalCacheScope independently of enableCacheControl source', async () => {
         // Cache on (per-call), scope off (per-call default): the emitted
-        // shape is per-session even though cache_control IS attached —
-        // non-Anthropic baseURL behavior in one call.
+        // shape is per-session even though cache_control IS attached — the
+        // default on every baseURL.
         const { system } = convert(
           'Hello',
           {

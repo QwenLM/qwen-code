@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -29,7 +30,6 @@ import {
   type ManagedSessionDurableRef,
 } from './managed-session-records.js';
 
-const enablement = vi.hoisted(() => ({ monitorRun: true }));
 const chainRules = vi.hoisted(() => ({ lenient: false }));
 
 // Lets a test write revisions that do not chain, as a log written under
@@ -51,30 +51,12 @@ vi.mock('./managed-extension-projection.js', async (importOriginal) => {
 });
 
 // monitor_run is enabled by H3's slice (#13856), so this suite commits
-// through the real gate. A test that needs the gate shut closes it per
-// test — never the other way around.
-vi.mock('./managed-session-records.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('./managed-session-records.js')>();
-  return {
-    ...actual,
-    assertManagedSessionDomainEnabled: (
-      domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
-    ) => {
-      if (domain === 'monitor_run' && !enablement.monitorRun) {
-        throw new actual.ManagedSessionRecordError(
-          'domain monitor_run is registered but not enabled for submission.',
-        );
-      }
-      actual.assertManagedSessionDomainEnabled(domain);
-    },
-  };
-});
+// through the real gate with no per-test switch — no registered domain
+// stays closed to refuse (#13930 R1-65).
 
 const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
-  enablement.monitorRun = true;
   chainRules.lenient = false;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
@@ -142,7 +124,10 @@ async function withAuthority<T>(
             createdBy: 'daemon',
           };
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',
@@ -1186,9 +1171,8 @@ describe('managed session authority Stage H records', () => {
     });
   });
 
-  it('refuses domains without a body and disabled domains', async () => {
+  it('refuses domains without a body', async () => {
     const harness = await createHarness();
-    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       // This suite's registry keeps only the monitor_run body, so the
       // schedule body H6a registered is out of scope here.
@@ -1199,14 +1183,6 @@ describe('managed session authority Stage H records', () => {
           TRUSTED,
         ),
       ).rejects.toThrow(/has no Stage H record body/);
-      enablement.monitorRun = false;
-      await expect(
-        authority.commitExtensionRecord(
-          command('monitor-1:1'),
-          { domain: 'monitor_run', record: life[0] },
-          TRUSTED,
-        ),
-      ).rejects.toThrow(/not enabled for submission/);
     });
   });
 
@@ -1497,36 +1473,6 @@ describe('managed session authority Stage H records', () => {
     ).rejects.toThrow(
       /session log is corrupt: command open-1 already opened monitor_run record monitor-1/,
     );
-  });
-
-  it('replays a committed command after its domain was disabled', async () => {
-    const harness = await createHarness();
-    const life = await monitorLife(harness);
-    await withAuthority(harness, async (authority) => {
-      const first = await authority.commitExtensionRecord(
-        command('monitor-1:1'),
-        { domain: 'monitor_run', record: life[0] },
-        TRUSTED,
-      );
-      enablement.monitorRun = false;
-      await expect(
-        authority.commitExtensionRecord(
-          command('monitor-1:1'),
-          { domain: 'monitor_run', record: life[0] },
-          TRUSTED,
-        ),
-      ).resolves.toMatchObject({
-        recordRef: first.recordRef,
-        receipt: { replayed: true },
-      });
-      await expect(
-        authority.commitExtensionRecord(
-          command('monitor-1:2'),
-          { domain: 'monitor_run', record: life[1] },
-          TRUSTED,
-        ),
-      ).rejects.toThrow(/not enabled for submission/);
-    });
   });
 });
 

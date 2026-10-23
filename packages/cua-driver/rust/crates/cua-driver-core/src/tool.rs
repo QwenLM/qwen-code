@@ -36,6 +36,27 @@ tokio::task_local! {
     /// Opaque generation for runtime-owned mutable resources. Nested
     /// dispatches inherit this key, while public arguments can never select it.
     static DISPATCH_RUNTIME_SCOPE: String;
+    static DISPATCH_COMPUTER_USE_NATIVE: bool;
+    static DISPATCH_AX_READINESS_DEADLINE: Option<std::time::Instant>;
+}
+
+#[doc(hidden)]
+pub const AX_READINESS_BUDGET: Duration = Duration::from_millis(500);
+
+// Read before spawn_blocking, then pass the value explicitly to native code.
+#[doc(hidden)]
+pub fn current_ax_readiness_deadline() -> Option<std::time::Instant> {
+    DISPATCH_AX_READINESS_DEADLINE
+        .try_with(|value| *value)
+        .ok()
+        .flatten()
+}
+
+#[doc(hidden)]
+pub fn computer_use_native_dispatch() -> bool {
+    DISPATCH_COMPUTER_USE_NATIVE
+        .try_with(|native| *native)
+        .unwrap_or(false)
 }
 
 /// Return the immutable authorization context bound to the current dispatch.
@@ -54,6 +75,48 @@ pub fn current_dispatch_runtime_scope() -> Option<String> {
         .try_with(Clone::clone)
         .ok()
         .or_else(|| CONSTRUCTION_RUNTIME_SCOPE.with(|scope| scope.borrow().clone()))
+}
+
+// Recording workers retain the dispatch that requested their read, even when
+// the caller times out before the native provider returns.
+pub(crate) struct CapturedDispatchContext {
+    runtime: Option<String>,
+    authorization: Option<Arc<crate::session_authorization::EffectiveAuthorizationContext>>,
+    evidence: Option<TrustedInvocationEvidence>,
+    native: Option<bool>,
+}
+
+impl CapturedDispatchContext {
+    pub(crate) fn capture() -> Self {
+        Self {
+            runtime: current_dispatch_runtime_scope(),
+            authorization: current_dispatch_authorization_context(),
+            evidence: DISPATCH_TRUSTED_INVOCATION_EVIDENCE
+                .try_with(Clone::clone)
+                .ok(),
+            native: DISPATCH_COMPUTER_USE_NATIVE.try_with(|value| *value).ok(),
+        }
+    }
+
+    pub(crate) fn run_sync<R>(self, action: impl FnOnce() -> R) -> R {
+        fn enter<T: 'static, R>(
+            key: &'static tokio::task::LocalKey<T>,
+            value: Option<T>,
+            action: impl FnOnce() -> R,
+        ) -> R {
+            match value {
+                Some(value) => key.sync_scope(value, action),
+                None => action(),
+            }
+        }
+        enter(&DISPATCH_RUNTIME_SCOPE, self.runtime, || {
+            enter(&DISPATCH_AUTHORIZATION_CONTEXT, self.authorization, || {
+                enter(&DISPATCH_TRUSTED_INVOCATION_EVIDENCE, self.evidence, || {
+                    enter(&DISPATCH_COMPUTER_USE_NATIVE, self.native, action)
+                })
+            })
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -245,6 +308,13 @@ impl ToolDef {
 
 fn advertised_runtime_input_schema(tool_name: &str, schema: &Value) -> Value {
     let mut schema = schema.clone();
+    cua_driver_contract::normalize_input_schema(&mut schema);
+    if tool_name == "set_config" {
+        if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+            properties.remove("key");
+            properties.remove("value");
+        }
+    }
     if !crate::action_target::supports_typed_target(tool_name) {
         return schema;
     }
@@ -598,6 +668,7 @@ impl TrustedInvocationEvidence {
 
 /// Thread-safe collection of all registered tools.
 pub struct ToolRegistry {
+    computer_use: Option<Arc<crate::computer_use::ComputerUseRuntime>>,
     tools: HashMap<String, Box<dyn Tool>>,
     /// Ordered list of tool names for `tools/list`.
     order: Vec<String>,
@@ -640,6 +711,7 @@ impl ToolRegistry {
         let weak_ownership = Arc::downgrade(&protected_resource_ownership);
         let session_end_hook =
             crate::session::register_scoped_session_end_hook(move |session_id| {
+                crate::element_token::global().clear_session(session_id);
                 if let Some(ownership) = weak_ownership.upgrade() {
                     ownership.remove_session(session_id);
                 }
@@ -668,6 +740,7 @@ impl ToolRegistry {
                 })
             }));
         Self {
+            computer_use: None,
             tools: HashMap::new(),
             order: Vec::new(),
             recording,
@@ -776,6 +849,27 @@ impl ToolRegistry {
         self.tools.insert(name, tool);
     }
 
+    pub fn enable_computer_use(&mut self) {
+        if self.computer_use.is_some() {
+            return;
+        }
+        let runtime = Arc::new(crate::computer_use::ComputerUseRuntime::default());
+        let weak = Arc::downgrade(&runtime);
+        self.retain_session_end_hook(crate::session::register_scoped_session_end_hook(
+            move |session| {
+                if let Some(runtime) = weak.upgrade() {
+                    runtime.clear_session(session);
+                }
+            },
+        ));
+        for spec in cua_driver_contract::computer_use::tools() {
+            if !self.tools.contains_key(spec.name) {
+                self.register(Box::new(crate::computer_use::Entry::new(spec)));
+            }
+        }
+        self.computer_use = Some(runtime);
+    }
+
     pub fn retain_session_end_hook(
         &mut self,
         registration: crate::session::SessionEndHookRegistration,
@@ -800,6 +894,25 @@ impl ToolRegistry {
     pub fn retain_runtime_cleanup(&mut self, cleanup: impl FnOnce() + Send + Sync + 'static) {
         self.runtime_cleanups
             .push(RuntimeCleanup(Some(Box::new(cleanup))));
+    }
+
+    pub(crate) async fn invoke_computer_use_native(&self, name: &str, args: Value) -> ToolResult {
+        self.invoke_computer_use_native_with_readiness(name, args, None)
+            .await
+    }
+
+    pub(crate) async fn invoke_computer_use_native_with_readiness(
+        &self,
+        name: &str,
+        args: Value,
+        deadline: Option<std::time::Instant>,
+    ) -> ToolResult {
+        DISPATCH_AX_READINESS_DEADLINE
+            .scope(
+                deadline,
+                DISPATCH_COMPUTER_USE_NATIVE.scope(true, Box::pin(self.invoke(name, args))),
+            )
+            .await
     }
 
     /// Register the four platform-independent recording/replay tools.
@@ -839,13 +952,52 @@ impl ToolRegistry {
     }
 
     pub fn tools_list(&self) -> Value {
-        let list: Vec<Value> = self
+        let mut list: Vec<Value> = self
             .order
             .iter()
             .filter(|name| crate::policy::is_tool_listable(name))
             .filter_map(|name| self.tools.get(name))
             .map(|tool| tool.def().to_list_entry())
             .collect();
+        if self.normalized_coordinates {
+            let mut native = serde_json::json!({"tools":list});
+            crate::coord_norm::rewrite_coord_desc(&mut native);
+            list = native["tools"].as_array().unwrap().clone();
+        }
+        if self.computer_use.is_some() {
+            let extra = std::env::var("CUA_DRIVER_EXTRA_TOOLS").as_deref() == Ok("1");
+            let mut entries = Vec::new();
+            for spec in cua_driver_contract::computer_use::tools() {
+                if !crate::policy::is_tool_listable(spec.name) {
+                    continue;
+                }
+                let mut schema = spec.input_schema.clone();
+                if extra {
+                    if let Some(native) = list.iter().find(|tool| tool["name"] == spec.name) {
+                        schema = serde_json::json!({"type":"object","anyOf":[schema,native["inputSchema"]]});
+                    }
+                }
+                let risk_tool = match spec.name {
+                    "get_app" => "get_window_state",
+                    "get_state" => "list_apps",
+                    "get_ax_state" | "get_screenshot" | "get_ax_state_and_screenshot" => {
+                        "get_window_state"
+                    }
+                    _ => spec.name,
+                };
+                entries.push(serde_json::json!({
+                    "name":spec.name,"description":spec.description,"inputSchema":schema,
+                    "annotations":{"readOnlyHint":spec.read_only,"destructiveHint":false,"idempotentHint":spec.read_only,"openWorldHint":!spec.read_only},
+                    "capabilities":default_capabilities_for(risk_tool),
+                    "risk":crate::authorization::risk_metadata_json(risk_tool),
+                }));
+            }
+            if extra {
+                list.retain(|entry| !entries.iter().any(|app| app["name"] == entry["name"]));
+                entries.extend(list);
+            }
+            list = entries;
+        }
         // `capability_version` is the contract version for the
         // capability tokens claimed by each tool entry. Bumped on
         // BREAKING vocabulary changes only; additive changes (new
@@ -860,16 +1012,13 @@ impl ToolRegistry {
         //
         // Both fields are additive: existing consumers that read only
         // `tools` keep working unchanged.
-        let mut result = serde_json::json!({
+        let result = serde_json::json!({
             "tools": list,
             "platform": std::env::consts::OS,
             "capability_version": CAPABILITY_VERSION,
             "schema_version": TOOLS_LIST_SCHEMA_VERSION,
             "enforcement_adapters": crate::authorization::enforcement_adapter_inventory_json(),
         });
-        if self.normalized_coordinates {
-            crate::coord_norm::rewrite_coord_desc(&mut result);
-        }
         result
     }
 
@@ -1071,6 +1220,16 @@ impl ToolRegistry {
             );
         }
 
+        if let Some(runtime) = &self.computer_use {
+            if !DISPATCH_COMPUTER_USE_NATIVE
+                .try_with(|native| *native)
+                .unwrap_or(false)
+                && cua_driver_contract::computer_use::is_app_call(name, &args)
+            {
+                return runtime.invoke(self, name, args).await;
+            }
+        }
+
         // Deprecated alias: `type_text_chars` → `type_text`.  Swift's
         // ToolRegistry.swift keeps the same alias (with stderr warning) for
         // backwards compatibility with hermes-agent builds that still emit
@@ -1134,8 +1293,13 @@ impl ToolRegistry {
             .and_then(Value::as_str)
             .map(str::to_owned);
         if let Some(session) = runtime_session.as_deref() {
+            let owner = args
+                .get("_transport_session_id")
+                .and_then(Value::as_str)
+                .unwrap_or(session);
             if !matches!(resolved_name, "start_session" | "end_session")
                 && crate::session::is_session_ended(session)
+                && !crate::session::recreates_on_next_call(session, owner)
             {
                 let mut result = protected_refusal(
                     "session_ended",
@@ -1149,7 +1313,7 @@ impl ToolRegistry {
         // Convert only the private dispatch copy. Authorization, consent,
         // manifests, recordings, and replay continue to use the caller's
         // normalized arguments, while platform workers receive pixels.
-        if self.normalized_coordinates {
+        if self.normalized_coordinates && !computer_use_native_dispatch() {
             let pid = args.opt_i64("pid").unwrap_or(0);
             let window_id = args.opt_u64("window_id").unwrap_or(0);
             let (width, height) = crate::coord_norm::get_size(pid, window_id).unwrap_or((0, 0));
@@ -1166,8 +1330,9 @@ impl ToolRegistry {
         // rejected action has no before/after evidence and must not leave a
         // pending recorder entry behind.
         if let Err(violation) = crate::capture_scope::enforce_tool(resolved_name, &args) {
-            let structured =
+            let mut structured =
                 violation.as_json(args.get("session").and_then(Value::as_str).unwrap_or(""));
+            structured["sent"] = serde_json::json!(false);
             let mut result = ToolResult::error(violation.message).with_structured(structured);
             restore_public_runtime_result(&mut result, &runtime_prefix);
             return result;
@@ -1523,7 +1688,12 @@ impl ToolRegistry {
         let should_record = !tool.def().read_only
             && !matches!(
                 resolved_name,
-                "start_recording" | "stop_recording" | "get_recording_state" | "replay_trajectory"
+                "start_recording"
+                    | "stop_recording"
+                    | "get_recording_state"
+                    | "replay_trajectory"
+                    | "start_session"
+                    | "end_session"
             );
         let private_consent_turn = is_existing_profile_prepare(resolved_name, &args);
         let _desktop_action = if is_physical_desktop_action(resolved_name) {
@@ -1540,14 +1710,27 @@ impl ToolRegistry {
         } else {
             None
         };
+        if is_physical_desktop_action(resolved_name) {
+            if let Err(result) = crate::desktop_keyboard::admit_input(resolved_name, &args) {
+                return result;
+            }
+        }
         let pending_turn = should_record
             .then(|| {
+                let caller = crate::recording::RecordingCaller {
+                    session: runtime_session.as_deref(),
+                    transport: args.get("_transport_session_id").and_then(Value::as_str),
+                };
                 if private_consent_turn {
-                    self.recording
-                        .begin_private_turn(resolved_name, &recording_args, start_ms)
+                    self.recording.begin_private_turn(
+                        resolved_name,
+                        &recording_args,
+                        start_ms,
+                        caller,
+                    )
                 } else {
                     self.recording
-                        .begin_turn(resolved_name, &recording_args, start_ms)
+                        .begin_turn(resolved_name, &recording_args, start_ms, caller)
                 }
             })
             .flatten();
@@ -1558,7 +1741,9 @@ impl ToolRegistry {
             crate::coord_norm::ingest_window_size(resolved_name, &args, &result);
             crate::coord_norm::ingest_screen_size(resolved_name, &result);
             crate::coord_norm::ingest_zoom_size(resolved_name, &args, &result);
-            crate::coord_norm::normalize_result(resolved_name, &mut result);
+            if !computer_use_native_dispatch() {
+                crate::coord_norm::normalize_result(resolved_name, &mut result);
+            }
         }
         // The platform worker has exited, so another text operation for this
         // pid may now start even while result projection and evidence capture
@@ -1858,7 +2043,7 @@ impl ToolRegistry {
             // checked against its approved manifest.
             return Ok(());
         }
-        let delivery_mode = if tool_name == "bring_to_front" {
+        let delivery_mode = if tool_name == "bring_to_front" || args["scope"] == "desktop" {
             "foreground"
         } else {
             args.get("delivery_mode")
@@ -2445,7 +2630,12 @@ fn canonical_existing_file(raw: &str) -> Result<String, ToolResult> {
 /// The deepest existing ancestor is canonicalized first, so symlinked parents
 /// are captured in the approved identity. Only normal path components may be
 /// appended after that ancestor; lexical parent traversal never enters a
-/// protected-resource digest.
+/// protected-resource digest. The caller replaces the raw argument with this
+/// canonical path, so the tool writes exactly the approved location.
+///
+/// A deepest existing ancestor that is itself a symbolic link to a directory
+/// (macOS `/tmp` -> `/private/tmp`) is resolved like any other symlinked
+/// parent. A link to a non-directory is refused.
 fn canonical_proposed_path(raw: &str) -> Result<String, ToolResult> {
     let path = expanded_path(raw)?;
     if path.exists() {
@@ -2469,6 +2659,11 @@ fn canonical_proposed_path(raw: &str) -> Result<String, ToolResult> {
                 ))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {
+                return Err(protected_scope_refusal(
+                    "an ancestor of the output path is not a directory",
+                ))
+            }
             Err(_) => {
                 return Err(protected_scope_refusal(
                     "the output path could not be inspected safely",
@@ -2483,11 +2678,13 @@ fn canonical_proposed_path(raw: &str) -> Result<String, ToolResult> {
             .parent()
             .ok_or_else(|| protected_scope_refusal("the output path has no existing ancestor"))?;
     }
-    let metadata = std::fs::symlink_metadata(existing)
+    // Follow a symlinked ancestor: `exists()` above already resolved it, and
+    // `canonicalize` below records its target in the approved identity.
+    let metadata = std::fs::metadata(existing)
         .map_err(|_| protected_scope_refusal("the output ancestor is unavailable"))?;
     if !metadata.is_dir() {
         return Err(protected_scope_refusal(
-            "the output path's existing ancestor is not a directory",
+            "the output path's deepest existing ancestor is not a directory",
         ));
     }
     let mut canonical = std::fs::canonicalize(existing)
@@ -2523,6 +2720,8 @@ fn is_physical_desktop_action(tool: &str) -> bool {
             | "mouse_button_up"
             | "type_text"
             | "press_key"
+            | "key_down"
+            | "key_up"
             | "hotkey"
             | "set_value"
             | "paste"
@@ -2732,6 +2931,37 @@ fn restore_public_runtime_value(value: &mut Value, runtime_prefix: &str) -> bool
 
 #[cfg(test)]
 mod runtime_isolation_tests {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn readiness_deadline_follows_the_task_and_is_explicitly_captured_for_workers() {
+        let first = std::time::Instant::now();
+        let second = first + std::time::Duration::from_secs(1);
+        let run = |deadline| {
+            tokio::spawn(async move {
+                super::DISPATCH_AX_READINESS_DEADLINE
+                    .scope(Some(deadline), async move {
+                        tokio::task::yield_now().await;
+                        assert_eq!(super::current_ax_readiness_deadline(), Some(deadline));
+                        let captured = super::current_ax_readiness_deadline();
+                        let worker = tokio::task::spawn_blocking(move || {
+                            assert!(super::current_ax_readiness_deadline().is_none());
+                            captured
+                        })
+                        .await
+                        .unwrap();
+                        assert_eq!(worker, Some(deadline));
+                        tokio::task::yield_now().await;
+                        assert_eq!(super::current_ax_readiness_deadline(), Some(deadline));
+                    })
+                    .await;
+                assert!(super::current_ax_readiness_deadline().is_none());
+            })
+        };
+        let (a, b) = tokio::join!(run(first), run(second));
+        a.unwrap();
+        b.unwrap();
+        assert!(super::current_ax_readiness_deadline().is_none());
+    }
+
     use super::{
         canonical_proposed_path, desktop_action_coordinator, namespace_runtime_args,
         publish_action_result, restore_public_runtime_result, try_admit_text_input,
@@ -2761,6 +2991,74 @@ mod runtime_isolation_tests {
         SessionAuthorizationRegistry::with_ceiling(ceiling)
             .compatibility_context(PermissionMode::Standard, None)
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn captured_dispatch_context_preserves_task_scope_and_restores_worker_scope() {
+        let auth = standard_context();
+        let evidence = TrustedInvocationEvidence {
+            session_id: Some("session-a".into()),
+            transport_session_id: Some("transport-a".into()),
+            ..Default::default()
+        };
+        DISPATCH_RUNTIME_SCOPE.scope("runtime-a".into(), async {
+            super::DISPATCH_AUTHORIZATION_CONTEXT.scope(auth.clone(), async {
+                super::DISPATCH_TRUSTED_INVOCATION_EVIDENCE.scope(evidence, async {
+                    super::DISPATCH_COMPUTER_USE_NATIVE.scope(true, async {
+                        let context = super::with_runtime_scope("construction-fallback".into(), || {
+                            super::CapturedDispatchContext::capture()
+                        });
+                        let worker_auth = auth.clone();
+                        std::thread::spawn(move || {
+                            super::with_runtime_scope("worker-fallback".into(), || {
+                                DISPATCH_RUNTIME_SCOPE.sync_scope("worker-runtime".into(), || {
+                                    context.run_sync(|| {
+                                        assert_eq!(super::current_dispatch_runtime_scope().as_deref(), Some("runtime-a"));
+                                        assert!(Arc::ptr_eq(&super::current_dispatch_authorization_context().unwrap(), &worker_auth));
+                                        assert!(super::computer_use_native_dispatch());
+                                        assert_eq!(super::current_dispatch_session_identity(), Some(super::DispatchSessionIdentity {
+                                            runtime_scope: "runtime-a".into(),
+                                            session_id: "__cua_runtime_runtime-a:session-a".into(),
+                                            transport_session_id: "__cua_runtime_runtime-a:transport-a".into(),
+                                        }));
+                                    });
+                                    assert_eq!(super::current_dispatch_runtime_scope().as_deref(), Some("worker-runtime"));
+                                    assert!(super::current_dispatch_authorization_context().is_none());
+                                    assert!(super::current_dispatch_session_identity().is_none());
+                                    assert!(!super::computer_use_native_dispatch());
+                                });
+                                assert_eq!(super::current_dispatch_runtime_scope().as_deref(), Some("worker-fallback"));
+                            });
+                            assert!(super::current_dispatch_runtime_scope().is_none());
+                        }).join().unwrap();
+                        assert_eq!(super::current_dispatch_runtime_scope().as_deref(), Some("runtime-a"));
+                        assert!(super::computer_use_native_dispatch());
+                    }).await;
+                }).await;
+            }).await;
+        }).await;
+        assert!(super::current_dispatch_runtime_scope().is_none());
+        assert!(super::current_dispatch_authorization_context().is_none());
+    }
+
+    #[test]
+    fn captured_dispatch_context_preserves_explicit_thread_runtime() {
+        let context = super::with_runtime_scope("construction-runtime".into(), || {
+            super::CapturedDispatchContext::capture()
+        });
+        assert!(super::current_dispatch_runtime_scope().is_none());
+        std::thread::spawn(move || {
+            context.run_sync(|| {
+                assert_eq!(
+                    super::current_dispatch_runtime_scope().as_deref(),
+                    Some("construction-runtime")
+                );
+                assert!(super::current_dispatch_session_identity().is_none());
+            });
+            assert!(super::current_dispatch_runtime_scope().is_none());
+        })
+        .join()
+        .unwrap();
     }
 
     fn unrestricted_context() -> Arc<crate::session_authorization::EffectiveAuthorizationContext> {
@@ -3124,6 +3422,139 @@ mod runtime_isolation_tests {
         registry
     }
 
+    fn recording_scope_registry(hits: Arc<AtomicUsize>) -> Arc<super::ToolRegistry> {
+        let mut registry = super::ToolRegistry::new();
+        registry.register(Box::new(ReplayProbe {
+            hits,
+            def: super::ToolDef {
+                name: "probe".into(),
+                description: "runtime-local recording-scope probe".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": { "session": { "type": "string" } },
+                }),
+                read_only: false,
+                destructive: false,
+                idempotent: true,
+                open_world: false,
+            },
+        }));
+        registry.register_recording_tools();
+        registry.register_session_tools();
+        let registry = Arc::new(registry);
+        registry.init_self_weak();
+        registry
+    }
+
+    #[tokio::test]
+    async fn recording_keeps_only_the_owning_session_and_never_lifecycle_calls() {
+        let registry = recording_scope_registry(Arc::new(AtomicUsize::new(0)));
+        let context = unrestricted_context();
+        let output = tempfile::tempdir().expect("temp dir");
+
+        let started = registry
+            .invoke_with_context(
+                "start_recording",
+                serde_json::json!({
+                    "output_dir": output.path(),
+                    "record_video": false,
+                    "session": "owner",
+                }),
+                context.clone(),
+            )
+            .await;
+        assert_ne!(started.is_error, Some(true), "{started:?}");
+
+        for (tool, session) in [
+            ("probe", "other"),
+            ("end_session", "other"),
+            ("end_session", "owner-lifecycle"),
+        ] {
+            let result = registry
+                .invoke_with_context(
+                    tool,
+                    serde_json::json!({ "session": session }),
+                    context.clone(),
+                )
+                .await;
+            assert_ne!(result.is_error, Some(true), "{tool} {session}: {result:?}");
+        }
+
+        let owned = registry
+            .invoke_with_context(
+                "probe",
+                serde_json::json!({ "session": "owner" }),
+                context.clone(),
+            )
+            .await;
+        assert_ne!(owned.is_error, Some(true), "{owned:?}");
+        registry
+            .invoke_with_context("stop_recording", serde_json::json!({}), context)
+            .await;
+
+        let action: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(output.path().join("turn-00001").join("action.json"))
+                .expect("the owning session's action is turn-00001"),
+        )
+        .expect("parse action.json");
+        assert_eq!(action["tool"], "probe");
+        assert_eq!(action["arguments"]["session"], "owner");
+        assert!(
+            !output.path().join("turn-00002").exists(),
+            "foreign and lifecycle calls must not leave turn folders"
+        );
+    }
+
+    #[tokio::test]
+    async fn implicit_recording_keeps_only_calls_on_the_owning_connection() {
+        let registry = recording_scope_registry(Arc::new(AtomicUsize::new(0)));
+        let context = unrestricted_context();
+        let output = tempfile::tempdir().expect("temp dir");
+        let evidence = |transport| {
+            super::TrustedInvocationEvidence::extract_from_adapter_args(
+                &mut serde_json::json!({"_transport_session_id": transport}),
+            )
+        };
+        let started = registry
+            .invoke_with_context_and_evidence(
+                "start_recording",
+                serde_json::json!({"output_dir": output.path(), "record_video": false}),
+                context.clone(),
+                evidence("owner-connection"),
+            )
+            .await;
+        assert_ne!(started.is_error, Some(true), "{started:?}");
+        assert!(registry.recording.current_state().owner.is_some());
+        for (transport, session) in [
+            ("owner-connection", "named-on-owner"),
+            ("foreign-connection", "foreign"),
+        ] {
+            let result = registry
+                .invoke_with_context_and_evidence(
+                    "probe",
+                    serde_json::json!({"session": session}),
+                    context.clone(),
+                    evidence(transport),
+                )
+                .await;
+            assert_ne!(result.is_error, Some(true), "{result:?}");
+        }
+        registry
+            .invoke_with_context_and_evidence(
+                "stop_recording",
+                serde_json::json!({}),
+                context,
+                evidence("owner-connection"),
+            )
+            .await;
+        let action: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(output.path().join("turn-00001/action.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(action["arguments"]["session"], "named-on-owner");
+        assert!(!output.path().join("turn-00002").exists());
+    }
+
     #[tokio::test]
     async fn replay_dispatches_only_through_the_owning_registry() {
         let hits_a = Arc::new(AtomicUsize::new(0));
@@ -3170,6 +3601,122 @@ mod runtime_isolation_tests {
 
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         assert_ne!(result.is_error, Some(true));
+    }
+
+    struct IdleSnapshotProbe(super::ToolDef);
+
+    #[async_trait::async_trait]
+    impl super::Tool for IdleSnapshotProbe {
+        fn def(&self) -> &super::ToolDef {
+            &self.0
+        }
+        async fn invoke(&self, args: serde_json::Value) -> ToolResult {
+            let owner = args["_session_id"].as_str().expect("admitted session");
+            let window = args["window_id"].as_u64().unwrap() as u32;
+            let id = crate::element_token::global().register_snapshot_payload_for_session(
+                42,
+                window,
+                [0],
+                Arc::new(owner.to_owned()),
+                Some(owner),
+            );
+            ToolResult::text("snapshot").with_structured(serde_json::json!({
+                "token": crate::element_token::token_for(id, 0),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_implicit_recreation_retires_only_its_owned_raw_snapshots() {
+        let mut registry = super::ToolRegistry::new_with_protected_consent_provider(None);
+        registry.register(Box::new(IdleSnapshotProbe(super::ToolDef {
+            name: "get_window_state".into(),
+            description: "snapshot owner probe".into(),
+            input_schema: serde_json::json!({"type":"object"}),
+            read_only: true,
+            destructive: false,
+            idempotent: true,
+            open_world: false,
+        })));
+        registry.register_session_tools();
+        let context = standard_context();
+        let call = |session: Option<&str>, window: u32| {
+            let mut args = serde_json::json!({"pid":42,"window_id":window});
+            if let Some(session) = session {
+                args["session"] = session.into();
+            }
+            registry.invoke_with_context("get_window_state", args, context.clone())
+        };
+        let first = call(None, 7).await;
+        let peer = call(Some("peer"), 8).await;
+        assert_ne!(first.is_error, Some(true), "{first:?}");
+        assert_ne!(peer.is_error, Some(true), "{peer:?}");
+        let token = first.structured_content.unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let peer_token = peer.structured_content.unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let implicit = context.runtime_session_key("implicit-direct");
+        assert_eq!(
+            crate::session::evict_idle_with_prefix(Duration::ZERO, &implicit),
+            [implicit.clone()]
+        );
+        super::DISPATCH_RUNTIME_SCOPE
+            .scope(context.runtime_scope_key(), async {
+                assert!(
+                    crate::element_token::global().resolve(42, &token).is_err(),
+                    "idle cleanup must retire the old snapshot before any new observation"
+                );
+                assert!(crate::element_token::global()
+                    .resolve(42, &peer_token)
+                    .is_ok());
+            })
+            .await;
+        let fresh = call(None, 7).await;
+        assert_ne!(fresh.is_error, Some(true), "{fresh:?}");
+        let new_token = fresh.structured_content.unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        super::DISPATCH_RUNTIME_SCOPE
+            .scope(context.runtime_scope_key(), async {
+                assert!(crate::element_token::global().resolve(42, &token).is_err());
+                assert!(crate::element_token::global()
+                    .resolve(42, &new_token)
+                    .is_ok());
+                assert!(crate::element_token::global()
+                    .resolve(42, &peer_token)
+                    .is_ok());
+            })
+            .await;
+        let peer_id = context.runtime_session_key("peer");
+        assert_eq!(
+            crate::session::evict_idle_with_prefix(Duration::ZERO, &peer_id),
+            [peer_id]
+        );
+        assert_eq!(
+            call(Some("peer"), 8).await.structured_content.unwrap()["refusal"]["code"],
+            "session_ended"
+        );
+        let ended = registry
+            .invoke_with_context("end_session", serde_json::json!({}), context.clone())
+            .await;
+        assert_ne!(ended.is_error, Some(true), "{ended:?}");
+        assert_eq!(
+            call(None, 7).await.structured_content.unwrap()["refusal"]["code"],
+            "session_ended"
+        );
+        let restarted = registry
+            .invoke_with_context("start_session", serde_json::json!({}), context.clone())
+            .await;
+        assert_ne!(restarted.is_error, Some(true), "{restarted:?}");
+        assert_ne!(call(None, 7).await.is_error, Some(true));
+        let prefix = context.runtime_session_key("");
+        crate::session::revoke_sessions_with_prefix(&prefix);
+        crate::session::forget_ended_sessions_with_prefix(&prefix);
     }
 
     #[tokio::test]
@@ -4243,6 +4790,55 @@ resources:
         assert_eq!(provider.requests.load(Ordering::SeqCst), 0);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn proposed_output_scope_resolves_a_symlinked_deepest_ancestor() {
+        // Mirrors macOS `/tmp/x.png`, where `/tmp` links to `/private/tmp`.
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("private-tmp");
+        std::fs::create_dir(&target).unwrap();
+        let link = root.path().join("tmp");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let proposed = link.join("x.png");
+
+        let canonical = canonical_proposed_path(proposed.to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            canonical,
+            std::fs::canonicalize(&target)
+                .unwrap()
+                .join("x.png")
+                .to_string_lossy()
+        );
+        assert!(!proposed.exists());
+        // The same file already existing was always resolved; both agree.
+        std::fs::write(target.join("x.png"), b"").unwrap();
+        assert_eq!(
+            canonical_proposed_path(proposed.to_str().unwrap()).unwrap(),
+            canonical
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proposed_output_scope_refuses_a_symlinked_ancestor_that_is_not_a_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let proposed = link.join("x.png");
+
+        let refusal = canonical_proposed_path(proposed.to_str().unwrap()).unwrap_err();
+
+        let text = serde_json::to_string(&refusal).unwrap();
+        assert!(
+            text.contains("an ancestor of the output path is not a directory"),
+            "{text}"
+        );
+        assert!(!file.with_file_name("x.png").exists());
+    }
+
     #[test]
     fn proposed_output_scope_canonicalizes_the_existing_ancestor_without_creating_output() {
         let root = tempfile::tempdir().unwrap();
@@ -4585,6 +5181,7 @@ resources:
 fn permission_denied_result(message: String) -> ToolResult {
     ToolResult::error(message.clone()).with_structured(serde_json::json!({
         "status": "refused",
+        "sent": false,
         "refusal": {
             "code": "permission_denied",
             "message": message,
@@ -4614,6 +5211,7 @@ fn protected_consent_refusal(error: crate::consent::ConsentError) -> ToolResult 
     let message = error.to_string();
     ToolResult::error(message.clone()).with_structured(serde_json::json!({
         "status": "refused",
+        "sent": false,
         "refusal": {
             "code": code,
             "message": message,
@@ -4628,6 +5226,7 @@ fn protected_scope_refusal(message: &str) -> ToolResult {
 fn protected_refusal(code: &str, message: &str) -> ToolResult {
     ToolResult::error(message).with_structured(serde_json::json!({
         "status": "refused",
+        "sent": false,
         "refusal": {
             "code": code,
             "message": message,

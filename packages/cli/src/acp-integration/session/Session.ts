@@ -4,9 +4,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
+import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
+import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import {
+  logLoopProtection,
+  logWorkflowKeyword,
+} from '@qwen-code/qwen-code-core/telemetry/loggers.js';
+import {
+  WorkflowKeywordEvent,
+  LoopProtectionEvent,
+  LoopReason,
+} from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
+import {
+  getTurnToolCallCapHalt,
+  shouldRemindTurnToolCallCap,
+} from '@qwen-code/qwen-code-core/services/loopDetectionService.js';
+import {
+  buildLoopReminder,
+  INVALID_PARAMS_REMINDER_AT,
+} from '@qwen-code/qwen-code-core/services/loop-protection.js';
+import type { LoopReminderInput } from '@qwen-code/qwen-code-core/services/loop-protection.js';
 import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -17,7 +39,11 @@ import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  getStartupContextLength,
+  markCompressedHistory,
+} from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -32,6 +58,7 @@ import {
   type Config,
   type ContentGeneratorConfig,
   type LlmChat,
+  type LoopStopDetail,
   type ToolCallConfirmationDetails,
   type ToolConfirmationPayload,
   type ToolResult,
@@ -192,7 +219,6 @@ import {
   GLOBAL_DUPLICATE_THRESHOLD,
   canonicalToolName,
   getToolCallRepeatKey,
-  shouldHaltOnTurnToolCallCap,
   logLoopDetected,
   logRepeatedToolFailureGuard,
   LoopDetectedEvent,
@@ -273,6 +299,13 @@ import {
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
+  buildSessionHistoryFromConversation,
+  getLastApiHistoryPromptId,
+  getLastApiPromptCancellation,
+  markApiHistoryPrompt,
+  cloneApiHistory,
+} from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import {
   CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
@@ -306,6 +339,8 @@ import {
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+  USER_CANCEL_ABORT_REASON,
+  INTERRUPTED_PROMPT_ABORT_REASON,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
 import {
@@ -365,7 +400,11 @@ import type {
   SetSessionModelResponse,
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
-import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import {
+  readSettingsSnapshot,
+  SettingScope,
+  type LoadedSettings,
+} from '../../config/settings.js';
 import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
 import { isSameConversationPath } from '../../utils/conversation-directory-identity.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
@@ -499,7 +538,6 @@ const debugLogger = createDebugLogger('SESSION');
 const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
 /** Idempotency keys `appendExternalRecord` remembers (oldest dropped first). */
 const MAX_EXTERNAL_RECORD_KEYS = 1_024;
-const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
 // Cuts a streaming model response short so queued user input the user asked
@@ -845,6 +883,18 @@ export type DaemonToolLoopState = {
   maxToolCallKeyRepeat: number;
   loopDetected: boolean;
   loopType?: LoopType;
+  /** Reason and tool-call numbers of the stop, for shared loop types. */
+  loopDetail?: LoopStopDetail;
+  /** Tool of the (tool, args) pair behind maxToolCallKeyRepeat. */
+  maxToolCallKeyName?: string;
+  /** Loop-protection patterns already reminded or observed this turn. */
+  loopProtectionHandled?: Set<string>;
+  /** Reminders for the next model request that carries tool results. */
+  pendingLoopReminders?: Array<{
+    text: string;
+    loopType: LoopType;
+    detail: LoopStopDetail;
+  }>;
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
   repeatedToolFailureState: RepeatedToolFailureGuardState;
   explorationBudget?: ToolExplorationBudget;
@@ -1016,17 +1066,19 @@ function recordDaemonLoopDetected(
   loopType: LoopType,
   message: string,
   loopState: DaemonToolLoopState,
-  options: { recordToQwenLogger?: boolean } = {},
+  options: { recordToQwenLogger?: boolean; loopDetail?: LoopStopDetail } = {},
 ): true {
   if (!loopState.loopDetected) {
+    const { loopDetail, ...logOptions } = options;
     loopState.loopDetected = true;
     loopState.loopType = loopType;
+    loopState.loopDetail = loopDetail;
     debugLogger.warn(message);
     try {
       logLoopDetected(
         config,
-        new LoopDetectedEvent(loopType, promptId),
-        options,
+        new LoopDetectedEvent(loopType, promptId, loopDetail),
+        logOptions,
       );
     } catch (error) {
       debugLogger.debug(
@@ -1055,10 +1107,18 @@ function managedOutcomeUnknownError(error: Error): RequestError {
 function createLoopDetectedTurnError(
   loopState: DaemonToolLoopState,
 ): RequestError {
+  const detail = loopState.loopDetail;
   return new RequestError(-32603, LOOP_DETECTED_TURN_ERROR_MESSAGE, {
     code: 'LOOP_DETECTED',
     errorKind: 'loop_detected',
     ...(loopState.loopType ? { loopType: loopState.loopType } : {}),
+    ...(detail?.loopReason ? { loopReason: detail.loopReason } : {}),
+    ...(detail?.toolCallCount !== undefined
+      ? { toolCallCount: detail.toolCallCount }
+      : {}),
+    ...(detail?.toolCallLimit !== undefined
+      ? { toolCallLimit: detail.toolCallLimit }
+      : {}),
   });
 }
 
@@ -1081,6 +1141,133 @@ function isLoopDetectedTurnError(error: unknown): boolean {
   );
 }
 
+function logDaemonLoopProtection(
+  config: Config,
+  promptId: string,
+  loopType: LoopType,
+  decision: 'reminded' | 'stopped' | 'observed',
+  detail: LoopStopDetail,
+): void {
+  try {
+    logLoopProtection(
+      config,
+      new LoopProtectionEvent({
+        prompt_id: promptId,
+        loop_type: loopType,
+        decision,
+        mode: config.getLoopProtection(),
+        loop_reason: detail.loopReason,
+      }),
+    );
+  } catch (error) {
+    debugLogger.debug(
+      '[Session] Failed to record loop protection telemetry',
+      error,
+    );
+  }
+}
+
+// One reminder per pattern.
+function remindDaemonLoop(
+  loopState: DaemonToolLoopState,
+  key: string,
+  input: LoopReminderInput,
+  detail: LoopStopDetail,
+): void {
+  const handled = (loopState.loopProtectionHandled ??= new Set());
+  if (handled.has(key)) return;
+  handled.add(key);
+  (loopState.pendingLoopReminders ??= []).push({
+    text: buildLoopReminder(input),
+    loopType: input.loopType,
+    detail,
+  });
+}
+
+// Takes the queued reminders for the next request, logging them as
+// delivered.
+function takeDaemonLoopReminders(
+  config: Config,
+  promptId: string,
+  loopState: DaemonToolLoopState,
+): string | undefined {
+  const pending = loopState.pendingLoopReminders;
+  if (!pending?.length) return undefined;
+  loopState.pendingLoopReminders = undefined;
+  for (const { loopType, detail } of pending) {
+    logDaemonLoopProtection(config, promptId, loopType, 'reminded', detail);
+  }
+  return pending.map(({ text }) => text).join('\n\n');
+}
+
+// A governed detector reached its reminder point (#14828).
+function remindDaemonLoopBeforeStop(
+  config: Config,
+  loopState: DaemonToolLoopState,
+  key: string,
+  input: Omit<LoopReminderInput, 'stops'>,
+  detail: LoopStopDetail = {},
+): void {
+  const mode = config.getLoopProtection();
+  if (mode === 'off') return;
+  remindDaemonLoop(
+    loopState,
+    key,
+    { ...input, stops: mode === 'stop' },
+    detail,
+  );
+}
+
+// A governed detector reached its stop point: `stop` halts, `warn` reminds,
+// `off` only records. Returns whether to halt.
+function onDaemonLoopStopPoint(
+  config: Config,
+  promptId: string,
+  loopState: DaemonToolLoopState,
+  key: string,
+  input: Omit<LoopReminderInput, 'stops'>,
+  detail: LoopStopDetail,
+  stopMessage: string,
+): boolean {
+  switch (config.getLoopProtection()) {
+    case 'stop':
+      if (loopState.loopDetected) return true;
+      recordDaemonLoopDetected(
+        config,
+        promptId,
+        input.loopType,
+        stopMessage,
+        loopState,
+        { loopDetail: detail },
+      );
+      logDaemonLoopProtection(
+        config,
+        promptId,
+        input.loopType,
+        'stopped',
+        detail,
+      );
+      return true;
+    case 'warn':
+      remindDaemonLoop(loopState, key, { ...input, stops: false }, detail);
+      return false;
+    default: {
+      const handled = (loopState.loopProtectionHandled ??= new Set());
+      if (!handled.has(key)) {
+        handled.add(key);
+        logDaemonLoopProtection(
+          config,
+          promptId,
+          input.loopType,
+          'observed',
+          detail,
+        );
+      }
+      return false;
+    }
+  }
+}
+
 function recordDaemonToolCalls(
   config: Config,
   promptId: string,
@@ -1096,10 +1283,11 @@ function recordDaemonToolCalls(
     loopState.toolCallKeyCounts.set(key, count);
     if (count > loopState.maxToolCallKeyRepeat) {
       loopState.maxToolCallKeyRepeat = count;
+      loopState.maxToolCallKeyName = call.name ?? '';
     }
   }
   // Same per-turn cap semantics as the core LoopDetectionService — the
-  // shouldHaltOnTurnToolCallCap predicate is shared with core's
+  // getTurnToolCallCapHalt classifier is shared with core's
   // checkTurnToolCallCap so the two runtimes cannot drift (an explicit
   // model.maxToolCallsPerTurn is a hard cap; the default is adaptive —
   // past the soft cap a productive turn continues until the
@@ -1114,21 +1302,64 @@ function recordDaemonToolCalls(
   // daemon stream loops discard the failed attempt's accumulated calls
   // (functionCalls.length = 0) before re-streaming, so a failed attempt's
   // calls never reach this function to be double-counted.
-  if (
-    shouldHaltOnTurnToolCallCap(
+  const cap = config.getMaxToolCallsPerTurn();
+  const isExplicitCap = config.isMaxToolCallsPerTurnExplicit();
+  const capHalt = getTurnToolCallCapHalt(
+    loopState.totalToolCalls,
+    loopState.maxToolCallKeyRepeat,
+    cap,
+    isExplicitCap,
+  );
+  const capMessage = `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`;
+  const stuck = {
+    loopType: LoopType.TURN_TOOL_CALL_CAP,
+    toolName: loopState.maxToolCallKeyName,
+    count: loopState.maxToolCallKeyRepeat,
+    softCap: cap,
+  };
+  if (capHalt) {
+    const loopDetail = {
+      loopReason: capHalt.reason,
+      toolCallCount: loopState.totalToolCalls,
+      toolCallLimit: capHalt.limit,
+    };
+    // Budgets (an explicit cap, the backstop) stop in every mode.
+    if (capHalt.reason !== LoopReason.STUCK_REPETITION) {
+      return recordDaemonLoopDetected(
+        config,
+        promptId,
+        LoopType.TURN_TOOL_CALL_CAP,
+        capMessage,
+        loopState,
+        { loopDetail },
+      );
+    }
+    if (
+      onDaemonLoopStopPoint(
+        config,
+        promptId,
+        loopState,
+        'cap',
+        stuck,
+        loopDetail,
+        capMessage,
+      )
+    ) {
+      return true;
+    }
+  } else if (
+    shouldRemindTurnToolCallCap(
       loopState.totalToolCalls,
       loopState.maxToolCallKeyRepeat,
-      config.getMaxToolCallsPerTurn(),
-      config.isMaxToolCallsPerTurnExplicit(),
+      cap,
+      isExplicitCap,
     )
   ) {
-    return recordDaemonLoopDetected(
-      config,
-      promptId,
-      LoopType.TURN_TOOL_CALL_CAP,
-      `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`,
-      loopState,
-    );
+    remindDaemonLoopBeforeStop(config, loopState, 'cap', stuck, {
+      loopReason: LoopReason.STUCK_REPETITION,
+      toolCallCount: loopState.totalToolCalls,
+      toolCallLimit: cap,
+    });
   }
   // Mirror of core's checkGlobalDuplicate: the same (tool, args) pair
   // repeated GLOBAL_DUPLICATE_THRESHOLD times anywhere in the turn halts
@@ -1143,15 +1374,18 @@ function recordDaemonToolCalls(
   // would ship this halt on.
   if (
     !config.getSkipLoopDetection() &&
-    loopState.maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD
-  ) {
-    return recordDaemonLoopDetected(
+    loopState.maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD &&
+    onDaemonLoopStopPoint(
       config,
       promptId,
-      LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
-      `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
       loopState,
-    );
+      LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+      { loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE },
+      { loopReason: LoopReason.REPEATED_CALL },
+      `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
+    )
+  ) {
+    return true;
   }
   // Deliberately after both halt checks: a halted batch is skipped whole and
   // never executes, so its calls must not feed the exploration budget (nor
@@ -1182,13 +1416,31 @@ function recordDaemonInvalidToolParams(
   const key = toolName;
   const count = (loopState.invalidToolParamErrors.get(key) ?? 0) + 1;
   loopState.invalidToolParamErrors.set(key, count);
+  const invalid = {
+    loopType: LoopType.INVALID_TOOL_PARAMS_STAGNATION,
+    toolName,
+    count,
+  };
+  if (
+    count >= INVALID_PARAMS_REMINDER_AT &&
+    count < DAEMON_INVALID_TOOL_PARAMS_THRESHOLD
+  ) {
+    remindDaemonLoopBeforeStop(
+      config,
+      loopState,
+      `invalid:${toolName}`,
+      invalid,
+    );
+  }
   if (count < DAEMON_INVALID_TOOL_PARAMS_THRESHOLD) return false;
-  return recordDaemonLoopDetected(
+  return onDaemonLoopStopPoint(
     config,
     promptId,
-    LoopType.INVALID_TOOL_PARAMS_STAGNATION,
-    `Stopping ACP turn after repeated tool parameter errors from ${toolName}: ${error.message}`,
     loopState,
+    `invalid:${toolName}`,
+    invalid,
+    {},
+    `Stopping ACP turn after repeated tool parameter errors from ${toolName}: ${error.message}`,
   );
 }
 
@@ -1380,7 +1632,7 @@ interface InFlightTurnRecording {
   cancelledAt?: number;
   promptText: string;
   promptTextTruncated: boolean;
-  finalAnswer: { finalText: string };
+  finalAnswer: { finalText: string; historyPromptId?: string };
   /**
    * Captured at turn start; settle writes against this instance (pinned to
    * the turn-start session by `Config.startNewSession`) instead of
@@ -1397,7 +1649,11 @@ function truncateTurnText(text: string): {
   if (text.length <= TURN_RESULT_TEXT_MAX_CHARS) {
     return { text, truncated: false };
   }
-  return { text: text.slice(0, TURN_RESULT_TEXT_MAX_CHARS), truncated: true };
+  const end =
+    (text.codePointAt(TURN_RESULT_TEXT_MAX_CHARS - 1) ?? 0) > 0xffff
+      ? TURN_RESULT_TEXT_MAX_CHARS - 1
+      : TURN_RESULT_TEXT_MAX_CHARS;
+  return { text: text.slice(0, end), truncated: true };
 }
 
 function stripReferencedAttachmentDataParts(
@@ -1696,6 +1952,8 @@ interface CronFire {
   modelServiceId?: string;
   groupId?: string;
   name?: string;
+  /** A gated fire's task prompt; `prompt` is then the gate's delivered text. */
+  taskPrompt?: string;
   delivery?: CronTaskDelivery;
   todoWorkChainId?: string;
 }
@@ -1725,6 +1983,7 @@ interface ChannelTaskResponseCapture {
 }
 
 interface AgentResponseCapture {
+  turnId?: string;
   channelTask?: ChannelTaskResponseCapture;
   backgroundResponse?: (text: string) => Promise<void>;
   goalProposalTurn?: {
@@ -1738,7 +1997,9 @@ interface AgentResponseCapture {
   };
   turnResult?: {
     finalText: string;
+    historyPromptId?: string;
   };
+  recordingService?: ChatRecordingService;
   agentOutput: AgentOutputMessageCapture;
 }
 
@@ -2221,6 +2482,7 @@ function isCallerCausedModelRefusal(error: Error): boolean {
 export class Session implements SessionContext {
   private readonly mcpAppCalls = new Map<string, AbortController>();
   private pendingPrompt: AbortController | null = null;
+  private readonly userPromptCancellations = new WeakMap<AbortSignal, number>();
   private activeGoalProposalTurn?: AgentResponseCapture['goalProposalTurn'];
   /**
    * Tracks the completion of the current prompt so that the next prompt
@@ -2362,7 +2624,9 @@ export class Session implements SessionContext {
   // on a session whose registries are already unregistered.
   private disposed = false;
   private closing = false;
+  private closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
   private historyMutationActive = false;
+  private pendingDeletedApiPromptIds: Set<string> | undefined;
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
@@ -2483,6 +2747,7 @@ export class Session implements SessionContext {
   readonly sessionId: string;
   private sessionReasoningSelection?: ReasoningSelection;
   private readonly restoredHistoryGaps?: HistoryGap[];
+  private historySnapshotBoundary?: { hash: string; prefixLength: number };
   /**
    * Tail of this session's permission queue. The serialization unit is the
    * session, not the `AgentSideConnection`: one daemon child owns a single
@@ -3011,7 +3276,9 @@ export class Session implements SessionContext {
         const pauseReason =
           turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
             ? GOAL_PAUSE_REASON_SESSION_DISPOSED
-            : turn.controller.signal.reason === USER_CANCEL_ABORT_REASON
+            : turn.controller.signal.reason === USER_CANCEL_ABORT_REASON ||
+                turn.controller.signal.reason ===
+                  INTERRUPTED_PROMPT_ABORT_REASON
               ? GOAL_PAUSE_REASON_USER_INTERRUPT
               : managedSessionBlock
                 ? GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED
@@ -3059,9 +3326,10 @@ export class Session implements SessionContext {
           }`,
         );
       }
-      const cancelledByUser =
+      const cancelledTurn =
         result?.stopReason === 'cancelled' &&
-        turn.controller.signal.reason === USER_CANCEL_ABORT_REASON;
+        (turn.controller.signal.reason === USER_CANCEL_ABORT_REASON ||
+          turn.controller.signal.reason === INTERRUPTED_PROMPT_ABORT_REASON);
       // A turn preempted by a newly arrived user prompt is a handoff, not a
       // failure. `this.pendingPrompt` is the goal turn's own controller while
       // a goal turn is in flight, so a new prompt aborts it with
@@ -3076,10 +3344,13 @@ export class Session implements SessionContext {
       // cause that names the pause. Enumerating them separately means a fifth
       // cause can compile, pause correctly, and fall through to the failure
       // arm -- mislabelling the stop in the journal, the `_meta.goalState`
-      // update and the card, with no test able to see it.
+      // update and the card, with no test able to see it. The two cancels in
+      // that list pause alike but do not read alike: the interrupted abort
+      // reason means the client or host cancelled the prompt, so only a user
+      // cancel may name the user.
       const pauseReason = supersededByNewPrompt
         ? undefined
-        : cancelledByUser
+        : cancelledTurn
           ? GOAL_PAUSE_REASON_USER_INTERRUPT
           : result?.stopReason === 'max_tokens'
             ? GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT
@@ -3801,6 +4072,7 @@ export class Session implements SessionContext {
             cron: req.cron,
             prompt: req.prompt,
             recurring: req.recurring,
+            ...(req.gate ? { gate: req.gate } : {}),
           },
         );
       } catch (error) {
@@ -3836,7 +4108,14 @@ export class Session implements SessionContext {
           'cron_create: bridge returned an invalid scheduled-task result',
         );
       }
-      return { id: resp['id'], cron: resp['cron'] };
+      // A daemon that predates gated tasks echoes no `gate`; cron_create
+      // reads the absence as a dropped gate.
+      const gate = resp['gate'];
+      return {
+        id: resp['id'],
+        cron: resp['cron'],
+        ...(typeof gate === 'string' || gate === null ? { gate } : {}),
+      };
     });
   }
 
@@ -4410,6 +4689,7 @@ export class Session implements SessionContext {
   }
 
   async assertCanStartTurn(): Promise<void> {
+    this.assertHistoryContextAvailable();
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
@@ -4473,6 +4753,18 @@ export class Session implements SessionContext {
       this.channelTaskCaptures.size === 0 &&
       !this.#hasActiveTurn()
     );
+  }
+
+  assertHistoryContextAvailable(): void {
+    if (this.pendingDeletedApiPromptIds) {
+      throw new RequestError(
+        -32000,
+        'Reload the session before using its history',
+        {
+          errorKind: 'session_history_context_unavailable',
+        },
+      );
+    }
   }
 
   isIdle(): boolean {
@@ -4625,7 +4917,7 @@ export class Session implements SessionContext {
     };
   }
 
-  beginClose(): () => void {
+  beginClose(cancelReason?: 'user'): () => void {
     if (this.closing) {
       throw RequestError.invalidParams(
         undefined,
@@ -4633,6 +4925,10 @@ export class Session implements SessionContext {
       );
     }
     this.closing = true;
+    this.closeAbortReason =
+      cancelReason === 'user'
+        ? USER_CANCEL_ABORT_REASON
+        : SESSION_DISPOSE_ABORT_REASON;
 
     let resolveGate!: () => void;
     const completion = new Promise<void>((resolve) => {
@@ -4651,6 +4947,7 @@ export class Session implements SessionContext {
       resolveGate();
       if (this.disposed) return;
       this.closing = false;
+      this.closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
       void this.#drainGoalQueue();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
@@ -4901,6 +5198,7 @@ export class Session implements SessionContext {
     targetTurnIndex: number;
     apiTruncateIndex: number;
   } {
+    this.assertHistoryContextAvailable();
     if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) {
       throw RequestError.invalidParams(
         undefined,
@@ -4992,13 +5290,85 @@ export class Session implements SessionContext {
     return { targetTurnIndex, apiTruncateIndex };
   }
 
+  async deleteMessageGroups(request: { snapshot: string; groupIds: string[] }) {
+    this.assertHistoryContextAvailable();
+    const release = this.beginHistoryMutation();
+    let persisted = false;
+    let deletedGroupIds: string[] = [];
+    let deletedPromptIds: string[] = [];
+    try {
+      const recording = this.config.getChatRecordingService();
+      if (!recording?.supportsMessageGroupDeletion())
+        throw new RequestError(-32602, 'History recording is unavailable', {
+          errorKind: 'session_message_deletion_unsupported',
+        });
+      const result = await recording.deleteMessageGroups(request);
+      persisted = true;
+      deletedGroupIds = result.deletedGroupIds;
+      deletedPromptIds = result.deletedPromptIds;
+      this.pendingDeletedApiPromptIds = new Set(result.removedApiPromptIds);
+      await this.installDeletedMessageHistory();
+      return { deletedGroupIds, deletedPromptIds };
+    } catch (error) {
+      if (persisted) {
+        throw new RequestError(
+          -32000,
+          'Messages were deleted, but the session must be reopened before sending another message',
+          {
+            errorKind: 'message_deletion_context_unavailable',
+            deletedGroupIds,
+            deletedPromptIds,
+          },
+        );
+      }
+      throw error;
+    } finally {
+      release();
+    }
+  }
+
+  async recoverMessageDeletionContext(): Promise<void> {
+    if (!this.pendingDeletedApiPromptIds) return;
+    const release = this.beginHistoryMutation();
+    try {
+      await this.installDeletedMessageHistory();
+    } finally {
+      release();
+    }
+  }
+
+  private async installDeletedMessageHistory(): Promise<void> {
+    const removed = this.pendingDeletedApiPromptIds!;
+    const records = await this.config
+      .getChatRecordingService()!
+      .readActiveTranscriptChain();
+    const restored = buildSessionHistoryFromConversation({ messages: records });
+    const current = this.captureHistorySnapshot();
+    const prelude = current.slice(0, getStartupContextLength(current));
+    const llmClient = this.config.getLlmClient()!;
+    llmClient.setHistory([...prelude, ...restored.apiHistory]);
+    llmClient.getChat().setCompletedToolCallIds(restored.completedToolCallIds);
+    const fileHistory = this.config.getFileHistoryService();
+    fileHistory.restoreFromSnapshots(
+      removeFileHistorySnapshots(fileHistory.getSnapshots(), removed),
+    );
+    this.pendingDeletedApiPromptIds = undefined;
+  }
+
   captureHistorySnapshot(): Content[] {
-    return this.config.getLlmClient()!.getChat().getHistoryShallow();
+    const history = this.config.getLlmClient()!.getChat().getHistoryShallow();
+    this.historySnapshotBoundary = {
+      hash: createHash('sha256').update(JSON.stringify(history)).digest('hex'),
+      prefixLength: getStartupContextLength(history, {
+        includeCompressed: true,
+      }),
+    };
+    return history;
   }
 
   getRewindableUserTurnCount(): number {
     return countApiUserPrompts(
-      this.captureHistorySnapshot(),
+      this.config.getLlmClient()!.getChat().getHistoryShallow(),
       ACP_API_USER_PROMPT_OPTIONS,
     );
   }
@@ -5011,7 +5381,17 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config.getLlmClient()!.setHistory(structuredClone(history));
+    const restored = cloneApiHistory(history);
+    if (
+      this.historySnapshotBoundary?.hash ===
+      createHash('sha256').update(JSON.stringify(history)).digest('hex')
+    ) {
+      markCompressedHistory(
+        restored,
+        this.historySnapshotBoundary.prefixLength,
+      );
+    }
+    this.config.getLlmClient()!.setHistory(restored);
     this.clearActiveTodoPlanRevision();
     // Restoring history discards the timeline the active-todo reminder
     // described: clear the chain head so the next turn starts fresh instead
@@ -5031,7 +5411,41 @@ export class Session implements SessionContext {
     );
   }
 
-  async cancelPendingPrompt(): Promise<void> {
+  #classifyPromptCancelAbortReason(requestedReason: string): string {
+    if (this.disposed) return SESSION_DISPOSE_ABORT_REASON;
+    return this.closing ? this.closeAbortReason : requestedReason;
+  }
+
+  cancelPromptAdmission(
+    controller: AbortController,
+    requestedReason: string,
+  ): void {
+    const reason = this.#classifyPromptCancelAbortReason(requestedReason);
+    // AbortSignal.reason cannot change once aborted; retain later human intent
+    // on this admission only, without transferring it to another prompt.
+    if (
+      reason === USER_CANCEL_ABORT_REASON &&
+      !this.userPromptCancellations.has(controller.signal)
+    ) {
+      this.userPromptCancellations.set(controller.signal, Date.now());
+    }
+    controller.abort(reason);
+  }
+
+  #isUserPromptCancellation(signal?: AbortSignal): boolean {
+    if (signal === undefined) return false;
+    if (
+      signal.reason === USER_CANCEL_ABORT_REASON ||
+      this.userPromptCancellations.has(signal)
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  async cancelPendingPrompt(
+    requestedAbortReason: string = USER_CANCEL_ABORT_REASON,
+  ): Promise<void> {
     const hadPrompt = !!this.pendingPrompt;
     const hadCron = !!this.cronAbortController;
     const hadNotification =
@@ -5057,9 +5471,7 @@ export class Session implements SessionContext {
 
     this.todoStopGuard.suspend();
     const abortReason =
-      this.closing || this.disposed
-        ? SESSION_DISPOSE_ABORT_REASON
-        : USER_CANCEL_ABORT_REASON;
+      this.#classifyPromptCancelAbortReason(requestedAbortReason);
     for (const capture of this.channelTaskCaptures) {
       capture.controller.abort(abortReason);
     }
@@ -5154,6 +5566,16 @@ export class Session implements SessionContext {
     if (managedSessionBlock) {
       throw managedOutcomeUnknownError(managedSessionBlock);
     }
+    if (params._meta?.[DAEMON_CONTINUE_META_KEY] === true) {
+      if (
+        (await this.#isContinueBlocked(
+          params._meta?.['qwen.daemon.confirmCancellation'],
+        )) ||
+        !this.#getRecoveryPlan(true)?.continuation
+      ) {
+        return { stopReason: 'end_turn' };
+      }
+    }
     const turnRecording = this.#beginTurnRecording(params, invocationContext);
     const controller = new AbortController();
     const channelTask =
@@ -5169,7 +5591,15 @@ export class Session implements SessionContext {
         : undefined;
     if (channelTask) this.channelTaskCaptures.add(channelTask);
     const recordAdmissionCancellation = () => {
-      if (turnRecording) turnRecording.cancelledAt ??= Date.now();
+      if (
+        turnRecording &&
+        this.#isUserPromptCancellation(admissionCancellation)
+      ) {
+        turnRecording.cancelledAt ??= admissionCancellation
+          ? (this.userPromptCancellations.get(admissionCancellation) ??
+            Date.now())
+          : Date.now();
+      }
     };
     admissionCancellation?.addEventListener(
       'abort',
@@ -5192,6 +5622,7 @@ export class Session implements SessionContext {
       if (channelTask && result.stopReason === 'end_turn') {
         result = await this.#waitForChannelTaskResult(channelTask, result);
       }
+      recordAdmissionCancellation();
       await this.#settleTurnRecording(
         result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
         turnRecording,
@@ -5199,13 +5630,16 @@ export class Session implements SessionContext {
       );
       return result;
     } catch (error) {
+      recordAdmissionCancellation();
       const pendingSend = turnRecording?.abortController;
       const abortReason =
         pendingSend?.signal.aborted === true
           ? pendingSend.signal.reason
           : undefined;
       // Mirror the send-loop's controlled-cancellation contract: explicit
-      // user cancels and session disposal settle as `cancelled`. A
+      // user cancels, a forwarded infrastructure interruption (response
+      // close, prompt deadline, teardown) and session disposal settle as
+      // `cancelled`. A
       // successor-prompt abort does so only when the thrown error is the
       // abort itself; the send loop deliberately excludes NEW_PROMPT from
       // controlled cancellation so infrastructure failures are not hidden
@@ -5219,8 +5653,13 @@ export class Session implements SessionContext {
           MANAGED_RUNTIME_OUTCOME_UNKNOWN;
       const controlledAbort =
         !managedOutcomeUnknown &&
-        (abortReason === USER_CANCEL_ABORT_REASON ||
+        ((this.closing &&
+          admissionCancellation?.aborted === true &&
+          (this.#isUserPromptCancellation(admissionCancellation) ||
+            admissionCancellation.reason === SESSION_DISPOSE_ABORT_REASON)) ||
+          abortReason === USER_CANCEL_ABORT_REASON ||
           abortReason === SESSION_DISPOSE_ABORT_REASON ||
+          abortReason === INTERRUPTED_PROMPT_ABORT_REASON ||
           (abortReason === NEW_PROMPT_ABORT_REASON &&
             this.#isAbortError(error)));
       if (controlledAbort) {
@@ -5345,6 +5784,7 @@ export class Session implements SessionContext {
     turnRecording: InFlightTurnRecording | null,
     channelTask?: ChannelTaskResponseCapture,
   ): Promise<PromptResponse> {
+    this.assertHistoryContextAvailable();
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
@@ -5444,7 +5884,8 @@ export class Session implements SessionContext {
     pendingSend.signal.addEventListener('abort', recordCancellation, {
       once: true,
     });
-    const cancelPendingSend = () => pendingSend.abort(USER_CANCEL_ABORT_REASON);
+    const cancelPendingSend = () =>
+      pendingSend.abort(admissionCancellation?.reason);
     if (admissionCancellation) {
       admissionCancellation.addEventListener('abort', cancelPendingSend, {
         once: true,
@@ -5603,6 +6044,9 @@ export class Session implements SessionContext {
       ...(channelTask ? { channelTask } : {}),
       ...(channelDelivery ? { channelDelivery: { finalText: '' } } : {}),
       ...(turnRecording ? { turnResult: turnRecording.finalAnswer } : {}),
+      recordingService:
+        turnRecording?.recordingService ??
+        this.config.getChatRecordingService(),
       agentOutput: new AgentOutputMessageCapture(this.config),
     };
     // One server-side channel classification, consumed by both the
@@ -5694,6 +6138,30 @@ export class Session implements SessionContext {
           proposalTurn.settlementBlocked !== true;
       }
       await this.#settleGoalProposal(responseCapture);
+      if (
+        !turnRecording &&
+        result.stopReason === 'cancelled' &&
+        responseCapture.turnId &&
+        (this.#isUserPromptCancellation(pendingSend.signal) ||
+          this.#isUserPromptCancellation(admissionCancellation))
+      ) {
+        const payload: TurnResultRecordPayload = {
+          promptId: responseCapture.turnId,
+          state: 'cancelled',
+          cancelledAt: Date.now(),
+          cancelReason: 'user',
+          endedAt: Date.now(),
+        };
+        responseCapture.recordingService?.recordTurnResult(
+          payload,
+          responseCapture.turnId,
+        );
+        try {
+          await responseCapture.recordingService?.flush();
+        } catch (error) {
+          debugLogger.warn(`Failed to flush cancellation: ${error}`);
+        }
+      }
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
@@ -5803,15 +6271,32 @@ export class Session implements SessionContext {
     }
   }
 
+  async #getTurnCancellation() {
+    const recorder = this.config.getChatRecordingService();
+    if (!recorder) throw new Error('Recovery requires a session transcript');
+    return getLastApiPromptCancellation(
+      this.#getCurrentChat().getHistoryShallow(),
+      await recorder.readActiveTranscriptChain(),
+    );
+  }
+
+  async #isContinueBlocked(confirmCancellation?: unknown): Promise<boolean> {
+    const cancellation = await this.#getTurnCancellation();
+    return (
+      (cancellation !== undefined &&
+        cancellation.confirmationId === undefined) ||
+      confirmCancellation !== cancellation?.confirmationId
+    );
+  }
+
   #getRecoveryPlan(fullHistory: boolean) {
     const llmClient = this.config.getLlmClient();
     if (!llmClient || !llmClient.isInitialized()) {
       return undefined;
     }
 
-    // Classify from a bounded, shallow tail — this accept/reject pre-check does
-    // not need to structuredClone the whole history. The authoritative
-    // re-detection inside the fired prompt() reads full history for the strip.
+    // Limit meaningful history while retaining trailing notifications for replay.
+    // The authoritative re-detection inside prompt() uses full history to strip.
     const chat = this.#getCurrentChat();
     // A trailing restorable ask_user_question is awaiting its restore
     // prompt, not an interruption to close: `interrupted_turn` would answer
@@ -5833,7 +6318,8 @@ export class Session implements SessionContext {
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
       apiHistory: fullHistory
         ? chat.getHistory()
-        : (chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+        : (chat.getHistoryForRecovery?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+          chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
           chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT)),
       historyGaps: runtimeGaps?.length
         ? runtimeGaps
@@ -5868,6 +6354,28 @@ export class Session implements SessionContext {
     };
   }
 
+  async getRecoveryStatusForClient(): Promise<
+    NonNullable<ServeSessionContextStatus['recovery']>
+  > {
+    const initial = this.getRecoveryStatus();
+    if (!initial.canContinue) return initial;
+    try {
+      const cancellation = await this.#getTurnCancellation();
+      const status = this.getRecoveryStatus();
+      if (cancellation && !cancellation.confirmationId) {
+        return { ...status, canContinue: false };
+      }
+      return {
+        ...status,
+        ...(status.canContinue && cancellation?.confirmationId
+          ? { cancellationConfirmationId: cancellation.confirmationId }
+          : {}),
+      };
+    } catch {
+      return { kind: this.getRecoveryStatus().kind, canContinue: false };
+    }
+  }
+
   /**
    * Classify whether an unfinished previous turn can be resumed — an
    * interrupted prompt (the model never answered) or a turn left with dangling
@@ -5881,11 +6389,11 @@ export class Session implements SessionContext {
    * tracked like any other prompt; `prompt()` then re-detects/strips
    * authoritatively. Powers `qwen/control/session/continue`.
    */
-  async continueLastTurn(): Promise<{
+  async continueLastTurn(confirmCancellation?: string): Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
   }> {
-    const recovery = this.getRecoveryStatus();
+    const recovery = await this.getRecoveryStatusForClient();
     if (!recovery.canContinue && recovery.kind !== 'clean') {
       // Name the veto that fired. `canContinue` collapses `closing` plus the
       // ten `#hasActiveTurn()` members into one boolean and the only UI
@@ -5915,7 +6423,9 @@ export class Session implements SessionContext {
       });
     }
     return {
-      accepted: recovery.canContinue,
+      accepted:
+        recovery.canContinue &&
+        confirmCancellation === recovery.cancellationConfirmationId,
       interruption:
         recovery.kind === 'interrupted_prompt' ||
         recovery.kind === 'interrupted_turn'
@@ -6215,6 +6725,14 @@ export class Session implements SessionContext {
           promptMetadata?.[DAEMON_RETRY_META_KEY] === true ||
           promptMetadata?.[DAEMON_CONTINUE_META_KEY] === true ||
           promptMetadata?.[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] === true;
+        responseCapture.turnId = continuesCurrentWorkChain
+          ? getLastApiHistoryPromptId(
+              this.#getCurrentChat().getHistoryShallow(),
+            )
+          : promptId;
+        if (responseCapture.turnResult) {
+          responseCapture.turnResult.historyPromptId = responseCapture.turnId;
+        }
         // Bind the prompt ID for the remainder of this turn, mirroring the
         // sessionIdContext.run wrapper in #executePrompt. Shell subprocesses
         // read it via getShellContextEnvVars (QWEN_CODE_PROMPT_ID) — without
@@ -6297,6 +6815,11 @@ export class Session implements SessionContext {
               (params as { _meta?: Record<string, unknown> })._meta?.[
                 DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY
               ] === true;
+            const continuedPromptId = continuesCurrentWorkChain
+              ? getLastApiHistoryPromptId(
+                  this.#getCurrentChat().getHistoryShallow(),
+                )
+              : undefined;
             if (
               isRestoreAskUserQuestion &&
               !findRestorableAskUserQuestion(
@@ -6310,6 +6833,16 @@ export class Session implements SessionContext {
               // snapshots, `conversation_finished` — so each such no-op
               // restore doesn't persist phantom records.
               return { stopReason: 'end_turn' };
+            }
+            if (
+              (isRetry || isRestoreAskUserQuestion) &&
+              !isContinue &&
+              daemonPromptId
+            ) {
+              await responseCapture.recordingService?.recordTurnAttempt(
+                continuedPromptId,
+                daemonPromptId,
+              );
             }
             if (
               !isRetry &&
@@ -6351,7 +6884,11 @@ export class Session implements SessionContext {
                 goalTurn.permit,
               );
             } else if (isContinue) {
-              const recoveryPlan = this.#getRecoveryPlan(true);
+              const recoveryPlan = (await this.#isContinueBlocked(
+                promptMetadata?.['qwen.daemon.confirmCancellation'],
+              ))
+                ? undefined
+                : this.#getRecoveryPlan(true);
               if (!recoveryPlan?.continuation) {
                 // History moved between continueLastTurn()'s accept and this
                 // re-detection (e.g. a concurrent turn settled it). Nothing to
@@ -6370,6 +6907,12 @@ export class Session implements SessionContext {
                   ),
                 );
                 return { stopReason: 'end_turn' };
+              }
+              if (daemonPromptId) {
+                await responseCapture.recordingService?.recordTurnAttempt(
+                  continuedPromptId,
+                  daemonPromptId,
+                );
               }
               void recordDaemonSessionApprovalModeFromConfig(this.config);
               if (recoveryPlan.continuation.mode === 'retry_user_parts') {
@@ -6718,6 +7261,46 @@ export class Session implements SessionContext {
             // plan mode in ACP has no effect because the model never learns it
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
+            const workflowHumanInput =
+              isUserSubmissionTurn &&
+              !isSlashInput &&
+              !isSlashCommand(submittedPrompt) &&
+              !goalTurn &&
+              !pendingSend.signal.aborted &&
+              submittedPrompt.trim().length > 0
+                ? { text: submittedPrompt }
+                : undefined;
+            if (workflowHumanInput && this.config.isWorkflowsEnabled?.()) {
+              try {
+                const liveSettings = readSettingsSnapshot(
+                  this.config.storage.getProjectRoot(),
+                  {
+                    environment: process.env,
+                    workspaceTrusted: this.config.isTrustedFolder(),
+                  },
+                );
+                this.config.setWorkflowKeywordTriggerEnabled(
+                  liveSettings.merged.ui?.disableWorkflowKeywordTrigger !==
+                    true,
+                );
+              } catch (error) {
+                this.config.setWorkflowKeywordTriggerEnabled(false);
+                debugLogger.warn(
+                  'Unable to read the live workflow keyword setting:',
+                  error,
+                );
+              }
+            }
+            // ACP sends through LlmChat, bypassing LlmClient's injection.
+            // Resolve here before the interrupted-prompt reminder deduplication.
+            const workflowIntent = resolveWorkflowIntent(
+              this.config,
+              workflowHumanInput,
+            );
+            if (workflowIntent) {
+              systemReminders.push({ text: workflowIntent.reminder });
+              logWorkflowKeyword(this.config, new WorkflowKeywordEvent());
+            }
             if (systemReminders.length > 0 && !isRestoreAskUserQuestion) {
               // On an `interrupted_prompt` continuation the replayed orphaned
               // user run can already carry the reminders that were prepended on
@@ -6962,7 +7545,9 @@ export class Session implements SessionContext {
                 turnCount++;
                 if (pendingSend.signal.aborted) {
                   this.todoStopGuard.suspend();
-                  this.#getCurrentChat().addHistory(nextMessage);
+                  const chat = this.#getCurrentChat();
+                  markApiHistoryPrompt(nextMessage, responseCapture.turnId);
+                  chat.addHistory(nextMessage);
                   if (restorePostAnswerNoticesAttached) {
                     this.#clearPendingRestoreNotices();
                   }
@@ -7019,6 +7604,16 @@ export class Session implements SessionContext {
                       responseInterrupt.signal,
                       {
                         modelOverride: fullTurnModelOverride,
+                        historyPromptId:
+                          turnCount === 1 &&
+                          goalTurn?.origin !== 'runtime' &&
+                          !nextMessage?.parts?.some(
+                            (part) => part.functionResponse,
+                          )
+                            ? continuesCurrentWorkChain
+                              ? continuedPromptId
+                              : promptId
+                            : undefined,
                         consumeInitialMemory:
                           isFreshUserTurn && turnCount === 1,
                       },
@@ -7032,6 +7627,9 @@ export class Session implements SessionContext {
                     // user never got an answer to.
                     const preserveFullMessage =
                       isContinue || sendResult.stopReason === 'cancelled';
+                    if (preserveFullMessage && nextMessage) {
+                      markApiHistoryPrompt(nextMessage, responseCapture.turnId);
+                    }
                     this.#preserveUnsentMessageHistory(
                       nextMessage,
                       preserveFullMessage,
@@ -7172,7 +7770,8 @@ export class Session implements SessionContext {
                   }
 
                   // Explicit user cancellation and session disposal are
-                  // controlled aborts. Other AbortErrors still surface so
+                  // controlled aborts, and so is the bridge's forwarded
+                  // interruption token. Other AbortErrors still surface so
                   // infrastructure failures are not hidden as cancellations.
                   // A response cut short by queued input gets here only when
                   // the turn itself is stopped meanwhile, and the turn's
@@ -7182,7 +7781,9 @@ export class Session implements SessionContext {
                     pendingSend.signal.aborted &&
                     (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
                       pendingSend.signal.reason ===
-                        SESSION_DISPOSE_ABORT_REASON);
+                        SESSION_DISPOSE_ABORT_REASON ||
+                      pendingSend.signal.reason ===
+                        INTERRUPTED_PROMPT_ABORT_REASON);
                   if (isControlledCancellation) {
                     this.todoStopGuard.suspend();
                     return { stopReason: 'cancelled' };
@@ -8365,7 +8966,8 @@ export class Session implements SessionContext {
         const isControlledCancellation =
           pendingSend.signal.aborted &&
           (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
-            pendingSend.signal.reason === SESSION_DISPOSE_ABORT_REASON);
+            pendingSend.signal.reason === SESSION_DISPOSE_ABORT_REASON ||
+            pendingSend.signal.reason === INTERRUPTED_PROMPT_ABORT_REASON);
         if (isControlledCancellation) {
           this.todoStopGuard.suspend();
           return {
@@ -8869,7 +9471,9 @@ export class Session implements SessionContext {
       ...(recording.startedAt !== undefined
         ? { startedAt: recording.startedAt }
         : {}),
-      ...(cancelledAt !== undefined ? { cancelledAt } : {}),
+      ...(cancelledAt !== undefined
+        ? { cancelledAt, cancelReason: 'user' as const }
+        : {}),
       endedAt: Date.now(),
       promptText: recording.promptText,
       ...(recording.promptTextTruncated ? { promptTextTruncated: true } : {}),
@@ -8885,8 +9489,11 @@ export class Session implements SessionContext {
         : {}),
     };
     try {
-      recording.recordingService?.recordTurnResult(payload);
-      if (cancelledAt !== undefined) {
+      recording.recordingService?.recordTurnResult(
+        payload,
+        recording.finalAnswer.historyPromptId,
+      );
+      if (state === 'cancelled') {
         await recording.recordingService?.flush();
       }
     } catch (recordError) {
@@ -8960,6 +9567,7 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     options: {
       skipCompression?: boolean;
+      historyPromptId?: string;
       modelOverride?: string;
       getModelOverride?: () => string | undefined;
       prepareBeforeCompression?: () => Promise<BeforeModelSendDecision>;
@@ -9143,9 +9751,14 @@ export class Session implements SessionContext {
     const goalPermit = goalTurnContext.getStore();
     let sourceStream: AsyncGenerator<StreamEvent>;
     try {
-      sourceStream = goalPermit
-        ? await chat.sendMessageStream(model, request, promptId, goalPermit)
-        : await chat.sendMessageStream(model, request, promptId);
+      sourceStream =
+        options.historyPromptId !== undefined
+          ? await chat.sendMessageStream(model, request, promptId, goalPermit, {
+              promptId: options.historyPromptId,
+            })
+          : goalPermit
+            ? await chat.sendMessageStream(model, request, promptId, goalPermit)
+            : await chat.sendMessageStream(model, request, promptId);
     } catch (error) {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
       throw error;
@@ -9470,6 +10083,11 @@ export class Session implements SessionContext {
         `[repeated-tool-failure-guard] mode=${toolLoopState.repeatedToolFailureMode} decision=${repeatedToolFailureDecision.kind} phase=${state.phase} candidate=${state.candidateOrdinal} failures=${state.failureCount} batches=${state.batchCount}`,
       );
     }
+    // A stop sends nothing, so its batch leaves the reminders unlogged.
+    const loopReminder =
+      repeatedToolFailureDecision.kind === 'stop'
+        ? undefined
+        : takeDaemonLoopReminders(this.config, promptId, toolLoopState);
     const parts = [
       ...toolRun.parts,
       ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
@@ -9478,6 +10096,7 @@ export class Session implements SessionContext {
       )
         ? [{ text: TOOL_EXPLORATION_REMINDER }]
         : []),
+      ...(loopReminder ? [{ text: loopReminder }] : []),
       ...(repeatedToolFailureDecision.kind === 'warn'
         ? [{ text: REPEATED_TOOL_FAILURE_REMINDER }]
         : []),
@@ -10399,7 +11018,7 @@ export class Session implements SessionContext {
           // the built prompt, whose first line is the execution-context
           // header. Same shape the manual-run route gives its children.
           name: scheduledTaskRunSessionName(
-            job.name ?? job.prompt,
+            job.name ?? job.taskPrompt ?? job.prompt,
             triggeredAt,
           ),
           ...(job.id
@@ -10528,6 +11147,7 @@ export class Session implements SessionContext {
   async #drainCronQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.closing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.cronProcessing) return;
     // Don't process cron while a user prompt is active — the queue will be
@@ -10544,6 +11164,7 @@ export class Session implements SessionContext {
 
   async #drainCronQueueExclusive(): Promise<void> {
     if (this.disposed || this.closing || this.cronProcessing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.pendingPrompt || this.notificationProcessing) return;
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
@@ -11797,6 +12418,7 @@ export class Session implements SessionContext {
   async #drainNotificationQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.closing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.notificationProcessing) return;
     if (this.notificationsPaused || this.notificationAdmissionDeferred) return;
@@ -11819,6 +12441,7 @@ export class Session implements SessionContext {
 
   async #drainNotificationQueueExclusive(): Promise<void> {
     if (this.disposed || this.closing || this.notificationProcessing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.notificationsPaused || this.notificationAdmissionDeferred) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
@@ -13043,9 +13666,12 @@ export class Session implements SessionContext {
       ? this.sessionReasoningSelection
       : parseReasoningSelection(rawSelection);
     const generation = this.config.getContentGeneratorConfig?.();
-    const thinkingMandatory = generation?.thinkingMandatory === true;
     const modelReasoning = getConfiguredModelReasoning(this.config, modelId);
-    const gptCapabilities = getGptReasoningCapabilities(modelId);
+    const requestModel = getRequestModel(generation ?? {}, modelId);
+    const thinkingMandatory =
+      requestModel === (generation?.model ?? modelId) &&
+      generation?.thinkingMandatory === true;
+    const gptCapabilities = getGptReasoningCapabilities(requestModel);
     const configuredReasoning = parseModelReasoningCapabilities(modelReasoning);
     const gptModel = gptCapabilities !== undefined && !configuredReasoning;
     const supportsPreference = (value: ReasoningSelection | undefined) =>
@@ -13053,7 +13679,7 @@ export class Session implements SessionContext {
       value !== REASONING_EFFORT_DEFAULT &&
       ((gptModel && value !== REASONING_EFFORT_NONE) ||
         isReasoningSelectionSupported(
-          modelId,
+          requestModel,
           value,
           thinkingMandatory,
           modelReasoning,
@@ -13225,9 +13851,7 @@ export class Session implements SessionContext {
       target.push({
         ...record,
         // Calls outside the model's batch are nested Code Mode originals.
-        ...(ordinal === -1
-          ? { subtype: 'code_mode_tool_result' as const }
-          : {}),
+        ...(ordinal === -1 ? codeModeToolResultStamp() : {}),
         toolArgs: (fc.args ?? {}) as Record<string, unknown>,
         ordinal: Math.max(0, ordinal),
         sequence: toolResultRecordSequence++,
@@ -13489,6 +14113,7 @@ export class Session implements SessionContext {
           LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
           message,
           toolLoopState,
+          { loopDetail: { loopReason: LoopReason.PROVIDER_DUPLICATE_ID } },
         );
       } else {
         debugLogger.warn(message);
@@ -16699,11 +17324,14 @@ export class Session implements SessionContext {
                   callId,
                   toolResult.llmContent,
                   toolResult.error.message,
+                  this.config,
                 )
               : convertToFunctionResponse(
                   modelFacingToolName,
                   callId,
                   toolResult.llmContent,
+                  toolResult,
+                  this.config,
                 );
 
           // A tool can fail "softly" by returning toolResult.error without

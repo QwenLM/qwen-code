@@ -532,6 +532,10 @@ fn handle_activation(dispatcher: &Arc<Dispatcher>, note: &objc2_foundation::NSNo
         pid as i32
     };
 
+    if crate::key_focus_guard::user_switched_recently() {
+        dispatcher.allow_user_activation(activated_pid);
+        return;
+    }
     let restore_pids = dispatcher.snapshot_matches(activated_pid);
     for pid in restore_pids {
         restore_focus(pid);

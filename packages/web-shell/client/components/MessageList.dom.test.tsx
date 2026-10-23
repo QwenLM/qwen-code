@@ -6363,6 +6363,61 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(scrollTo).not.toHaveBeenCalled();
   });
 
+  it.each(['before reconnect', 'during replay'])(
+    'preserves a reading pause started %s after catch-up completes',
+    async (timing) => {
+      let scrollTop = 600;
+      Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+        configurable: true,
+        value: 1200,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+        configurable: true,
+        value: 600,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => {
+          scrollTop = Math.max(0, Math.min(value, 600));
+        },
+      });
+      const messages = [userMsg('u1'), asstMsg('a1')];
+      const ref = createRef<MessageListHandle>();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container, transcriptRenderMode: 'interactive' });
+      renderInto(root, messages, ref);
+      const list = container.querySelector<HTMLElement>(
+        '[data-web-shell-message-list]',
+      )!;
+      if (timing === 'during replay') {
+        renderInto(root, messages, ref, { catchingUp: true });
+      }
+      act(() => {
+        list.dispatchEvent(new WheelEvent('wheel', { deltaY: -300 }));
+        list.scrollTop = 300;
+        list.dispatchEvent(new Event('scroll'));
+      });
+      if (timing === 'before reconnect') {
+        renderInto(root, messages, ref, { catchingUp: true });
+      }
+      renderInto(root, messages, ref, { catchingUp: false });
+      await nextFrame();
+      expect(scrollTop).toBe(300);
+
+      renderInto(root, [...messages, asstMsg('a2')], ref, {
+        catchingUp: false,
+      });
+      await nextFrame();
+      expect(scrollTop).toBe(300);
+
+      act(() => ref.current?.scrollToBottom('auto'));
+      expect(scrollTop).toBe(600);
+    },
+  );
+
   it('finishes cooldown following unless the user scrolls up', () => {
     resizeObserversFireOnObserve = false;
     let scrollHeight = 1200;

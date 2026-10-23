@@ -5,6 +5,9 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidR
 import com.alibaba.qwen.code.managedagent.store.ManagedHookRecords;
 import com.alibaba.qwen.code.managedagent.store.ManagedHookRecords.AdmissionKeys;
 import com.fasterxml.jackson.databind.JsonNode;
+import org.flywaydb.core.api.migration.BaseJavaMigration;
+import org.flywaydb.core.api.migration.Context;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -18,8 +21,6 @@ import java.time.Instant;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.Set;
-import org.flywaydb.core.api.migration.BaseJavaMigration;
-import org.flywaydb.core.api.migration.Context;
 
 /**
  * Gives the Hook records written before V28 the admission projection that

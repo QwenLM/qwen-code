@@ -63,7 +63,7 @@ A matching NOT_FOUND observation permits the stopped cleanup path to wait for th
 | Managed server     | Profile admission, current-claim writer/record authorization, independent effect/resource verification and final atomic retirement. |
 | Runtime Broker     | Durable owner enumeration, original RuntimeSession drain and claim checks on recovery controls.                                     |
 
-Source changes are concentrated in `packages/cli/src/serve/`, `packages/sdk-java/qwencode/`, `packages/sdk-java/managed-agent-server/` and `packages/sdk-java/runtime-broker/`, with collocated tests. The E2E plan and execution results are in `.qwen/e2e-tests/workspace-profile-lifecycle.md`.
+Source changes are concentrated in `packages/cli/src/serve/`, `packages/sdk-java/qwencode/`, `packages/managed-agent-server/` and `packages/managed-agent-server/`, with collocated tests. The E2E plan and execution results are in `.qwen/e2e-tests/workspace-profile-lifecycle.md`.
 
 ## Validation and rollout
 

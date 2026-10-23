@@ -5,8 +5,8 @@
  */
 
 import type React from 'react';
-import { describe, expect, it, vi } from 'vitest';
-import { render } from 'ink-testing-library';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, render } from 'ink-testing-library';
 import { Text } from 'ink';
 import { MainContent } from './MainContent.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
@@ -18,6 +18,8 @@ import { AppContext } from '../contexts/AppContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
 import { ToolCallStatus, StreamingState } from '../types.js';
+
+afterEach(cleanup);
 
 // Global compact mode was removed (#5666); type-based tool rendering no longer
 // consumes a compact-mode context.

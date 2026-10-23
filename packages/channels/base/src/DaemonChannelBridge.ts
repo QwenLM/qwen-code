@@ -70,6 +70,7 @@ export interface DaemonChannelSessionClient {
   }): AsyncGenerator<DaemonChannelEvent>;
   detach?(): Promise<void>;
   cancel(): Promise<void>;
+  interrupt?(): Promise<void>;
   setModel(modelId: string): Promise<Record<string, unknown>>;
   respondToPermission(
     requestId: string,
@@ -873,7 +874,7 @@ export class DaemonChannelBridge
         // Fall back to cancellation for clients that cannot detach cleanly.
       }
     }
-    await session.cancel();
+    await (session.interrupt ? session.interrupt() : session.cancel());
   }
 
   async setSessionModel(
@@ -922,9 +923,11 @@ export class DaemonChannelBridge
     for (const sessionId of Array.from(this.sessions.keys())) {
       const session = this.sessions.get(sessionId);
       if (session) {
-        void session.cancel().catch((error: unknown) => {
-          this.lastError = error;
-        });
+        void (session.interrupt ? session.interrupt() : session.cancel()).catch(
+          (error: unknown) => {
+            this.lastError = error;
+          },
+        );
       }
       this.dropSession(sessionId, 'bridge_stopped', false);
     }
