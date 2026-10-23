@@ -298,6 +298,24 @@ describe('OpenTuiAppHost — forwarded shell actions', () => {
     expect(h.presentAction).toHaveBeenCalledWith('install this extension?');
   });
 
+  it('forwards owned confirmation lifetime options unchanged', async () => {
+    const h = makeHost();
+    const signal = new AbortController().signal;
+    const isCurrent = () => true;
+    const onConfirm = vi.fn();
+    h.host.addConfirmUpdateExtensionRequest({
+      prompt: 'owned',
+      signal,
+      isCurrent,
+      onConfirm,
+    });
+    expect(h.presentAction).toHaveBeenCalledWith('owned', {
+      signal,
+      isCurrent,
+    });
+    await vi.waitFor(() => expect(onConfirm.mock.calls).toEqual([[true]]));
+  });
+
   it('a rejected consent bridge still settles as a denial', async () => {
     const h = makeHost();
     h.presentAction.mockRejectedValueOnce(new Error('renderer blew up'));
