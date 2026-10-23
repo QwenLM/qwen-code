@@ -25,6 +25,7 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { PUBLISHED_PACKAGES } from '../assert-release-version.mjs';
 import { RELEASE_WORKSPACES } from '../release-packages.mjs';
+import { isAlreadyPublishedDryRunFailure } from '../../packages/cua-driver/scripts/publish-dry-run-skip.mjs';
 import { getTestCiWorkspacePackageJsonPaths } from '../workspaces.js';
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
@@ -58,15 +59,17 @@ const cuaReleaseWorkflow = readFileSync(
   '.github/workflows/cd-cua-driver.yml',
   'utf8',
 );
+const cuaReleaseJobs = parse(cuaReleaseWorkflow).jobs;
 const nodeReplPackage = JSON.parse(
   readFileSync('packages/node-repl/package.json', 'utf8'),
 );
 const cuaSdkPackage = JSON.parse(
   readFileSync('packages/cua-driver/typescript/package.json', 'utf8'),
 );
-const cuaSdkPackageLock = JSON.parse(
-  readFileSync('packages/cua-driver/typescript/package-lock.json', 'utf8'),
+const browserUsePackage = JSON.parse(
+  readFileSync('packages/browser-use/package.json', 'utf8'),
 );
+const workspaceLock = parse(readFileSync('pnpm-lock.yaml', 'utf8'));
 const cuaInstallScript = readFileSync(
   'packages/cua-driver/scripts/install.sh',
   'utf8',
@@ -97,17 +100,35 @@ const liveHostOssWorkflow = readFileSync(
 );
 
 describe('CUA release workflow', () => {
-  it('keeps the Node REPL package independently versioned', () => {
+  it('excludes the Computer Use distribution from the CLI release', () => {
+    for (const name of [
+      '@qwen-code/browser-use',
+      '@qwen-code/cua-sdk',
+      '@qwen-code/node-repl-mcp',
+    ]) {
+      expect(RELEASE_WORKSPACES).not.toContain(name);
+    }
+  });
+
+  it('keeps the Computer Use distribution on one version', () => {
     expect(nodeReplPackage.name).toBe('@qwen-code/node-repl-mcp');
-    expect(nodeReplPackage.version).toBe('0.1.7');
+    expect(nodeReplPackage.version).toBe(cuaSdkPackage.version);
+    expect(browserUsePackage.version).toBe(cuaSdkPackage.version);
+    expect(nodeReplPackage.dependencies['@qwen-code/cua-sdk']).toBe(
+      cuaSdkPackage.version,
+    );
+    expect(cuaSdkPackage.dependencies['@qwen-code/browser-use']).toBe(
+      cuaSdkPackage.version,
+    );
     expect(cuaReleaseWorkflow).toContain(
       "node_repl_version: '${{ steps.release.outputs.node_repl_version }}'",
     );
     expect(cuaReleaseWorkflow).not.toContain(
       'NODE_REPL_VERSION does not match release version',
     );
-    expect(cuaSdkPackageLock.version).toBe(cuaSdkPackage.version);
-    expect(cuaSdkPackageLock.packages[''].version).toBe(cuaSdkPackage.version);
+    expect(
+      workspaceLock.importers['packages/cua-driver/typescript'],
+    ).toBeDefined();
   });
 
   it('dry-runs and clean-installs the packed Node REPL MCP server', () => {
@@ -117,9 +138,15 @@ describe('CUA release workflow', () => {
   });
 
   it('publishes the verified Node REPL tarball immutably with provenance', () => {
-    expect(cuaReleaseWorkflow).toMatch(
-      /publish-node-repl:[\s\S]*?needs: \['validate-version', 'verify-node-repl-package', 'release'\][\s\S]*?npm view "@qwen-code\/node-repl-mcp@\$\{VERSION\}" dist\.integrity[\s\S]*?npm publish "\$TARBALL" --provenance --access public --tag "\$NPM_TAG"[\s\S]*?Verify npm registry integrity/,
+    const job = cuaReleaseJobs['publish-node-repl'];
+    expect(job.needs).toContain('publish-sdk');
+    const commands = job.steps.map((step) => step.run ?? '').join('\n');
+    expect(commands).toMatch(
+      /npm view "@qwen-code\/node-repl-mcp@\$\{VERSION\}" dist\.integrity[\s\S]*?npm publish "\$TARBALL" --provenance --access public --tag "\$NPM_TAG"/,
     );
+    expect(
+      job.steps.some((step) => step.name === 'Verify npm registry integrity'),
+    ).toBe(true);
   });
 
   it('keeps installer version changes in the feature PR', () => {
@@ -150,32 +177,30 @@ describe('CUA release workflow', () => {
     );
   });
 
-  it('pins exact Computer Use package versions across the skill and user guide', () => {
+  it('pins exact runtime registration and dependency versions', () => {
     expect(computerUseGuide).toContain(
       `@qwen-code/node-repl-mcp@${nodeReplPackage.version}`,
     );
     expect(computerUseGuide).toContain(
-      `@qwen-code/cua-sdk@${cuaSdkPackage.version}`,
+      'installs the matching SDK and browser SDK as dependencies',
     );
-    expect(cuaReleaseWorkflow).toContain('SKILL_NODE_REPL_VERSION=$(sed -nE');
+    expect(cuaReleaseWorkflow).not.toContain('SKILL_NODE_REPL_VERSION=');
     expect(cuaReleaseWorkflow).toContain(
       'USER_GUIDE_NODE_REPL_VERSION=$(sed -nE',
     );
-    expect(cuaReleaseWorkflow).toContain('SKILL_SDK_VERSION=$(sed -nE');
-    expect(cuaReleaseWorkflow).toContain('USER_GUIDE_SDK_VERSION=$(sed -nE');
+    expect(cuaReleaseWorkflow).not.toContain('SKILL_SDK_VERSION=');
+    expect(cuaReleaseWorkflow).toContain('SDK_BROWSER_VERSION=');
+    expect(cuaReleaseWorkflow).not.toContain('USER_GUIDE_SDK_VERSION=');
     expect(cuaReleaseWorkflow).not.toContain(
       'grep -Fq "@qwen-code/node-repl-mcp@',
     );
     expect(cuaReleaseWorkflow).not.toContain('grep -Fq "@qwen-code/cua-sdk@');
   });
 
-  it('bootstraps only Node REPL without replacing an existing CUA release', () => {
-    expect(cuaReleaseWorkflow).toMatch(
-      /node_repl_only:[\s\S]*?type: 'boolean'[\s\S]*?default: false/,
-    );
-    expect(cuaReleaseWorkflow).toMatch(
-      /publish-node-repl:[\s\S]*?needs\.release\.result == 'success'[\s\S]*?inputs\.node_repl_only == true[\s\S]*?inputs\.dry_run == false/,
-    );
+  it('releases dependencies before the same-version runtime', () => {
+    expect(cuaReleaseWorkflow).not.toContain('node_repl_only');
+    expect(cuaReleaseJobs['publish-sdk'].needs).toContain('publish-browser');
+    expect(cuaReleaseJobs['publish-node-repl'].needs).toContain('publish-sdk');
     expect(cuaReleaseWorkflow).toContain(
       'A production dispatch must run from protected main',
     );
@@ -3436,5 +3461,41 @@ describe('release lane runner routing', () => {
     expect(wipe.if).toBe("${{ runner.environment == 'self-hosted' }}");
     expect(wipe.run).toBe('rm -rf prebuilds');
     expect(rest[0].name).toBe('Merge per-platform prebuilds');
+  });
+});
+
+describe('SDK publish dry-run already-published tolerance', () => {
+  // After a release, the packaged version lives in the registry and the
+  // dry-run's collision probe is permanently red until the next bump; only
+  // that exact registry state may be treated as a skip.
+  it.each([
+    {
+      label: 'npm stderr line',
+      text: 'npm error You cannot publish over the previously published versions: 0.26.0.',
+    },
+    {
+      label: 'npm --json error summary',
+      text: '{"error":{"code":"E403","summary":"You cannot publish over the previously published versions: 0.26.0."}}',
+    },
+  ])('skips the registry-collision case: $label', ({ text }) => {
+    expect(isAlreadyPublishedDryRunFailure(text)).toBe(true);
+  });
+
+  it.each([
+    {
+      label: 'permission denied',
+      text: 'npm error code E403\nnpm error 403 403 Forbidden - PUT https://registry.npmjs.org/@qwen-code%2fcua-sdk - You do not have permission to publish "@qwen-code/cua-sdk".',
+    },
+    {
+      label: 'network failure',
+      text: 'npm error code ENOTFOUND\nnpm error network request to https://registry.npmjs.org/@qwen-code%2fcua-sdk failed',
+    },
+    {
+      label: 'bare exit without captured detail',
+      text: 'npm exited with status 1',
+    },
+    { label: 'empty', text: '' },
+  ])('keeps failing every other registry failure: $label', ({ text }) => {
+    expect(isAlreadyPublishedDryRunFailure(text)).toBe(false);
   });
 });

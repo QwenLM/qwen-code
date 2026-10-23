@@ -749,8 +749,6 @@ and visual baselines, and attaches before/after screenshots.
   - `TrajectoryPanel.tsx`: the layout-tier observer; the drill-in overlay over
     the `inert` list, and the side-by-side split with `ResizablePanelGroup`;
     click opens details; ↑ / ↓ stepping; focus and scroll restoration on Back.
-  - `ArtifactPanel.tsx`: pass `workspaceCwd`, and optionally `onOpenFile` and
-    `onOpenAgent`.
 - **Test ids.** `trajectory-inspector` becomes `trajectory-detail`. The 8 e2e
   uses are updated in the same PR.
 - **Done when**
@@ -758,6 +756,14 @@ and visual baselines, and attaches before/after screenshots.
   - Back restores the scroll offset to within one row, keeps the selection and
     puts focus on the grid.
   - Resizing works with the pointer and the keyboard.
+- **Moved to PR-R3.** These depend on the row absorption and step model that
+  PR-R3 introduces:
+  - Step content (Response, Thinking, Tool calls). Until then a step shows its
+    facts, identifiers and lifecycle.
+  - Turn wall duration and tokens. Until then a turn shows steps, tools, main
+    model time and the prompt.
+  - Passing `workspaceCwd`, `onOpenFile` and `onOpenAgent` from
+    `ArtifactPanel.tsx`, together with the file and agent links they serve.
 
 ### PR-R3: rows and tree
 
@@ -770,6 +776,8 @@ and visual baselines, and attaches before/after screenshots.
   - `TrajectoryPanel.tsx`: the tree grid, the pinned turn header, micro-bars,
     owner-based search counts and stepping, and the hollow descendant-failure
     icon.
+  - `TrajectoryDetail.tsx` and `ArtifactPanel.tsx`: the items moved from
+    PR-R2.
 - **Tests**
   - Layout units: absorption, nesting, unresolved parents, partial turns,
     sessions without timing frames (their messages stay visible), injected

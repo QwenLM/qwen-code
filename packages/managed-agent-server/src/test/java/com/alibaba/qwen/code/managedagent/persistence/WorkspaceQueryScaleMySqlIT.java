@@ -151,9 +151,6 @@ class WorkspaceQueryScaleMySqlIT {
                 var head = new Query(LocalStorageOwners.HEAD_AUTHORITY_SQL, new Object[] {"other-tenant", tenantKey, "other-tenant", "other-storage"});
                 assertThat(jdbc.queryForList(head.sql(), Integer.class, head.arguments())).isEmpty();
                 assertBounded(jdbc, head, "ix_ma_session_storage_scope", 5);
-                var holder = new Query(WorkspaceExecutionStore.ORIGINAL_HOLDER_SQL, new Object[] {failed.getBindingId(), failed.getGeneration()});
-                assertThat(jdbc.queryForList(holder.sql(), String.class, holder.arguments())).isEmpty();
-                assertBounded(jdbc, holder, "ix_ma_storage_owner_binding", 5);
             }
         }
     }

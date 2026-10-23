@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRecoveryCommand;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
@@ -89,7 +88,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
         assertThat(originalSeed).isNotBlank();
         assertThat(execution.get("dispatch_generation")).isEqualTo(1L);
         if (phase.equals("prepare")) {
-            assertBusy(session);
+            assertIndependentAdmission(session);
             String inspection = command("inspect", binding, generation);
             var view = JSON.readTree(inspection.lines().filter(line -> line.startsWith("{")).findFirst().orElseThrow());
             assertThat(view.path("captureStatus").asText()).isEqualTo("partial");
@@ -137,7 +136,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
         assertThat(command("complete", recovery, evidence.toString())).contains("completed");
         assertThat(command("complete", recovery, evidence.toString())).contains("completed");
         assertOriginalSeed(binding, originalSeed);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE binding_id = ?",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_key IS NOT NULL",
                 Integer.class, binding)).isZero();
         assertThat(jdbc.queryForObject("SELECT binding_state FROM ma_runtime_binding WHERE binding_id = ?",
                 String.class, binding)).isEqualTo("RELEASED");
@@ -150,24 +149,21 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
                 "replacementBindingId", next.getBindingId());
     }
 
-    private void assertBusy(Map<String, Object> session) throws Exception {
-        try {
-            broker.acquire(session.get("secondarySessionId").toString(), UUID.randomUUID().toString(), "bootstrap")
-                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
-            throw new AssertionError("A second Session entered the uncertain Workspace");
-        } catch (java.util.concurrent.ExecutionException error) {
-            Throwable cause = error.getCause();
-            while (cause.getCause() != null && !(cause instanceof RuntimeBrokerException)) {
-                cause = cause.getCause();
-            }
-            assertThat(cause).isInstanceOf(RuntimeBrokerException.class);
-            assertThat(((RuntimeBrokerException) cause).getCode()).isEqualTo("workspace_busy");
-        }
+    private void assertIndependentAdmission(Map<String, Object> session) throws Exception {
+        var neighbor = broker.acquire(session.get("secondarySessionId").toString(), UUID.randomUUID().toString(), "bootstrap")
+                .toCompletableFuture().get(30, TimeUnit.SECONDS);
+        assertThat(broker.release(neighbor.getSession().getHarnessSessionId(), neighbor.getRuntimeSessionId())
+                .toCompletableFuture().get(30, TimeUnit.SECONDS)).isTrue();
     }
 
     private void assertHeld(String binding, String holder) {
-        assertThat(jdbc.queryForObject("SELECT holder_key FROM ma_storage_owner WHERE binding_id = ?",
-                String.class, binding)).isEqualTo(holder);
+        var members = jdbc.queryForList("SELECT runtime_generation, runtime_session_id, execution_storage_key"
+                + " FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_key IS NOT NULL", binding);
+        assertThat(members).hasSize(1);
+        var member = members.getFirst();
+        assertThat(org.apache.commons.codec.digest.DigestUtils.sha256Hex((binding + "\u0000"
+                + member.get("runtime_generation") + "\u0000" + member.get("runtime_session_id"))
+                .getBytes(StandardCharsets.UTF_8))).isEqualTo(holder);
     }
 
     private void assertOriginalSeed(String binding, String ciphertext) {

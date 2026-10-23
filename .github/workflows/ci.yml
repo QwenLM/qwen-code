@@ -49,6 +49,7 @@ on:
         type: 'choice'
         options:
           - 'self-hosted'
+          - 'self-hosted-arm64'
           - 'hosted'
 
 concurrency:
@@ -191,6 +192,10 @@ jobs:
           SAME_REPO: '${{ github.event.pull_request.head.repo.full_name == github.repository }}'
           AUTHOR_ASSOCIATION: '${{ github.event.pull_request.author_association }}'
           ECS_DISABLED: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED }}'
+          # Optional fleet selector: 'hosted' forces github.com-hosted runners,
+          # 'arm64' routes to the experimental ARM64 ECS fleet, anything else
+          # keeps the x64 ecs-qwen fleet. Empty/unset keeps current behavior.
+          LINUX_RUNNER_FLEET: '${{ vars.LINUX_RUNNER_FLEET }}'
           EVENT_NAME: '${{ github.event_name }}'
           DISPATCH_LINUX_RUNNER: '${{ github.event.inputs.linux_runner }}'
         run: |-
@@ -199,12 +204,25 @@ jobs:
           case "${AUTHOR_ASSOCIATION}" in
             OWNER|MEMBER|COLLABORATOR) trusted_author=true ;;
           esac
+          # Dispatch input wins over the fleet variable; MAINTAINER_ECS_RUNNER_
+          # DISABLED=true still hard-forces hosted runners everywhere.
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
             if [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted" ]]; then
               ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+            elif [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted-arm64" ]]; then
+              # Experimental ARM64 ECS fleet (Hangzhou, ecs.q8y). No arch label
+              # set is required by any production lane; this only selects the
+              # fleet that self-identifies as ARM64.
+              ubuntu_runner='["self-hosted", "linux", "arm64"]'
             fi
-          elif [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" || "${EVENT_NAME}" == "push" ) ]]; then
-            ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+          elif [[ "${ECS_DISABLED}" == "true" || "${LINUX_RUNNER_FLEET}" == "hosted" ]]; then
+            ubuntu_runner='["ubuntu-latest"]'
+          elif [[ "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" || "${EVENT_NAME}" == "push" ]]; then
+            if [[ "${LINUX_RUNNER_FLEET}" == "arm64" ]]; then
+              ubuntu_runner='["self-hosted", "linux", "arm64"]'
+            else
+              ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+            fi
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected Linux runner: ${ubuntu_runner}"
@@ -839,6 +857,14 @@ jobs:
       - name: 'Publish Test Report (for non-forks)'
         if: |-
           ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && steps.unit_tests.outcome != 'skipped' && (github.event.pull_request.head.repo.full_name == github.repository) }}
+        # The parser rejects the whole step when any matched file is not
+        # well-formed XML, and vitest's JUnit writer can leave
+        # packages/cli/junit.xml truncated at the tail when the suite exits
+        # mid-write: #15305 (attempt 1) failed at line 47397 and #15261 at
+        # 47232 with "Invalid character in entity name", while both runs'
+        # tests had passed. The report is advisory (`fail-on-error: false`),
+        # so a broken artifact must not turn a green suite red.
+        continue-on-error: true
         uses: 'dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2' # ratchet:dorny/test-reporter@v3
         with:
           name: 'Test Results (ubuntu-latest, Node 22.x)'
@@ -1380,9 +1406,9 @@ jobs:
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
           {
             echo "DISKCONTEXT failure-dump $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            df -hT || true
+            df -hT || df -h || true
             df -i || true
-            grep -E 'MemTotal|MemAvailable' /proc/meminfo || true
+            grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo || true
           } 2>/dev/null | tee -a "$DISK_SAMPLES" || true
       # Collector for the #10035 telemetry, kept as the LAST step: failure()
       # is evaluated when the step is reached and never revisited, so at its
@@ -1907,7 +1933,7 @@ jobs:
       - name: 'Verify temp paths carry no short alias'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
-          node -e "const fs = require('node:fs'); for (const key of ['TEMP', 'TMP']) { const value = process.env[key]; if (!value) { console.error(key + ' is not set'); process.exitCode = 1; continue; } const real = fs.realpathSync(value); if (real === value) continue; if (real.toLowerCase() === value.toLowerCase()) { console.log('::warning::' + key + ' differs from its real path only by casing: ' + value + ' -> ' + real); continue; } console.error(key + ' carries a short alias: ' + value + ' -> ' + real); process.exitCode = 1; }"
+          node -e "const fs = require('node:fs'); for (const key of ['TEMP', 'TMP']) { const value = process.env[key]; if (!value) { console.error('::error::' + key + ' is not set'); process.exitCode = 1; continue; } const real = fs.realpathSync(value); if (real === value) continue; if (real.toLowerCase() === value.toLowerCase()) { console.log('::warning::' + key + ' differs from its real path only by casing: ' + value + ' -> ' + real); continue; } console.error('::error::' + key + ' carries a short alias: ' + value + ' -> ' + real); process.exitCode = 1; }"
 
       - name: 'Configure persistent npm cache (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
@@ -1929,6 +1955,7 @@ jobs:
           npm config set fetch-timeout 300000
 
       - name: 'Install dependencies'
+        id: 'install'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
@@ -1992,9 +2019,11 @@ jobs:
       # Unlike macOS, whose E2E legs run this file in full, no other Windows
       # lane runs the Hosted cases, so this one runs all of them and fails if
       # any is skipped. It runs after the unit tests so that a Hosted failure
-      # cannot hide their results.
+      # cannot hide their results, but only after a successful install: without
+      # node_modules and dist the suite cannot even collect and the red is then
+      # attributed to a test file that never ran.
       - name: 'Hosted process suite'
-        if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ !cancelled() && steps.install.outcome == 'success' && needs.classify_pr.outputs.skip_ci != 'true' }}"
         timeout-minutes: 10
         run: |-
           npm run test:integration:hosted:sandbox:none -- --reporter=default --reporter=json --outputFile.json=hosted-process-suite.json

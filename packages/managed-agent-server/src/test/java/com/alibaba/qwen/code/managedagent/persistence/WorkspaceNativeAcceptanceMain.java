@@ -17,7 +17,7 @@ public final class WorkspaceNativeAcceptanceMain {
         if (!"storage".equals(args[0])) {
             var fixture = new HostedWorkspaceConcurrencyIT();
             fixture.temporary = Files.createTempDirectory(directory, "concurrency-");
-            fixture.twoBrokerProcessesSerializeFenceClaimDispatchAndStaleCleanup();
+            fixture.twoBrokerProcessesFenceClaimDispatchAndStaleCleanup();
             System.out.println("{\"fixture\":\"HostedWorkspaceConcurrencyIT\",\"passed\":true}");
         }
         if (!"concurrency".equals(args[0])) {

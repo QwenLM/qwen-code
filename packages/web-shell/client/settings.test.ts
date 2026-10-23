@@ -7,6 +7,29 @@ import {
 } from './settings';
 
 describe('settings presentation aliases', () => {
+  it('includes and excludes the Generated UI row through its public alias', () => {
+    expect(WEB_SHELL_SETTING_ITEM_IDS).toContain('setting:generated-ui');
+    expect(
+      isSettingVisible('experimental.generatedUi', {
+        includeItems: ['setting:generated-ui'],
+      }),
+    ).toBe(true);
+    expect(
+      isSettingVisible('experimental.generatedUi', {
+        excludeItems: ['setting:generated-ui'],
+      }),
+    ).toBe(false);
+    expect(
+      isSettingVisible('experimental.generatedUi', {
+        includeItems: WEB_SHELL_SETTING_ITEM_IDS,
+      }),
+    ).toBe(true);
+    expect(
+      isSettingVisible('experimental.generatedUi', {
+        excludeItems: WEB_SHELL_SETTING_ITEM_IDS,
+      }),
+    ).toBe(false);
+  });
   it('maps stable public aliases to configuration keys without accepting raw paths', () => {
     expect(
       isSettingVisible('fastModel', { excludeItems: ['setting:fast-model'] }),
@@ -229,6 +252,7 @@ describe('settings presentation aliases', () => {
       'setting:workflow-keyword-trigger': 'ui.disableWorkflowKeywordTrigger',
       'setting:status-in-title': 'ui.showStatusInTitle',
       'setting:response-speed': 'ui.showResponseTokensPerSecond',
+      'setting:loading-phrases': 'ui.accessibility.enableLoadingPhrases',
       'setting:followup-suggestions': 'ui.enableFollowupSuggestions',
       'setting:tool-call-details': 'ui.showToolCallDetails',
       'setting:shell-output-limit': 'ui.shellOutputMaxLines',
@@ -259,6 +283,7 @@ describe('settings presentation aliases', () => {
       'setting:model-proposed-goals': 'goals.modelProposed',
       'setting:arena-artifacts': 'agents.arena.preserveArtifacts',
       'setting:session-workflow': 'experimental.sessionWorkflow',
+      'setting:generated-ui': 'experimental.generatedUi',
       'setting:scheduled-tasks': 'experimental.cron',
       'setting:session-writer-lease': 'experimental.sessionWriterLease',
       'setting:agent-team': 'experimental.agentTeam',
