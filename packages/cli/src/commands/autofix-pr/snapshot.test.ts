@@ -257,6 +257,33 @@ describe('buildSnapshot', () => {
     expect(buildSnapshot(pr({}, [run(5)]), otherHead).action).toBe('fix');
   });
 
+  it('leaves out the failures of a deferred re-run until their run has ended', () => {
+    const lint = (status: string): Contexts[number] => ({
+      __typename: 'CheckRun',
+      databaseId: 5,
+      name: 'Lint',
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      detailsUrl: 'https://github.com/o/r/actions/runs/123/job/5',
+      checkSuite: {
+        status,
+        app: { databaseId: 1 },
+        workflowRun: { event: 'pull_request', workflow: { databaseId: 2 } },
+      },
+    });
+    const deferred = state({ deferredRuns: [123] });
+    expect(
+      buildSnapshot(pr({}, [lint('IN_PROGRESS')]), deferred),
+    ).toMatchObject({ action: 'wait', events: [] });
+    expect(buildSnapshot(pr({}, [lint('IN_PROGRESS')]), state()).action).toBe(
+      'fix',
+    );
+    expect(buildSnapshot(pr({}, [lint('COMPLETED')]), deferred)).toMatchObject({
+      action: 'fix',
+      events: [{ type: 'ci_failed', check: 'Lint', runId: 123 }],
+    });
+  });
+
   it('reads an API that has not caught up with the branch as lag, not a push', () => {
     const pushed = 'b'.repeat(40);
     const failing: Contexts[number] = {

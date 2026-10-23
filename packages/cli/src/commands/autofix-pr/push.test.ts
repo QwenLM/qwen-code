@@ -55,6 +55,7 @@ describe('runPush (real git, bare remote)', () => {
   let live: {
     state: string;
     headRefName: string;
+    baseRefName: string;
     isCrossRepository: boolean;
     headRepository: { name: string } | null;
     headRepositoryOwner: { login: string } | null;
@@ -125,6 +126,7 @@ describe('runPush (real git, bare remote)', () => {
     live = {
       state: 'OPEN',
       headRefName: 'feat',
+      baseRefName: 'main',
       isCrossRepository: false,
       headRepository: { name: 'r' },
       headRepositoryOwner: { login: 'o' },
@@ -360,6 +362,90 @@ describe('runPush (real git, bare remote)', () => {
     symlinkSync(repo, paths.worktreePath);
     expect(() => runPush(7)).toThrow(/is a symlink/);
     expect(remoteFeat()).toBe(featSha);
+  });
+
+  /** A pre-push hook, named in the repository's own config. */
+  const prePushHook = (script: string) => {
+    const hooks = join(base, 'hooks');
+    mkdirSync(hooks, { recursive: true });
+    run(repo, 'config', 'core.hooksPath', hooks);
+    const hook = join(hooks, 'pre-push');
+    writeFileSync(hook, `#!/bin/sh\n${script}`);
+    chmodSync(hook, 0o755);
+  };
+
+  it('pushes when a pre-push hook prints more than a megabyte', () => {
+    prePushHook('head -c 2097152 /dev/zero | tr "\\000" x >&2\nexit 0\n');
+    const fix = commitIn(paths.worktreePath, 'fix.txt');
+    expect(runPush(7)).toMatchObject({ pushed: true, sha: fix });
+    expect(remoteFeat()).toBe(fix);
+  });
+
+  it('reads a lease lost while a pre-push hook refused from the remote, with no "stale info" to read', () => {
+    run(repo, 'switch', '-q', 'feat');
+    const theirs = commitIn(repo, 'theirs.txt');
+    run(repo, 'push', '-q', 'origin', 'feat:refs/heads/side');
+    run(repo, 'switch', '-q', 'main');
+    // Someone pushes while the hook runs, and the hook refuses.
+    prePushHook(
+      `git --git-dir="${remote}" update-ref refs/heads/feat ${theirs}\necho "hook says no" >&2\nexit 1\n`,
+    );
+    commitIn(paths.worktreePath, 'fix.txt');
+    expect(runPush(7)).toMatchObject({ pushed: false, action: 'resync' });
+    expect(remoteFeat()).toBe(theirs);
+  });
+
+  it('refuses a plain directory in place of the worktree, whatever the enclosing clone has checked out', () => {
+    run(repo, 'worktree', 'remove', '--force', paths.worktreePath);
+    mkdirSync(paths.worktreePath);
+    writeFileSync(join(repo, '.git', 'info', 'exclude'), '.qwen/\n');
+    // The user checked the watch's branch out in their own clone.
+    run(repo, 'switch', '-q', paths.branch);
+    commitIn(repo, 'user-work.txt');
+    expect(() => runPush(7)).toThrow(/is not a git worktree/);
+    expect(remoteFeat()).toBe(featSha);
+  });
+
+  it('refuses a worktree reached through a symlinked directory above it', () => {
+    // Another clone watching the same PR, with unpushed work of its own.
+    const other = join(base, 'other');
+    run(base, 'clone', '-q', remote, other);
+    run(other, 'config', 'user.email', 't@example.com');
+    run(other, 'config', 'user.name', 't');
+    const otherTmp = join(other, '.qwen', 'tmp');
+    mkdirSync(otherTmp, { recursive: true });
+    const otherWorktree = join(otherTmp, 'autofix-pr-7');
+    run(
+      other,
+      'worktree',
+      'add',
+      '-q',
+      '-b',
+      paths.branch,
+      otherWorktree,
+      featSha,
+    );
+    const theirWork = commitIn(otherWorktree, 'their-work.txt');
+    // This clone's `.qwen/tmp` now leads there.
+    writeState(join(otherTmp, 'autofix-pr-7-state.json'), state());
+    run(repo, 'worktree', 'remove', '--force', paths.worktreePath);
+    rmSync(dirname(paths.worktreePath), { recursive: true });
+    symlinkSync(otherTmp, dirname(paths.worktreePath));
+    expect(() => runPush(7)).toThrow(/resolves through the symlink/);
+    expect(remoteFeat()).toBe(featSha);
+    expect(run(otherWorktree, 'rev-parse', 'HEAD')).toBe(theirWork);
+  });
+
+  it('records the base GitHub names now, and refuses one a command cannot carry', () => {
+    live.baseRefName = 'release/2.0';
+    const fix = commitIn(paths.worktreePath, 'fix.txt');
+    expect(runPush(7)).toMatchObject({ pushed: true, sha: fix });
+    expect(state().baseRefName).toBe('release/2.0');
+    live.baseRefName = 'release;id';
+    commitIn(paths.worktreePath, 'fix2.txt');
+    expect(() => runPush(7)).toThrow(/cannot be named in a command/);
+    expect(remoteFeat()).toBe(fix);
+    expect(state().baseRefName).toBe('release/2.0');
   });
 
   it('refuses a watch owned by another session', () => {

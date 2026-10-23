@@ -268,8 +268,27 @@ describe('runReply', () => {
     expect(() => reply({ handledChecks: [`Test@${HEAD}@#4`] })).toThrow(
       /not a failure snapshot reports/,
     );
+    // Not a key at all, rather than one of another head.
+    for (const key of ['Test@#5', `Test@${HEAD}@#5@ended`]) {
+      expect(() => reply({ handledChecks: [key] })).toThrow(
+        /is not the `key` of a ci_failed event/,
+      );
+    }
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
     expect(state().handledChecks).toBeUndefined();
+  });
+
+  it('records the comments a plan handled without a reply of their own, once', () => {
+    expect(reply({ handled: ['IC_1'] })).toMatchObject({
+      posted: [],
+      handledCommentIds: 1,
+    });
+    expect(state().handledCommentIds).toEqual(['IC_1']);
+    expect(reply({ handled: ['IC_1'] })).toMatchObject({
+      handledCommentIds: 0,
+    });
+    expect(state().handledCommentIds).toEqual(['IC_1']);
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
 
   it('after a push, judges the plan by the head the watch pushed, even while the API lags', () => {
@@ -336,6 +355,14 @@ describe('runReply', () => {
     writeState(paths.statePath, { ...state(), handledConflictSha: null });
     mocks.fetchPrData.mockImplementation(() => ({
       pr: prData({ mergeable: 'MERGEABLE' }),
+      viewer: 'me',
+    }));
+    reply({ handledConflict: true });
+    expect(state().handledConflictSha).toBeNull();
+
+    // UNKNOWN on a head the watch did not push says nothing of a conflict.
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({ mergeable: 'UNKNOWN' }),
       viewer: 'me',
     }));
     reply({ handledConflict: true });

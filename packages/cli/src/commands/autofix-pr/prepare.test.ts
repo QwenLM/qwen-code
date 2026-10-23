@@ -150,6 +150,20 @@ describe('eligibilityError', () => {
       eligibilityError(prView({ headRepository: null }), writable, 'me'),
     ).toMatch(/no longer exists/);
   });
+
+  it('refuses branch names git cannot take, or a base the brief cannot put in a command', () => {
+    expect(
+      eligibilityError(prView({ headRefName: 'a..b' }), writable, 'me'),
+    ).toMatch(/head branch "a\.\.b" is not a name/);
+    for (const base of ['main;id', 'rel$(id)', '-x']) {
+      expect(
+        eligibilityError(prView({ baseRefName: base }), writable, 'me'),
+      ).toMatch(/base branch .* cannot be named in a command/);
+    }
+    expect(
+      eligibilityError(prView({ baseRefName: 'release/2.0' }), writable, 'me'),
+    ).toBeNull();
+  });
 });
 
 describe('pushUrl', () => {
@@ -233,6 +247,15 @@ describe('runPrepare (real git)', () => {
     if (savedHost === undefined) delete process.env['GH_HOST'];
     else process.env['GH_HOST'] = savedHost;
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('refuses a remote whose name a command cannot carry, before creating anything', () => {
+    run(clone, 'remote', 'rename', 'origin', 'up$(id)');
+    mocks.matched.mockImplementation(() => ['up$(id)']);
+    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
+      /cannot be named in a command as it is/,
+    );
+    expect(existsSync(autofixPrPaths(clone, 7).worktreePath)).toBe(false);
   });
 
   it('creates a worktree at the PR head and records the state', () => {

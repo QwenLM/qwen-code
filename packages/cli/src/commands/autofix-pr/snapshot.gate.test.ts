@@ -984,6 +984,71 @@ describe('runSnapshot --gate', () => {
     expect(mockGh).not.toHaveBeenCalled();
   });
 
+  it('leaves out what a prepared watch handled: failures, a conflict, and a deferred run until it ends', () => {
+    const statePath = autofixPrPaths(mocks.root, 7).statePath;
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeState(statePath, {
+      version: 1,
+      sessionId: '',
+      host: 'github.com',
+      owner: 'o',
+      repo: 'r',
+      prNumber: 7,
+      remote: 'origin',
+      pushTarget: 'origin',
+      headRefName: 'feat',
+      baseRefName: 'main',
+      branch: 'qwen-autofix/pr-7',
+      worktreePath: join(dirname(statePath), 'autofix-pr-7'),
+      viewer: 'me',
+      prAuthor: 'me',
+      lastKnownHeadSha: HEAD,
+      pushedShas: [],
+      handledCommentIds: [],
+      postedCommentIds: [],
+      handledChecks: [`Test@${HEAD}@#5`],
+      handledConflictSha: HEAD,
+      deferredRuns: [456],
+    });
+    const lint = (status: string): Contexts[number] => ({
+      __typename: 'CheckRun',
+      name: 'Lint',
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      detailsUrl: 'https://github.com/o/r/actions/runs/456/job/6',
+      databaseId: 6,
+      checkSuite: {
+        status,
+        app: { databaseId: 1 },
+        workflowRun: { event: 'pull_request', workflow: { databaseId: 2 } },
+      },
+    });
+    const printed = () =>
+      mocks.stdout.mock.calls.map((call) =>
+        (JSON.parse(call[0]) as { events: Array<{ type: string }> }).events.map(
+          (event) => event.type,
+        ),
+      );
+    // The round saw Lint fail and deferred its re-run.
+    respond(pr({ mergeable: 'CONFLICTING' }, [failed('Test', 5)]));
+    runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+    expect(mocks.stdout).not.toHaveBeenCalled();
+    respond(
+      pr({ mergeable: 'CONFLICTING' }, [
+        failed('Test', 5),
+        lint('IN_PROGRESS'),
+      ]),
+    );
+    runSnapshot({ pr: 7, gate: true });
+    expect(printed()).toEqual([['ci_failed']]);
+    // Its run ended: reported once more, from the state file's deferredRuns.
+    respond(
+      pr({ mergeable: 'CONFLICTING' }, [failed('Test', 5), lint('COMPLETED')]),
+    );
+    runSnapshot({ pr: 7, gate: true });
+    expect(printed()).toEqual([['ci_failed'], ['ci_failed']]);
+  });
+
   it('uses what a prepared watch of the PR knows: its host, pushes and handled comments', () => {
     const statePath = autofixPrPaths(mocks.root, 7).statePath;
     mkdirSync(dirname(statePath), { recursive: true });

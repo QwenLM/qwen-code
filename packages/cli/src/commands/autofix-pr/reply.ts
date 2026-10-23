@@ -391,6 +391,13 @@ function replyLocked(
   const currentChecks: string[] = [];
   let ignoredChecks = 0;
   for (const key of new Set(plan.handledChecks)) {
+    // Not a key at all — a gate key, a check name — would otherwise pass for
+    // one of another head and be dropped while the round counts it handled.
+    if (keyHead(key) === null) {
+      throw new Error(
+        `${key} is not the \`key\` of a ci_failed event (<check>@<head>@<attempt>).`,
+      );
+    }
     if (keyHead(key) !== head || keyHead(key) !== pr.headRefOid) {
       ignoredChecks += 1;
       continue;
@@ -518,10 +525,12 @@ function replyLocked(
       ...addHandled(otherHandled),
     ],
     handledChecks: [...(state.handledChecks ?? []), ...currentChecks],
-    // Right after a push GitHub reports `UNKNOWN` until it has recomputed
-    // the merge, so a conflict left for a human is recorded unless the
-    // head is known to merge cleanly.
-    ...(plan.handledConflict && pr.mergeable !== 'MERGEABLE'
+    // A conflict is recorded only while there is one: GitHub reports it,
+    // or — right after this watch pushed the head, when GitHub answers
+    // `UNKNOWN` until it has recomputed the merge — may still report it.
+    ...(plan.handledConflict &&
+    (pr.mergeable === 'CONFLICTING' ||
+      (pr.mergeable === 'UNKNOWN' && state.pushedShas.includes(head)))
       ? { handledConflictSha: head }
       : {}),
   });

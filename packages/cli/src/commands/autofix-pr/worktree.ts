@@ -8,16 +8,23 @@
 
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { gitOpt, gitProbe } from '../review/lib/git.js';
+import { redirectedAncestor } from '../review/lib/worktree.js';
 import type { AutofixPrPaths } from './state.js';
 
 /**
  * Throws unless the watch's worktree is a git worktree of its own, at its
  * own path, with the watch's branch checked out. Inside a directory that is
- * not a worktree, git finds the enclosing clone; through a symlink, another
- * checkout; on another branch — the user's copy of the PR branch, say — a
- * push would publish that branch's commits and a reset would discard them.
+ * not a worktree, git finds the enclosing clone; through a symlink — the
+ * worktree's own path or a directory above it, up to the clone's `root` —
+ * another checkout; on another branch — the user's copy of the PR branch,
+ * say — a push would publish that branch's commits and a reset would
+ * discard them.
  */
-export function requireWorktree(paths: AutofixPrPaths, prNumber: number): void {
+export function requireWorktree(
+  paths: AutofixPrPaths,
+  prNumber: number,
+  root: string,
+): void {
   const worktreePath = paths.worktreePath;
   if (!existsSync(worktreePath)) {
     throw new Error(
@@ -26,6 +33,12 @@ export function requireWorktree(paths: AutofixPrPaths, prNumber: number): void {
   }
   if (lstatSync(worktreePath).isSymbolicLink()) {
     throw new Error(`${worktreePath} is a symlink, not the watch's worktree.`);
+  }
+  const redirected = redirectedAncestor(worktreePath, root);
+  if (redirected !== null) {
+    throw new Error(
+      `${worktreePath} resolves through the symlink ${redirected}; it is not the watch's worktree.`,
+    );
   }
   const top = gitOpt('-C', worktreePath, 'rev-parse', '--show-toplevel');
   if (top === null || realpathSync(top) !== realpathSync(worktreePath)) {

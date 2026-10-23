@@ -147,6 +147,7 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
      - `action: "stop"` → Section "Stop" with its `reason`.
      - A refusal (a pre-push hook failed, uncommitted changes) → nothing is pushed: report it, and answer the items the push would have fixed as `needs_human` with the reason.
    - If `verified` is false, nothing is pushed: the items it attempted are `needs_human` ("my fix did not pass verification: …").
+   - If `commits` is empty, nothing is pushed: an item it answered `fixed` is `needs_human` ("my fix left no commit"), as no reply may say "Fixed in" a commit that is not on the PR.
    - Whenever the round ends without pushing what the worktree holds — not verified, a refused push, a merge that did not push — run `"${QWEN_CODE_CLI:-qwen}" autofix-pr sync <n> --discard`, so the next round does not build on (or push) work already answered as `needs_human`. If it answers `synced: false`, the worktree cannot be cleaned: Section "Stop" with its `reason`.
 7. **Reply and record.** Write the plan with `write_file` to `.qwen/tmp/autofix-pr-<n>-plan.json` beside the worktree, then run `"${QWEN_CODE_CLI:-qwen}" autofix-pr reply <n> <plan path>`, adding `--no-post` with `--no-reply`. The plan:
 

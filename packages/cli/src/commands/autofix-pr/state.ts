@@ -253,6 +253,42 @@ export function isBranchName(name: string): boolean {
   );
 }
 
+/** What a POSIX shell gives a meaning to, beyond what git refuses in a ref. */
+const SHELL_SPECIAL = /[;&|$`<>()'"{}!#]/;
+
+/**
+ * Whether a name can go into a shell command as it is: the round's brief has
+ * the fix agent fetch and merge `<remote>/<baseRefName>`.
+ */
+export function isCommandSafeName(name: string): boolean {
+  return !SHELL_SPECIAL.test(name);
+}
+
+/** The strings of a list read from a file, or [] for anything else. */
+export function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
+const isStringList = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === 'string');
+
+const isRunList = (value: unknown): value is number[] =>
+  Array.isArray(value) && value.every((item) => Number.isInteger(item));
+
+function isPendingPost(value: unknown): value is PendingPost {
+  const post = value as PendingPost | null;
+  return (
+    typeof post === 'object' &&
+    post !== null &&
+    (post.where === 'summary' || Number.isInteger(post.where)) &&
+    isStringList(post.handled) &&
+    typeof post.bodyHash === 'string' &&
+    typeof post.sha === 'string'
+  );
+}
+
 /**
  * Why a state file's values cannot be handed to git and gh as they are, or
  * null. The helpers pass the remote, the push target, the head ref and the
@@ -263,10 +299,23 @@ export function isBranchName(name: string): boolean {
 export function stateDefect(state: AutofixPrState): string | null {
   const word = (value: unknown) =>
     typeof value === 'string' && value !== '' && !value.startsWith('-');
-  if (!word(state.remote)) return 'remote';
+  if (
+    !word(state.remote) ||
+    !isBranchName(state.remote) ||
+    !isCommandSafeName(state.remote)
+  ) {
+    return 'remote';
+  }
   if (!word(state.pushTarget)) return 'pushTarget';
   if (!word(state.headRefName) || !isBranchName(state.headRefName)) {
     return 'headRefName';
+  }
+  if (
+    !word(state.baseRefName) ||
+    !isBranchName(state.baseRefName) ||
+    !isCommandSafeName(state.baseRefName)
+  ) {
+    return 'baseRefName';
   }
   if (!isOwnerRepo(`${state.owner}/${state.repo}`)) return 'owner/repo';
   if (typeof state.host !== 'string' || !HOSTNAME_RE.test(state.host)) {
@@ -288,6 +337,34 @@ export function stateDefect(state: AutofixPrState): string | null {
     )
   ) {
     return 'pushedShas';
+  }
+  // Lists the helpers spread and look up: anything else would fail them
+  // halfway through, or count a budget wrong.
+  if (!isStringList(state.handledCommentIds)) return 'handledCommentIds';
+  if (!isStringList(state.postedCommentIds)) return 'postedCommentIds';
+  if (state.handledChecks !== undefined && !isStringList(state.handledChecks)) {
+    return 'handledChecks';
+  }
+  if (state.rerunChecks !== undefined && !isStringList(state.rerunChecks)) {
+    return 'rerunChecks';
+  }
+  if (state.deferredRuns !== undefined && !isRunList(state.deferredRuns)) {
+    return 'deferredRuns';
+  }
+  if (
+    state.pendingPosts !== undefined &&
+    !(
+      Array.isArray(state.pendingPosts) &&
+      state.pendingPosts.every(isPendingPost)
+    )
+  ) {
+    return 'pendingPosts';
+  }
+  if (
+    state.pushCount !== undefined &&
+    !(Number.isInteger(state.pushCount) && state.pushCount >= 0)
+  ) {
+    return 'pushCount';
   }
   return null;
 }
@@ -351,7 +428,26 @@ export function readHistory(path: string): AutofixPrHistory | null {
       `unsupported autofix-pr history version in ${path}: ${String(parsed.version)}`,
     );
   }
-  return parsed;
+  // A field that is not what it should be is dropped, not the history: the
+  // rest still keeps a later watch from answering or re-running twice.
+  return {
+    ...parsed,
+    handledCommentIds: stringList(parsed.handledCommentIds),
+    postedCommentIds: stringList(parsed.postedCommentIds),
+    handledChecks: stringList(parsed.handledChecks),
+    rerunChecks: stringList(parsed.rerunChecks),
+    handledConflictSha:
+      typeof parsed.handledConflictSha === 'string' &&
+      SHA_RE.test(parsed.handledConflictSha)
+        ? parsed.handledConflictSha
+        : null,
+    pendingPosts: Array.isArray(parsed.pendingPosts)
+      ? parsed.pendingPosts.filter(isPendingPost)
+      : [],
+    deferredRuns: Array.isArray(parsed.deferredRuns)
+      ? parsed.deferredRuns.filter((run) => Number.isInteger(run))
+      : [],
+  };
 }
 
 /** Adds what a watch's state posted and handled to its PR's history. */
@@ -367,8 +463,8 @@ export function keepHistory(
     // An unreadable history is replaced rather than blocking cleanup.
   }
   if (earlier && !sameRepository(earlier, state)) earlier = null;
-  const union = (a: string[] | undefined, b: string[] | undefined) => [
-    ...new Set([...(a ?? []), ...(b ?? [])]),
+  const union = (a: unknown, b: unknown) => [
+    ...new Set([...stringList(a), ...stringList(b)]),
   ];
   const history: AutofixPrHistory = {
     version: 1,
@@ -478,7 +574,12 @@ export function withWatchLock<T>(
           `${lockPath} is not a lock file; remove it, or run \`qwen autofix-pr cleanup ${prNumber} --force\`.`,
         );
       }
-      const held = readFileSync(lockPath, 'utf8');
+      let held: string;
+      try {
+        held = readFileSync(lockPath, 'utf8');
+      } catch {
+        continue; // Released meanwhile.
+      }
       if (attempt === 0 && lockIsStale(held, stat.mtimeMs)) {
         if (breakStaleLock(lockPath, held, pending)) break;
         continue;

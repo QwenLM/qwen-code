@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   live: {
     state: 'OPEN',
     headRefName: 'feat',
+    baseRefName: 'main',
     isCrossRepository: false,
     headRepository: { name: 'r' },
     headRepositoryOwner: { login: 'o' },
@@ -144,6 +145,7 @@ describe('runSync (real git, bare remote)', () => {
     mocks.live = {
       state: 'OPEN',
       headRefName: 'feat',
+      baseRefName: 'main',
       isCrossRepository: false,
       headRepository: { name: 'r' },
       headRepositoryOwner: { login: 'o' },
@@ -191,6 +193,32 @@ describe('runSync (real git, bare remote)', () => {
     });
     expect(worktreeHead()).toBe(ours);
     expect(known()).toBe(featSha);
+  });
+
+  it('counts as dropped only what the round made, not the PR commits it merged', () => {
+    commitIn(paths.worktreePath, 'ours1.txt');
+    commitIn(paths.worktreePath, 'ours2.txt');
+    const theirs = pushFromElsewhere('theirs.txt');
+    expect(runSync(7)).toMatchObject({
+      action: 'merge',
+      reason: expect.stringContaining('has 2 unpushed commit(s)'),
+    });
+    // The merge does not pass verification, and the round is discarded.
+    run(paths.worktreePath, 'merge', '-q', '--no-edit', theirs);
+    expect(runSync(7, true)).toMatchObject({
+      synced: true,
+      headSha: theirs,
+      dropped: 3,
+    });
+  });
+
+  it('records a base the PR was retargeted to, and refuses one a command cannot carry', () => {
+    mocks.live = { ...mocks.live, baseRefName: 'release/2.0' };
+    expect(runSync(7)).toMatchObject({ synced: true, moved: false });
+    expect(readState(paths.statePath)!.baseRefName).toBe('release/2.0');
+    mocks.live = { ...mocks.live, baseRefName: 'release$(id)' };
+    expect(() => runSync(7)).toThrow(/cannot be named in a command/);
+    expect(readState(paths.statePath)!.baseRefName).toBe('release/2.0');
   });
 
   it('adopts the new head once the worktree has merged it', () => {

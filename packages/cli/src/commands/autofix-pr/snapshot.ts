@@ -627,7 +627,12 @@ export function buildSnapshot(
   // stays on the head, so it is skipped by its attempt; a re-run that fails
   // again is a new attempt. `key` is what `reply` and `rerun` record.
   const handledChecks = new Set(state.handledChecks ?? []);
-  for (const { event, attempt } of checks.failed) {
+  // A run the round could not re-run yet is offered again once it ended.
+  const deferredRuns = new Set(state.deferredRuns ?? []);
+  for (const { event, attempt, runDone } of checks.failed) {
+    if (!runDone && event.runId !== null && deferredRuns.has(event.runId)) {
+      continue;
+    }
     const key = checkAttemptKey(event.check, pr.headRefOid, attempt);
     if (!handledChecks.has(key)) events.push({ ...event, key });
   }

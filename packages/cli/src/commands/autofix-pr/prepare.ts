@@ -29,6 +29,8 @@ import {
   autofixPrPaths,
   currentSessionId,
   historyPath,
+  isBranchName,
+  isCommandSafeName,
   readHistory,
   readState,
   repoRoot,
@@ -75,6 +77,13 @@ export function eligibilityError(
   }
   if (!pr.headRepository || !pr.headRepositoryOwner) {
     return `PR #${pr.number}'s head repository no longer exists.`;
+  }
+  if (!isBranchName(pr.headRefName)) {
+    return `PR #${pr.number}'s head branch ${JSON.stringify(pr.headRefName)} is not a name autofix can hand to git.`;
+  }
+  // The round's brief has the fix agent merge the base by name.
+  if (!isBranchName(pr.baseRefName) || !isCommandSafeName(pr.baseRefName)) {
+    return `PR #${pr.number}'s base branch ${JSON.stringify(pr.baseRefName)} cannot be named in a command as it is.`;
   }
   if (!pr.isCrossRepository && pr.headRefName === repo.defaultBranchRef?.name) {
     return `PR #${pr.number}'s head is the default branch (${pr.headRefName}); autofix never pushes there.`;
@@ -266,6 +275,12 @@ export function runPrepare(args: PrepareArgs): void {
   if (!remote) {
     throw new Error(
       `no single git remote here serves ${host}/${args.repo}; autofix needs a clone of the PR's repository.`,
+    );
+  }
+  // The brief names it in the fix agent's merge command.
+  if (!isBranchName(remote) || !isCommandSafeName(remote)) {
+    throw new Error(
+      `the remote ${JSON.stringify(remote)} cannot be named in a command as it is; rename it (\`git remote rename\`) to watch this PR.`,
     );
   }
   const pushTarget = pushTargetFor(remoteV, host, headOwner, headName);

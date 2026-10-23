@@ -212,7 +212,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 推送时向 GitHub 现查，而不是沿用 `prepare` 时的结果：期间已合并或关闭的 PR 回答 `stop`；默认分支也重新读取，因为监视期间它可能被改名。推送的分支和目的地按 `prepare` 的方式从 GitHub 和 clone 的 remote 重新得出，必须与状态文件记录的一致，所以改过的状态文件无法改变推送去向。状态文件里会交给 git 的值——remote、推送目标、head ref、各个 SHA——在读取时都会检查，以 `-` 开头的值会被当成选项。推送次数已用完（10 次，第 10 节）的监视直接回答 `stop`，不再询问任何东西。`HEAD` 等于已知 head 时没有可推送的内容。
 
-然后在 worktree 里执行 `git push --porcelain <target> <sha>:refs/heads/<headRef> --force-with-lease=refs/heads/<headRef>:<lastKnownHeadSha>`，给 pre-push hook 留九分钟（skill 给这次 shell 调用设置工具允许的最长超时，十分钟，所以辅助命令仍能记录结果）。`<sha>` 是通过上述检查的那个提交，而不是 `HEAD`——询问 GitHub 期间 `HEAD` 可能会动。hook 照常运行，不使用 `--force` 或 `--no-verify`。成功后把新 SHA 记入 `pushedShas` 和 `lastKnownHeadSha`，推送计数加一。lease 被拒（`[rejected] (stale info)`，或者 `git ls-remote` 看到远端分支已不在已知 head 上——不依赖 git 输出的语言）说明别人推送过，结果是 `resync` 而不是重试，什么都不记录。响应丢失但远端已经收下提交的推送，按已推送记录。推送前远端就已持有的提交——别人推送的，或者之前某次推送没有被记录——不计为这一次推送：回答 `resync`，由 `sync` 接纳为已知 head，下一次 `push` 便无可推送。skill 随后把这一轮的提交视为已在该 head 上推送，因为该 head 包含它们。其他拒绝——hook、分支保护、凭据——都是错误，附上 git 的最后几行。输出是一行 JSON：`{"pushed": true, "sha", "pushes", "maxPushes"}`，或 `{"pushed": false, "action": "resync" | "stop", "reason"}`。
+然后在 worktree 里执行 `git push --porcelain <target> <sha>:refs/heads/<headRef> --force-with-lease=refs/heads/<headRef>:<lastKnownHeadSha>`，给 pre-push hook 留九分钟（skill 给这次 shell 调用设置工具允许的最长超时，十分钟，所以辅助命令仍能记录结果）。`<sha>` 是通过上述检查的那个提交，而不是 `HEAD`——询问 GitHub 期间 `HEAD` 可能会动。hook 照常运行，不使用 `--force` 或 `--no-verify`。成功后把新 SHA 记入 `pushedShas` 和 `lastKnownHeadSha`，推送计数加一。lease 被拒（`[rejected] (stale info)`，或者 `git ls-remote` 看到远端分支已不在已知 head 上——不依赖 git 输出的语言）说明别人推送过，结果是 `resync` 而不是重试，什么都不记录。响应丢失但远端已经收下提交的推送，按已推送记录。推送前远端就已持有的提交——别人推送的，或者之前某次推送没有被记录——不计为这一次推送：回答 `resync`，由 `sync` 接纳为已知 head，下一次 `push` 便无可推送。skill 随后把这一轮的提交视为已在该 head 上推送，因为该 head 包含它们。其他拒绝——hook、分支保护、凭据——都是错误，附上 git 的最后几行。输出是一行 JSON：`{"pushed": true, "sha", "pushes", "maxPushes"}`；`{"pushed": false, "action": "resync" | "stop", "reason"}`；或者在 `HEAD` 就是已知 head、无可推送时，回答不带 `action` 的 `{"pushed": false, "reason"}`——skill 把没有 `action` 理解为"修复没有留下提交"。和 `sync` 一样，推送时也会记下 GitHub 此刻给出的 PR base 分支：监视期间 PR 可能被改到别的 base，而这一轮的修复说明合并的是记录下的 base。
 
 ### 6.5 `reply <pr> <plan.json> [--no-post]`
 
@@ -234,7 +234,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 - 回复只发到此刻有可信作者新评论的 thread，`handled` 列出的必须是该 thread 的评论。不可信评论不能标记为已处理；check 键必须是 head 上某个 `ci_failed` 事件报告的（prepared 模式会输出它的 `key`）；冲突只有在确实存在时才能留给人处理。PR 必须仍处于打开状态。
 - 判断计划所依据的 head 是监视已知的那个（`sync` 和 `push` 从分支读取），而不是 API 的——API 可能比推送滞后。
-- 其他 head 的失败键（这一轮已推送越过了它）被忽略并计入 `ignoredChecks`：prepared snapshot 只读当前 head。`handledConflict` 除非 GitHub 报告当前 head 可干净合并，否则都记在当前 head 上；推送刚完成时 GitHub 会报告 `UNKNOWN`，直到重新算完合并。
+- 其他 head 的失败键（这一轮已推送越过了它）被忽略并计入 `ignoredChecks`：prepared snapshot 只读当前 head。根本不是失败键的字符串会被拒绝。`handledConflict` 只在 GitHub 报告冲突时，或者在本监视推送的 head 上报告 `UNKNOWN` 时，才记在当前 head 上：推送刚完成时 GitHub 会报告 `UNKNOWN`，直到重新算完合并。
 - 同一 thread 有两条回复，或同一个评论 id 出现两次的计划会被拒绝。
 - 所有检查在发出任何内容之前完成，被拒绝的计划什么都不发。
 - 每次 POST 之前先在状态文件里登记（`pendingPosts`：发往哪里、回复哪些评论、正文的哈希、发帖时的 head——之后认领的总结只算作那个 head 的推送，而不是更晚的推送）。下一次运行会在 PR 上找每条登记过的回复：找到的——POST 已到达 GitHub 但响应丢失——按它当初回复的那些评论记录（`adopted`）；找不到的说明从未发出。回复永远不会按之后计划的措辞来认，为别的评论发的回复也永远不会被当成对新评论的回答。
@@ -274,13 +274,13 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
 
 有未提交改动的 worktree 永远不会被移动或重置。`--discard` 把 worktree 恢复到 PR head，不管里面有什么——未推送的提交和未提交的改动，包括嵌套仓库（`git clean -ffd`）和已检出子模块里的改动（`git submodule foreach`，从不碰未检出的子模块）——用来结束一轮没能推送的工作，并报告丢弃了什么。之后 worktree 仍不干净时回答 `{"synced": false, "reason"}`。`sync` 每次移动 worktree 时，都以同样方式把已检出的子模块移到新 head 记录的提交上，子模块缺少的提交从它自己的远端获取（PR 的 fetch 不递归进子模块，所以取不到的子模块提交不会让它失败）。`foreach` 只用来列出已检出的子模块，每条记录以 NUL 结尾（PR 指定的路径里可能有换行，按行读取时换行之后的内容会被当成另一个子模块）；fetch（每个子模块有自己的一分钟时限，一次 `sync` 的所有子模块合计三分钟，并沿用 git 对子模块的协议限制）和 reset 都在它之外执行，因为 `foreach` 启动的子进程会活过只杀掉顶层 git 的超时，在 `sync` 返回之后继续改动子模块（超时的 fetch 会被杀掉；它启动的传输进程可能留到连接结束，但只会下载对象）。子模块逐层对齐，所以嵌套的子模块在父模块移动之后才取父模块记录的提交；worktree 已包含 PR head（某一轮合并过）时也会对齐——合并移动的是 gitlink，而不是已检出的子模块。这条路径事先没有检查未提交的改动，所以在这里，持有自己工作的子模块（有未提交的改动，或 HEAD 不被记录的提交包含）保持原样。列出的子模块只有同时满足以下条件才会被处理：位于 worktree 内部、是它自己仓库的顶层、git 目录在父仓库的 `modules` 目录下（`git submodule` 放置的位置）或在它自身内部。否则，在普通目录里 `git -C` 会找到外层仓库；通过指向别的仓库或目录的 `.git` 文件或 `core.worktree`，reset 会移动那个仓库的分支，或写入那个目录。不论 `submodule.recurse` 怎么设，reset 都不递归进子模块；之后仍不干净则回答 `synced: false`，所以修复永远不会把子模块提交回旧的提交。读不到 PR 分支时（PR 已关闭、分支被删、网络不通），改为恢复到监视上次知道的 head。
 
-和 `push` 一样，`sync` 先向 GitHub 查 PR 的 head 分支，并对照 clone 的 remote 检查目的地，所以改过的状态文件无法让 fetch 指向别的 ref 或仓库；head ref 按分支名规则校验（`git check-ref-format --branch`），因此不能夹带 refspec。
+和 `push` 一样，`sync` 先向 GitHub 查 PR 的 head 分支，并对照 clone 的 remote 检查目的地，所以改过的状态文件无法让 fetch 指向别的 ref 或仓库；head ref 按分支名规则校验（`git check-ref-format --branch`），因此不能夹带 refspec。它还会记下 GitHub 此刻给出的 PR base 分支。`remote` 和 `baseRefName` 会被这一轮的修复说明写进修复 agent 的合并命令，所以必须是不含 shell 特殊字符的分支名（名字含这类字符的 PR 或 remote，`prepare` 会拒绝）。辅助命令从状态文件读取的每个列表都必须是类型正确的列表；历史文件里格式不对的字段会被丢弃，其余部分照常合并。
 
 ### 6.9 `rerun <pr> <run-id>`
 
 对修复 agent 判断为基础设施问题的 run，用 `gh run rerun <run-id> --failed` 重跑其失败的 job。只认 PR 所在仓库的 GitHub Actions job：commit status 或其他 app 可以链接任意 URL，从中读出的 run id 会重跑某个无关的 run。该 run 在当前 head 上的每个失败检查都用掉自己唯一的一次重跑（`rerunChecks`，按检查身份——app、workflow、触发事件和 job 名，与第 6.2 节区分检查的方式相同——和 head 记，所以两个 workflow 里同名的 job 各有各的一次）；如果其中有检查已在这个 head 上重跑过，回答 `{"rerun": false}`，该失败按真实失败处理。被重跑的 attempt 记入 `handledChecks`，所以重跑期间 prepared snapshot 不会再派发它们；重跑后再次失败是新的 attempt。head 在监视上次看到之后移动过时回答 `resync`；head 上没有失败检查的 run 是错误。重跑在询问 GitHub 之前就计数，调用本身也不重试，所以响应丢失的重跑不会被再请求一次：最多一次，绝不两次。只有 GitHub 接受了重跑，其失败才记为已处理：被拒绝（gh 的 `run <id> cannot be rerun`，即 403——token 没有 `actions: write`、run 太旧——或其他 HTTP 4xx）会退还这次重跑，而任何错误都会让这一轮把这些失败作为需要人工处理来回答，所以检查不会一直红着却无人报告。
 
-GitHub 只在 run 结束后才能重跑它，而 `snapshot` 在 job 一失败就报告。因此仍在进行的 run 不询问 GitHub，直接回答 `{"rerun": false, "deferred": true}`，并记入 `deferredRuns`：该 run 结束时闸门会再报告一次它的失败（第 6.2 节），届时那一轮再重跑。
+GitHub 只在 run 结束后才能重跑它，而 `snapshot` 在 job 一失败就报告。因此仍在进行的 run 不询问 GitHub，直接回答 `{"rerun": false, "deferred": true}`，并记入 `deferredRuns`：该 run 结束时闸门会再报告一次它的失败（第 6.2 节），届时那一轮再重跑。在那之前 prepared snapshot 也不列出它们，这样别的事件不会把同一个失败再交给这一轮延后一次。
 
 `push`、`sync`、`reply` 和 `rerun` 在读写状态文件期间都持有这次监视的锁（`.qwen/tmp/autofix-pr-<n>.lock`）：否则模型同时发出的两个辅助命令调用会各自写回自己读到的内容，抹掉对方关于推送、回复或重跑的记录。锁以硬链接的方式整体创建（链接到一个已写好令牌的文件），并且只在仍持有自己令牌时才删除。沙箱可能让每条命令运行在独立的 pid 命名空间里，pid 会重复，所以只在同一命名空间里才检查持有者的 pid；其他锁在存在时间超过任何辅助命令的运行时长（十五分钟）后被接管，`cleanup --force` 则会立即删除它。过期锁一次只由一个辅助命令打破，在独占的 `<lock>.break` 文件保护下进行（被杀掉的辅助命令留下的 `.break` 在一分钟后清除，不论时钟偏前还是偏后）；此时锁里仍是过期令牌，就用一次 rename 把它替换成打破者自己的令牌，所以锁路径从不出现空档让别的辅助命令趁机拿到，新的锁也永远不会被动到。
 

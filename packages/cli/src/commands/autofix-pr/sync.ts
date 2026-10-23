@@ -26,7 +26,7 @@ import { isWithinRoot } from '../../config/path-comparison.js';
 import { sanitizedGitEnv } from '../review/lib/worktree.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { git, gitOpt } from '../review/lib/git.js';
-import { liveDestination } from './push.js';
+import { liveDestination, withLiveBase } from './push.js';
 import {
   assertOwnedBySession,
   autofixPrPaths,
@@ -58,9 +58,10 @@ export interface SyncOutcome {
 }
 
 export function runSync(prNumber: number, discard = false): SyncOutcome {
-  const paths = autofixPrPaths(repoRoot(), prNumber);
+  const root = repoRoot();
+  const paths = autofixPrPaths(root, prNumber);
   return withWatchLock(paths, prNumber, () =>
-    syncLocked(paths, prNumber, discard),
+    syncLocked(paths, prNumber, discard, root),
   );
 }
 
@@ -68,13 +69,16 @@ function syncLocked(
   paths: AutofixPrPaths,
   prNumber: number,
   discard: boolean,
+  root: string,
 ): SyncOutcome {
   const state = requireState(paths.statePath, prNumber);
   assertOwnedBySession(state);
   const worktree = paths.worktreePath;
-  requireWorktree(paths, prNumber);
+  requireWorktree(paths, prNumber, root);
 
   const known = state.lastKnownHeadSha;
+  // The state with the PR's base as GitHub names it now.
+  let current = state;
   // FETCH_HEAD is per worktree, so this leaves the user's checkout alone.
   const fetchPrHead = (): string => {
     const live = liveDestination(state, prNumber);
@@ -83,6 +87,7 @@ function syncLocked(
         `PR #${prNumber} is ${live.state.toLowerCase()}; there is no head to follow.`,
       );
     }
+    current = withLiveBase(state, live, prNumber);
     // Submodules are fetched by `alignSubmodules`, as each one needs it: a
     // submodule commit that cannot be fetched must not fail the PR's own.
     git(
@@ -112,9 +117,18 @@ function syncLocked(
   const head = git('-C', worktree, 'rev-parse', 'HEAD');
   const moved = prHead !== known;
   // Commits of a round that are not on the PR: the worktree's own work.
+  // Not the PR head's either: a round that merged it holds its commits.
   const own = Number(
-    gitOpt('-C', worktree, 'rev-list', '--count', 'HEAD', '--not', known) ??
-      'NaN',
+    gitOpt(
+      '-C',
+      worktree,
+      'rev-list',
+      '--count',
+      'HEAD',
+      '--not',
+      known,
+      prHead,
+    ) ?? 'NaN',
   );
   if (!Number.isInteger(own)) {
     throw new Error(`git cannot count the unpushed commits in ${worktree}`);
@@ -141,8 +155,8 @@ function syncLocked(
     alignSubmodules(worktree);
     if (own > 0) dropped = own;
     if (dirtyOrUnreadable(worktree)) {
-      if (moved) {
-        writeState(paths.statePath, { ...state, lastKnownHeadSha: prHead });
+      if (moved || current !== state) {
+        writeState(paths.statePath, { ...current, lastKnownHeadSha: prHead });
       }
       return {
         synced: false,
@@ -206,8 +220,8 @@ function syncLocked(
     // work of its own is left for the check below.
     alignSubmodules(worktree, true);
   }
-  if (moved) {
-    writeState(paths.statePath, { ...state, lastKnownHeadSha: prHead });
+  if (moved || current !== state) {
+    writeState(paths.statePath, { ...current, lastKnownHeadSha: prHead });
   }
   // A submodule the new head moved, which git could not check out, would
   // otherwise be committed back to its old commit by the next fix.

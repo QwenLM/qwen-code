@@ -417,8 +417,13 @@ adopts it as the known head, and the next `push` has nothing to push. The
 skill then treats the round's commits as pushed at that head, since it
 contains them. Any other refusal —
 a hook, branch protection, credentials — is an error with git's last lines.
-The output is one JSON line: `{"pushed": true, "sha", "pushes", "maxPushes"}`,
-or `{"pushed": false, "action": "resync" | "stop", "reason"}`.
+The output is one JSON line: `{"pushed": true, "sha", "pushes", "maxPushes"}`;
+`{"pushed": false, "action": "resync" | "stop", "reason"}`; or, when `HEAD`
+is the known head and there is nothing to push, `{"pushed": false, "reason"}`
+with no `action` — the skill reads that absence as "the fix left no commit".
+A push also records the PR's base branch as GitHub names it then, as `sync`
+does: a PR can be retargeted while a watch runs, and the round's brief
+merges the recorded base.
 
 ### 6.5 `reply <pr> <plan.json> [--no-post]`
 
@@ -449,9 +454,10 @@ The helper decides what may be posted, against one fresh read of the PR
   `push` read it from the branch), not the API's, which can lag a push.
 - A failure key of another head — the round pushed past it — is ignored and
   counted in `ignoredChecks`: prepared snapshots read only the current head.
-  `handledConflict` is recorded against the head unless GitHub reports it as
-  mergeable; right after a push it reports `UNKNOWN` until it has recomputed
-  the merge.
+  A string that is not a failure key at all is refused.
+  `handledConflict` is recorded against the head while GitHub reports a
+  conflict, or reports `UNKNOWN` on a head this watch pushed: right after a
+  push GitHub answers `UNKNOWN` until it has recomputed the merge.
 - A plan with two replies to one thread, or one comment id twice, is refused.
 - Every check runs before anything is posted, so a refused plan posts
   nothing.
@@ -628,7 +634,13 @@ Like `push`, `sync` first asks GitHub for the PR's head branch and checks
 the destination against the clone's remotes, so an edited state file cannot
 point the fetch at another ref or repository; the head ref is validated as
 a branch name (`git check-ref-format --branch`), so it cannot carry a
-refspec.
+refspec. It also records the PR's base branch as GitHub names it now.
+`remote` and `baseRefName`, which the round's brief puts into the fix
+agent's merge command, must be branch names without a character a shell
+gives a meaning to (`prepare` refuses a PR or a remote whose name has one).
+Every list a helper reads from the state file must be a list of the right
+type; a history file's malformed field is dropped, and the rest still
+merged.
 
 ### 6.9 `rerun <pr> <run-id>`
 
@@ -657,7 +669,9 @@ GitHub re-runs a run only once it has ended, while `snapshot` reports a
 failed job as soon as it fails. A run still in progress therefore answers
 `{"rerun": false, "deferred": true}` without asking GitHub, and is recorded
 in `deferredRuns`: the gate reports its failures once more when the run has
-ended (Section 6.2), and the round then re-runs it.
+ended (Section 6.2), and the round then re-runs it. Until then prepared
+snapshots leave them out as well, so another event does not hand the round
+the same failure to defer again.
 
 `push`, `sync`, `reply` and `rerun` each hold the watch's lock
 (`.qwen/tmp/autofix-pr-<n>.lock`) while they read and write the state file:

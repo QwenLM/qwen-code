@@ -20,6 +20,8 @@ import {
   MAX_PUSHES,
   assertOwnedBySession,
   autofixPrPaths,
+  isBranchName,
+  isCommandSafeName,
   repoRoot,
   requireState,
   withWatchLock,
@@ -43,6 +45,7 @@ const PUSH_TIMEOUT_MS = 9 * 60_000;
 interface LivePr {
   state: 'OPEN' | 'CLOSED' | 'MERGED';
   headRefName: string;
+  baseRefName: string;
   isCrossRepository: boolean;
   headRepository: { name: string } | null;
   headRepositoryOwner: { login: string } | null;
@@ -68,7 +71,7 @@ export function liveDestination(
       '-R',
       `${state.owner}/${state.repo}`,
       '--json',
-      'state,headRefName,isCrossRepository,headRepository,headRepositoryOwner',
+      'state,headRefName,baseRefName,isCrossRepository,headRepository,headRepositoryOwner',
     ),
   ) as LivePr;
   if (live.state !== 'OPEN') return live;
@@ -93,6 +96,26 @@ export function liveDestination(
     );
   }
   return live;
+}
+
+/**
+ * The state with the base branch GitHub names now: a PR can be retargeted
+ * while a watch runs, and the round's brief merges the recorded base.
+ */
+export function withLiveBase(
+  state: AutofixPrState,
+  live: LivePr,
+  prNumber: number,
+): AutofixPrState {
+  if (live.state !== 'OPEN' || live.baseRefName === state.baseRefName) {
+    return state;
+  }
+  if (!isBranchName(live.baseRefName) || !isCommandSafeName(live.baseRefName)) {
+    throw new Error(
+      `PR #${prNumber}'s base branch is now ${JSON.stringify(live.baseRefName)}, which cannot be named in a command as it is.`,
+    );
+  }
+  return { ...state, baseRefName: live.baseRefName };
 }
 
 export interface PushOutcome {
@@ -171,6 +194,8 @@ function pushRef(
       {
         encoding: 'utf8',
         timeout: PUSH_TIMEOUT_MS,
+        // A hook that runs a test suite prints more than the 1 MiB default.
+        maxBuffer: 256 * 1024 * 1024,
         stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...sanitizedGitEnv(), GIT_TERMINAL_PROMPT: '0' },
       },
@@ -188,15 +213,22 @@ function pushRef(
 }
 
 export function runPush(prNumber: number): PushOutcome {
-  const paths = autofixPrPaths(repoRoot(), prNumber);
-  return withWatchLock(paths, prNumber, () => pushLocked(paths, prNumber));
+  const root = repoRoot();
+  const paths = autofixPrPaths(root, prNumber);
+  return withWatchLock(paths, prNumber, () =>
+    pushLocked(paths, prNumber, root),
+  );
 }
 
-function pushLocked(paths: AutofixPrPaths, prNumber: number): PushOutcome {
+function pushLocked(
+  paths: AutofixPrPaths,
+  prNumber: number,
+  root: string,
+): PushOutcome {
   const state = requireState(paths.statePath, prNumber);
   assertOwnedBySession(state);
   const worktree = paths.worktreePath;
-  requireWorktree(paths, prNumber);
+  requireWorktree(paths, prNumber, root);
   if (hasUncommittedChanges(worktree)) {
     throw new Error(
       `${worktree} has uncommitted changes; commit them, or discard what should not be pushed, before pushing.`,
@@ -232,6 +264,7 @@ function pushLocked(paths: AutofixPrPaths, prNumber: number): PushOutcome {
       reason: `PR #${prNumber} is ${live.state.toLowerCase()}`,
     };
   }
+  const current = withLiveBase(state, live, prNumber);
   const slug = `${state.owner}/${state.repo}`;
   // Asked at push time, not trusted from `prepare`: the default branch can
   // be renamed while a watch runs.
@@ -294,7 +327,7 @@ function pushLocked(paths: AutofixPrPaths, prNumber: number): PushOutcome {
   }
 
   writeState(paths.statePath, {
-    ...state,
+    ...current,
     lastKnownHeadSha: head,
     pushedShas: [...state.pushedShas, head],
     pushCount: pushes + 1,
