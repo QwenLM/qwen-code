@@ -370,6 +370,12 @@ WebShell 提供两种接入形态：
 
 ### 1. 独立接入（自带 Provider）
 
+加载状态文案遵循有效设置 `ui.accessibility.enableLoadingPhrases`。设为
+`false` 时隐藏内置和宿主自定义文案，保留加载动画、计时和取消提示。设为
+`true` 或未配置时，可以通过 `loadingPhrases={() => ['自定义文案']}` 定制文案，
+或返回空数组隐藏文案；该属性适用于 `WebShell` 和 `WebShellWithProviders`。
+设置行的展示别名为 `setting:loading-phrases`。
+
 适合只需要嵌入一个终端视图的场景。组件内部自建
 `DaemonWorkspaceProvider` + `DaemonSessionProvider`。
 
