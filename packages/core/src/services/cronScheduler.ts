@@ -1393,8 +1393,9 @@ export class CronScheduler {
 
   /**
    * Installs a listener called after a gate settles without delivering a
-   * fire: a quiet gate, a failure or block past the first of its streak, a
-   * result dropped because the job is gone, or a gate cancelled by delete()
+   * fire: a quiet gate, a failure or block that neither opens nor changes
+   * its streak, a result dropped because the job is gone, or a gate
+   * cancelled by delete()
    * or a disk reload (not by stop()). Such a settlement reaches no consumer,
    * so a headless run re-checks its hold-open from here — a one-shot or
    * final fire whose gate stays quiet, or a durable catch-up whose task is
@@ -1587,15 +1588,18 @@ export class CronScheduler {
       job.durable &&
       (outcome !== 'quiet' || (previous?.consecutiveFailures ?? 0) > 0)
     ) {
+      // The fire's own slot, not the live job's: a later slot, or a manual
+      // run stamped while the gate ran, has moved `lastFiredAt` on since.
       this.persistGateOutcome(
         job,
         text !== null ? (outcome as CronGateRunOutcome) : undefined,
-        job.lastFiredAt ?? at,
+        at,
         kind,
       );
     }
     if (text === null) return false;
-    onFire({ ...job, prompt: text });
+    // The consumer annotates the run by this stamp (a per-run session).
+    onFire({ ...job, lastFiredAt: at, prompt: text });
     return true;
   }
 
@@ -2291,8 +2295,9 @@ function durableTaskToJob(
     ...(task.name ? { name: task.name } : {}),
     ...(task.delivery && task.sessionId ? { delivery: task.delivery } : {}),
     ...(task.gate ? { gate: task.gate } : {}),
-    // The in-memory summary may be newer than the file's: a quiet settle is
-    // persisted only with the next tick, and a reload can land in between.
+    // The in-memory summary may be newer than the file's: a quiet settle
+    // (other than one ending a failure streak) is persisted only with the
+    // next tick, and a reload can land in between.
     ...(gateStatus ? { gateStatus } : {}),
     ...(existing?.gateApproved && existing.gate === task.gate
       ? { gateApproved: true }

@@ -282,10 +282,12 @@ it, and books its run only when the gate delivers, as a `catch-up` run.
 
 The job keeps a `gateStatus` summary: last outcome and time, quiet fires
 since the last delivery, consecutive failures, and the last error line. For
-durable tasks it is written with the per-fire persist that already stores
-`lastFiredAt`, so a one-minute gated task rewrites the file no more often than
-a one-minute plain task does today. A quiet fire that ends a failure streak is
-written at once: a restart before the next fire would otherwise reload the
+durable tasks a quiet fire's summary is written with the per-fire persist that
+already stores `lastFiredAt`, so a quiet one-minute gated task rewrites the
+file no more often than a one-minute plain task does today. Every other
+outcome is written once more as it settles (a failing or blocked one-minute
+gate writes the file twice a minute), and so is a quiet fire that ends a
+failure streak: a restart before the next fire would otherwise reload the
 streak and count the next failure into it, unreported.
 
 Quiet fires do not append to the task's `runs` ring; a one-minute cadence

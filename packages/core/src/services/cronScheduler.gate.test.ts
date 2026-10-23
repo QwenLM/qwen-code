@@ -619,6 +619,36 @@ describe('CronScheduler gate', () => {
       expect(task?.runs).toEqual([expect.objectContaining({ gate: 'failed' })]);
     });
 
+    it('books a gated fire at its own slot when the job was stamped again while the gate ran', async () => {
+      // A manual run (or the next slot) stamps the job while the gate runs:
+      // the run record and the delivered fire keep the slot the gate ran for.
+      const job = await scheduler.createDurable(
+        '* * * * *',
+        'p',
+        true,
+        './probe.sh',
+      );
+      job.gateApproved = true;
+      await scheduler.enableDurable('session-1');
+      scheduler.start((j) => fired.push(j));
+      scheduler.tick(at(10, 30, 59));
+      const live = scheduler.list().find((j) => j.id === job.id)!;
+      expect(live.lastFiredAt).toBe(at(10, 30).getTime());
+      live.lastFiredAt = at(10, 45).getTime();
+      await script.release(output('event: comment\n'));
+      expect(fired[0]!.lastFiredAt).toBe(at(10, 30).getTime());
+      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+      const [task] = await readCronTasks(tmpDir);
+      expect(task?.runs).toEqual([
+        expect.objectContaining({
+          at: at(10, 30).getTime(),
+          gate: 'delivered',
+        }),
+      ]);
+      expect(task?.gateStatus?.lastAt).toBe(at(10, 30).getTime());
+    });
+
     it('keeps a late result of the replaced command off the new gate', async () => {
       // The old command settles after the PATCH rewrote the file and before
       // the watcher reloads the task: its status must not land on the new
