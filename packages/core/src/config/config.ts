@@ -1596,12 +1596,19 @@ export interface ConfigParameters {
    */
   allowedModelBaseUrls?: readonly string[];
   /**
-   * Whether the hard-coded qwen-oauth built-ins are disabled by an
-   * operator-scope pin (an explicitly empty qwen-oauth model list in a
-   * User/System/SystemDefaults scope). `undefined` lets the registry fall
-   * back to detecting the pin in the merged config.
+   * Whether the built-in Qwen OAuth (personal Qwen login) models are
+   * disabled by `model.qwenOAuthBuiltinsDisabled` in System, User, or
+   * SystemDefaults settings (issue #12805). `undefined`/`false` = enabled.
    */
   qwenOAuthBuiltinsDisabled?: boolean;
+  /**
+   * True when the allowlist above was set ONLY in workspace scope (no
+   * operator scope). The list still narrows configured provider endpoints,
+   * but the registry must exempt the Qwen OAuth built-ins from the filter —
+   * their dynamic endpoint cannot be listed, and disabling personal login
+   * is an operator decision (issue #12805).
+   */
+  allowedBaseUrlsWorkspaceOnly?: boolean;
   /** Agent and multi-agent collaboration settings */
   agents?: AgentsCollabSettings;
   /** General-purpose worktree settings (Phase D-2). */
@@ -2887,6 +2894,7 @@ export class Config {
   private readonly providerProtocolConfig?: ProviderProtocolConfig;
   private readonly allowedModelBaseUrls?: readonly string[];
   private readonly qwenOAuthBuiltinsDisabled?: boolean;
+  private readonly allowedBaseUrlsWorkspaceOnly?: boolean;
   private readonly sandbox: SandboxConfig | undefined;
   private targetDir: string;
   private workspaceContext: WorkspaceContext;
@@ -3633,6 +3641,7 @@ export class Config {
     this.providerProtocolConfig = params.providerProtocolConfig;
     this.allowedModelBaseUrls = params.allowedModelBaseUrls;
     this.qwenOAuthBuiltinsDisabled = params.qwenOAuthBuiltinsDisabled;
+    this.allowedBaseUrlsWorkspaceOnly = params.allowedBaseUrlsWorkspaceOnly;
     this.cliVersion = params.cliVersion;
 
     this.chatRecordingEnabled = params.chatRecording ?? true;
@@ -3778,6 +3787,7 @@ export class Config {
       providerProtocolConfig: this.providerProtocolConfig,
       allowedModelBaseUrls: this.allowedModelBaseUrls,
       qwenOAuthBuiltinsDisabled: this.qwenOAuthBuiltinsDisabled,
+      allowedBaseUrlsWorkspaceOnly: this.allowedBaseUrlsWorkspaceOnly,
       generationConfig: {
         model: params.model,
         ...(params.generationConfig || {}),

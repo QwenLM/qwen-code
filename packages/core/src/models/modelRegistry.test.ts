@@ -9,7 +9,6 @@ import {
   ModelRegistry,
   QWEN_OAUTH_MODELS,
   isBaseUrlAllowed,
-  isQwenOAuthBuiltinsPinnedEmpty,
   modelRegistryKey,
   resolveProviderProtocol,
 } from './modelRegistry.js';
@@ -1150,6 +1149,31 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
     expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual(['ext']);
   });
 
+  it('ignores a trailing slash on the ENTRY side and keeps path boundaries', () => {
+    // The strip is symmetric — an entry written `…/v1/` covers the same
+    // path without the slash (the earlier direction, target `…/V1/` against
+    // entry `…/`, is covered by the case-insensitivity test above).
+    const trailingEntry = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: `${CORP}/v1`, envKey: 'CORP_KEY' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [`${CORP}/v1/`],
+    );
+    expect(idsOf(trailingEntry, AuthType.USE_OPENAI)).toEqual(['ext']);
+
+    // A path prefix that is not a path boundary still must not match:
+    // entry `/v1` covers `/v1/…` but not `/v1beta`.
+    const boundary = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: `${CORP}/v1beta`, envKey: 'CORP_KEY' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [`${CORP}/v1`],
+    );
+    expect(boundary.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+
   it('matches allowlist paths case-sensitively while hosts stay case-insensitive', () => {
     // Hosts compare case-insensitively, but the path is case-sensitive:
     // /V1 is a different endpoint path than /v1.
@@ -1173,6 +1197,29 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
     expect(idsOf(match, AuthType.USE_OPENAI)).toEqual(['ext']);
   });
 
+  it('never matches across a scheme mismatch in either direction', () => {
+    // The matcher compares protocol first, so an http:// entry can never
+    // cover an https:// endpoint (and vice versa) — scheme sensitivity must
+    // survive a refactor that weakens the origin/host comparison.
+    const httpEntry = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: 'https://corp.example/v1' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      ['http://corp.example/v1'],
+    );
+    expect(httpEntry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+
+    const httpsEntry = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: 'http://corp.example/v1' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      ['https://corp.example/v1'],
+    );
+    expect(httpsEntry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+
   it('an empty allowlist registers no models, including the qwen-oauth built-ins', () => {
     const registry = new ModelRegistry(
       { openai: [{ id: 'llm', baseUrl: CORP }] },
@@ -1194,6 +1241,38 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
     expect(idsOf(registry, AuthType.QWEN_OAUTH)).toEqual([]);
   });
 
+  it('exempts the built-ins when the allowlist is workspace-scoped only', () => {
+    // A workspace list still narrows configured provider endpoints, but the
+    // built-in qwen-oauth models register without the filter — their login
+    // endpoint cannot be listed, and disabling personal Qwen login is an
+    // operator decision (issue #12805).
+    const registry = new ModelRegistry(
+      undefined,
+      undefined,
+      [CORP],
+      false,
+      true,
+    );
+    expectHardCodedQwenCount(registry);
+    // Exempt models are not recorded as drops.
+    expect(registry.getAllowlistDroppedModels()).toEqual([]);
+
+    // The exemption is qwen-oauth-only: an external endpoint is still judged
+    // against the same workspace list.
+    const narrowed = new ModelRegistry(
+      externalCustom(),
+      { custom: 'openai' },
+      [CORP],
+      false,
+      true,
+    );
+    expect(narrowed.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+    expectHardCodedQwenCount(narrowed);
+    expect(narrowed.getAllowlistDroppedModels()).toEqual([
+      { id: 'ext', baseUrl: 'https://external-llm.example/v1' },
+    ]);
+  });
+
   it('fails closed for a model whose protocol default endpoint is not listed', () => {
     // openai protocol default baseUrl is the external DashScope endpoint.
     const registry = new ModelRegistry({ openai: [{ id: 'llm' }] }, undefined, [
@@ -1202,9 +1281,13 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
     expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
   });
 
-  it('does not register the qwen-oauth built-ins for an explicit empty list', () => {
+  it('keeps the qwen-oauth built-ins for an explicit empty list (retired pin)', () => {
+    // `[]` under qwen-oauth is an empty provider list, not a switch: only
+    // the operator-scoped model.qwenOAuthBuiltinsDisabled disables the
+    // built-ins (issue #12805, the migration and the provider-removal
+    // route synthesize `[]` without operator intent).
     const registry = new ModelRegistry({ 'qwen-oauth': [] });
-    expect(idsOf(registry, AuthType.QWEN_OAUTH)).toEqual([]);
+    expect(idsOf(registry, AuthType.QWEN_OAUTH)).toEqual(['coder-model']);
   });
 
   it('keeps the qwen-oauth built-ins when the key is missing', () => {
@@ -1247,12 +1330,20 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
     expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
   });
 
-  it('reloadModels honors a newly-pinned empty qwen-oauth list', () => {
-    const registry = new ModelRegistry();
-    expectHardCodedQwenCount(registry);
+  it('reloadModels keeps the boot-time builtins decision (no pin via [] anymore)', () => {
+    // The disable decision is boot-frozen (like the allowlist): a
+    // providers-only reload cannot re-enable the built-ins, and `[]` under
+    // qwen-oauth no longer means anything (retired pin, issue #12805).
+    const disabled = new ModelRegistry(undefined, undefined, undefined, true);
+    expect(idsOf(disabled, AuthType.QWEN_OAUTH)).toEqual([]);
+    disabled.reloadModels({ 'qwen-oauth': [] });
+    expect(idsOf(disabled, AuthType.QWEN_OAUTH)).toEqual([]);
 
-    registry.reloadModels({ 'qwen-oauth': [] });
-    expect(idsOf(registry, AuthType.QWEN_OAUTH)).toEqual([]);
+    // Not disabled: `[]` is just an empty provider list, so the hard-coded
+    // built-ins survive a reload that carries only it.
+    const enabled = new ModelRegistry();
+    enabled.reloadModels({ 'qwen-oauth': [] });
+    expectHardCodedQwenCount(enabled);
   });
 
   it('matches an explicit default port as absent (URL origin semantics)', () => {
@@ -1328,6 +1419,44 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
     ).toBe(true);
   });
 
+  it('keeps query/fragment entries but warns they match the whole prefix', () => {
+    // Matching is URL-semantic and ignores query/fragment on both sides, so
+    // an entry that carries one allows every endpoint under the same
+    // origin+path — warn, but keep the entry (it still confines by
+    // host+path; rejecting it would also break an all-invalid list's
+    // fail-closed shape).
+    const registry = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: `${CORP}/v1`, envKey: 'CORP_KEY' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [`${CORP}/v1?q=1`],
+    );
+    expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual(['ext']);
+    expect(
+      debugLoggerWarnSpy.mock.calls.some((call) =>
+        String(call[0]).includes('carries a query/fragment'),
+      ),
+    ).toBe(true);
+
+    // A fragment-only entry behaves the same way. Both constructions
+    // validate their list (the spy is cleared per test, not per
+    // construction), so two entries carrying a query/fragment warn twice.
+    const fragment = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: `${CORP}/v1`, envKey: 'CORP_KEY' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [`${CORP}/v1#f`],
+    );
+    expect(idsOf(fragment, AuthType.USE_OPENAI)).toEqual(['ext']);
+    expect(
+      debugLoggerWarnSpy.mock.calls.filter((call) =>
+        String(call[0]).includes('carries a query/fragment'),
+      ).length,
+    ).toBe(2);
+  });
+
   it('matches a whitespace-padded allowlist entry against the exact baseUrl', () => {
     const registry = new ModelRegistry(
       {
@@ -1350,33 +1479,25 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
     expect(isBaseUrlAllowed(`${CORP}/v1`, ['https://other.example'])).toBe(
       false,
     );
+    // A degenerate entry must match nothing even when a raw-list consumer
+    // receives it unvalidated — the matcher itself is the chokepoint
+    // (issue #12805: the previous string-normalized fallback turned
+    // `https://` into a match-everything wildcard).
+    expect(isBaseUrlAllowed('https://anything.example/v1', ['https://'])).toBe(
+      false,
+    );
+    expect(isBaseUrlAllowed('https://anything.example/v1', ['not a url'])).toBe(
+      false,
+    );
+    // Trailing slash on the entry side is ignored (symmetric with the
+    // target side covered above).
+    expect(isBaseUrlAllowed(`${CORP}`, [`${CORP}/`])).toBe(true);
   });
 
-  it('detects the qwen-oauth builtins pin through providerProtocol mappings', () => {
-    expect(isQwenOAuthBuiltinsPinnedEmpty({ 'qwen-oauth': [] })).toBe(true);
-    expect(
-      isQwenOAuthBuiltinsPinnedEmpty(
-        { 'corp-qwarn': [] },
-        { 'corp-qwarn': 'qwen-oauth' },
-      ),
-    ).toBe(true);
-    // A mapped-to-openai id with an empty list is a regular empty provider,
-    // not the qwen-oauth pin.
-    expect(
-      isQwenOAuthBuiltinsPinnedEmpty(
-        { 'corp-openai': [] },
-        { 'corp-openai': 'openai' },
-      ),
-    ).toBe(false);
-    expect(
-      isQwenOAuthBuiltinsPinnedEmpty({ 'qwen-oauth': [{ id: 'x' }] }),
-    ).toBe(false);
-    expect(isQwenOAuthBuiltinsPinnedEmpty(undefined)).toBe(false);
-  });
-
-  it('keeps the built-ins when the caller passes an explicit false (workspace-only pin)', () => {
-    // The merge strips workspace-scope pins; callers with scope visibility
-    // pass false so a workspace-only pin never suppresses the built-ins.
+  it('keeps the built-ins when the disabled flag is an explicit false', () => {
+    // The operator key is a plain boolean (issue #12805): false means
+    // "not disabled", so the built-ins register even alongside an empty
+    // qwen-oauth provider list.
     const registry = new ModelRegistry(
       { 'qwen-oauth': [] },
       undefined,

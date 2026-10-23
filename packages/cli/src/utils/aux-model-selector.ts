@@ -17,10 +17,10 @@
  * The guarantee is per call site, not per key. Surfaces that interpolate the
  * stored value raw are not converted by this module and stay tracked in
  * #12856: the `/model --fast` and `/model --compaction` readbacks
- * (`modelCommand.ts:619`, `:841`) and the startup advisor-validation error,
- * which puts the raw selector into a `FatalConfigError` message
- * (`config.ts` `formatUnavailableAdvisorModelMessage`) that
- * `handleCriticalError` writes to stderr.
+ * (`modelCommand.ts:619`, `:841`). The startup advisor-validation error and
+ * its allowlist hint (`config.ts` `formatUnavailableAdvisorModelMessage`,
+ * `buildAdvisorAllowlistHint`, which `handleCriticalError` writes to stderr)
+ * delegate to this module's scrubbing.
  *
  * The persisted value is deliberately not rewritten. That suffix is the
  * routing key: `modelRegistry` copies the configured `baseUrl` verbatim, and
@@ -76,9 +76,13 @@ function hasFoldedCharacter(baseUrl: string): boolean {
  * an already-clean URL returns verbatim so republishing never rewrites a
  * clean persisted value. Anything else (scheme-less, non-http(s),
  * unparseable, or carrying a folded character) is not publishable, and the
- * caller must drop the suffix rather than emit it.
+ * caller must drop the suffix rather than emit it. Exported so error
+ * messages that echo a bare suffix (the startup advisor allowlist hint in
+ * `config.ts`) fail closed the same way the display and wire forms do.
  */
-function publishableSelectorBaseUrl(baseUrl: string): string | undefined {
+export function publishableSelectorBaseUrl(
+  baseUrl: string,
+): string | undefined {
   if (hasFoldedCharacter(baseUrl)) return undefined;
   // No `.trim()` here: the guard above already rejects every character
   // `String.prototype.trim` strips, so normalizing on this line could not

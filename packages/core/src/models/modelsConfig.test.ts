@@ -2274,5 +2274,50 @@ describe('ModelsConfig', () => {
         { id: 'ext', baseUrl: 'https://external-llm.example/v1' },
       ]);
     });
+
+    it('exempts the qwen-oauth built-ins for a workspace-scoped allowlist', () => {
+      // A workspace list narrows configured providers but must not disable
+      // personal Qwen login (operator decision, issue #12805).
+      const modelsConfig = new ModelsConfig({
+        allowedModelBaseUrls: [CORP],
+        allowedBaseUrlsWorkspaceOnly: true,
+      });
+      expect(
+        modelsConfig
+          .getAvailableModelsForAuthType(AuthType.QWEN_OAUTH)
+          .map((m) => m.id),
+      ).toEqual(['coder-model']);
+
+      // Without the flag the same list excludes the built-ins.
+      const operatorList = new ModelsConfig({
+        allowedModelBaseUrls: [CORP],
+      });
+      expect(
+        operatorList.getAvailableModelsForAuthType(AuthType.QWEN_OAUTH),
+      ).toEqual([]);
+    });
+
+    it('suppresses the built-ins on qwenOAuthBuiltinsDisabled (plain boolean)', () => {
+      // The operator key is a boolean, not the retired `[]` pin: true
+      // disables the built-ins, false keeps them even with an empty
+      // qwen-oauth provider list (issue #12805).
+      const disabled = new ModelsConfig({
+        modelProvidersConfig: { 'qwen-oauth': [] },
+        qwenOAuthBuiltinsDisabled: true,
+      });
+      expect(
+        disabled.getAvailableModelsForAuthType(AuthType.QWEN_OAUTH),
+      ).toEqual([]);
+
+      const kept = new ModelsConfig({
+        modelProvidersConfig: { 'qwen-oauth': [] },
+        qwenOAuthBuiltinsDisabled: false,
+      });
+      expect(
+        kept
+          .getAvailableModelsForAuthType(AuthType.QWEN_OAUTH)
+          .map((m) => m.id),
+      ).toEqual(['coder-model']);
+    });
   });
 });

@@ -106,12 +106,21 @@ export interface ModelConfigSourcesInput {
   allowedBaseUrls?: readonly string[];
 
   /**
-   * Operator-scope pin disabling the built-in Qwen OAuth models
-   * (`modelProviders["qwen-oauth"] = []` in system or user settings). When
-   * true, Qwen OAuth resolution fails closed instead of falling back to the
-   * default built-in model (issue #12805).
+   * Whether the operator scopes disabled the built-in Qwen OAuth models
+   * (model.qwenOAuthBuiltinsDisabled in system, user, or systemDefaults
+   * settings). When true, Qwen OAuth resolution fails closed instead of
+   * falling back to the default built-in model (issue #12805).
    */
   qwenOAuthBuiltinsDisabled?: boolean;
+
+  /**
+   * True when the effective allowlist was set ONLY in workspace scope (no
+   * operator scope). A workspace list still narrows the configured provider
+   * endpoints, but it must not fail closed for the Qwen OAuth dynamic
+   * endpoint — disabling personal Qwen login is an operator decision
+   * (issue #12805).
+   */
+  allowedBaseUrlsWorkspaceOnly?: boolean;
 }
 
 /**
@@ -323,21 +332,65 @@ export function resolveModelConfig(
   // --model/--openaiBaseUrl, env vars, security.auth, provider defaults), and
   // the preserve/capture paths in ModelsConfig can re-admit credentials for
   // endpoints the registry never registered. Gate the resolved selection on
-  // the same predicate: the effective endpoint is the explicit baseUrl or the
-  // protocol default the SDK would dial when none is set. QWEN_OAUTH returns
-  // above, so its dynamic endpoint is handled by the builtins pin instead.
-  if (input.allowedBaseUrls !== undefined && authType) {
-    const effectiveBaseUrl =
-      config.baseUrl || getDefaultBaseUrlForProtocol(authType);
-    if (!isBaseUrlAllowed(effectiveBaseUrl, input.allowedBaseUrls)) {
-      throw new FatalConfigError(
-        `Model endpoint '${effectiveBaseUrl || '(protocol default)'}' (auth type '${authType}') is not in the managed allowlist 'model.allowedBaseUrls'. ` +
-          `Ask the operator to add it to the allowlist in system or user settings, or choose a model on an allowed endpoint.`,
-      );
+  // the same predicate. The endpoint judged is the explicit baseUrl whenever
+  // any source resolved one — even before an auth type is selected, so a
+  // boot-time env/CLI endpoint cannot slip past — else the protocol default
+  // the SDK would dial. QWEN_OAUTH returns above; its dynamic endpoint is
+  // handled in resolveQwenOAuthConfig.
+  if (input.allowedBaseUrls !== undefined) {
+    if (config.baseUrl) {
+      if (!isBaseUrlAllowed(config.baseUrl, input.allowedBaseUrls)) {
+        throw new FatalConfigError(
+          `Model endpoint '${scrubBaseUrlForMessage(config.baseUrl)}'` +
+            (authType ? ` (auth type '${authType}')` : '') +
+            ` is not in the managed allowlist 'model.allowedBaseUrls'. ` +
+            `Ask the operator to add it to the allowlist in system or user settings, or choose a model on an allowed endpoint.`,
+        );
+      }
+    } else if (authType) {
+      const protocolDefault = getDefaultBaseUrlForProtocol(authType);
+      if (protocolDefault) {
+        if (!isBaseUrlAllowed(protocolDefault, input.allowedBaseUrls)) {
+          throw new FatalConfigError(
+            `Model endpoint '${protocolDefault}' (the protocol default for auth type '${authType}') is not in the managed allowlist 'model.allowedBaseUrls'. ` +
+              `Ask the operator to add it to the allowlist in system or user settings, set an explicit baseUrl on the model, or choose a model on an allowed endpoint.`,
+          );
+        }
+      } else {
+        throw new FatalConfigError(
+          `Auth type '${authType}' has no protocol default endpoint and no explicit baseUrl was resolved, so no endpoint can be checked against the managed allowlist 'model.allowedBaseUrls'. ` +
+            `Set an explicit baseUrl (model.baseUrl or a modelProviders entry) that matches an allowlist entry.`,
+        );
+      }
     }
+    // No explicit baseUrl and no auth type: nothing is dialed yet (pre-auth
+    // boot); the gate re-runs once auth is selected.
   }
 
   return { config, sources, warnings };
+}
+
+/**
+ * Render a baseUrl for a user-visible error message without leaking
+ * userinfo credentials to stderr (issue #12805): a parseable URL with
+ * user:pass@ is shown with the credential stripped; a value that does not
+ * parse as a URL is shown with any userinfo-shaped prefix masked, so a
+ * malformed endpoint cannot echo a live secret.
+ */
+function scrubBaseUrlForMessage(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.username.length === 0 && parsed.password.length === 0) {
+      return url;
+    }
+    parsed.username = '';
+    parsed.password = '';
+    return parsed.toString();
+  } catch {
+    return url
+      .replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/@\s]*@/, '***@')
+      .replace(/^[\w.-]+:[\w.-]+@/, '***@');
+  }
 }
 
 /**
@@ -351,16 +404,31 @@ function resolveQwenOAuthConfig(
   const { cli, settings, proxy, modelProvider } = input;
   const sources: ConfigSources = {};
 
-  // Operator-scope builtins pin (issue #12805): personal Qwen login is
-  // disabled by `modelProviders["qwen-oauth"] = []` in system or user
+  // Operator-scope disable (issue #12805): personal Qwen login is disabled
+  // by model.qwenOAuthBuiltinsDisabled in system, user, or systemDefaults
   // settings. Fail closed with an actionable error instead of falling back
   // to the default built-in model, which would silently re-admit the dynamic
   // Qwen endpoint the operator locked down.
   if (input.qwenOAuthBuiltinsDisabled) {
     throw new FatalConfigError(
       `Qwen OAuth (personal Qwen login) is disabled by operator settings: ` +
-        `modelProviders["qwen-oauth"] is pinned to an empty model list in system or user settings. ` +
-        `Remove that pin from the operator scope or choose another authentication type.`,
+        `model.qwenOAuthBuiltinsDisabled is set in system, user, or systemDefaults settings. ` +
+        `Remove that setting from the operator scope or choose another authentication type.`,
+    );
+  }
+
+  // An operator-scope model.allowedBaseUrls can never list the Qwen OAuth
+  // endpoint: it is discovered dynamically at login. Such a deployment
+  // therefore excludes personal Qwen login — fail closed rather than dial
+  // the unlisted dynamic endpoint (issue #12805). A workspace-scope list
+  // still narrows configured providers but must not disable personal login.
+  if (
+    input.allowedBaseUrls !== undefined &&
+    !input.allowedBaseUrlsWorkspaceOnly
+  ) {
+    throw new FatalConfigError(
+      `The Qwen OAuth (personal Qwen login) endpoint is discovered dynamically at login and cannot be listed in the managed allowlist 'model.allowedBaseUrls', which this deployment sets in operator scope. ` +
+        `Personal Qwen login and an operator-scope allowlist are mutually exclusive: removing model.allowedBaseUrls is the only way to re-enable it, or choose another authentication type.`,
     );
   }
 

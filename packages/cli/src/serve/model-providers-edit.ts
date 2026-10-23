@@ -87,7 +87,9 @@ function buildRemoval(
   // writer merges the modelProviders object per key and only replaces arrays
   // wholesale, so dropping a key here would leave a zombie entry in the file
   // while an emptied array is written correctly. An empty provider contributes
-  // no models and is hidden from the model list.
+  // no models and is hidden from the model list; in particular an emptied
+  // qwen-oauth key no longer disables the built-in Qwen OAuth (personal Qwen
+  // login) models — that is model.qwenOAuthBuiltinsDisabled now (issue #12805).
   next[key] = nextModels;
   return {
     next,

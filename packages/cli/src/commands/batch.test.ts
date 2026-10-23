@@ -27,11 +27,13 @@ const mockResolve = vi.hoisted(() => vi.fn());
 const mockResolveProxy = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockIgnoreBrokenPipe = vi.hoisted(() => vi.fn());
+const mockCollectProviderModels = vi.hoisted(() => vi.fn());
 
 vi.mock('../config/settings.js', () => ({ loadSettings: mockLoadSettings }));
 vi.mock('../utils/modelConfigUtils.js', () => ({
   getAuthTypeFromEnv: vi.fn(() => undefined),
   resolveCliGenerationConfig: mockResolve,
+  collectProviderModelsForProtocol: mockCollectProviderModels,
 }));
 vi.mock('./channel/proxy.js', () => ({ resolveProxy: mockResolveProxy }));
 vi.mock('../utils/stdioHelpers.js', () => ({
@@ -105,6 +107,40 @@ describe('resolveEndpoint', () => {
     resolveEndpoint({});
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('model m is not served'),
+    );
+  });
+
+  it('threads the operator allowlist into the resolver despite model narrowing (R2-1)', () => {
+    // The batch.model narrowing replaces the whole model object; the
+    // allowlist gate must run on the policy captured before it, or the
+    // batch endpoint is dialed off-list (issue #12805).
+    const provider = {
+      id: 'batch-model',
+      baseUrl: 'https://off-list.example/v1',
+      envKey: 'BATCH_KEY',
+    };
+    mockLoadSettings.mockReturnValue({
+      merged: {
+        model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+        modelProviders: { openai: [provider] },
+        batch: { model: 'batch-model' },
+        security: { auth: { selectedType: AuthType.USE_OPENAI } },
+      },
+    });
+    mockCollectProviderModels.mockReturnValue([provider]);
+    mockResolve.mockReturnValue({
+      apiKey: 'k',
+      baseUrl: 'https://off-list.example/v1',
+      model: 'batch-model',
+      authType: AuthType.USE_OPENAI,
+    });
+
+    resolveEndpoint({ BATCH_KEY: 'key' });
+
+    expect(mockResolve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        allowedBaseUrls: ['https://corp-llm.example/v1'],
+      }),
     );
   });
 });

@@ -11,6 +11,7 @@ import { beforeEach, describe, it, expect, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import {
+  prepareSettingWrite,
   registerWorkspaceQualifiedSettingsRoutes,
   registerWorkspaceSettingsRoutes,
 } from './workspace-settings.js';
@@ -125,6 +126,64 @@ describe('fast-model ACP settings writes', () => {
     expect(response.status).toBe(500);
     expect(persistSetting).not.toHaveBeenCalled();
     expect(broadcastSettingsChanged).not.toHaveBeenCalled();
+  });
+});
+
+describe('aux-model endpoint allowlist gate (advisorModel/imageModel)', () => {
+  const policy = ['https://corp.example'];
+
+  it('rejects a persisted selector whose endpoint is off the allowlist', () => {
+    // The daemon model listing reads raw scopes, so an off-list endpoint is
+    // offerable — the write route must gate the persisted suffix, or the
+    // next CLI start fails as a FatalConfigError (issue #12805).
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { model: { allowedBaseUrls: policy } },
+    } as never);
+
+    expect(() =>
+      prepareSettingWrite(
+        '/workspace',
+        SettingScope.User,
+        'advisorModel',
+        'openai:ext\0https://external-llm.example/v1',
+        undefined,
+        true,
+      ),
+    ).toThrow(
+      /advisorModel endpoint is not in the managed allowlist 'model\.allowedBaseUrls'/,
+    );
+  });
+
+  it('allows a persisted selector whose endpoint is on the allowlist', () => {
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { model: { allowedBaseUrls: policy } },
+    } as never);
+
+    const prepared = prepareSettingWrite(
+      '/workspace',
+      SettingScope.User,
+      'advisorModel',
+      'openai:ext\0https://corp.example/v1',
+      undefined,
+      true,
+    );
+    expect(prepared.persistedValue).toBe('openai:ext\0https://corp.example/v1');
+  });
+
+  it('leaves the write untouched when no policy is set', () => {
+    vi.mocked(loadSettings).mockReturnValue({ merged: {} } as never);
+
+    const prepared = prepareSettingWrite(
+      '/workspace',
+      SettingScope.User,
+      'advisorModel',
+      'openai:ext\0https://external-llm.example/v1',
+      undefined,
+      true,
+    );
+    expect(prepared.persistedValue).toBe(
+      'openai:ext\0https://external-llm.example/v1',
+    );
   });
 });
 

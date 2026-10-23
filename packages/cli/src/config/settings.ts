@@ -9,11 +9,9 @@ import * as path from 'node:path';
 import { homedir } from 'node:os';
 import process from 'node:process';
 import {
-  AuthType,
   FatalConfigError,
   getErrorMessage,
   isValidAdvisorMaxUses,
-  resolveProviderProtocol,
   Storage,
   createDebugLogger,
   stripRuntimeSnapshotPrefix,
@@ -21,8 +19,6 @@ import {
 import type {
   MCPServerConfig,
   McpServerScope,
-  ModelProvidersConfig,
-  ProviderProtocolConfig,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import {
@@ -367,6 +363,14 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
     warningSet.add(`Warning: ${warning}`);
   }
 
+  // Scope objects are always present on a production LoadedSettings; the
+  // optional chaining keeps this helper total for partial loaded-settings
+  // shapes (e.g. tests that stub loadSettings with a minimal object).
+  const systemSettings = loadedSettings.system?.settings ?? ({} as Settings);
+  const systemDefaultsSettings =
+    loadedSettings.systemDefaults?.settings ?? ({} as Settings);
+  const userSettings = loadedSettings.user?.settings ?? ({} as Settings);
+
   for (const scope of [SettingScope.User, SettingScope.Workspace]) {
     const settingsFile = loadedSettings.forScope(scope);
     if (settingsFile.rawJson === undefined) {
@@ -431,9 +435,9 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
     // warning — it lost nothing.
     for (const entry of WORKSPACE_TIGHTEN_ONLY_SETTINGS) {
       const verdict = tightenOnlyVerdict(entry, workspaceFile.settings, {
-        system: loadedSettings.system.settings,
-        systemDefaults: loadedSettings.systemDefaults.settings,
-        user: loadedSettings.user.settings,
+        system: systemSettings,
+        systemDefaults: systemDefaultsSettings,
+        user: userSettings,
       });
       if (verdict === undefined || verdict.kept) continue;
       const key = `${entry.section}.${entry.key}`;
@@ -448,47 +452,19 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
       }
     }
   }
-  // The qwen-oauth pin (an empty model list for a provider id that resolves
-  // to qwen-oauth) disables the built-in Qwen OAuth (personal Qwen login)
-  // models. It is an operator decision: workspace-scope pins are stripped
-  // from the merge, so name the stripped ones and the pinning operator
-  // scope — the disable must never be silent (issue #12805).
-  const effectiveProviderProtocol = getEffectiveProviderProtocol(
-    loadedSettings.system.settings,
-    loadedSettings.systemDefaults.settings,
-    loadedSettings.user.settings,
-    loadedSettings.isTrusted ? loadedSettings.workspace.settings : undefined,
-  );
-  if (loadedSettings.isTrusted) {
-    const workspacePins = findQwenOAuthPinIds(
-      loadedSettings.workspace.settings.modelProviders,
-      effectiveProviderProtocol,
-    );
-    for (const id of workspacePins) {
-      warningSet.add(
-        `Warning: modelProviders["${id}"] = [] in workspace settings (${loadedSettings.workspace.path}) is ignored: only System, User, or SystemDefaults scope settings can disable the built-in Qwen OAuth (personal Qwen login) models with an empty model list.`,
-      );
-    }
-  }
-  for (const id of findQwenOAuthPinIds(
-    loadedSettings.merged.modelProviders,
-    effectiveProviderProtocol,
-  )) {
+  // model.qwenOAuthBuiltinsDisabled disables the built-in Qwen OAuth
+  // (personal Qwen login) models. It is an operator decision: workspace-
+  // scope attempts are stripped from the merge (with the generic
+  // WORKSPACE_RESTRICTED_SETTINGS warning above), so the disable must never
+  // be silent — name the operator scope that set it (issue #12805).
+  if (loadedSettings.merged.model?.qwenOAuthBuiltinsDisabled === true) {
     const pinningScope = [
-      { name: 'System', settings: loadedSettings.system.settings },
-      { name: 'User', settings: loadedSettings.user.settings },
-      {
-        name: 'SystemDefaults',
-        settings: loadedSettings.systemDefaults.settings,
-      },
-    ].find((scope) =>
-      findQwenOAuthPinIds(
-        scope.settings.modelProviders,
-        effectiveProviderProtocol,
-      ).includes(id),
-    );
+      { name: 'System', settings: systemSettings },
+      { name: 'User', settings: userSettings },
+      { name: 'SystemDefaults', settings: systemDefaultsSettings },
+    ].find((scope) => scope.settings.model?.qwenOAuthBuiltinsDisabled === true);
     warningSet.add(
-      `Warning: modelProviders["${id}"] is pinned to an empty model list in ${pinningScope?.name ?? 'operator'} scope settings, disabling the built-in Qwen OAuth (personal Qwen login) models. Remove the pin in that scope to re-enable personal Qwen login.`,
+      `Warning: model.qwenOAuthBuiltinsDisabled is set in ${pinningScope?.name ?? 'operator'} scope settings, disabling the built-in Qwen OAuth (personal Qwen login) models. Remove it in that scope to re-enable personal Qwen login.`,
     );
   }
   // Core falls back to unlimited for an invalid value instead of refusing to
@@ -597,79 +573,29 @@ function stripWorkspaceOverrides(
 }
 
 /**
- * The provider ids whose model list is an empty-array qwen-oauth pin in one
- * scope's modelProviders, resolved through the given providerProtocol
- * mapping — a custom id mapped to qwen-oauth counts, exactly like at
- * registration (issue #12805: the pin must resolve through the same
- * protocol mapping as everything else).
+ * True when the effective `model.allowedBaseUrls` was set ONLY in workspace
+ * scope (a trusted workspace defines it and no operator scope — System,
+ * User, or SystemDefaults — does). A workspace list still narrows the
+ * configured provider endpoints, but it must not fail closed for the Qwen
+ * OAuth dynamic endpoint: disabling personal Qwen login is an operator
+ * decision (issue #12805). Callers use this to thread the flag through to
+ * ModelRegistry / ModelConfigResolver.
  */
-function findQwenOAuthPinIds(
-  modelProviders: ModelProvidersConfig | undefined,
-  providerProtocol: ProviderProtocolConfig | undefined,
-): string[] {
-  if (!modelProviders) {
-    return [];
+export function isAllowedBaseUrlsWorkspaceOnly(
+  loadedSettings: LoadedSettings,
+): boolean {
+  if (!loadedSettings.isTrusted) {
+    return false;
   }
-  return Object.entries(modelProviders)
-    .filter(
-      ([id, models]) =>
-        Array.isArray(models) &&
-        models.length === 0 &&
-        resolveProviderProtocol(id, providerProtocol) === AuthType.QWEN_OAUTH,
-    )
-    .map(([id]) => id);
-}
-
-/**
- * The effective providerProtocol mapping for a merge: the same per-key
- * precedence as the full settings merge (System beats Workspace beats User
- * beats SystemDefaults), restricted to the providerProtocol sub-objects.
- * The qwen-oauth pin strip and its warnings resolve provider ids through
- * this mapping, not through any single scope's partial one.
- */
-function getEffectiveProviderProtocol(
-  system: Settings,
-  systemDefaults: Settings,
-  user: Settings,
-  workspace: Settings | undefined,
-): ProviderProtocolConfig {
-  return customDeepMerge(
-    getMergeStrategyForPath,
-    {},
-    { providerProtocol: systemDefaults.providerProtocol ?? {} },
-    { providerProtocol: user.providerProtocol ?? {} },
-    ...(workspace
-      ? [{ providerProtocol: workspace.providerProtocol ?? {} }]
-      : []),
-    { providerProtocol: system.providerProtocol ?? {} },
-  )['providerProtocol'] as ProviderProtocolConfig;
-}
-
-/**
- * Drop workspace-scope qwen-oauth pins (an empty model list for a provider
- * id that resolves to qwen-oauth). Disabling the built-in Qwen OAuth
- * (personal Qwen login) models is an operator decision: only the System,
- * User, or SystemDefaults scopes may pin. A trusted workspace must not
- * disable personal Qwen login, and it must not replace a non-empty
- * operator list for a mapped provider id with an empty one — per-key merge
- * order (workspace applied after user) would let the workspace array win.
- */
-function stripWorkspaceQwenOAuthPins(
-  workspace: Settings,
-  providerProtocol: ProviderProtocolConfig | undefined,
-): Settings {
-  const modelProviders = workspace.modelProviders;
-  if (!modelProviders) {
-    return workspace;
+  const ref: SettingKeyRef = { section: 'model', key: 'allowedBaseUrls' };
+  if (!isSettingDefined(loadedSettings.workspace.settings, ref)) {
+    return false;
   }
-  const pinnedIds = findQwenOAuthPinIds(modelProviders, providerProtocol);
-  if (pinnedIds.length === 0) {
-    return workspace;
-  }
-  const rest = Object.fromEntries(
-    Object.entries(modelProviders).filter(([id]) => !pinnedIds.includes(id)),
+  return (
+    !isSettingDefined(loadedSettings.system.settings, ref) &&
+    !isSettingDefined(loadedSettings.user.settings, ref) &&
+    !isSettingDefined(loadedSettings.systemDefaults.settings, ref)
   );
-  return { ...workspace, modelProviders: rest as ModelProvidersConfig };
 }
 
 type TightenOnlyEntry = (typeof WORKSPACE_TIGHTEN_ONLY_SETTINGS)[number];
@@ -756,18 +682,11 @@ function mergeSettings(
   const safeWorkspace = isTrusted
     ? tagMcpServerScope(
         stripWorkspaceLoosenings(
-          stripWorkspaceQwenOAuthPins(
-            stripWorkspaceOverrides(
-              stripWorkspaceRestrictedSettings(workspace),
-              [systemDefaults, user, system],
-            ),
-            getEffectiveProviderProtocol(
-              system,
-              systemDefaults,
-              user,
-              workspace,
-            ),
-          ),
+          stripWorkspaceOverrides(stripWorkspaceRestrictedSettings(workspace), [
+            systemDefaults,
+            user,
+            system,
+          ]),
           { system, systemDefaults, user },
         ),
         'workspace',
@@ -1133,6 +1052,9 @@ export function createMinimalSettings(): LoadedSettings {
         }
       : {}),
     ...(operator.privacy ? { privacy: operator.privacy } : {}),
+    // Bare mode must keep the operator's model controls in force — the
+    // managed allowlist and the Qwen OAuth builtins disable (issue #12805).
+    ...(operator.model ? { model: operator.model } : {}),
   };
   const emptySettingsFile: SettingsFile = {
     path: '',

@@ -6,6 +6,7 @@
 
 import type { Application, Request, Response } from 'express';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import { isBaseUrlAllowed } from '@qwen-code/qwen-code-core/models/modelRegistry.js';
 import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
@@ -290,6 +291,33 @@ export function prepareSettingWrite(
       );
       if (persistedValue === null) {
         throw new Error('Fast model ACP route is unavailable');
+      }
+    }
+    // Managed endpoint allowlist (issue #12805): advisor/image selectors pin
+    // their endpoint in the NUL suffix, and the Web Shell can write back a
+    // selector the daemon model listing emitted — that listing reads raw
+    // scopes, so an off-list endpoint is offerable. Gate the persisted
+    // suffix against the policy: the registry filter cannot reach a value
+    // this route persists, and an off-list advisorModel would refuse the
+    // next CLI start as a FatalConfigError.
+    if (
+      (key === 'advisorModel' || key === 'imageModel') &&
+      typeof value === 'string' &&
+      value.includes('\0')
+    ) {
+      const suffix = value.slice(value.indexOf('\0') + 1);
+      if (suffix) {
+        const { merged } = loadSettings(workspace, {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: !workspaceTrusted,
+          workspaceTrusted,
+        });
+        const policy = merged.model?.allowedBaseUrls;
+        if (policy !== undefined && !isBaseUrlAllowed(suffix, policy)) {
+          throw new Error(
+            `${key} endpoint is not in the managed allowlist 'model.allowedBaseUrls'; choose a model on an allowed endpoint or ask the operator to add it to the allowlist.`,
+          );
+        }
       }
     }
     return {

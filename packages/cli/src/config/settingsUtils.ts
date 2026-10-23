@@ -286,6 +286,10 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'goals', key: 'modelProposed' },
   { section: 'outboundCorrelation', key: 'allowDynamicHeaderValues' },
   { section: 'serve', key: 'tokenQr' },
+  // Disabling the built-in Qwen OAuth (personal Qwen login) models is an
+  // operator decision; a trusted workspace must not make it (issue #12805).
+  // The merge-time strip and the generic "ignored" warning follow from this.
+  { section: 'model', key: 'qwenOAuthBuiltinsDisabled' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;

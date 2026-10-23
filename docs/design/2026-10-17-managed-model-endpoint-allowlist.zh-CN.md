@@ -4,11 +4,11 @@
 
 ## 状态与范围
 
-已在 PR #14231 中实现（第 1–3 轮修复）。`model.allowedBaseUrls` 是模型端点 baseUrl 的托管白名单。这是一个纯配置机制：没有新的 CLI 参数，没有新的协议。范围之外：SDK 内部逐请求的端点策略执行，以及把 workspace 不可覆盖语义推广到整个 `modelProviders` 映射（见“开放问题”）。
+已在 PR #14231 中实现（第 1–4 轮修复）。`model.allowedBaseUrls` 是模型端点 baseUrl 的托管白名单。这是一个纯配置机制：没有新的 CLI 参数，没有新的协议。范围之外：SDK 内部逐请求的端点策略执行，以及把 workspace 不可覆盖语义推广到整个 `modelProviders` 映射（见“开放问题”）。
 
 ## 问题
 
-在此设计之前，白名单只在模型注册阶段过滤。出站端点通过另一条路径（`resolveCliGenerationConfig` → `resolveModelConfig`）解析，完全不看策略，因此托管部署仍可能通过 `--model`、`--openaiBaseUrl`、环境变量、`security.auth` 或凭据的 preserve/capture 路径拨向白名单之外的端点。此外还有若干缺口：workspace（受信仓库）可以替换操作员配置的白名单；非数组值会以裸 `TypeError` 崩溃启动；退化条目（例如 `"https://"`）会静默匹配所有 HTTPS URL；qwen-oauth 空列表 pin 会被任何 scope 生效且无警告；advisor-model 错误从不点名责任设置项，还把原始选择器（含凭据）插值进 stderr。
+在此 PR 之前，尚不存在任何托管端点策略：出站端点通过另一条路径（`resolveCliGenerationConfig` → `resolveModelConfig`）解析，没有操作员的端点白名单可查，因此托管部署仍可能通过 `--model`、`--openaiBaseUrl`、环境变量、`security.auth` 或凭据的 preserve/capture 路径拨向任意端点。本 PR 的第一次迭代加入了只在注册阶段过滤的白名单，以下缺口即在该迭代上度量：workspace（受信仓库）可以替换操作员配置的白名单；非数组值会以裸 `TypeError` 崩溃启动；退化条目（例如 `"https://"`）会静默匹配所有 HTTPS URL；qwen-oauth 空列表 pin 会被任何 scope 生效且无警告；advisor-model 错误从不点名责任设置项，还把原始选择器（含凭据）插值进 stderr。
 
 ## 匹配语义
 
@@ -34,14 +34,14 @@
 
 - `model.allowedBaseUrls` 必须是数组。非数组值是点名该键的启动期 `FatalConfigError`（CLI 在构造前校验；注册表也防御性地 fail closed）。
 - 条目必须是非空字符串且可解析为带 hostname 的 URL。非字符串、空值、无法解析、无 hostname 的条目（例如 `"https://"`）会被警告并跳过 —— 退化条目绝不可能变成匹配一切的通配。
-- 列表像 `providerProtocol` 一样在启动时冻结：reload 保留策略。
+- 列表在启动时冻结：模型 reload 重新应用启动时的列表 —— 白名单根本不是 `reloadModels` 的参数（与 reload API 可以替换的 `providerProtocol` 映射不同），因此会话中途修改策略只在重启后生效。
 
-## Scope 优先级与 qwen-oauth pin
+## Scope 优先级与禁用内置 Qwen OAuth 模型
 
 - System scope 优先于 user；**workspace-scope 的列表只有在 User、System、SystemDefaults 均未定义时才生效**（该设置在 `WORKSPACE_NON_OVERRIDING_SETTINGS` 中，与 `security.allowedHttpHookUrls` 同一机制），workspace 值被剥离时发出警告。
-- 内置 Qwen OAuth 模型是硬编码的。只能通过**操作员 scope pin** 禁用：在 System、User、SystemDefaults 配置中，把某个经生效 `providerProtocol` 映射解析到 `qwen-oauth` 的 provider id 的模型列表显式置空。workspace-scope 的 pin 在合并时剥离（仓库不得替其用户禁用个人 Qwen 登录），被剥离的 workspace pin 和生效的操作员 pin 都会产生加载期警告。
-- pin 生效时，Qwen OAuth 解析以 `FatalConfigError` fail closed，而不是回落到默认内置模型，因此 `--model` 和持久化的 `model.name` 无法重新放行动态端点。
-- 注意：设置 `model.allowedBaseUrls` 本身也会禁用内置 Qwen OAuth 模型，因为其端点在登录时动态发现、无法列入白名单。需要个人 Qwen 登录的部署既不应设置白名单，也不应 pin 空列表。
+- 内置 Qwen OAuth 模型是硬编码的。只能通过**操作员 scope 设置 `model.qwenOAuthBuiltinsDisabled`** 禁用（在 System、User、SystemDefaults 配置中设为 `true`；`false`/缺省保留内置模型）。已退役的 pin —— 把某个经生效 `providerProtocol` 映射解析到 `qwen-oauth` 的 provider id 的模型列表显式置空 —— 现已失效：`[]` 只表示"没有列出模型"，且配置迁移与 provider 删除路径都会在没有操作员意图的情况下合成 `[]`，因此它不能再兼作禁用开关。workspace-scope 尝试设置新键会在合并时剥离并发出警告（仓库不得替其用户禁用个人 Qwen 登录），操作员 scope 中设置的键在加载时产生点名该 scope 的警告。
+- 键设置后，Qwen OAuth 解析以 `FatalConfigError` fail closed，而不是回落到默认内置模型，因此 `--model` 和持久化的 `model.name` 无法重新放行动态端点。
+- 注意：**操作员 scope** 的 `model.allowedBaseUrls` 也会禁用内置 Qwen OAuth 模型，因为其端点在登录时动态发现、无法列入白名单（仅 workspace 的列表不会 —— 内置模型豁免 workspace 级策略）。需要个人 Qwen 登录的部署既不应设置操作员白名单，也不应设置 `model.qwenOAuthBuiltinsDisabled`。
 
 ## Advisor-model 诊断
 
@@ -49,11 +49,12 @@
 
 ## 验证计划与验收标准
 
-- 每个执行点都有单元测试/行为测试，且各自配有一个命名 mutant，使其在变异后转红：默认端口匹配、退化条目跳过、非数组启动错误、workspace 列表不可覆盖、workspace pin 剥离、mapped-id pin、qwen-oauth `--model`/持久化名称 fail closed、带协议默认端的解析门、Live Voice 路由门、advisor 消息内容、以及 `loadCliConfig` → `Config` → `ModelsConfig` 交接。
+- 每个执行点都有单元测试/行为测试，且各自配有一个命名 mutant，使其在变异后转红：默认端口匹配、退化条目跳过、非数组启动错误、workspace 列表不可覆盖、workspace-scope 键剥离、仅 workspace 列表时内置模型豁免、qwen-oauth `--model`/持久化名称 fail closed、带协议默认端的解析门、Live Voice 路由门、advisor 消息内容、以及 `loadCliConfig` → `Config` → `ModelsConfig` 交接。
 - 按仓库测试策略在 Docker 中运行全部受影响套件（core + CLI 的 `tsc`/eslint/vitest）。
 
 ## 开放问题与后续工作
 
 - **动态 Qwen OAuth 端点**：任何白名单都会禁用内置 Qwen OAuth 模型（动态端点无法列入）。此行为已记录、未改动；让内置模型可被白名单覆盖是另一个独立设计决策。
-- **推广 workspace 不可覆盖**：受信 workspace 仍可用空列表（或其他列表）替换非 qwen-oauth provider id 的非空操作员 `modelProviders` 列表。把 pin 剥离推广到所有 provider id 是行为影响更大的后续工作。
+- **推广 workspace 不可覆盖**：受信 workspace 仍可用空列表（或其他列表）替换非 qwen-oauth provider id 的非空操作员 `modelProviders` 列表。把操作员专属剥离推广到所有 provider id 是行为影响更大的后续工作。
+- **workspace 提供的端点**：解析门自身创建了一条 workspace 通道 —— 受信仓库可以提供门所判定的端点（`security.auth.baseUrl`，或经 `model.name` 选中的带 `baseUrl` 的 `modelProviders` 条目）。白名单约束这类端点可以是什么，但在名单之内选择端点仍是仓库的权力。
 - Live Voice 路径还额外把端点限制在 DashScope 主机；托管部署若想要非 DashScope 实时端点，需要单独的设计决策。

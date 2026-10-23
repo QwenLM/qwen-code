@@ -27,7 +27,7 @@ export {
   resolveModelSelectionAuthType,
   isBaseUrlAllowed,
   validateAllowedBaseUrls,
-  isQwenOAuthBuiltinsPinnedEmpty,
+  DYNAMIC_QWEN_OAUTH_BASE_URL,
 } from './modelRegistry.js';
 
 export { isImageGenerationCapable } from './image-generation-capability.js';

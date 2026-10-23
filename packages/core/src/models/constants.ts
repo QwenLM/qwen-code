@@ -110,12 +110,21 @@ export const DEFAULT_MODELS = {
 } as Partial<Record<AuthType, string>>;
 
 /**
+ * Placeholder standing in for the Qwen OAuth endpoint, which is discovered
+ * dynamically at login and therefore has no static URL. No allowlist entry
+ * can ever match it (validateAllowedBaseUrls rejects host-less values), so
+ * any model.allowedBaseUrls in operator scope excludes the built-ins — the
+ * allowlist and personal Qwen login are mutually exclusive in that
+ * deployment.
+ */
+export const DYNAMIC_QWEN_OAUTH_BASE_URL = 'DYNAMIC_QWEN_OAUTH_BASE_URL';
+
+/**
  * Hard-coded Qwen OAuth models. User configuration can neither add to nor
- * replace them; they are only disabled by the operator-scope pin (an
- * explicitly empty model list for a qwen-oauth provider id in System, User,
- * or SystemDefaults settings — see isQwenOAuthBuiltinsPinnedEmpty), or by
- * setting model.allowedBaseUrls, which cannot list their dynamically
- * discovered endpoint.
+ * replace them; they are only disabled by the operator-scope setting
+ * model.qwenOAuthBuiltinsDisabled (System, User, or SystemDefaults), or by
+ * an operator-scope model.allowedBaseUrls, which cannot list their
+ * dynamically discovered endpoint.
  */
 export const QWEN_OAUTH_MODELS: ModelConfig[] = [
   {

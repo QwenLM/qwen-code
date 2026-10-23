@@ -73,10 +73,16 @@ export interface ModelsConfigOptions {
    */
   allowedModelBaseUrls?: readonly string[];
   /**
-   * Whether the hard-coded qwen-oauth built-ins are disabled by an
-   * operator-scope pin. See {@link ModelRegistry}.
+   * Whether the hard-coded qwen-oauth built-ins are disabled by the operator
+   * scope setting model.qwenOAuthBuiltinsDisabled. See {@link ModelRegistry}.
    */
   qwenOAuthBuiltinsDisabled?: boolean;
+  /**
+   * True when the effective allowlist was set ONLY in workspace scope (no
+   * operator scope): the built-in qwen-oauth models then register without
+   * the allowlist filter. See {@link ModelRegistry}.
+   */
+  allowedBaseUrlsWorkspaceOnly?: boolean;
   /** Generation config from CLI/settings */
   generationConfig?: Partial<ContentGeneratorConfig>;
   /** Source tracking for generation config */
@@ -186,6 +192,7 @@ export class ModelsConfig {
       options.providerProtocolConfig,
       options.allowedModelBaseUrls,
       options.qwenOAuthBuiltinsDisabled,
+      options.allowedBaseUrlsWorkspaceOnly,
     );
     // Boot-frozen managed endpoint allowlist, reused by the preserve/capture
     // paths below (the registry applies it at registration).
@@ -1205,7 +1212,13 @@ export class ModelsConfig {
           this.generationConfigSources['apiKey'] = savedApiKeySource;
         }
       }
-      if (savedBaseUrl) {
+      // Restore the previously-resolved baseUrl only when it still passes
+      // the managed allowlist: applyResolvedModelDefaults installs the
+      // registry (on-list) endpoint, and re-applying an off-list
+      // cli/env/settings baseUrl on top of it would re-admit an endpoint
+      // the policy excluded (issue #12805). An off-list saved baseUrl is
+      // dropped, keeping the registry endpoint.
+      if (savedBaseUrl && this.isPolicyBaseUrlAllowed(savedBaseUrl)) {
         this._generationConfig.baseUrl = savedBaseUrl;
         if (savedBaseUrlSource) {
           this.generationConfigSources['baseUrl'] = savedBaseUrlSource;

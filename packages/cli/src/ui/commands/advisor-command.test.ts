@@ -44,11 +44,16 @@ const mockBuildBtwCacheSafeParams = vi.hoisted(() =>
   }),
 );
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
-  BTW_MAX_INPUT_LENGTH: 4096,
-  runForkedAgent: mockRunForkedAgent,
-  buildBtwCacheSafeParams: mockBuildBtwCacheSafeParams,
-}));
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    BTW_MAX_INPUT_LENGTH: 4096,
+    runForkedAgent: mockRunForkedAgent,
+    buildBtwCacheSafeParams: mockBuildBtwCacheSafeParams,
+  };
+});
 
 const ADVISOR_REVIEW = {
   verdict: 'Sound.',
@@ -97,6 +102,10 @@ describe('advisorCommand', () => {
       { id: 'image-model', imageOnly: true },
     ],
     setAdvisorModel,
+    // No managed allowlist by default: /advisor's unavailable-model path
+    // always consults the policy before deciding whether to name it.
+    getAllowedModelBaseUrls: () => undefined,
+    getAllowlistDroppedModels: () => [],
     ...overrides,
   });
 
@@ -202,6 +211,37 @@ describe('advisorCommand', () => {
       messageType: 'error',
       content: expect.stringContaining(
         "Advisor model 'missing-model' is not configured.",
+      ),
+    });
+    // No managed policy in force: the unavailable-model message must not
+    // name the allowlist — the in-session hint wiring stays neutral
+    // without model.allowedBaseUrls (issue #12805).
+    expect((result as { content: string }).content).not.toContain(
+      'model.allowedBaseUrls',
+    );
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setAdvisorModel).not.toHaveBeenCalled();
+  });
+
+  it('names model.allowedBaseUrls when the allowlist dropped the model', async () => {
+    mockCheckAvailability.mockReturnValue({
+      available: false,
+      availableModelIds: ['advisor-model'],
+    });
+    mockContext.services.config = createConfig({
+      getAllowedModelBaseUrls: () => ['https://corp-llm.example/v1'],
+      getAllowlistDroppedModels: () => [
+        { id: 'missing-model', baseUrl: 'https://external-llm.example/v1' },
+      ],
+    }) as unknown as Config;
+
+    const result = await advisorCommand.action!(mockContext, 'missing-model');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining(
+        "Model 'missing-model' was excluded from the model registry by the managed allowlist 'model.allowedBaseUrls'.",
       ),
     });
     expect(setValue).not.toHaveBeenCalled();

@@ -68,6 +68,14 @@ type OperatorSettingsScope = SandboxSettingsInput & {
   privacy?: { usageStatisticsEnabled?: unknown };
   /** Pre-v2 location, migrated to `privacy.*` by a normal settings load. */
   usageStatisticsEnabled?: unknown;
+  /**
+   * Model controls bare mode keeps in force (issue #12805): the managed
+   * endpoint allowlist and the Qwen OAuth builtins disable. Values are read
+   * raw here; the same startup validation a normal load applies
+   * (non-array allowedBaseUrls is a FatalConfigError in config.ts) still
+   * runs, because bare-mode settings flow through the same config path.
+   */
+  model?: { allowedBaseUrls?: unknown; qwenOAuthBuiltinsDisabled?: unknown };
 };
 
 /**
@@ -104,11 +112,17 @@ export function readOperatorSandboxSettings(): SandboxSettingsInput {
 
 /**
  * The operator settings bare mode keeps: sandbox confinement, plus the
- * usage-statistics choice so `--bare` cannot turn a privacy opt-out back on.
+ * usage-statistics choice so `--bare` cannot turn a privacy opt-out back on,
+ * plus the model controls (managed endpoint allowlist, Qwen OAuth builtins
+ * disable) so `--bare` cannot escape an operator lockdown (issue #12805).
  * Scopes resolve like a normal load (system over user over system defaults).
  */
 export function readBareModeOperatorSettings(): SandboxSettingsInput & {
   privacy?: { usageStatisticsEnabled: boolean };
+  model?: {
+    allowedBaseUrls?: string[];
+    qwenOAuthBuiltinsDisabled?: boolean;
+  };
 } {
   const scopes = readOperatorSettingsScopes();
   const usageStatisticsEnabled = scopes.reduce<boolean | undefined>(
@@ -125,11 +139,41 @@ export function readBareModeOperatorSettings(): SandboxSettingsInput & {
     },
     undefined,
   );
+  // Last scope that defines a control wins, per control — the same
+  // precedence as the merge (system over user over system defaults).
+  // Values pass through raw: the config layer applies the same
+  // interpretation a normal load would (strict `=== true`, non-array
+  // allowedBaseUrls is a startup error), so bare mode cannot diverge.
+  const model = scopes.reduce<
+    | { allowedBaseUrls?: string[]; qwenOAuthBuiltinsDisabled?: boolean }
+    | undefined
+  >((current, scope) => {
+    const scopeModel = scope.model;
+    if (
+      scopeModel?.allowedBaseUrls === undefined &&
+      scopeModel?.qwenOAuthBuiltinsDisabled === undefined
+    ) {
+      return current;
+    }
+    return {
+      ...current,
+      ...(scopeModel?.allowedBaseUrls !== undefined
+        ? { allowedBaseUrls: scopeModel.allowedBaseUrls as string[] }
+        : {}),
+      ...(scopeModel?.qwenOAuthBuiltinsDisabled !== undefined
+        ? {
+            qwenOAuthBuiltinsDisabled:
+              scopeModel.qwenOAuthBuiltinsDisabled as boolean,
+          }
+        : {}),
+    };
+  }, undefined);
   return {
     ...sandboxSettingsFromScopes(scopes),
     ...(usageStatisticsEnabled === undefined
       ? {}
       : { privacy: { usageStatisticsEnabled } }),
+    ...(model ? { model } : {}),
   };
 }
 

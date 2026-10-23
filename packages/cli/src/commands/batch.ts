@@ -79,6 +79,12 @@ export function resolveEndpoint(
 ): BatchEndpoint {
   let settings = options.settings ?? loadSettings().merged;
   const batch = settings.batch;
+  // The batch.model narrowing below replaces the whole model object; capture
+  // the operator's model controls first, or the allowlist gate silently
+  // stops applying to the batch upload endpoint (issue #12805).
+  const allowedBaseUrls = settings.model?.allowedBaseUrls;
+  const qwenOAuthBuiltinsDisabled =
+    settings.model?.qwenOAuthBuiltinsDisabled === true;
   if (batch?.model || batch?.authType || batch?.baseUrl) {
     if (!batch.model?.trim()) {
       throw new Error('Set batch.model to a modelProviders model ID.');
@@ -129,6 +135,10 @@ export function resolveEndpoint(
       settings,
       selectedAuthType,
       env,
+      // The narrowing above replaced the whole model object — the gate must
+      // run on the operator's policy captured before it (issue #12805).
+      allowedBaseUrls,
+      qwenOAuthBuiltinsDisabled,
     });
   // The resolver can change the wire: a model pinned to `wireApi: "responses"`
   // resolves an `openai` startup to `openai-responses`, which has no Batch

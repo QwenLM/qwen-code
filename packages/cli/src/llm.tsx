@@ -62,6 +62,7 @@ import {
   ENV_WAS_RECOVERED,
   createMinimalSettings,
   getSettingsWarnings,
+  isAllowedBaseUrlsWorkspaceOnly,
   loadSettings,
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
@@ -734,6 +735,7 @@ export async function main() {
         undefined,
         undefined,
         buildEnabledSkillNamesProvider(settings),
+        isAllowedBaseUrlsWorkspaceOnly(settings),
       );
 
       if (!settings.merged.security?.auth?.useExternal) {
@@ -1069,6 +1071,7 @@ export async function main() {
       undefined,
       undefined,
       buildEnabledSkillNamesProvider(settings),
+      isAllowedBaseUrlsWorkspaceOnly(settings),
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');

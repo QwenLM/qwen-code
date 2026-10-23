@@ -2219,93 +2219,263 @@ describe('loadCliConfig', () => {
     ).rejects.toThrow("Advisor model 'missing-advisor' is not configured.");
   });
 
-  it('fails closed at startup for a non-array model.allowedBaseUrls', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments();
+  describe('model.allowedBaseUrls (loadCliConfig hand-off)', () => {
+    beforeEach(() => {
+      // Isolate the ambient auth environment (issue #12805): in a shell
+      // exporting OPENAI_API_KEY + OPENAI_BASE_URL, getAuthTypeFromEnv
+      // infers openai and the effective endpoint becomes the ambient URL,
+      // so resolveModelConfig throws before the assertions run.
+      for (const key of [
+        'QWEN_OAUTH',
+        'OPENAI_API_KEY',
+        'OPENAI_MODEL',
+        'QWEN_MODEL',
+        'OPENAI_BASE_URL',
+        'GEMINI_API_KEY',
+        'GEMINI_MODEL',
+        'GOOGLE_API_KEY',
+        'GOOGLE_MODEL',
+        'GOOGLE_CLOUD_PROJECT',
+        'ANTHROPIC_API_KEY',
+        'ANTHROPIC_MODEL',
+        'ANTHROPIC_BASE_URL',
+      ]) {
+        vi.stubEnv(key, undefined);
+      }
+    });
+    afterEach(() => {
+      // vitest.config.ts does not set unstubEnvs — pair the stubs.
+      vi.unstubAllEnvs();
+    });
 
-    const err = await loadCliConfig(
-      {
-        model: {
-          allowedBaseUrls: 'https://corp-llm.example/v1' as unknown as string[],
-        },
-      },
-      argv,
-    ).catch((e: unknown) => e);
+    it('fails closed at startup for a non-array model.allowedBaseUrls', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
 
-    expect(err).toBeInstanceOf(FatalConfigError);
-    expect((err as Error).message).toMatch(
-      /model\.allowedBaseUrls must be an array of base URL strings/,
-    );
-  });
-
-  it('threads model.allowedBaseUrls into the Config getters (loadCliConfig hand-off)', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments();
-    const list = ['https://corp-llm.example/v1'];
-
-    const config = await loadCliConfig(
-      { model: { allowedBaseUrls: list } },
-      argv,
-    );
-
-    // The whole point of the hand-off: the policy the CLI validated must be
-    // the one the Config (and its ModelsConfig) enforce. The built-in
-    // qwen-oauth model is dropped (its dynamic endpoint cannot be listed),
-    // which also proves the registry saw the same list.
-    expect(config.getAllowedModelBaseUrls()).toEqual(list);
-    expect(config.getModelsConfig().getAllowlistDroppedModels()).toEqual([
-      { id: 'coder-model', baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL' },
-    ]);
-  });
-
-  it('names model.allowedBaseUrls when the allowlist is why the advisor model is unavailable', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments();
-
-    await expect(
-      loadCliConfig(
+      const err = await loadCliConfig(
         {
-          advisorModel: 'ext-model',
-          model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
-          modelProviders: {
-            openai: [
-              {
-                id: 'ext-model',
-                name: 'External Model',
-                baseUrl: 'https://external-llm.example/v1',
-                envKey: 'EXT_KEY',
-              },
-            ],
+          model: {
+            allowedBaseUrls:
+              'https://corp-llm.example/v1' as unknown as string[],
           },
         },
         argv,
-      ),
-    ).rejects.toThrow(
-      "was excluded from the model registry by the managed allowlist 'model.allowedBaseUrls'",
-    );
-  });
+      ).catch((e: unknown) => e);
 
-  it('sanitizes an endpoint-qualified advisor selector before it reaches stderr', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments();
-    const selector = 'ext-model\0https://user:pass@external-llm.example/v1';
+      expect(err).toBeInstanceOf(FatalConfigError);
+      expect((err as Error).message).toMatch(
+        /model\.allowedBaseUrls must be an array of base URL strings/,
+      );
+    });
 
-    let message = '';
-    try {
-      await loadCliConfig(
-        {
-          advisorModel: selector,
-          model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
-        },
+    it('threads model.allowedBaseUrls into the Config getters (loadCliConfig hand-off)', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const list = ['https://corp-llm.example/v1'];
+
+      const config = await loadCliConfig(
+        { model: { allowedBaseUrls: list } },
         argv,
       );
-    } catch (e) {
-      message = String((e as Error).message);
-    }
 
-    expect(message).toContain('model.allowedBaseUrls');
-    expect(message).not.toContain('user:pass@');
-    expect(message).not.toContain('\0');
+      // The whole point of the hand-off: the policy the CLI validated must be
+      // the one the Config (and its ModelsConfig) enforce. The built-in
+      // qwen-oauth model is dropped (its dynamic endpoint cannot be listed),
+      // which also proves the registry saw the same list.
+      expect(config.getAllowedModelBaseUrls()).toEqual(list);
+      expect(config.getModelsConfig().getAllowlistDroppedModels()).toEqual([
+        { id: 'coder-model', baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL' },
+      ]);
+    });
+
+    it('threads model.qwenOAuthBuiltinsDisabled into the Config (hand-off)', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { model: { qwenOAuthBuiltinsDisabled: true } },
+        argv,
+      );
+
+      // The operator key is a plain boolean: the built-in qwen-oauth model
+      // is suppressed even without an allowlist (issue #12805).
+      expect(
+        config
+          .getModelsConfig()
+          .getAvailableModelsForAuthType(AuthType.QWEN_OAUTH)
+          .map((m) => m.id),
+      ).toEqual([]);
+    });
+
+    it('keeps the built-ins when model.qwenOAuthBuiltinsDisabled is false', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { model: { qwenOAuthBuiltinsDisabled: false } },
+        argv,
+      );
+
+      expect(
+        config
+          .getModelsConfig()
+          .getAvailableModelsForAuthType(AuthType.QWEN_OAUTH)
+          .map((m) => m.id),
+      ).toEqual([DEFAULT_QWEN_MODEL]);
+    });
+
+    it('names model.allowedBaseUrls when the allowlist is why the advisor model is unavailable', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await expect(
+        loadCliConfig(
+          {
+            advisorModel: 'ext-model',
+            model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+            modelProviders: {
+              openai: [
+                {
+                  id: 'ext-model',
+                  name: 'External Model',
+                  baseUrl: 'https://external-llm.example/v1',
+                  envKey: 'EXT_KEY',
+                },
+              ],
+            },
+          },
+          argv,
+        ),
+      ).rejects.toThrow(
+        "was excluded from the model registry by the managed allowlist 'model.allowedBaseUrls'",
+      );
+    });
+
+    it('matches a qualified selector against the dropped model id', async () => {
+      // The picker and /advisor persist the authType-qualified form
+      // (`openai:ext-model`); the registry records the bare id it dropped —
+      // the hint must match both so the allowlist explanation fires for the
+      // persisted form too (issue #12805).
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await expect(
+        loadCliConfig(
+          {
+            advisorModel: 'openai:ext-model',
+            model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+            modelProviders: {
+              openai: [
+                {
+                  id: 'ext-model',
+                  name: 'External Model',
+                  baseUrl: 'https://external-llm.example/v1',
+                  envKey: 'EXT_KEY',
+                },
+              ],
+            },
+          },
+          argv,
+        ),
+      ).rejects.toThrow(
+        "was excluded from the model registry by the managed allowlist 'model.allowedBaseUrls'",
+      );
+    });
+
+    it('explains the Qwen OAuth sentinel drop instead of suggesting an endpoint', async () => {
+      // The built-in model is dropped with the non-URL sentinel: its
+      // endpoint is discovered at login, so "allow its endpoint" is an
+      // impossible remedy — the hint names what actually re-enables it.
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      let message = '';
+      try {
+        await loadCliConfig(
+          {
+            advisorModel: 'coder-model',
+            model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+          },
+          argv,
+        );
+      } catch (e) {
+        message = String((e as Error).message);
+      }
+
+      expect(message).toContain(
+        "Model 'coder-model' is a built-in Qwen OAuth (personal Qwen login) model",
+      );
+      expect(message).toContain(
+        'Removing model.allowedBaseUrls is the only way to re-enable it',
+      );
+      expect(message).not.toContain(
+        'was excluded from the model registry by the managed allowlist',
+      );
+    });
+
+    it('sanitizes an endpoint-qualified advisor selector before it reaches stderr', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const selector = 'ext-model\0https://user:pass@external-llm.example/v1';
+
+      let message = '';
+      try {
+        await loadCliConfig(
+          {
+            advisorModel: selector,
+            model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+          },
+          argv,
+        );
+      } catch (e) {
+        message = String((e as Error).message);
+      }
+
+      expect(message).toContain('model.allowedBaseUrls');
+      expect(message).not.toContain('user:pass@');
+      expect(message).not.toContain('\0');
+
+      // Scheme-less userinfo suffix: the endpoint echo is redacted and the
+      // display form keeps only the selector (issue #12805).
+      const schemeless = 'ext-model\0user:pass@corp-llm.example/v1';
+      let redacted = '';
+      try {
+        await loadCliConfig(
+          {
+            advisorModel: schemeless,
+            model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+          },
+          argv,
+        );
+      } catch (e) {
+        redacted = String((e as Error).message);
+      }
+      expect(redacted).toContain('(redacted)');
+      expect(redacted).toContain('model.allowedBaseUrls');
+      expect(redacted).not.toContain('user:pass@');
+      expect(redacted).not.toContain('\0');
+
+      // A second authority folded into the pathname reads clean on the
+      // parsed URL fields but still carries the credential — the
+      // publishability gate rejects it, so the echo is redacted too.
+      const folded =
+        'ext-model\0https://host/v1/https://user:sk@other.example/v1';
+      let foldedMessage = '';
+      try {
+        await loadCliConfig(
+          {
+            advisorModel: folded,
+            model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+          },
+          argv,
+        );
+      } catch (e) {
+        foldedMessage = String((e as Error).message);
+      }
+      expect(foldedMessage).toContain('(redacted)');
+      expect(foldedMessage).not.toContain('user:sk@');
+      expect(foldedMessage).not.toContain('\0');
+    });
   });
 
   it('should use settings fallback models when the CLI flag is absent', async () => {

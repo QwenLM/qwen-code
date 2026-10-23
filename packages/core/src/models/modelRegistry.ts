@@ -7,7 +7,7 @@
 import { AuthType } from '../core/contentGenerator.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { tokenLimit } from '../core/tokenLimits.js';
-import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
+import { getDefaultBaseUrlForProtocol } from '../providers/provider-config.js';
 import {
   type ModelConfig,
   type ModelProvidersConfig,
@@ -16,12 +16,12 @@ import {
   type AvailableModel,
 } from './types.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
-import { QWEN_OAUTH_MODELS } from './constants.js';
+import { DYNAMIC_QWEN_OAUTH_BASE_URL, QWEN_OAUTH_MODELS } from './constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('MODEL_REGISTRY');
 
-export { QWEN_OAUTH_MODELS } from './constants.js';
+export { DYNAMIC_QWEN_OAUTH_BASE_URL, QWEN_OAUTH_MODELS } from './constants.js';
 
 /**
  * Validates if a string key is a valid AuthType enum value.
@@ -128,76 +128,53 @@ export function validateModelProvidersConfig(
 }
 
 /**
- * Whether the providers config pins the qwen-oauth model list explicitly
- * empty — the operator signal to disable the hard-coded qwen-oauth built-ins.
- * Resolved through the same protocol mapping as everything else, so a
- * custom id mapped to `qwen-oauth` via `providerProtocol` with an empty list
- * pins the built-ins exactly like the literal key does.
- */
-export function isQwenOAuthBuiltinsPinnedEmpty(
-  modelProviders?: ModelProvidersConfig,
-  providerProtocol?: ProviderProtocolConfig,
-): boolean {
-  if (!modelProviders) return false;
-  return Object.entries(modelProviders).some(([providerId, models]) => {
-    if (!Array.isArray(models) || models.length !== 0) return false;
-    return (
-      resolveProviderProtocol(providerId, providerProtocol) ===
-      AuthType.QWEN_OAUTH
-    );
-  });
-}
-
-/**
  * Parse a URL for allowlist comparison; undefined when the value does not
- * parse (the caller falls back to the string comparison).
+ * parse or carries no host (a host-less value such as `https://` must never
+ * match anything — as a string it could prefix-match every same-scheme
+ * endpoint).
  */
 function parseUrlForMatch(url: string): URL | undefined {
   try {
-    return new URL(url);
+    const parsed = new URL(url);
+    return parsed.hostname.length > 0 ? parsed : undefined;
   } catch {
     return undefined;
   }
 }
 
 /**
- * Normalize a base URL for allowlist comparison (string fallback): trim
- * whitespace and trailing slashes, then lowercase the scheme and host
- * (hostnames are case-insensitive) while leaving the path case-sensitive.
- * Strings without a scheme keep the previous full-lowercase behavior on
- * both sides, so comparisons remain consistent.
- */
-function normalizeBaseUrlForMatch(url: string): string {
-  const trimmed = url.trim().replace(/\/+$/, '');
-  const parts = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^/]+)(.*)$/.exec(trimmed);
-  if (!parts) return trimmed.toLowerCase();
-  return `${parts[1].toLowerCase()}${parts[2].toLowerCase()}${parts[3]}`;
-}
-
-/**
  * Decide whether a single target baseUrl matches a single allowlist entry.
  *
- * When both sides parse as URLs, compare URL semantics: the origins must be
- * equal (URL origins elide explicit default ports, so
- * `https://corp.example:443` and `https://corp.example` are the same
- * origin, while a non-default port like `:8443` is not), and the entry path
- * must be a path-boundary prefix of the target path. When either side is
- * not a URL, fall back to the case-normalized string comparison.
+ * Both sides must parse as URLs with a host — a degenerate entry (not a
+ * URL, or host-less like `https://`) never matches, so one malformed entry
+ * cannot widen the control fail-open (issue #12805: the previous
+ * string-normalized fallback turned `https://` into a match-everything
+ * wildcard).
+ *
+ * The comparison is URL-semantic: the protocol and host must be equal
+ * (URL hosts elide explicit default ports, so `https://corp.example:443`
+ * and `https://corp.example` are the same host, while a non-default port
+ * like `:8443` is not; comparing `origin` instead would serialize to the
+ * opaque string `null` for non-special schemes and skip the host check
+ * entirely), and the entry path must be a path-boundary prefix of the
+ * target path. Trailing slashes are ignored on BOTH sides, so an entry
+ * written `https://corp.example/v1/` covers `https://corp.example/v1`,
+ * while `/v1` still does not cover `/v1beta`. A query/fragment on either
+ * side is ignored by design (validateAllowedBaseUrls warns when the entry
+ * carries one, since it then allows the whole path prefix).
  */
 function baseUrlMatchesEntry(target: string, entry: string): boolean {
   const t = parseUrlForMatch(target);
   const e = parseUrlForMatch(entry);
-  if (t && e) {
-    if (t.origin !== e.origin) return false;
-    if (t.pathname === e.pathname) return true;
-    const prefix = e.pathname.endsWith('/') ? e.pathname : `${e.pathname}/`;
-    return t.pathname.startsWith(prefix);
-  }
-  const targetNorm = normalizeBaseUrlForMatch(target);
-  if (targetNorm.length === 0) return false;
-  const allowedNorm = normalizeBaseUrlForMatch(entry);
-  if (allowedNorm.length === 0) return false;
-  return targetNorm === allowedNorm || targetNorm.startsWith(`${allowedNorm}/`);
+  if (!t || !e) return false;
+  if (t.protocol !== e.protocol || t.host !== e.host) return false;
+  const stripTrailingSlash = (p: string) =>
+    p.length > 1 ? p.replace(/\/+$/, '') : p;
+  const targetPath = stripTrailingSlash(t.pathname);
+  const entryPath = stripTrailingSlash(e.pathname);
+  if (targetPath === entryPath) return true;
+  const prefix = entryPath === '/' ? '/' : `${entryPath}/`;
+  return targetPath.startsWith(prefix);
 }
 
 /**
@@ -232,13 +209,25 @@ export function validateAllowedBaseUrls(
       continue;
     }
     const url = parseUrlForMatch(entry.trim());
-    if (!url || url.hostname.length === 0) {
+    if (!url) {
       debugLogger.warn(
         `model.allowedBaseUrls entry "${entry}" is not a URL with a host ` +
           '(a scheme-only value like "https://" matches every endpoint); ' +
           'it is ignored.',
       );
       continue;
+    }
+    // Matching is URL-semantic and ignores query/fragment on both sides, so
+    // an entry that carries one allows the whole path prefix — say so. The
+    // entry is kept (not rejected): its host+path still confine the control,
+    // and an all-invalid list must stay fail-closed, not become no-policy.
+    if (url.search.length > 0 || url.hash.length > 0) {
+      debugLogger.warn(
+        `model.allowedBaseUrls entry "${entry}" carries a query/fragment, ` +
+          `which is ignored when matching; it allows every endpoint under ` +
+          `${url.origin}${url.pathname}. Use a more specific path to confine ` +
+          'by query.',
+      );
     }
     valid.push(entry.trim());
   }
@@ -365,15 +354,36 @@ export class ModelRegistry {
    */
   private allowlistDroppedModels: Array<{ id: string; baseUrl: string }> = [];
 
+  /**
+   * Boot-frozen operator decision (model.qwenOAuthBuiltinsDisabled),
+   * re-applied by reloadModels so a provider reload cannot re-enable or
+   * disable the built-ins behind the session's back.
+   */
+  private qwenOAuthBuiltinsDisabledFlag = false;
+
+  /**
+   * True when the boot allowlist came from workspace scope only: the
+   * built-in qwen-oauth models then register without the allowlist filter
+   * (their dynamic login endpoint cannot be listed), while configured
+   * providers are still narrowed by the list.
+   */
+  private builtinsAllowlistExempt = false;
+
+  /**
+   * The protocol default endpoint for an authType — the SAME table the
+   * resolution gate judges against (getDefaultBaseUrlForProtocol), so the
+   * registration filter and the resolver agree on the endpoint a
+   * baseUrl-less model dials (issue #12805: a model whose true endpoint the
+   * operator listed must not be dropped by one enforcement point and
+   * admitted by the other). Qwen OAuth has no static default — its endpoint
+   * is discovered at login, represented by the sentinel no allowlist entry
+   * can match.
+   */
   private getDefaultBaseUrl(authType: AuthType): string {
-    switch (authType) {
-      case AuthType.QWEN_OAUTH:
-        return 'DYNAMIC_QWEN_OAUTH_BASE_URL';
-      case AuthType.USE_OPENAI:
-        return DEFAULT_OPENAI_BASE_URL;
-      default:
-        return '';
+    if (authType === AuthType.QWEN_OAUTH) {
+      return DYNAMIC_QWEN_OAUTH_BASE_URL;
     }
+    return getDefaultBaseUrlForProtocol(authType);
   }
 
   /**
@@ -394,34 +404,41 @@ export class ModelRegistry {
     providerProtocolConfig?: ProviderProtocolConfig,
     allowedModelBaseUrls?: readonly string[],
     /**
-     * Whether the hard-coded qwen-oauth built-ins are disabled by an
-     * operator-scope pin (an explicitly empty qwen-oauth model list).
-     * `true` suppresses the built-ins; `false` keeps them even when the
-     * merged config carries a workspace-only pin (which the caller must not
-     * honor). `undefined` falls back to detecting the pin in the merged
-     * config itself (see {@link isQwenOAuthBuiltinsPinnedEmpty}).
+     * Whether the hard-coded qwen-oauth built-ins are disabled by the
+     * operator scope setting model.qwenOAuthBuiltinsDisabled (System, User,
+     * or SystemDefaults). `true` suppresses the built-ins; `false`/`undefined`
+     * keeps them. An empty qwen-oauth model list no longer pins the built-ins
+     * — `[]` means "no models listed" (issue #12805: the migration and the
+     * provider-removal route synthesize `[]` without operator intent).
      */
     qwenOAuthBuiltinsDisabled?: boolean,
+    /**
+     * Whether the effective allowlist was set ONLY in workspace scope (no
+     * operator scope). A workspace list still narrows the configured
+     * provider endpoints, but it must not disable the built-in qwen-oauth
+     * personal-login models, whose endpoint is discovered at login and
+     * cannot be listed — disabling personal Qwen login is an operator
+     * decision (issue #12805).
+     */
+    allowedBaseUrlsWorkspaceOnly?: boolean,
   ) {
     validateModelProvidersConfig(modelProvidersConfig, providerProtocolConfig);
     this.modelsByAuthType = new Map();
     this.providerProtocolConfig = providerProtocolConfig ?? {};
     this.modelProvidersConfig = modelProvidersConfig;
     this.allowedModelBaseUrls = validateAllowedBaseUrls(allowedModelBaseUrls);
+    this.qwenOAuthBuiltinsDisabledFlag = qwenOAuthBuiltinsDisabled === true;
+    this.builtinsAllowlistExempt =
+      !this.qwenOAuthBuiltinsDisabledFlag &&
+      allowedBaseUrlsWorkspaceOnly === true;
 
-    // Register the hard-coded qwen-oauth models unless an operator pins the
-    // qwen-oauth list explicitly empty — an empty list is a signal to disable
-    // the built-in provider, not "unconfigured" (a missing key keeps the
-    // built-ins, preserving today's default). Callers with scope visibility
-    // pass the explicit flag so a trusted workspace's pin does not disable
-    // the built-ins; without it the merged config decides.
-    const builtinsDisabled =
-      qwenOAuthBuiltinsDisabled ??
-      isQwenOAuthBuiltinsPinnedEmpty(
-        modelProvidersConfig,
-        providerProtocolConfig,
-      );
-    if (!builtinsDisabled) {
+    // Register the hard-coded qwen-oauth models unless the operator disabled
+    // them via model.qwenOAuthBuiltinsDisabled. When the allowlist comes from
+    // workspace scope only, the built-ins register WITHOUT the allowlist
+    // filter (their dynamic login endpoint cannot be listed); an
+    // operator-scoped policy excludes them the same way it excludes any
+    // off-list endpoint.
+    if (!this.qwenOAuthBuiltinsDisabledFlag) {
       this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
     }
 
@@ -525,19 +542,31 @@ export class ModelRegistry {
         config,
         providerId ? this.providerProtocolConfig : undefined,
       )!;
+      // Validate BEFORE any policy decision: a malformed entry (missing id)
+      // must fail startup with the clear error whether or not the allowlist
+      // would drop it anyway — a policy must not silence fail-fast
+      // validation of a malformed settings file (issue #12805).
+      this.validateModelConfig(config, modelAuthType);
       // Managed endpoint allowlist: a model only registers when its resolved
       // baseUrl (explicit, or the protocol default) is on the list. An
       // `undefined` allowlist keeps today's behavior; an empty list blocks
       // everything, including protocol-default endpoints. The URL judged
       // here is the same one the registered model carries
-      // (resolveRegistryBaseUrl).
+      // (resolveRegistryBaseUrl). Built-in qwen-oauth models are exempt when
+      // the list came from workspace scope only: their endpoint is discovered
+      // at login and cannot be listed, so a workspace must not disable
+      // personal Qwen login (issue #12805).
+      const allowlist =
+        this.builtinsAllowlistExempt && modelAuthType === AuthType.QWEN_OAUTH
+          ? undefined
+          : this.allowedModelBaseUrls;
       const resolvedBaseUrl = this.resolveRegistryBaseUrl(
         config,
         modelAuthType,
       );
       if (
-        this.allowedModelBaseUrls !== undefined &&
-        !isBaseUrlAllowed(resolvedBaseUrl, this.allowedModelBaseUrls)
+        allowlist !== undefined &&
+        !isBaseUrlAllowed(resolvedBaseUrl, allowlist)
       ) {
         // Record the drop so user-visible channels (advisor errors, skipped
         // provider warnings) can name the cause — the picker only ever sees
@@ -729,8 +758,9 @@ export class ModelRegistry {
   /**
    * Reload models from updated configuration.
    * Clears existing user-configured models and re-registers from new config.
-   * Preserves hard-coded qwen-oauth models unless the new config pins an
-   * explicit empty list.
+   * The hard-coded qwen-oauth models are preserved unless the operator
+   * disabled them via model.qwenOAuthBuiltinsDisabled at boot (a reload
+   * cannot flip that decision).
    *
    * @param providerProtocolConfig - Updated provider->protocol map. `undefined`
    *   PRESERVES the existing map (so a reload carrying only modelProviders does
@@ -749,6 +779,8 @@ export class ModelRegistry {
       modelProvidersConfig,
       providerProtocolConfig ?? this.providerProtocolConfig,
       this.allowedModelBaseUrls,
+      this.qwenOAuthBuiltinsDisabledFlag,
+      this.builtinsAllowlistExempt,
     );
     this.modelsByAuthType = reloaded.modelsByAuthType;
     this.providerProtocolConfig = reloaded.providerProtocolConfig;

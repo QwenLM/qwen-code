@@ -42,7 +42,7 @@ export {
   resolveModelSelectionAuthType,
   isBaseUrlAllowed,
   validateAllowedBaseUrls,
-  isQwenOAuthBuiltinsPinnedEmpty,
+  DYNAMIC_QWEN_OAUTH_BASE_URL,
   type ModelGenerationConfig,
   ModelsConfig,
   type ModelsConfigOptions,

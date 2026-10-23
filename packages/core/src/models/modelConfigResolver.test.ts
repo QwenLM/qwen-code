@@ -846,21 +846,110 @@ describe('modelConfigResolver', () => {
       expect(result.config.model).toBe('some-model');
     });
 
-    it('fails closed for Qwen OAuth when the operator pin is active', () => {
+    it('fails closed for Qwen OAuth when model.qwenOAuthBuiltinsDisabled is set', () => {
       expectFatal(
         () => oauth({ qwenOAuthBuiltinsDisabled: true }),
-        'pinned to an empty model list',
-        'modelProviders["qwen-oauth"]',
+        'disabled by operator settings',
+        'model.qwenOAuthBuiltinsDisabled',
       );
     });
 
-    it('cannot re-admit a Qwen OAuth model via --model while the pin is active', () => {
-      expectFatal(() =>
-        oauth({
-          cli: { model: 'coder-model' },
-          qwenOAuthBuiltinsDisabled: true,
-        }),
+    it('cannot re-admit a Qwen OAuth model via --model while operator-disabled', () => {
+      expectFatal(
+        () =>
+          oauth({
+            cli: { model: 'coder-model' },
+            qwenOAuthBuiltinsDisabled: true,
+          }),
+        'model.qwenOAuthBuiltinsDisabled',
       );
+    });
+
+    it('fails closed for Qwen OAuth when an operator-scope allowlist is set', () => {
+      // The Qwen OAuth endpoint is discovered at login and cannot be listed,
+      // so an operator-scope model.allowedBaseUrls excludes personal Qwen
+      // login — fail closed instead of dialing the unlisted endpoint.
+      expectFatal(
+        () => oauth({ allowedBaseUrls: [CORP] }),
+        'discovered dynamically at login',
+        'model.allowedBaseUrls',
+      );
+    });
+
+    it('keeps Qwen OAuth usable when the allowlist is workspace-scoped only', () => {
+      // A workspace list narrows configured providers but must not disable
+      // personal Qwen login (operator decision, issue #12805).
+      const result = oauth({
+        allowedBaseUrls: [CORP],
+        allowedBaseUrlsWorkspaceOnly: true,
+      });
+      expect(result.config.model).toBe(DEFAULT_QWEN_MODEL);
+    });
+
+    it('judges an explicit baseUrl even before an auth type is selected', () => {
+      // A CLI-provided baseUrl must be gated even when no auth type is
+      // known yet (issue #12805: the gate used to be unreachable until
+      // authType was selected). Auth env vars are read only once an auth
+      // type is known (upstream design), so the explicit baseUrl sources
+      // available pre-auth are the CLI and settings — use the CLI here.
+      expectFatal(
+        () =>
+          resolve({
+            authType: undefined,
+            cli: { baseUrl: 'https://external-llm.example/v1' },
+            allowedBaseUrls: [CORP],
+          }),
+        'model.allowedBaseUrls',
+        'https://external-llm.example/v1',
+      );
+    });
+
+    it('scrubs userinfo credentials from the off-list endpoint error', () => {
+      // A credential-bearing baseUrl must reach stderr without its
+      // userinfo (issue #12805).
+      let error: unknown;
+      try {
+        resolve({
+          env: { MY_CUSTOM_KEY: 'provider-key' },
+          modelProvider: {
+            id: 'provider-model',
+            name: 'Provider Model',
+            envKey: 'MY_CUSTOM_KEY',
+            baseUrl: 'https://user:pass@external-llm.example/v1',
+            generationConfig: {},
+          },
+          allowedBaseUrls: [CORP],
+        });
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(FatalConfigError);
+      const message = String((error as Error).message);
+      expect(message).toContain('external-llm.example/v1');
+      expect(message).not.toContain('user:pass');
+
+      // A value that does not parse as a URL gets any userinfo-shaped
+      // prefix masked, so a malformed endpoint cannot echo a live secret.
+      let malformed: unknown;
+      try {
+        resolve({
+          env: { MY_CUSTOM_KEY: 'provider-key' },
+          modelProvider: {
+            id: 'provider-model',
+            name: 'Provider Model',
+            envKey: 'MY_CUSTOM_KEY',
+            baseUrl: 'https://user:sk@',
+            generationConfig: {},
+          },
+          allowedBaseUrls: [CORP],
+        });
+      } catch (e) {
+        malformed = e;
+      }
+      expect(malformed).toBeInstanceOf(FatalConfigError);
+      const masked = String((malformed as Error).message);
+      expect(masked).toContain('***@');
+      expect(masked).not.toContain('user:sk');
     });
   });
 });
