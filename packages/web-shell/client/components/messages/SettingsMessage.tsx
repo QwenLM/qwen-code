@@ -68,7 +68,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../ui/select';
-import { Popover, PopoverAnchor, PopoverContent } from '../ui/popover';
 import { Separator } from '../ui/separator';
 import { Spinner } from '../ui/spinner';
 import { Switch } from '../ui/switch';
@@ -438,58 +437,57 @@ function OutputLanguageCombobox({
   };
 
   return (
-    <Popover open={open && !disabled} onOpenChange={setOpen}>
-      <PopoverAnchor asChild>
-        <Input
-          role="combobox"
-          name={name}
-          autoComplete="off"
-          aria-label={label}
-          aria-expanded={open}
-          aria-controls={listId}
-          aria-autocomplete="list"
-          aria-activedescendant={
-            open && items[activeIndex] ? `${listId}-${activeIndex}` : undefined
-          }
-          value={draft}
-          disabled={disabled}
-          placeholder={placeholder}
-          className="w-[min(200px,50vw)] max-md:w-full"
-          onChange={(event) => {
-            setDraft(event.target.value);
-            setActiveIndex(0);
+    <div className="relative">
+      <Input
+        role="combobox"
+        name={name}
+        autoComplete="off"
+        aria-label={label}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={listId}
+        aria-autocomplete="list"
+        aria-activedescendant={
+          open && items[activeIndex] ? `${listId}-${activeIndex}` : undefined
+        }
+        value={draft}
+        disabled={disabled}
+        placeholder={placeholder}
+        className="w-[min(200px,50vw)] max-md:w-full"
+        onChange={(event) => {
+          setDraft(event.target.value);
+          setActiveIndex(0);
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => commit(draft)}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowDown') {
+            event.preventDefault();
             setOpen(true);
-          }}
-          onFocus={() => setOpen(true)}
-          onBlur={() => commit(draft)}
-          onKeyDown={(event) => {
-            if (event.key === 'ArrowDown') {
-              event.preventDefault();
-              setOpen(true);
-              setActiveIndex((index) => Math.min(index + 1, items.length - 1));
-            } else if (event.key === 'ArrowUp') {
-              event.preventDefault();
-              setActiveIndex((index) => Math.max(index - 1, 0));
-            } else if (event.key === 'Enter') {
-              event.preventDefault();
-              commit(open ? (items[activeIndex]?.value ?? draft) : draft);
-            } else if (event.key === 'Escape') {
-              event.preventDefault();
-              setOpen(false);
-              setDraft(currentValue);
-            }
-          }}
-        />
-      </PopoverAnchor>
-      <PopoverContent
-        align="start"
-        className="w-[min(240px,80vw)] p-1"
-        onOpenAutoFocus={(event) => event.preventDefault()}
-        // Keep focus in the input so picking an item does not commit the typed
-        // draft first.
-        onMouseDown={(event) => event.preventDefault()}
-      >
-        <div role="listbox" id={listId} className="max-h-64 overflow-y-auto">
+            setActiveIndex((index) => Math.min(index + 1, items.length - 1));
+          } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            setActiveIndex((index) => Math.max(index - 1, 0));
+          } else if (event.key === 'Enter') {
+            event.preventDefault();
+            commit(open ? (items[activeIndex]?.value ?? draft) : draft);
+          } else if (event.key === 'Escape') {
+            event.preventDefault();
+            setOpen(false);
+            setDraft(currentValue);
+          }
+        }}
+      />
+      {open && !disabled && (
+        <div
+          role="listbox"
+          id={listId}
+          className="absolute left-0 top-full z-20 mt-1 max-h-64 w-[min(240px,80vw)] overflow-y-auto rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md"
+          // Keep focus in the input so clicking an option does not commit the
+          // typed draft first.
+          onMouseDown={(event) => event.preventDefault()}
+        >
           {items.map((item, index) => (
             <div
               key={item.value || 'auto'}
@@ -508,8 +506,8 @@ function OutputLanguageCombobox({
             </div>
           ))}
         </div>
-      </PopoverContent>
-    </Popover>
+      )}
+    </div>
   );
 }
 
