@@ -527,6 +527,22 @@ describe('gate fire text', () => {
     ).toContain('It printed nothing on stderr.');
   });
 
+  it('cuts the stderr tail without halving a character', () => {
+    // 5 × 603 units: the cap's cut lands on the low half of a pair.
+    const stderr = Array.from(
+      { length: 5 },
+      () => `xx${'😀'.repeat(300)}`,
+    ).join('\n');
+    const text = buildGateFailureNotice(job, {
+      kind: 'failed',
+      detail: 'exited with code 1',
+      stderr,
+      durationMs: 400,
+    });
+    expect(/[\uD800-\uDFFF]/u.test(text)).toBe(false);
+    expect(text).toContain('😀\n</gate-stderr>');
+  });
+
   it('describes a blocked gate with the rule that would unblock it', () => {
     const text = buildGateBlockedNotice(job, {
       kind: 'blocked',
