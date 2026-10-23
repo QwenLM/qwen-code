@@ -72,6 +72,7 @@ import {
 } from './lib/toolchain.js';
 import { type TestScope } from './lib/workspace-scope.js';
 import { declaredBuildHeapMb } from './lib/workspaces.js';
+import { heapBannerIn, MAX_OLD_SPACE_FLAG } from './lib/heap.js';
 
 /**
  * The root toolchains build-test can select. One today; the registry exists so
@@ -105,6 +106,14 @@ export interface CommandResult {
    * The raw text exists here and nowhere else; record the set while it does.
    */
   failingFiles?: string[];
+  /**
+   * True when the command failed and its UNTRIMMED output carries V8's
+   * heap-exhaustion banner. Measured here for the reason `failingFiles` is:
+   * `output` keeps a bounded head and tail, and a banner with more than the
+   * tail after it — siblings of a parallel build still printing — is cut.
+   * Absent otherwise.
+   */
+  heapExhausted?: boolean;
   /**
    * The deadline the command was actually given (ms) — the whole-call budget
    * shortens it below the per-command default, and the timeout note must
@@ -149,6 +158,12 @@ export interface BuildTestReport {
    * parsing prose.
    */
   notBuilt?: string[];
+  /**
+   * The local script a skipped root `build` hands off to, when the root build
+   * did not run because of it — see `rootBuildFanOutScript`. Structural so a
+   * `--resume` merge, which rewrites the note, can say it again.
+   */
+  skippedRootBuild?: string;
   /** Packages the compiler asked for that the dependency graph had not predicted. */
   widenedWith: string[];
   install: CommandResult | null;
@@ -337,7 +352,7 @@ export function buildRunEnv(
   const nodeOptions = base['NODE_OPTIONS'] ?? '';
   if (
     heapMb !== undefined &&
-    !/--max[-_]old[-_]space[-_]size/.test(nodeOptions)
+    !new RegExp(MAX_OLD_SPACE_FLAG).test(nodeOptions)
   ) {
     env['NODE_OPTIONS'] =
       `${nodeOptions} --max-old-space-size=${heapMb}`.trim();
@@ -430,6 +445,7 @@ function containerised(
       cwd: workdir,
       tmpDir,
       kind,
+      heapMb: kind === 'build' ? declaredBuildHeapMb(cwd) : undefined,
       name,
       runtime: verdict.runtime,
       rootless: runtimeIsRootless(verdict.runtime),
@@ -476,7 +492,8 @@ export function run(
         killSignal: 'SIGKILL',
         stdio: ['ignore', 'pipe', 'pipe'],
         // NOT `buildRunEnv()`: the container gets an allowlist instead (see
-        // `containerEnv`), and this env is the RUNTIME CLIENT's — the caller's
+        // `containerEnv`; a build's declared heap rides in the argv, see
+        // `containerCommand`), and this env is the RUNTIME CLIENT's — the caller's
         // PATH and nothing from the review, minus the daemon-selecting
         // variables a repository could have shipped in its own `.env`.
         env: runtimeClientEnv(),
@@ -521,6 +538,7 @@ export function run(
   // reads absent as "this seam supplied no measurement" and falls back to
   // re-parsing `output`, exactly as it did before this field existed.
   const failingFiles = failingFilesOf(raw, cwd);
+  const heapExhausted = r.status !== 0 && heapBannerIn(raw);
   return {
     command,
     exitCode: r.status,
@@ -529,6 +547,7 @@ export function run(
     output: trimOutput(raw),
     deadlineMs,
     ...(failingFiles.length > 0 ? { failingFiles } : {}),
+    ...(heapExhausted ? { heapExhausted } : {}),
   };
 }
 

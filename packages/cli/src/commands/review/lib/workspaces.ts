@@ -30,6 +30,8 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { MAX_OLD_SPACE_FLAG } from './heap.js';
+import { stripComments } from './js-source.js';
 
 /** One workspace package, as its own `package.json` describes it. */
 export interface WorkspacePackage {
@@ -257,8 +259,45 @@ export function scriptFansOut(text: unknown): boolean {
   );
 }
 
-/** `node <file>` in a script: the local build script it hands off to. */
-const NODE_SCRIPT_RE = /(?:^|[\s;&|])node\s+([\w@./-]+\.[cm]?js)(?=[\s;&|]|$)/g;
+/** Node flags whose value is the next word — a preload, not the script. */
+const NODE_VALUE_FLAGS = new Set([
+  '-r',
+  '--require',
+  '--import',
+  '--loader',
+  '--experimental-loader',
+  '-C',
+  '--conditions',
+  '--env-file',
+  '--input-type',
+  '--title',
+]);
+/** Node flags after which no script file follows: the code is inline. */
+const NODE_INLINE_FLAGS = new Set(['-e', '--eval', '-p', '--print', '-']);
+
+/**
+ * The script file each `node …` command in a script runs: the first word
+ * after `node` that is not a flag, stepping over a value-taking flag's value
+ * (`--import tsx/esm`, `--require ./hooks.js`), so neither a preload nor a
+ * flag is taken for the script.
+ */
+function nodeScripts(text: string): string[] {
+  const files: string[] = [];
+  for (const command of text.split(/[;&|]+/)) {
+    const words = command.trim().split(/\s+/);
+    for (let i = words.indexOf('node') + 1; i > 0 && i < words.length; i++) {
+      const word = words[i]!;
+      if (NODE_INLINE_FLAGS.has(word)) break;
+      if (word.startsWith('-')) {
+        if (NODE_VALUE_FLAGS.has(word)) i++;
+        continue;
+      }
+      if (/^[\w@./-]+\.[cm]?js$/.test(word)) files.push(word);
+      break;
+    }
+  }
+  return files;
+}
 
 /**
  * The local script the root's `build` hands off to with `node <file>`, when
@@ -282,12 +321,10 @@ export function rootBuildFanOutScript(
   text: unknown,
 ): string | undefined {
   if (typeof text !== 'string') return undefined;
-  for (const [, file] of text.matchAll(NODE_SCRIPT_RE)) {
+  for (const file of nodeScripts(text)) {
     if (file.split('/').includes('..')) continue;
     try {
-      if (
-        scriptFansOut(withoutComments(readFileSync(join(root, file), 'utf8')))
-      )
+      if (scriptFansOut(stripComments(readFileSync(join(root, file), 'utf8'))))
         return file;
     } catch {
       // Unreadable is not evidence of a fan-out: the build runs as written.
@@ -297,20 +334,9 @@ export function rootBuildFanOutScript(
 }
 
 /**
- * JavaScript source with its comments blanked, roughly: `/* … *\/` blocks,
- * and `//` to the end of a line where it follows whitespace — so a URL's
- * `https://` survives. A string that happens to hold either marker loses some
- * text, which can only hide a fan-out, and a hidden one runs as written.
- */
-function withoutComments(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|\s)\/\/.*$/gm, '$1');
-}
-
-/**
  * The V8 heap the root's `build` script declares for its compile
- * (`--max-old-space-size=<MB>`), or undefined when it declares none.
+ * (`--max-old-space-size=<MB>` in a `NODE_OPTIONS` assignment), or undefined
+ * when it declares none.
  *
  * A scoped build runs each member's own `build` and so bypasses the root
  * script — and with it the heap the project says its compile needs. This
@@ -320,8 +346,19 @@ function withoutComments(source: string): string {
  */
 export function declaredBuildHeapMb(root: string): number | undefined {
   const text = readRootPackage(root)?.scriptsText['build'];
-  const mb = text?.match(/--max[-_]old[-_]space[-_]size=(\d+)/)?.[1];
-  return mb ? Number(mb) : undefined;
+  if (typeof text !== 'string') return undefined;
+  // Only `NODE_OPTIONS` reaches the compilers the build starts. The same flag
+  // elsewhere in the text — an argument to a child, a usage string, a node
+  // flag that sizes only the build script's own process — declares nothing
+  // for them.
+  const flag = new RegExp(`(?:^|\\s)${MAX_OLD_SPACE_FLAG}=(\\d+)(?=\\s|$)`);
+  for (const m of text.matchAll(
+    /\bNODE_OPTIONS=(?:"([^"]*)"|'([^']*)'|(\S*))/g,
+  )) {
+    const mb = (m[1] ?? m[2] ?? m[3] ?? '').match(flag)?.[1];
+    if (mb) return Number(mb);
+  }
+  return undefined;
 }
 
 /** The manifest fields this module reads. */

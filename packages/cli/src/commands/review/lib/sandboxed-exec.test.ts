@@ -700,6 +700,27 @@ describe('containerCommand', () => {
     }
   });
 
+  it('gives a build — and only a build — its declared heap, as an explicit entry', () => {
+    // The direct spawn gets it through `buildRunEnv`; the allowlist has no
+    // NODE_OPTIONS, so without this a boxed `tsc --build` dies at Node's
+    // default heap — the failure the declared heap exists to prevent.
+    const passed = (kind: 'build' | 'test' | 'install'): string[] => {
+      const { args } = containerCommand('npm run build', {
+        ...base,
+        cwd: join(tmpDir, 'review-pr-9'),
+        kind,
+        heapMb: 6144,
+      });
+      return args.filter((_, i) => args[i - 1] === '--env');
+    };
+    expect(passed('build')).toContain('NODE_OPTIONS=--max-old-space-size=6144');
+    for (const kind of ['test', 'install'] as const) {
+      expect(passed(kind).some((e) => e.startsWith('NODE_OPTIONS='))).toBe(
+        false,
+      );
+    }
+  });
+
   // Windows has no `process.getuid`, so the flag is correctly absent there —
   // and the merge queue runs this file on Windows.
   it.skipIf(process.getuid === undefined)(

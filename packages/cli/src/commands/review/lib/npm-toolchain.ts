@@ -27,6 +27,7 @@ import {
 } from './workspaces.js';
 import { resolveTestScope, type TestScope } from './workspace-scope.js';
 import { DEFAULT_WHOLE_CALL_BUDGET_S } from './build-budget.js';
+import { ranOutOfHeap } from './heap.js';
 import type { ReviewToolchainAdapter, ToolchainRunArgs } from './toolchain.js';
 
 /**
@@ -160,6 +161,21 @@ const succeeded = (r: CommandResult): boolean => r.exitCode === 0;
  * judged insufficient here (that is why the fresh path prepends this on every
  * return); a continuation is not the place to start relying on it.
  */
+/**
+ * What a skipped root build left undone, for the note: `work` is the script
+ * it hands off to, or the fan-out root build's own text when it chains
+ * commands of its own. Built from the report's own fields — the root is not
+ * in `buildSet` — rather than claiming what the manifests cannot show.
+ */
+function rootBuildSkipNote(work: string): string {
+  return (
+    ` The root \`build\` did not run: it runs \`${work}\`, which builds every ` +
+    'workspace, and this run built only the ones in `buildSet`. Anything else ' +
+    `\`${work}\` does did not run either — a failure over a file it writes may ` +
+    'come from that, not from the diff.'
+  );
+}
+
 function installFailureFraming(install: CommandResult | null): string {
   if (!install || install.exitCode === 0) return '';
   return (
@@ -470,7 +486,11 @@ function resumedNote(
     // a brief whose standing rule is to correlate failures with the diff.
     installFailureFraming(previous.install) +
       `Continued from a previous build-test call (install and build reused: ` +
-      `${previous.build.length} build command(s) already ran).`,
+      `${previous.build.length} build command(s) already ran).` +
+      // The reused build is the one that skipped it: say so again.
+      (previous.skippedRootBuild
+        ? rootBuildSkipNote(previous.skippedRootBuild)
+        : ''),
   ];
   if (failures.length > 0) {
     parts.push(
@@ -910,17 +930,23 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   // running. Only a NON-fan-out root build — one that compiles the root's own
   // sources — is worth its deadline.
   const rootBuildText = rootPkg?.scriptsText['build'];
+  const rootBuildFansOut = scriptFansOut(rootBuildText);
   // A root build that hands off to a local script which fans out (`node
   // scripts/build.js` running `pnpm -r … run build`) is the same whole-monorepo
   // build, but the script can do work of its own as well — generate a file
   // the root's suite reads — and its source cannot prove otherwise. It is
   // skipped only when nothing in the repository reads what the ROOT package
-  // makes: no root suite of its own (a fan-out root `test` runs no root
-  // suite) and no member that depends on the root. Otherwise it runs as
-  // written, and costs what it costs. Static facts, not this run's scope, so
-  // the merge-base probe skips exactly what the run skips.
+  // makes, as far as the manifests can say: no root suite of its own (a
+  // fan-out root `test` runs no root suite) and no member that depends on the
+  // root. Otherwise it runs as written, and costs what it costs. Either way
+  // the note says what a skip left undone (`skippedRootWork`).
+  //
+  // Read from the tree, not from this run's scope, so a build-only probe of
+  // the same tree decides the same way. The merge-base probe reads the BASE
+  // tree, though, and decides differently when the PR changes the root
+  // scripts, the script handed off to, or a member's dependency on the root.
   const handOff =
-    rootPkg && !scriptFansOut(rootBuildText)
+    rootPkg && !rootBuildFansOut
       ? rootBuildFanOutScript(root, rootBuildText)
       : undefined;
   const rootOutputRead =
@@ -930,12 +956,27 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   const skippedHandOff = handOff && !rootOutputRead ? handOff : undefined;
   const rootBuildRuns =
     !!rootPkg?.scripts.includes('build') &&
-    !scriptFansOut(rootBuildText) &&
+    !rootBuildFansOut &&
     !skippedHandOff;
   // One predicate for both the loop skip and the reported set: a fan-out
   // root's build does not run — never in single-root mode, where the root is
   // the only package there is.
   const rootBuildSkipped = !singleRoot && !rootBuildRuns;
+  // What a skipped root build does besides building the members: the script
+  // it hands off to, or a fan-out chained with commands of its own (`pnpm -r
+  // run build && node copy-assets.js`). Disclosed on every report that
+  // carries the root in its set — see `rootBuildSkipNote`.
+  const skippedRootWork = !rootBuildSkipped
+    ? undefined
+    : (skippedHandOff ??
+      (rootBuildFansOut && /&&|\|\||;/.test(String(rootBuildText))
+        ? String(rootBuildText)
+        : undefined));
+  const discloseRootSkip = (): void => {
+    if (!skippedRootWork || !set.includes('.')) return;
+    results.skippedRootBuild = skippedRootWork;
+    results.note += rootBuildSkipNote(skippedRootWork);
+  };
   const notBuilt: string[] = [];
 
   // Build, and let the compiler correct the set. Three widenings is generous: each
@@ -945,6 +986,7 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   // outer shell kill a report the budget exists to save.
   for (let attempt = 0; attempt <= 3; attempt++) {
     let failure: CommandResult | null = null;
+    let failedDir = '';
 
     for (const dir of set) {
       if (built.has(dir)) continue;
@@ -982,6 +1024,7 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       if (r.timedOut) results.timedOut.push(r.command);
       if (r.exitCode !== 0) {
         failure = r;
+        failedDir = dir;
         break;
       }
       built.add(dir);
@@ -1004,20 +1047,31 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
     // would look like a too-small build set and trigger a retry — another full
     // deadline, and another, up to the attempt cap. A timeout is infrastructure, not
     // a graph gap: report it and stop, the same way the install path does.
-    const missing = failure.timedOut
+    // Nor must a heap death, for the same reason: its partial output can name
+    // a module too, and the retry would only run out of heap again.
+    const infraKill = failure.timedOut || ranOutOfHeap(failure);
+    const missing = infraKill
       ? []
       : unresolvedWorkspaceDeps(failure.output, packages).filter((name) => {
           const dir = packages.find((p) => p.name === name)?.dir;
           return dir && !built.has(dir);
         });
-    if (missing.length === 0 || failure.timedOut || attempt === 3) {
+    if (missing.length === 0 || infraKill || attempt === 3) {
       results.ok = false;
       results.note = failure.timedOut
         ? `\`${failure.command}\` ran out of time (${deadlineSecs(failure)}s). That is an ` +
           'infrastructure result, not a defect in the diff — report it as informational.'
-        : /JavaScript heap out of memory/.test(failure.output)
-          ? `\`${failure.command}\` ran out of JavaScript heap. That is an ` +
-            'infrastructure result, not a defect in the diff — report it as informational.'
+        : ranOutOfHeap(failure)
+          ? `\`${failure.command}\` ran out of JavaScript heap. ` +
+            // A package the diff does not change compiles as it did before:
+            // its heap death is the machine's. One the diff changes may have
+            // grown by what the diff added.
+            (affected.includes(failedDir)
+              ? 'The diff changes this package: if what it adds can grow the compile — a ' +
+                'deeply recursive or very large type, a big generated file — that is a ' +
+                'finding; otherwise it is an infrastructure result — report it as informational.'
+              : 'That is an infrastructure result, not a defect in the diff — report it as ' +
+                'informational.')
           : `\`${failure.command}\` failed. Correlate the errors below with the diff: a ` +
             'compile error in a file the PR changed is a Critical; one in a file it did not ' +
             'touch is a pre-existing failure, and belongs in the terminal, not on the PR.';
@@ -1025,6 +1079,7 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
         rootBuildSkipped ? set.filter((d) => d !== '.') : set
       ).filter((d) => !notBuilt.includes(d));
       results.widenedWith = [...widened];
+      discloseRootSkip();
       frameInstallFailure();
       return results;
     }
@@ -1209,6 +1264,10 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
     // framing the build-timeout path already gives, not the "a failure is a Critical"
     // message meant for a real compile/assertion failure.
     const realFailures = failed.filter((r) => !r.timedOut);
+    // A heap death is not a timeout and not, by itself, a defect either: it
+    // gets its own sentence, as the build phase gives it one.
+    const heapDeaths = realFailures.filter(ranOutOfHeap);
+    const defects = realFailures.filter((r) => !ranOutOfHeap(r));
     if (results.ok) {
       // The tests sentence names the scope, because it is the agent's report
       // that has to be able to say what was and was not run: a scoped run
@@ -1260,12 +1319,22 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
         `${failed.length} command(s) ran out of time (${deadlineSecs(failed[0])}s). A timeout is an ` +
         'infrastructure result, not a defect in the diff — report it as informational.';
     } else {
-      results.note =
-        `${realFailures.length} command(s) failed. Correlate each error with the diff: a failure in a ` +
-        'file the PR changed is a Critical; one in a file it did not touch is pre-existing.' +
-        (failed.length > realFailures.length
-          ? ' (Commands that timed out are infrastructure, not findings.)'
-          : '');
+      results.note = [
+        defects.length > 0
+          ? `${defects.length} command(s) failed. Correlate each error with the diff: a failure in a ` +
+            'file the PR changed is a Critical; one in a file it did not touch is pre-existing.'
+          : '',
+        heapDeaths.length > 0
+          ? `${heapDeaths.length} command(s) ran out of JavaScript heap. That is more often the ` +
+            'machine than the diff: report it as informational, unless what the diff adds is ' +
+            'what could hold that much memory.'
+          : '',
+        failed.length > realFailures.length
+          ? '(Commands that timed out are infrastructure, not findings.)'
+          : '',
+      ]
+        .filter(Boolean)
+        .join(' ');
     }
   }
 
@@ -1284,17 +1353,7 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       : partialNote;
   }
 
-  // A root build skipped on the strength of the script it hands off to (see
-  // `handOff`): whatever else that script does did not run, and the agent has
-  // to know that before it reads a failure over a file only the script writes.
-  if (skippedHandOff && set.includes('.')) {
-    results.note +=
-      ` The root \`build\` did not run: it hands off to \`${skippedHandOff}\`, ` +
-      'which builds every workspace (built above, one at a time), and nothing ' +
-      'in this repository depends on the root package. Anything else that ' +
-      'script does was not run — a failure over a file only it writes is not ' +
-      'a defect in the diff.';
-  }
+  discloseRootSkip();
 
   // The build and test results below are real, and the install failure is
   // not a finding about this PR. (A `prepare` script that builds the whole

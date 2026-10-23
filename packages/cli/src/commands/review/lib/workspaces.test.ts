@@ -527,6 +527,40 @@ describe('rootBuildFanOutScript', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it("steps over node's flags, a preload's value included, to the script itself", () => {
+    const root = withRoot({
+      'scripts/build.js': "execSync('corepack pnpm -r run build');",
+      'hooks.js': "execSync('corepack pnpm -r run build');",
+    });
+    for (const build of [
+      'node --max-old-space-size=6144 scripts/build.js',
+      'node --import tsx/esm scripts/build.js',
+      // The preload fans out too, and is still not the script the build runs.
+      'node --require ./hooks.js scripts/build.js',
+      'node -r ./hooks.js scripts/build.js',
+    ]) {
+      expect(rootBuildFanOutScript(root, build)).toBe('scripts/build.js');
+    }
+    expect(
+      rootBuildFanOutScript(root, `node -e "require('./hooks.js')"`),
+    ).toBeUndefined();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('sees a fan-out between two globs, whose `/*` and `*/` are not a comment', () => {
+    const root = withRoot({
+      'scripts/build.js': [
+        "const dirs = globSync('packages/*/src');",
+        "execSync('pnpm -r run build');",
+        "const files = globSync('scripts/**/*.js');",
+      ].join('\n'),
+    });
+    expect(rootBuildFanOutScript(root, 'node scripts/build.js')).toBe(
+      'scripts/build.js',
+    );
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it('reads nothing outside the root, and treats an unreadable script as no fan-out', () => {
     const parent = mkdtempSync(join(tmpdir(), 'ws-'));
     const root = join(parent, 'repo');
@@ -560,6 +594,25 @@ describe('declaredBuildHeapMb', () => {
     );
     expect(declaredBuildHeapMb(root)).toBe(6144);
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reads it only from a NODE_OPTIONS assignment, which is what reaches the compilers', () => {
+    for (const [build, mb] of [
+      [
+        "NODE_OPTIONS='--enable-source-maps --max-old-space-size=8192' tsc -b",
+        8192,
+      ],
+      ['NODE_OPTIONS=--max-old-space-size=4096 tsc -b', 4096],
+      // A child's argument, a usage string, a comment's worth of text, and a
+      // flag that sizes only the build script's own process.
+      ['node scripts/x.js --max-old-space-size=1024', undefined],
+      ['echo "usage: build [--max-old-space-size=1024]" && tsc -b', undefined],
+      ['node --max-old-space-size=2048 scripts/build.js', undefined],
+    ] as const) {
+      const root = rootWithBuild(build);
+      expect(declaredBuildHeapMb(root)).toBe(mb);
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('is undefined when the root build declares no heap, or there is no root build', () => {

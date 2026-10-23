@@ -460,6 +460,12 @@ export interface ContainerCommandOptions {
   /** The review temp dir (`<repo>/.qwen/tmp`): the mount, and the farm's far end. */
   tmpDir: string;
   kind: CommandKind;
+  /**
+   * The heap a build gets — the number `declaredBuildHeapMb` read from the
+   * root build script, never an inherited `NODE_OPTIONS`. Ignored for any
+   * other kind.
+   */
+  heapMb?: number;
   runtime: ContainerRuntime;
   image: string;
   /**
@@ -591,6 +597,11 @@ export function containerCommand(
   args.push('--tmpfs', `${CONTAINER_HOME}:rw,mode=1777`);
   for (const entry of containerEnv(join(opts.tmpDir, '.npm-cache'))) {
     args.push('--env', entry);
+  }
+  // A build's declared heap, as the direct spawn gets it (`buildRunEnv`).
+  // Pushed here, not added to `containerEnv`, which subagent workers share.
+  if (opts.kind === 'build' && opts.heapMb !== undefined) {
+    args.push('--env', `NODE_OPTIONS=--max-old-space-size=${opts.heapMb}`);
   }
   args.push(opts.image, 'sh', '-lc', command);
   return { file: opts.runtime, args };
