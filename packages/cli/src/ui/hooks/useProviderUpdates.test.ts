@@ -5,7 +5,6 @@
  */
 // @vitest-environment jsdom
 
-import { createHash } from 'node:crypto';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
 import {
@@ -1366,6 +1365,44 @@ describe('useProviderUpdates', () => {
     );
   });
 
+  it('reports a failed skip write instead of rejecting', async () => {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    mockSettings.setValue.mockImplementation(() => {
+      throw new Error('EROFS: read-only file system');
+    });
+
+    await expect(
+      result.current.providerUpdateRequest!.onConfirm('skip'),
+    ).resolves.toBeUndefined();
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('EROFS'),
+      }),
+      expect.any(Number),
+    );
+  });
+
   it('shows prompt again when a newer version supersedes ignoredVersion', async () => {
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
@@ -1402,9 +1439,22 @@ describe('useProviderUpdates', () => {
       (model) => !unservedIds.includes(model.id),
     );
 
-    const servedFingerprint = createHash('sha256')
-      .update(JSON.stringify(servedSpecs.map((model) => model.id).sort()))
-      .digest('hex');
+    const servedRecord = servedSpecs.map((model) => model.id).sort();
+
+    // Every settings write, single or batched.
+    const writes = () => [
+      ...mockSettings.setValue.mock.calls.map(([, key, value]) => ({
+        key,
+        value,
+      })),
+      ...mockSettings.setValues.mock.calls.flatMap(([batch]) =>
+        (batch as Array<{ key: string; value: unknown }>).map(
+          ({ key, value }) => ({ key, value }),
+        ),
+      ),
+    ];
+    const metadataKey = (field: string) =>
+      `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.${field}`;
 
     const setUpTokenPlanUpdate = (
       currentModel = 'qwen3.7-plus',
@@ -1469,11 +1519,10 @@ describe('useProviderUpdates', () => {
         expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
       });
       expect(installedIds()).toEqual(servedSpecs.map((model) => model.id));
-      expect(mockSettings.setValue).toHaveBeenCalledWith(
-        expect.anything(),
-        `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.version`,
-        tokenVersion,
-      );
+      expect(writes()).toContainEqual({
+        key: metadataKey('version'),
+        value: tokenVersion,
+      });
     });
 
     it('keeps the current model when /models does not list it', async () => {
@@ -1507,17 +1556,15 @@ describe('useProviderUpdates', () => {
       const { result } = setUpTokenPlanUpdate('qwen3.7-plus', servedTemplate);
 
       await waitFor(() => {
-        expect(mockSettings.setValue).toHaveBeenCalledWith(
-          expect.anything(),
-          `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.version`,
-          tokenVersion,
-        );
+        expect(writes()).toContainEqual({
+          key: metadataKey('version'),
+          value: tokenVersion,
+        });
       });
-      expect(mockSettings.setValue).toHaveBeenCalledWith(
-        expect.anything(),
-        `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.servedModels`,
-        servedFingerprint,
-      );
+      expect(writes()).toContainEqual({
+        key: metadataKey('servedModels'),
+        value: servedRecord,
+      });
       expect(result.current.providerUpdateRequest).toBeUndefined();
       expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
     });
@@ -1713,11 +1760,10 @@ describe('useProviderUpdates', () => {
       ]);
 
       await waitFor(() => {
-        expect(mockSettings.setValue).toHaveBeenCalledWith(
-          expect.anything(),
-          `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.version`,
-          tokenVersion,
-        );
+        expect(writes()).toContainEqual({
+          key: metadataKey('version'),
+          value: tokenVersion,
+        });
       });
       expect(result.current.providerUpdateRequest).toBeUndefined();
     });
@@ -1731,11 +1777,13 @@ describe('useProviderUpdates', () => {
             ? servedSpecs
             : codingPlanProvider.models!.map((model) => ({ id: model.id })),
       );
-      mockSettings.setValue.mockImplementation((_scope, key: string) => {
-        if (key.endsWith(`${TOKEN_METADATA_KEY}.version`)) {
-          throw new Error('EROFS: read-only file system');
-        }
-      });
+      mockSettings.setValues.mockImplementation(
+        (batch: Array<{ key: string }>) => {
+          if (batch.some((write) => write.key === metadataKey('version'))) {
+            throw new Error('EROFS: read-only file system');
+          }
+        },
+      );
       const metadataNs = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
         string,
         unknown
@@ -1809,10 +1857,8 @@ describe('useProviderUpdates', () => {
       resolveDiscovery(servedSpecs);
       await new Promise((resolve) => setTimeout(resolve, 0));
 
-      expect(mockSettings.setValue).not.toHaveBeenCalledWith(
-        expect.anything(),
-        `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.version`,
-        expect.anything(),
+      expect(writes().map((write) => write.key)).not.toContain(
+        metadataKey('version'),
       );
       expect(result.current.providerUpdateRequest).toBeUndefined();
     });
@@ -1841,11 +1887,10 @@ describe('useProviderUpdates', () => {
           expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
         });
         expect(installedIds()).toEqual(servedSpecs.map((model) => model.id));
-        expect(mockSettings.setValue).toHaveBeenCalledWith(
-          expect.anything(),
-          `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.servedModels`,
-          servedFingerprint,
-        );
+        expect(writes()).toContainEqual({
+          key: metadataKey('servedModels'),
+          value: servedRecord,
+        });
       });
 
       it('offers newly served models after the key changes', async () => {
@@ -1858,7 +1903,7 @@ describe('useProviderUpdates', () => {
         const { result } = setUpTokenPlanUpdate(
           'qwen3.7-plus',
           servedTemplate,
-          { version: tokenVersion, servedModels: servedFingerprint },
+          { version: tokenVersion, servedModels: servedRecord },
         );
 
         await waitFor(() => {
@@ -1878,7 +1923,7 @@ describe('useProviderUpdates', () => {
         const { result } = setUpTokenPlanUpdate(
           'qwen3.7-plus',
           servedTemplate,
-          { version: tokenVersion, servedModels: servedFingerprint },
+          { version: tokenVersion, servedModels: servedRecord },
         );
 
         await waitFor(() => {
@@ -1886,7 +1931,7 @@ describe('useProviderUpdates', () => {
         });
         await new Promise((resolve) => setTimeout(resolve, 0));
         expect(result.current.providerUpdateRequest).toBeUndefined();
-        expect(mockSettings.setValue).not.toHaveBeenCalled();
+        expect(writes()).toEqual([]);
       });
 
       it('records the served models without prompting when nothing changes', async () => {
@@ -1900,11 +1945,10 @@ describe('useProviderUpdates', () => {
         );
 
         await waitFor(() => {
-          expect(mockSettings.setValue).toHaveBeenCalledWith(
-            expect.anything(),
-            `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.servedModels`,
-            servedFingerprint,
-          );
+          expect(writes()).toContainEqual({
+            key: metadataKey('servedModels'),
+            value: servedRecord,
+          });
         });
         expect(result.current.providerUpdateRequest).toBeUndefined();
       });
@@ -1914,7 +1958,7 @@ describe('useProviderUpdates', () => {
 
         const { result } = setUpTokenPlanUpdate('qwen3.7-plus', tokenTemplate, {
           version: tokenVersion,
-          servedModels: servedFingerprint,
+          servedModels: servedRecord,
         });
 
         await waitFor(() => {
@@ -1937,16 +1981,126 @@ describe('useProviderUpdates', () => {
         });
         await result.current.providerUpdateRequest!.onConfirm('skip');
 
-        expect(mockSettings.setValue).toHaveBeenCalledWith(
-          expect.anything(),
-          `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.servedModels`,
-          servedFingerprint,
+        expect(writes()).toContainEqual({
+          key: metadataKey('servedModels'),
+          value: servedRecord,
+        });
+        expect(writes().map((write) => write.key)).not.toContain(
+          metadataKey('ignoredVersion'),
         );
-        expect(mockSettings.setValue).not.toHaveBeenCalledWith(
-          expect.anything(),
-          `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.ignoredVersion`,
-          expect.anything(),
+      });
+      it('does not offer a served model the user left out', async () => {
+        // No recorded check yet, e.g. right after /auth or an older update.
+        process.env[TOKEN_PLAN_ENV_KEY] = 'sk-sp-personal';
+        vi.mocked(discoverProviderModels).mockResolvedValue(servedSpecs);
+
+        const { result } = setUpTokenPlanUpdate(
+          'qwen3.7-plus',
+          servedTemplate.filter((model) => model.id !== 'qwen3.6-plus'),
+          { version: tokenVersion },
         );
+
+        await waitFor(() => {
+          expect(writes()).toContainEqual({
+            key: metadataKey('servedModels'),
+            value: servedRecord,
+          });
+        });
+        expect(result.current.providerUpdateRequest).toBeUndefined();
+        expect(writes().map((write) => write.key)).not.toContain(
+          metadataKey('version'),
+        );
+      });
+
+      it('offers only the models newly served since the last check', async () => {
+        process.env[TOKEN_PLAN_ENV_KEY] = 'sk-team';
+        vi.mocked(discoverProviderModels).mockResolvedValue(
+          tokenPlanProvider.models!.map((model) => ({ id: model.id })),
+        );
+
+        const { result } = setUpTokenPlanUpdate(
+          'qwen3.7-plus',
+          servedTemplate.filter((model) => model.id !== 'qwen3.6-plus'),
+          { version: tokenVersion, servedModels: servedRecord },
+        );
+
+        await waitFor(() => {
+          expect(result.current.providerUpdateRequest).toBeDefined();
+        });
+        expect(result.current.providerUpdateRequest!.entries[0]!.diff).toEqual({
+          added: unservedIds,
+          removed: [],
+          currentModelAffected: false,
+        });
+      });
+
+      it('later postpones the served models, not the version', async () => {
+        process.env[TOKEN_PLAN_ENV_KEY] = 'sk-sp-personal';
+        vi.mocked(discoverProviderModels).mockResolvedValue(servedSpecs);
+
+        const { result } = setUpTokenPlanUpdate('qwen3.7-plus', tokenTemplate, {
+          version: tokenVersion,
+        });
+
+        await waitFor(() => {
+          expect(result.current.providerUpdateRequest).toBeDefined();
+        });
+        await result.current.providerUpdateRequest!.onConfirm('later');
+
+        expect(writes()).toContainEqual({
+          key: metadataKey('postponedServedModels'),
+          value: servedRecord,
+        });
+        expect(writes().map((write) => write.key)).not.toContain(
+          metadataKey('postponedVersion'),
+        );
+      });
+
+      it('does not prompt for postponed served models during the cooldown', async () => {
+        process.env[TOKEN_PLAN_ENV_KEY] = 'sk-sp-personal';
+        vi.mocked(discoverProviderModels).mockResolvedValue(servedSpecs);
+
+        const { result } = setUpTokenPlanUpdate('qwen3.7-plus', tokenTemplate, {
+          version: tokenVersion,
+          postponedServedModels: servedRecord,
+          postponedAt: Date.now() - 1000,
+        });
+
+        await waitFor(() => {
+          expect(discoverProviderModels).toHaveBeenCalled();
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(result.current.providerUpdateRequest).toBeUndefined();
+      });
+
+      it('prompts when the served models differ from the postponed ones', async () => {
+        process.env[TOKEN_PLAN_ENV_KEY] = 'sk-sp-personal';
+        vi.mocked(discoverProviderModels).mockResolvedValue(servedSpecs);
+
+        const { result } = setUpTokenPlanUpdate('qwen3.7-plus', tokenTemplate, {
+          version: tokenVersion,
+          postponedServedModels: [...servedRecord, 'glm-5'].sort(),
+          postponedAt: Date.now() - 1000,
+        });
+
+        await waitFor(() => {
+          expect(result.current.providerUpdateRequest).toBeDefined();
+        });
+      });
+
+      it('ignores a version postponement left from before the update', async () => {
+        process.env[TOKEN_PLAN_ENV_KEY] = 'sk-sp-personal';
+        vi.mocked(discoverProviderModels).mockResolvedValue(servedSpecs);
+
+        const { result } = setUpTokenPlanUpdate('qwen3.7-plus', tokenTemplate, {
+          version: tokenVersion,
+          postponedVersion: tokenVersion,
+          postponedAt: Date.now() - 1000,
+        });
+
+        await waitFor(() => {
+          expect(result.current.providerUpdateRequest).toBeDefined();
+        });
       });
     });
 

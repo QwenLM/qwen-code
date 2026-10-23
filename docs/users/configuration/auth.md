@@ -31,6 +31,8 @@ The official platform entry. Choose it when your API key comes from 千问AI平�
 
 Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **QwenCloud**, and choose **Token Plan** or **Standard API Key** from the sub-menu. Choose the platform (**China — 千问AI平台** or **International — QwenCloud**), then enter your API key.
 
+Qwen Code checks the endpoint's model list at startup with your stored key; see [Built-in provider updates](#built-in-provider-updates).
+
 ### Headless or scripted setup
 
 For CI, containers, or scripts, configure the platform with environment variables instead of the interactive `/auth` flow.
@@ -134,6 +136,8 @@ Alibaba Cloud Coding Plan is available in two regions:
 
 Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **Alibaba ModelStudio**, and choose **Coding Plan** from the sub-menu. Choose your region, then enter your `sk-sp-xxxxxxxxx` key.
 
+Qwen Code checks the endpoint's model list at startup with your stored key; see [Built-in provider updates](#built-in-provider-updates).
+
 After authentication, use the `/model` command to switch between all Alibaba Cloud Coding Plan supported models (including qwen3.5-plus, qwen3.6-plus, qwen3.7-plus, qwen3-coder-plus, qwen3-coder-next, qwen3-max-2026-01-23, glm-5, glm-4.7, kimi-k2.5, and MiniMax-M2.5).
 
 ### Headless or scripted setup
@@ -205,7 +209,7 @@ Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, 
 
 After authentication, use the `/model` command to browse and switch between the models configured for your Token Plan. The model lineup evolves over time, so it is intentionally not listed here; model discovery from the endpoint happens during the `/auth` setup step above (the endpoint's own list is offered there and must be selected explicitly), and `/model` then shows the models configured for your plan.
 
-Qwen Code also checks the endpoint's model list at startup with your stored API key. When a newer built-in model list ships, or when the models served to your key change (for example after you switch to a key for a different plan), Qwen Code offers a **Built-in Provider Update**. The update configures only the built-in models your key is served and removes the ones it cannot use, except the model you have selected, which is always kept. If nothing would change for your key, the check is recorded without a prompt.
+Qwen Code also checks the endpoint's model list at startup with your stored API key, as described in [Built-in provider updates](#built-in-provider-updates).
 
 ### Headless or scripted setup
 
@@ -464,6 +468,12 @@ qwen --model "qwen3-coder-plus"
 
 qwen --model "qwen3.5-plus"
 ```
+
+## Built-in provider updates
+
+This applies to QwenCloud (Token Plan and Standard API Key) and to Alibaba ModelStudio (Coding Plan, Token Plan and Standard API Key). At startup, Qwen Code checks the endpoint's model list with your stored API key. When a newer built-in model list ships, or when the models served to your key change (for example after you switch to a key for a different plan), Qwen Code offers a **Built-in Provider Update**.
+
+The update configures only the built-in models your key is served and removes the ones it cannot use, except the model you have selected, which is always kept. When only the served models changed, the update adds just the models your key was not served before, so a built-in model you left out during `/auth` is not added back. If nothing would change for your key, the check is recorded without a prompt. **Later** waits 24 hours before asking again about the same change, and **Skip** keeps your configuration as it is: a skipped model list is not offered again until a newer one ships, and a skipped change in served models is not offered again until they change once more.
 
 ## Removed `qwen auth` CLI command
 

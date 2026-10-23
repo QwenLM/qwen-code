@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   ProviderModelConfig,
@@ -67,8 +66,10 @@ interface ProviderMetadata {
   ignoredVersion?: string;
   postponedVersion?: string;
   postponedAt?: number;
-  /** Fingerprint of the built-in models served to the key at the last update. */
-  servedModels?: string;
+  /** Built-in model ids served to the key when the provider was last checked. */
+  servedModels?: string[];
+  /** Served model ids whose re-check prompt was answered with "Later". */
+  postponedServedModels?: string[];
 }
 
 // "Later" suppresses re-prompting for the same version for this long, so a
@@ -169,8 +170,10 @@ interface PendingUpdate {
    * re-checked for a change in the models served to its key.
    */
   upToDate: boolean;
-  /** Fingerprint of the served models recorded by the last update. */
-  storedServedModels?: string;
+  /** Served model ids recorded by the last check. */
+  storedServedModels?: string[];
+  /** Served model ids postponed by "Later", set only while the cooldown runs. */
+  postponedServedModels?: string[];
   existingModelIds: string[];
   diff: ModelUpdateDiff;
   /** Key for `/models`, set only for providers that support discovery. */
@@ -180,8 +183,8 @@ interface PendingUpdate {
    * prompt's diff is computed from the same list. Unset means every built-in.
    */
   installModelIds?: string[];
-  /** Fingerprint of the built-in models served to the key, when narrowed. */
-  servedModels?: string;
+  /** Sorted built-in model ids served to the key, when narrowed. */
+  servedModels?: string[];
 }
 
 function resolveDiscoveryApiKey(provider: ProviderConfig): string | undefined {
@@ -193,10 +196,25 @@ function resolveDiscoveryApiKey(provider: ProviderConfig): string | undefined {
   return process.env[provider.envKey]?.trim() || undefined;
 }
 
-function fingerprintServedModels(ids: string[]): string {
-  return createHash('sha256')
-    .update(JSON.stringify([...ids].sort()))
-    .digest('hex');
+function readModelIdList(value: unknown): string[] | undefined {
+  return Array.isArray(value) &&
+    value.every((id): id is string => typeof id === 'string')
+    ? value
+    : undefined;
+}
+
+function sameModelIds(a: readonly string[], b: readonly string[] | undefined) {
+  return (
+    b !== undefined && a.length === b.length && a.every((id, i) => id === b[i])
+  );
+}
+
+function isCooldownActive(postponedAt: unknown): boolean {
+  // Negative elapsed time (a backward clock jump) is treated as expired so
+  // the prompt is not suppressed until the wall clock catches up.
+  if (typeof postponedAt !== 'number') return false;
+  const elapsed = Date.now() - postponedAt;
+  return elapsed >= 0 && elapsed < LATER_COOLDOWN_MS;
 }
 
 function readInstalledOwnedModels(
@@ -257,16 +275,20 @@ function findAllPendingUpdates(
 
     // A "later" choice suppresses re-prompting for the same version while the
     // cooldown is active. A new version (postponedVersion mismatch) re-prompts.
-    // Negative elapsed time (a backward clock jump) is treated as expired so
-    // the prompt is not suppressed until the wall clock catches up.
+    // An up-to-date install is postponed per served-model set instead, which
+    // is only known after discovery.
+    const cooldownActive = isCooldownActive(metadata.postponedAt);
     if (
-      metadata.postponedVersion === currentVersion &&
-      typeof metadata.postponedAt === 'number' &&
-      Date.now() - metadata.postponedAt >= 0 &&
-      Date.now() - metadata.postponedAt < LATER_COOLDOWN_MS
+      !upToDate &&
+      cooldownActive &&
+      metadata.postponedVersion === currentVersion
     ) {
       continue;
     }
+    const storedServedModels = readModelIdList(metadata.servedModels);
+    const postponedServedModels = cooldownActive
+      ? readModelIdList(metadata.postponedServedModels)
+      : undefined;
 
     const existingModelIds = getInstalledOwnedModelIds(settings, provider);
     const newModelIds = provider.models!.map((s) => s.id);
@@ -278,9 +300,8 @@ function findAllPendingUpdates(
       baseUrl,
       currentVersion,
       upToDate,
-      ...(metadata.servedModels
-        ? { storedServedModels: metadata.servedModels }
-        : {}),
+      ...(storedServedModels ? { storedServedModels } : {}),
+      ...(postponedServedModels ? { postponedServedModels } : {}),
       existingModelIds,
       diff,
       ...(discoveryApiKey ? { discoveryApiKey } : {}),
@@ -319,14 +340,23 @@ async function narrowToServedModels(
   // one incomplete listing cannot drop the model in use. The preset can
   // still remove it.
   const currentModel = getCurrentModel();
-  const keepsCurrentModel = pending.existingModelIds.includes(currentModel);
+  const existingIds = new Set(pending.existingModelIds);
+  const keepsCurrentModel = existingIds.has(currentModel);
+  // An up-to-date install keeps the user's own selection: it only adds
+  // models that became served since the last check. Without a recorded
+  // check nothing is added, so a model left out in /auth is not offered.
+  const storedServed = new Set(pending.storedServedModels ?? servedBuiltInIds);
+  const offers = (id: string) =>
+    !pending.upToDate || existingIds.has(id) || !storedServed.has(id);
   const installModelIds = builtInIds.filter(
-    (id) => servedIds.has(id) || (keepsCurrentModel && id === currentModel),
+    (id) =>
+      (servedIds.has(id) && offers(id)) ||
+      (keepsCurrentModel && id === currentModel),
   );
   return {
     ...pending,
     installModelIds,
-    servedModels: fingerprintServedModels(servedBuiltInIds),
+    servedModels: [...servedBuiltInIds].sort(),
     diff: computeModelDiff(
       pending.existingModelIds,
       installModelIds,
@@ -448,8 +478,8 @@ export function useProviderUpdates(
             `${PROVIDER_METADATA_NS}.${pending.metadataKey}`
           ]!;
         providerState['version'] = pending.currentVersion;
-        // Unset when discovery did not narrow the list, which clears a
-        // fingerprint from an earlier key.
+        // Unset when discovery did not narrow the list, which clears the
+        // served models recorded for an earlier key.
         providerState['servedModels'] = pending.servedModels;
         delete installPlan.env;
         // Template updates never change the selected model.
@@ -551,32 +581,52 @@ export function useProviderUpdates(
             }
           } else if (choice === 'skip') {
             const persistScope = getPersistScopeForModelSelection(settings);
-            for (const p of pendingList) {
-              // For an up-to-date install, skipping accepts the served
-              // models as they are, so it is not asked again until they
-              // change.
-              settings.setValue(
-                persistScope,
-                p.upToDate
-                  ? `${PROVIDER_METADATA_NS}.${p.metadataKey}.servedModels`
-                  : `${PROVIDER_METADATA_NS}.${p.metadataKey}.ignoredVersion`,
-                p.upToDate ? p.servedModels : p.currentVersion,
+            try {
+              for (const p of pendingList) {
+                // For an up-to-date install, skipping accepts the served
+                // models as they are, so it is not asked again until they
+                // change.
+                settings.setValue(
+                  persistScope,
+                  p.upToDate
+                    ? `${PROVIDER_METADATA_NS}.${p.metadataKey}.servedModels`
+                    : `${PROVIDER_METADATA_NS}.${p.metadataKey}.ignoredVersion`,
+                  p.upToDate ? p.servedModels : p.currentVersion,
+                );
+              }
+            } catch (error) {
+              addItem(
+                {
+                  type: 'error',
+                  text: t('Failed to save the skipped update: {{message}}', {
+                    message: getErrorMessage(error),
+                  }),
+                },
+                Date.now(),
               );
             }
           } else if (choice === 'later') {
             // Persist a cooldown so "later" does not re-prompt on every launch.
             // One batched write keeps the version/timestamp pair atomic, so a
             // partial persist cannot invalidate the cooldown guard on next launch.
+            // An up-to-date install postpones its served-model set, so a later
+            // change to that set still prompts.
             const persistScope = getPersistScopeForModelSelection(settings);
             const postponedAt = Date.now();
             try {
               settings.setValues(
                 pendingList.flatMap((p) => [
-                  {
-                    scope: persistScope,
-                    key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedVersion`,
-                    value: p.currentVersion,
-                  },
+                  p.upToDate
+                    ? {
+                        scope: persistScope,
+                        key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedServedModels`,
+                        value: p.servedModels,
+                      }
+                    : {
+                        scope: persistScope,
+                        key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedVersion`,
+                        value: p.currentVersion,
+                      },
                   {
                     scope: persistScope,
                     key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedAt`,
@@ -645,25 +695,34 @@ export function useProviderUpdates(
               // Only a change in the served models matters here; without a
               // discovery result there is nothing to compare.
               if (!p.servedModels) continue;
-              if (p.servedModels === p.storedServedModels) continue;
+              if (sameModelIds(p.servedModels, p.storedServedModels)) continue;
+              if (sameModelIds(p.servedModels, p.postponedServedModels)) {
+                continue;
+              }
             }
             if (!isNarrowedUpdateNoop(settings, p)) {
               toPrompt.push(p);
               continue;
             }
             // Nothing changes for this key: record the version and served
-            // models without asking.
+            // models without asking, in one write.
             try {
-              settings.setValue(
-                persistScope,
-                `${PROVIDER_METADATA_NS}.${p.metadataKey}.version`,
-                p.currentVersion,
-              );
-              settings.setValue(
-                persistScope,
-                `${PROVIDER_METADATA_NS}.${p.metadataKey}.servedModels`,
-                p.servedModels,
-              );
+              settings.setValues([
+                ...(p.upToDate
+                  ? []
+                  : [
+                      {
+                        scope: persistScope,
+                        key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.version`,
+                        value: p.currentVersion,
+                      },
+                    ]),
+                {
+                  scope: persistScope,
+                  key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.servedModels`,
+                  value: p.servedModels,
+                },
+              ]);
             } catch (error) {
               addItem(
                 {
