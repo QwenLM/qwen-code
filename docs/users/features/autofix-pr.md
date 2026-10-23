@@ -53,7 +53,7 @@ Comments are acted on when their author is an owner, member or collaborator of t
 | ------------------------------------- | ----- | ------------------------ |
 | Pushes per watch                      | 10    | the watch stops          |
 | Re-runs of a failed check on one head | 1     | the next failure is real |
-| Attempts per review thread            | 1     | "Needs a human decision" |
+| Attempts per review comment           | 1     | not offered again        |
 | Pushes by someone else within a round | 2     | the watch stops          |
 
 ## Stopping and files

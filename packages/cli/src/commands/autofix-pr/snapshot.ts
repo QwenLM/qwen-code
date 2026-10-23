@@ -505,9 +505,16 @@ function commentEvents(
 
   // A review's inline comments arrive through its threads; only a review
   // with a body of its own says something the threads do not. A dismissed
-  // review was withdrawn, so it asks for nothing.
+  // review was withdrawn, and an approval's body ("LGTM") accepts the PR:
+  // neither asks for anything.
   for (const node of pr.reviews.nodes) {
-    if (node.state === 'PENDING' || node.state === 'DISMISSED') continue;
+    if (
+      node.state === 'PENDING' ||
+      node.state === 'DISMISSED' ||
+      node.state === 'APPROVED'
+    ) {
+      continue;
+    }
     if (!node.body.trim() || !isNew(node)) continue;
     const trust = classify(node, 'review', prAuthor);
     if (trust === 'ignore') continue;

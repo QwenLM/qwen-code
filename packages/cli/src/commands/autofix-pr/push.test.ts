@@ -448,6 +448,30 @@ describe('runPush (real git, bare remote)', () => {
     expect(state().baseRefName).toBe('release/2.0');
   });
 
+  it('pushes the one branch, never the tags its commit reaches', () => {
+    run(repo, 'config', 'push.followTags', 'true');
+    const fix = commitIn(paths.worktreePath, 'fix.txt');
+    run(paths.worktreePath, 'tag', '-a', '-m', 'local', 'local-only', fix);
+    expect(runPush(7)).toMatchObject({ pushed: true, sha: fix });
+    expect(run(remote, 'tag', '--list')).toBe('');
+  });
+
+  it('refuses a commit that only a graft file says builds on the PR head', () => {
+    // An orphan that drops the author's history, grafted onto the known
+    // head in the clone's common directory.
+    run(paths.worktreePath, 'checkout', '-q', '--orphan', 'tmp-orphan');
+    run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'orphan');
+    const orphan = run(paths.worktreePath, 'rev-parse', 'HEAD');
+    run(paths.worktreePath, 'checkout', '-q', paths.branch);
+    run(paths.worktreePath, 'reset', '-q', '--hard', orphan);
+    writeFileSync(
+      join(repo, '.git', 'info', 'grafts'),
+      `${orphan} ${featSha}\n`,
+    );
+    expect(() => runPush(7)).toThrow(/does not build on the PR head/);
+    expect(remoteFeat()).toBe(featSha);
+  });
+
   it('refuses a watch owned by another session', () => {
     commitIn(paths.worktreePath, 'fix.txt');
     process.env['QWEN_CODE_SESSION_ID'] = 'session-b';

@@ -55,6 +55,9 @@ export interface SyncOutcome {
   dropped?: number;
   /** `--discard` threw away uncommitted changes as well. */
   discardedChanges?: true;
+  /** Commits the worktree holds that the PR does not: a round's work not
+   * pushed yet — or left behind by a round that never ended. */
+  unpushed?: number;
 }
 
 export function runSync(prNumber: number, discard = false): SyncOutcome {
@@ -231,7 +234,7 @@ function syncLocked(
       headSha: prHead,
       moved,
       ...(dropped === undefined ? {} : { dropped }),
-      reason: `${worktree} is not clean after moving to ${prHead.slice(0, 12)} (a submodule git could not update?); run \`qwen autofix-pr sync ${prNumber} --discard\``,
+      reason: `${worktree} is not clean at ${prHead.slice(0, 12)}: it has uncommitted or untracked files, or a submodule git could not move; run \`qwen autofix-pr sync ${prNumber} --discard\``,
     };
   }
   return {
@@ -240,6 +243,7 @@ function syncLocked(
     moved,
     ...(dropped === undefined ? {} : { dropped }),
     ...(discardedChanges ? { discardedChanges: true as const } : {}),
+    ...(!discard && dropped === undefined && own > 0 ? { unpushed: own } : {}),
   };
 }
 

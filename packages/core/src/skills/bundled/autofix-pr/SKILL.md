@@ -54,7 +54,7 @@ Read the arguments from `<skill-args>`:
 
 A round handles everything outstanding on the PR at once. When a scheduled fire starts it, the gate output that came with the fire only says that something changed: read the PR's state from `snapshot` below, which has the full comment bodies and knows what earlier rounds handled.
 
-1. Run `"${QWEN_CODE_CLI:-qwen}" autofix-pr sync <n>` first: it follows a push or a rollback the author made since the last round, which the GitHub API may not show yet, so the worktree starts at the PR's real head. If it says the PR is not prepared here, the watch was cleaned up: delete this PR's scheduled task (Section "Stop", step 1) and end. If it says the PR was merged or closed, go to `stop` below. If it refuses over uncommitted changes, or answers `action: "merge"` or `synced: false`, an earlier round left work behind: run `sync <n> --discard` instead. If that answers `synced: false`, the worktree cannot be cleaned: Section "Stop" with its `reason`.
+1. Run `"${QWEN_CODE_CLI:-qwen}" autofix-pr sync <n>` first: it follows a push or a rollback the author made since the last round, which the GitHub API may not show yet, so the worktree starts at the PR's real head. If it says the PR is not prepared here, the watch was cleaned up: delete this PR's scheduled task (Section "Stop", step 1) and end. If it says the PR was merged or closed, go to `stop` below. If it refuses over uncommitted changes, or answers `action: "merge"`, `synced: false` or `unpushed` commits, an earlier round left work behind that nothing answered: run `sync <n> --discard` instead. If that answers `synced: false`, the worktree cannot be cleaned: Section "Stop" with its `reason`.
    Then run `"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot <n>`.
 2. Act on `action`:
    - **`stop`** (merged or closed) → Section "Stop", then one line: the outcome and the pushes made.
@@ -87,7 +87,7 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
    ## What to do
 
    - Conflict: `git fetch <remote> <baseRefName>` then
-     `git merge <remote>/<baseRefName>` — merge, never rebase — and resolve.
+     `git merge FETCH_HEAD` — merge, never rebase — and resolve.
    - Failed check: read its log. A defect in the PR's code or tests → fix it.
      A failure outside the PR (network, runner, an unrelated flaky test) →
      change nothing for it and report `rerun`.
@@ -111,9 +111,11 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
    fixed. Stage the files you changed by name — never `git add -A` or
    `git commit -a` — and never commit a submodule (gitlink) change the fix
    does not need: after a merge a checked-out submodule can show as
-   modified only because it was not moved along. If you cannot make the
-   checks pass, say so (`verified: false`) and leave the worktree as it is:
-   the round discards it.
+   modified only because it was not moved along. Then delete the files
+   your checks created that git does not ignore (reports, coverage): the
+   worktree must be clean to push. If you cannot make the checks pass, say
+   so (`verified: false`) and leave the worktree as it is: the round
+   discards it.
 
    ## Answer
 
@@ -127,7 +129,7 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
 
    Read `remote` and `baseRefName` from the state file `.qwen/tmp/autofix-pr-<n>-state.json` beside the worktree.
 
-5. **Fix** with one `agent` call: `working_dir` = `worktreePath`, `description` = `autofix-pr #<n> round`, prompt = "Read <brief path> and follow it exactly." Wait for it to finish; do not start another round meanwhile.
+5. **Fix** with one `agent` call: `subagent_type` = `general-purpose` (`working_dir` requires one), `working_dir` = `worktreePath`, `description` = `autofix-pr #<n> round`, prompt = "Read <brief path> and follow it exactly." Wait for it to finish; do not start another round meanwhile.
 6. **Re-runs and push.**
    - An item with outcome `rerun` whose check has no `runId` (an external status) cannot be re-run from here: it is `needs_human`, and its `key` goes into `handledChecks`.
    - For the items with outcome `rerun`, once per distinct `runId` (one re-run covers every failed job of its run): `"${QWEN_CODE_CLI:-qwen}" autofix-pr rerun <n> <runId>`. Its answers:
@@ -137,12 +139,12 @@ A round handles everything outstanding on the PR at once. When a scheduled fire 
      - `action: "resync"` → the PR head moved during the round: restart from step 1 (the same once-per-turn limit).
      - an error (GitHub refused or did not answer) → nothing was re-run for sure: its items are `needs_human`, and their `key`s go into `handledChecks`.
    - If `commits` is not empty and `verified` is true: run `sync <n>` first — a merge the agent made moves the gitlinks but not the checked-out submodules, which `sync` moves along, and `push` refuses a worktree that is not clean. Any answer but `synced: true` with no `dropped` is handled as under `action: "resync"` below. Then `"${QWEN_CODE_CLI:-qwen}" autofix-pr push <n>`, with the shell tool's `timeout` set to 600000: pre-push hooks may run a test suite, and the helper gives them nine minutes.
-     - `pushed: true` → keep `sha`.
+     - `pushed: true` → keep `sha`. When `pushes` has reached `maxPushes`, this round is the watch's last: reply as step 7 says, then Section "Stop" with the reason "used its <maxPushes> pushes".
      - `pushed: false` with no `action` (nothing to push) → the agent's commits are not in the worktree: nothing was pushed, so the items it claimed fixed are `needs_human` ("my fix left no commit").
      - `action: "resync"` → someone pushed while the round ran, or the branch already holds the round's commit; run `sync <n>`:
        - `synced: true` with no `dropped` → the worktree contains the new head: run `push <n>` once more. If it answers "nothing to push", the round's commits are already on the PR — `sync`'s `headSha` contains them (an earlier push whose answer was lost, or someone pushed them): they count as pushed at that head, and the items they fixed are answered as fixed.
        - `synced: false` with no `action` (with or without `dropped`) → the worktree could not follow the new head: run `sync <n> --discard`, then start the round over from step 1 as for `dropped` — once per turn; the second time, report it and end the round.
-       - `action: "merge"` → run one more `agent` call in the worktree: merge the commit `sync` named (never rebase), resolve, re-run the same verification, commit (the same staging rules as the brief); then `sync <n>`. If it answers `synced: false`, nothing is pushed this round: run `sync <n> --discard` and report it. Otherwise `push <n>` once more; if that does not push, nothing is pushed this round: report it.
+       - `action: "merge"` → run one more `agent` call in the worktree (the same `subagent_type` and `working_dir`): merge the commit `sync` named (never rebase), resolve, re-run the same verification, commit (the same staging rules as the brief); then `sync <n>`. If it answers `synced: false`, nothing is pushed this round: run `sync <n> --discard` and report it. Otherwise `push <n>` once more; if that does not push, nothing is pushed this round: report it.
        - `dropped` → the author rewrote the PR's history, and the round's commits were made on the old one. Nothing is pushed or recorded. The gate will not report the same events again, so start the round over from step 1 now, on the new head — once per turn; a second rewrite ends the round with a report. (The `dropped` that `sync --discard` reports is expected and needs nothing.)
      - `action: "stop"` → Section "Stop" with its `reason`.
      - A refusal (a pre-push hook failed, uncommitted changes) → nothing is pushed: report it, and answer the items the push would have fixed as `needs_human` with the reason.

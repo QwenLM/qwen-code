@@ -275,9 +275,10 @@ Event rules:
   `postedCommentIds`, and it is not one of the tool's replies: a comment by
   the viewer whose body ends with the reply marker (Section 9). A marker
   anywhere else — someone quoting a reply — does not hide a comment.
-  Resolved threads, empty or pending reviews, and dismissed reviews (a
-  dismissed review was withdrawn) are skipped; outdated threads are kept
-  with `outdated: true`.
+  Resolved threads, empty or pending reviews, approvals (their body accepts
+  the PR; their inline comments still arrive as threads) and dismissed
+  reviews (a dismissed review was withdrawn) are skipped; outdated threads
+  are kept with `outdated: true`.
 - A head SHA that differs from `lastKnownHeadSha` is `head_moved_externally`
   when the branch itself (`git ls-remote` on the push target) has left the
   known head too — a rollback to a head the watch pushed earlier included;
@@ -404,7 +405,10 @@ from the worktree, with nine minutes for pre-push hooks (the skill gives the
 shell call the tool's longest timeout, ten, so the helper still records the
 outcome). `<sha>` is the commit
 the checks above passed, not `HEAD`, which could move while GitHub is asked.
-Hooks run, and there is no `--force` or `--no-verify`. On success it records
+Hooks run, and there is no `--force` or `--no-verify`. Only that one ref
+is pushed: `--no-follow-tags` and `--recurse-submodules=no` keep
+`push.followTags` and `push.recurseSubmodules` from sending tags or
+submodule branches along. On success it records
 the new SHA in `pushedShas` and `lastKnownHeadSha` and counts one push. A
 rejected lease (`[rejected] (stale info)`, or a remote branch that
 `git ls-remote` no longer finds at the known head, whatever language git
@@ -587,7 +591,10 @@ checkout is untouched), and checks the worktree as `push` does. Then:
   An unpushed attempt made on the old history is reported as `dropped`;
 - a head built on the known one that the worktree already contains (a round
   merged it) is recorded as `lastKnownHeadSha`, and the checked-out
-  submodules are moved along as described below;
+  submodules are moved along as described below. The answer carries
+  `unpushed`, the number of commits the worktree holds that the PR does
+  not: a round's own work, or work a round that never ended left behind,
+  which the skill discards before a round starts;
 - a worktree behind it is fast-forwarded, when it is clean;
 - a worktree with unpushed commits of a round is not touched: the answer is
   `{"synced": false, "action": "merge"}` with the head to merge (never
@@ -770,7 +777,12 @@ The helpers check where a push goes and that it builds on the PR head, not
 what the round's commits contain: a fix that moves a submodule pointer, for
 one, is pushed like any other change. The brief tells the fix agent to stage
 only the files it changed and never to commit a gitlink change the fix does
-not need; the PR's review sees the rest.
+not need; the PR's review sees the rest. Nor do the helpers contain a fix
+agent that turns against them: it runs commands with the user's own
+credentials, as any tool the user runs does. They keep the session's own
+steps, and an edited state file, from pushing anywhere else or rewriting the
+PR's history, reading history as git stores it: replace refs and a graft
+file are ignored.
 
 A comment is actionable when its author is:
 
@@ -793,7 +805,8 @@ editing CI configuration to skip, disable or weaken checks; deleting or
 weakening tests to make them pass; force-pushing; and changes unrelated to the
 PR. Such requests get a "needs a human decision" reply.
 
-Loop guards for bots: each review thread gets one fix attempt, and pushes are
+Loop guards for bots: each review comment gets one fix attempt (a new
+comment in a thread already answered is a new request), and pushes are
 capped (Section 10). A bot that re-reviews every push therefore cannot keep the
 loop running forever.
 
@@ -840,7 +853,7 @@ Budgets, stored in the state file:
 | ---------------------------------------------------- | ------- | ------------------------------ |
 | Fix attempts per failing check without turning green | 3       | stop the loop                  |
 | Re-runs per check per head SHA                       | 1       | treat the next failure as real |
-| Fix attempts per review thread                       | 1       | reply "needs a human decision" |
+| Fix attempts per review comment                      | 1       | never offered again            |
 | Pushes per start                                     | 10      | stop the loop                  |
 | Consecutive external head moves                      | 2       | stop the loop                  |
 | Minutes one fix attempt may run                      | 30      | count it failed, clear it      |
@@ -891,7 +904,9 @@ Validation:
 - Push guard tests against a local bare repository: non-fast-forward refusal,
   default-branch refusal, lease rejection after an external push.
 - An integration test with a fake `gh` on `PATH` that drives `prepare` →
-  `snapshot` → `push` → `reply` → `cleanup`.
+  `snapshot` → `push` → `reply` → `cleanup` — not written yet; each helper
+  is tested on its own against real git with a bare remote and a stubbed
+  `gh`.
 - Manual end-to-end on a sandbox repository: a failing test is fixed and
   pushed; a collaborator comment is fixed and answered; a stranger's comment is
   ignored; merging the PR ends the loop and removes the worktree.
@@ -921,8 +936,9 @@ Delivery plan:
    agent runs in the foreground: the session waits for it, so no fire can
    start a second attempt and `inFlight` is not needed yet. The budgets it
    enforces are the pushes per start (`push`), one re-run per check and head
-   (`rerun`), and one attempt per review thread (every comment a round
-   handled is recorded, whatever its outcome); two resyncs within one round
+   (`rerun`), and one attempt per review comment (every comment a round
+   handled is recorded, whatever its outcome; the round after the last
+   push is the watch's last); two resyncs within one round
    stop the watch, and a round whose work was not pushed ends with
    `sync --discard`, so the next one does not build on it. The sandbox rule of
    Section 8 is applied at the start, and each round starts with `sync`, so

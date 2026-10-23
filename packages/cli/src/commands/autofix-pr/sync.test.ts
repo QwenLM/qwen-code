@@ -195,6 +195,23 @@ describe('runSync (real git, bare remote)', () => {
     expect(known()).toBe(featSha);
   });
 
+  it('reports the commits a round left unpushed, so the next round does not push them', () => {
+    // A turn ended after the fix agent committed and before the push.
+    commitIn(paths.worktreePath, 'leftover.txt');
+    expect(runSync(7)).toEqual({
+      synced: true,
+      headSha: featSha,
+      moved: false,
+      unpushed: 1,
+    });
+    expect(runSync(7, true)).toMatchObject({ synced: true, dropped: 1 });
+    expect(runSync(7)).toEqual({
+      synced: true,
+      headSha: featSha,
+      moved: false,
+    });
+  });
+
   it('counts as dropped only what the round made, not the PR commits it merged', () => {
     commitIn(paths.worktreePath, 'ours1.txt');
     commitIn(paths.worktreePath, 'ours2.txt');
@@ -226,7 +243,12 @@ describe('runSync (real git, bare remote)', () => {
     const theirs = pushFromElsewhere('theirs.txt');
     run(paths.worktreePath, 'merge', '-q', '--no-edit', theirs);
     const merged = worktreeHead();
-    expect(runSync(7)).toEqual({ synced: true, headSha: theirs, moved: true });
+    expect(runSync(7)).toEqual({
+      synced: true,
+      headSha: theirs,
+      moved: true,
+      unpushed: 2,
+    });
     expect(worktreeHead()).toBe(merged);
     expect(known()).toBe(theirs);
   });

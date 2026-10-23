@@ -686,13 +686,17 @@ describe('buildSnapshot', () => {
     ]);
   });
 
-  it('reports reviews with a body and skips empty or pending ones', () => {
+  it('reports reviews with a body and skips empty, pending or approving ones', () => {
     const snap = buildSnapshot(
       pr({
         reviews: {
           pageInfo: { hasPreviousPage: false },
           nodes: [
-            comment('R1', 'a', 'MEMBER', { body: '', state: 'APPROVED' }),
+            comment('R1', 'a', 'MEMBER', { body: '', state: 'COMMENTED' }),
+            comment('R4', 'a', 'MEMBER', {
+              body: 'LGTM, thanks!',
+              state: 'APPROVED',
+            }),
             comment('R2', 'a', 'MEMBER', { state: 'PENDING' }),
             comment('R3', 'review-bot', 'NONE', {
               bot: true,

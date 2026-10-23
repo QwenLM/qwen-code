@@ -184,6 +184,10 @@ function pushRef(
         worktreePath,
         'push',
         '--porcelain',
+        // Only the one ref: `push.followTags` would send the annotated tags
+        // the commit reaches, `push.recurseSubmodules` submodule branches.
+        '--no-follow-tags',
+        '--recurse-submodules=no',
         target,
         // The commit that was checked, not `HEAD`: the worktree may move
         // while GitHub is asked, and the lease alone would let a commit

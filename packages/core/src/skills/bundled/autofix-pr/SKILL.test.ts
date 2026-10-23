@@ -15,6 +15,7 @@ import {
 import { PermissionManager } from '../../../permissions/permission-manager.js';
 import { applySkillAllowedTools } from '../../../tools/skill-utils.js';
 import { parseSkillContent } from '../../skill-load.js';
+import { BuiltinAgentRegistry } from '../../../subagents/builtin-agents.js';
 
 const PROJECT = '/work/repo';
 
@@ -143,5 +144,11 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain(
       '`prompt`: `Run /autofix-pr tick <owner>/<repo>#<n>`',
     );
+  });
+
+  it('names a built-in subagent type for the fix agent, as working_dir requires', () => {
+    const { body } = loadSkill();
+    expect(body).toContain('`subagent_type` = `general-purpose`');
+    expect(BuiltinAgentRegistry.isBuiltinAgent('general-purpose')).toBe(true);
   });
 });
