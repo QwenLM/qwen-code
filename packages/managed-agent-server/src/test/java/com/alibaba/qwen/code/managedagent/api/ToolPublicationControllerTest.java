@@ -193,7 +193,7 @@ class ToolPublicationControllerTest {
         ToolPublicationStore grants = new ToolPublicationStore(jdbc, manager, sessions,
                 mock(ToolExecutionRepository.class), mock(RuntimeBindingRepository.class),
                 new ToolPublicationStore.Capacity(1024L * 1024 * 1024,
-                        1024L * 1024 * 1024, 1024L * 1024 * 1024, 4), false);
+                        1024L * 1024 * 1024, 1024L * 1024 * 1024, 4));
         ToolPublicationDataStore data = new ToolPublicationDataStore(jdbc, manager, grants,
                 sessions, mock(ToolPublicationObjectStore.class), Duration.ofSeconds(10),
                 Duration.ofSeconds(5), new ToolPublicationDataStore.VerificationBudget(

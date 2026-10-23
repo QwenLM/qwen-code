@@ -96,7 +96,9 @@ public final class AgentDefinitionExtensions {
 
     public static List<Map<String, Object>> mcpServers(Object value, String profile) {
         List<?> entries = list(value, "mcp_servers");
-        if (entries.size() > 16 || entries.isEmpty() == WorkspaceToolProfiles.MCP.equals(profile)) {
+        if (entries.size() > 16 || entries.isEmpty() && WorkspaceToolProfiles.MCP.equals(profile)
+                || !entries.isEmpty() && !WorkspaceToolProfiles.MCP.equals(profile)
+                        && !WorkspaceToolProfiles.SHELL.equals(profile)) {
             throw unsupported("mcp_servers");
         }
         List<Map<String, Object>> result = new ArrayList<>();

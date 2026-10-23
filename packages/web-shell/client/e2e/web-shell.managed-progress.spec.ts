@@ -61,6 +61,9 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
       sessionId: SESSION_ID,
       turnId: summary.activeTurn!.turnId,
       type,
+      ...(type.startsWith('item.tool_')
+        ? { itemId: String(data.itemId ?? data.toolCallId) }
+        : {}),
       data,
       terminal: ['turn.completed', 'turn.cancelled'].includes(type),
     });
@@ -88,6 +91,7 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
     if (path === '/sessions/get') return respond(summary);
     if (path === '/transcript/query')
       return respond({
+        items: [],
         events,
         lastSequence: summary.lastSequence,
         hasMore: false,
@@ -140,6 +144,9 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
           turnId: summary.activeTurn!.turnId,
           status: 'accepted',
           replayed: false,
+          operationId: `operation-${summary.activeTurn!.turnId}`,
+          admissionStage: 'java_durable',
+          deliveryState: 'pending',
         },
         202,
       );
@@ -154,9 +161,22 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
           turnId: body.turnId,
           status: 'accepted',
           replayed: false,
+          operationId: `operation-${summary.activeTurn!.turnId}`,
+          admissionStage: 'java_durable',
+          deliveryState: 'pending',
         },
         202,
       );
+    }
+    if (path === '/operations/query') {
+      return respond({
+        sessionId: SESSION_ID,
+        operationId: body.operationId,
+        type: 'cancel',
+        status:
+          summary.activeTurn?.status === 'cancelled' ? 'completed' : 'running',
+        replayed: false,
+      });
     }
     return respond({ error: `Unexpected Managed request: ${path}` }, 500);
   });

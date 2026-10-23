@@ -763,15 +763,16 @@ describe('standalone release packaging', () => {
     expect(allowedBlock).not.toBeNull();
     expect(npmOnlyBlock).not.toBeNull();
     for (const entry of entries) {
-      if (entry.includes('*')) {
+      const topLevelEntry = entry.split('/')[0];
+      if (topLevelEntry.includes('*')) {
         // Glob entries (today: '*.sb') are covered by
         // DIST_ALLOWED_ENTRY_PATTERNS rather than a literal name.
         expect(packageScript).toContain('DIST_ALLOWED_ENTRY_PATTERNS');
         continue;
       }
       const known =
-        allowedBlock[1].includes(`'${entry}'`) ||
-        npmOnlyBlock[1].includes(`'${entry}'`);
+        allowedBlock[1].includes(`'${topLevelEntry}'`) ||
+        npmOnlyBlock[1].includes(`'${topLevelEntry}'`);
       expect(known, `npm files entry '${entry}' unknown to packager`).toBe(
         true,
       );
