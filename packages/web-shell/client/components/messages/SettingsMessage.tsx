@@ -68,6 +68,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../ui/select';
+import { Popover, PopoverAnchor, PopoverContent } from '../ui/popover';
 import { Separator } from '../ui/separator';
 import { Spinner } from '../ui/spinner';
 import { Switch } from '../ui/switch';
@@ -355,6 +356,163 @@ function SettingsRow({
   );
 }
 
+// A commit may be rejected (busy session, failed command). The saved value
+// does not change in that case, so the draft has to be restored explicitly.
+function applyCommitResult(result: unknown, restore: () => void): void {
+  if (result && typeof (result as Promise<unknown>).then === 'function') {
+    void (result as Promise<unknown>).then(
+      (applied) => {
+        if (applied === false) restore();
+      },
+      () => restore(),
+    );
+    return;
+  }
+  if (result === false) restore();
+}
+
+function OutputLanguageCombobox({
+  name,
+  label,
+  value,
+  options,
+  disabled,
+  placeholder,
+  onCommit,
+}: {
+  name: string;
+  label: string;
+  value: string;
+  options: ReadonlyArray<{ value: string | number; label: string }>;
+  disabled: boolean;
+  placeholder: string;
+  onCommit: (value: string) => unknown;
+}) {
+  const { t } = useI18n();
+  const currentValue = value;
+  const [draft, setDraft] = useState(currentValue);
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const listId = `${name}-options`;
+
+  useEffect(() => setDraft(currentValue), [currentValue]);
+
+  const items = useMemo(() => {
+    const all = [
+      { value: '', label: placeholder },
+      ...options.map((option) => ({
+        value: String(option.value),
+        label: option.label,
+      })),
+    ];
+    const query = draft.trim().toLowerCase();
+    // Opening on the saved value shows every suggestion; only an edited draft
+    // narrows the list.
+    if (!query || query === currentValue.trim().toLowerCase()) return all;
+    const matches = all.filter(
+      (item) =>
+        item.value.toLowerCase().includes(query) ||
+        item.label.toLowerCase().includes(query),
+    );
+    if (matches.length > 0) return matches;
+    // The setting accepts any language name, so an unmatched draft stays
+    // selectable as free-form input.
+    return [
+      {
+        value: draft.trim(),
+        label: t('settings.option.general.outputLanguage.useCustom', {
+          value: draft.trim(),
+        }),
+      },
+    ];
+  }, [currentValue, draft, options, placeholder, t]);
+
+  const commit = (next: string) => {
+    setOpen(false);
+    const trimmed = next.trim();
+    if (trimmed === currentValue.trim()) {
+      setDraft(currentValue);
+      return;
+    }
+    applyCommitResult(onCommit(trimmed), () => setDraft(currentValue));
+  };
+
+  return (
+    <Popover open={open && !disabled} onOpenChange={setOpen}>
+      <PopoverAnchor asChild>
+        <Input
+          role="combobox"
+          name={name}
+          autoComplete="off"
+          aria-label={label}
+          aria-expanded={open}
+          aria-controls={listId}
+          aria-autocomplete="list"
+          aria-activedescendant={
+            open && items[activeIndex] ? `${listId}-${activeIndex}` : undefined
+          }
+          value={draft}
+          disabled={disabled}
+          placeholder={placeholder}
+          className="w-[min(200px,50vw)] max-md:w-full"
+          onChange={(event) => {
+            setDraft(event.target.value);
+            setActiveIndex(0);
+            setOpen(true);
+          }}
+          onFocus={() => setOpen(true)}
+          onBlur={() => commit(draft)}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowDown') {
+              event.preventDefault();
+              setOpen(true);
+              setActiveIndex((index) => Math.min(index + 1, items.length - 1));
+            } else if (event.key === 'ArrowUp') {
+              event.preventDefault();
+              setActiveIndex((index) => Math.max(index - 1, 0));
+            } else if (event.key === 'Enter') {
+              event.preventDefault();
+              commit(open ? (items[activeIndex]?.value ?? draft) : draft);
+            } else if (event.key === 'Escape') {
+              event.preventDefault();
+              setOpen(false);
+              setDraft(currentValue);
+            }
+          }}
+        />
+      </PopoverAnchor>
+      <PopoverContent
+        align="start"
+        className="w-[min(240px,80vw)] p-1"
+        onOpenAutoFocus={(event) => event.preventDefault()}
+        // Keep focus in the input so picking an item does not commit the typed
+        // draft first.
+        onMouseDown={(event) => event.preventDefault()}
+      >
+        <div role="listbox" id={listId} className="max-h-64 overflow-y-auto">
+          {items.map((item, index) => (
+            <div
+              key={item.value || 'auto'}
+              id={`${listId}-${index}`}
+              role="option"
+              aria-selected={index === activeIndex}
+              className={`flex w-full cursor-pointer items-center rounded-sm px-2 py-1.5 text-left text-sm ${
+                index === activeIndex
+                  ? 'bg-accent text-accent-foreground'
+                  : 'hover:bg-accent/60'
+              }`}
+              onMouseEnter={() => setActiveIndex(index)}
+              onClick={() => commit(item.value)}
+            >
+              <span className="truncate">{item.label}</span>
+            </div>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function SettingInput({
   name,
   label,
@@ -381,21 +539,6 @@ function SettingInput({
 
   useEffect(() => setDraft(currentValue), [currentValue]);
 
-  // A commit may be rejected (busy session, failed command). The saved value
-  // does not change in that case, so the draft has to be restored explicitly.
-  const applyCommitResult = (result: unknown) => {
-    if (result && typeof (result as Promise<unknown>).then === 'function') {
-      void (result as Promise<unknown>).then(
-        (applied) => {
-          if (applied === false) setDraft(currentValue);
-        },
-        () => setDraft(currentValue),
-      );
-      return;
-    }
-    if (result === false) setDraft(currentValue);
-  };
-
   const commit = () => {
     if (type === 'number') {
       const trimmed = draft.trim();
@@ -405,10 +548,14 @@ function SettingInput({
         onInvalid();
         return;
       }
-      if (parsed !== value) applyCommitResult(onCommit(parsed));
+      if (parsed !== value) {
+        applyCommitResult(onCommit(parsed), () => setDraft(currentValue));
+      }
       return;
     }
-    if (draft !== currentValue) applyCommitResult(onCommit(draft));
+    if (draft !== currentValue) {
+      applyCommitResult(onCommit(draft), () => setDraft(currentValue));
+    }
   };
 
   return (
@@ -747,19 +894,18 @@ export function SettingsMessage({
     if (setting.key === OUTPUT_LANGUAGE_SETTING_KEY) {
       // Model output language is a user-level preference applied by the
       // language command (which rewrites output-language.md and refreshes
-      // running sessions); an empty value means follow the user's input.
+      // running sessions); an empty value means follow the user's input. The
+      // combobox offers the supported names but still accepts any language.
       const effective = String(value ?? '').trim();
       return (
-        <SettingInput
+        <OutputLanguageCombobox
           name={setting.key}
           label={formatSettingLabel(setting, t)}
-          type="text"
           value={effective.toLowerCase() === 'auto' ? '' : effective}
+          options={setting.options ?? []}
           placeholder={t('settings.placeholder.general.outputLanguage')}
-          className="w-[min(200px,50vw)] max-md:w-full"
           disabled={disabled}
           onCommit={(next) => onOutputLanguageChange(String(next ?? '').trim())}
-          onInvalid={() => setMessage(t('settings.invalidNumber'))}
         />
       );
     }

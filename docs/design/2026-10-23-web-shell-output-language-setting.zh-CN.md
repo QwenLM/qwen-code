@@ -46,15 +46,20 @@ Web Shell 设置面板通过 `general.language` 暴露界面语言，用 `en` / 
 （用户作用域与默认值合并后的结果），并保留 `values.user` /
 `values.workspace` 供通用作用域提示使用。
 
+descriptor 同时携带 `options`：来自 `SUPPORTED_LANGUAGES` 的语言名，形如
+`{ value: fullName, label: "nativeName (fullName)" }`。它们只是建议，不是白名单；
+该设置仍然接受任意语言名。
+
 旧版 daemon 不下发该 descriptor，面板相应地不渲染这一行，属于优雅降级。
 
 ### 写路径：language 命令
 
-Web Shell 用文本输入渲染这一行，因为该值是自由文本（`中文`、`English`、
-`日本語` 或 `auto` 等语言名），而不是界面语言下拉使用的固定 `en` / `zh-CN`
-两项。输入为空时显示 `auto（跟随输入）` 占位符。
+Web Shell 用 combobox 而不是固定下拉渲染这一行。该值是自由文本（`中文`、
+`English`、`日本語` 或 `auto` 等语言名），因此输入框仍接受手输；弹出列表展示
+daemon 下发的建议以提升可发现性。输入为空或选择第一项表示 `auto`（跟随用户
+输入语言）。
 
-提交输入后，通过与 `/language ui` 相同的会话命令通道发送
+提交后，通过与 `/language ui` 相同的会话命令通道发送
 `/language output <value>`（空值发送 `auto`）。daemon 侧命令会写入当前会话实际
 读取的 `output-language.md`（存在项目文件时为项目文件，否则为
 `~/.qwen/output-language.md`），在用户作用域持久化 `general.outputLanguage`，
@@ -87,14 +92,14 @@ Web Shell 用文本输入渲染这一行，因为该值是自由文本（`中文
 
 ## 改动面
 
-| 层        | 位置                                                                | 改动                                          |
-| --------- | ------------------------------------------------------------------- | --------------------------------------------- |
-| Daemon    | `packages/cli/src/serve/routes/workspace-settings.ts`               | `READ_ONLY_SETTINGS` 并入两个 GET 的 key 列表 |
-| Web Shell | `packages/web-shell/client/settings.ts`                             | 新增 `setting:output-language` 别名           |
-| Web Shell | `packages/web-shell/client/components/messages/SettingsMessage.tsx` | 文本控件、`auto` 占位符、仅用户作用域渲染     |
-| Web Shell | `packages/web-shell/client/App.tsx`                                 | 分发 `/language output` 并重新加载设置        |
-| Web Shell | `packages/web-shell/client/constants/localCommands.ts`              | 补全 `output` 子命令                          |
-| 测试      | daemon 路由与设置面板测试                                           | 只读 descriptor、拒绝写入、控件行为           |
+| 层        | 位置                                                                | 改动                                              |
+| --------- | ------------------------------------------------------------------- | ------------------------------------------------- |
+| Daemon    | `packages/cli/src/serve/routes/workspace-settings.ts`               | `READ_ONLY_SETTINGS` 并入两个 GET 的 key 列表     |
+| Web Shell | `packages/web-shell/client/settings.ts`                             | 新增 `setting:output-language` 别名               |
+| Web Shell | `packages/web-shell/client/components/messages/SettingsMessage.tsx` | combobox（语言建议 + 自由输入）、仅用户作用域渲染 |
+| Web Shell | `packages/web-shell/client/App.tsx`                                 | 分发 `/language output` 并重新加载设置            |
+| Web Shell | `packages/web-shell/client/constants/localCommands.ts`              | 补全 `output` 子命令                              |
+| 测试      | daemon 路由与设置面板测试                                           | 只读 descriptor、拒绝写入、控件行为               |
 
 ## 验证计划
 

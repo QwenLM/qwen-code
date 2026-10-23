@@ -51,17 +51,22 @@ restriction intact while giving hosts the effective value (user scope merged
 over defaults), including its `values.user` and `values.workspace` fields for
 the generic scope hints.
 
+The descriptor also carries `options`: the names from `SUPPORTED_LANGUAGES`
+as `{ value: fullName, label: "nativeName (fullName)" }`. They are suggestions,
+not a whitelist; the setting keeps accepting any language name.
+
 Older daemons simply do not serve the descriptor; the panel then renders no
 row, which degrades cleanly.
 
 ### Write path: the language command
 
-The Web Shell renders the row with a text input, because the value is free-form
-(a language name such as `中文`, `English`, `日本語`, or `auto`) rather than the
-fixed `en` / `zh-CN` pair used by the UI language select. An empty input is
-shown as the `auto (follow input)` placeholder.
+The Web Shell renders the row as a combobox rather than a fixed select. The
+value is free-form (a language name such as `中文`, `English`, `日本語`, or
+`auto`), so the input still accepts typed text; the popover exposes the
+served suggestions for discoverability. An empty input, or picking the first
+suggestion, means `auto` (follow the user's input language).
 
-Committing the input sends `/language output <value>` (an empty value sends
+Committing a value sends `/language output <value>` (an empty value sends
 `auto`) through the same session command channel used by `/language ui`. The
 daemon command writes the `output-language.md` the session actually reads (the
 project file when one exists, otherwise `~/.qwen/output-language.md`), persists
@@ -99,14 +104,14 @@ daemon that does not serve the key.
 
 ## Change surface
 
-| Layer     | Location                                                            | Change                                                  |
-| --------- | ------------------------------------------------------------------- | ------------------------------------------------------- |
-| Daemon    | `packages/cli/src/serve/routes/workspace-settings.ts`               | `READ_ONLY_SETTINGS` unioned into both GET key lists    |
-| Web Shell | `packages/web-shell/client/settings.ts`                             | `setting:output-language` alias                         |
-| Web Shell | `packages/web-shell/client/components/messages/SettingsMessage.tsx` | Text control, `auto` placeholder, user-scope-only row   |
-| Web Shell | `packages/web-shell/client/App.tsx`                                 | `/language output` dispatch and settings reload         |
-| Web Shell | `packages/web-shell/client/constants/localCommands.ts`              | `output` subcommand completion                          |
-| Tests     | daemon route and settings panel tests                               | Read-only descriptor, write rejection, control behavior |
+| Layer     | Location                                                            | Change                                                                   |
+| --------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Daemon    | `packages/cli/src/serve/routes/workspace-settings.ts`               | `READ_ONLY_SETTINGS` unioned into both GET key lists                     |
+| Web Shell | `packages/web-shell/client/settings.ts`                             | `setting:output-language` alias                                          |
+| Web Shell | `packages/web-shell/client/components/messages/SettingsMessage.tsx` | Combobox with language suggestions, free-form input, user-scope-only row |
+| Web Shell | `packages/web-shell/client/App.tsx`                                 | `/language output` dispatch and settings reload                          |
+| Web Shell | `packages/web-shell/client/constants/localCommands.ts`              | `output` subcommand completion                                           |
+| Tests     | daemon route and settings panel tests                               | Read-only descriptor, write rejection, control behavior                  |
 
 ## Validation plan
 

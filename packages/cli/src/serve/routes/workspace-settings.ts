@@ -26,6 +26,7 @@ import {
   WORKSPACE_RESTRICTED_SETTING_KEYS,
 } from '../../config/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { SUPPORTED_LANGUAGES } from '../../i18n/languages.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import {
@@ -68,6 +69,19 @@ const TUI_ONLY_SETTINGS = new Set([
 // sessions stale. The language command (`/language output`) is the only
 // supported write path.
 const READ_ONLY_SETTINGS = new Set(['general.outputLanguage']);
+
+// Suggestions for the output-language row. Values are the full names
+// `normalizeOutputLanguage` persists; hosts still accept free-form input
+// because the setting supports any language name.
+const OUTPUT_LANGUAGE_OPTIONS = SUPPORTED_LANGUAGES.map(
+  ({ fullName, nativeName }) => ({
+    value: fullName,
+    label:
+      nativeName && nativeName !== fullName
+        ? `${nativeName} (${fullName})`
+        : fullName,
+  }),
+);
 
 // `voiceModel`, `imageModel`, and `advisorModel` are `showInDialog: false` (so
 // not in the dialog allowlist), but the Web Shell settings panel still renders
@@ -244,6 +258,14 @@ function buildSettingsResponse(
       values.workspace = publicValue(wsVal);
     }
 
+    // `general.outputLanguage` declares no schema options, but hosts render a
+    // combobox, so it ships the supported language names as suggestions.
+    const options = def.options?.length
+      ? def.options
+      : key === 'general.outputLanguage'
+        ? OUTPUT_LANGUAGE_OPTIONS
+        : undefined;
+
     settings.push({
       key,
       type: def.type,
@@ -252,7 +274,7 @@ function buildSettingsResponse(
       ...(def.description ? { description: def.description } : {}),
       requiresRestart: def.requiresRestart,
       default: def.default,
-      ...(def.options?.length ? { options: def.options } : {}),
+      ...(options?.length ? { options } : {}),
       values,
     });
   }

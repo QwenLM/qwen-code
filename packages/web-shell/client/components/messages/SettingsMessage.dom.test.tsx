@@ -130,6 +130,11 @@ function outputLanguageSetting(effective: string): DaemonSettingDescriptor {
     category: 'General',
     requiresRestart: true,
     default: 'auto',
+    options: [
+      { value: 'Chinese', label: '中文 (Chinese)' },
+      { value: 'English', label: 'English' },
+      { value: 'Japanese', label: '日本語 (Japanese)' },
+    ],
     values: { effective },
   };
 }
@@ -618,6 +623,61 @@ describe('SettingsMessage user-scope editing', () => {
 
     expect(onOutputLanguageChange).toHaveBeenCalledWith('French');
     expect(input?.value).toBe('English');
+  });
+
+  it('offers output language suggestions and commits a picked one', async () => {
+    const onOutputLanguageChange = vi.fn();
+    const container = renderPanel(
+      makeState([outputLanguageSetting('auto')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+    await act(async () => {
+      input!.focus();
+      await Promise.resolve();
+    });
+
+    const option = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((node) => node.textContent === '中文 (Chinese)');
+    expect(option).toBeTruthy();
+    await act(async () => {
+      option!.click();
+      await Promise.resolve();
+    });
+
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('Chinese');
+  });
+
+  it('keeps free-form output languages that have no suggestion', async () => {
+    const onOutputLanguageChange = vi.fn();
+    const container = renderPanel(
+      makeState([outputLanguageSetting('auto')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Klingon');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('Klingon');
   });
 
   it('still persists to workspace scope on the default (Workspace) tab', async () => {

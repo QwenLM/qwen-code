@@ -926,6 +926,18 @@ describe('POST /workspace/settings', () => {
       (setting: { key?: string }) => setting.key === 'general.outputLanguage',
     );
     expect(descriptor?.values.effective).toBe('中文');
+    expect(descriptor?.options).toEqual(
+      expect.arrayContaining([
+        { value: 'Chinese', label: '中文 (Chinese)' },
+        { value: 'English', label: 'English' },
+      ]),
+    );
+    // Suggestions carry the full names the command persists, not locale codes.
+    expect(
+      (descriptor?.options ?? []).map(
+        (option: { value: string }) => option.value,
+      ),
+    ).not.toContain('zh');
 
     // Persisting this key alone would leave output-language.md and running
     // sessions stale, so the language command stays the only write path.
