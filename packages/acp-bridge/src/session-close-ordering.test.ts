@@ -45,8 +45,8 @@ describe('session calls racing the transport', () => {
           (error: unknown) => error,
         );
       await requested.promise;
+      // Same job: any extra hop on the closed-signal side lets the reply win.
       transportFailure.reject(new Error('transport failed'));
-      await Promise.resolve();
       reply.resolve({});
       expect(await switching).toBeInstanceOf(BridgeChannelClosedError);
     } finally {

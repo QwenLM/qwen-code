@@ -5,10 +5,65 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import type { AcpChannel } from './channel.js';
+import { raceChannelUnavailable } from './channel-transport.js';
 import { makeBridge, makeChannel, WS_A } from './internal/testUtils.js';
 import { BridgeChannelClosedError, BridgeTimeoutError } from './status.js';
 
 describe('channel transport', () => {
+  it('races every operation against a single reaction on channel.exited', async () => {
+    const handle = makeChannel();
+    const exited: AcpChannel['exited'] = new Promise(() => {});
+    const then = exited.then.bind(exited);
+    let reactions = 0;
+    exited.then = ((...args: Parameters<typeof then>) => {
+      reactions += 1;
+      return then(...args);
+    }) as typeof exited.then;
+    const channel: AcpChannel = { ...handle.channel, exited };
+    try {
+      for (const value of [1, 2, 3]) {
+        await expect(
+          raceChannelUnavailable(
+            channel,
+            Promise.resolve(value),
+            'during test',
+          ),
+        ).resolves.toBe(value);
+      }
+      expect(reactions).toBe(1);
+    } finally {
+      await handle.channel.kill();
+    }
+  });
+
+  it('labels each closed-channel rejection with its own operation', async () => {
+    const handle = makeChannel();
+    handle.crash();
+    const pending = () => new Promise<never>(() => {});
+    try {
+      const load = raceChannelUnavailable(
+        handle.channel,
+        pending(),
+        'during session/load',
+      );
+      const cleanup = raceChannelUnavailable(
+        handle.channel,
+        pending(),
+        'during branchSession cleanup',
+      );
+      await expect(load).rejects.toBeInstanceOf(BridgeChannelClosedError);
+      await expect(load).rejects.toMatchObject({
+        context: 'during session/load',
+      });
+      await expect(cleanup).rejects.toMatchObject({
+        context: 'during branchSession cleanup',
+      });
+    } finally {
+      await handle.channel.kill();
+    }
+  });
+
   it('forces a hanging teardown at the configured deadline and retains its failure', async () => {
     vi.useFakeTimers();
     const handle = makeChannel();

@@ -38,6 +38,24 @@ async function finishCalls(
   return first!;
 }
 
+// The same for the array form, with a second work that never settles.
+async function finishArrayCalls(
+  longLived: Promise<never>,
+): Promise<WeakRef<object>> {
+  let first: WeakRef<object> | undefined;
+  for (let call = 0; call < 3; call++) {
+    const result = { call };
+    expect(
+      await raceLongLived(
+        [deferred<object>().promise, Promise.resolve(result)],
+        longLived,
+      ),
+    ).toBe(result);
+    first ??= new WeakRef(result);
+  }
+  return first!;
+}
+
 describe('raceLongLived', () => {
   it('leaves finished results collectable while the long-lived promise is pending', async ({
     skip,
@@ -97,6 +115,38 @@ describe('raceLongLived', () => {
     );
     fast.resolve('fast');
     await expect(raced).resolves.toBe('fast');
+  });
+
+  it('leaves finished results of several works collectable', async ({
+    skip,
+  }) => {
+    skip(
+      !(await nativeRaceRetainsValues()),
+      'native Promise.race does not retain finished values on this runtime',
+    );
+    const longLived = deferred<never>();
+    const finished = await finishArrayCalls(longLived.promise);
+    expect(await collectedAfterGc(finished)).toBe(true);
+    longLived.reject(new Error('closed'));
+  });
+
+  it('races several works with no extra hop, as Promise.race does', async () => {
+    const longLived = deferred<never>();
+    const works = [deferred<string>().promise, Promise.resolve('ack')];
+    const outcomes = [
+      Promise.race([...works, longLived.promise]),
+      raceLongLived(works, longLived.promise),
+    ].map((race) =>
+      race.then(
+        (value) => `resolved ${value}`,
+        (error: Error) => `rejected ${error.message}`,
+      ),
+    );
+    // Settles after both calls but before the settled work's reaction runs.
+    longLived.reject(new Error('closed'));
+    const [native, patched] = await Promise.all(outcomes);
+    expect(patched).toBe(native);
+    expect(patched).toBe('resolved ack');
   });
 
   it('passes through a failure of the work', async () => {
