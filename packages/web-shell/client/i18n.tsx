@@ -61,6 +61,11 @@ import {
   WORKSPACE_REGISTRATION_MESSAGES_ZH,
 } from './components/managed/managed-workspace-messages.js';
 
+import {
+  MANAGED_MCP_MESSAGES_EN,
+  MANAGED_MCP_MESSAGES_ZH,
+} from './components/managed/managed-mcp-messages.js';
+
 export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
 
 export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
@@ -158,6 +163,8 @@ const EN: Messages = {
   'managed.empty': 'No managed tasks yet.',
   'managed.loading': 'Loading…',
   'managed.more': 'Load more',
+  'managed.titleSearch': 'Search session titles',
+  'managed.titleSearchPlaceholder': 'Filter by title…',
   'managed.prompt': 'Message the managed agent',
   'managed.runtime': 'Environment',
   'managed.unavailable': 'Managed Agents is unavailable on this daemon.',
@@ -4525,6 +4532,7 @@ const EN: Messages = {
   ...MANAGED_TASK_MESSAGES_EN,
   ...MANAGED_LIFECYCLE_MESSAGES_EN,
   ...WORKSPACE_REGISTRATION_MESSAGES_EN,
+  ...MANAGED_MCP_MESSAGES_EN,
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
@@ -4607,6 +4615,8 @@ const ZH: Messages = {
   'managed.empty': '暂无托管任务。',
   'managed.loading': '加载中…',
   'managed.more': '加载更多',
+  'managed.titleSearch': '搜索会话标题',
+  'managed.titleSearchPlaceholder': '按标题筛选…',
   'managed.prompt': '向托管 Agent 发送消息',
   'managed.runtime': '执行环境',
   'managed.unavailable': '当前 daemon 未启用托管 Agent。',
@@ -8709,6 +8719,7 @@ const ZH: Messages = {
   ...MANAGED_TASK_MESSAGES_ZH,
   ...MANAGED_LIFECYCLE_MESSAGES_ZH,
   ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
+  ...MANAGED_MCP_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,

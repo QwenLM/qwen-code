@@ -181,7 +181,8 @@ function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
     if (
       hasPosixBracketExpression(jsPattern) ||
       hasLeadingBracketLiteral(jsPattern) ||
-      hasSedJavascriptDivergentEscape(jsPattern)
+      hasSedJavascriptDivergentEscape(jsPattern) ||
+      hasBracketCharacterEscape(sedInfo.pattern)
     ) {
       return false;
     }
@@ -228,6 +229,36 @@ function hasLeadingBracketLiteral(pattern: string): boolean {
 
 function hasSedJavascriptDivergentEscape(pattern: string): boolean {
   return /\\[<>dDwWsS]/u.test(pattern);
+}
+
+/**
+ * True when a bracket expression holds a character escape such as `\t`,
+ * `\n` or `\x41`. GNU sed expands these, so `[ \t]` is a space or a TAB;
+ * POSIX reads a backslash and a `t`, as the translation does. The seds
+ * disagree, so the caller declines the pattern and real sed runs it.
+ */
+function hasBracketCharacterEscape(pattern: string): boolean {
+  let inCharacterClass = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === '\\') {
+      const next = pattern[i + 1] ?? '';
+      if (inCharacterClass && /[ntrfvadoxc]/u.test(next)) {
+        return true;
+      }
+      // Inside a bracket only `\\` pairs up, so `[\\t]` ends in a plain `t`.
+      if (!inCharacterClass || next === '\\') {
+        i++;
+      }
+      continue;
+    }
+    if (char === '[') {
+      inCharacterClass = true;
+    } else if (char === ']') {
+      inCharacterClass = false;
+    }
+  }
+  return false;
 }
 
 function hasReplacementBackrefBeyondCaptures(
@@ -505,15 +536,13 @@ export function applySedSubstitution(
 function toJavascriptPattern(sedInfo: SedEditInfo): string {
   const pattern = unescapeSedDelimiter(sedInfo.pattern);
 
-  if (sedInfo.extendedRegex) {
-    return pattern;
-  }
-
   let jsPattern = '';
   let inCharacterClass = false;
   for (let i = 0; i < pattern.length; i++) {
     const char = pattern[i]!;
     if (inCharacterClass) {
+      // A backslash inside a bracket expression is a literal member in BRE
+      // and ERE alike, not an escape as in JS.
       if (char === '\\') {
         jsPattern += '\\\\';
         continue;
@@ -528,6 +557,16 @@ function toJavascriptPattern(sedInfo: SedEditInfo): string {
     if (char === '[') {
       inCharacterClass = true;
       jsPattern += char;
+      continue;
+    }
+
+    if (sedInfo.extendedRegex) {
+      if (char === '\\' && i + 1 < pattern.length) {
+        jsPattern += char + pattern[i + 1]!;
+        i++;
+      } else {
+        jsPattern += char;
+      }
       continue;
     }
 

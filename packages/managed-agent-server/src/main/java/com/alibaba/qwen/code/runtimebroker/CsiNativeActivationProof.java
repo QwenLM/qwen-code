@@ -1593,7 +1593,7 @@ public final class CsiNativeActivationProof {
         require(id(ref, "resourceId").equals(id(metadata, "latestCheckpointResourceId"))
                 && text(ref, "digest").equals(text(metadata, "contentDigest")));
         closed(state, Set.of("identity", "resume", "continuation", "attempt", "tools", "runtime", "approval",
-                "output", "followUp"));
+                "output", "followUp", "agentWait", "commandWait", "commandLock"));
         JsonNode identity = state.path("identity");
         closed(identity, Set.of("schemaVersion", "sessionKey", "engine", "checkpointId", "coveredSequence",
                 "activationId", "turnId", "promptId", "definitionRevision", "configRevision", "inputDigest",
@@ -1626,7 +1626,7 @@ public final class CsiNativeActivationProof {
         closed(continuation, Set.of("phase", "pendingEventIds"));
         require("before_model".equals(text(continuation, "phase")));
         emptyArrays(continuation, "pendingEventIds");
-        nullFields(state, "attempt", "tools", "runtime", "approval");
+        nullFields(state, "attempt", "tools", "runtime", "approval", "agentWait", "commandWait", "commandLock");
         JsonNode output = state.path("output");
         closed(output, Set.of("llmContentRef", "physicalStatus", "hookResultRef", "mediaRefs", "parentHistory"));
         nullFields(output, "llmContentRef", "physicalStatus", "hookResultRef", "parentHistory");

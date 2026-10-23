@@ -14,6 +14,7 @@ import { execFile } from 'node:child_process';
 import { lookup } from 'node:dns/promises';
 import * as fs from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
+import type { ManagedLocalWebOptions } from './managed-local-web.js';
 import * as https from 'node:https';
 import { isIP } from 'node:net';
 import * as path from 'node:path';
@@ -2120,6 +2121,9 @@ function buildProviderSetupInputs(
 }
 
 export interface RunQwenServeDeps {
+  /** The application launcher owns signals when it supervises other services. */
+  installSignalHandlers?: boolean;
+  managedLocalWeb?: ManagedLocalWebOptions;
   /** Only CLI entrypoints opt into replacing their own daemon process. */
   updateRestartArgv?: readonly string[];
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
@@ -2131,9 +2135,9 @@ export interface RunQwenServeDeps {
     hostname: string,
   ) => Promise<{ address: string; family: number }>;
   /**
-   * Whether to start the real ACP child eagerly after listen. Production
-   * keeps this on; tests can disable it so boot-path assertions do not wait
-   * on a real child bridge.
+   * Whether to start the real ACP child eagerly after listen. The ordinary
+   * CLI keeps this on; the Managed application starts Local ACP on demand.
+   * Tests can disable it to avoid waiting on a real child bridge.
    */
   preheatBridge?: boolean;
   /**
@@ -8524,6 +8528,7 @@ async function runQwenServeImpl(
     };
 
     const app = runtime.createServeApp(opts, () => actualPort, {
+      managedLocalWeb: deps.managedLocalWeb,
       restartForUpdate,
       maxChannelControlWorkspaces: MAX_CHANNEL_CONTROL_WORKSPACES,
       serveAppLifecycle,
@@ -10919,9 +10924,11 @@ async function runQwenServeImpl(
           `\`qwen daemon stop --port ${actualPort}\`.`,
       );
 
-      process.on('SIGINT', onSignal);
-      process.on('SIGTERM', onSignal);
-      process.on('SIGHUP', onSignal);
+      if (deps.installSignalHandlers !== false) {
+        process.on('SIGINT', onSignal);
+        process.on('SIGTERM', onSignal);
+        process.on('SIGHUP', onSignal);
+      }
       process.on('uncaughtExceptionMonitor', onUncaughtExceptionMonitor);
 
       // The per-attempt boot-error listener was removed by handleListening.
