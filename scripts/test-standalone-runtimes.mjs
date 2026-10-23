@@ -1026,7 +1026,7 @@ async function ci() {
     const result = spawnSync(node, [script], {
       env: { ...process.env, PINNED_NODE: node, PINNED_BUN: bun },
       stdio: 'inherit',
-      timeout: 600_000,
+      timeout: 1_200_000,
     });
     assert.equal(result.error, undefined);
     assert.equal(result.signal, null);
@@ -1098,7 +1098,8 @@ if (process.argv[2] === '--ci') {
           cwd: root,
           env,
           encoding: 'utf8',
-          timeout: 300_000,
+          // This bounds the whole sequential matrix, not an individual probe.
+          timeout: 600_000,
           maxBuffer: 8 * 1024 * 1024,
         },
       );

@@ -49,10 +49,8 @@ describe('Managed workspace navigation', () => {
     localStorage.clear();
     list.mockResolvedValue({ data: [workspace], supported: true });
     provider = {
-      kind: 'java',
       storageKey: 'provider:a',
       canCancel: true,
-      acceptsWorkspaceCwd: false,
       workspaceBinding: {
         agentId: 'agent',
         list,
@@ -65,6 +63,7 @@ describe('Managed workspace navigation', () => {
       createSession: vi.fn(),
       submitPrompt: vi.fn(),
       cancel: vi.fn(),
+      queryCancelOperation: vi.fn(),
       async *subscribeEvents() {
         yield* [];
       },
