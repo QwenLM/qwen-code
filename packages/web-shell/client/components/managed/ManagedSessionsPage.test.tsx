@@ -42,6 +42,7 @@ const mocks = vi.hoisted(() => ({
     createSession: vi.fn(),
     submitPrompt: vi.fn(),
     cancel: vi.fn(),
+    queryCancelOperation: vi.fn(),
   },
 }));
 
@@ -173,7 +174,6 @@ function summary(
     sessionId,
     activeTurnId: 'p1',
     title: `Task ${sessionId}`,
-    workspaceCwd: '/workspace',
     createdAt: 10,
     updatedAt: 20,
     admittedAt: 10,
@@ -225,10 +225,8 @@ describe('ManagedSessionsPage', () => {
     vi.clearAllMocks();
     mocks.restoreEditorDraft.mockReturnValue('');
     provider = {
-      kind: 'java',
       storageKey: 'http://managed-test',
       canCancel: true,
-      acceptsWorkspaceCwd: false,
       ...mocks.client,
     };
     sessionStorage.clear();
@@ -267,7 +265,18 @@ describe('ManagedSessionsPage', () => {
       sessionId: 's1',
       turnId: 'p-next',
     });
-    mocks.client.cancel.mockResolvedValue({ accepted: true });
+    mocks.client.cancel.mockResolvedValue({
+      sessionId: 's1',
+      turnId: 'p1',
+      operationId: 'cancel-1',
+    });
+    mocks.client.queryCancelOperation.mockResolvedValue({
+      sessionId: 's1',
+      operationId: 'cancel-1',
+      type: 'cancel',
+      status: 'running',
+      replayed: false,
+    });
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -294,7 +303,6 @@ describe('ManagedSessionsPage', () => {
           <ManagedSessionsPage
             sessionId={sessionId}
             onSelectSession={onSelect}
-            workspaceCwd="/workspace"
             managedAgentProvider={managedAgentProvider ?? undefined}
             navigationTarget={navigationTarget}
             interactive={interactive}
@@ -2665,7 +2673,7 @@ describe('ManagedSessionsPage', () => {
           {
             ...event(1, ''),
             type: 'tool_requested',
-            data: { toolCallId: 'call-1', toolName, input },
+            data: { itemId: 'item-1', toolCallId: 'call-1', toolName, input },
           },
         ],
         lastEventId: 1,
@@ -3199,16 +3207,15 @@ describe('ManagedSessionsPage', () => {
       sessions: [summary('java-session')],
     });
     const provider: ManagedAgentProvider = {
-      kind: 'java',
       storageKey: 'https://java.example/agent',
       canCancel: true,
-      acceptsWorkspaceCwd: false,
       listSessions,
       getSession: vi.fn(),
       getTranscript: vi.fn(),
       createSession: vi.fn(),
       submitPrompt: vi.fn(),
       cancel: vi.fn(),
+      queryCancelOperation: vi.fn(),
       async *subscribeEvents() {
         yield* [];
       },
@@ -3217,9 +3224,7 @@ describe('ManagedSessionsPage', () => {
     await render(undefined, 'en', provider);
 
     expect(container.textContent).toContain('Task java-session');
-    expect(listSessions).toHaveBeenCalledWith(
-      expect.objectContaining({ workspaceCwd: undefined }),
-    );
+    expect(listSessions.mock.calls[0][0]).not.toHaveProperty('workspaceCwd');
     expect(mocks.useWorkspace).not.toHaveBeenCalled();
     expect(mocks.client.listSessions).not.toHaveBeenCalled();
   });
@@ -3433,7 +3438,6 @@ describe('ManagedSessionsPage', () => {
     const [first, retry] = mocks.client.createSession.mock.calls;
     expect(first?.[0]).toEqual({
       text: 'Do the work',
-      workspaceCwd: undefined,
     });
     expect(retry?.[0]).toEqual(first?.[0]);
     expect(retry?.[1].idempotencyKey).toBe(first?.[1].idempotencyKey);
@@ -3505,7 +3509,6 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.createSession).toHaveBeenCalledTimes(2);
     expect(mocks.client.createSession.mock.calls[1]?.[0]).toEqual({
       text: 'Do the other work',
-      workspaceCwd: undefined,
     });
     expect(
       mocks.client.createSession.mock.calls[1]?.[1].idempotencyKey,
@@ -3930,29 +3933,6 @@ describe('ManagedSessionsPage', () => {
         container.querySelectorAll('[role="status"], [aria-live]'),
       ).map((node) => node.textContent),
     ).toContain('Request discarded. The draft is back in the composer.');
-  });
-
-  it('does not refetch the list when a dropped workspace path changes', async () => {
-    await render('s1');
-    expect(mocks.client.listSessions).toHaveBeenCalledTimes(1);
-
-    await act(async () => {
-      root.render(
-        <I18nProvider language="en">
-          <ManagedSessionsPage
-            sessionId="s1"
-            onSelectSession={onSelect}
-            workspaceCwd="/other"
-            managedAgentProvider={provider}
-          />
-        </I18nProvider>,
-      );
-      await flush();
-    });
-
-    // The provider drops workspaceCwd from the request, so the new folder
-    // changes nothing: the fetched page (and its pagination) must survive.
-    expect(mocks.client.listSessions).toHaveBeenCalledTimes(1);
   });
 
   it('gates sending and cancels the captured Prompt without treating acceptance as terminal', async () => {

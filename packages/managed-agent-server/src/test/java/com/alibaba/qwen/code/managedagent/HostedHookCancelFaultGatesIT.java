@@ -22,7 +22,6 @@ import org.springframework.boot.web.servlet.context.ServletWebServerApplicationC
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -48,6 +47,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -465,31 +465,15 @@ class HostedHookCancelFaultGatesIT {
         return json.readTree(body);
     }
 
-    // The Harness status route identifies the caller by the client id its
-    // attach minted and the process generation it attached to; the connector
-    // keeps both on the private attachment ref.
-    private record HarnessAttach(String clientId, String bootId) {}
-
-    private HarnessAttach attachment(HarnessConnector connector, String session) throws Exception {
-        Field field = connector.getClass().getDeclaredField("attachments");
-        field.setAccessible(true);
-        for (Object value : ((Map<?, ?>) field.get(connector)).values()) {
-            if (value instanceof HarnessSessionRef ref && session.equals(ref.getHarnessSessionId())) {
-                return new HarnessAttach(ref.getHarnessClientId(), ref.getHarnessBootId());
-            }
-        }
-        return null;
-    }
-
     private JsonNode cancelHook(String session, String executionId) throws Exception {
-        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        HarnessSessionRef attach = attachment(spring.getBean(HarnessConnector.class), session);
         assertThat(attach).as("Session attachment before cancel").isNotNull();
         var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
                         + "/session/" + session + "/hooks/operations/" + executionId + "/cancel"))
                 .timeout(Duration.ofSeconds(90)).header("Authorization", "Bearer " + TOKEN)
-                .header("X-Qwen-Client-Id", attach.clientId())
+                .header("X-Qwen-Client-Id", attach.getHarnessClientId())
                 .header("X-Qwen-Harness-Protocol-Version", "1")
-                .header("X-Qwen-Harness-Boot-Id", attach.bootId())
+                .header("X-Qwen-Harness-Boot-Id", attach.getHarnessBootId())
                 .POST(HttpRequest.BodyPublishers.noBody()).build();
         var response = http.send(request, HttpResponse.BodyHandlers.ofString());
         assertThat(response.statusCode()).as("hook cancel: %s", response.body()).isEqualTo(200);
