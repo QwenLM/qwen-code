@@ -26,6 +26,10 @@ Issue #15316 希望普通会话使用独立目录，而不新增工作区注册�
 SSH 工作区的 cd，不顺带扩大 branch/fork 支持范围。Managed 执行模式继续由现有 agent
 处理器拒绝目录切换。
 
+内部 Conversations 的 cd 拒绝路径保留结构化路由告警，包含路由、会话和归属上下文，
+但 HTTP 响应不暴露内部工作区身份。SSH cd 在调用 bridge 前返回 HTTP 501 和
+`code: ssh_workspace_operation_unsupported`。
+
 ## 生命周期与兼容性
 
 bridge 现有的 prompt queue 负责 cd 与会话 prompt 的排序。ACP 只修改会话 Config，
@@ -46,7 +50,10 @@ bridge 现有的 prompt queue 负责 cd 与会话 prompt 的排序。ACP 只修�
 验证 containment，不依赖 Git。现有 primary cd 与内部工作区拒绝测试继续适用。
 执行 CLI 定向测试、build、typecheck，以及
 `integration-tests/cli/qwen-serve-session-cd.test.ts` 中的无界面 daemon 回归测试。
-目录越界返回 HTTP 400 和 `code: containment_violation`，而不是内部错误。
+仅 `POST /session/:id/cd` 的目录越界返回 HTTP 400 和
+`code: containment_violation`，而不是内部错误。其他路由及未提供路由上下文的调用，
+对同一错误类型保留既有 HTTP 500 响应和 daemon 错误日志；不改变 worktree
+创建/恢复或 managed relocation 的错误信号。回归测试同时固定 cd 映射与非 cd 的状态码及日志。
 
 回退仅需撤销本次路由改动，不涉及持久化 schema、工作区注册或文件迁移。
 合并前仍需上游维护者评审新的 live-session-owner 契约及次级工作区目录限制策略。

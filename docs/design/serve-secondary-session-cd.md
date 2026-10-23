@@ -34,6 +34,11 @@ selection policy. Do not expose cd for internal Conversations workspaces or SSH
 workspaces, and do not broaden branch/fork support. Managed execution continues
 to reject relocation in the existing agent handler.
 
+Internal Conversations cd rejection retains the structured routing warning with
+route, session, and owner context, without exposing internal workspace identity
+in its HTTP response. SSH cd is rejected before bridge dispatch with HTTP 501
+and `code: ssh_workspace_operation_unsupported`.
+
 ## Lifecycle and compatibility
 
 The bridge's existing prompt queue orders cd against session prompts. ACP changes
@@ -59,7 +64,11 @@ to verify containment without Git. Existing primary cd and internal-workspace
 rejection tests remain applicable. Run focused CLI tests, build, typecheck, and
 the headless daemon regression in
 `integration-tests/cli/qwen-serve-session-cd.test.ts`. Containment failures return
-HTTP 400 with `code: containment_violation` rather than an internal error.
+HTTP 400 with `code: containment_violation` rather than an internal error only
+for `POST /session/:id/cd`. Other routes and calls without route context retain
+their existing HTTP 500 payload and daemon error reporting for that error kind;
+this does not change worktree create/restore or managed relocation error signals.
+Regression tests pin both the cd mapping and non-cd status/logging behavior.
 
 Rollback consists of reverting this route change. No persisted schema, workspace
 registrations, or files are migrated. Upstream maintainer review must approve the

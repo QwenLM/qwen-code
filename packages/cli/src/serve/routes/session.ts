@@ -6166,6 +6166,15 @@ export function registerSessionRoutes(
       'POST /session/:id/cd',
       async (req, res, sessionId, runtime) => {
         if (isInternalWorkspaceRuntime(runtime)) {
+          logSessionRoutingFailure(
+            'POST /session/:id/cd',
+            'non_primary_session_route_not_supported',
+            {
+              sessionId,
+              workspaceId: runtime.workspaceId,
+              workspaceCwd: runtime.workspaceCwd,
+            },
+          );
           sendNonPrimarySessionRouteUnsupported(
             res,
             'POST /session/:id/cd',

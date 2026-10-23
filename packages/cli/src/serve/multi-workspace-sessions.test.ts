@@ -3562,7 +3562,9 @@ describe('multi-workspace session dispatch', () => {
   });
 
   it('does not expose the Conversations runtime identity in an unsupported session route response', async () => {
+    const daemonLog = makeDaemonLog();
     const { app } = makeHarness({
+      daemonLog,
       secondaryProvenance: 'live-conversation',
     });
 
@@ -3578,6 +3580,13 @@ describe('multi-workspace session dispatch', () => {
       code: 'non_primary_session_route_not_supported',
       sessionId: '22222222-2222-4222-a222-222222222222',
       route: 'POST /session/:id/cd',
+    });
+    expect(daemonLog.warn).toHaveBeenCalledWith('session routing failed', {
+      route: 'POST /session/:id/cd',
+      resolutionKind: 'non_primary_session_route_not_supported',
+      sessionId: '22222222-2222-4222-a222-222222222222',
+      workspaceId: 'secondary-id',
+      workspaceCwd: SECONDARY_CWD,
     });
   });
 

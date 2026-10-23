@@ -72,6 +72,7 @@ describe('session cd errors', () => {
           errorKind,
           path: targetPath,
         }),
+        { route: 'POST /session/:id/cd', sessionId: 'session-1' },
       );
       expect(status).toHaveBeenCalledWith(400);
       expect(json).toHaveBeenCalledWith({
@@ -81,6 +82,36 @@ describe('session cd errors', () => {
       });
     },
   );
+
+  it.each([
+    undefined,
+    'POST /session',
+    'POST /session/:id/load',
+    'POST /session/:id/worktree-reset',
+  ])('preserves non-cd containment errors and logging for %s', (route) => {
+    const { response, status, json } = responseMock();
+    const daemonLog = { error: vi.fn() } as unknown as DaemonLogger;
+    const data = {
+      errorKind: 'containment_violation',
+      path: '/outside/workspace',
+    };
+    const error = new RequestError(-32004, 'Invalid working directory', data);
+    const context = route ? { route, sessionId: 'session-1' } : undefined;
+
+    sendBridgeError(response, error, context, daemonLog);
+
+    expect(status).toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid working directory',
+      code: -32004,
+      data,
+    });
+    expect(daemonLog.error).toHaveBeenCalledWith(
+      error.message,
+      error,
+      context ?? {},
+    );
+  });
 });
 
 describe('artifact library errors', () => {
