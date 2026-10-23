@@ -7,6 +7,7 @@
 import { isDeepStrictEqual } from 'node:util';
 
 export type ModPermission = 'allow' | 'ask' | 'deny';
+export type ModApprover = 'host' | 'person';
 export interface ModToolCallInput extends Record<string, unknown> {
   tool: string;
   tool_use_id?: string;
@@ -18,6 +19,8 @@ export interface ModToolCheckInput extends Record<string, unknown> {
   tool_use_id?: string;
   agentId?: string;
   ceiling?: ModPermission;
+  approver?: ModApprover;
+  isReadOnly?: true;
 }
 export interface ModToolCheckResult {
   decision: ModPermission;
@@ -25,6 +28,7 @@ export interface ModToolCheckResult {
   rule?: string;
   hook?: string;
   ceiling?: ModPermission;
+  plugin?: string;
 }
 export type ModToolResult =
   | { deny: string }
@@ -94,9 +98,9 @@ export function validToolCheck(value: Record<string, unknown>): boolean {
     typeof value['decision'] === 'string' &&
     ['allow', 'ask', 'deny'].includes(value['decision']) &&
     Object.keys(value).every((key) =>
-      ['decision', 'reason', 'rule', 'hook', 'ceiling'].includes(key),
+      ['decision', 'reason', 'rule', 'hook', 'ceiling', 'plugin'].includes(key),
     ) &&
-    ['reason', 'rule', 'hook'].every(
+    ['reason', 'rule', 'hook', 'plugin'].every(
       (key) => value[key] === undefined || typeof value[key] === 'string',
     ) &&
     (value['ceiling'] === undefined ||
