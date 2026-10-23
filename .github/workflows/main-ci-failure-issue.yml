@@ -110,11 +110,11 @@ jobs:
           # there would drop the only report of a real regression. An
           # unreadable tip keeps the old fail-open reporting.
           #
-          # Attempts after the first are exempt: an infrastructure-only
-          # attempt 1 dispatches a rerun and files nothing, so attempt 2 is
-          # that chain's only filing opportunity and must not be silenced by a
-          # main that moved while the rerun queued.
-          if [[ "${superseded}" != 'true' && "${RUN_ATTEMPT}" == '1' &&
+          # Every attempt is compared, not just the first: #15259 itself was
+          # filed by such an attempt-2 recovery run. The `newer` check is what
+          # keeps a lone recovery attempt reporting when main moved while it
+          # queued.
+          if [[ "${superseded}" != 'true' &&
             "${EVENT_NAME}" == 'push' && "${HEAD_BRANCH}" == 'main' &&
             -n "${HEAD_SHA}" ]]; then
             if tip="$(gh api "repos/${REPO}/commits/main" --jq '.sha')"; then

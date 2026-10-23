@@ -495,10 +495,9 @@ fi
         'Could not list the newer runs of workflow 12345',
       );
     });
-    it('reports a recovery attempt even when main has advanced', () => {
-      // An infrastructure-only attempt 1 dispatches a rerun and files
-      // nothing; attempt 2 is that chain's only filing opportunity, and main
-      // can move while the rerun queues.
+    it('skips a recovery attempt when a newer run owns the tip', () => {
+      // #15259 itself was filed by attempt 2: the rerun queued while main
+      // advanced to a commit whose own push run owned the result.
       const resolved = detect(
         '2',
         {
@@ -510,8 +509,29 @@ fi
         undefined,
         'new-head',
       );
+      expect(resolved.output).toBe('superseded=true\n');
+      expect(resolved.stdout).toContain('main is now new-head');
+      expect(resolved.calls).toContain('commits/main');
+    });
+    it('reports a recovery attempt when the advanced tip has no run', () => {
+      // An infrastructure-only attempt 1 dispatches a rerun and files
+      // nothing; with no run at the new tip, attempt 2 is the chain's only
+      // report of a failure main still carries.
+      const resolved = detect(
+        '2',
+        {
+          RUN_ATTEMPT: '2',
+          EVENT_NAME: 'push',
+          HEAD_BRANCH: 'main',
+          HEAD_SHA: 'old-head',
+        },
+        undefined,
+        'new-head',
+        '0',
+      );
       expect(resolved.output).toBe('superseded=false\n');
-      expect(resolved.calls).not.toContain('commits/main');
+      expect(resolved.stdout).toContain('no newer push run');
+      expect(resolved.calls).toContain('commits/main');
     });
     it('reports a push run while its head is still the tip of main', () => {
       const resolved = detect(
