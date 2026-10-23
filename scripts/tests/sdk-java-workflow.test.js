@@ -151,7 +151,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     // fallback keeps acquisition independent of the checkout's ref.
     expect(block).toContain('flock --wait 5400 9');
     expect(block).toContain(
-      '::warning::Maven cache write-back skipped: sdk-java host lock not acquired within',
+      '::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full 90-minute budget',
     );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
@@ -366,6 +366,12 @@ describe('SDK Java self-hosted workflow guards', () => {
   it.skipIf(process.platform !== 'linux')(
     'skips the cache write-back when the host lock cannot be acquired',
     () => {
+      const signatures = new RegExp(
+        parse(
+          readFileSync('.github/workflows/qwen-autofix.yml', 'utf8'),
+        ).env.INFRA_FAILURE_SIGNATURES,
+        'i',
+      );
       const jobs = parse(workflow).jobs;
       for (const name of ['test', 'mysql-integration']) {
         const run = jobs[name].steps.find((candidate) =>
@@ -376,7 +382,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         );
         expect(start, name).toBeGreaterThan(-1);
         const acquisitionAndWriteBack = run.slice(start);
-        for (const arm of ['helper', 'fallback']) {
+        for (const arm of ['helper', 'fallback', 'setup-fault']) {
           const dir = mkdtempSync(join(tmpdir(), 'sdk-java-lock-skip-'));
           const workspace = join(dir, 'workspace');
           const home = join(dir, 'home');
@@ -386,14 +392,31 @@ describe('SDK Java self-hosted workflow guards', () => {
           mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
           mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
           mkdirSync(shims);
+          // A publishable delta (nlink 1, outside the pruned coordinates):
+          // if the skip falls through into the write-back, it lands in the
+          // host cache and the assertion below catches it.
+          writeFileSync(join(runnerTemp, 'm2-repo', 'delta.marker'), 'x');
           if (arm === 'helper') {
-            // Take the sourced-helper arm: the slot the slice sources is
-            // this stub, so the failing acquisition is the only behavior
-            // under test.
+            // The slot the slice sources is this stub, whose line is the
+            // helper's own timeout annotation with the classifier signature.
             writeFileSync(
               join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
-              'sdk_java_lock_acquire() { return 1; }\n',
+              'sdk_java_lock_acquire() {\n' +
+                '  echo "::error::sdk-java host lock not acquired within 90 minutes as queue ticket 1 (fast); head of queue is (no other ticket queued)"\n' +
+                '  return 1\n' +
+                '}\n',
             );
+          } else if (arm === 'setup-fault') {
+            // The real helper with a shim that breaks its setup: the call
+            // site must surface the fault instead of spinning out the wait
+            // and exiting green.
+            writeFileSync(
+              join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
+              readFileSync('.github/scripts/sdk-java-lock.sh', 'utf8'),
+            );
+            writeFileSync(join(shims, 'mkdir'), '#!/bin/sh\nexit 1\n', {
+              mode: 0o755,
+            });
           } else {
             writeFileSync(join(shims, 'flock'), '#!/bin/sh\nexit 1\n', {
               mode: 0o755,
@@ -417,10 +440,27 @@ describe('SDK Java self-hosted workflow guards', () => {
               },
             );
             expect(result.error, `${name}/${arm}`).toBeUndefined();
+            if (arm === 'setup-fault') {
+              expect(result.status, `${name}/${arm}${result.stderr}`).toBe(1);
+              expect(result.stdout, `${name}/${arm}`).toContain(
+                'Maven cache write-back setup failed',
+              );
+              expect(result.stdout, `${name}/${arm}`).not.toMatch(signatures);
+              continue;
+            }
             expect(result.status, `${name}/${arm}${result.stderr}`).toBe(0);
             expect(result.stdout, `${name}/${arm}`).toContain(
               '::warning::Maven cache write-back skipped',
             );
+            // Neither the call-site warning nor the helper's timeout line
+            // (rewritten at the call site) may carry a rerun-classifier
+            // signature onto this now-green step.
+            expect(result.stdout, `${name}/${arm}`).not.toMatch(signatures);
+            // The skip must not fall through into an unlocked write-back.
+            expect(
+              existsSync(join(home, '.m2', 'repository', 'delta.marker')),
+              `${name}/${arm}`,
+            ).toBe(false);
           } finally {
             rmSync(dir, { recursive: true, force: true });
           }
@@ -1343,7 +1383,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // predate the helper, so this site must also keep the bare-lock arm.
     expect(step.run).toContain('flock --wait 5400 9');
     expect(step.run).toContain(
-      '::warning::Maven cache write-back skipped: sdk-java host lock not acquired within',
+      '::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full 90-minute budget',
     );
     const seconds = Number(step.run.match(/sdk_java_lock_acquire (\d+)/)?.[1]);
     // The fast tier owns the same lock: it overtakes this job only while
@@ -1353,7 +1393,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(seconds).toBe(90 * 60);
     // This site stays in the normal class: a tier argument here would put
     // full-tier MariaDB holds ahead of fast PR-feedback work.
-    expect(step.run).toContain('sdk_java_lock_acquire 5400 || {');
+    expect(step.run).toContain(
+      'sdk_java_lock_acquire 5400 >&7 2>&1 || lock_rc=$?',
+    );
     // Promotion must fire strictly inside the acquisition budget; at or
     // above it the rename lands in the iteration whose timeout arm deletes
     // the ticket, and no test would see the anti-starvation arm go dead.

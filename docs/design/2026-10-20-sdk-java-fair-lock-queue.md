@@ -70,7 +70,7 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
   gave up; `H` is the head of the queue at that moment, or
   `(no other ticket queued)` when this ticket was the last one. The
   `lock not acquired within` substring is the contract the rerun classifiers
-  match.
+  match; the sdk-java call sites rewrite it on the tolerated path below.
 - Wait observability: a non-blocking probe runs first, and only a waiter
   that actually has to wait prints its ticket number and the remaining
   budget — before it blocks, and at most once a minute after. A blocked head
@@ -116,9 +116,19 @@ longer covers that variable — uncapped concurrent JVM suites per host is now
 the mechanism's real bound.
 
 A write-back that cannot acquire the lock within 5400 s warns and skips the
-copy instead of failing the step. The gate result is already final at that
-point, so the warning never reaches the rerun classifiers, which inspect
-failed runs only.
+copy instead of failing the step. The Maven gate result above is already
+final at that point, and the call sites rewrite the helper's timeout text
+before it
+reaches the log, so nothing on that tolerated path carries a rerun-classifier
+signature onto a succeeding step.
+
+The 5400 s wait budget is unchanged. It bounds the queue, not the hold, and
+both lock sites (and the MariaDB lane) size their job ceilings against it;
+the 1200 s promotion window must stay well inside it. What changed is that
+the wait now guards an optional bounded copy, so an expired budget skips the
+copy instead of failing the step. Shortening the budget would give up the
+shared-cache warm-up more readily under the same contention, a queue-depth
+trade-off left as a non-goal.
 
 ### Fast-tier priority
 
@@ -158,13 +168,17 @@ physical lock:
   cannot starve the full tier. Promotion protects waiting full-tier tickets,
   not parked ones: a parked head never loops back to the promotion check, and
   it does not need to, because it is already next.
-- The promotion window bounds the overtake, not a hold. A fast ticket that
-  arrived before the promotion and already parked in `flock` keeps its
-  earlier kernel position, so the promoted ticket waits one more hold behind
-  it; the cost is bounded by tickets already parked, not starvation. Once a
-  ticket has waited past the window every waiting normal ticket has crossed
-  the threshold, the queue is plain sequence order, and a fast ticket
-  arriving afterwards has nothing left to overtake.
+- The promotion window bounds the overtake, not a hold. Promotion is
+  per-waiter: each normal ticket renames itself when its own wait crosses
+  the window. A fast ticket that arrived before the promotion and already
+  parked in `flock` keeps its earlier kernel position, so the promoted
+  ticket waits one more hold behind it; the cost is bounded by tickets
+  already parked, not starvation. Only under a single hold longer than the
+  window does every waiting normal ticket cross the threshold together;
+  otherwise they promote one at a time, and a fast ticket arriving before a
+  younger normal ticket has aged past the window can still overtake it. The
+  queue is plain sequence order only once every waiting normal ticket has
+  individually crossed the window.
 
 The release semantics, the 5400 s budget, and the
 `lock not acquired within` substring the rerun classifiers match are
@@ -232,7 +246,8 @@ order this section exists to prevent.
   `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper and the
   `sdk_java_lock_acquire 5400` budget at each acquisition site, both jobs'
   Maven runs above their acquisition, their write-back children's fd 9
-  close, and the `.size-baseline` records the workflow's new size.
+  close, and the `.size-baseline` entry is re-measured to the workflow's
+  size after the last edit.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
@@ -247,9 +262,11 @@ scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.
 - The helper's timeout line still contains the substring
   `lock not acquired within`, so `qwen-autofix.yml`'s
-  `INFRA_FAILURE_SIGNATURES` keeps matching a failed acquisition. Both call
-  sites downgrade a failed acquisition to a warning and skip the write-back,
-  so that path no longer reaches the classifiers.
+  `INFRA_FAILURE_SIGNATURES` keeps matching a failed acquisition elsewhere.
+  Both call sites downgrade a failed acquisition to a warning, skip the
+  write-back, and rewrite the helper's timeout text on the way to the log,
+  so an acquisition this workflow now tolerates leaves no classifier
+  signature on a succeeding step.
 
 ## Open questions
 

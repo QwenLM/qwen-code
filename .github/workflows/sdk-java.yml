@@ -268,10 +268,33 @@ jobs:
           # reddening a green suite.
           if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
-            sdk_java_lock_acquire 5400 "${TIER}" || {
-              echo "::warning::Maven cache write-back skipped: sdk-java host lock not acquired within 90 minutes; the gate result above is unaffected"
-              exit 0
+            # The helper runs on the left of `||`, where bash suppresses
+            # errexit for its whole body, so probe the setup it depends on:
+            # without flock or a writable cache directory it would spin out
+            # the full budget and exit 0 green.
+            command -v flock >/dev/null 2>&1 || {
+              echo "::error::Maven cache write-back setup failed: flock is unavailable"
+              exit 1
             }
+            mkdir -p "${HOME}/.cache/qwen-code-ci" &&
+              [ -w "${HOME}/.cache/qwen-code-ci" ] || {
+              echo "::error::Maven cache write-back setup failed: ${HOME}/.cache/qwen-code-ci is not writable"
+              exit 1
+            }
+            # The rerun classifiers match `lock not acquired within` in the
+            # annotations of a failed run; rewrite the helper's timeout line
+            # so this tolerated path cannot misattribute a later genuine
+            # failure in the same job to infrastructure.
+            exec 7> >(sed -u -e 's/^::error::/::warning::/' -e 's/lock not acquired within/lock wait exhausted/')
+            lock_filter=$!
+            lock_rc=0
+            sdk_java_lock_acquire 5400 "${TIER}" >&7 2>&1 || lock_rc=$?
+            exec 7>&-
+            wait "${lock_filter}" 2>/dev/null || true
+            if [ "${lock_rc}" -ne 0 ]; then
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full 90-minute budget; the gate result above is unaffected"
+              exit 0
+            fi
           else
             # release-sdk-java.yml resumes an existing tag by checking out
             # that immutable commit, which may predate this helper. Fall
@@ -280,7 +303,7 @@ jobs:
             mkdir -p "${HOME}/.cache/qwen-code-ci"
             exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
             if ! flock --wait 5400 9; then
-              echo "::warning::Maven cache write-back skipped: sdk-java host lock not acquired within 90 minutes; the gate result above is unaffected"
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full 90-minute budget; the gate result above is unaffected"
               exit 0
             fi
           fi
@@ -794,10 +817,33 @@ jobs:
           # skips the copy instead of reddening a green suite.
           if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
-            sdk_java_lock_acquire 5400 || {
-              echo "::warning::Maven cache write-back skipped: sdk-java host lock not acquired within 90 minutes; the gate result above is unaffected"
-              exit 0
+            # The helper runs on the left of `||`, where bash suppresses
+            # errexit for its whole body, so probe the setup it depends on:
+            # without flock or a writable cache directory it would spin out
+            # the full budget and exit 0 green.
+            command -v flock >/dev/null 2>&1 || {
+              echo "::error::Maven cache write-back setup failed: flock is unavailable"
+              exit 1
             }
+            mkdir -p "${HOME}/.cache/qwen-code-ci" &&
+              [ -w "${HOME}/.cache/qwen-code-ci" ] || {
+              echo "::error::Maven cache write-back setup failed: ${HOME}/.cache/qwen-code-ci is not writable"
+              exit 1
+            }
+            # The rerun classifiers match `lock not acquired within` in the
+            # annotations of a failed run; rewrite the helper's timeout line
+            # so this tolerated path cannot misattribute a later genuine
+            # failure in the same job to infrastructure.
+            exec 7> >(sed -u -e 's/^::error::/::warning::/' -e 's/lock not acquired within/lock wait exhausted/')
+            lock_filter=$!
+            lock_rc=0
+            sdk_java_lock_acquire 5400 >&7 2>&1 || lock_rc=$?
+            exec 7>&-
+            wait "${lock_filter}" 2>/dev/null || true
+            if [ "${lock_rc}" -ne 0 ]; then
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full 90-minute budget; the gate result above is unaffected"
+              exit 0
+            fi
           else
             # release-sdk-java.yml resumes an existing tag by checking out
             # that immutable commit, which may predate this helper. Fall
@@ -806,7 +852,7 @@ jobs:
             mkdir -p "${HOME}/.cache/qwen-code-ci"
             exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
             if ! flock --wait 5400 9; then
-              echo "::warning::Maven cache write-back skipped: sdk-java host lock not acquired within 90 minutes; the gate result above is unaffected"
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full 90-minute budget; the gate result above is unaffected"
               exit 0
             fi
           fi
