@@ -35,8 +35,8 @@ public final class ManagedExtensionRecords {
             "memory_job", "monitor_run", "goal_state", "todo_state",
             "plan_mode", "team_state", "team_task", "team_message",
             "team_plan", "session_message", "session_command",
-            "session_metadata",
-            "file_history", "session_source");
+            "session_metadata", "file_history", "session_source",
+            "hosted_harness_release");
     /** The event kinds of managed-session/1, as the authority writes them. */
     public static final List<String> EVENT_KINDS = List.of("input.accepted",
             "wake.requested", "activation.changed", "model.attempt",
