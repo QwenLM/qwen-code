@@ -103,6 +103,14 @@ fast job 两次尝试分别以票据 258 和 271 停在队首整整 5400 s，在
 `mvn install` 变成对宿主共享字节的不持锁写入者，而除了 `MAVEN_VERSION`
 的取值之外，没有任何东西强制这一耦合。
 
+test job 中所有可能在池上运行的 Checkstyle 与发布构件 step 也从同一个
+job 本地仓库解析（托管 leg 在套件之后播种它），因此池宿主上没有任何
+Maven 运行会在写回之外修改宿主缓存。fast 档的写回取锁失败是刻意的
+非致命行为：fast 档会完全跳过 `mysql-integration`，因此 full 档 MariaDB
+通道现在是唯一会因锁饥饿而变红的通道。该 step 把辅助脚本的 `::error::`
+超时行降级为 `::warning::`，并把票据行写入 `$GITHUB_STEP_SUMMARY`，
+使跳过在绿色运行中无需翻日志即可看到。
+
 ### fast 档优先
 
 FIFO 队列把 waiter 的等待限制在它的排位内，但 fast 档 job 仍然排在所有

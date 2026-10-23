@@ -121,6 +121,16 @@ rather than writing in place. A resolver that writes in place would turn an
 unlocked `mvn install` into an unlocked writer of host-shared bytes, and
 nothing but `MAVEN_VERSION`'s value enforces that coupling.
 
+The test job's pool-reachable Checkstyle and release-artifact steps resolve
+from the same job-local repository (the hosted legs seed it after their suite),
+so no Maven run on a pool host mutates the host cache outside the write-back.
+A missed write-back acquisition on the fast tier is deliberately non-fatal:
+`mysql-integration` is skipped there, so the full-tier MariaDB lane is the
+only lane that reddens on lock starvation. The step demotes the helper's
+`::error::` timeout line to `::warning::` and copies the ticket line into
+`$GITHUB_STEP_SUMMARY`, so the skip is visible on a green run without opening
+the log.
+
 ### Fast-tier priority
 
 The FIFO queue bounds a waiter by its position, but it still puts a fast-tier

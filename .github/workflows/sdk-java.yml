@@ -264,14 +264,23 @@ jobs:
           # class, then oldest — retries the lock, and the fast class is
           # served first — see the sourced helper.
           lock_status=0
-          # Probe the queue directory outside the acquisition's OR list:
-          # bash ignores errexit inside a function invoked there, so a host
-          # whose cache directory cannot be created would otherwise burn the
-          # whole 5400 s budget as if it were contention.
+          lock_log="${RUNNER_TEMP}/sdk-java-lock.log"
+          # Probe the queue directory before either acquisition path: a host
+          # whose cache directory cannot be created must skip the optional
+          # write-back, not fail the step in the bare-lock fallback.
           mkdir -p "${HOME}/.cache/qwen-code-ci" || lock_status=1
           if [ "${lock_status}" -eq 0 ] && [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
-            sdk_java_lock_acquire 5400 "${TIER}" || lock_status=$?
+            # A missed write-back lock is tolerated below, so demote the
+            # helper's ::error:: timeout line to ::warning::; tee keeps the
+            # ticket line for the step summary. The subshell restores
+            # errexit inside the helper, which an OR list would disable.
+            set +e
+            (set -e; sdk_java_lock_acquire 5400 "${TIER}") 2>&1 \
+              | sed 's/^::error::sdk-java host lock not acquired/::warning::sdk-java host lock not acquired/' \
+              | tee "${lock_log}"
+            lock_status=${PIPESTATUS[0]}
+            set -e
           elif [ "${lock_status}" -eq 0 ]; then
             # release-sdk-java.yml resumes an existing tag by checking out
             # that immutable commit, which may predate this helper. Fall
@@ -279,11 +288,17 @@ jobs:
             # before the write-back and wedging the release.
             exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
             if ! flock --wait 5400 9; then
-              echo "::error::sdk-java host lock not acquired within 90 minutes"
+              echo "::warning::sdk-java host lock not acquired within 90 minutes" | tee "${lock_log}"
               lock_status=1
             fi
           fi
           if [ "${lock_status}" -ne 0 ]; then
+            # A green step's ::error:: annotation is not read by the
+            # failure-issue consumers; the summary is visible on the run.
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -s "${lock_log}" ]; then
+              grep -F 'lock not acquired within' "${lock_log}" \
+                | sed 's/^::warning:://' >> "${GITHUB_STEP_SUMMARY}" || true
+            fi
             echo "::warning::Maven cache write-back skipped; the test result above is unaffected"
             exit "${mvn_status}"
           fi
@@ -331,25 +346,32 @@ jobs:
             mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test
           fi
 
+      - name: 'Seed job-local Maven repository (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        run: |-
+          # The pool-reachable steps below resolve from the job-local copy;
+          # on a hosted leg the setup-java cache restored ~/.m2 is the source.
+          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+
       - name: 'Run Java SDK Checkstyle'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
         working-directory: 'packages/sdk-java/qwencode'
         env:
-          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
         run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'
 
       - name: 'Run Managed Agent Server Checkstyle'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '21' }}"
         working-directory: 'packages/managed-agent-server'
         env:
-          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
         run: 'mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle'
 
       - name: 'Build release artifacts'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
         working-directory: 'packages/sdk-java/qwencode'
         env:
-          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
         run: 'mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true package'
 
   # The Flyway duplicate-version guard is the fast filename scan. Server

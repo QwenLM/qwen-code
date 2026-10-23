@@ -149,7 +149,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     // immutable commit, which may predate this helper; the guarded bare-lock
     // fallback keeps acquisition independent of the checkout's ref.
     expect(block).toContain('flock --wait 5400 9');
-    expect(block).toContain('::error::sdk-java host lock not acquired within');
+    expect(block).toContain(
+      '::warning::sdk-java host lock not acquired within',
+    );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
     );
@@ -218,6 +220,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       const workspace = join(dir, 'workspace');
       const home = join(dir, 'home');
       const runnerTemp = join(dir, 'runner-temp');
+      const summary = join(dir, 'summary.md');
       mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
       mkdirSync(home);
       mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
@@ -246,14 +249,19 @@ describe('SDK Java self-hosted workflow guards', () => {
               GITHUB_WORKSPACE: workspace,
               HOME: home,
               RUNNER_TEMP: runnerTemp,
+              GITHUB_STEP_SUMMARY: summary,
               TIER: 'fast',
             },
           },
         );
         expect(result.error).toBeUndefined();
         expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).not.toContain('::error::');
         expect(result.stdout).toContain(
-          '::error::sdk-java host lock not acquired within 90 minutes as queue ticket 1 (fast)',
+          '::warning::sdk-java host lock not acquired within 90 minutes as queue ticket 1 (fast)',
+        );
+        expect(readFileSync(summary, 'utf8')).toContain(
+          'sdk-java host lock not acquired within 90 minutes as queue ticket 1 (fast)',
         );
         expect(result.stdout).toContain(
           '::warning::Maven cache write-back skipped; the test result above is unaffected',
@@ -279,6 +287,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       const workspace = join(dir, 'workspace');
       const home = join(dir, 'home');
       const runnerTemp = join(dir, 'runner-temp');
+      const summary = join(dir, 'summary.md');
       const shims = join(dir, 'bin');
       mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
       mkdirSync(home);
@@ -308,14 +317,19 @@ describe('SDK Java self-hosted workflow guards', () => {
               GITHUB_WORKSPACE: workspace,
               HOME: home,
               RUNNER_TEMP: runnerTemp,
+              GITHUB_STEP_SUMMARY: summary,
               TIER: 'fast',
             },
           },
         );
         expect(result.error).toBeUndefined();
         expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).not.toContain('::error::');
         expect(result.stdout).toContain(
-          '::error::sdk-java host lock not acquired within 90 minutes',
+          '::warning::sdk-java host lock not acquired within 90 minutes',
+        );
+        expect(readFileSync(summary, 'utf8')).toContain(
+          'sdk-java host lock not acquired within 90 minutes',
         );
         expect(result.stdout).toContain(
           '::warning::Maven cache write-back skipped; the test result above is unaffected',
@@ -341,13 +355,11 @@ describe('SDK Java self-hosted workflow guards', () => {
       mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
       mkdirSync(home);
       mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
-      writeFileSync(
-        join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
-        readFileSync('.github/scripts/sdk-java-lock.sh', 'utf8'),
-      );
-      // A regular file where the queue directory belongs: the helper's
-      // preconditions fail, and inside the acquisition's OR list errexit is
-      // ignored, so without the probe the wait loop burns its whole budget.
+      // No helper file: release-sdk-java.yml may check out a tag that
+      // predates it, so this exercises the bare-lock fallback. A regular
+      // file where the cache directory belongs makes `exec 9>` fail; the
+      // probe must skip the fallback instead of letting `bash -e` fail the
+      // step.
       writeFileSync(join(home, '.cache'), 'not a directory');
       try {
         const result = spawnSync(
@@ -728,9 +740,11 @@ describe('SDK Java self-hosted workflow guards', () => {
         'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
       );
     } else if (name === 'test') {
-      // The self-hosted test step resolves from the same job-local copy as
-      // the MariaDB lane, so its suite no longer runs under the host lock.
-      expect(jobLocal?.length, name).toBe(1);
+      // The self-hosted suite and every step that can run on the pool
+      // resolve from the job-local copy; the hosted-only suite and Broker
+      // steps keep the cache-restored host repository.
+      expect(jobLocal?.length, name).toBe(4);
+      expect(exact?.length, name).toBe(2);
       const selfHosted = parse(workflow).jobs.test.steps.find(
         (s) => s.name === 'Run Java SDK tests (self-hosted)',
       );
@@ -745,6 +759,47 @@ describe('SDK Java self-hosted workflow guards', () => {
     }
     expect(block).not.toContain('Drop shared Maven toolchains.xml');
     expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
+  });
+
+  it('keeps every pool-reachable test-job Maven step on the job-local repository', () => {
+    const steps = parse(workflow).jobs.test.steps;
+    const hostedOnly = (candidate) =>
+      (candidate.if ?? '').includes("runner.environment == 'github-hosted'");
+    const selfHostedOnly = (candidate) =>
+      (candidate.if ?? '').includes("runner.environment == 'self-hosted'");
+    const seed = steps.find(
+      (candidate) =>
+        candidate.name === 'Seed job-local Maven repository (hosted)',
+    );
+    expect(seed?.if).toBe("${{ runner.environment == 'github-hosted' }}");
+    expect(seed.run).toContain(
+      'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
+    );
+    const mavenSteps = steps.filter((candidate) =>
+      /\bmvn\b/.test(candidate.run ?? ''),
+    );
+    const poolReachable = mavenSteps.filter(
+      (candidate) => !hostedOnly(candidate),
+    );
+    expect(poolReachable.length).toBeGreaterThan(0);
+    for (const candidate of poolReachable) {
+      expect(candidate.env?.MAVEN_ARGS, candidate.name).toContain(
+        '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
+      );
+    }
+    for (const candidate of mavenSteps.filter(hostedOnly)) {
+      expect(candidate.env?.MAVEN_ARGS, candidate.name).not.toContain(
+        '-Dmaven.repo.local',
+      );
+    }
+    // The hosted seed must precede the hosted variants of the pool steps,
+    // or they resolve from an empty job-local repository.
+    const seedAt = steps.indexOf(seed);
+    for (const candidate of poolReachable.filter(
+      (step) => !selfHostedOnly(step),
+    )) {
+      expect(steps.indexOf(candidate), candidate.name).toBeGreaterThan(seedAt);
+    }
   });
 
   it('keeps the self-hosted Maven bootstrap byte-identical across pool jobs', () => {
