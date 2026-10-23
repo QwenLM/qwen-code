@@ -49227,16 +49227,15 @@ describe('Managed home integration', () => {
 
   function managedProvider(): ManagedAgentProvider {
     return {
-      kind: 'java',
       storageKey: 'managed-test',
       canCancel: true,
-      acceptsWorkspaceCwd: false,
       listSessions: vi.fn(),
       getSession: vi.fn(),
       getTranscript: vi.fn(),
       createSession: vi.fn(),
       submitPrompt: vi.fn(),
       cancel: vi.fn(),
+      queryCancelOperation: vi.fn(),
       async *subscribeEvents() {
         yield* [];
       },

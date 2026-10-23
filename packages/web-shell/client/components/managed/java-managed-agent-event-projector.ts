@@ -1,5 +1,4 @@
 import type {
-  JavaAgentDate,
   JavaAgentEvent,
   JavaAgentItem,
 } from './java-managed-agent-client';
@@ -15,7 +14,7 @@ export function projectJavaAgentEvent(
   if (!type) return undefined;
   return {
     id: event.sequence,
-    at: toTimestamp(event.createdAt),
+    at: event.createdAt,
     type,
     sessionId: event.sessionId,
     turnId: event.turnId ?? '',
@@ -93,7 +92,7 @@ function projectedItemEvent(
 ): ManagedAgentSessionEvent {
   return {
     id,
-    at: toTimestamp(item.createdAt),
+    at: item.createdAt,
     type,
     sessionId: item.sessionId,
     turnId: item.turnId,
@@ -183,11 +182,4 @@ function normalizeData(
   if (type !== 'accepted') return value;
   const input = Array.isArray(value['input']) ? value['input'] : [];
   return { ...value, prompt: input };
-}
-
-export function toTimestamp(value: JavaAgentDate | undefined): number {
-  if (typeof value === 'number') return value;
-  if (!value) return Date.now();
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? Date.now() : parsed;
 }

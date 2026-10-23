@@ -975,24 +975,7 @@ export class HostedMcpSession {
       ) &&
       configurations.every((entry) => entry.releaseState !== 'active')
     ) {
-      try {
-        await this.acquireOwner();
-      } catch (cause) {
-        // Older writers did not persist drain receipts before owner release.
-        if (
-          this.options.lifecycleAuthority?.() ||
-          !(cause instanceof HostedWorkspaceBrokerRejection) ||
-          cause.status !== 409 ||
-          ![
-            'runtime_session_not_ready',
-            'runtime_session_not_acquirable',
-          ].includes(String(cause.code))
-        )
-          throw cause;
-        await this.broker.release();
-        await this.markReleased(configurations);
-        return;
-      }
+      await this.acquireOwner();
     }
     if (
       configurations.some(
