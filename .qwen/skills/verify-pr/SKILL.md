@@ -134,10 +134,9 @@ posting is governed by the maintainer-driven local publish rule below.
 nothing. `/verify-pr <n> --publish` is the one-line form of a maintainer
 round that also publishes the result: identical verification, then the local
 publish rules below. It takes no further arguments to turn on the deliverables
-— the English body with the verdict line first, the collapsed `<details>`
-Chinese summary, the image evidence, and the assets-branch image host are all
-fixed by this skill, so do not ask the maintainer to restate them and do not
-treat a request without those words as a thinner report.
+— the local publish rule owns the report body, its Chinese summary, the image
+evidence and the asset host — so do not ask the maintainer to restate them and
+do not treat a request without those words as a thinner report.
 `--assets-branch <branch>` overrides the assets branch; the default and the
 `$QWEN_VERIFY_ASSETS_BRANCH` override are resolved in the local publish rule
 below. Only a coordinate like this is defaultable — posting stays a
