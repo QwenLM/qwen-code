@@ -15,6 +15,7 @@ import {
   statSync,
   utimesSync,
 } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -26,6 +27,7 @@ import {
   trimOutput,
   unresolvedWorkspaceDeps,
   buildRunEnv,
+  REAPING_SHELL,
   type CommandResult,
 } from './build-test.js';
 import {
@@ -226,6 +228,81 @@ describe('run (capture-time failing-file measurement)', () => {
     },
   );
 });
+
+describe.skipIf(process.platform === 'win32')(
+  'run (a killed command takes its process tree with it)',
+  () => {
+    let dir: string;
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'bt-reap-'));
+    });
+    afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+    // A grandchild that outlives a killed shell unless something kills it:
+    // the shape of a test runner's workers, two levels below the spawn.
+    const grandchild = (pidFile: string): string =>
+      `node -e "require('fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000)" ${pidFile} & wait`;
+    const pidIn = async (pidFile: string): Promise<number> => {
+      for (let i = 0; i < 100; i++) {
+        try {
+          const pid = Number(readFileSync(pidFile, 'utf8'));
+          if (pid > 0) return pid;
+        } catch {
+          // not written yet
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      throw new Error(`no pid in ${pidFile}`);
+    };
+    // Dead or a zombie: a reparented process waits for init to reap it.
+    const gone = async (pid: number): Promise<boolean> => {
+      for (let i = 0; i < 40; i++) {
+        try {
+          process.kill(pid, 0);
+        } catch {
+          return true;
+        }
+        const stat = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], {
+          encoding: 'utf8',
+        }).stdout.trim();
+        if (stat === '' || stat.startsWith('Z')) return true;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      process.kill(pid, 'SIGKILL');
+      return false;
+    };
+
+    it('kills what the command started when its deadline fires', async () => {
+      const pidFile = join(dir, 'pid');
+      const r = run(grandchild(pidFile), dir, 1_500);
+      // Still reported as a timeout, exactly as when the shell itself died.
+      expect(r.timedOut).toBe(true);
+      expect(r.exitCode).toBeNull();
+      expect(await gone(await pidIn(pidFile))).toBe(true);
+    });
+
+    it("keeps the command's own exit status", () => {
+      expect(run('exit 3', dir, 30_000).exitCode).toBe(3);
+      expect(run('false; true', dir, 30_000).exitCode).toBe(0);
+    });
+
+    it('kills it on an interrupt too, though the job started with SIGINT ignored', async () => {
+      const pidFile = join(dir, 'pid');
+      const shell = spawn(
+        '/bin/sh',
+        ['-c', REAPING_SHELL, 'sh', grandchild(pidFile)],
+        { stdio: 'ignore' },
+      );
+      const pid = await pidIn(pidFile);
+      shell.kill('SIGINT');
+      const [, signal] = await new Promise<[number | null, string | null]>(
+        (res) => shell.on('exit', (code, sig) => res([code, sig])),
+      );
+      expect(signal).toBe('SIGINT');
+      expect(await gone(pid)).toBe(true);
+    });
+  },
+);
 
 describe('runBuildTest', () => {
   let root: string;
