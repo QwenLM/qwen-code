@@ -248,10 +248,12 @@ public class SessionLifecycleCoordinator {
             }, period, period, java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (java.util.concurrent.RejectedExecutionException stopped) {
             // The coordinator is shutting down; the claim's lease lets the
-            // recovery scan re-drive this operation after restart.
+            // recovery scan re-drive this operation after restart, once a
+            // scan tick has room under its page limit.
             LOG.warn("Managed Session operation abandoned at shutdown;"
-                            + " the lease re-drives it tenant={} session={}"
-                            + " operation={} leaseMs={}",
+                            + " the lease re-drives it when a recovery scan"
+                            + " tick has room under its page limit"
+                            + " tenant={} session={} operation={} leaseMs={}",
                     tenantId, sessionId, operationId,
                     leaseDuration.toMillis());
             return;
