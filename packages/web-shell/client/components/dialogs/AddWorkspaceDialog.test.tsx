@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { StrictMode, act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
@@ -18,6 +18,19 @@ function mount(node: React.ReactNode) {
   root = createRoot(container);
   act(() => {
     root!.render(<I18nProvider language="en">{node}</I18nProvider>);
+  });
+}
+
+function mountStrict(node: React.ReactNode) {
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  act(() => {
+    root!.render(
+      <StrictMode>
+        <I18nProvider language="en">{node}</I18nProvider>
+      </StrictMode>,
+    );
   });
 }
 
@@ -1411,5 +1424,85 @@ describe('AddWorkspaceDialog', () => {
     expect(document.body.textContent).toContain(
       'Enter an absolute target path.',
     );
+  });
+
+  it('offers recheck after a polling failure before the stale cancel action', async () => {
+    let polls = 0;
+    const poll = vi.fn().mockImplementation(async () => {
+      polls++;
+      if (polls === 1) throw new Error('network down');
+      return {
+        jobId: 'job-unknown',
+        status: 'succeeded',
+        percent: 100,
+        cwd: '/home/me/repo',
+      };
+    });
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    mount(
+      <AddWorkspaceDialog
+        onClose={onClose}
+        onAdd={onAdd}
+        gitClone={{
+          start: vi.fn().mockResolvedValue({ jobId: 'job-unknown' }),
+          poll,
+          cancel: vi.fn(),
+        }}
+      />,
+    );
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), '/home/me/repo');
+    submit();
+    await flushAsync();
+
+    expect(document.body.textContent).toContain(
+      'Could not confirm the clone result.',
+    );
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('button')];
+    const recheck = buttons.find(
+      (button) => button.textContent === 'Check again',
+    );
+    expect(recheck).toBeTruthy();
+    expect(
+      buttons.some((button) => button.textContent === 'Cancel clone'),
+    ).toBe(false);
+
+    await act(async () => {
+      recheck!.click();
+      await Promise.resolve();
+    });
+    await flushAsync();
+    expect(onAdd).toHaveBeenCalledWith('/home/me/repo', true);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('registers a clone under StrictMode', async () => {
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    mountStrict(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={onAdd}
+        gitClone={{
+          start: vi.fn().mockResolvedValue({ jobId: 'job-strict' }),
+          poll: vi.fn().mockResolvedValue({
+            jobId: 'job-strict',
+            status: 'succeeded',
+            percent: 100,
+            cwd: '/home/me/repo',
+          }),
+          cancel: vi.fn(),
+        }}
+      />,
+    );
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), '/home/me/repo');
+    submit();
+    await flushAsync();
+
+    expect(onAdd).toHaveBeenCalledTimes(1);
+    expect(onAdd).toHaveBeenCalledWith('/home/me/repo', true);
   });
 });

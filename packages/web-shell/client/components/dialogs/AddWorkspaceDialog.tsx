@@ -192,15 +192,17 @@ export function AddWorkspaceDialog({
 
   useEffect(() => () => cancelBlurDismiss(), [cancelBlurDismiss]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // StrictMode replays setup/cleanup/setup in development; resetting here
+    // keeps the cleanup reversible, or every later poll would be discarded.
+    cloneUnmountedRef.current = false;
+    return () => {
       cloneUnmountedRef.current = true;
       if (clonePollTimerRef.current !== undefined) {
         clearTimeout(clonePollTimerRef.current);
       }
-    },
-    [],
-  );
+    };
+  }, []);
 
   useEffect(() => {
     if (!gitClone) setSource('directory');
@@ -668,7 +670,15 @@ export function AddWorkspaceDialog({
               >
                 {t('sidebar.addWorkspaceCancel')}
               </Button>
-              {cloneJob?.status === 'running' ? (
+              {cloneUnknown ? (
+                <Button
+                  type="button"
+                  className="flex-1 sm:flex-none"
+                  onClick={recheckClone}
+                >
+                  {t('sidebar.gitCloneRecheck')}
+                </Button>
+              ) : cloneJob?.status === 'running' ? (
                 <Button
                   type="button"
                   className="flex-1 sm:flex-none"
@@ -676,14 +686,6 @@ export function AddWorkspaceDialog({
                   disabled={cancelling}
                 >
                   {t('sidebar.gitCloneCancel')}
-                </Button>
-              ) : cloneUnknown ? (
-                <Button
-                  type="button"
-                  className="flex-1 sm:flex-none"
-                  onClick={recheckClone}
-                >
-                  {t('sidebar.gitCloneRecheck')}
                 </Button>
               ) : cloneJob ? (
                 <Button
