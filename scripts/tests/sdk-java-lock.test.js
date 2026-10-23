@@ -600,6 +600,67 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
   );
 
   it(
+    'returns a timeout so the caller can demote it',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-demote-'));
+      const held = join(home, 'held');
+      writeFileSync(held, '');
+      const stub = flockStub(parkedFlock(held, join(home, 'order')));
+      const child = spawn(
+        'bash',
+        [
+          '--noprofile',
+          '--norc',
+          '-eo',
+          'pipefail',
+          '-c',
+          [
+            `source "${script}"`,
+            'if ! sdk_java_lock_acquire 3; then echo "demoted"; fi',
+            'echo "reached-end"',
+          ].join('\n'),
+        ],
+        {
+          env: {
+            ...baseEnv,
+            HOME: home,
+            PATH: `${stub}:${process.env.PATH}`,
+          },
+        },
+      );
+      let out = '';
+      child.stdout.on('data', (d) => (out += d));
+      child.stderr.on('data', (d) => (out += d));
+      const code = await new Promise((resolve) => child.on('close', resolve));
+      // A `return 1` reaches the caller's demotion arm; an `exit 1` in the
+      // helper would end the step there, so the demotion could never run.
+      expect(code).toBe(0);
+      expect(out).toContain('demoted');
+      expect(out).toContain('reached-end');
+    },
+  );
+
+  it(
+    'fails fast with status 2 when the lock queue is unusable',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-broken-'));
+      const cache = join(home, '.cache/qwen-code-ci');
+      mkdirSync(cache, { recursive: true });
+      // A file where the queue directory must go: nothing can recover it, and
+      // the old body spun the whole budget out as an unattributable timeout.
+      writeFileSync(`${join(cache, 'sdk-java-tests.lock')}.queue`, '');
+      const stub = flockStub(freeFlock);
+      const started = Date.now();
+      const result = await acquire(home, 60, stub);
+      expect(result.code).toBe(2);
+      expect(result.out).toContain('lock queue unusable');
+      expect(Date.now() - started).toBeLessThan(5000);
+    },
+  );
+
+  it(
     'names the blocking head ticket when it times out behind one',
     { timeout: 30000 },
     async () => {

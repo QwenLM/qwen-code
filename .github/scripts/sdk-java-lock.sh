@@ -23,8 +23,9 @@
 # threshold together and the queue is plain sequence order.
 #
 # Source this file and call `sdk_java_lock_acquire <wait-seconds> [fast|full]`
-# (an empty tier means normal); it returns non-zero on timeout with the pinned
-# `lock not acquired within` error.
+# (an empty tier means normal). It returns 1 on timeout with the pinned
+# `lock not acquired within` error, and 2 when the queue itself is unusable,
+# so a caller can demote the wait timeout without hiding a broken host.
 sdk_java_lock_acquire() {
   local wait_seconds="${1:?wait seconds required}"
   # Callers pass the workflow tier (`fast`, `full`, or empty); everything but
@@ -38,32 +39,39 @@ sdk_java_lock_acquire() {
   if [[ ${class} == 'fast' ]]; then
     rank=0
   fi
-  # 1200 s leaves 4200 s of the 5400 s acquisition budget, enough for four
-  # 925 s holds. At or above the budget promotion would rename a ticket in the
-  # same iteration whose timeout arm deletes it; sdk-java-workflow.test.js
-  # pins the default below both acquisition budgets.
+  # 1200 s leaves 600 s of the 1800 s acquisition budget, enough for two
+  # 300 s write-back holds. At or above the budget promotion would rename a
+  # ticket in the same iteration whose timeout arm deletes it;
+  # sdk-java-workflow.test.js pins the default below the acquisition budget.
   local promote_after="${SDK_JAVA_LOCK_PROMOTE_AFTER:-1200}"
   local lock="${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
   local queue="${lock}.queue"
-  mkdir -p "${queue}"
-  exec 9>"${lock}"
+  # Explicit status checks, not errexit: callers run this under `set +e` so a
+  # timeout can be demoted, and a queue that cannot be read or written must
+  # fail fast with status 2 instead of spinning the budget out as an
+  # unattributable timeout.
+  if ! mkdir -p "${queue}" || ! exec 9>"${lock}" ||
+    ! exec 8>>"${queue}/.seq" || ! flock 8; then
+    echo "::error::sdk-java lock queue unusable at ${queue}"
+    return 2
+  fi
 
   # Atomic sequence: fd 8 holds the counter file and flock serializes the
   # read-increment-write. A holder killed inside this millisecond window only
   # costs one sequence number, not a stuck queue.
   # Append, never truncate: opening with `>` would wipe the counter before
   # this process even takes the lock.
-  exec 8>>"${queue}/.seq"
-  flock 8
   local seq
   seq=$(tail -n 1 "${queue}/.seq" 2>/dev/null)
   seq=$((${seq:-0} + 1))
-  printf '%s\n' "${seq}" >>"${queue}/.seq"
   local ticket
   ticket=$(printf '%s/%d-%010d-%s' "${queue}" "${rank}" "${seq}" "$$")
   # Publish inside the critical section: a later arrival that sees an empty
   # queue names itself head and wins out of arrival order.
-  : >"${ticket}"
+  if ! printf '%s\n' "${seq}" >>"${queue}/.seq" || ! : >"${ticket}"; then
+    echo "::error::sdk-java lock queue unusable at ${queue}"
+    return 2
+  fi
   exec 8>&-
 
   local start=${SECONDS} head name pid mtime age remaining last_log=-60 blocking head_hint=0
