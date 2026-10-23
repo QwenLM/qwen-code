@@ -5200,6 +5200,29 @@ describe('qwen-triage verify hardening round 2', () => {
     }
   });
 
+  // The maintainer's publish round used to be a paragraph retyped every time
+  // ("English comment, collapsed Chinese, screenshots, my assets branch"), so
+  // the request and the report could drift apart. `--publish` has to resolve
+  // every one of those deliverables on its own, without weakening the repo
+  // rule it replaces.
+  it('resolves --publish to the whole local report deliverable', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain('`/verify-pr <n> --publish`');
+    expect(flat).toContain('`--publish` in the invocation is that request');
+    // A stable host is a coordinate, so it resolves once and needs no flag.
+    expect(flat).toContain(
+      'Resolve the branch as `--assets-branch`, else `$QWEN_VERIFY_ASSETS_BRANCH`, else `assets/pr<n>-validation`',
+    );
+    // Posting is consent, not a coordinate: it stays per-invocation.
+    expect(flat).toContain('Only a coordinate like this is defaultable');
+    expect(flat).toContain('posting stays a per-invocation request');
+    // The flag is not a shortcut around the metadata rule.
+    expect(flat).toContain('does not license an `origin` fallback');
+    // The deliverables are the skill's, not the maintainer's list.
+    expect(flat).toContain('do not ask the maintainer to restate them');
+  });
+
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
   // expected A/B base-cell failures proving the tests are load-bearing"
   // while assertions.json said fail:7 — so the publisher's trust rule

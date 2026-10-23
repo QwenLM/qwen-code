@@ -21,6 +21,7 @@ import {
   MANAGED_CHILD_LIMITS,
   decodeChildLaunchEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
   HookEventName,
@@ -45,7 +46,6 @@ import {
   hostedShellLaneAttachesChildAgents,
   type HostedWorkspaceToolProfile,
 } from './hosted-workspace-profiles.js';
-import { hostedTranscriptFitsInline } from './hosted-transcript-budget.test-helper.js';
 
 // H4b: the kind gate admits `child_agent` for real, so this suite runs
 // without an enablement mock. The Broker is mocked as in the sibling
@@ -956,7 +956,21 @@ it('answers an over-size prompt with the byte_limit refusal, not recovery', asyn
 
 it('answers an encoded-overflow prompt with the byte_limit refusal', async () => {
   messageFitsInline.mockImplementation(
-    hostedTranscriptFitsInline(root, sessionKey.sessionId),
+    (type, parts, model) =>
+      Buffer.byteLength(
+        JSON.stringify({
+          uuid: randomUUID(),
+          parentUuid: randomUUID(),
+          sessionId: sessionKey.sessionId,
+          timestamp: new Date().toISOString(),
+          type,
+          cwd: root,
+          version: 'hosted-harness/1',
+          daemonPromptId: 'prompt',
+          model,
+          message: { role: type === 'assistant' ? 'model' : 'user', parts },
+        }),
+      ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
   );
   const turn = createTurn();
   const responses = await executeAgent(
@@ -968,6 +982,7 @@ it('answers an encoded-overflow prompt with the byte_limit refusal', async () =>
     }),
   );
   expect(JSON.stringify(responses)).toContain('byte_limit');
+  expect(JSON.stringify(responses)).toContain('shorten them and retry');
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     0,
   );

@@ -9,8 +9,6 @@ import type {
 
 type Schemas = components['schemas'];
 
-export type JavaAgentDate = number | string;
-
 export type JavaAgentTurn = Schemas['WebShellTurn'];
 
 export interface JavaAgentEnvironment {
@@ -73,6 +71,7 @@ export type JavaAgentContentPart = Schemas['WebShellContentPart'];
 export type JavaAgentItem = Schemas['WebShellItem'];
 
 export type JavaAgentCommandAdmission = Schemas['WebShellAdmission'];
+export type JavaAgentTurnAdmission = Schemas['WebShellTurnAdmission'];
 
 export type JavaAgentTranscript = Schemas['WebShellTranscript'];
 export type JavaAgentAction = Schemas['WebShellAction'];
@@ -313,14 +312,14 @@ export class JavaManagedAgentClient {
   submitTurn(
     request: Schemas['WebShellSubmitRequest'],
     signal?: AbortSignal,
-  ): Promise<JavaAgentCommandAdmission> {
+  ): Promise<JavaAgentTurnAdmission> {
     return this.post('/turns/submit', request, signal);
   }
 
   cancelTurn(
     request: Schemas['WebShellCancelRequest'],
     signal?: AbortSignal,
-  ): Promise<JavaAgentCommandAdmission> {
+  ): Promise<JavaAgentTurnAdmission> {
     return this.post('/turns/cancel', request, signal);
   }
 
