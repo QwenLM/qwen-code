@@ -670,6 +670,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_tasks',
   'session_agents',
   'session_agent_trace',
+  'scheduled_task_gate',
   'session_monitor_tool_correlation',
   'session_stats',
   'session_lsp',
