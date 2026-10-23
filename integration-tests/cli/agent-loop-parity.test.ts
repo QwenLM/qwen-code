@@ -37,6 +37,8 @@ interface Scenario {
   args?: string[];
   prepare?: (rig: TestRig) => void;
   settings?: JsonObject;
+  /** Run without --yolo and allow every stream-json `can_use_tool` request. */
+  approve?: boolean;
   /** The exit code both runs must end with; defaults to 0. */
   exitCode?: number;
   /** The model's reply to a streaming request, from its message history. */
@@ -48,6 +50,8 @@ interface Run {
   requests: unknown[];
   frames: unknown[];
   stderr: string;
+  /** The `tool_use_id` of each `can_use_tool` request, in order. */
+  approvals: string[];
 }
 
 const toolResults = (messages: JsonObject[]) =>
@@ -182,7 +186,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     const args = [
       rig.bundlePath,
       '--no-chat-recording',
-      '--yolo',
+      ...(scenario.approve ? [] : ['--yolo']),
       ...(scenario.prompt !== undefined ? ['--prompt', scenario.prompt] : []),
       '--output-format',
       'stream-json',
@@ -208,14 +212,33 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       else if (!child.stdin.writableEnded) child.stdin.end();
     };
     let stdout = '';
-    let results = 0;
+    let lines = 0;
+    const approvals: string[] = [];
     child.stdout.on('data', (data: Buffer) => {
       stdout += data;
-      const seen = stdout
-        .split('\n')
-        .slice(0, -1)
-        .filter((line) => line.startsWith('{"type":"result"')).length;
-      for (; results < seen; results++) sendNext();
+      const complete = stdout.split('\n').slice(0, -1);
+      for (; lines < complete.length; lines++) {
+        if (!complete[lines].startsWith('{')) continue;
+        const frame = JSON.parse(complete[lines]) as JsonObject;
+        if (frame['type'] === 'result') sendNext();
+        const request = frame['request'] as JsonObject | undefined;
+        if (
+          frame['type'] === 'control_request' &&
+          request?.['subtype'] === 'can_use_tool'
+        ) {
+          approvals.push(String(request['tool_use_id']));
+          child.stdin.write(
+            `${JSON.stringify({
+              type: 'control_response',
+              response: {
+                subtype: 'success',
+                request_id: frame['request_id'],
+                response: { behavior: 'allow' },
+              },
+            })}\n`,
+          );
+        }
+      }
     });
     let stderr = '';
     child.stderr.on('data', (data: Buffer) => (stderr += data));
@@ -228,6 +251,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       requests: modelRequests(server, dir),
       frames: streamFrames(stdout, dir),
       stderr,
+      approvals,
     };
   }
 
@@ -239,6 +263,14 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
 
   const read = (file: string, id: string) =>
     fakeToolCall('read_file', { file_path: file }, id);
+
+  const message = (text: string) =>
+    JSON.stringify({
+      type: 'user',
+      session_id: 'parity-session',
+      message: { role: 'user', content: text },
+      parent_tool_use_id: null,
+    });
 
   const scenarios: Scenario[] = [
     {
@@ -434,13 +466,6 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
   );
 
   it('ends a stream-json message past --max-session-turns at the limit (#15325)', async () => {
-    const message = (text: string) =>
-      JSON.stringify({
-        type: 'user',
-        session_id: 'parity-session',
-        message: { role: 'user', content: text },
-        parent_tool_use_id: null,
-      });
     const scenario: Scenario = {
       name: 'session turn cap',
       messages: [message('first question'), message('second question')],
@@ -468,5 +493,47 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       { is_error: false, result: 'answer 1' },
     ]);
     expect(shared.stderr).toContain('Reached max session turns');
+  }, 120_000);
+
+  it('asks for approval of a whole batch before the tool budget stops it', async () => {
+    const scenario: Scenario = {
+      name: 'approvals at the tool budget edge',
+      messages: [message('Write both files.')],
+      args: ['--input-format', 'stream-json', '--max-tool-calls', '1'],
+      approve: true,
+      reply: (messages, dir) =>
+        toolResults(messages) === 0
+          ? {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  { file_path: join(dir, 'one.txt'), content: 'one\n' },
+                  'call_one',
+                ),
+                fakeToolCall(
+                  'write_file',
+                  { file_path: join(dir, 'two.txt'), content: 'two\n' },
+                  'call_two',
+                ),
+              ],
+            }
+          : { content: 'Both written.' },
+    };
+
+    const { current, shared } = await both(scenario);
+    const output = (frames: unknown[]) =>
+      frames.filter(
+        (frame) => (frame as JsonObject)['type'] !== 'control_request',
+      );
+
+    expect(current.exitCode).toBe(55);
+    expect(shared.exitCode).toBe(55);
+    expect(shared.requests).toEqual(current.requests);
+    expect(output(shared.frames)).toEqual(output(current.frames));
+    // The current loop asks for each call right before it runs, so the call
+    // past the budget is never asked. The shared loop asks for the whole batch
+    // first, and the budget then stops the second call before it runs.
+    expect(current.approvals).toEqual(['call_one']);
+    expect(shared.approvals).toEqual(['call_one', 'call_two']);
   }, 120_000);
 });

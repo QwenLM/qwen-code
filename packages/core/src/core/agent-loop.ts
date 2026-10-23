@@ -42,6 +42,11 @@ export type AgentLoopStopReason =
   | 'completed'
   /** `maxRounds` was reached with tool results still to send (`parts`). */
   | 'next_round'
+  /**
+   * The loop's signal was aborted. A cancel that comes only from a signal the
+   * client merged in, such as a Goal turn's, ends the round like a response
+   * without tool calls.
+   */
   | 'cancelled'
   | 'loop_detected'
   | 'duplicate_provider_call'
@@ -277,7 +282,7 @@ async function runModelRound(
         discardedCalls = calls.splice(0);
       } else if (event.type === LlmEventType.ToolCallRequest) {
         calls.push(event.value);
-      } else {
+      } else if (event.type !== LlmEventType.UserCancelled || signal.aborted) {
         stop ??= STOP_EVENTS[event.type];
       }
       await host.onModelEvent?.(event, discardedCalls);

@@ -146,7 +146,7 @@ The result holds the stop reason, the number of rounds and the last `Turn`. The 
 
 - `completed`;
 - `next_round` — `maxRounds` was reached; the result carries the tool results to send;
-- `cancelled`;
+- `cancelled` — the loop's own signal was aborted; a cancel that comes only from a signal the client merged in, such as a Goal turn's, ends the round as if the model made no calls, as headless does today;
 - `loop_detected`;
 - `duplicate_provider_call`;
 - `tool_ended_turn`;
@@ -250,7 +250,7 @@ A difference fails the scenario unless it is listed with a linked issue.
 - an output-truncated edit;
 - loop detection;
 - a blocking Stop hook;
-- `--max-tool-calls` at the budget edge: a parallel batch, a sequential batch, and a call rejected before it runs;
+- `--max-tool-calls` at the budget edge: a parallel batch, a sequential batch, a call rejected before it runs, and a batch that needs approval;
 - `--max-session-turns` across two stream-json messages;
 - structured output with a sibling call;
 - a teammate message merged into a tool-result turn.
@@ -262,7 +262,7 @@ The suite runs in the integration job. A scheduled job also runs the whole headl
 - With the setting off, no surface changes. The only shared code that changes is the scheduler's new optional `beforeToolLaunch`, which does nothing when it is not passed.
 - With the setting on, headless differs from today in these intended ways. Most follow from scheduling a batch as one unit, as the TUI already does:
   - a stream-json message past `--max-session-turns` ends the run at the session turn limit, as `-p` does (the error on stderr, exit code 53), instead of a success that repeats the previous answer (#15325);
-  - a batch's PreToolUse hooks and approvals (stream-json `can_use_tool`) run for all of its calls before any of them is launched, instead of one call at a time;
+  - a batch's PreToolUse hooks and approvals (stream-json `can_use_tool`) run for all of its calls before any of them is launched, instead of one call at a time; under `--max-tool-calls`, a call past the budget can be approved and then stopped before it runs;
   - a PostToolBatch hook fires once per batch with all of its calls, and the batch output budget applies across the batch; today each call is its own batch;
   - telemetry follows the batch, as in the TUI: a plan-mode entry's siblings are logged as failed tool calls, also in the JSON `stats`, and a call stopped before its launch still has a tool span; with Mod tool hooks the calls are still scheduled one at a time, so neither applies;
   - the results of a batch with several sequential calls are printed when the batch completes, instead of after each call;
@@ -270,7 +270,7 @@ The suite runs in the integration job. A scheduled job also runs the whole headl
   - when a skill earlier in the batch registers a PreToolUse hook, a later call of the batch is stopped and the model has to issue it again, instead of being checked by the new hook;
   - under `--json-schema`, a `structured_output` call that repeats a call id in the same response is answered as a duplicate instead of being run, so a valid second submission waits for the next round.
 
-  The parity suite covers the common cases unchanged and asserts the first difference.
+  The parity suite covers the common cases unchanged and asserts the first two differences.
 
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 
@@ -308,6 +308,7 @@ End state:
 
 - Should `model.maxSessionTurns: 0` mean "no turns" or be rejected? Today the loops disagree (#15325).
 - The parity suite compares frames in order, and no scenario yet runs concurrent calls with live output, whose progress frames have no fixed order in either loop. Should such scenarios compare progress frames per call?
+- A call `beforeToolLaunch` refuses is still a member of its batch for PostToolBatch, so a stop or added context the hook attaches to it does not reach the model. Headless refuses a call only when the run ends, so this does not show there. Before another surface uses `beforeToolLaunch`, should refused calls leave the batch the hook sees, or should the hook's output move to the last call that ran?
 
 ## Follow-up
 

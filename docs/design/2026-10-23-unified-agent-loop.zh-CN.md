@@ -146,7 +146,7 @@ loop 是一个异步函数。每个模型事件都通过回调原样交给入口
 
 - `completed`；
 - `next_round`——达到 `maxRounds`，结果中带有待发送的工具结果；
-- `cancelled`；
+- `cancelled` —— loop 自己的 signal 被中止；如果取消只来自 client 合并进来的其他 signal（例如 Goal 轮次的 signal），这一轮按模型没有发起调用来结束，与 headless 现在的行为一致；
 - `loop_detected`；
 - `duplicate_provider_call`；
 - `tool_ended_turn`；
@@ -250,7 +250,7 @@ if (config.isUnifiedAgentLoopEnabled()) {
 - 输出被截断的编辑；
 - 循环检测；
 - 阻断型 Stop hook；
-- 预算边界上的 `--max-tool-calls`：并行批次、顺序批次，以及在执行前就被拒绝的调用；
+- 预算边界上的 `--max-tool-calls`：并行批次、顺序批次、在执行前就被拒绝的调用，以及需要审批的批次；
 - 跨两条 stream-json 消息的 `--max-session-turns`；
 - 带同批调用的 structured output；
 - 合并进工具结果轮的 teammate 消息。
@@ -262,7 +262,7 @@ if (config.isUnifiedAgentLoopEnabled()) {
 - 设置关闭时，任何入口都不变。唯一改动的共享代码是 scheduler 新增的可选项 `beforeToolLaunch`，不传入时它不起作用。
 - 设置开启时，headless 与现在相比有以下有意的差异。其中大多数源于把一批调用作为一个整体调度，这也是 TUI 现在的做法：
   - 在 stream-json 中，超过 `--max-session-turns` 的消息会在会话轮数上限处结束运行，与 `-p` 相同（错误写到 stderr，退出码 53），而不是返回一个重复上一条回答的成功结果（#15325）；
-  - 一批调用的 PreToolUse hook 和审批（stream-json 的 `can_use_tool`）会在这一批的任何调用启动之前为所有调用执行，而不是一次一个调用；
+  - 一批调用的 PreToolUse hook 和审批（stream-json 的 `can_use_tool`）会在这一批的任何调用启动之前为所有调用执行，而不是一次一个调用；在 `--max-tool-calls` 下，超出预算的调用可能先被审批通过，然后在执行前被停下；
   - PostToolBatch hook 每批触发一次，带上这一批的所有调用，批次输出预算也按整批计算；现在每个调用都是单独的一批；
   - 遥测按整批记录，与 TUI 一致：进入 plan mode 那个调用的同批调用记为失败的工具调用（JSON 输出的 `stats` 也计入），启动前被拦下的调用仍有工具 span；带 Mod 工具 hook 时调用仍逐个调度，这两点都不适用；
   - 一批中有多个串行调用时，它们的结果在整批完成时输出，而不是每个调用完成后输出；
@@ -270,7 +270,7 @@ if (config.isUnifiedAgentLoopEnabled()) {
   - 同批中排在前面的 skill 注册了 PreToolUse hook 时，后面的调用会被拦下，需要模型重新发起，而不是由新的 hook 检查；
   - 在 `--json-schema` 下，同一次回复中重复 call id 的 `structured_output` 调用按重复调用作答而不执行，因此有效的第二次提交要等到下一轮。
 
-  对拍测试覆盖了保持不变的常见场景，并对第一条差异做了断言。
+  对拍测试覆盖了保持不变的常见场景，并对前两条差异做了断言。
 
 - 之后迁移的入口会带来各自的修复：#15324（ACP）、#15326（OpenTUI）、#14114 与 #12209（ACP）。
 
@@ -308,6 +308,7 @@ if (config.isUnifiedAgentLoopEnabled()) {
 
 - `model.maxSessionTurns: 0` 应该表示“不允许任何轮次”，还是应该被拒绝？目前各 loop 的理解不一致（#15325）。
 - 对拍测试按顺序比较各帧，目前还没有场景并发运行带实时输出的调用；这类调用的进度帧在两份 loop 中都没有固定顺序。这类场景是否应该按调用分别比较进度帧？
+- 被 `beforeToolLaunch` 拒绝的调用，对 PostToolBatch 来说仍是所在批次的成员，因此 hook 附加在它上面的停止指令或补充上下文不会到达模型。headless 只在运行结束时才拒绝调用，所以这在 headless 中不会表现出来。在其他入口使用 `beforeToolLaunch` 之前，应该让被拒绝的调用离开 hook 看到的批次，还是把 hook 的输出移到最后一个实际运行的调用上？
 
 ## 后续工作
 

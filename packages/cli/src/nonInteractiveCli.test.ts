@@ -471,6 +471,26 @@ describe('runNonInteractive', () => {
     vi.restoreAllMocks();
   });
 
+  const bothLoops = [
+    { loop: 'current loop', shared: false },
+    { loop: 'shared loop with Mod tool hooks', shared: true },
+  ] as const;
+
+  // With Mod tool hooks the shared loop runs each call through
+  // `executeToolCall`, which these tests mock.
+  function useSharedLoopWithModToolHooks(): void {
+    Object.assign(mockConfig, { isUnifiedAgentLoopEnabled: () => true });
+    vi.spyOn(ModSession, 'create').mockReturnValue({
+      initialize: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      flushOutput: vi.fn().mockResolvedValue(undefined),
+      flushLogs: vi.fn(),
+      syncSession: vi.fn().mockResolvedValue(undefined),
+      hasToolHooks: true,
+      toolCall: () => undefined,
+    } as unknown as ModSession);
+  }
+
   /**
    * Creates a default mock SessionMetrics object.
    * Can be overridden in individual tests if needed.
@@ -2341,35 +2361,81 @@ describe('runNonInteractive', () => {
     });
   });
 
-  it('records a user interrupt when a Goal run is cancelled outside any budget', async () => {
-    // `routeAbort` is the writer here, and with no budget tripped the stop
-    // is the user's own, not a run that ran out of its allowance.
-    setupMetricsMock();
-    mockGetCommands.mockReturnValue([goalCommand]);
-    await prepareGoalState('paused');
-    const runAbortController = new AbortController();
-    mockLlmClient.sendMessageStream.mockImplementation(() =>
-      (async function* (): AsyncGenerator<ServerLlmStreamEvent> {
-        runAbortController.abort();
-        yield {
-          type: LlmEventType.UserCancelled,
-        } as ServerLlmStreamEvent;
-      })(),
-    );
+  it.each([false, true])(
+    'records a user interrupt when a Goal run is cancelled outside any budget (shared loop: %s)',
+    async (shared) => {
+      // `routeAbort` is the writer here, and with no budget tripped the stop
+      // is the user's own, not a run that ran out of its allowance.
+      setupMetricsMock();
+      Object.assign(mockConfig, { isUnifiedAgentLoopEnabled: () => shared });
+      mockGetCommands.mockReturnValue([goalCommand]);
+      await prepareGoalState('paused');
+      const runAbortController = new AbortController();
+      mockLlmClient.sendMessageStream.mockImplementation(() =>
+        (async function* (): AsyncGenerator<ServerLlmStreamEvent> {
+          runAbortController.abort();
+          yield {
+            type: LlmEventType.UserCancelled,
+          } as ServerLlmStreamEvent;
+        })(),
+      );
 
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      '/goal resume',
-      'goal-user-cancel',
-      { abortController: runAbortController, recoverableCancellation: true },
-    ).catch(() => undefined);
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/goal resume',
+        'goal-user-cancel',
+        { abortController: runAbortController, recoverableCancellation: true },
+      ).catch(() => undefined);
 
-    expect(goalRuntime.getSnapshot().goal).toMatchObject({
-      status: 'paused',
-      lastReason: GOAL_PAUSE_REASON_USER_INTERRUPT,
-    });
-  });
+      expect(goalRuntime.getSnapshot().goal).toMatchObject({
+        status: 'paused',
+        lastReason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+      });
+    },
+  );
+
+  it.each([false, true])(
+    'finishes a Goal turn that a Goal pause preempts mid-stream (shared loop: %s)',
+    async (shared) => {
+      // The pause aborts only the Goal signal the client merges in, so the
+      // client reports a cancel while the run itself goes on.
+      setupMetricsMock();
+      Object.assign(mockConfig, { isUnifiedAgentLoopEnabled: () => shared });
+      mockGetCommands.mockReturnValue([goalCommand]);
+      await prepareGoalState('paused');
+      mockLlmClient.sendMessageStream.mockImplementation(
+        (
+          _parts: unknown,
+          _signal: AbortSignal,
+          _promptId: string,
+          sendOptions: { goalPermit: GoalTurnPermit },
+        ) =>
+          (async function* (): AsyncGenerator<ServerLlmStreamEvent> {
+            await goalRuntime.dispatch({
+              action: 'pause',
+              expectedGoalId: sendOptions.goalPermit.goalId,
+              expectedRevision: sendOptions.goalPermit.revision,
+              reason: 'paused by another client',
+            });
+            yield { type: LlmEventType.UserCancelled } as ServerLlmStreamEvent;
+          })(),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/goal resume',
+        'goal-preempted',
+      );
+
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
+      expect(goalRuntime.getSnapshot().goal).toMatchObject({
+        status: 'paused',
+        lastReason: 'paused by another client',
+      });
+    },
+  );
 
   it('records the headless register when a Goal run ends with structured output', async () => {
     setupMetricsMock();
@@ -3795,285 +3861,305 @@ describe('runNonInteractive', () => {
     expect(mockLlmClient.consumePendingMemoryTaskPromises).toHaveBeenCalled();
   });
 
-  it('uses a tool-selected full-turn model for the next request', async () => {
-    setupMetricsMock();
-    const model = 'qwen3-vl-plus\0';
-    mockCoreExecuteToolCall.mockImplementation(
-      async (_config, request, _signal, options) => {
-        if (request.callId === 'tool-image') {
-          expect(options.onToolResultFullTurnModel?.(model)).toBe(true);
+  it.each(bothLoops)(
+    'uses a tool-selected full-turn model for the next request ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+      const model = 'qwen3-vl-plus\0';
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config, request, _signal, options) => {
+          if (request.callId === 'tool-image') {
+            expect(options.onToolResultFullTurnModel?.(model)).toBe(true);
+            return {
+              responseParts: [{ text: 'Tool response with image' }],
+              modelOverride: model,
+            };
+          }
           return {
-            responseParts: [{ text: 'Tool response with image' }],
-            modelOverride: model,
+            responseParts: [{ text: 'Skill response' }],
+            modelOverride: undefined,
           };
-        }
-        return {
-          responseParts: [{ text: 'Skill response' }],
-          modelOverride: undefined,
-        };
-      },
-    );
-    mockLlmClient.sendMessageStream
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          {
-            type: LlmEventType.ToolCallRequest,
-            value: {
-              callId: 'tool-image',
-              name: 'screenshot_tool',
-              args: {},
-              isClientInitiated: false,
-              prompt_id: 'prompt-tool-image',
+        },
+      );
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'tool-image',
+                name: 'screenshot_tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-tool-image',
+              },
             },
-          },
-          {
-            type: LlmEventType.ToolCallRequest,
-            value: {
-              callId: 'skill-after-image',
-              name: 'skill_tool',
-              args: {},
-              isClientInitiated: false,
-              prompt_id: 'prompt-tool-image',
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'skill-after-image',
+                name: 'skill_tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-tool-image',
+              },
             },
-          },
-        ]),
-      )
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: LlmEventType.Content, value: 'Image understood' },
-          {
-            type: LlmEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 1 },
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Image understood' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
             },
-          },
-        ]),
+          ]),
+        );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Use the screenshot tool',
+        'prompt-tool-image',
       );
 
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Use the screenshot tool',
-      'prompt-tool-image',
-    );
+      expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+        2,
+        [{ text: 'Tool response with image' }, { text: 'Skill response' }],
+        expect.any(AbortSignal),
+        'prompt-tool-image',
+        { type: SendMessageType.ToolResult, modelOverride: model },
+      );
+    },
+  );
 
-    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
-      2,
-      [{ text: 'Tool response with image' }, { text: 'Skill response' }],
-      expect.any(AbortSignal),
-      'prompt-tool-image',
-      { type: SendMessageType.ToolResult, modelOverride: model },
-    );
-  });
+  it.each(bothLoops)(
+    'rejects a conflicting tool-selected full-turn model within a batch ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+      const first = 'qwen3-vl-plus\0';
+      const second = 'qwen3-vl-max\0';
+      const accepted: Record<string, boolean> = {};
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config, request, _signal, options) => {
+          if (request.callId === 'tool-image-a') {
+            accepted['a'] = options.onToolResultFullTurnModel?.(first) ?? false;
+            return {
+              responseParts: [{ text: 'first image' }],
+              modelOverride: first,
+            };
+          }
+          if (request.callId === 'tool-image-b') {
+            accepted['b'] =
+              options.onToolResultFullTurnModel?.(second) ?? false;
+            return {
+              responseParts: [{ text: 'second image' }],
+              modelOverride: second,
+            };
+          }
+          return {
+            responseParts: [{ text: 'other' }],
+            modelOverride: undefined,
+          };
+        },
+      );
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'tool-image-a',
+                name: 'screenshot_tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-tool-image',
+              },
+            },
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'tool-image-b',
+                name: 'screenshot_tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-tool-image',
+              },
+            },
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Image understood' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        );
 
-  it('rejects a conflicting tool-selected full-turn model within a batch', async () => {
-    setupMetricsMock();
-    const first = 'qwen3-vl-plus\0';
-    const second = 'qwen3-vl-max\0';
-    const accepted: Record<string, boolean> = {};
-    mockCoreExecuteToolCall.mockImplementation(
-      async (_config, request, _signal, options) => {
-        if (request.callId === 'tool-image-a') {
-          accepted['a'] = options.onToolResultFullTurnModel?.(first) ?? false;
-          return {
-            responseParts: [{ text: 'first image' }],
-            modelOverride: first,
-          };
-        }
-        if (request.callId === 'tool-image-b') {
-          accepted['b'] = options.onToolResultFullTurnModel?.(second) ?? false;
-          return {
-            responseParts: [{ text: 'second image' }],
-            modelOverride: second,
-          };
-        }
-        return { responseParts: [{ text: 'other' }], modelOverride: undefined };
-      },
-    );
-    mockLlmClient.sendMessageStream
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          {
-            type: LlmEventType.ToolCallRequest,
-            value: {
-              callId: 'tool-image-a',
-              name: 'screenshot_tool',
-              args: {},
-              isClientInitiated: false,
-              prompt_id: 'prompt-tool-image',
-            },
-          },
-          {
-            type: LlmEventType.ToolCallRequest,
-            value: {
-              callId: 'tool-image-b',
-              name: 'screenshot_tool',
-              args: {},
-              isClientInitiated: false,
-              prompt_id: 'prompt-tool-image',
-            },
-          },
-        ]),
-      )
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: LlmEventType.Content, value: 'Image understood' },
-          {
-            type: LlmEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 1 },
-            },
-          },
-        ]),
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Use the screenshot tool',
+        'prompt-tool-image',
       );
 
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Use the screenshot tool',
-      'prompt-tool-image',
-    );
+      expect(accepted['a']).toBe(true);
+      expect(accepted['b']).toBe(false);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+        2,
+        [{ text: 'first image' }, { text: 'second image' }],
+        expect.any(AbortSignal),
+        'prompt-tool-image',
+        { type: SendMessageType.ToolResult, modelOverride: first },
+      );
+    },
+  );
 
-    expect(accepted['a']).toBe(true);
-    expect(accepted['b']).toBe(false);
-    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
-      2,
-      [{ text: 'first image' }, { text: 'second image' }],
-      expect.any(AbortSignal),
-      'prompt-tool-image',
-      { type: SendMessageType.ToolResult, modelOverride: first },
-    );
-  });
+  it.each(bothLoops)(
+    'rejects a conflicting tool-selected full-turn model in a drain item ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+      const first = 'qwen3-vl-plus\0';
+      const second = 'qwen3-vl-max\0';
+      const accepted: Record<string, boolean> = {};
 
-  it('rejects a conflicting tool-selected full-turn model in a drain item', async () => {
-    setupMetricsMock();
-    const first = 'qwen3-vl-plus\0';
-    const second = 'qwen3-vl-max\0';
-    const accepted: Record<string, boolean> = {};
-
-    let notificationCallback:
-      | ((
-          displayText: string,
-          modelText: string,
-          meta: { agentId: string; toolUseId?: string; status: string },
-        ) => void)
-      | null = null;
-    mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
-      (cb) => {
-        notificationCallback = cb;
-      },
-    );
-
-    mockCoreExecuteToolCall.mockImplementation(
-      async (_config, request, _signal, options) => {
-        if (request.callId === 'tool-main') {
-          notificationCallback?.('Agent done', 'Agent completed', {
-            agentId: 'bg-1',
-            status: 'completed',
-          });
-          return { responseParts: [{ text: 'main tool done' }] };
-        }
-        if (request.callId === 'drain-tool-a') {
-          accepted['a'] = options.onToolResultFullTurnModel?.(first) ?? false;
-          return {
-            responseParts: [{ text: 'drain image a' }],
-            modelOverride: first,
-          };
-        }
-        if (request.callId === 'drain-tool-b') {
-          accepted['b'] = options.onToolResultFullTurnModel?.(second) ?? false;
-          return {
-            responseParts: [{ text: 'drain image b' }],
-            modelOverride: second,
-          };
-        }
-        return { responseParts: [{ text: 'other' }], modelOverride: undefined };
-      },
-    );
-
-    mockLlmClient.sendMessageStream
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          {
-            type: LlmEventType.ToolCallRequest,
-            value: {
-              callId: 'tool-main',
-              name: 'some_tool',
-              args: {},
-              isClientInitiated: false,
-              prompt_id: 'prompt-drain',
-            },
-          },
-        ]),
-      )
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: LlmEventType.Content, value: 'Main done' },
-          {
-            type: LlmEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 1 },
-            },
-          },
-        ]),
-      )
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          {
-            type: LlmEventType.ToolCallRequest,
-            value: {
-              callId: 'drain-tool-a',
-              name: 'screenshot_tool',
-              args: {},
-              isClientInitiated: false,
-              prompt_id: 'prompt-drain',
-            },
-          },
-          {
-            type: LlmEventType.ToolCallRequest,
-            value: {
-              callId: 'drain-tool-b',
-              name: 'screenshot_tool',
-              args: {},
-              isClientInitiated: false,
-              prompt_id: 'prompt-drain',
-            },
-          },
-        ]),
-      )
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: LlmEventType.Content, value: 'Drain done' },
-          {
-            type: LlmEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 1 },
-            },
-          },
-        ]),
+      let notificationCallback:
+        | ((
+            displayText: string,
+            modelText: string,
+            meta: { agentId: string; toolUseId?: string; status: string },
+          ) => void)
+        | null = null;
+      mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+        (cb) => {
+          notificationCallback = cb;
+        },
       );
 
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Do something',
-      'prompt-drain',
-    );
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config, request, _signal, options) => {
+          if (request.callId === 'tool-main') {
+            notificationCallback?.('Agent done', 'Agent completed', {
+              agentId: 'bg-1',
+              status: 'completed',
+            });
+            return { responseParts: [{ text: 'main tool done' }] };
+          }
+          if (request.callId === 'drain-tool-a') {
+            accepted['a'] = options.onToolResultFullTurnModel?.(first) ?? false;
+            return {
+              responseParts: [{ text: 'drain image a' }],
+              modelOverride: first,
+            };
+          }
+          if (request.callId === 'drain-tool-b') {
+            accepted['b'] =
+              options.onToolResultFullTurnModel?.(second) ?? false;
+            return {
+              responseParts: [{ text: 'drain image b' }],
+              modelOverride: second,
+            };
+          }
+          return {
+            responseParts: [{ text: 'other' }],
+            modelOverride: undefined,
+          };
+        },
+      );
 
-    expect(accepted['a']).toBe(true);
-    expect(accepted['b']).toBe(false);
-    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
-      4,
-      [{ text: 'drain image a' }, { text: 'drain image b' }],
-      expect.any(AbortSignal),
-      'prompt-drain/automatic/3',
-      { type: SendMessageType.ToolResult, modelOverride: first },
-    );
-  });
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'tool-main',
+                name: 'some_tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-drain',
+              },
+            },
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Main done' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'drain-tool-a',
+                name: 'screenshot_tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-drain',
+              },
+            },
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'drain-tool-b',
+                name: 'screenshot_tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-drain',
+              },
+            },
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Drain done' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Do something',
+        'prompt-drain',
+      );
+
+      expect(accepted['a']).toBe(true);
+      expect(accepted['b']).toBe(false);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+        4,
+        [{ text: 'drain image a' }, { text: 'drain image b' }],
+        expect.any(AbortSignal),
+        'prompt-drain/automatic/3',
+        { type: SendMessageType.ToolResult, modelOverride: first },
+      );
+    },
+  );
 
   describe('parallel tool execution', () => {
     const finishTurn: ServerLlmStreamEvent[] = [
@@ -4101,25 +4187,11 @@ describe('runNonInteractive', () => {
       }));
     }
 
-    it.each([
-      { loop: 'current loop', shared: false },
-      { loop: 'shared loop with Mod tool hooks', shared: true },
-    ])(
+    it.each(bothLoops)(
       'isolates enter_plan_mode from headless siblings without charging skipped calls to the budget ($loop)',
       async ({ shared }) => {
         setupMetricsMock();
-        if (shared) {
-          Object.assign(mockConfig, { isUnifiedAgentLoopEnabled: () => true });
-          vi.spyOn(ModSession, 'create').mockReturnValue({
-            initialize: vi.fn().mockResolvedValue(undefined),
-            close: vi.fn().mockResolvedValue(undefined),
-            flushOutput: vi.fn().mockResolvedValue(undefined),
-            flushLogs: vi.fn(),
-            syncSession: vi.fn().mockResolvedValue(undefined),
-            hasToolHooks: true,
-            toolCall: () => undefined,
-          } as unknown as ModSession);
-        }
+        if (shared) useSharedLoopWithModToolHooks();
         const recordToolResult = vi.fn();
         (
           mockConfig as Config & {

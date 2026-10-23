@@ -270,7 +270,6 @@ describe('runAgentLoop', () => {
     [LlmEventType.MaxSessionTurns, 'max_session_turns'],
     [LlmEventType.SessionTokenLimitExceeded, 'session_token_limit'],
     [LlmEventType.UserPromptSubmitBlocked, 'user_prompt_blocked'],
-    [LlmEventType.UserCancelled, 'cancelled'],
   ] as const)('stops on %s without running tools', async (type, reason) => {
     const { client } = fakeClient([
       [
@@ -290,6 +289,54 @@ describe('runAgentLoop', () => {
 
     expect(result.reason).toBe(reason);
     expect(batches).toEqual([]);
+  });
+
+  it('stops on UserCancelled without running tools once its signal is aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const { client } = fakeClient([
+      [
+        requestEvent(toolRequest('call-1')),
+        { type: LlmEventType.UserCancelled } as ServerLlmStreamEvent,
+      ],
+    ]);
+    const { executor, batches } = fakeExecutor();
+
+    const result = await runAgentLoop({
+      client,
+      config: fakeConfig().config,
+      signal: controller.signal,
+      first: first(),
+      executor,
+    });
+
+    expect(result.reason).toBe('cancelled');
+    expect(batches).toEqual([]);
+  });
+
+  it('ends the round as the model left it when only a merged signal cancelled it', async () => {
+    // A Goal pause aborts the Goal signal the client merges into the stream's.
+    const { client } = fakeClient([
+      [
+        requestEvent(toolRequest('call-1')),
+        { type: LlmEventType.UserCancelled } as ServerLlmStreamEvent,
+      ],
+      [{ type: LlmEventType.UserCancelled } as ServerLlmStreamEvent],
+    ]);
+    const { executor, batches } = fakeExecutor();
+
+    const result = await runAgentLoop({
+      client,
+      config: fakeConfig().config,
+      signal: new AbortController().signal,
+      first: first(),
+      executor,
+    });
+
+    expect(result).toMatchObject({ reason: 'completed', rounds: 2 });
+    expect(batches.map((batch) => batch.map(({ callId }) => callId))).toEqual([
+      ['call-1'],
+    ]);
   });
 
   it('answers a provider replay without running it, and stops when it repeats', async () => {

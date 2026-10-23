@@ -2712,7 +2712,8 @@ export async function runNonInteractive(
               if (abortController.signal.aborted) return false;
               // A plan-mode sibling skip is not counted, as today.
               if (planModeSiblings.has(request)) return true;
-              // The first valid structured_output ends the session.
+              // The first valid structured_output ends the session. The tool is
+              // not concurrency-safe, so an earlier one has settled by now.
               if (
                 structuredOutputActive &&
                 settled.some(
